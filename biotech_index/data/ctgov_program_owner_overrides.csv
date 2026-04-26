@@ -1,0 +1,6 @@
+enabled,ticker,nct_id,confidence,source_name,notes
+true,ABUS,NCT06154278,0.95,manual_program_owner,Arbutus-owned imdusiran AB-729 program in investigator-led mechanistic chronic HBV study
+true,ALEC,NCT06079190,0.95,manual_program_owner,Alector partnered AL101/GSK4527226 program with GSK listed as lead sponsor
+true,ALEC,NCT07105709,0.95,manual_program_owner,Alector partnered AL101/GSK4527226 open-label extension with GSK listed as lead sponsor
+true,ZVRA,NCT06773026,0.95,manual_program_owner,Zevra ACER-001 program in investigator-led MCADD study
+true,ZVRA,NCT07125066,0.95,manual_program_owner,Zevra ACER-001 program in investigator-led C-2HGA study

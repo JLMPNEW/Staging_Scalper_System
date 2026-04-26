@@ -1,0 +1,6 @@
+input: new_tickers.csv
+output: new_tickers_cik_mapping.csv
+ticker_column: Tickers
+cache_dir: _sec_cache
+timeout_sec: 30.0
+user_agent: "JL, Independent Research, jm.357@yhotmail.com"

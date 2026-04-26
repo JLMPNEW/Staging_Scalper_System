@@ -1,0 +1,57 @@
+ticker,alias,source,confidence,notes
+ABSI,Absci,manual_sponsor_alias,0.95,Common sponsor/company short name
+AGMB,Agomab Therapeutics,manual_sponsor_alias,0.95,CTGov sponsor commonly omits NV suffix
+FBIO,Avenue Therapeutics,manual_parent_subsidiary,0.85,Fortress Biotech subsidiary/program company
+FBIO,Checkpoint Therapeutics,manual_parent_subsidiary,0.85,Fortress Biotech subsidiary/program company
+FBIO,Mustang Bio,manual_parent_subsidiary,0.85,Fortress Biotech subsidiary/program company
+FBIO,Journey Medical,manual_parent_subsidiary,0.85,Fortress Biotech subsidiary/program company
+GPCR,Structure Therapeutics,manual_sponsor_alias,0.95,Issuer/sponsor operating name
+HELP,Cybin US Ltd,manual_sponsor_alias,0.90,Cybin trial sponsor alias
+HELP,Cybin IRL Limited,manual_sponsor_alias,0.90,Cybin trial sponsor alias
+HELP,Cybin Inc,manual_sponsor_alias,0.95,Canonical issuer name
+LEGN,Legend Biotech,manual_sponsor_alias,0.95,CTGov sponsor alias
+LEGN,Legend Biotech USA,manual_sponsor_alias,0.90,US operating sponsor alias
+TLX,Telix Pharmaceuticals,manual_sponsor_alias,0.95,CTGov sponsor alias
+TLX,Telix Pharmaceuticals (US) Inc.,manual_sponsor_alias,0.95,US operating sponsor alias
+XERS,Xeris Pharmaceuticals,manual_sponsor_alias,0.95,Operating sponsor alias
+XERS,Xeris Biopharma,manual_sponsor_alias,0.95,Shortened issuer/sponsor alias
+MRNA,ModernaTX Inc,manual_sponsor_alias,0.95,CTGov sponsor alias for Moderna trials
+MRNA,ModernaTX,manual_sponsor_alias,0.95,CTGov sponsor alias for Moderna trials
+PCRX,Pacira Pharmaceuticals Inc,manual_sponsor_alias,0.95,Historical/operating CTGov sponsor alias
+PCRX,Pacira BioSciences Inc,manual_sponsor_alias,0.95,CTGov sponsor alias
+BCYC,BicycleTx Limited,manual_sponsor_alias,0.95,CTGov sponsor alias for Bicycle Therapeutics trials
+BCYC,Bicycle Therapeutics Ltd,manual_sponsor_alias,0.95,CTGov sponsor alias
+ANL,Adlai Nortye Biopharma Co., Ltd.,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Adlai Nortye trials
+DAWN,Day One Biopharmaceuticals,manual_sponsor_alias,0.95,Exact CTGov sponsor alias for Day One trials
+DAWN,Day One Biopharmaceuticals, Inc.,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Day One trials
+KROS,Keros Therapeutics Inc,manual_sponsor_alias,0.95,CTGov sponsor alias
+LCTX,Lineage Cell Therapeutics,manual_sponsor_alias,0.95,Exact CTGov sponsor alias for Lineage trials
+LCTX,Lineage Cell Therapeutics, Inc.,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Lineage trials
+MRK,Merck Sharp & Dohme LLC,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Merck-sponsored trials
+ONC,BeiGene,manual_legacy_sponsor_alias,0.95,BeOne Medicines historical CTGov sponsor alias before rebrand
+ONC,BeiGene Ltd,manual_legacy_sponsor_alias,0.95,BeOne Medicines historical CTGov sponsor alias before rebrand
+ONC,BeiGene USA Inc,manual_legacy_sponsor_alias,0.90,BeOne Medicines US operating sponsor alias before rebrand
+ONC,BeiGene Beijing Co Ltd,manual_legacy_sponsor_alias,0.90,BeOne Medicines China operating sponsor alias before rebrand
+JNJ,Johnson & Johnson Enterprise Innovation Inc.,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Johnson & Johnson oncology pipeline trials
+JNJ,Johnson & Johnson Private Limited,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Johnson & Johnson regional sponsor trials
+JNJ,Johnson & Johnson Enterprise Innovation,manual_sponsor_alias,0.90,Short sponsor alias for Johnson & Johnson Enterprise Innovation
+JNJ,Janssen Biotech Inc.,manual_sponsor_alias,0.90,Common Johnson & Johnson operating sponsor alias on CTGov
+JNJ,Johnson and Johnson Medical,manual_sponsor_alias,0.90,CTGov sponsor alias variant for Johnson & Johnson device studies
+JNJ,Johnson & Johnson Medical Products,manual_sponsor_alias,0.90,CTGov sponsor alias variant for Johnson & Johnson device studies
+ROIV,Immunovant Inc,manual_parent_subsidiary,0.85,Roivant subsidiary/vant sponsor alias
+ROIV,Immunovant Sciences GmbH,manual_parent_subsidiary,0.90,Exact CTGov lead sponsor string for Roivant subsidiary
+ROIV,Dermavant Sciences Inc,manual_parent_subsidiary,0.85,Roivant subsidiary/vant sponsor alias
+ROIV,Dermavant Sciences GmbH,manual_parent_subsidiary,0.90,Exact CTGov lead sponsor string for Roivant subsidiary
+ROIV,Priovant Therapeutics Inc,manual_parent_subsidiary,0.85,Roivant subsidiary/vant sponsor alias
+ROIV,Priovant Therapeutics Inc.,manual_parent_subsidiary,0.90,Exact CTGov lead sponsor string for Roivant subsidiary
+ROIV,Kinevant Sciences GmbH,manual_parent_subsidiary,0.85,Roivant subsidiary/vant sponsor alias
+ROIV,Roivant Sciences Inc,manual_sponsor_alias,0.95,Issuer/sponsor alias
+PRAX,Praxis Precision Medicines,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Praxis trials
+ZLAB,Zai Lab (US) LLC,manual_sponsor_alias,0.95,Exact CTGov sponsor alias for Zai Lab trials
+ZLAB,Zai Lab (Shanghai) Co., Ltd.,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Zai Lab trials
+ZNTL,Zentalis Pharmaceuticals Inc,manual_sponsor_alias,0.95,CTGov sponsor alias
+CRMD,CorMedix,manual_sponsor_alias,0.95,CTGov sponsor short name for DefenCath studies
+CRMD,CorMedix Inc,manual_sponsor_alias,0.95,CTGov sponsor alias for DefenCath studies
+CRMD,Cormedix,manual_sponsor_alias,0.95,CTGov sponsor capitalization variant
+DRUG,Bright Minds Biosciences Pty Ltd,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Bright Minds Biosciences trials
+IMMX,Nexcella Inc,manual_parent_subsidiary,0.95,Immix affiliate lead sponsor alias for NXC-201 CTGov studies

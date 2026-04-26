@@ -1,0 +1,2 @@
+enabled,ticker,metric,guidance_year,period_label,low_value,high_value,midpoint_value,unit,currency,filing_date,form,confidence,source_name,source_url,source_excerpt,override_reason
+true,DCTH,revenue,2026,FY2026,100000000,,100000000,usd,USD,,USER_VERIFIED,0.72,user_verified_review_april_2026,,"Delcath produced $85.2 million of 2025 revenue, $2.7 million of full-year net income, 86% gross margin, and guided 2026 revenue to at least $100 million.","Manual override because the SEC text parser did not extract the forward revenue floor from available filing text."

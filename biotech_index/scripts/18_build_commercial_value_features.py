@@ -1,0 +1,624 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import logging
+import math
+import sqlite3
+import sys
+import time
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = PACKAGE_ROOT.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from biotech_index.core.config import cfg_get, load_yaml, resolve_path
+from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+
+
+LOGGER = logging.getLogger("build_commercial_value_features")
+DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+QUARTER_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
+
+COMMERCIAL_FIELDS = [
+    "asof_date", "company_id", "ticker", "company_name", "latest_period_end",
+    "latest_quarter_revenue", "ttm_revenue", "revenue_qoq_growth_pct", "revenue_yoy_growth_pct",
+    "gross_profit_ttm", "gross_margin_pct", "operating_income_ttm", "operating_margin_pct",
+    "net_income_ttm", "net_margin_pct", "operating_cash_flow_ttm", "free_cash_flow_ttm",
+    "rd_expense_ttm", "sgna_expense_ttm", "cash_and_investments", "total_debt", "net_cash",
+    "shares_outstanding", "shares_yoy_growth_pct", "close_price", "market_cap", "enterprise_value",
+    "price_to_sales", "ev_to_sales", "pe_ratio", "fcf_yield", "commercial_stage_flag", "profitable_flag",
+    "revenue_scale_score", "revenue_growth_score", "margin_score", "profitability_score",
+    "balance_sheet_score", "dilution_score", "valuation_score", "upside_capacity_score",
+    "commercial_quality_score", "commercial_value_score", "data_quality", "missing_fields",
+    "proxy_fields_used", "payload_json",
+]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build SEC-derived commercial value features for biotech scoring.")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--asof", type=str, default="", help="Feature date in YYYY-MM-DD. Defaults to UTC today.")
+    parser.add_argument("--max-companies", type=int, default=0, help="Smoke-test limit. 0 means all.")
+    parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
+    return parser.parse_args()
+
+
+def configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%SZ",
+    )
+    for handler in logging.getLogger().handlers:
+        if handler.formatter is not None:
+            handler.formatter.converter = time.gmtime
+
+
+def parse_date(raw: object) -> date | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def to_float(raw: object) -> float | None:
+    if raw is None:
+        return None
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def pct_change(current: float | None, previous: float | None) -> float | None:
+    if current is None or previous is None or previous == 0:
+        return None
+    return (current - previous) / abs(previous)
+
+
+def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
+    return max(low, min(high, value))
+
+
+def safe_div(num: float | None, den: float | None) -> float | None:
+    if num is None or den is None or den == 0:
+        return None
+    return num / den
+
+
+def as_bool(raw: object) -> bool:
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def read_scoring_tickers(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        out: set[str] = set()
+        for row in reader:
+            ticker = str(row.get("ticker") or "").strip().upper()
+            if ticker and str(row.get("final_status") or "").strip().lower() == "keep" and as_bool(row.get("scoring_include")):
+                out.add(ticker)
+        return out
+
+
+def load_companies(conn: sqlite3.Connection, *, scoring_tickers: set[str], ticker_filter: set[str], max_companies: int) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT company_id, ticker, company_name
+        FROM companies
+        WHERE is_active = 1
+        ORDER BY ticker
+        """
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        ticker = str(row["ticker"] or "").upper()
+        if scoring_tickers and ticker not in scoring_tickers:
+            continue
+        if ticker_filter and ticker not in ticker_filter:
+            continue
+        out.append(dict(row))
+        if max_companies > 0 and len(out) >= max_companies:
+            break
+    return out
+
+
+def load_fact_rows(conn: sqlite3.Connection, company_id: int, asof_date: date) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM company_facts_quarterly
+        WHERE company_id = ? AND period_end <= ?
+        ORDER BY period_end DESC, filed_date DESC
+        """,
+        (company_id, asof_date.isoformat()),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def load_fact_rows_bulk(conn: sqlite3.Connection, company_ids: list[int], asof_date: date) -> dict[int, list[dict[str, Any]]]:
+    if not company_ids:
+        return {}
+    placeholders = ",".join("?" for _ in company_ids)
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM company_facts_quarterly
+        WHERE company_id IN ({placeholders}) AND period_end <= ?
+        ORDER BY company_id, period_end DESC, filed_date DESC
+        """,
+        tuple(company_ids) + (asof_date.isoformat(),),
+    ).fetchall()
+    out: dict[int, list[dict[str, Any]]] = {company_id: [] for company_id in company_ids}
+    for row in rows:
+        out.setdefault(int(row["company_id"]), []).append(dict(row))
+    for company_id, company_rows in out.items():
+        out[company_id] = dedup_fact_rows(company_rows)
+    return out
+
+
+def dedup_fact_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        key = (str(row.get("period_end") or ""), str(row.get("fiscal_period") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
+def load_latest_market_bulk(
+    conn: sqlite3.Connection,
+    company_ids: list[int],
+    asof_date: date,
+    *,
+    preferred_source: str,
+) -> dict[int, dict[str, Any]]:
+    if not company_ids:
+        return {}
+    placeholders = ",".join("?" for _ in company_ids)
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM market_features_daily
+        WHERE company_id IN ({placeholders}) AND asof_date <= ?
+        ORDER BY
+            company_id,
+            asof_date DESC,
+            CASE WHEN source = ? THEN 0 ELSE 1 END,
+            source
+        """,
+        tuple(company_ids) + (asof_date.isoformat(), preferred_source),
+    ).fetchall()
+    out: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        company_id = int(row["company_id"])
+        if company_id not in out:
+            out[company_id] = dict(row)
+    return out
+
+
+def latest_nonnull(rows: list[dict[str, Any]], field: str) -> tuple[float | None, dict[str, Any] | None]:
+    for row in rows:
+        value = to_float(row.get(field))
+        if value is not None:
+            return value, row
+    return None, None
+
+
+def amount_for_period(row: dict[str, Any], field: str, proxies: list[str]) -> float | None:
+    value = to_float(row.get(field))
+    if value is None:
+        return None
+    if str(row.get("fiscal_period") or "").upper() == "FY":
+        proxies.append(f"quarterly_{field}_from_annual_div4")
+        return value / 4.0
+    return value
+
+
+def ttm_amount(rows: list[dict[str, Any]], field: str, proxies: list[str]) -> float | None:
+    quarterly: list[float] = []
+    for row in rows:
+        value = to_float(row.get(field))
+        if value is None:
+            continue
+        fp = str(row.get("fiscal_period") or "").upper()
+        if fp in QUARTER_PERIODS:
+            quarterly.append(value)
+        if len(quarterly) >= 4:
+            return sum(quarterly[:4])
+    if len(quarterly) >= 2:
+        proxies.append(f"partial_quarter_annualized_{field}")
+        return sum(quarterly) / len(quarterly) * 4.0
+    for row in rows:
+        if str(row.get("fiscal_period") or "").upper() == "FY":
+            value = to_float(row.get(field))
+            if value is not None:
+                return value
+    return None
+
+
+def closest_period_amount(rows: list[dict[str, Any]], field: str, target_date: date, min_days: int, max_days: int, proxies: list[str]) -> float | None:
+    best: tuple[int, float] | None = None
+    for row in rows:
+        period_end = parse_date(row.get("period_end"))
+        if period_end is None:
+            continue
+        age = (target_date - period_end).days
+        if min_days <= age <= max_days:
+            value = amount_for_period(row, field, proxies)
+            if value is not None and (best is None or age < best[0]):
+                best = (age, value)
+    return best[1] if best else None
+
+
+def score_revenue_scale(ttm_revenue: float | None) -> float:
+    if ttm_revenue is None or ttm_revenue <= 0:
+        return 10.0
+    # 10M revenue ~= 25, 100M ~= 50, 1B ~= 75, 10B caps near 100.
+    return clamp(25.0 + (math.log10(max(ttm_revenue, 1.0)) - 7.0) * 25.0)
+
+
+def score_growth(growth: float | None, *, default: float = 45.0) -> float:
+    if growth is None:
+        return default
+    if growth < -0.20:
+        return 20.0
+    if growth < 0.0:
+        return 35.0 + growth * 75.0
+    if growth < 0.10:
+        return 50.0 + growth * 150.0
+    if growth < 0.30:
+        return 65.0 + (growth - 0.10) * 100.0
+    if growth < 0.75:
+        return 85.0 + (growth - 0.30) * 25.0
+    return 100.0
+
+
+def score_margin(gross_margin: float | None) -> float:
+    if gross_margin is None:
+        return 50.0
+    if gross_margin < 0:
+        return 10.0
+    return clamp(25.0 + gross_margin * 80.0)
+
+
+def score_profitability(ttm_revenue: float | None, op_margin: float | None, net_margin: float | None, fcf: float | None) -> float:
+    if ttm_revenue is None or ttm_revenue <= 0:
+        return 15.0
+    score = 35.0
+    if op_margin is not None:
+        score += clamp(op_margin * 100.0, -30.0, 30.0)
+    if net_margin is not None:
+        score += clamp(net_margin * 100.0, -30.0, 30.0)
+    if fcf is not None and fcf > 0:
+        score += 15.0
+    return clamp(score)
+
+
+def score_balance(cash: float | None, debt: float | None, net_cash: float | None, ttm_revenue: float | None) -> float:
+    if cash is None:
+        return 35.0
+    debt = debt or 0.0
+    score = 65.0
+    if net_cash is not None and net_cash > 0:
+        score += 15.0
+    if debt > cash:
+        score -= 25.0
+    if ttm_revenue and cash / max(ttm_revenue, 1.0) > 0.5:
+        score += 10.0
+    return clamp(score)
+
+
+def score_dilution(shares_yoy_growth: float | None) -> float:
+    if shares_yoy_growth is None:
+        return 55.0
+    if shares_yoy_growth <= 0.02:
+        return 95.0
+    if shares_yoy_growth <= 0.10:
+        return 80.0
+    if shares_yoy_growth <= 0.25:
+        return 55.0
+    if shares_yoy_growth <= 0.50:
+        return 30.0
+    return 10.0
+
+
+def score_valuation(ev_to_sales: float | None, price_to_sales: float | None, pe_ratio: float | None, fcf_yield: float | None) -> float:
+    multiple = ev_to_sales if ev_to_sales is not None and ev_to_sales > 0 else price_to_sales
+    if multiple is None or multiple <= 0:
+        return 50.0
+    if multiple < 1.0:
+        score = 95.0
+    elif multiple < 2.0:
+        score = 85.0
+    elif multiple < 4.0:
+        score = 70.0
+    elif multiple < 8.0:
+        score = 55.0
+    elif multiple < 15.0:
+        score = 35.0
+    else:
+        score = 20.0
+    if pe_ratio is not None and pe_ratio > 0:
+        if pe_ratio < 15:
+            score += 12.0
+        elif pe_ratio < 25:
+            score += 5.0
+        elif pe_ratio > 45:
+            score -= 12.0
+    if fcf_yield is not None:
+        if fcf_yield > 0.08:
+            score += 10.0
+        elif fcf_yield < -0.10:
+            score -= 10.0
+    return clamp(score)
+
+
+def score_upside_capacity(market_cap: float | None) -> float:
+    if market_cap is None or market_cap <= 0:
+        return 50.0
+    if market_cap < 300_000_000:
+        return 95.0
+    if market_cap < 1_000_000_000:
+        return 90.0
+    if market_cap < 3_000_000_000:
+        return 80.0
+    if market_cap < 10_000_000_000:
+        return 70.0
+    if market_cap < 25_000_000_000:
+        return 55.0
+    if market_cap < 50_000_000_000:
+        return 40.0
+    if market_cap < 100_000_000_000:
+        return 25.0
+    return 10.0
+
+
+def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: dict[str, Any] | None, asof_date: date, config: dict[str, Any]) -> dict[str, Any]:
+    missing: list[str] = []
+    proxies: list[str] = []
+    latest_revenue, latest_revenue_row = latest_nonnull(rows, "revenue")
+    latest_quarter_revenue = amount_for_period(latest_revenue_row, "revenue", proxies) if latest_revenue_row else None
+    latest_period_end = str(latest_revenue_row.get("period_end") if latest_revenue_row else rows[0].get("period_end") if rows else "")
+    latest_period_date = parse_date(latest_period_end) if latest_period_end else asof_date
+
+    ttm_revenue = ttm_amount(rows, "revenue", proxies)
+    gross_profit_ttm = ttm_amount(rows, "gross_profit", proxies)
+    operating_income_ttm = ttm_amount(rows, "operating_income", proxies)
+    net_income_ttm = ttm_amount(rows, "net_income", proxies)
+    operating_cash_flow_ttm = ttm_amount(rows, "operating_cash_flow", proxies)
+    free_cash_flow_ttm = ttm_amount(rows, "free_cash_flow", proxies)
+    rd_expense_ttm = ttm_amount(rows, "rd_expense", proxies)
+    sgna_expense_ttm = ttm_amount(rows, "sgna_expense", proxies)
+
+    prev_quarter_revenue = closest_period_amount(rows, "revenue", latest_period_date or asof_date, 60, 150, proxies)
+    prior_year_revenue = closest_period_amount(rows, "revenue", latest_period_date or asof_date, 270, 455, proxies)
+    revenue_qoq_growth = pct_change(latest_quarter_revenue, prev_quarter_revenue)
+    revenue_yoy_growth = pct_change(latest_quarter_revenue, prior_year_revenue)
+
+    cash, _ = latest_nonnull(rows, "cash_and_investments")
+    debt, _ = latest_nonnull(rows, "total_debt")
+    shares, shares_row = latest_nonnull(rows, "shares_outstanding")
+    shares_prior = closest_period_amount(rows, "shares_outstanding", latest_period_date or asof_date, 270, 455, proxies)
+    shares_yoy_growth = pct_change(shares, shares_prior)
+
+    close_price = to_float(market.get("close_price") if market else None)
+    market_cap = to_float(market.get("market_cap") if market else None)
+    if market_cap is None and close_price is not None and shares is not None and shares > 0:
+        market_cap = close_price * shares
+        proxies.append("market_cap_from_ib_price_x_sec_shares")
+    enterprise_value = (
+        market_cap + (debt or 0.0) - (cash or 0.0)
+        if market_cap is not None and (cash is not None or debt is not None)
+        else None
+    )
+    net_cash = (cash or 0.0) - (debt or 0.0) if cash is not None or debt is not None else None
+
+    gross_margin = safe_div(gross_profit_ttm, ttm_revenue)
+    operating_margin = safe_div(operating_income_ttm, ttm_revenue)
+    net_margin = safe_div(net_income_ttm, ttm_revenue)
+    price_to_sales = safe_div(market_cap, ttm_revenue)
+    ev_to_sales = safe_div(enterprise_value, ttm_revenue)
+    pe_ratio = safe_div(market_cap, net_income_ttm) if net_income_ttm and net_income_ttm > 0 else None
+    fcf_yield = safe_div(free_cash_flow_ttm, market_cap)
+
+    commercial_stage_flag = bool(ttm_revenue is not None and ttm_revenue >= float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000)))
+    profitable_flag = bool((net_income_ttm is not None and net_income_ttm > 0) or (free_cash_flow_ttm is not None and free_cash_flow_ttm > 0))
+
+    if ttm_revenue is None:
+        missing.append("ttm_revenue")
+    if cash is None:
+        missing.append("cash_and_investments")
+    if shares is None:
+        missing.append("shares_outstanding")
+    if market_cap is None:
+        missing.append("market_cap")
+
+    revenue_scale_score = score_revenue_scale(ttm_revenue)
+    revenue_growth_score = score_growth(revenue_yoy_growth)
+    margin_score = score_margin(gross_margin)
+    profitability_score = score_profitability(ttm_revenue, operating_margin, net_margin, free_cash_flow_ttm)
+    balance_sheet_score = score_balance(cash, debt, net_cash, ttm_revenue)
+    dilution_score = score_dilution(shares_yoy_growth)
+    valuation_score = score_valuation(ev_to_sales, price_to_sales, pe_ratio, fcf_yield)
+    upside_capacity_score = score_upside_capacity(market_cap)
+    commercial_stage_score = 80.0 if commercial_stage_flag else 45.0 if ttm_revenue and ttm_revenue > 0 else 15.0
+
+    quality_weights = cfg_get(config, "commercial_value.quality_weights", {}) or {}
+    commercial_quality_score = clamp(
+        float(quality_weights.get("revenue_scale", 0.15)) * revenue_scale_score
+        + float(quality_weights.get("revenue_growth", 0.20)) * revenue_growth_score
+        + float(quality_weights.get("margin", 0.15)) * margin_score
+        + float(quality_weights.get("profitability", 0.20)) * profitability_score
+        + float(quality_weights.get("balance_sheet", 0.15)) * balance_sheet_score
+        + float(quality_weights.get("dilution", 0.15)) * dilution_score
+    )
+    value_weights = cfg_get(config, "commercial_value.value_weights", {}) or {}
+    commercial_value_score = clamp(
+        float(value_weights.get("commercial_quality", 0.45)) * commercial_quality_score
+        + float(value_weights.get("valuation", 0.30)) * valuation_score
+        + float(value_weights.get("upside_capacity", 0.15)) * upside_capacity_score
+        + float(value_weights.get("commercial_stage", 0.10)) * commercial_stage_score
+    )
+
+    if len(missing) <= 1:
+        data_quality = "high"
+    elif ttm_revenue is not None and cash is not None:
+        data_quality = "medium"
+    else:
+        data_quality = "low"
+
+    payload = {
+        "source": "sec_companyfacts_primary_market_optional",
+        "market_source": str(market.get("source") if market else ""),
+        "latest_shares_period_end": str(shares_row.get("period_end") if shares_row else ""),
+        "component_scores": {
+            "revenue_scale_score": round(revenue_scale_score, 4),
+            "revenue_growth_score": round(revenue_growth_score, 4),
+            "margin_score": round(margin_score, 4),
+            "profitability_score": round(profitability_score, 4),
+            "balance_sheet_score": round(balance_sheet_score, 4),
+            "dilution_score": round(dilution_score, 4),
+            "valuation_score": round(valuation_score, 4),
+            "upside_capacity_score": round(upside_capacity_score, 4),
+        },
+    }
+    return {
+        "asof_date": asof_date.isoformat(),
+        "company_id": int(company["company_id"]),
+        "ticker": str(company["ticker"]),
+        "company_name": str(company["company_name"] or ""),
+        "latest_period_end": latest_period_end,
+        "latest_quarter_revenue": latest_quarter_revenue,
+        "ttm_revenue": ttm_revenue,
+        "revenue_qoq_growth_pct": revenue_qoq_growth,
+        "revenue_yoy_growth_pct": revenue_yoy_growth,
+        "gross_profit_ttm": gross_profit_ttm,
+        "gross_margin_pct": gross_margin,
+        "operating_income_ttm": operating_income_ttm,
+        "operating_margin_pct": operating_margin,
+        "net_income_ttm": net_income_ttm,
+        "net_margin_pct": net_margin,
+        "operating_cash_flow_ttm": operating_cash_flow_ttm,
+        "free_cash_flow_ttm": free_cash_flow_ttm,
+        "rd_expense_ttm": rd_expense_ttm,
+        "sgna_expense_ttm": sgna_expense_ttm,
+        "cash_and_investments": cash,
+        "total_debt": debt,
+        "net_cash": net_cash,
+        "shares_outstanding": shares,
+        "shares_yoy_growth_pct": shares_yoy_growth,
+        "close_price": close_price,
+        "market_cap": market_cap,
+        "enterprise_value": enterprise_value,
+        "price_to_sales": price_to_sales,
+        "ev_to_sales": ev_to_sales,
+        "pe_ratio": pe_ratio,
+        "fcf_yield": fcf_yield,
+        "commercial_stage_flag": int(commercial_stage_flag),
+        "profitable_flag": int(profitable_flag),
+        "revenue_scale_score": round(revenue_scale_score, 4),
+        "revenue_growth_score": round(revenue_growth_score, 4),
+        "margin_score": round(margin_score, 4),
+        "profitability_score": round(profitability_score, 4),
+        "balance_sheet_score": round(balance_sheet_score, 4),
+        "dilution_score": round(dilution_score, 4),
+        "valuation_score": round(valuation_score, 4),
+        "upside_capacity_score": round(upside_capacity_score, 4),
+        "commercial_quality_score": round(commercial_quality_score, 4),
+        "commercial_value_score": round(commercial_value_score, 4),
+        "data_quality": data_quality,
+        "missing_fields": ";".join(missing),
+        "proxy_fields_used": ";".join(dict.fromkeys(proxies)),
+        "payload_json": json.dumps(payload, ensure_ascii=True, sort_keys=True),
+    }
+
+
+def upsert_features(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_date: str) -> None:
+    now = utc_now()
+    update_fields = [field for field in COMMERCIAL_FIELDS if field not in {"asof_date", "company_id"}]
+    update_clause = ",\n                    ".join(f"{field} = excluded.{field}" for field in update_fields)
+    with conn:
+        conn.execute("DELETE FROM commercial_value_features_daily WHERE asof_date = ?", (asof_date,))
+        conn.executemany(
+            f"""
+            INSERT INTO commercial_value_features_daily({", ".join(COMMERCIAL_FIELDS)}, created_at, updated_at)
+            VALUES ({", ".join("?" for _ in COMMERCIAL_FIELDS)}, ?, ?)
+            ON CONFLICT(asof_date, company_id) DO UPDATE SET
+                {update_clause},
+                updated_at = excluded.updated_at
+            """,
+            [tuple(row.get(field) for field in COMMERCIAL_FIELDS) + (now, now) for row in rows],
+        )
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=COMMERCIAL_FIELDS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows([{field: row.get(field, "") for field in COMMERCIAL_FIELDS} for row in rows])
+
+
+def main() -> None:
+    configure_logging()
+    args = parse_args()
+    config_path = args.config.expanduser().resolve()
+    config = load_yaml(config_path)
+    base_dir = config_path.parent
+    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    output_csv = resolve_path(cfg_get(config, "commercial_value.output_csv"), base_dir=base_dir)
+    final_universe_csv = resolve_path(cfg_get(config, "commercial_value.final_scoring_universe_csv"), base_dir=base_dir)
+    sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
+    asof_date = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
+    if asof_date is None:
+        raise ValueError(f"Invalid --asof date: {args.asof}")
+    ticker_filter = {value.strip().upper().replace(".", "-") for value in args.tickers.split(",") if value.strip()}
+
+    with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
+        init_db(conn)
+        run_id = start_run(conn, run_type="build_commercial_value_features", input_path=db_path)
+        try:
+            scoring_tickers = read_scoring_tickers(final_universe_csv)
+            companies = load_companies(conn, scoring_tickers=scoring_tickers, ticker_filter=ticker_filter, max_companies=args.max_companies)
+            company_ids = [int(company["company_id"]) for company in companies]
+            fact_rows_by_company = load_fact_rows_bulk(conn, company_ids, asof_date)
+            preferred_source = str(cfg_get(config, "commercial_value.preferred_market_source", "interactive_brokers") or "interactive_brokers")
+            market_by_company = load_latest_market_bulk(conn, company_ids, asof_date, preferred_source=preferred_source)
+            rows: list[dict[str, Any]] = []
+            for idx, company in enumerate(companies, start=1):
+                company_id = int(company["company_id"])
+                fact_rows = fact_rows_by_company.get(company_id, [])
+                market = market_by_company.get(company_id)
+                rows.append(build_feature(company, fact_rows, market, asof_date, config))
+                if idx % 50 == 0:
+                    LOGGER.info("Built commercial features for %d/%d companies", idx, len(companies))
+            upsert_features(conn, rows, asof_date.isoformat())
+            write_csv(output_csv, rows)
+            finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=f"asof={asof_date.isoformat()} output={output_csv}")
+        except Exception as exc:
+            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            raise
+    LOGGER.info("Built commercial value features: rows=%d output=%s", len(rows), output_csv)
+
+
+if __name__ == "__main__":
+    main()

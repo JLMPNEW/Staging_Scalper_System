@@ -1,0 +1,498 @@
+paths:
+  screen_results_csv: "../output/preload_biotech_screen/biotech_screen_results_all.csv"
+  manual_alias_overrides_csv: "data/company_alias_overrides.csv"
+  company_status_overrides_csv: "data/company_status_overrides.csv"
+  database_path: "C:/Users/josel/Documents/STAGING/DB/biotech_index.sqlite"
+
+company_master:
+  active_decisions:
+    - keep
+    - review
+  store_decisions:
+    - keep
+    - review
+    - remove
+
+runtime:
+  sqlite_timeout_sec: 30.0
+
+ctgov:
+  studies_url: "https://clinicaltrials.gov/api/v2/studies"
+  cache_dir: "../output/biotech_index_cache"
+  search_overrides_csv: "data/ctgov_search_overrides.csv"
+  status_filter:
+    - keep
+    - review
+  query_fields:
+    - "query.spons"
+    - "query.lead"
+  override_default_query_fields:
+    - "query.intr"
+  min_alias_length: 4
+  max_aliases_per_company: 4
+  page_size: 100
+  max_pages: 25
+  json_ttl_hours: 168.0
+  sleep_sec: 0.2
+  timeout_sec: 45.0
+  max_retries: 3
+  max_workers: 4
+
+trial_linking:
+  status_filter:
+    - keep
+    - review
+  program_owner_overrides_csv: "data/ctgov_program_owner_overrides.csv"
+  min_confidence: 0.65
+  allow_single_token_match: false
+  allow_single_token_prefix_match: true
+  single_token_prefix_min_length: 7
+
+ctgov_audit:
+  output_dir: "../output/biotech_index_reports"
+  trial_status_overrides_csv: "data/ctgov_trial_status_overrides.csv"
+  status_filter:
+    - keep
+    - review
+  active_statuses:
+    - RECRUITING
+    - ACTIVE_NOT_RECRUITING
+    - NOT_YET_RECRUITING
+    - ENROLLING_BY_INVITATION
+  stale_days: 365
+  completed_stale_days: 730
+  low_confidence_threshold: 0.75
+  min_keep_score: 3.0
+  therapeutic_intervention_types:
+    - DRUG
+    - BIOLOGICAL
+    - GENETIC
+    - RADIATION
+    - COMBINATION_PRODUCT
+  non_therapeutic_intervention_types:
+    - DEVICE
+    - DIAGNOSTIC_TEST
+    - BEHAVIORAL
+  non_therapeutic_primary_purposes:
+    - DIAGNOSTIC
+    - SCREENING
+    - DEVICE_FEASIBILITY
+    - HEALTH_SERVICES_RESEARCH
+    - BASIC_SCIENCE
+  qualifying_device_keywords:
+    - pivotal
+    - registrational
+    - rns system
+    - responsive neurostimulation
+    - organ care system
+    - ocs
+    - delirium monitoring
+    - icu delirium
+    - ceribell
+    - amds
+    - arcevo
+    - vns therapy
+    - vagus nerve stimulation
+    - hypoglossal neurostimulation
+    - hypoglossal nerve stimulation
+  therapeutic_keywords:
+    - safety
+    - efficacy
+    - pharmacokinetic
+    - pharmacokinetics
+    - pharmacodynamic
+    - dose escalation
+    - dose-escalation
+    - dose ranging
+    - tolerability
+    - objective response
+    - treatment
+    - therapy
+    - therapeutic
+    - biologic
+    - vaccine
+    - gene therapy
+    - cell therapy
+  non_therapeutic_keywords:
+    - observational
+    - registry
+    - validation
+    - validate
+    - user experience
+    - usability
+    - reliability
+    - diagnostic accuracy
+    - screening test
+    - sample collection
+    - specimen collection
+    - molecular diagnostic
+    - genomic test
+    - sequencing service
+    - real-world
+    - real world
+    - implementation
+    - agreement study
+    - precision study
+  diagnostic_company_keywords:
+    - diagnostic
+    - diagnostics
+    - sequencing
+    - genomics
+    - genomic
+    - laboratory
+    - labs
+    - screening
+    - test
+    - testing
+  locked_clean_universe_csv: "ctgov_clean_universe_locked.csv"
+  locked_clean_universe_json: "ctgov_clean_universe_locked.json"
+  audit_csv: "ctgov_trial_link_audit.csv"
+  review_csv: "ctgov_trial_link_review.csv"
+  manual_verification_csv: "ctgov_manual_verification_queue.csv"
+  final_scoring_universe_csv: "ctgov_final_scoring_universe.csv"
+  evidence_csv: "ctgov_trial_evidence.csv"
+  manifest_json: "ctgov_audit_manifest.json"
+
+ctgov_reactivation:
+  output_dir: "../output/biotech_index_reports"
+  source_review_csv: "../output/biotech_index_reports/ctgov_trial_link_review.csv"
+  policy_overrides_csv: "data/ctgov_reactivation_policy_overrides.csv"
+  source_final_status_filter:
+    - review
+    - remove
+  status_filter:
+    - remove
+  scan_csv: "ctgov_reactivation_scan.csv"
+  review_csv: "ctgov_reactivation_review.csv"
+  evidence_csv: "ctgov_reactivation_evidence.csv"
+  manifest_json: "ctgov_reactivation_manifest.json"
+
+inactive_removed_audit:
+  output_dir: "../output/biotech_index_reports"
+  screen_results_csv: "../output/preload_biotech_screen/biotech_screen_results_all.csv"
+  reactivation_scan_csv: "../output/biotech_index_reports/ctgov_reactivation_scan.csv"
+  rescreen_results_csv:
+  screen_config_yaml: "screen_biotech_universe_config.yaml"
+  rescreen_output_dir: "../output/biotech_index_reports/inactive_removed_rescreen"
+  rescreen_output_file: "inactive_removed_rescreen_results.csv"
+  audit_csv: "inactive_removed_audit.csv"
+  rescreen_tickers_csv: "inactive_removed_rescreen_tickers.csv"
+  status_override_candidates_csv: "inactive_removed_status_override_candidates.csv"
+  manifest_json: "inactive_removed_audit_manifest.json"
+  active_listing_statuses:
+    - active
+  hard_block_reason_codes:
+    - manual_exclude
+    - confirmed_going_concern
+    - reverse_split
+    - acquired_delisted_non_public
+  policy_review_hard_reason_codes:
+    - reverse_split
+    - google_confirmed_reverse_split
+  min_liquidity_addv20: 1000000
+  soft_rescreen_reason_codes:
+    - ctgov_fetch_error
+    - sec_fetch_error
+    - no_interventional_ctgov_match
+    - ctgov_match_missing_needs_alias_review
+    - no_recent_10k_10q_8k_2y
+    - biotech_name_no_trials_no_rd_no_pipeline
+    - extremely_illiquid
+    - possible_going_concern
+    - possible_reverse_split
+
+biotech_features:
+  output_dir: "../output/biotech_index_reports"
+  final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
+  ctgov_evidence_csv: "../output/biotech_index_reports/ctgov_trial_evidence.csv"
+  screen_results_csv: "../output/preload_biotech_screen/biotech_screen_results_all.csv"
+  output_csv: "biotech_daily_features.csv"
+  min_liquidity_addv20: 1000000
+  low_liquidity_addv20: 2000000
+  strong_liquidity_addv20: 10000000
+
+sec_filings:
+  final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
+  submissions_url_template: "https://data.sec.gov/submissions/CIK{cik}.json"
+  archives_base_url: "https://www.sec.gov/Archives/edgar/data"
+  cache_dir: "../output/biotech_index_cache"
+  output_csv: "../output/biotech_index_reports/sec_filings_synced.csv"
+  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  lookback_days: 730
+  max_filings_per_company: 40
+  fetch_text: true
+  forms:
+    - "8-K"
+    - "8-K/A"
+    - "10-Q"
+    - "10-Q/A"
+    - "10-K"
+    - "10-K/A"
+    - "20-F"
+    - "20-F/A"
+    - "40-F"
+    - "40-F/A"
+    - "6-K"
+    - "6-K/A"
+    - "S-1"
+    - "S-1/A"
+    - "S-3"
+    - "S-3/A"
+    - "424B*"
+  ttl_hours: 24.0
+  text_ttl_hours: 168.0
+  sleep_sec: 0.15
+  timeout_sec: 45.0
+  max_retries: 3
+  max_workers: 4
+
+sec_event_parser:
+  output_csv: "../output/biotech_index_reports/sec_events.csv"
+  lookback_days: 730
+  min_confidence: 0.65
+  max_events_per_filing_type: 1
+  batch_size: 250
+  max_workers: 1
+
+sec_companyfacts_history:
+  final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
+  companyfacts_url_template: "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+  cache_dir: "../output/biotech_index_cache"
+  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  lookback_years: 3
+  ttl_hours: 24.0
+  sleep_sec: 0.15
+  timeout_sec: 45.0
+  max_retries: 3
+  max_workers: 6
+  output_csv: "../output/biotech_index_reports/company_facts_quarterly.csv"
+
+ib_market_data:
+  final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
+  output_csv: "../output/biotech_index_reports/ib_market_features.csv"
+  host: "127.0.0.1"
+  port: 7497
+  client_id: 7717
+  connect_timeout_sec: 15.0
+  duration: "1 Y"
+  sleep_sec: 0.15
+
+commercial_value:
+  final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
+  output_csv: "../output/biotech_index_reports/commercial_value_features.csv"
+  preferred_market_source: "interactive_brokers"
+  commercial_stage_revenue_min: 50000000
+  quality_weights:
+    revenue_scale: 0.15
+    revenue_growth: 0.20
+    margin: 0.15
+    profitability: 0.20
+    balance_sheet: 0.15
+    dilution: 0.15
+  value_weights:
+    commercial_quality: 0.45
+    valuation: 0.30
+    upside_capacity: 0.15
+    commercial_stage: 0.10
+
+forward_guidance:
+  final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
+  guidance_output_csv: "../output/biotech_index_reports/forward_guidance_records.csv"
+  features_output_csv: "../output/biotech_index_reports/forward_guidance_features.csv"
+  overrides_csv: "data/forward_guidance_overrides.csv"
+  cache_dir: "../output/biotech_index_cache"
+  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  fetch_complete_submission_text: true
+  fetch_complete_submission_forms:
+    - "8-K"
+    - "8-K/A"
+    - "6-K"
+    - "6-K/A"
+  lookback_days: 420
+  max_filings_per_company: 8
+  max_windows_per_filing: 40
+  run_mode: "daily_delta"
+  max_workers: 4
+  min_confidence: 0.68
+  text_ttl_hours: 168.0
+  sleep_sec: 0.15
+  timeout_sec: 45.0
+  max_retries: 3
+  forms:
+    - "8-K"
+    - "8-K/A"
+    - "10-K"
+    - "10-K/A"
+    - "10-Q"
+    - "10-Q/A"
+    - "20-F"
+    - "20-F/A"
+    - "40-F"
+    - "40-F/A"
+    - "6-K"
+    - "6-K/A"
+
+financial_survival:
+  output_csv: "../output/biotech_index_reports/financial_survival_features.csv"
+  min_high_quality_runway_months: 18
+  min_acceptable_runway_months: 12
+  short_runway_months: 6
+  severe_runway_months: 3
+  rd_growth_threshold: 0.30
+  cash_decline_threshold: -0.30
+  low_data_quality_penalty: 12
+  missing_burn_proxy_penalty: 10
+  active_atm_penalty: 15
+  recent_offering_penalty: 10
+  shelf_registration_penalty: 8
+
+biotech_scoring:
+  output_dir: "../output/biotech_index_reports"
+  output_csv: "biotech_daily_scores.csv"
+  use_investment_score: true
+  weights:
+    catalyst: 0.45
+    credibility: 0.30
+    financial_quality: 0.15
+    momentum: 0.10
+    risk_penalty: 0.35
+  investment_weights:
+    clinical_opportunity: 0.25
+    commercial_quality: 0.25
+    valuation: 0.20
+    upside_capacity: 0.10
+    financial_quality: 0.15
+    momentum: 0.05
+    risk_penalty: 0.15
+  investment_weight_profiles:
+    commercial_stage:
+      clinical_opportunity: 0.10
+      commercial_value: 0.30
+      forward_guidance: 0.20
+      valuation: 0.10
+      upside_capacity: 0.10
+      financial_quality: 0.15
+      momentum: 0.05
+      risk_penalty: 0.15
+    clinical_stage:
+      clinical_opportunity: 0.45
+      commercial_value: 0.05
+      forward_guidance: 0.05
+      valuation: 0.05
+      upside_capacity: 0.15
+      financial_quality: 0.15
+      momentum: 0.10
+      risk_penalty: 0.30
+  buckets:
+    high_conviction_min: 80
+    watchlist_min: 60
+    speculative_min: 45
+    max_high_conviction_risk: 35
+    max_watchlist_risk: 50
+    max_speculative_risk: 75
+    avoid_risk_min: 80
+    high_conviction_min_runway_months: 12
+    terminal_runway_months: 3
+    require_advanced_catalyst_for_high_conviction: true
+    require_active_trial_for_watchlist: true
+
+biotech_reports:
+  output_dir: "../output/biotech_index_reports"
+  top_n: 20
+  alerts_score_change_min: 12
+  index_latest_csv: "biotech_index_latest.csv"
+  top_candidates_csv: "biotech_top_candidates.csv"
+  alerts_csv: "biotech_alerts.csv"
+  evidence_cards_json: "biotech_evidence_cards.json"
+  trial_validation_csv: "biotech_top_trial_validation.csv"
+  trial_validation_summary_csv: "biotech_top_trial_validation_summary.csv"
+  trial_validation_max_trials_per_ticker: 25
+  trial_validation_extra_tickers:
+    - GILD
+    - BMY
+    - VRTX
+    - SMMT
+    - UTHR
+    - INCY
+
+biotech_refresh:
+  timing_csv: "../output/biotech_index_reports/biotech_refresh_timing.csv"
+
+governance_events:
+  final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
+  output_csv: "../output/biotech_index_reports/governance_event_features.csv"
+  form4_db_path: "C:/Users/josel/Documents/PROD/DB/sec_insider.sqlite"
+  form4_table: "form4_events_tier1"
+  form4_snapshot_table: "sec_form4_daily_state"
+  lookback_days: 365
+  insider_buy_lookback_days: 90
+  insider_sell_lookback_days: 90
+  executive_buy_lookback_days: 180
+  cluster_lookback_days: 90
+  buy_cluster_min_insiders: 2
+  sec_event_lookback_days: 365
+  sec_document_max_per_company: 40
+  buy_codes:
+    - "P"
+  sell_codes:
+    - "S"
+  executive_title_keywords:
+    - "chief executive"
+    - "ceo"
+    - "chief financial"
+    - "cfo"
+    - "president"
+  director_title_keywords:
+    - "director"
+
+multibagger:
+  output_dir: "../output/biotech_index_reports"
+  features_csv: "multibagger_features.csv"
+  scores_csv: "biotech_multibagger_scores.csv"
+  candidates_csv: "biotech_multibagger_candidates.csv"
+  summary_csv: "biotech_multibagger_summary.csv"
+  evidence_cards_json: "biotech_multibagger_evidence_cards.json"
+  preferred_market_source: "interactive_brokers"
+  top_n: 50
+  market_cap_soft_cap: 25000000000
+  market_cap_hard_cap: 75000000000
+  min_addv20: 1000000
+  require_event_or_catalyst: true
+  high_conviction_min: 80
+  watchlist_min: 65
+  speculative_min: 50
+  max_high_conviction_risk: 35
+  max_watchlist_risk: 55
+  max_speculative_risk: 75
+  avoid_risk_min: 75
+  avoid_fragility_min: 70
+  weights:
+    commercial_acceleration: 0.25
+    upside_capacity: 0.20
+    cash_flow_acceleration: 0.15
+    survival_quality: 0.15
+    governance_event: 0.10
+    market_confirmation: 0.10
+    catalyst_quality: 0.05
+    risk_penalty: 0.20
+
+fmp_reverse_split:
+  input_csv: "../ticker_mapping/second_check_reverse_plit.csv"
+  output_csv: "../ticker_mapping/reverse_split_events_fmp.csv"
+  audit_output_csv: "../ticker_mapping/reverse_split_second_check_results.csv"
+  cache_dir: "../ticker_mapping/_fmp_reverse_split_cache"
+  api_key_env: "FMP_API_KEY"
+  ttl_days: 30.0
+  sleep_sec: 0.25
+  timeout_sec: 30.0
+  max_tickers: 0
+
+yahoo_reverse_split:
+  input_csv: "../ticker_mapping/second_check_reverse_plit.csv"
+  output_csv: "../ticker_mapping/reverse_split_events_yahoo.csv"
+  audit_output_csv: "../ticker_mapping/reverse_split_second_check_results_yahoo.csv"
+  cache_dir: "../ticker_mapping/_yahoo_reverse_split_cache"
+  ttl_days: 30.0
+  sleep_sec: 2.0
+  max_tickers: 0
+  use_stale_cache_on_error: true

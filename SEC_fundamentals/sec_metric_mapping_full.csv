@@ -1,0 +1,83 @@
+metric_name,source_kind,taxonomy,concept_name,priority,industry_aggregate,component_group,wide_column_name,period_type,taxonomy_key,concept_key,rule_id,rule_scope,mapping_note
+net_income,direct,ifrs-full,ProfitLoss,10,,,,duration,ifrs-full,profitloss,,,
+net_income,direct,us-gaap,NetIncomeLoss,10,,,,duration,us-gaap,netincomeloss,,,
+net_income,direct,ifrs-full,ProfitLossAttributableToOwnersOfParent,11,,,,duration,ifrs-full,profitlossattributabletoownersofparent,,,
+net_income,direct,us-gaap,ProfitLoss,11,,,,duration,us-gaap,profitloss,,,
+net_income,direct,us-gaap,NetIncomeLossAvailableToCommonStockholdersBasic,60,,,,duration,,,net_income_available_to_common_aliases,generic_rules,Lower-priority alias. Useful for issuers that only expose common-shareholder net income.
+net_income,direct,us-gaap,NetIncomeLossAvailableToCommonStockholdersDiluted,61,,,,duration,,,net_income_available_to_common_aliases,generic_rules,Lower-priority alias. Useful for issuers that only expose common-shareholder net income.
+operating_cash_flow,direct,ifrs-full,NetCashFlowsFromUsedInOperatingActivities,10,,,,duration,ifrs-full,netcashflowsfromusedinoperatingactivities,,,
+operating_cash_flow,direct,us-gaap,NetCashProvidedByUsedInOperatingActivities,10,,,,duration,us-gaap,netcashprovidedbyusedinoperatingactivities,,,
+operating_cash_flow,direct,ifrs-full,CashFlowsFromUsedInOperatingActivities,11,,,,duration,ifrs-full,cashflowsfromusedinoperatingactivities,,,
+operating_cash_flow,direct,us-gaap,NetCashProvidedByUsedInOperatingActivitiesContinuingOperations,11,,,,duration,us-gaap,netcashprovidedbyusedinoperatingactivitiescontinuingoperations,,,
+revenue,direct,us-gaap,RevenuesNetOfInterestExpense,45,Banking & Consumer Finance,,,duration,,,bank_revenue_net_of_interest_expense,generic_rules,High-confidence bank top-line equivalent. Prefer this before any fallback.
+revenue,direct,us-gaap,InterestAndDividendIncomeOperating,85,Banking & Consumer Finance,,,duration,,,bank_interest_and_dividend_income_operating,generic_rules,Lower-confidence bank top-line proxy. Keep at low priority so it only applies when higher-confidence revenue concepts are unavailable.
+revenue,formula_component,ifrs-full,InterestRevenueCalculatedUsingEffectiveInterestMethod,10,Banking & Consumer Finance,bank_net_interest_income,net_interest_income,duration,ifrs-full,interestrevenuecalculatedusingeffectiveinterestmethod,,,
+revenue,formula_component,us-gaap,NetInterestIncome,10,Banking & Consumer Finance,bank_net_interest_income,net_interest_income,duration,us-gaap,netinterestincome,,,
+revenue,formula_component,ifrs-full,InterestAndSimilarIncome,11,Banking & Consumer Finance,bank_net_interest_income,net_interest_income,duration,ifrs-full,interestandsimilarincome,,,
+revenue,formula_component,us-gaap,InterestAndDividendIncomeOperating,11,Banking & Consumer Finance,bank_net_interest_income,net_interest_income,duration,us-gaap,interestanddividendincomeoperating,,,
+revenue,formula_component,ifrs-full,NetInterestIncome,12,Banking & Consumer Finance,bank_net_interest_income,net_interest_income,duration,ifrs-full,netinterestincome,,,
+revenue,formula_component,ifrs-full,FeeAndCommissionIncome,20,Banking & Consumer Finance,bank_noninterest_income,noninterest_income,duration,ifrs-full,feeandcommissionincome,,,
+revenue,formula_component,us-gaap,NoninterestIncome,20,Banking & Consumer Finance,bank_noninterest_income,noninterest_income,duration,us-gaap,noninterestincome,,,
+revenue,formula_component,ifrs-full,NetTradingIncome,21,Banking & Consumer Finance,bank_noninterest_income,noninterest_income,duration,ifrs-full,nettradingincome,,,
+revenue,formula_component,us-gaap,FeesAndCommissionsRevenue,21,Banking & Consumer Finance,bank_noninterest_income,noninterest_income,duration,us-gaap,feesandcommissionsrevenue,,,
+revenue,formula_component,ifrs-full,OtherOperatingIncome,22,Banking & Consumer Finance,bank_noninterest_income,noninterest_income,duration,ifrs-full,otheroperatingincome,,,
+revenue,formula_component,us-gaap,TradingRevenue,22,Banking & Consumer Finance,bank_noninterest_income,noninterest_income,duration,us-gaap,tradingrevenue,,,
+revenue,formula_component,ifrs-full,FeesAndCommissionsRevenue,23,Banking & Consumer Finance,bank_noninterest_income,noninterest_income,duration,ifrs-full,feesandcommissionsrevenue,,,
+revenue,formula_component,us-gaap,BrokerageCommissionsRevenue,23,Banking & Consumer Finance,bank_noninterest_income,noninterest_income,duration,us-gaap,brokeragecommissionsrevenue,,,
+revenue,formula_component,us-gaap,InvestmentBankingRevenue,24,Banking & Consumer Finance,bank_noninterest_income,noninterest_income,duration,us-gaap,investmentbankingrevenue,,,
+revenue,formula_component,us-gaap,ServicingFees,25,Banking & Consumer Finance,bank_noninterest_income,noninterest_income,duration,us-gaap,servicingfees,,,
+revenue,formula_component,ifrs-full,FeeAndCommissionIncome,10,"Capital Markets, Asset Managers & Exchanges",capital_markets_core_revenue,,duration,ifrs-full,feeandcommissionincome,,,
+revenue,formula_component,us-gaap,InvestmentBankingRevenue,10,"Capital Markets, Asset Managers & Exchanges",capital_markets_core_revenue,,duration,us-gaap,investmentbankingrevenue,,,
+revenue,formula_component,ifrs-full,NetTradingIncome,11,"Capital Markets, Asset Managers & Exchanges",capital_markets_core_revenue,,duration,ifrs-full,nettradingincome,,,
+revenue,formula_component,us-gaap,BrokerageCommissionsRevenue,11,"Capital Markets, Asset Managers & Exchanges",capital_markets_core_revenue,,duration,us-gaap,brokeragecommissionsrevenue,,,
+revenue,formula_component,ifrs-full,Revenue,12,"Capital Markets, Asset Managers & Exchanges",capital_markets_core_revenue,,duration,ifrs-full,revenue,,,
+revenue,formula_component,us-gaap,TradingRevenue,12,"Capital Markets, Asset Managers & Exchanges",capital_markets_core_revenue,,duration,us-gaap,tradingrevenue,,,
+revenue,formula_component,ifrs-full,OtherOperatingIncome,13,"Capital Markets, Asset Managers & Exchanges",capital_markets_core_revenue,,duration,ifrs-full,otheroperatingincome,,,
+revenue,formula_component,us-gaap,AssetManagementFees1,13,"Capital Markets, Asset Managers & Exchanges",capital_markets_core_revenue,,duration,us-gaap,assetmanagementfees1,,,
+revenue,formula_component,us-gaap,FeesAndCommissionsRevenue,14,"Capital Markets, Asset Managers & Exchanges",capital_markets_core_revenue,,duration,us-gaap,feesandcommissionsrevenue,,,
+revenue,formula_component,us-gaap,AdvisoryFeeRevenue,15,"Capital Markets, Asset Managers & Exchanges",capital_markets_core_revenue,,duration,us-gaap,advisoryfeerevenue,,,
+revenue,formula_component,us-gaap,CommissionRevenue,16,"Capital Markets, Asset Managers & Exchanges",capital_markets_core_revenue,,duration,us-gaap,commissionrevenue,,,
+revenue,formula_component,ifrs-full,InsuranceRevenue,10,Insurance & Brokerage,insurance_core_revenue,,duration,ifrs-full,insurancerevenue,,,
+revenue,formula_component,us-gaap,InsuranceRevenue,10,Insurance & Brokerage,insurance_core_revenue,,duration,us-gaap,insurancerevenue,,,
+revenue,formula_component,ifrs-full,GrossWrittenPremiums,11,Insurance & Brokerage,insurance_core_revenue,,duration,ifrs-full,grosswrittenpremiums,,,
+revenue,formula_component,us-gaap,PremiumsEarnedNet,11,Insurance & Brokerage,insurance_core_revenue,,duration,us-gaap,premiumsearnednet,,,
+revenue,formula_component,ifrs-full,FeeAndCommissionIncome,12,Insurance & Brokerage,insurance_core_revenue,,duration,ifrs-full,feeandcommissionincome,,,
+revenue,formula_component,us-gaap,BrokerageCommissionsRevenue,12,Insurance & Brokerage,insurance_core_revenue,,duration,us-gaap,brokeragecommissionsrevenue,,,
+revenue,formula_component,ifrs-full,Revenue,13,Insurance & Brokerage,insurance_core_revenue,,duration,ifrs-full,revenue,,,
+revenue,formula_component,us-gaap,FeesAndCommissionsRevenue,13,Insurance & Brokerage,insurance_core_revenue,,duration,us-gaap,feesandcommissionsrevenue,,,
+revenue,formula_component,us-gaap,CommissionRevenue,14,Insurance & Brokerage,insurance_core_revenue,,duration,us-gaap,commissionrevenue,,,
+revenue,direct,us-gaap,RegulatedAndUnregulatedOperatingRevenue,45,Utilities,,,duration,,,utilities_regulated_operating_revenue_exact,generic_rules,Common utility top-line tags not in the built-in mapping registry.
+revenue,direct,us-gaap,RegulatedOperatingRevenue,46,Utilities,,,duration,,,utilities_regulated_operating_revenue_exact,generic_rules,Common utility top-line tags not in the built-in mapping registry.
+revenue,direct,us-gaap,RegulatedOperatingRevenueElectricNonNuclear,46,Utilities,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,us-gaap,RegulatedOperatingRevenueFieldServices,47,Utilities,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,us-gaap,RegulatedOperatingRevenueFossilFuel,48,Utilities,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,us-gaap,RegulatedOperatingRevenueGas,49,Utilities,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,us-gaap,RegulatedOperatingRevenueOther,50,Utilities,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,us-gaap,RegulatedOperatingRevenueSteam,51,Utilities,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,us-gaap,RegulatedOperatingRevenueWater,52,Utilities,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,us-gaap,RegulatedAndUnregulatedOperatingRevenue,45,Utilities & Independent Power,,,duration,,,utilities_regulated_operating_revenue_exact,generic_rules,Common utility top-line tags not in the built-in mapping registry.
+revenue,direct,us-gaap,RegulatedOperatingRevenue,46,Utilities & Independent Power,,,duration,,,utilities_regulated_operating_revenue_exact,generic_rules,Common utility top-line tags not in the built-in mapping registry.
+revenue,direct,us-gaap,RegulatedOperatingRevenueElectricNonNuclear,46,Utilities & Independent Power,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,us-gaap,RegulatedOperatingRevenueFieldServices,47,Utilities & Independent Power,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,us-gaap,RegulatedOperatingRevenueFossilFuel,48,Utilities & Independent Power,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,us-gaap,RegulatedOperatingRevenueGas,49,Utilities & Independent Power,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,us-gaap,RegulatedOperatingRevenueOther,50,Utilities & Independent Power,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,us-gaap,RegulatedOperatingRevenueSteam,51,Utilities & Independent Power,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,us-gaap,RegulatedOperatingRevenueWater,52,Utilities & Independent Power,,,duration,,,utilities_regulated_operating_revenue_pattern,generic_rules,Expand to exact concepts only when they exist in the fact inventory.
+revenue,direct,ifrs-full,Revenue,10,,,,duration,ifrs-full,revenue,,,
+revenue,direct,us-gaap,RevenueFromContractWithCustomerExcludingAssessedTax,10,,,,duration,us-gaap,revenuefromcontractwithcustomerexcludingassessedtax,,,
+revenue,direct,ifrs-full,RevenueFromContractsWithCustomers,11,,,,duration,ifrs-full,revenuefromcontractswithcustomers,,,
+revenue,direct,us-gaap,Revenues,11,,,,duration,us-gaap,revenues,,,
+revenue,direct,ifrs-full,InsuranceRevenue,12,,,,duration,ifrs-full,insurancerevenue,,,
+revenue,direct,us-gaap,SalesRevenueNet,12,,,,duration,us-gaap,salesrevenuenet,,,
+revenue,direct,us-gaap,SalesRevenueServicesNet,13,,,,duration,us-gaap,salesrevenueservicesnet,,,
+revenue,direct,us-gaap,OperatingRevenue,14,,,,duration,us-gaap,operatingrevenue,,,
+total_assets,direct,ifrs-full,Assets,10,,,,instant,ifrs-full,assets,,,
+total_assets,direct,us-gaap,Assets,10,,,,instant,us-gaap,assets,,,
+total_equity,direct,ifrs-full,Equity,10,,,,instant,ifrs-full,equity,,,
+total_equity,direct,us-gaap,StockholdersEquity,10,,,,instant,us-gaap,stockholdersequity,,,
+total_equity,direct,ifrs-full,EquityAttributableToOwnersOfParent,11,,,,instant,ifrs-full,equityattributabletoownersofparent,,,
+total_equity,direct,us-gaap,StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest,11,,,,instant,us-gaap,stockholdersequityincludingportionattributabletononcontrollinginterest,,,
+total_equity,direct,us-gaap,PartnersCapitalIncludingPortionAttributableToNoncontrollingInterest,12,,,,instant,us-gaap,partnerscapitalincludingportionattributabletononcontrollinginterest,,,
+total_equity,direct,us-gaap,MembersEquity,13,,,,instant,us-gaap,membersequity,,,
+total_equity,direct,us-gaap,CommonStockholdersEquity,45,,,,instant,,,common_stockholders_equity_alias,generic_rules,Safe lower-priority alias for total equity when stockholders-equity tags are absent.

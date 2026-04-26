@@ -1,0 +1,51 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# --- Data outputs & archives ---
+output/
+FileDepository/
+
+# --- Caches ---
+ticker_mapping/_sec_cache/
+ticker_mapping/_identity_enrichment_cache/
+
+# --- Data file formats ---
+*.parquet
+*.pkl
+*.pickle
+*.db
+*.sqlite
+*.sqlite3
+*.h5
+*.hdf5
+*.feather
+*.arrow
+*.log
+
+# --- Large data / generated files ---
+*.xlsx
+*.json
+
+# --- CSVs: ignore all by default ---
+*.csv
+
+# --- CSVs to track (override above) ---
+!ticker_mapping/All_tickers_biotech.csv
+!ticker_mapping/All_tickers_biotech_enriched.csv
+!ticker_mapping/reverse_split_events_fmp.csv
+!biotech_index/data/*.csv
+!SEC_fundamentals/sec_issuer_metric_override_seed.csv
+!SEC_fundamentals/sec_metric_mapping_full.csv
+
+# --- OS / IDE ---
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp

@@ -1,0 +1,202 @@
+sec_fundamentals:
+  # Core paths
+  db_path: "C:\\Users\\josel\\Documents\\STAGING\\DB\\sec_fundamentals.sqlite"
+  insider_db_path: "C:\\Users\\josel\\Documents\\STAGING\\DB\\sec_insider.sqlite"
+  # CIK universe used by fundamentals ingest.
+  # Supports columns like: Ticker, MatchedTicker, CIK, CompanyName (from build_cik_ticker_mapping.py).
+  universe_csv: "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\ticker_mapping\\cik_ticker_mapping_biotech.csv"
+  tag_map_path: "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\SEC_fundamentals\\tier1_tag_map.yaml"
+
+  # SEC identity
+  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  run_mode: "daily"  # daily | weekly | quarterly | backfill
+
+  # Backfill horizon: start with 7 years
+  backfill_years: 7
+  start_date: null
+  end_date: null
+
+  request:
+    timeout_seconds: 60
+    max_retries: 4
+    backoff_base_seconds: 1.5
+    backoff_cap_seconds: 60.0
+    sleep_seconds: 0.2  # minimum spacing between SEC request starts; shared globally when fetch_workers > 1
+    cache_enabled: true
+    cache_dir: "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\SEC_fundamentals\\cache\\sec_http"
+    cache_use_for_backfill: true
+    submissions_cache_ttl_hours: 4.0
+    companyfacts_cache_ttl_hours: 8.0
+
+  ingestion:
+    fetch_workers: 1  # parallel SEC fetch workers; DB writes remain single-threaded
+    forms_of_interest:
+      - "10-Q"
+      - "10-Q/A"
+      - "10-K"
+      - "10-K/A"
+      - "20-F"
+      - "20-F/A"
+      - "40-F"
+      - "40-F/A"
+      - "8-K"
+      - "8-K/A"
+      - "DEF 14A"
+      - "3"
+      - "4"
+      - "4/A"
+      - "5"
+    facts_forms:
+      - "10-Q"
+      - "10-Q/A"
+      - "10-K"
+      - "10-K/A"
+      - "20-F"
+      - "20-F/A"
+      - "40-F"
+      - "40-F/A"
+    include_submissions_pages: true
+    max_submissions_pages_per_cik: 200
+    only_tag_mapped: false  # false = ingest all companyfacts tags; true = ingest only tier1_tag_map tags
+    batch_commit_size: 2500
+    max_ciks: 0  # 0 means all
+
+  daily:
+    lookback_days: 30
+    fetch_companyfacts_on_new_filings_only: true
+    companyfacts_refresh_days: 7
+    max_ciks: 0
+
+  weekly:
+    lookback_days: 120
+    fetch_companyfacts_on_new_filings_only: false
+    companyfacts_refresh_days: 0
+    max_ciks: 0
+
+  quarterly:
+    lookback_days: 420
+    fetch_companyfacts_on_new_filings_only: false
+    companyfacts_refresh_days: 0
+    max_ciks: 0
+
+  backfill:
+    fetch_companyfacts_on_new_filings_only: false
+    companyfacts_refresh_days: 0
+    max_ciks: 0
+
+  features:
+    as_of_date: null
+    include_forms:
+      - "10-Q"
+      - "10-Q/A"
+      - "10-QT"
+      - "10-QT/A"
+      - "10-K"
+      - "10-K/A"
+      - "10-KT"
+      - "10-KT/A"
+      - "20-F"
+      - "20-F/A"
+      - "40-F"
+      - "40-F/A"
+    net_debt_ebitda_cap: 30.0
+    consensus_proxy_weights:
+      sue: 0.18
+      sur: 0.06
+      earnings_acceleration: 0.15
+      revenue_acceleration: 0.11
+      insider_net_score: 0.22
+      eight_k_item202: 0.08
+      accruals_quality_bonus: 0.05
+      accruals_penalty: 0.10
+      leverage_penalty: 0.05
+    # Sector-relative SUE normalization (fallback to global when group coverage is thin).
+    sue_group_enabled: true
+    sue_primary_group: "industry_aggregate"
+    sue_secondary_group: "sector"
+    sue_min_group_size: 8
+    # Penalize high accruals only when growth is not high.
+    accrual_penalty_growth_threshold: 0.15
+    # Convert binary 8-K Item 2.02 flag into a recency-decayed score for consensus proxy.
+    item202_decay_enabled: true
+    item202_decay_window_days: 30.0
+    # Standard deviation lookback for SUE/SUR surprise normalization.
+    sue_std_window: 8
+    sue_std_min_periods: 4
+    # Guard tiny prior-period denominators when computing YoY growth.
+    revenue_yoy_min_abs_prior: 1.0e-8
+    eps_yoy_min_abs_prior: 0.01
+    recommendation_thresholds:
+      strong_buy: 1.20
+      buy: 0.40
+      hold_low: -0.40
+      reduce_low: -1.20
+    cutover_tolerances:
+      universe_coverage_min: 0.93
+      required_field_coverage_min: 0.85
+      accruals_coverage_min: 0.75
+      proxy_coverage_min: 0.90
+      freshness_median_days_max: 130
+
+  outputs:
+    report_output_dir: "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\output"
+    cutover_report_json: "sec_fund_cutover_report.json"
+    feature_snapshot_csv: "sec_fundamental_proxy_snapshot.csv"
+    yahoo_compatible_csv: "sec_fundamentals_yahoo_compatible.csv"
+    yahoo_compatible_json: "sec_fundamentals_yahoo_compatible.json"
+
+  snapshot_enhanced:
+    enabled: true
+    # If null/empty, runner uses sec_fundamentals.universe_csv.
+    universe_csv: null
+    # Optional issuer profile CSV with ticker/sector/industry/industry_aggregate.
+    issuer_profile_csv: "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\ticker_mapping\\industry_aggregate_mapping_biotech.csv"
+    # Compiled full mapping CSV (base + overlay). This is required in strict mode.
+    metric_mapping_csv: "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\SEC_fundamentals\\sec_metric_mapping_full.csv"
+    metric_mapping_required: true
+    mapping_overlay_yaml: "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\SEC_fundamentals\\sec_metric_mapping_overlay.yaml"
+    mapping_unmatched_csv: "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\SEC_fundamentals\\sec_metric_mapping_overlay_unmatched.csv"
+    mapping_rule_diagnostics_csv: "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\SEC_fundamentals\\sec_metric_mapping_rule_diagnostics.csv"
+    # Trading-day cutoff used to build as_of timestamp in UTC.
+    cutoff_time: "16:15:00"
+    cutoff_timezone: "America/New_York"
+    # Keep both entity and security outputs.
+    output_security_snapshots: true
+    fanout_aliases: true
+    # Enable same-filing metric repair using long-form facts.
+    same_filing_repair_enabled: true
+    # Pull long-form facts only for accessions that still have missing core metrics.
+    repair_only_for_missing_accessions: true
+    # Source lookback window (days) used for strict + backfill candidate rows.
+    lookback_days: 900
+    # Optional hard quality gate on enhanced snapshot output.
+    enforce_quality_gates: false
+    max_all5_missing_entity: 0
+    # Optional lag to prevent intraday publication leakage.
+    publication_lag_minutes: 0
+    # Output table names.
+    strict_table: "sec_fundamental_snapshot_strict_t1"
+    filled_table: "sec_fundamental_snapshot_filled_t1"
+    security_strict_table: "sec_fundamental_snapshot_strict_security_t1"
+    security_filled_table: "sec_fundamental_snapshot_filled_security_t1"
+    run_table: "sec_fundamental_snapshot_run_t1"
+
+  snapshot_resolver:
+    enabled: true
+    # Input/output tables for resolver pass.
+    snapshot_table: "sec_fundamental_snapshot_filled_security_t1"
+    facts_table: "sec_xbrl_facts_raw"
+    output_table: "sec_fundamental_snapshot_filled_security_t1_resolved"
+    # Optional persisted candidate table (leave null to skip).
+    candidate_table: null
+    # Resolver rule inputs.
+    extension_rule_yaml: "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\SEC_fundamentals\\sec_extension_pattern_library.yaml"
+    applicability_yaml: "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\SEC_fundamentals\\sec_metric_applicability_policy.yaml"
+    issuer_override_csv: "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\SEC_fundamentals\\sec_issuer_metric_override_seed.csv"
+    # Diagnostics outputs (rewritten each run).
+    candidate_csv: "output\\sec_gap_candidates_latest.csv"
+    # New: list of tickers still missing applicable core metrics after resolver.
+    missing_tickers_csv: "output\\sec_missing_metrics_tickers.csv"
+    # Prior-filing carry-forward guardrails.
+    prior_filing_fallback_enabled: true
+    prior_filing_max_staleness_days: 550

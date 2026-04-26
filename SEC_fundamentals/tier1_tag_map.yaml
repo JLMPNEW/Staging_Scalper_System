@@ -1,0 +1,353 @@
+version: 1
+description: >
+  Tier-1 SEC canonical metric mapping. Candidate tags are evaluated in listed priority order.
+  This format is intentionally extensible for future additions.
+
+canonical_metrics:
+  revenue:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "Revenues"]
+      - ["us-gaap", "SalesRevenueNet"]
+      - ["us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"]
+      - ["us-gaap", "RevenueFromContractWithCustomerIncludingAssessedTax"]
+
+  cogs:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "CostOfRevenue"]
+      - ["us-gaap", "CostOfGoodsAndServicesSold"]
+      - ["us-gaap", "CostOfGoodsSold"]
+
+  gross_profit:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "GrossProfit"]
+
+  sga:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "SellingGeneralAndAdministrativeExpense"]
+
+  research_and_development:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "ResearchAndDevelopmentExpense"]
+
+  depreciation_and_amortization:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "DepreciationAndAmortization"]
+      - ["us-gaap", "DepreciationDepletionAndAmortization"]
+      - ["us-gaap", "Depreciation"]
+      - ["us-gaap", "AmortizationOfIntangibleAssets"]
+
+  operating_income:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "OperatingIncomeLoss"]
+
+  interest_expense:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "InterestExpense"]
+
+  pretax_income:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "IncomeBeforeTax"]
+      - ["us-gaap", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest"]
+
+  tax_expense:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "IncomeTaxExpenseBenefit"]
+
+  net_income:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "NetIncomeLoss"]
+      - ["us-gaap", "ProfitLoss"]
+
+  eps_basic:
+    kind: flow
+    preferred_units: ["USD/shares", "USD / shares"]
+    candidate_tags:
+      - ["us-gaap", "EarningsPerShareBasic"]
+
+  eps_diluted:
+    kind: flow
+    preferred_units: ["USD/shares", "USD / shares"]
+    candidate_tags:
+      - ["us-gaap", "EarningsPerShareDiluted"]
+
+  weighted_avg_shares_basic:
+    kind: flow
+    preferred_units: ["shares"]
+    candidate_tags:
+      - ["us-gaap", "WeightedAverageNumberOfSharesOutstandingBasic"]
+
+  weighted_avg_shares_diluted:
+    kind: flow
+    preferred_units: ["shares"]
+    candidate_tags:
+      - ["us-gaap", "WeightedAverageNumberOfDilutedSharesOutstanding"]
+
+  stock_based_compensation:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "ShareBasedCompensation"]
+
+  impairment_charges:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "AssetImpairmentCharges"]
+      - ["us-gaap", "ImpairmentOfLongLivedAssetsHeldForUse"]
+
+  restructuring_charges:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "RestructuringCharges"]
+
+  cash_and_equivalents:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "CashAndCashEquivalentsAtCarryingValue"]
+
+  short_term_investments:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "ShortTermInvestments"]
+      - ["us-gaap", "AvailableForSaleSecuritiesCurrent"]
+      - ["us-gaap", "MarketableSecuritiesCurrent"]
+
+  accounts_receivable:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "AccountsReceivableNetCurrent"]
+
+  inventory:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "InventoryNet"]
+
+  prepaid_other_current_assets:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "PrepaidExpenseCurrent"]
+      - ["us-gaap", "OtherAssetsCurrent"]
+
+  total_current_assets:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "AssetsCurrent"]
+
+  ppe_net:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "PropertyPlantAndEquipmentNet"]
+
+  goodwill:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "Goodwill"]
+
+  intangibles:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "IntangibleAssetsNetExcludingGoodwill"]
+      - ["us-gaap", "FiniteLivedIntangibleAssetsNet"]
+
+  total_assets:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "Assets"]
+
+  accounts_payable:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "AccountsPayableCurrent"]
+
+  accrued_liabilities:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "AccruedLiabilitiesCurrent"]
+      - ["us-gaap", "AccruedExpensesAndOtherCurrentLiabilities"]
+
+  contract_liabilities_current:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "ContractWithCustomerLiabilityCurrent"]
+      - ["us-gaap", "DeferredRevenueCurrent"]
+
+  contract_liabilities_noncurrent:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "ContractWithCustomerLiabilityNoncurrent"]
+      - ["us-gaap", "DeferredRevenueNoncurrent"]
+
+  short_term_borrowings:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "ShortTermBorrowings"]
+      - ["us-gaap", "ShortTermDebt"]
+
+  current_portion_long_term_debt:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "LongTermDebtCurrent"]
+      - ["us-gaap", "CurrentPortionOfLongTermDebt"]
+
+  long_term_debt:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "LongTermDebtNoncurrent"]
+      - ["us-gaap", "LongTermDebt"]
+
+  lease_liabilities:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "OperatingLeaseLiabilityNoncurrent"]
+      - ["us-gaap", "OperatingLeaseLiabilityCurrent"]
+      - ["us-gaap", "FinanceLeaseLiabilityNoncurrent"]
+      - ["us-gaap", "FinanceLeaseLiabilityCurrent"]
+
+  total_liabilities:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "Liabilities"]
+
+  total_equity:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "StockholdersEquity"]
+      - ["us-gaap", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"]
+
+  shares_outstanding_period_end:
+    kind: stock
+    preferred_units: ["shares"]
+    candidate_tags:
+      - ["dei", "EntityCommonStockSharesOutstanding"]
+      - ["us-gaap", "CommonStockSharesOutstanding"]
+
+  public_float:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["dei", "EntityPublicFloat"]
+
+  operating_cash_flow:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "NetCashProvidedByUsedInOperatingActivities"]
+
+  capex:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "PaymentsToAcquirePropertyPlantAndEquipment"]
+
+  acquisitions:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "PaymentsToAcquireBusinessesNetOfCashAcquired"]
+      - ["us-gaap", "PaymentsToAcquireBusinessesNetOfCashAcquiredAndIntangibleAssets"]
+
+  cash_from_investing:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "NetCashProvidedByUsedInInvestingActivities"]
+
+  cash_from_financing:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "NetCashProvidedByUsedInFinancingActivities"]
+
+  dividends_paid:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "PaymentsOfDividends"]
+      - ["us-gaap", "PaymentsOfDividendsCommonStock"]
+
+  share_repurchases:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "PaymentsForRepurchaseOfCommonStock"]
+
+  share_issuance:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "ProceedsFromIssuanceOfCommonStock"]
+
+  debt_issuance:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "ProceedsFromIssuanceOfLongTermDebt"]
+
+  debt_repayment:
+    kind: flow
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "RepaymentsOfLongTermDebt"]
+
+  taxes_payable:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "TaxesPayableCurrent"]
+
+  taxes_receivable:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "IncomeTaxesReceivable"]
+
+  allowance_credit_losses:
+    kind: stock
+    preferred_units: ["USD"]
+    candidate_tags:
+      - ["us-gaap", "AllowanceForDoubtfulAccountsReceivableCurrent"]
+      - ["us-gaap", "AllowanceForCreditLosses"]
+

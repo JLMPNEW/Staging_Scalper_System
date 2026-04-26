@@ -1,0 +1,156 @@
+paths:
+  mapping_csv: "../ticker_mapping/All_tickers_biotech_enriched.csv"
+  tickers_csv:
+  no_tickers_csv: false
+  output_dir: "../output/preload_biotech_screen"
+  output_file: "biotech_screen_results_all.csv"
+  cache_dir: "../output/preload_biotech_screen_cache"
+
+clinicaltrials:
+  studies_url: "https://clinicaltrials.gov/api/v2/studies"
+
+sec:
+  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  submissions_url: "https://data.sec.gov/submissions/CIK{cik10}.json"
+  companyfacts_url: "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik10}.json"
+  archives_base: "https://www.sec.gov/Archives/edgar/data"
+
+  required_sec_forms:
+    - "10-K"
+    - "10-K/A"
+    - "10-Q"
+    - "10-Q/A"
+    - "10-QT"
+    - "10-QT/A"
+    - "8-K"
+    - "8-K/A"
+    - "20-F"
+    - "20-F/A"
+    - "40-F"
+    - "40-F/A"
+    - "6-K"
+    - "6-K/A"
+
+  current_report_forms:
+    - "8-K"
+    - "8-K/A"
+    - "6-K"
+    - "6-K/A"
+
+  periodic_forms:
+    - "10-K"
+    - "10-K/A"
+    - "10-Q"
+    - "10-Q/A"
+    - "10-QT"
+    - "10-QT/A"
+    - "20-F"
+    - "20-F/A"
+    - "40-F"
+    - "40-F/A"
+
+  text_scan_forms:
+    - "10-K"
+    - "10-K/A"
+    - "10-Q"
+    - "10-Q/A"
+    - "20-F"
+    - "20-F/A"
+    - "40-F"
+    - "40-F/A"
+    - "8-K"
+    - "8-K/A"
+    - "6-K"
+    - "6-K/A"
+    - "DEF 14A"
+    - "DEFA14A"
+    - "PRE 14A"
+    - "PRE14A"
+    - "S-1"
+    - "S-1/A"
+    - "S-3"
+    - "S-3/A"
+    - "424B1"
+    - "424B2"
+    - "424B3"
+    - "424B4"
+    - "424B5"
+    - "424B7"
+
+  soft_risk_text_forms:
+    - "6-K"
+    - "6-K/A"
+
+screen:
+  target_security_types:
+    - "Common Stock"
+    - "Ordinary Shares"
+    - "ADR/ADS"
+  allowed_listing_statuses:
+    - "active"
+  require_primary_listing: true
+  disable_identity_gate: false
+  allow_missing_identity_fields: false
+  manual_include_demotes_remove_to_review: true
+  lookback_years: 2.0
+  reverse_split_lookback_years: 5.0
+  min_median_addv20: 1000000.0
+  disable_liquidity: false
+  allow_missing_liquidity: true
+  max_text_filings: 8
+  max_biotech_diagnostic_filings: 2
+  # Soft financing language is retained in going_concern_soft_hits_2y, but should
+  # not force review by default because it is common in development-stage biotech.
+  review_on_soft_liquidity_warning: false
+
+liquidity:
+  source: "ib"
+  ib_host: "127.0.0.1"
+  ib_port: 7497
+  ib_client_id: 91
+  ib_connect_timeout_sec: 8.0
+  ib_exchange: "SMART"
+  ib_currency: "USD"
+  ib_duration: "4 M"
+  ib_bar_size: "1 day"
+  ib_what_to_show: "TRADES"
+  ib_use_rth: true
+
+risk:
+  # Optional exported corporate-action feed, e.g. Nasdaq Trader Daily List.
+  # Expected columns are flexible but should include ticker/symbol, event/effective date,
+  # and a description/action containing "reverse" and "split".
+  reverse_split_events_csv:
+
+google_confirmation:
+  enabled: true
+  api_key_env: "GEMINI_API_KEY"
+  model: "gemini-2.5-flash"
+  fallback_model: ""
+  use_search_grounding: true
+  classifications:
+    - "reverse_split"
+    - "going_concern"
+  batch_size: 8
+  max_calls_per_run: 30
+  min_seconds_between_calls: 10.0
+  cache_ttl_days: 30.0
+  cache_file: "../output/preload_biotech_screen/google_confirmation_cache.csv"
+  raw_output_file: "../output/preload_biotech_screen/google_confirmation_raw.json"
+  min_confidence_for_confirmed: "high"
+  require_company_name_match: true
+  require_primary_source: true
+  rerun_missing_tickers: true
+  max_missing_rerun_calls: 3
+  # Only hard-remove these risk flags when Google confirms the local evidence.
+  hard_remove_confirmed_going_concern: true
+  hard_remove_confirmed_reverse_split: true
+
+runtime:
+  workers: 4
+  sleep_sec: 0.2
+  ctgov_max_pages: 25
+  json_ttl_hours: 24.0
+  text_ttl_hours: 168.0
+  timeout_sec: 45.0
+  max_tickers: 0

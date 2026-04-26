@@ -1,0 +1,146 @@
+version: 1
+metadata:
+  name: sec_metric_applicability_policy
+  description: >-
+    Reclassify unresolved gaps that are economically real rather than mapping errors.
+    These policies do not invent values. They only change the gap classification so
+    downstream scoring can reweight correctly.
+
+policies:
+  - policy_id: biotech_pre_revenue_not_applicable
+    enabled: true
+    metric_name: revenue
+    action: not_applicable_pre_revenue
+    applicable: false
+    sector: Healthcare
+    industry_aggregate: "Healthcare: Biopharma & Research Tools"
+    industry_aggregate_aliases:
+      - Biopharma & Research Tools
+    require_statuses:
+      - mapping_gap_same_filing
+      - missing
+      - partial_core_metrics_missing_after_same_filing_mapping_and_backfill
+    note: >-
+      Pre-commercial biotech issuers commonly have no periodic revenue. Treat revenue as
+      not applicable for scoring when no same-filing revenue fact is found.
+
+  - policy_id: mortgage_reit_revenue_equivalent_required
+    enabled: true
+    metric_name: revenue
+    action: needs_revenue_equivalent_policy
+    applicable: false
+    industry_aggregate: Real Estate & REITs
+    industry_regex: '(?i)mortgage'
+    require_statuses:
+      - mapping_gap_same_filing
+      - missing
+      - partial_core_metrics_missing_after_same_filing_mapping_and_backfill
+    note: >-
+      Mortgage REITs often need a revenue-equivalent policy rather than a standard industrial revenue map.
+
+  - policy_id: crml_pre_revenue_reclassification
+    enabled: true
+    metric_name: revenue
+    action: not_applicable_pre_revenue_issuer
+    applicable: false
+    cik: "0001951089"
+    ticker: CRML
+    require_statuses:
+      - mapping_gap_same_filing
+      - missing
+      - partial_core_metrics_missing_after_same_filing_mapping_and_backfill
+    note: >-
+      Critical Metals Corp. appears to be a development-stage issuer with no usable periodic
+      top-line revenue fact in current SEC filings. Treat revenue as not applicable until the
+      issuer begins reporting operating revenue.
+
+  - policy_id: ctgo_pre_revenue_reclassification
+    enabled: true
+    metric_name: revenue
+    action: not_applicable_pre_revenue_issuer
+    applicable: false
+    cik: "0001502377"
+    ticker: CTGO
+    require_statuses:
+      - mapping_gap_same_filing
+      - missing
+      - partial_core_metrics_missing_after_same_filing_mapping_and_backfill
+    note: >-
+      Contango ORE, Inc. does not currently surface a usable periodic top-line revenue fact in
+      the SEC raw fact set. Treat revenue as not applicable for resolver coverage rather than as
+      an unresolved mapping gap.
+
+  - policy_id: dc_pre_revenue_reclassification
+    enabled: true
+    metric_name: revenue
+    action: not_applicable_pre_revenue_issuer
+    applicable: false
+    cik: "0001852353"
+    ticker: DC
+    require_statuses:
+      - mapping_gap_same_filing
+      - missing
+      - partial_core_metrics_missing_after_same_filing_mapping_and_backfill
+    note: >-
+      Dakota Gold Corp. appears pre-production in current SEC filings and does not expose a
+      usable periodic top-line revenue fact. Revenue should not remain an unresolved core gap.
+
+  - policy_id: evex_pre_revenue_reclassification
+    enabled: true
+    metric_name: revenue
+    action: not_applicable_pre_revenue_issuer
+    applicable: false
+    cik: "0001823652"
+    ticker: EVEX
+    require_statuses:
+      - mapping_gap_same_filing
+      - missing
+      - partial_core_metrics_missing_after_same_filing_mapping_and_backfill
+    note: >-
+      Eve Holding, Inc. remains pre-commercial in current SEC filings and does not provide a
+      usable recurring revenue fact. Treat revenue as not applicable for coverage accounting.
+
+  - policy_id: oklo_pre_revenue_reclassification
+    enabled: true
+    metric_name: revenue
+    action: not_applicable_pre_revenue_issuer
+    applicable: false
+    cik: "0001849056"
+    ticker: OKLO
+    require_statuses:
+      - mapping_gap_same_filing
+      - missing
+      - partial_core_metrics_missing_after_same_filing_mapping_and_backfill
+    note: >-
+      Oklo Inc. does not yet report an operating revenue line in the current SEC raw fact set.
+      Revenue should be treated as not applicable instead of left as an unresolved mapping gap.
+
+  - policy_id: ppta_pre_revenue_reclassification
+    enabled: true
+    metric_name: revenue
+    action: not_applicable_pre_revenue_issuer
+    applicable: false
+    cik: "0001526243"
+    ticker: PPTA
+    require_statuses:
+      - mapping_gap_same_filing
+      - missing
+      - partial_core_metrics_missing_after_same_filing_mapping_and_backfill
+    note: >-
+      Perpetua Resources Corp. does not currently expose a usable periodic top-line revenue fact
+      in the SEC raw facts and should be treated as pre-revenue for resolver classification.
+
+  - policy_id: usau_pre_revenue_reclassification
+    enabled: true
+    metric_name: revenue
+    action: not_applicable_pre_revenue_issuer
+    applicable: false
+    cik: "0000027093"
+    ticker: USAU
+    require_statuses:
+      - mapping_gap_same_filing
+      - missing
+      - partial_core_metrics_missing_after_same_filing_mapping_and_backfill
+    note: >-
+      U.S. Gold Corp. appears pre-production in current SEC filings and does not report a usable
+      periodic revenue fact. Reclassify revenue as not applicable for gap accounting.

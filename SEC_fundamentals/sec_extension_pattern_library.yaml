@@ -1,0 +1,188 @@
+version: 1
+metadata:
+  name: sec_extension_pattern_library
+  description: >-
+    High-confidence same-filing extension-concept rules for residual snapshot gaps.
+    Use with sec_snapshot_gap_resolver.py. Auto-apply rules are intentionally
+    conservative. Candidate rules are exported for review but not auto-filled.
+
+auto_apply_rules:
+  - rule_id: biotech_collaboration_and_license_revenue_exact
+    enabled: true
+    metric_name: revenue
+    source_kind: direct
+    taxonomies: [us-gaap, ifrs-full, '*']
+    sector: Healthcare
+    industry_aggregate: "Healthcare: Biopharma & Research Tools"
+    industry_aggregate_aliases: [Biopharma & Research Tools]
+    period_type: duration
+    priority_start: 20
+    auto_apply: true
+    confidence: high
+    match:
+      mode: exact
+      concepts:
+        - CollaborationRevenue
+        - CollaborationAndLicenseRevenue
+        - LicenseRevenue
+        - LicensingRevenue
+        - RoyaltyRevenue
+        - GrantRevenue
+        - MilestoneRevenue
+        - ContractResearchRevenue
+        - ResearchRevenue
+    note: >-
+      Common same-filing revenue concepts for commercializing or partnered biotech issuers.
+
+  - rule_id: biotech_collaboration_and_license_revenue_regex
+    enabled: true
+    metric_name: revenue
+    source_kind: direct
+    taxonomies: [us-gaap, ifrs-full, '*']
+    sector: Healthcare
+    industry_aggregate: "Healthcare: Biopharma & Research Tools"
+    industry_aggregate_aliases: [Biopharma & Research Tools]
+    period_type: duration
+    priority_start: 30
+    auto_apply: false
+    confidence: high
+    match:
+      mode: regex
+      concepts:
+        - '.*Collaboration.*Revenue.*'
+        - '.*License.*Revenue.*'
+        - '.*Royalt.*Revenue.*'
+        - '.*Grant.*Revenue.*'
+        - '.*Milestone.*Revenue.*'
+    note: >-
+      Regex catch-all for biotech extension concepts. Review before converting to exact issuer overrides.
+
+  - rule_id: reit_rental_revenue_exact
+    enabled: true
+    metric_name: revenue
+    source_kind: direct
+    taxonomies: [us-gaap, ifrs-full, '*']
+    industry_aggregate: Real Estate & REITs
+    period_type: duration
+    priority_start: 25
+    auto_apply: true
+    confidence: high
+    match:
+      mode: exact
+      concepts:
+        - RentalRevenue
+        - LeaseRevenue
+        - RentalAndOtherRevenues
+        - RealEstateRentalRevenue
+        - RealEstateRentalRevenueNet
+        - OperatingLeaseLeaseIncome
+    note: >-
+      High-confidence equity REIT top-line concepts.
+
+  - rule_id: reit_mortgage_interest_income_candidate
+    enabled: true
+    metric_name: revenue
+    source_kind: direct
+    taxonomies: [us-gaap, ifrs-full, '*']
+    industry_regex: '(?i)mortgage'
+    period_type: duration
+    priority_start: 35
+    auto_apply: true
+    confidence: high
+    match:
+      mode: exact
+      concepts:
+        - InterestAndDividendIncomeOperating
+        - InterestAndFeeIncomeLoansAndLeases
+        - InterestAndFeeIncomeLoansCommercialRealEstate
+        - InterestIncomeOperating
+        - InterestIncomeOther
+        - InterestIncomeSecuritiesOtherUSGovernment
+        - InterestIncomeLoans
+        - InterestIncomeMortgageLoansHeldForInvestment
+        - InterestIncomeMortgageBackedSecurities
+        - RevenuesNetOfInterestExpense
+        - OperatingLeaseLeaseIncome
+    note: >-
+      Mortgage REIT revenue-equivalent candidates. Review issuer-by-issuer before auto-applying.
+
+  - rule_id: bank_interest_income_topline_exact
+    enabled: true
+    metric_name: revenue
+    source_kind: direct
+    taxonomies: [us-gaap, ifrs-full, '*']
+    industry_aggregate: Banking & Consumer Finance
+    period_type: duration
+    priority_start: 25
+    auto_apply: true
+    confidence: high
+    match:
+      mode: exact
+      concepts:
+        - RevenuesNetOfInterestExpense
+        - InterestAndDividendIncomeOperating
+        - InterestAndFeeIncomeLoansAndLeases
+        - InterestAndFeeIncomeLoansAndLeasesHeldInPortfolio
+        - InterestAndFeeIncomeLoansCommercialRealEstate
+        - InterestIncomeOperating
+    note: >-
+      Conservative direct bank top-line equivalents.
+
+  - rule_id: utility_operating_revenue_regex
+    enabled: true
+    metric_name: revenue
+    source_kind: direct
+    taxonomies: [us-gaap, '*']
+    sector: Utilities
+    period_type: duration
+    priority_start: 25
+    auto_apply: true
+    confidence: review
+    match:
+      mode: regex
+      concepts:
+        - '^RegulatedOperatingRevenue.*$'
+        - '^RegulatedAndUnregulatedOperatingRevenue.*$'
+        - '^OperatingRevenue.*$'
+    note: >-
+      Utility operating revenue families that often need exact concept review.
+
+candidate_rules:
+  - rule_id: generic_same_filing_revenue_review
+    enabled: true
+    metric_name: revenue
+    source_kind: direct
+    taxonomies: ['*']
+    period_type: duration
+    priority_start: 90
+    auto_apply: false
+    confidence: review
+    match:
+      mode: regex
+      concepts:
+        - '.*Revenue.*'
+        - '.*Sales.*'
+        - '.*Premium.*'
+        - '.*Lease.*'
+        - '.*Rental.*'
+        - '.*Interest.*Income.*'
+    note: >-
+      Broad review-only catchall. Used to produce candidate issuer overrides.
+
+  - rule_id: generic_same_filing_net_income_review
+    enabled: true
+    metric_name: net_income
+    source_kind: direct
+    taxonomies: ['*']
+    period_type: duration
+    priority_start: 90
+    auto_apply: false
+    confidence: review
+    match:
+      mode: regex
+      concepts:
+        - '.*NetIncome.*'
+        - '.*ProfitLoss.*'
+        - '.*Earnings.*'
+    note: >-
+      Review-only catchall for issuer-specific net-income aliases.

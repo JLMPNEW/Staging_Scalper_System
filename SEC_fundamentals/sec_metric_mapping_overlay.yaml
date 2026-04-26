@@ -1,0 +1,140 @@
+version: 1
+metadata:
+  name: sec_metric_mapping_overlay
+  description: >-
+    Extended coverage overlay for sec_tier1_snapshot_enhanced.py.
+    Maintain this file in source control and compile it with
+    sec_metric_mapping_overlay_builder.py to produce a full merged mapping CSV.
+  owner: data-platform
+  status: production-starter
+
+generic_rules:
+  - rule_id: bank_revenue_net_of_interest_expense
+    enabled: true
+    metric_name: revenue
+    source_kind: direct
+    taxonomies: [us-gaap]
+    industry_aggregate: Banking & Consumer Finance
+    priority_start: 45
+    period_type: duration
+    match:
+      mode: exact
+      concepts:
+        - RevenuesNetOfInterestExpense
+    note: >-
+      High-confidence bank top-line equivalent. Prefer this before any fallback.
+
+  - rule_id: utilities_regulated_operating_revenue_exact
+    enabled: true
+    metric_name: revenue
+    source_kind: direct
+    taxonomies: [us-gaap]
+    industry_aggregate_any_of:
+      - Utilities & Independent Power
+      - Utilities
+    priority_start: 45
+    period_type: duration
+    match:
+      mode: exact
+      concepts:
+        - RegulatedAndUnregulatedOperatingRevenue
+        - RegulatedOperatingRevenue
+    note: >-
+      Common utility top-line tags not in the built-in mapping registry.
+
+  - rule_id: utilities_regulated_operating_revenue_pattern
+    enabled: true
+    metric_name: revenue
+    source_kind: direct
+    taxonomies: [us-gaap]
+    industry_aggregate_any_of:
+      - Utilities & Independent Power
+      - Utilities
+    priority_start: 46
+    period_type: duration
+    match:
+      mode: regex
+      concepts:
+        - '^RegulatedOperatingRevenue[A-Za-z0-9_]+$'
+    note: >-
+      Expand to exact concepts only when they exist in the fact inventory.
+
+  - rule_id: reit_rental_revenue_patterns
+    enabled: true
+    metric_name: revenue
+    source_kind: direct
+    taxonomies: [us-gaap]
+    industry_aggregate: Real Estate & REITs
+    priority_start: 50
+    period_type: duration
+    match:
+      mode: regex
+      concepts:
+        - '^RentalRevenue.*$'
+        - '^RealEstateRentalRevenue.*$'
+        - '^LeaseRevenue.*$'
+    note: >-
+      Conservative REIT/real-estate rental revenue expansion. Requires fact inventory.
+
+  - rule_id: common_stockholders_equity_alias
+    enabled: true
+    metric_name: total_equity
+    source_kind: direct
+    taxonomies: [us-gaap]
+    priority_start: 45
+    period_type: instant
+    match:
+      mode: exact
+      concepts:
+        - CommonStockholdersEquity
+    note: >-
+      Safe lower-priority alias for total equity when stockholders-equity tags are absent.
+
+  - rule_id: net_income_available_to_common_aliases
+    enabled: true
+    metric_name: net_income
+    source_kind: direct
+    taxonomies: [us-gaap]
+    priority_start: 60
+    period_type: duration
+    match:
+      mode: exact
+      concepts:
+        - NetIncomeLossAvailableToCommonStockholdersBasic
+        - NetIncomeLossAvailableToCommonStockholdersDiluted
+    note: >-
+      Lower-priority alias. Useful for issuers that only expose common-shareholder net income.
+
+  - rule_id: bank_interest_and_dividend_income_operating
+    enabled: true
+    metric_name: revenue
+    source_kind: direct
+    taxonomies: [us-gaap]
+    industry_aggregate: Banking & Consumer Finance
+    priority_start: 85
+    period_type: duration
+    match:
+      mode: exact
+      concepts:
+        - InterestAndDividendIncomeOperating
+    note: >-
+      Lower-confidence bank top-line proxy. Keep at low priority so it only applies
+      when higher-confidence revenue concepts are unavailable.
+
+issuer_overrides:
+  - rule_id: template_new_issuer_extension_revenue
+    enabled: false
+    cik: '0000000000'
+    metric_name: revenue
+    source_kind: direct
+    taxonomies: ['*']
+    industry_aggregate: Banking & Consumer Finance
+    priority_start: 30
+    period_type: duration
+    match:
+      mode: regex
+      concepts:
+        - 'Revenue.*'
+    note: >-
+      Template only. To onboard a new issuer-specific extension concept, set enabled=true,
+      replace the CIK, tighten the regex or use exact mode, and compile with a fact inventory.

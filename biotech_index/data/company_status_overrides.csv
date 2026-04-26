@@ -1,0 +1,2 @@
+ticker,decision,listing_status,manual_include,manual_exclude,manual_review,reason_codes,notes
+DAWN,remove,acquired_delisted,,true,,acquired_delisted_non_public,Acquired by Servier and ceased trading on Nasdaq on 2026-04-22; exclude from active public universe.

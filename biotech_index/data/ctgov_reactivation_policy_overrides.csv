@@ -1,0 +1,6 @@
+ticker,enabled,reactivation_status,reactivation_priority,reactivation_reason,notes
+AXGN,true,reactivation_review,high,high_priority_device_catalyst_review,"Avance Nerve Graft pivotal/BLA/commercial transition catalyst"
+HAE,true,reactivation_review,high,high_priority_device_catalyst_review,"VASCADE MVP XL label-expansion catalyst tied to high-growth cardiac procedures"
+IRWD,true,no_reactivation_signal,none,false_linkage_or_future_drug_watch,"Current device exception appears to be false linkage; watch for Apraglutide Phase 3 when registered"
+STIM,true,reactivation_review,low,adoption_or_coverage_device_review,"Therapeutic-device adoption, reimbursement, and TAM-expansion catalyst"
+TNDM,true,reactivation_review,low,adoption_or_coverage_device_review,"Software and sensor-integration adoption catalyst for therapeutic device ecosystem"

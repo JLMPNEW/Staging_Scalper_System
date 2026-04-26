@@ -1,0 +1,113 @@
+﻿ticker,search_term,query_field,source,confidence,link_from_search,notes
+ABSI,ABS-201,query.intr,manual_program,0.85,true,Program/intervention search term for Absci clinical trial discovery
+ABSI,Absci,query.spons,manual_sponsor_search,0.90,true,Company short-name sponsor search
+AGMB,AGMB-129,query.intr,manual_program,0.85,true,Agomab program/intervention search
+AGMB,Ontunisertib,query.intr,manual_program,0.85,true,Agomab program/intervention search
+AGMB,Agomab Therapeutics,query.spons,manual_sponsor_search,0.90,true,Sponsor operating-name search
+FBIO,Avenue Therapeutics,query.spons,manual_parent_subsidiary,0.85,true,Fortress Biotech subsidiary sponsor search
+FBIO,Checkpoint Therapeutics,query.spons,manual_parent_subsidiary,0.85,true,Fortress Biotech subsidiary sponsor search
+FBIO,Mustang Bio,query.spons,manual_parent_subsidiary,0.85,true,Fortress Biotech subsidiary sponsor search
+FBIO,Journey Medical,query.spons,manual_parent_subsidiary,0.85,true,Fortress Biotech subsidiary sponsor search
+FBIO,NG-350A,query.intr,manual_program,0.75,true,Program-level search supplied for Fortress ecosystem review
+GPCR,GSBR-1290,query.intr,manual_program,0.90,true,Structure Therapeutics program/intervention search
+GPCR,Structure Therapeutics,query.spons,manual_sponsor_search,0.90,true,Sponsor operating-name search
+HELP,CYB003,query.intr,manual_program,0.90,true,Cybin program/intervention search
+HELP,Cybin US Ltd,query.spons,manual_sponsor_search,0.90,true,Cybin sponsor alias search
+HELP,Cybin IRL Limited,query.spons,manual_sponsor_search,0.90,true,Cybin sponsor alias search
+LEGN,Legend Biotech,query.spons,manual_sponsor_search,0.95,true,Legend sponsor search
+LEGN,Legend Biotech USA,query.spons,manual_sponsor_search,0.90,true,Legend US sponsor search
+LEGN,Carvykti,query.intr,manual_program,0.85,true,Legend/Janssen partnered intervention search
+LEGN,ciltacabtagene autoleucel,query.intr,manual_program,0.85,true,Legend/Janssen partnered intervention search
+LEGN,LB1901,query.intr,manual_program,0.85,true,Legend program/intervention search
+TLX,Telix Pharmaceuticals,query.spons,manual_sponsor_search,0.95,true,Telix sponsor search
+TLX,Telix Pharmaceuticals (US) Inc.,query.spons,manual_sponsor_search,0.95,true,Telix US sponsor search
+TLX,TLX101,query.intr,manual_program,0.85,true,Telix program/intervention search
+TLX,TLX101-Tx,query.intr,manual_program,0.85,true,Telix program/intervention search
+JNJ,Johnson & Johnson Enterprise Innovation Inc.,query.spons,manual_sponsor_search,0.95,true,Exact CTGov lead sponsor alias for Johnson & Johnson oncology pipeline trials
+JNJ,Johnson & Johnson Private Limited,query.spons,manual_sponsor_search,0.95,true,Exact CTGov lead sponsor alias for Johnson & Johnson regional sponsor trials
+JNJ,Janssen Biotech Inc.,query.spons,manual_sponsor_search,0.90,true,Common Johnson & Johnson operating sponsor alias on CTGov
+XERS,Xeris Pharmaceuticals,query.spons,manual_sponsor_search,0.95,true,Xeris operating sponsor search
+XERS,Xeris Biopharma,query.spons,manual_sponsor_search,0.95,true,Xeris issuer/sponsor search
+XERS,XeriSol,query.intr,manual_program,0.80,true,Xeris formulation/platform intervention search
+XERS,XeriLend,query.intr,manual_program,0.80,true,Xeris formulation/platform intervention search
+MRNA,ModernaTX,query.spons,manual_sponsor_search,0.95,true,CTGov sponsor alias for Moderna trials
+MRNA,mRNA-1345,query.intr,manual_program,0.85,true,Moderna RSV vaccine program search
+MRNA,mRNA-1647,query.intr,manual_program,0.85,true,Moderna CMV vaccine program search
+MRNA,mRNA-1083,query.intr,manual_program,0.80,true,Moderna flu/COVID vaccine program search
+MRNA,NCT04470427,query.term,manual_nct,0.95,true,User-verified Moderna Phase 3/pivotal NCT
+MRNA,NCT05815411,query.term,manual_nct,0.95,true,User-verified Moderna Phase 3/pivotal NCT
+MRNA,NCT05127330,query.term,manual_nct,0.95,true,User-verified Moderna Phase 3/pivotal NCT
+PCRX,Pacira Pharmaceuticals,query.spons,manual_sponsor_search,0.95,true,Pacira historical/operating sponsor search
+PCRX,Pacira BioSciences,query.spons,manual_sponsor_search,0.95,true,Pacira sponsor search
+PCRX,NCT05043519,query.term,manual_nct,0.95,true,User-verified Pacira pivotal/Phase 3 NCT
+PCRX,NCT05829317,query.term,manual_nct,0.95,true,User-verified Pacira pivotal/Phase 3 NCT
+BCYC,BicycleTx,query.spons,manual_sponsor_search,0.95,true,Bicycle Therapeutics CTGov sponsor alias
+BCYC,Bicycle Therapeutics,query.spons,manual_sponsor_search,0.95,true,Bicycle Therapeutics sponsor search
+BCYC,BT8009,query.intr,manual_program,0.85,true,Bicycle program/intervention search
+BCYC,BT5528,query.intr,manual_program,0.85,true,Bicycle program/intervention search
+BCYC,BT1718,query.intr,manual_program,0.85,true,Bicycle program/intervention search
+BCYC,zelenectide pevedotin,query.intr,manual_program,0.90,true,Bicycle Phase 3 intervention search
+BCYC,NCT05671653,query.term,manual_nct,0.95,true,User-verified Bicycle Phase 3 NCT
+KROS,KER-050,query.intr,manual_program,0.85,true,Keros program/intervention search
+KROS,KER-012,query.intr,manual_program,0.85,true,Keros program/intervention search
+KROS,elritercept,query.intr,manual_program,0.90,true,Keros program/intervention search
+KROS,cibotercept,query.intr,manual_program,0.85,true,Keros program/intervention search
+KROS,NCT06499285,query.term,manual_nct,0.95,true,User-verified Keros Phase 3 NCT
+ONC,BeiGene,query.spons,manual_legacy_sponsor_search,0.95,true,BeOne Medicines historical sponsor search before rebrand
+ONC,BeiGene Ltd,query.spons,manual_legacy_sponsor_search,0.95,true,BeOne Medicines historical sponsor search before rebrand
+ONC,BeiGene USA,query.spons,manual_legacy_sponsor_search,0.90,true,BeOne Medicines US historical sponsor search before rebrand
+ROIV,Immunovant,query.spons,manual_parent_subsidiary,0.85,true,Roivant subsidiary/vant sponsor search
+ROIV,Immunovant Sciences GmbH,query.spons,manual_parent_subsidiary,0.90,true,Exact CTGov lead sponsor string for Roivant subsidiary
+ROIV,Dermavant,query.spons,manual_parent_subsidiary,0.85,true,Roivant subsidiary/vant sponsor search
+ROIV,Dermavant Sciences GmbH,query.spons,manual_parent_subsidiary,0.90,true,Exact CTGov lead sponsor string for Roivant subsidiary
+ROIV,Priovant,query.spons,manual_parent_subsidiary,0.85,true,Roivant subsidiary/vant sponsor search
+ROIV,Priovant Therapeutics,query.spons,manual_parent_subsidiary,0.90,true,Roivant subsidiary/vant sponsor search
+ROIV,Kinevant Sciences GmbH,query.spons,manual_parent_subsidiary,0.85,true,Roivant subsidiary/vant sponsor search
+ROIV,IMVT-1402,query.intr,manual_program,0.85,true,Roivant/Immunovant program search
+ROIV,batoclimab,query.intr,manual_program,0.85,true,Roivant/Immunovant program search
+ROIV,brepocitinib,query.intr,manual_program,0.85,true,Roivant/Priovant program search
+ROIV,NCT05061602,query.term,manual_nct,0.95,true,User-verified Roivant subsidiary Phase 3 NCT
+ROIV,NCT06153758,query.term,manual_nct,0.95,true,User-verified Roivant subsidiary Phase 3 NCT
+ROIV,NCT05524571,query.term,manual_nct,0.95,true,User-verified Roivant subsidiary Fast Track NCT
+ZNTL,azenosertib,query.intr,manual_program,0.90,true,Zentalis program/intervention search
+ZNTL,ZN-c3,query.intr,manual_program,0.85,true,Zentalis historical code/intervention search
+ZNTL,ASPENOVA,query.term,manual_program,0.85,true,Zentalis Phase 3 study acronym search
+ZNTL,NCT06734567,query.term,manual_nct,0.95,true,User-verified Zentalis Phase 3 NCT
+CDXS,CDX-7108,query.intr,manual_program,0.90,true,Codexis current interventional program search
+ABOS,ACU193,query.intr,manual_program,0.90,true,Acumen current interventional program search
+ABOS,sabirnetug,query.intr,manual_program,0.90,true,Acumen current interventional program search
+ABOS,NCT04505722,query.term,manual_nct,0.95,true,User-provided Acumen interventional NCT
+CRBU,CB-010,query.intr,manual_program,0.90,true,Caribou program/intervention search
+CRBU,CB-011,query.intr,manual_program,0.90,true,Caribou program/intervention search
+CRBU,CB-012,query.intr,manual_program,0.90,true,Caribou program/intervention search
+TSHA,TSHA-102,query.intr,manual_program,0.90,true,Taysha program/intervention search
+TSHA,TSHA-120,query.intr,manual_program,0.90,true,Taysha program/intervention search
+SANA,SC291,query.intr,manual_program,0.90,true,Sana active program/intervention search
+SANA,SC262,query.intr,manual_program,0.90,true,Sana active program/intervention search
+SANA,NCT06294236,query.term,manual_nct,0.95,true,User-verified Sana SC291 NCT
+SLNO,DCCR,query.intr,manual_program,0.90,true,Soleno DCCR program/intervention search
+SLNO,diazoxide choline,query.intr,manual_program,0.90,true,Soleno DCCR generic intervention search
+SLNO,NCT03440814,query.term,manual_nct,0.95,true,User-verified Soleno DCCR NCT
+SLNO,NCT03714373,query.term,manual_nct,0.95,true,User-verified Soleno DCCR NCT
+ZVRA,arimoclomol,query.intr,manual_program,0.90,true,Zevra arimoclomol program/intervention search
+ZVRA,KP415,query.intr,manual_program,0.85,true,Zevra KP415 program/intervention search
+ZVRA,NCT02612129,query.term,manual_nct,0.95,true,User-verified Zevra arimoclomol NCT
+HELP,CYB004,query.intr,manual_program,0.90,true,Cybin CYB004 program/intervention search
+NERV,roluperidone,query.intr,manual_program,0.90,true,Minerva roluperidone program/intervention search
+NERV,NCT03397134,query.term,manual_nct,0.95,true,CTGov roluperidone Phase 3 NCT
+CING,CTx-1301,query.intr,manual_program,0.90,true,Cingulate CTx-1301 program/intervention search
+CBLL,NCT07449416,query.term,manual_nct,0.95,true,CTGov-verified Ceribell qualifying interventional device NCT
+NPCE,NCT05147571,query.term,manual_nct,0.95,true,User-verified NeuroPace pivotal interventional device NCT
+TMDX,NCT07145515,query.term,manual_nct,0.95,true,CTGov-verified TransMedics qualifying interventional device NCT
+TMDX,NCT07340710,query.term,manual_nct,0.95,true,CTGov-verified TransMedics qualifying interventional device NCT
+CRMD,CorMedix,query.spons,manual_sponsor_search,0.95,true,CorMedix sponsor search for DefenCath studies
+CRMD,DefenCath,query.intr,manual_program,0.95,true,CorMedix DefenCath program intervention search
+CRMD,NCT06822426,query.term,manual_nct,0.95,true,CTGov verified active Phase 3 DefenCath NCT
+CRMD,NCT06714864,query.term,manual_nct,0.95,true,CTGov verified active Phase 4 DefenCath NCT
+SMMT,NCT07264075,query.term,manual_nct,0.95,true,Summit-relevant ILLUMINE ivonescimab Phase 3 program NCT
+MRNA,V940,query.intr,manual_program,0.90,true,Moderna Merck V940 personalized cancer vaccine program search
+MRNA,intismeran,query.intr,manual_program,0.90,true,Moderna Merck intismeran V940 cancer vaccine program search
+DRUG,Bright Minds Biosciences Pty Ltd,query.spons,manual_sponsor_search,0.95,true,Exact CTGov sponsor search for Bright Minds Biosciences trials
+DRUG,BMB-101,query.intr,manual_program,0.95,true,Bright Minds lead clinical program search
+DRUG,NCT06401538,query.term,manual_nct,0.95,true,CTGov verified active Bright Minds BMB-101 Phase 2 NCT
+DRUG,NCT07266324,query.term,manual_nct,0.95,true,CTGov verified active Bright Minds BMB-101 Phase 2 Prader-Willi NCT

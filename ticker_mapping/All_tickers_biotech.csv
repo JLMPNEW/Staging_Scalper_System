@@ -1,0 +1,616 @@
+Tickers,CIK,CompanyName,Exchange,sector,industry,industry_aggregate
+ABBV,1551152,AbbVie Inc.,NYSE,Healthcare,Drug Manufacturers - General,Healthcare: Biopharma & Research Tools
+ABCL,1703057,AbCellera Biologics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ABSI,1672688,Absci Corp,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ABT,1800,ABBOTT LABORATORIES,NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+ABUS,1447028,Arbutus Biopharma Corp,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ACAD,1070494,ACADIA PHARMACEUTICALS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ACLX,1786205,"Arcellx, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ACRV,1781174,"Acrivon Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ADAG,1818838,Adagene Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ADCT,1771910,ADC Therapeutics SA,NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ADMA,1368514,"ADMA BIOLOGICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AGIO,1439222,"AGIOS PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ALDX,1341235,"Aldeyra Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ALEC,1653087,"Alector, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ALKS,1520262,Alkermes plc.,Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+ALLO,1737287,"Allogene Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ALLR,1860657,"Allarity Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ALNY,1178670,"ALNYLAM PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ALT,1326190,"Altimmune, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AMGN,318154,AMGEN INC,Nasdaq,Healthcare,Drug Manufacturers - General,Healthcare: Biopharma & Research Tools
+AMLX,1658551,"Amylyx Pharmaceuticals, Inc.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+AMPH,1297184,"Amphastar Pharmaceuticals, Inc.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+AMRX,1723128,"Amneal Pharmaceuticals, Inc.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+ANIK,898437,"Anika Therapeutics, Inc.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+ANIP,1023024,ANI PHARMACEUTICALS INC,Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+ANIX,715446,Anixa Biosciences Inc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ANNX,1528115,"Annexon, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ANTX,1880438,"AN2 Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AORT,784199,"ARTIVION, INC.",NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+ARDX,1437402,"ARDELYX, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ARTV,1817241,"Artiva Biotherapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ARVN,1655759,"ARVINAS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ASND,1612042,Ascendis Pharma A/S,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ATHE,1131343,ALTERITY THERAPEUTICS LTD,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ATNM,1388320,"Actinium Pharmaceuticals, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AUPH,1600620,Aurinia Pharmaceuticals Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AVIR,1593899,"Atea Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AVNS,1606498,"AVANOS MEDICAL, INC.",NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+AXGN,805928,"Axogen, Inc.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+AXSM,1579428,"Axsome Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BBIO,1743881,"BridgeBio Pharma, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BCRX,882796,BIOCRYST PHARMACEUTICALS INC,Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+BCYC,1761612,BICYCLE THERAPEUTICS PLC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BDTX,1701541,"Black Diamond Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BFLY,1804176,"Butterfly Network, Inc.",NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+BIIB,875045,BIOGEN INC.,Nasdaq,Healthcare,Drug Manufacturers - General,Healthcare: Biopharma & Research Tools
+BMRN,1048477,BIOMARIN PHARMACEUTICAL INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BMY,14272,BRISTOL MYERS SQUIBB CO,NYSE,Healthcare,Drug Manufacturers - General,Healthcare: Biopharma & Research Tools
+BNTX,1776985,BioNTech SE,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BOLD,1782303,"Boundless Bio, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BVS,1665988,Bioventus Inc.,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+CDNA,1217234,"CareDx, Inc.",Nasdaq,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+CDXS,1200375,"CODEXIS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CGEN,1119774,COMPUGEN LTD,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CGTX,1455365,COGNITION THERAPEUTICS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CHRS,1512762,"Coherus Oncology, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CLDX,744218,"Celldex Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CLYM,1768446,"Climb Bio, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CMND,1892500,Clearmind Medicine Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CNMD,816956,CONMED Corp,NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+CNTA,1847903,Centessa Pharmaceuticals plc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CNTX,1842952,Context Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+COGT,1622229,"Cogent Biosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+COLL,1267565,"COLLEGIUM PHARMACEUTICAL, INC",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+CORT,1088856,CORCEPT THERAPEUTICS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CPRX,1369568,"CATALYST PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CRBP,1595097,"Corbus Pharmaceuticals Holdings, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CRL,1100682,"CHARLES RIVER LABORATORIES INTERNATIONAL, INC.",NYSE,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+CRNX,1658247,"Crinetics Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CRSP,1674416,CRISPR Therapeutics AG,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CSBR,771856,"CHAMPIONS ONCOLOGY, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CTMX,1501989,"CytomX Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CVRX,1235912,"CVRx, Inc.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+CYTK,1061983,CYTOKINETICS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+DGX,1022079,QUEST DIAGNOSTICS INC,NYSE,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+DMAC,1401040,DiaMedica Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+DNLI,1714899,Denali Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+DRTS,1871321,Alpha Tau Medical Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+DXCM,1093557,DEXCOM INC,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+DYN,1818794,"Dyne Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+EDIT,1650664,"Editas Medicine, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+EPRX,1581178,EUPRAXIA PHARMACEUTICALS INC.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ESPR,1434868,"Esperion Therapeutics, Inc.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+EVAX,1828253,Evaxion A/S,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+EW,1099800,Edwards Lifesciences Corp,NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+EXEL,939767,"EXELIXIS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+EYPT,1314102,"EyePoint, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+FDMT,1650648,"4D Molecular Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+FENC,1211583,FENNEC PHARMACEUTICALS INC.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+FHTX,1822462,Foghorn Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+FOLD,1178879,"AMICUS THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+FTRE,1965040,Fortrea Holdings Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+FULC,1680581,"Fulcrum Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GEHC,1932393,GE HealthCare Technologies Inc.,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+GERN,886744,GERON CORP,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GILD,882095,"GILEAD SCIENCES, INC.",Nasdaq,Healthcare,Drug Manufacturers - General,Healthcare: Biopharma & Research Tools
+GKOS,1192448,GLAUKOS Corp,NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+GLUE,1826457,"Monte Rosa Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GMAB,1434265,GENMAB A/S,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GPCR,1888886,Structure Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GRCE,1444192,"Grace Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+HAE,313143,HAEMONETICS CORP,NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+HALO,1159036,"HALOZYME THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+HROW,1360214,"HARROW, INC.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+HRTX,818033,"HERON THERAPEUTICS, INC. /DE/",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IDYA,1676725,"IDEAYA Biosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IMCR,1671927,Immunocore Holdings plc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IMMP,1506184,IMMUTEP Ltd,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IMNM,1472012,Immunome Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IMRN,1660046,Immuron Ltd,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IMVT,1764013,"Immunovant, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+INBX,2007919,"Inhibrx Biosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+INCY,879169,INCYTE CORP,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+INDV,1625297,"Indivior Pharmaceuticals, Inc.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+INGN,1294133,Inogen Inc,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+INSM,1104506,INSMED Inc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IONS,874015,IONIS PHARMACEUTICALS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IRWD,1446847,IRONWOOD PHARMACEUTICALS INC,Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+JAZZ,1232524,Jazz Pharmaceuticals plc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+JNJ,200406,JOHNSON & JOHNSON,NYSE,Healthcare,Drug Manufacturers - General,Healthcare: Biopharma & Research Tools
+KALV,1348911,"KalVista Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KROS,1664710,"Keros Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KRYS,1711279,"Krystal Biotech, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KURA,1422143,"Kura Oncology, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KZIA,1075880,KAZIA THERAPEUTICS LTD,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LCTX,876343,"Lineage Cell Therapeutics, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LH,920148,LABCORP HOLDINGS INC.,NYSE,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+LLY,59478,ELI LILLY & Co,NYSE,Healthcare,Drug Manufacturers - General,Healthcare: Biopharma & Research Tools
+LQDA,1819576,Liquidia Corp,Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+LUNG,1127537,Pulmonx Corp,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+LXEO,1907108,"Lexeo Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LXRX,1062822,"LEXICON PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MDT,1613103,Medtronic plc,NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+MDXG,1376339,"MIMEDX GROUP, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MESO,1345099,MESOBLAST LTD,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MGNX,1125345,MACROGENICS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MGTX,1735438,MeiraGTx Holdings plc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MLYS,1933414,"Mineralys Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MNKD,899460,MANNKIND CORP,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MNOV,1226616,MEDICINOVA INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MRK,310158,"Merck & Co., Inc.",NYSE,Healthcare,Drug Manufacturers - General,Healthcare: Biopharma & Research Tools
+MRNA,1682852,"Moderna, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MXCT,1287098,"MAXCYTE, INC.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+MYGN,899923,MYRIAD GENETICS INC,Nasdaq,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+NAMS,1936258,NewAmsterdam Pharma Co N.V.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NEO,1077183,NEOGENOMICS INC,Nasdaq,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+NMRA,1885522,"Neumora Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NNOX,1795251,Nano-X Imaging Ltd.,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+NTLA,1652130,"Intellia Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NTRA,1604821,"Natera, Inc.",Nasdaq,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+NUVB,1811063,Nuvation Bio Inc.,NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NUVL,1861560,"Nuvalent, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NVCR,1645113,NovoCure Ltd,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+OCUL,1393434,"OCULAR THERAPEUTIX, INC",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ONC,1651308,BeOne Medicines Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+OPK,944809,"OPKO HEALTH, INC.",Nasdaq,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+ORGO,1661181,Organogenesis Holdings Inc.,Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+PACB,1299130,"PACIFIC BIOSCIENCES OF CALIFORNIA, INC.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+PBYI,1401667,"PUMA BIOTECHNOLOGY, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PCRX,1396814,"Pacira BioSciences, Inc.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+PCVX,1649094,"Vaxcyte, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PFE,78003,PFIZER INC,NYSE,Healthcare,Drug Manufacturers - General,Healthcare: Biopharma & Research Tools
+PLRX,1746473,"PLIANT THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PMVP,1699382,"PMV Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PODD,1145197,INSULET CORP,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+PRCT,1588978,PROCEPT BioRobotics Corp,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+PRLD,1678660,Prelude Therapeutics Inc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PROK,1850270,PROKIDNEY CORP.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PSNL,1527753,"Personalis, Inc.",Nasdaq,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+PTCT,1070081,"PTC THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PTGX,1377121,"Protagonist Therapeutics, Inc",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+QDEL,1906324,QuidelOrtho Corp,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+QSI,1816431,Quantum-Si Inc,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+QURE,1590560,uniQure N.V.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RARE,1515673,Ultragenyx Pharmaceutical Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RCUS,1724521,"Arcus Biosciences, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+REGN,872589,"REGENERON PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+REPL,1737953,"Replimune Group, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RLAY,1812364,"Relay Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RNA,2093101,"Atrium Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ROIV,1635088,Roivant Sciences Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RXRX,1601830,"RECURSION PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RYTM,1649904,"RHYTHM PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SGHT,1531177,"Sight Sciences, Inc.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+SIBN,1459839,"SI-BONE, Inc.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+SIGA,1010086,SIGA TECHNOLOGIES INC,Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+SMMT,1599298,Summit Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SNDX,1395937,Syndax Pharmaceuticals Inc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SRPT,873303,"Sarepta Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+STE,1757898,STERIS plc,NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+STOK,1623526,"Stoke Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+STTK,1680367,"Shattuck Labs, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SUPN,1356576,"SUPERNUS PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+SVRA,1160308,Savara Inc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SYK,310764,STRYKER CORP,NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+TARS,1819790,"Tarsus Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TBPH,1583107,"Theravance Biopharma, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TCMD,1027838,TACTILE SYSTEMS TECHNOLOGY INC,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+TECH,842023,BIO-TECHNE Corp,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TENX,34956,"TENAX THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TERN,1831363,"Terns Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TLSA,1723069,Tiziana Life Sciences Ltd,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TLX,2007191,Telix Pharmaceuticals Ltd,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TMCI,1630627,"TREACE MEDICAL CONCEPTS, INC.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+TMDX,1756262,"TransMedics Group, Inc.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+TMO,97745,THERMO FISHER SCIENTIFIC INC.,NYSE,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+TNGX,1819133,"Tango Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TNYA,1858848,"Tenaya Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TSHA,1806310,"Taysha Gene Therapies, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TVTX,1438533,"Travere Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TWST,1581280,Twist Bioscience Corp,Nasdaq,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+TYRA,1863127,"Tyra Biosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+UTHR,1082554,UNITED THERAPEUTICS Corp,Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+VERA,1831828,"Vera Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VIR,1706431,"Vir Biotechnology, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VKTX,1607678,"Viking Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VNDA,1347178,Vanda Pharmaceuticals Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VRTX,875320,VERTEX PHARMACEUTICALS INC / MA,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VTRS,1792044,Viatris Inc,Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+VYGR,1640266,"Voyager Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+WAT,1000697,WATERS CORP /DE/,NYSE,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+XBIT,1626878,XBiotech Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+XENE,1582313,Xenon Pharmaceuticals Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+XERS,1867096,"Xeris Biopharma Holdings, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+XNCR,1326732,Xencor Inc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+XTLB,1023549,XTL BIOPHARMACEUTICALS LTD,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ZBH,1136869,"ZIMMER BIOMET HOLDINGS, INC.",NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+ZLAB,1704292,Zai Lab Ltd,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ZVRA,1434647,"ZEVRA THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ZYME,1937653,Zymeworks Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AARD,1774857,"Aardvark Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ABEO,318306,ABEONA THERAPEUTICS INC.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ABOS,1576885,"Acumen Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ABVC,1173313,"ABVC BIOPHARMA, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ABVX,1956827,Abivax S.A.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ACHV,949858,"ACHIEVE LIFE SCIENCES, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ACIU,1651625,AC Immune SA,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ACRS,1557746,"Aclaris Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ACTU,1652935,"ACTUATE THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ACXP,1736243,"Acurx Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ADIL,1513525,"ADIAL PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AEON,1837607,"AEON Biopharma, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AGEN,1098972,AGENUS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AIM,946644,AIM ImmunoTech Inc.,NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AKBA,1517022,"Akebia Therapeutics, Inc.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+AKTS,2035832,"Aktis Oncology, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AKTX,1541157,Akari Therapeutics Plc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ALGS,1799448,"Aligos Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ALZN,1677077,"Alzamend Neuro, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ANAB,1370053,"ANAPTYSBIO, INC",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ANL,1944552,Adlai Nortye Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ANVS,1477845,"Annovis Bio, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+APGE,1974640,"Apogee Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+APLS,1492422,"Apellis Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+APM,1734005,Aptorum Group Ltd,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+APRE,1781983,"Aprea Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+APVO,1671584,Aptevo Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AQST,1398733,"Aquestive Therapeutics, Inc.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+ARAY,1138723,ACCURAY INC,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+ARCT,1768224,Arcturus Therapeutics Holdings Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ARGX,1697862,ARGENX SE,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ARMP,921114,"Armata Pharmaceuticals, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ARQT,1787306,"Arcutis Biotherapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ASBP,1847345,"Aspire Biopharma Holdings, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ASMB,1426800,"ASSEMBLY BIOSCIENCES, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ATOS,1488039,"ATOSSA THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ATRA,1604464,"Atara Biotherapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ATYR,1339970,aTYR PHARMA INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AURA,1501796,"Aura Biosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AUTL,1730463,Autolus Therapeutics plc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AVBP,1868279,"ArriVent BioPharma, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AVTX,1534120,"Avalo Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AVXL,1314052,ANAVEX LIFE SCIENCES CORP.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AZTR,1701478,"Azitra, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BBLG,1419554,Bone Biologics Corp,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BBNX,1674632,"Beta Bionics, Inc.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+BBOT,1869105,"BridgeBio Oncology Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BCAB,1826892,"BioAtla, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BCDA,925741,"BioCardia, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BCTX,1610820,BriaCell Therapeutics Corp.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BDRX,1643918,Biodexa Pharmaceuticals Plc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BHVN,1935979,Biohaven Ltd.,NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BIOA,1709941,"BioAge Labs, Inc.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+BIVI,1580149,BIOVIE INC.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BMEA,1840439,"Biomea Fusion, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BNTC,1808898,Benitec Biopharma Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BOLT,1641281,"Bolt Biotherapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BRNS,1828185,Barinthus Biotherapeutics plc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BRTX,1505497,"BioRestorative Therapies, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BSX,885725,BOSTON SCIENTIFIC CORP,NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+BYSI,1677940,BeyondSpring Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CABA,1759138,"Cabaletta Bio, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CADL,1841387,"Candel Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CAI,2019410,"Caris Life Sciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CALC,1534133,"CalciMedica, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CANF,1536196,Can-Fite BioPharma Ltd.,NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CAPR,1133869,"CAPRICOR THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CATX,728387,"Perspective Therapeutics, Inc.",NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+CBIO,1253689,"CRESCENT BIOPHARMA, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CBLL,1861107,"Ceribell, Inc.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+CCCC,1662579,"C4 Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CERS,1020214,CERUS CORP,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+CGEM,1789972,"Cullinan Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CLLS,1627281,Cellectis S.A.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CLRB,1279704,"Cellectar Biosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CMMB,1534248,Chemomab Therapeutics Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CMPX,1738021,"Compass Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CNSP,1729427,"CNS Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CNTB,1835268,Connect Biopharma Holdings Ltd,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+COCP,1412486,"Cocrystal Pharma, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+COEP,1759186,"Coeptis Therapeutics Holdings, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+COYA,1835022,"Coya Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CRBU,1619856,"Caribou Biosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CRDF,1213037,"Cardiff Oncology, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CRIS,1108205,CURIS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CRVO,1053691,CervoMed Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CRVS,1626971,"Corvus Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CSTL,1447362,CASTLE BIOSCIENCES INC,Nasdaq,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+CTXR,1506251,"Citius Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CUE,1645460,"Cue Biopharma, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CVM,725363,CEL SCI CORP,NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CYCN,1755237,"Cyclerion Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+DBVT,1613780,DBV Technologies S.A.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+DCTH,872912,"DELCATH SYSTEMS, INC.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+DERM,1867066,Journey Medical Corp,Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+DFTX,1813814,"Definium Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+DNTH,1690585,"Dianthus Therapeutics, Inc. /DE/",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+DRMA,1853816,"Dermata Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+DSGN,1807120,"Design Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+DWTX,1818844,"Dogwood Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+EBS,1367644,Emergent BioSolutions Inc.,NYSE,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+EDSA,1540159,"Edesa Biotech, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+EIKN,1861123,"Eikon Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ELDN,1404281,"Eledon Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ELTX,1601485,"Elicio Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ELVN,1672619,"Enliven Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ENGN,1980845,enGene Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ENLV,1596812,Enlivex Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ENSC,1716947,"Ensysce Biosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ENTX,1638097,Entera Bio Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+EOLS,1570562,"Evolus, Inc.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+EQ,1746466,"Equillium, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+EVMN,2044725,"Evommune, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+EWTX,1710072,"Edgewise Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+FATE,1434316,FATE THERAPEUTICS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+FBLG,1958777,"FibroBiologics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+FBRX,1419041,"Forte Biosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GALT,1133416,GALECTIN THERAPEUTICS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GANX,1819411,"Gain Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GDTC,1873093,CytoMed Therapeutics Ltd,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GENB,2100782,"Generate Biomedicines, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GLMD,1595353,Galmed Pharmaceuticals Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GLPG,1421876,GALAPAGOS NV,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GLSI,1799788,"Greenwich LifeSciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GNLX,1231457,GENELUX Corp,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GNPX,1595248,"Genprex, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GNTA,1838716,Genenta Science S.p.A.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GOSS,1728117,"Gossamer Bio, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GOVX,832489,"GeoVax Labs, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GRAL,1699031,"GRAIL, Inc.",Nasdaq,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+GRI,1824293,"GRI Bio, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GTBP,109657,"GT Biopharma, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+GUTS,1572616,"FRACTYL HEALTH, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+HCWB,1828673,HCW Biologics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+HIND,1427570,"Vyome Holdings, Inc",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+HOTH,1711786,"Hoth Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+HOWL,1785530,"Werewolf Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+HRMY,1802665,"Harmony Biosciences Holdings, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+HUMA,1818382,"Humacyte, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+HURA,1498382,"TuHURA Biosciences, Inc./NV",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IBIO,1420720,"iBio, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IBRX,1326110,"ImmunityBio, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ICU,1831868,SeaStar Medical Holding Corp,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IFRX,1708688,InflaRx N.V.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IGC,1326205,"IGC Pharma, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IMMX,1873835,"Immix Biopharma, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IMNN,749647,"Imunon, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IMRX,1790340,Immuneering Corp,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IMTX,1809196,Immatics N.V.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IMUX,1280776,"IMMUNIC, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+INAB,1740279,"IN8BIO, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+INDP,1857044,"Indaptus Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+INKT,1840229,"MiNK Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+INMB,1711754,"Inmune Bio, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+INO,1055726,"INOVIO PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+INTS,1567264,"INTENSITY THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+INVA,1080014,"Innoviva, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IOVA,1425205,"IOVANCE BIOTHERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IPHA,1598599,Innate Pharma SA,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IPSC,1850119,"Century Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IRD,1228627,"Opus Genetics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IVA,1756594,Inventiva S.A.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IVVD,1832038,"Invivyd, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+JAGX,1585608,"Jaguar Health, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+JANX,1817713,"Janux Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+JBIO,1798749,"Jade Biosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+JSPR,1788028,"Jasper Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KAPA,1962011,"Kairos Pharma, LTD.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KOD,1468748,Kodiak Sciences Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KPRX,1372514,KIORA PHARMACEUTICALS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KPTI,1503802,Karyopharm Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KTTA,1841330,Pasithea Therapeutics Corp.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KYNB,921299,"KYNTRA BIO, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KZR,1645666,"Kezar Life Sciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LEGN,1801198,Legend Biotech Corp,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LEXX,1348362,Lexaria Bioscience Corp.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LGVN,1721484,Longeveron Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LIVN,1639691,LivaNova PLC,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+LIXT,1335105,"LIXTE BIOTECHNOLOGY HOLDINGS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LNTH,1521036,"Lantheus Holdings, Inc.",Nasdaq,Healthcare,Drug Manufacturers - Specialty & Generic,Healthcare: Biopharma & Research Tools
+LPCN,1535955,Lipocine Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LRMR,1374690,"Larimar Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LSTA,320017,"LISATA THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LTRN,1763950,Lantern Pharma Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LUCD,1799011,Lucid Diagnostics Inc.,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+LYEL,1806952,"Lyell Immunopharma, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MAIA,1878313,"MAIA Biotechnology, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MANE,1827635,"Veradermics, Inc",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MAZE,1842295,"Maze Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MBIO,1680048,"MUSTANG BIO, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MCRB,1609809,"Seres Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MDGL,1157601,"MADRIGAL PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MDWD,1593984,MediWound Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MIST,1408443,Milestone Pharmaceuticals Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MLTX,1821586,MoonLake Immunotherapeutics,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MNPR,1645469,Monopar Therapeutics,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MPLT,1770069,"MapLight Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MREO,1719714,Mereo BioPharma Group plc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MRKR,1094038,"Marker Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MSLE,1421642,Satellos Bioscience Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MTNB,1582554,"Matinas BioPharma Holdings, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MYO,1369290,"MYOMO, INC.",NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+NBTX,1760854,Nanobiotix S.A.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NCNA,1709626,NuCana plc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NERV,1598646,"Minerva Neurosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NGEN,1751912,NERVGEN PHARMA CORP.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NGNE,1404644,Neurogene Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NKTR,906709,NEKTAR THERAPEUTICS,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NKTX,1787400,"Nkarta, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NPCE,1528287,NeuroPace Inc,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+NRIX,1549595,"Nurix Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NRSN,1875091,NeuroSense Therapeutics Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NTHI,1979414,"NEONC TECHNOLOGIES HOLDINGS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NVAX,1000694,NOVAVAX INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NVCT,1875558,"Nuvectis Pharma, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+NXTC,1661059,"NextCure, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+OBIO,1814114,"Orchestra BioMed Holdings, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+OCGN,1372299,"Ocugen, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+OCS,1953530,Oculis Holding AG,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+OGEN,1174940,ORAGENICS INC,NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+OKUR,1637715,"OnKure Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+OLMA,1750284,"Olema Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+OM,1484612,"Outset Medical, Inc.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+ONCY,1129928,ONCOLYTICS BIOTECH INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ORIC,1796280,"Oric Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ORKA,907654,"Oruka Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ORMP,1176309,ORAMED PHARMACEUTICALS INC.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+OSTX,1795091,OS Therapies Inc,NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+OTLK,1649989,"Outlook Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PALI,1357459,"PALISADE BIO, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PASG,1787297,"Passage BIO, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PCSA,1533743,"Processa Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PDSB,1472091,PDS Biotechnology Corp,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PGEN,1356090,"PRECIGEN, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PHAR,1828316,Pharming Group N.V.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PHAT,1783183,"Phathom Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PHIO,1533040,Phio Pharmaceuticals Corp.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PHVS,1830487,Pharvaris N.V.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PLYX,2075320,"Polaryx Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PMN,1374339,ProMIS Neurosciences Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PRAX,1689548,"Praxis Precision Medicines, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PRME,1894562,"Prime Medicine, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PRQR,1612940,ProQR Therapeutics N.V.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PRTC,1782999,PureTech Health plc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PSTV,1095981,"PLUS THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PTN,911216,PALATIN TECHNOLOGIES INC,NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PULM,1574235,"Pulmatrix, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PVLA,1583648,"PALVELLA THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PYPD,1611842,PolyPid Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PYXS,1782223,"Pyxis Oncology, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+QNCX,1662774,"Quince Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+QNRX,1671502,"Quoin Pharmaceuticals, Ltd.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+QNTM,1771885,Quantum Biopharma Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+QTTB,1661998,Q32 Bio Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RANI,1856725,"Rani Therapeutics Holdings, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RAPP,2012593,"Rapport Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RCEL,1762303,"AVITA Medical, Inc.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+REVB,1810560,"REVELATION BIOSCIENCES, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RGNX,1590877,REGENXBIO Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RLMD,1553643,"RELMADA THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RLYB,1739410,Rallybio Corp,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RNAC,1453687,"Cartesian Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RNAZ,1829635,"Transcode Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RNTX,1420565,"Rein Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RNXT,1574094,"RenovoRx, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RVMD,1628171,"Revolution Medicines, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RVPH,1742927,"REVIVA PHARMACEUTICALS HOLDINGS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RXST,1111485,"RxSight, Inc.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+RZLT,1509261,"Rezolute, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SABS,1833214,"SAB Biotherapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SANA,1770121,"Sana Biotechnology, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SEPN,1984086,"Septerna, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SGMO,1001233,"SANGAMO THERAPEUTICS, INC",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SGMT,1400118,Sagimet Biosciences Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SGP,1778922,"SpyGlass Pharma, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SION,2036042,"Sionna Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SKYE,1516551,"Skye Bioscience, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SLDB,1707502,Solid Biosciences Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SLGL,1684693,Sol-Gel Technologies Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SLN,1479615,Silence Therapeutics plc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SLS,1390478,"SELLAS Life Sciences Group, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SNGX,812796,"SOLIGENIX, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SNSE,1829802,"Sensei Biotherapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SNTI,1854270,"Senti Biosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SPRB,1683553,"SPRUCE BIOSCIENCES, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SPRO,1701108,"Spero Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SPRY,1671858,"ARS Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+STIM,1227636,"Neuronetics, Inc.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+STRO,1382101,"SUTRO BIOPHARMA, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SXTP,1946563,"60 DEGREES PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SYRE,1636282,"Spyre Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TCRT,1107421,"Alaunos Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TECX,1681087,"Tectonic Therapeutic, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TGTX,1001316,"TG THERAPEUTICS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TIL,1789769,"Instil Bio, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TLSI,1826667,"TriSalus Life Sciences, Inc.",Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+TNDM,1438133,TANDEM DIABETES CARE INC,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+TNXP,1430306,Tonix Pharmaceuticals Holding Corp.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TOVX,894158,"Theriva Biologics, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TPST,1544227,"Tempest Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TRAW,1130598,"Traws Pharma, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TRDA,1689375,"Entrada Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TRVI,1563880,"Trevi Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TTRX,2023016,Turn Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TVGN,1860871,Tevogen Bio Holdings Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TVRD,1346830,"Tvardi Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+UNCY,1766140,"Unicycive Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+UPB,2022626,"Upstream Bio, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+URGN,1668243,UroGen Pharma Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VALN,1836564,Valneva SE,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VANI,1266806,"Vivani Medical, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VCEL,887359,Vericel Corp,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VERU,863894,VERU INC.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VRCA,1660334,Verrica Pharmaceuticals Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VRDN,1590750,"Viridian Therapeutics, Inc.\DE",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VSTM,1526119,"Verastem, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VTGN,1411685,"Vistagen Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VTVT,1641489,vTv Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VYNE,1566044,VYNE Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+WVE,1631574,Wave Life Sciences Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+XBIO,1534525,"Xenetic Biosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+XCUR,1698530,"EXICURE, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+XFOR,1501697,"X4 Pharmaceuticals, Inc",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+XLO,1840233,"Xilio Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ZBIO,1953926,"Zenas BioPharma, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ZNTL,1725160,"Zentalis Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ZURA,1855644,Zura Bio Ltd,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ADXN,1574232,Addex Therapeutics Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+AGMB,2020932,Agomab Therapeutics NV,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ALMS,1847367,ALUMIS INC.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ALXO,1810182,ALX ONCOLOGY HOLDINGS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ANRO,1999480,"Alto Neuroscience, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+APLM,1944885,Apollomics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ARWR,879407,"ARROWHEAD PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BCAX,2023658,Bicara Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BEAM,1745999,Beam Therapeutics Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BLRX,1498403,BioLineRx Ltd.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+BLTE,1889109,"BELITE BIO, INC",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CAMP,1736730,Camp4 Therapeutics Corp,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CELC,1603454,Celcuity Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CELU,1752828,Celularity Inc,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CELZ,1187953,"CREATIVE MEDICAL TECHNOLOGY HOLDINGS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CGON,1991792,"CG Oncology, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CING,1862150,Cingulate Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CRMD,1410098,CorMedix Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+CTNM,1855175,"Contineum Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+DAWN,1845337,"Day One Biopharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+DRUG,1827401,BRIGHT MINDS BIOSCIENCES INC.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+DTIL,1357874,PRECISION BIOSCIENCES INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ENOV,1420800,Enovis CORP,NYSE,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+ENTA,1177648,ENANTA PHARMACEUTICALS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+ERAS,1761918,"Erasca, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+FBIO,1429260,"Fortress Biotech, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+FBIOP,1429260,"Fortress Biotech, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+HELP,1833141,CYBIN INC.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IART,917520,INTEGRA LIFESCIENCES HOLDINGS CORP,Nasdaq,Healthcare,Medical Devices,"Healthcare: Providers, Plans, MedTech & Distribution"
+IKT,1750149,"Inhibikase Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+IQV,1478242,IQVIA HOLDINGS INC.,NYSE,Healthcare,Diagnostics & Research,Healthcare: Biopharma & Research Tools
+IRON,1816736,"Disc Medicine, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KRRO,1703647,"Korro Bio, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KYMR,1815442,"Kymera Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+KYTX,1994702,"Kyverna Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LBRX,1691082,LB PHARMACEUTICALS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LENZ,1815776,"LENZ Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LGND,886163,LIGAND PHARMACEUTICALS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+LONA,1620463,"LeonaBio, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MBRX,1659617,"Moleculin Biotech, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MBX,1776111,"MBX Biosciences, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MIRM,1759425,"Mirum Pharmaceuticals, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+MOLN,1745114,MOLECULAR PARTNERS AG,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+OKYO,1849296,OKYO Pharma Ltd,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+OMER,1285819,OMEROS CORP,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PEPG,1835597,PepGen Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PHGE,1739174,BiomX Inc.,NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+PPBT,1614744,PURPLE BIOTECH LTD.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RADX,1949257,Radiopharm Theranostics Ltd,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RCKT,1281895,"ROCKET PHARMACEUTICALS, INC.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+RIGL,1034842,RIGEL PHARMACEUTICALS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SER,1708599,"Serina Therapeutics, Inc.",NYSE,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SLNO,1484565,SOLENO THERAPEUTICS INC,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+SRRK,1727196,Scholar Rock Holding Corp,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TARA,1359931,"Protara Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+TCRX,1783328,"TScan Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+VOR,1817229,Vor Biopharma Inc.,Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
+WHWK,1422142,"Whitehawk Therapeutics, Inc.",Nasdaq,Healthcare,Biotechnology,Healthcare: Biopharma & Research Tools
