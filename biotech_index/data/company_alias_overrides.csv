@@ -55,3 +55,4 @@ CRMD,CorMedix Inc,manual_sponsor_alias,0.95,CTGov sponsor alias for DefenCath st
 CRMD,Cormedix,manual_sponsor_alias,0.95,CTGov sponsor capitalization variant
 DRUG,Bright Minds Biosciences Pty Ltd,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Bright Minds Biosciences trials
 IMMX,Nexcella Inc,manual_parent_subsidiary,0.95,Immix affiliate lead sponsor alias for NXC-201 CTGov studies
+SXTP,60 Degrees Pharmaceuticals LLC,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for 60 Degrees tafenoquine babesiosis study

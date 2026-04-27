@@ -111,3 +111,5 @@ DRUG,Bright Minds Biosciences Pty Ltd,query.spons,manual_sponsor_search,0.95,tru
 DRUG,BMB-101,query.intr,manual_program,0.95,true,Bright Minds lead clinical program search
 DRUG,NCT06401538,query.term,manual_nct,0.95,true,CTGov verified active Bright Minds BMB-101 Phase 2 NCT
 DRUG,NCT07266324,query.term,manual_nct,0.95,true,CTGov verified active Bright Minds BMB-101 Phase 2 Prader-Willi NCT
+SXTP,NCT06207370,query.term,manual_nct,0.95,true,CTGov verified 60 Degrees Pharma tafenoquine babesiosis NCT
+ATRA,NCT04554914,query.term,manual_nct,0.95,true,CTGov verified active tab-cel program NCT with Pierre Fabre sponsor

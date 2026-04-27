@@ -1,0 +1,4 @@
+ticker,enabled,condition,notes
+FBRX,true,require_reactivation_candidate,"Do not promote from screen-only evidence. Forte Biosciences is in a transition to FB-102 after earlier failures; include later only if reactivation scan shows active qualifying company-owned evidence."
+TNXP,true,require_reactivation_candidate,"Do not promote from screen-only evidence. Tonix is in a data-heavy/new-IND transition phase with older trial activity; include later only if reactivation scan shows active qualifying company-owned evidence."
+BDRX,true,require_reactivation_candidate,"Do not promote from screen-only evidence. Biodexa is highly volatile and often tied to small-scale/investigator-sponsored activity; include later only if reactivation scan shows active qualifying company-owned evidence."

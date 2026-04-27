@@ -56,6 +56,10 @@ AUDIT_FIELDS = [
     "liquidity_status",
     "liquid_for_screen",
     "hard_blocker_policy_review_signal",
+    "conditional_exclusion",
+    "conditional_exclusion_notes",
+    "policy_inclusion",
+    "policy_inclusion_notes",
     "ctgov_reactivation_status",
     "ctgov_reactivation_priority",
     "ctgov_reactivation_reason",
@@ -105,6 +109,13 @@ DEFAULT_SOFT_RESCREEN_REASON_CODES = [
 DEFAULT_POLICY_REVIEW_HARD_REASON_CODES = [
     "reverse_split",
     "google_confirmed_reverse_split",
+]
+
+DEFAULT_ABSOLUTE_HARD_REASON_CODES = [
+    "manual_exclude",
+    "confirmed_going_concern",
+    "google_confirmed_going_concern",
+    "acquired_delisted_non_public",
 ]
 
 
@@ -206,6 +217,28 @@ def read_keyed_csv(path: Path | None) -> dict[str, dict[str, str]]:
     return normalize_keyed_rows(read_csv_flexible(path))
 
 
+def load_conditional_exclusions(path: Path | None) -> dict[str, dict[str, str]]:
+    rows = read_keyed_csv(path)
+    out: dict[str, dict[str, str]] = {}
+    for ticker, row in rows.items():
+        enabled_raw = row_get(row, "enabled")
+        if enabled_raw and not parse_boolish(enabled_raw):
+            continue
+        out[ticker] = row
+    return out
+
+
+def load_policy_inclusions(path: Path | None) -> dict[str, dict[str, str]]:
+    rows = read_keyed_csv(path)
+    out: dict[str, dict[str, str]] = {}
+    for ticker, row in rows.items():
+        enabled_raw = row_get(row, "enabled")
+        if enabled_raw and not parse_boolish(enabled_raw):
+            continue
+        out[ticker] = row
+    return out
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -280,9 +313,12 @@ def classify_row(
     db_row: dict[str, Any],
     rescreen_row: dict[str, str],
     reactivation_row: dict[str, str],
+    conditional_exclusion_row: dict[str, str],
+    policy_inclusion_row: dict[str, str],
     active_listing_statuses: set[str],
     hard_block_reason_codes: set[str],
     policy_review_hard_reason_codes: set[str],
+    absolute_hard_reason_codes: set[str],
     soft_rescreen_reason_codes: set[str],
     min_liquidity_addv20: float,
 ) -> dict[str, Any]:
@@ -347,6 +383,13 @@ def classify_row(
     reactivation_review = reactivation_status == "reactivation_review"
     rescreen_promotes = rescreen_decision in {"keep", "review"}
     manual_include_promotes = parse_boolish(manual_include) and old_decision == "remove"
+    conditional_exclusion = bool(conditional_exclusion_row)
+    conditional_exclusion_notes = row_get(conditional_exclusion_row, "notes")
+    policy_inclusion = bool(policy_inclusion_row)
+    policy_inclusion_notes = row_get(policy_inclusion_row, "notes")
+    absolute_hard_blocker = bool(hard_reasons.intersection(absolute_hard_reason_codes)) or any(
+        reason.startswith("non_active_listing:") for reason in hard_reasons
+    )
 
     include_in_rescreen = False
     recommended_action = "keep_removed"
@@ -355,11 +398,51 @@ def classify_row(
     candidate_override_reason_codes = ""
     candidate_override_notes = ""
 
-    if hard_blocker:
-        if hard_policy_review_signal:
-            recommended_action = "hard_blocker_policy_review"
+    if policy_inclusion and not absolute_hard_blocker and not conditional_exclusion:
+        recommended_action = "candidate_promote_to_review"
+        action_priority = row_get(policy_inclusion_row, "priority") or "medium"
+        include_in_rescreen = False
+        candidate_override_decision = "review"
+        candidate_override_reason_codes = join_codes(
+            [
+                "manual_reactivation_review",
+                "policy_inclusion",
+                f"source_decision:{old_decision}" if old_decision else "",
+                f"screen_reason:{join_codes(reason_codes)}" if reason_codes else "",
+            ]
+        )
+        candidate_override_notes = (
+            f"Inactive audit recommends review as of {utc_now()[:10]} from policy inclusion; "
+            f"{policy_inclusion_notes}; median_addv20={median_addv20:g}; "
+            f"screen_ctgov_matches={interventional_count}; old_reason_codes={join_codes(reason_codes)}"
+        )
+    elif hard_blocker:
+        if absolute_hard_blocker:
+            recommended_action = "keep_removed_hard_blocker"
+        elif conditional_exclusion and not reactivation_candidate:
+            recommended_action = "conditional_exclusion_pending_reactivation_scan"
+            action_priority = "none"
+        elif hard_policy_review_signal or reactivation_candidate or rescreen_promotes or manual_include_promotes:
+            recommended_action = "candidate_promote_to_review"
             action_priority = "high"
-            include_in_rescreen = True
+            candidate_override_decision = "review"
+            candidate_override_reason_codes = join_codes(
+                [
+                    "manual_reactivation_review",
+                    "reverse_split_scoring_penalty",
+                    f"source_decision:{old_decision}" if old_decision else "",
+                    f"ctgov:{reactivation_reason}" if reactivation_reason else "",
+                    "screen_active_lead_signal" if hard_policy_review_signal else "",
+                    "screen_rerun_promoted" if rescreen_promotes else "",
+                    "manual_include_override" if manual_include_promotes else "",
+                ]
+            )
+            candidate_override_notes = (
+                f"Inactive audit recommends review as of {utc_now()[:10]}; reverse split should remain a scoring penalty; "
+                f"ctgov_status={reactivation_status or 'none'}; "
+                f"active_interventional={active_interventional_count}; lead_matches={lead_sponsor_count}; "
+                f"median_addv20={median_addv20:g}; old_reason_codes={join_codes(reason_codes)}"
+            )
         else:
             recommended_action = "keep_removed_hard_blocker"
     elif reactivation_candidate or rescreen_promotes or manual_include_promotes:
@@ -426,6 +509,10 @@ def classify_row(
         "liquidity_status": row_get(screen_row, "liquidity_status"),
         "liquid_for_screen": int(liquid_for_screen),
         "hard_blocker_policy_review_signal": int(hard_policy_review_signal),
+        "conditional_exclusion": int(conditional_exclusion),
+        "conditional_exclusion_notes": conditional_exclusion_notes,
+        "policy_inclusion": int(policy_inclusion),
+        "policy_inclusion_notes": policy_inclusion_notes,
         "ctgov_reactivation_status": reactivation_status,
         "ctgov_reactivation_priority": reactivation_priority,
         "ctgov_reactivation_reason": reactivation_reason,
@@ -523,6 +610,14 @@ def main() -> None:
         )
         if value.strip()
     }
+    absolute_hard_reason_codes = {
+        value.strip().lower()
+        for value in normalize_string_list(
+            cfg_get(config, "inactive_removed_audit.absolute_hard_reason_codes"),
+            DEFAULT_ABSOLUTE_HARD_REASON_CODES,
+        )
+        if value.strip()
+    }
     soft_rescreen_reason_codes = {
         value.strip().lower()
         for value in normalize_string_list(
@@ -545,6 +640,12 @@ def main() -> None:
     screen_rows = read_keyed_csv(screen_path)
     rescreen_rows = read_keyed_csv(rescreen_path)
     reactivation_rows = read_keyed_csv(reactivation_scan_path)
+    conditional_exclusions = load_conditional_exclusions(
+        resolve_optional_path(cfg_get(config, "inactive_removed_audit.conditional_exclusions_csv"), base_dir=base_dir)
+    )
+    policy_inclusions = load_policy_inclusions(
+        resolve_optional_path(cfg_get(config, "inactive_removed_audit.policy_inclusions_csv"), base_dir=base_dir)
+    )
 
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     with connect_readonly(db_path, timeout_sec=sqlite_timeout_sec) as conn:
@@ -569,9 +670,12 @@ def main() -> None:
             db_row=db_rows.get(ticker, {}),
             rescreen_row=rescreen_rows.get(ticker, {}),
             reactivation_row=reactivation_rows.get(ticker, {}),
+            conditional_exclusion_row=conditional_exclusions.get(ticker, {}),
+            policy_inclusion_row=policy_inclusions.get(ticker, {}),
             active_listing_statuses=active_listing_statuses,
             hard_block_reason_codes=hard_block_reason_codes,
             policy_review_hard_reason_codes=policy_review_hard_reason_codes,
+            absolute_hard_reason_codes=absolute_hard_reason_codes,
             soft_rescreen_reason_codes=soft_rescreen_reason_codes,
             min_liquidity_addv20=min_liquidity_addv20,
         )
@@ -579,7 +683,12 @@ def main() -> None:
     ]
     audit_rows.sort(
         key=lambda row: (
-            {"candidate_promote_to_review": 0, "manual_reactivation_review": 1, "targeted_rescreen": 2}.get(
+            {
+                "candidate_promote_to_review": 0,
+                "manual_reactivation_review": 1,
+                "targeted_rescreen": 2,
+                "conditional_exclusion_pending_reactivation_scan": 3,
+            }.get(
                 str(row.get("recommended_action")),
                 9,
             ),
@@ -631,6 +740,8 @@ def main() -> None:
         "screen_results_csv": str(screen_path),
         "rescreen_results_csv": str(rescreen_path) if rescreen_path else "",
         "reactivation_scan_csv": str(reactivation_scan_path) if reactivation_scan_path else "",
+        "conditional_exclusion_count": len(conditional_exclusions),
+        "policy_inclusion_count": len(policy_inclusions),
         "database_path": str(db_path),
         "audit_csv": str(audit_csv),
         "rescreen_tickers_csv": str(tickers_csv),

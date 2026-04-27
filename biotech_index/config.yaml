@@ -172,6 +172,8 @@ inactive_removed_audit:
   screen_results_csv: "../output/preload_biotech_screen/biotech_screen_results_all.csv"
   reactivation_scan_csv: "../output/biotech_index_reports/ctgov_reactivation_scan.csv"
   rescreen_results_csv:
+  conditional_exclusions_csv: "data/inactive_removed_conditional_exclusions.csv"
+  policy_inclusions_csv: "data/inactive_removed_policy_inclusions.csv"
   screen_config_yaml: "screen_biotech_universe_config.yaml"
   rescreen_output_dir: "../output/biotech_index_reports/inactive_removed_rescreen"
   rescreen_output_file: "inactive_removed_rescreen_results.csv"
@@ -189,6 +191,11 @@ inactive_removed_audit:
   policy_review_hard_reason_codes:
     - reverse_split
     - google_confirmed_reverse_split
+  absolute_hard_reason_codes:
+    - manual_exclude
+    - confirmed_going_concern
+    - google_confirmed_going_concern
+    - acquired_delisted_non_public
   min_liquidity_addv20: 1000000
   soft_rescreen_reason_codes:
     - ctgov_fetch_error
@@ -200,6 +207,29 @@ inactive_removed_audit:
     - extremely_illiquid
     - possible_going_concern
     - possible_reverse_split
+
+hard_remove:
+  output_dir: "../output/biotech_index_reports"
+  candidates_csv: "data/company_hard_remove_candidates.csv"
+  audit_csv: "company_hard_remove_audit.csv"
+  table_counts_csv: "company_hard_remove_table_counts.csv"
+  csv_references_csv: "company_hard_remove_csv_references.csv"
+  manifest_json: "company_hard_remove_manifest.json"
+  safe_reason_codes:
+    - wrong_entity
+    - duplicate_security
+    - not_tradable
+    - not_biotech_universe
+    - bad_reference
+    - symbol_reuse
+  active_identity_error_reason_codes:
+    - wrong_entity
+    - duplicate_security
+    - bad_reference
+    - symbol_reuse
+  csv_reference_dirs:
+    - "data"
+    - "../ticker_mapping"
 
 biotech_features:
   output_dir: "../output/biotech_index_reports"

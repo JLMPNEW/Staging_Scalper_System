@@ -1,0 +1,7 @@
+ticker,enabled,priority,notes
+ARTV,true,medium,"Manual policy inclusion for scoring review: active Phase 2 autoimmune studies cited by user; current preload screen has missing CTGov linkage and sub-$1M ADDV20."
+AURA,true,medium,"Manual policy inclusion for scoring review: Phase 3 CoMpass choroidal melanoma catalyst cited by user; current preload screen has missing CTGov linkage and sub-$1M ADDV20."
+ACIU,true,medium,"Manual policy inclusion for scoring review: Phase 2 ABATE Alzheimer catalyst cited by user; current preload screen has missing CTGov linkage and sub-$1M ADDV20."
+COYA,true,medium,"Manual policy inclusion for scoring review: ALS/neuro-inflammation studies cited by user; current preload screen has missing CTGov linkage and sub-$1M ADDV20."
+JSPR,true,medium,"Manual policy inclusion for scoring review: mast-cell disease studies cited by user; current preload screen has missing CTGov linkage and sub-$1M ADDV20."
+PASG,true,medium,"Manual policy inclusion for scoring review: upliFT-D Phase 1/2 FTD-GRN study cited by user; current preload screen has missing CTGov linkage and sub-$1M ADDV20."
