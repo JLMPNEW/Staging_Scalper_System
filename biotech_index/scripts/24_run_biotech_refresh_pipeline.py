@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", type=str, default="", help="As-of date in YYYY-MM-DD. Defaults to UTC today.")
     parser.add_argument("--mode", choices=["daily_delta", "weekly_reconcile", "full_backfill"], default="daily_delta")
     parser.add_argument("--steps", type=str, default="", help="Optional comma-separated step names to run.")
+    parser.add_argument("--skip-ctgov", action="store_true", help="Skip CTGov sync/link/audit upstream steps.")
     parser.add_argument("--skip-ib", action="store_true", help="Skip the IB market-data step.")
     parser.add_argument("--skip-analyze", action="store_true", help="Skip SQLite ANALYZE at the end.")
     return parser.parse_args()
@@ -56,16 +57,29 @@ def configure_logging() -> None:
     logging.Formatter.converter = time.gmtime
 
 
-def pipeline_steps(mode: str, *, skip_ib: bool) -> list[Step]:
+def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool) -> list[Step]:
     sec_event_args: tuple[str, ...] = ("--full-rescan",) if mode in {"weekly_reconcile", "full_backfill"} else ()
     companyfacts_args: tuple[str, ...] = ("--full-refresh",) if mode == "full_backfill" else ()
     forward_args: tuple[str, ...] = ("--run-mode", mode)
     steps = [
-        Step("sec_filings", "06_sync_sec_filings.py", supports_asof=False),
-        Step("sec_events", "07_parse_sec_biotech_events.py", sec_event_args),
-        Step("sec_companyfacts", "15_sync_sec_companyfacts_history.py", companyfacts_args, supports_asof=False),
-        Step("financial_survival", "16_build_financial_survival_features.py"),
+        Step("company_master", "02_build_company_master.py", supports_asof=False),
     ]
+    if not skip_ctgov:
+        steps.extend(
+            [
+                Step("ctgov_trials", "03_sync_ctgov_trials.py"),
+                Step("trial_links", "04_link_trials_to_companies.py", supports_asof=False),
+                Step("ctgov_audit", "05_audit_ctgov_trial_links.py"),
+            ]
+        )
+    steps.extend(
+        [
+            Step("sec_filings", "06_sync_sec_filings.py"),
+            Step("sec_events", "07_parse_sec_biotech_events.py", sec_event_args),
+            Step("sec_companyfacts", "15_sync_sec_companyfacts_history.py", companyfacts_args),
+            Step("financial_survival", "16_build_financial_survival_features.py"),
+        ]
+    )
     if not skip_ib:
         steps.append(Step("ib_market", "17_sync_market_data_ib.py"))
     steps.extend(
@@ -164,9 +178,13 @@ def main() -> None:
         base_dir=base_dir,
     )
     selected_steps = {step.strip() for step in args.steps.split(",") if step.strip()}
-    steps = [step for step in pipeline_steps(args.mode, skip_ib=args.skip_ib) if not selected_steps or step.name in selected_steps]
+    steps = [
+        step
+        for step in pipeline_steps(args.mode, skip_ctgov=args.skip_ctgov, skip_ib=args.skip_ib)
+        if not selected_steps or step.name in selected_steps
+    ]
     if selected_steps:
-        known = {step.name for step in pipeline_steps(args.mode, skip_ib=args.skip_ib)}
+        known = {step.name for step in pipeline_steps(args.mode, skip_ctgov=args.skip_ctgov, skip_ib=args.skip_ib)}
         unknown = sorted(selected_steps - known)
         if unknown:
             raise ValueError(f"Unknown pipeline step(s): {', '.join(unknown)}")

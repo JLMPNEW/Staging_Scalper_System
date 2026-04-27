@@ -160,6 +160,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync 3-year SEC companyfacts history for biotech scoring companies.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--asof", type=str, default="", help="History as-of date in YYYY-MM-DD. Defaults to UTC today.")
     parser.add_argument("--max-companies", type=int, default=0, help="Smoke-test limit. 0 means all.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
     parser.add_argument("--full-refresh", action="store_true", help="Force refresh for all eligible companies regardless of sync state.")
@@ -208,7 +209,7 @@ def as_bool(raw: object) -> bool:
 
 def read_scoring_tickers(path: Path) -> set[str]:
     if not path.exists():
-        return set()
+        raise FileNotFoundError(f"Final scoring universe CSV not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         out: set[str] = set()
@@ -218,7 +219,9 @@ def read_scoring_tickers(path: Path) -> set[str]:
                 continue
             if str(row.get("final_status") or "").strip().lower() == "keep" and as_bool(row.get("scoring_include")):
                 out.add(ticker)
-        return out
+    if not out:
+        raise ValueError(f"Final scoring universe CSV contains no scoring tickers: {path}")
+    return out
 
 
 def load_companies(
@@ -632,10 +635,32 @@ def fetch_companyfacts_result(
         return CompanyFactsFetchResult(company=company, latest_source_filing_date=latest_source_filing_date, error=f"{type(exc).__name__}: {exc}")
 
 
-def replace_company_facts(conn: sqlite3.Connection, *, company: Company, observations: list[dict[str, Any]], normalized: list[dict[str, Any]]) -> None:
+def replace_company_facts(
+    conn: sqlite3.Connection,
+    *,
+    company: Company,
+    observations: list[dict[str, Any]],
+    normalized: list[dict[str, Any]],
+    cutoff: date,
+) -> None:
     now = utc_now()
-    conn.execute("DELETE FROM financial_fact_observations WHERE company_id = ?", (company.company_id,))
-    conn.execute("DELETE FROM company_facts_quarterly WHERE company_id = ?", (company.company_id,))
+    cutoff_text = cutoff.isoformat()
+    conn.execute(
+        """
+        DELETE FROM financial_fact_observations
+        WHERE company_id = ?
+          AND (period_end IS NULL OR period_end = '' OR period_end >= ?)
+        """,
+        (company.company_id, cutoff_text),
+    )
+    conn.execute(
+        """
+        DELETE FROM company_facts_quarterly
+        WHERE company_id = ?
+          AND (period_end IS NULL OR period_end = '' OR period_end >= ?)
+        """,
+        (company.company_id, cutoff_text),
+    )
     conn.executemany(
         """
         INSERT INTO financial_fact_observations(
@@ -782,10 +807,13 @@ def main() -> None:
     if not user_agent:
         raise ValueError("sec_companyfacts_history.user_agent is required for SEC requests.")
     lookback_years = int(cfg_get(config, "sec_companyfacts_history.lookback_years", 3))
-    cutoff = datetime.now(timezone.utc).date() - timedelta(days=max(1, lookback_years) * 366)
+    asof_obj = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
+    if asof_obj is None:
+        raise ValueError(f"Invalid --asof date: {args.asof}")
+    cutoff = asof_obj - timedelta(days=max(1, lookback_years) * 366)
     ticker_filter = {x.strip().upper() for x in args.tickers.split(",") if x.strip()}
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
-    asof = datetime.now(timezone.utc).date().isoformat()
+    asof = asof_obj.isoformat()
     ttl_hours = float(cfg_get(config, "sec_companyfacts_history.ttl_hours", 24.0))
     sleep_sec = float(cfg_get(config, "sec_companyfacts_history.sleep_sec", 0.15))
     timeout_sec = float(cfg_get(config, "sec_companyfacts_history.timeout_sec", 45.0))
@@ -909,6 +937,7 @@ def main() -> None:
                             company=company,
                             observations=list(result.observations),
                             normalized=list(result.normalized),
+                            cutoff=cutoff,
                         )
                     upsert_company_facts_sync_state(
                         conn,

@@ -319,6 +319,53 @@ def insert_history(conn: Any, *, company_id: int, company: ScreenCompany, source
     )
 
 
+def deactivate_absent_companies(conn: Any, *, present_tickers: set[str], source_file: Path, run_id: int) -> int:
+    if not present_tickers:
+        return 0
+    placeholders = ",".join("?" for _ in present_tickers)
+    rows = conn.execute(
+        f"""
+        SELECT company_id, ticker
+        FROM companies
+        WHERE is_active = 1
+          AND ticker NOT IN ({placeholders})
+        ORDER BY ticker
+        """,
+        tuple(sorted(present_tickers)),
+    ).fetchall()
+    if not rows:
+        return 0
+
+    now = utc_now()
+    asof_date = datetime.now(timezone.utc).date().isoformat()
+    reason_codes = "absent_from_latest_screen"
+    for row in rows:
+        company_id = int(row["company_id"])
+        ticker = str(row["ticker"] or "").upper()
+        conn.execute(
+            """
+            UPDATE companies
+            SET is_active = 0,
+                universe_status = ?,
+                source_screen_decision = ?,
+                reason_codes = ?,
+                updated_at = ?
+            WHERE company_id = ?
+            """,
+            ("remove", "absent_from_latest_screen", reason_codes, now, company_id),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO company_universe_history(
+                asof_date, company_id, ticker, universe_status, reason_codes, source_file, run_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (asof_date, company_id, ticker, "remove", reason_codes, str(source_file), run_id, now),
+        )
+    return len(rows)
+
+
 def build_aliases(company: ScreenCompany, manual_aliases: dict[str, list[AliasCandidate]]) -> list[AliasCandidate]:
     aliases = [
         AliasCandidate(alias_raw=company.ticker, alias_norm=normalize_org_name(company.ticker), source="ticker", confidence=1.0),
@@ -342,6 +389,12 @@ def main() -> None:
     status_path = args.status_overrides.expanduser().resolve() if args.status_overrides else resolve_optional_path(cfg_get(config, "paths.company_status_overrides_csv"), base_dir=base_dir)
     active_decisions = {x.lower() for x in normalize_string_list(cfg_get(config, "company_master.active_decisions"), ["keep", "review"])}
     store_decisions = {x.lower() for x in normalize_string_list(cfg_get(config, "company_master.store_decisions"), ["keep", "review", "remove"])}
+    deactivate_absent = str(cfg_get(config, "company_master.deactivate_absent_from_screen", True)).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+    }
     timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
 
     if not screen_path.exists():
@@ -373,13 +426,29 @@ def main() -> None:
                         upsert_alias(conn, company_id=company_id, alias=alias)
                         alias_count += 1
                     insert_history(conn, company_id=company_id, company=company, source_file=screen_path, run_id=run_id)
-            finish_run(conn, run_id=run_id, status="success", row_count=len(companies), message=f"active={active_count} aliases={alias_count}")
+                absent_count = (
+                    deactivate_absent_companies(
+                        conn,
+                        present_tickers={company.ticker for company in companies},
+                        source_file=screen_path,
+                        run_id=run_id,
+                    )
+                    if deactivate_absent
+                    else 0
+                )
+            finish_run(
+                conn,
+                run_id=run_id,
+                status="success",
+                row_count=len(companies),
+                message=f"active={active_count} aliases={alias_count} deactivated_absent={absent_count}",
+            )
         except Exception as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
     LOGGER.info("Wrote company master DB: %s", db_path)
-    LOGGER.info("Companies=%d Active=%d Aliases=%d", len(companies), active_count, alias_count)
+    LOGGER.info("Companies=%d Active=%d Aliases=%d DeactivatedAbsent=%d", len(companies), active_count, alias_count, absent_count)
 
 
 if __name__ == "__main__":

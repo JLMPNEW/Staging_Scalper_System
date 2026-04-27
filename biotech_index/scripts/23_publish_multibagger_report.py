@@ -298,6 +298,8 @@ def main() -> None:
         run_id = start_run(conn, run_type="publish_multibagger_report", input_path=db_path)
         try:
             rows = load_rows(conn, asof_date)
+            if not rows:
+                raise ValueError(f"No multibagger score rows found for asof_date={asof_date}")
             flattened = [flatten(row) for row in rows]
             all_candidate_rows = [row for row in flattened if not str(row.get("bucket") or "").startswith("avoid")]
             candidate_rows = all_candidate_rows[:top_n]

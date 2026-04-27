@@ -284,35 +284,39 @@ def load_aliases(conn: sqlite3.Connection, company_id: int) -> tuple[list[str], 
     return all_aliases, manual_aliases
 
 
-def load_trial_rows(conn: sqlite3.Connection, company_id: int) -> dict[str, tuple[sqlite3.Row, list[TrialLink]]]:
+def load_trial_rows(conn: sqlite3.Connection, company_id: int, *, asof_date: date) -> dict[str, tuple[sqlite3.Row, list[TrialLink]]]:
     rows = conn.execute(
         """
+        WITH latest_snapshot AS (
+            SELECT s.*
+            FROM trial_snapshot_daily s
+            JOIN (
+                SELECT nct_id, MAX(asof_date) AS max_asof
+                FROM trial_snapshot_daily
+                WHERE asof_date <= ?
+                GROUP BY nct_id
+            ) latest
+              ON latest.nct_id = s.nct_id
+             AND latest.max_asof = s.asof_date
+        )
         SELECT
-            t.nct_id, t.brief_title, t.study_type, t.phase_text, t.overall_status,
-            t.lead_sponsor, t.last_update_post_date, t.has_results,
-            (
-                SELECT s.primary_completion_date
-                FROM trial_snapshot_daily s
-                WHERE s.nct_id = t.nct_id
-                ORDER BY s.asof_date DESC
-                LIMIT 1
-            ) AS primary_completion_date,
-            (
-                SELECT s.enrollment_count
-                FROM trial_snapshot_daily s
-                WHERE s.nct_id = t.nct_id
-                ORDER BY s.asof_date DESC
-                LIMIT 1
-            ) AS enrollment_count,
+            t.nct_id, t.brief_title, t.study_type,
+            COALESCE(s.phase_text, t.phase_text) AS phase_text,
+            COALESCE(s.overall_status, t.overall_status) AS overall_status,
+            t.lead_sponsor, t.last_update_post_date,
+            COALESCE(s.has_results, t.has_results) AS has_results,
+            s.primary_completion_date AS primary_completion_date,
+            s.enrollment_count AS enrollment_count,
             '' AS raw_hash,
             t.raw_json,
             l.match_role, l.match_method, l.confidence
         FROM trial_company_links l
         JOIN trials t ON t.nct_id = l.nct_id
+        LEFT JOIN latest_snapshot s ON s.nct_id = t.nct_id
         WHERE l.company_id = ?
         ORDER BY t.nct_id, l.confidence DESC
         """,
-        (company_id,),
+        (asof_date.isoformat(), company_id),
     ).fetchall()
     grouped: dict[str, tuple[sqlite3.Row, list[TrialLink]]] = {}
     for row in rows:
@@ -912,6 +916,12 @@ def db_signature(conn: sqlite3.Connection) -> str:
     for table in ("companies", "trials", "trial_company_links", "ctgov_query_hits"):
         count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         pieces.append(f"{table}:{count}")
+        columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+        for timestamp_col in ("updated_at", "created_at"):
+            if timestamp_col in columns:
+                latest = conn.execute(f"SELECT MAX({timestamp_col}) FROM {table}").fetchone()[0]
+                pieces.append(f"{table}.{timestamp_col}:{latest or ''}")
+                break
         if table == "companies":
             active = conn.execute("SELECT COUNT(*) FROM companies WHERE is_active = 1").fetchone()[0]
             pieces.append(f"{table}.active:{active}")
@@ -982,7 +992,7 @@ def main() -> None:
         LOGGER.info("Loaded %d active companies for CTGov audit", len(companies))
         for idx, company in enumerate(companies, start=1):
             aliases, manual_aliases = load_aliases(conn, company.company_id)
-            trial_rows = load_trial_rows(conn, company.company_id)
+            trial_rows = load_trial_rows(conn, company.company_id, asof_date=asof_date)
             company_evidence: list[dict[str, Any]] = []
             for nct_id, (row, links) in trial_rows.items():
                 study = extract_trial_payload(str(row["raw_json"] or ""))
@@ -1145,9 +1155,11 @@ def main() -> None:
     apply_manual_decisions(audit_rows, manual_decisions)
     manual_verification_rows = build_manual_verification_rows(audit_rows, manual_decisions)
     final_scoring_rows = [row for row in audit_rows if bool(row.get("scoring_include"))]
+    clean_rows = [row for row in audit_rows if str(row.get("final_status") or "").lower() == "keep"]
+    review_rows = [row for row in audit_rows if str(row.get("final_status") or "").lower() != "keep"]
 
     audit_rows.sort(key=lambda row: (str(row["final_status"]), str(row["recommended_status"]), str(row["ticker"])))
-    review_rows.sort(key=lambda row: (str(row["recommended_status"]), str(row["ticker"])))
+    review_rows.sort(key=lambda row: (str(row["final_status"]), str(row["recommended_status"]), str(row["ticker"])))
     clean_rows.sort(key=lambda row: str(row["ticker"]))
     final_scoring_rows.sort(key=lambda row: str(row["ticker"]))
     evidence_rows.sort(key=lambda row: (str(row["ticker"]), str(row["nct_id"])))

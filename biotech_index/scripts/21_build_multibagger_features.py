@@ -535,12 +535,27 @@ def build_row(
     }
 
 
-def upsert_rows(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_date: str) -> None:
+def upsert_rows(
+    conn: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+    asof_date: str,
+    *,
+    target_company_ids: set[int] | None = None,
+) -> None:
     now = utc_now()
     placeholders = ", ".join("?" for _ in FEATURE_FIELDS)
     update_cols = [field for field in FEATURE_FIELDS if field not in {"asof_date", "company_id"}]
     with conn:
-        conn.execute("DELETE FROM multibagger_features_daily WHERE asof_date = ?", (asof_date,))
+        if target_company_ids is None:
+            conn.execute("DELETE FROM multibagger_features_daily WHERE asof_date = ?", (asof_date,))
+        elif target_company_ids:
+            company_placeholders = ",".join("?" for _ in target_company_ids)
+            conn.execute(
+                f"DELETE FROM multibagger_features_daily WHERE asof_date = ? AND company_id IN ({company_placeholders})",
+                (asof_date, *sorted(target_company_ids)),
+            )
+        else:
+            return
         for row in rows:
             conn.execute(
                 f"""
@@ -606,7 +621,13 @@ def main() -> None:
                 )
                 for row in base_rows
             ]
-            upsert_rows(conn, rows, asof_date)
+            partial_run = bool(ticker_filter) or int(args.max_companies) > 0
+            upsert_rows(
+                conn,
+                rows,
+                asof_date,
+                target_company_ids={int(row["company_id"]) for row in base_rows} if partial_run else None,
+            )
             write_csv(output_csv, rows)
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=f"asof={asof_date} output={output_csv}")
         except Exception as exc:

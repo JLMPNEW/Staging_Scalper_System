@@ -459,7 +459,9 @@ def dedupe_links(links: Iterable[LinkCandidate]) -> list[LinkCandidate]:
 
 def replace_links(conn: sqlite3.Connection, links: list[LinkCandidate], *, company_ids: set[int] | None = None) -> None:
     now = utc_now()
-    if company_ids:
+    if company_ids is not None:
+        if not company_ids:
+            return
         placeholders = ",".join("?" for _ in sorted(company_ids))
         conn.execute(f"DELETE FROM trial_company_links WHERE company_id IN ({placeholders})", tuple(sorted(company_ids)))
     else:

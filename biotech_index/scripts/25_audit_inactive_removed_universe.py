@@ -9,7 +9,7 @@ import logging
 import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -308,6 +308,7 @@ def screen_value(screen_row: dict[str, str], db_row: dict[str, Any], key: str, *
 
 def classify_row(
     *,
+    asof_date: date,
     ticker: str,
     screen_row: dict[str, str],
     db_row: dict[str, Any],
@@ -412,7 +413,7 @@ def classify_row(
             ]
         )
         candidate_override_notes = (
-            f"Inactive audit recommends review as of {utc_now()[:10]} from policy inclusion; "
+            f"Inactive audit recommends review as of {asof_date.isoformat()} from policy inclusion; "
             f"{policy_inclusion_notes}; median_addv20={median_addv20:g}; "
             f"screen_ctgov_matches={interventional_count}; old_reason_codes={join_codes(reason_codes)}"
         )
@@ -438,7 +439,7 @@ def classify_row(
                 ]
             )
             candidate_override_notes = (
-                f"Inactive audit recommends review as of {utc_now()[:10]}; reverse split should remain a scoring penalty; "
+                f"Inactive audit recommends review as of {asof_date.isoformat()}; reverse split should remain a scoring penalty; "
                 f"ctgov_status={reactivation_status or 'none'}; "
                 f"active_interventional={active_interventional_count}; lead_matches={lead_sponsor_count}; "
                 f"median_addv20={median_addv20:g}; old_reason_codes={join_codes(reason_codes)}"
@@ -459,7 +460,7 @@ def classify_row(
             ]
         )
         candidate_override_notes = (
-            f"Inactive audit recommends review as of {utc_now()[:10]}; "
+            f"Inactive audit recommends review as of {asof_date.isoformat()}; "
             f"ctgov_status={reactivation_status or 'none'}; "
             f"rescreen_decision={rescreen_decision or 'not_run'}; "
             f"old_reason_codes={join_codes(reason_codes)}"
@@ -665,6 +666,7 @@ def main() -> None:
 
     audit_rows = [
         classify_row(
+            asof_date=asof_date,
             ticker=ticker,
             screen_row=screen_rows.get(ticker, {}),
             db_row=db_rows.get(ticker, {}),

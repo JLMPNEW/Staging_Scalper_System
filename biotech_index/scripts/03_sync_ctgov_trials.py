@@ -9,7 +9,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync ClinicalTrials.gov interventional studies for active biotech companies.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None, help="Override SQLite database path.")
+    parser.add_argument("--asof", type=str, default="", help="Snapshot date in YYYY-MM-DD. Defaults to UTC today.")
     parser.add_argument("--max-workers", type=int, default=None)
     parser.add_argument("--max-companies", type=int, default=0, help="Limit companies for smoke tests. 0 means all.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
@@ -88,6 +89,16 @@ def configure_logging() -> None:
     for handler in logging.getLogger().handlers:
         if handler.formatter is not None:
             handler.formatter.converter = time.gmtime
+
+
+def parse_date(raw: object) -> date | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def load_company_jobs(
@@ -352,7 +363,7 @@ def sync_one_company(
         )
 
 
-def upsert_trial(conn: sqlite3.Connection, study: dict[str, Any]) -> bool:
+def upsert_trial(conn: sqlite3.Connection, study: dict[str, Any], *, asof_date: str | None = None) -> bool:
     parsed = parse_study(study)
     if parsed is None:
         return False
@@ -389,7 +400,9 @@ def upsert_trial(conn: sqlite3.Connection, study: dict[str, Any]) -> bool:
             now,
         ),
     )
-    for sponsor in parse_sponsors(study):
+    sponsors = parse_sponsors(study)
+    conn.execute("DELETE FROM trial_sponsors WHERE nct_id = ?", (parsed.nct_id,))
+    for sponsor in sponsors:
         conn.execute(
             """
             INSERT INTO trial_sponsors(
@@ -409,7 +422,7 @@ def upsert_trial(conn: sqlite3.Connection, study: dict[str, Any]) -> bool:
                 now,
             ),
         )
-    asof_date = datetime.now(timezone.utc).date().isoformat()
+    snapshot_date = asof_date or datetime.now(timezone.utc).date().isoformat()
     conn.execute(
         """
         INSERT INTO trial_snapshot_daily(
@@ -426,7 +439,7 @@ def upsert_trial(conn: sqlite3.Connection, study: dict[str, Any]) -> bool:
             raw_hash = excluded.raw_hash
         """,
         (
-            asof_date,
+            snapshot_date,
             parsed.nct_id,
             parsed.overall_status,
             parsed.phase_text,
@@ -441,14 +454,15 @@ def upsert_trial(conn: sqlite3.Connection, study: dict[str, Any]) -> bool:
 
 
 def replace_query_hits(conn: sqlite3.Connection, results: list[SyncResult]) -> int:
-    company_ids = sorted({result.company_id for result in results})
+    successful_results = [result for result in results if not result.error]
+    company_ids = sorted({result.company_id for result in successful_results})
     if not company_ids:
         return 0
     placeholders = ",".join("?" for _ in company_ids)
     conn.execute(f"DELETE FROM ctgov_query_hits WHERE company_id IN ({placeholders})", tuple(company_ids))
     written = 0
     now = utc_now()
-    for result in results:
+    for result in successful_results:
         for hit in result.query_hits:
             conn.execute(
                 """
@@ -500,6 +514,10 @@ def main() -> None:
     max_retries = int(cfg_get(config, "ctgov.max_retries", 3))
     max_workers = int(args.max_workers if args.max_workers is not None else cfg_get(config, "ctgov.max_workers", 4))
     ticker_filter = {value.strip().upper().replace(".", "-") for value in args.tickers.split(",") if value.strip()}
+    asof_obj = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
+    if asof_obj is None:
+        raise ValueError(f"Invalid --asof date: {args.asof}")
+    asof_date = asof_obj.isoformat()
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
@@ -597,17 +615,17 @@ def main() -> None:
             query_hit_count = 0
             with conn:
                 for study in unique_studies.values():
-                    if upsert_trial(conn, study):
+                    if upsert_trial(conn, study, asof_date=asof_date):
                         written += 1
                 query_hit_count = replace_query_hits(conn, results)
             sponsor_count = int(conn.execute("SELECT COUNT(*) FROM trial_sponsors").fetchone()[0])
             snapshot_count = int(
                 conn.execute(
                     "SELECT COUNT(*) FROM trial_snapshot_daily WHERE asof_date = ?",
-                    (datetime.now(timezone.utc).date().isoformat(),),
+                    (asof_date,),
                 ).fetchone()[0]
             )
-            message = f"companies={len(jobs)} errors={error_count} unique_trials={written} query_hits={query_hit_count} sponsors={sponsor_count} snapshots_today={snapshot_count}"
+            message = f"companies={len(jobs)} errors={error_count} unique_trials={written} query_hits={query_hit_count} sponsors={sponsor_count} snapshots_asof={snapshot_count}"
             finish_run(conn, run_id=run_id, status="success" if error_count == 0 else "partial", row_count=written, message=message)
             LOGGER.info("CTGov sync complete: %s", message)
         except Exception as exc:

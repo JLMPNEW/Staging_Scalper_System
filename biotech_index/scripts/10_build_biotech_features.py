@@ -269,9 +269,10 @@ def load_recent_sec_event_summary(conn: sqlite3.Connection, asof_date: date, *, 
         SELECT company_id, filing_date, form, event_type, polarity, confidence, extracted_text, accession_nodash
         FROM sec_events
         WHERE filing_date >= ?
+          AND filing_date <= ?
         ORDER BY filing_date DESC, confidence DESC, event_id DESC
         """,
-        (cutoff,),
+        (cutoff, asof_date.isoformat()),
     ).fetchall()
     summary: dict[int, dict[str, Any]] = {}
     per_company_seen: dict[int, int] = {}

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import html
 import json
 import logging
 import re
@@ -27,6 +29,7 @@ from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_n
 
 LOGGER = logging.getLogger("parse_sec_biotech_events")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+PARSER_LOGIC_VERSION = "2026-04-27-sec-event-parser-v3"
 OUTPUT_FIELDS = [
     "ticker",
     "company_name",
@@ -87,7 +90,9 @@ def rx(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern, re.IGNORECASE | re.DOTALL)
 
 
-PDUFA_VALUE = rx(r"\b(?:PDUFA|Prescription Drug User Fee Act)(?: date| goal date)?\b.{0,120}")
+TAG_RE = re.compile(r"<[^>]+>")
+WHITESPACE_RE = re.compile(r"\s+")
+PDUFA_VALUE = rx(r"\b(?:PDUFA|Prescription Drug User Fee Act)(?: date| goal date| action date| target action date)?\b.{0,160}")
 RULES: tuple[EventRule, ...] = (
     EventRule(
         "going_concern_confirmed",
@@ -216,7 +221,7 @@ RULES: tuple[EventRule, ...] = (
         0.74,
         (
             rx(r"\b(topline|clinical|phase [123])\b.{0,120}\b(negative|disappointing|unfavorable)\b.{0,80}\b(data|results|outcome)\b"),
-            rx(r"\b(discontinue|discontinued|terminate|terminated|pause|paused)\b.{0,160}\b(trial|study|program|development)\b"),
+            rx(r"\b(discontinue|discontinued|terminate|terminated|pause|paused|halt|halted)\b.{0,160}\b(trial|study|program|development)\b"),
             rx(r"\bsafety signal\b"),
         ),
     ),
@@ -235,10 +240,8 @@ RULES: tuple[EventRule, ...] = (
         "positive",
         0.70,
         (
-            rx(r"\blicense agreement\b"),
-            rx(r"\bcollaboration agreement\b"),
-            rx(r"\bstrategic (collaboration|partnership)\b"),
-            rx(r"\bexclusive license\b"),
+            rx(r"\b(entered into|announced|signed|executed|granted|obtained|expanded|amended)\b.{0,160}\b(license agreement|collaboration agreement|strategic collaboration|strategic partnership|exclusive license)\b"),
+            rx(r"\b(license agreement|collaboration agreement|strategic collaboration|strategic partnership|exclusive license)\b.{0,160}\b(entered into|announced|signed|executed|granted|obtained|expanded|amended)\b"),
         ),
     ),
 )
@@ -256,18 +259,34 @@ RULE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "clinical_hold": ("clinical hold",),
     "endpoint_missed": ("endpoint", "not statistically significant", "failed to", "did not"),
     "endpoint_met": ("endpoint", "statistically significant", "achieved", "met"),
-    "clinical_update_negative": ("negative", "discontinue", "terminated", "paused", "safety signal"),
+    "clinical_update_negative": ("negative", "discontinue", "discontinued", "terminate", "terminated", "pause", "paused", "halt", "halted", "safety signal"),
     "clinical_update_positive": ("positive", "promising", "topline", "clinical"),
     "partnership_license": ("license agreement", "collaboration agreement", "strategic collaboration", "strategic partnership", "exclusive license"),
 }
 
 NEGATED_HOLD = rx(r"\b(no|not|without|never)\b.{0,80}\bclinical hold\b")
 NEGATED_GOING_CONCERN = rx(r"\b(no|not)\b.{0,80}\bsubstantial doubt\b.{0,160}\bgoing concern\b")
+ALLEV_GOING_CONCERN = rx(r"\b(alleviate|alleviates|alleviated|alleviating)\b.{0,80}\bsubstantial doubt\b|\bsubstantial doubt\b.{0,120}\b(alleviate|alleviates|alleviated|alleviating)\b")
 GENERIC_RISK_FACTOR = rx(
-    r"\b(risk factors|may subject|could subject|may have to|may decide|clinical failure can occur|negative or inconclusive results|administrative or judicial sanctions)\b"
+    r"\b(risk factors|may subject|could subject|may have to|may decide|clinical failure can occur|negative or inconclusive results|administrative or judicial sanctions|there can be no assurance|we may|we could|if we)\b"
+)
+NEGATED_SAFETY_SIGNAL = rx(r"\b(no|not|without)\b.{0,80}\b(?:new )?safety signal\b|\b(?:new )?safety signal\b.{0,80}\b(not observed|not identified|not detected|was not observed)")
+GENERIC_NDA_BLA = rx(
+    r"\b(reviews all submitted|must make a decision|may refuse to file|refusal to file|"
+    r"once (?:the )?(?:submission|NDA|BLA|application) (?:is|has been) accepted|"
+    r"(?:an|a) (?:NDA|BLA) must contain|as part of (?:an|a) (?:NDA|BLA))\b"
+)
+GENERIC_PDUFA = rx(
+    r"\b(review goal|goal dates?|within (?:six|ten|6|10)\s+months|does not always meet|may be extended|or at all)\b"
+)
+HYPOTHETICAL_SUBMISSION = rx(r"\b(can submit|may submit|would submit|is required to submit|could submit)\b")
+PARTNERSHIP_NEGATIVE_OR_GENERIC = rx(
+    r"\b(termination of|terminated the|may enter|could enter|would enter|if we enter|"
+    r"license termination rights|breach our license agreement)\b"
 )
 DATE_HINT = rx(
-    r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b"
+    r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
+    r"Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2},\s+\d{4}\b"
     r"|\b\d{1,2}/\d{1,2}/\d{2,4}\b"
     r"|\b\d{4}-\d{2}-\d{2}\b"
 )
@@ -336,8 +355,31 @@ def parse_date(raw: object) -> date | None:
         return None
 
 
+def build_parser_signature(*, min_confidence: float, max_per_type: int) -> str:
+    payload = {
+        "logic_version": PARSER_LOGIC_VERSION,
+        "min_confidence": round(float(min_confidence), 6),
+        "max_per_type": int(max_per_type),
+        "rules": [
+            {
+                "event_type": rule.event_type,
+                "polarity": rule.polarity,
+                "confidence": rule.confidence,
+                "patterns": [pattern.pattern for pattern in rule.patterns],
+                "value_pattern": rule.value_pattern.pattern if rule.value_pattern else "",
+            }
+            for rule in RULES
+        ],
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def clean_text(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text or "")).strip()
+    normalized = html.unescape(str(text or ""))
+    normalized = TAG_RE.sub(" ", normalized)
+    normalized = normalized.replace("\xa0", " ")
+    return WHITESPACE_RE.sub(" ", normalized).strip()
 
 
 def extract_window(text: str, start: int, end: int, radius: int = 320) -> str:
@@ -349,29 +391,62 @@ def extract_value(rule: EventRule, window: str) -> str:
         match = rule.value_pattern.search(window)
         if match:
             date_match = DATE_HINT.search(match.group(0))
-            return clean_text(date_match.group(0) if date_match else match.group(0))
+            return clean_text(date_match.group(0) if date_match else "")
     date_match = DATE_HINT.search(window)
     if rule.event_type == "pdufa_date" and date_match:
         return clean_text(date_match.group(0))
     return ""
 
 
-def should_skip(rule: EventRule, window: str) -> bool:
+def stale_historical_window(window: str, *, filing_date: str, max_age_years: int = 1) -> bool:
+    filing_dt = parse_date(filing_date)
+    if filing_dt is None:
+        return False
+    years = [int(match) for match in re.findall(r"\b(20\d{2})\b", window)]
+    return bool(years and max(years) < filing_dt.year - max_age_years)
+
+
+def stale_event_value_date(event_value: str, *, filing_date: str, max_age_years: int = 1) -> bool:
+    filing_dt = parse_date(filing_date)
+    if filing_dt is None:
+        return False
+    years = [int(match) for match in re.findall(r"\b(20\d{2})\b", str(event_value or ""))]
+    return bool(years and max(years) < filing_dt.year - max_age_years)
+
+
+def should_skip(rule: EventRule, window: str, *, filing_date: str) -> bool:
     if rule.event_type in {"clinical_hold", "partial_clinical_hold"} and NEGATED_HOLD.search(window):
         return True
     if rule.event_type in {"clinical_hold", "partial_clinical_hold"} and GENERIC_RISK_FACTOR.search(window):
         return True
+    if rule.event_type in {"clinical_hold", "partial_clinical_hold"} and stale_historical_window(window, filing_date=filing_date):
+        return True
     if rule.event_type == "clinical_update_negative" and GENERIC_RISK_FACTOR.search(window):
+        return True
+    if rule.event_type == "clinical_update_negative" and NEGATED_SAFETY_SIGNAL.search(window):
         return True
     if rule.event_type == "going_concern_confirmed" and NEGATED_GOING_CONCERN.search(window):
         return True
+    if rule.event_type == "going_concern_confirmed" and ALLEV_GOING_CONCERN.search(window):
+        return True
     if rule.event_type == "clinical_hold" and "partial clinical hold" in window.lower():
         return True
+    if rule.event_type in {"nda_bla_accepted", "regulatory_submission"} and GENERIC_NDA_BLA.search(window):
+        return True
+    if rule.event_type == "regulatory_submission" and HYPOTHETICAL_SUBMISSION.search(window):
+        return True
+    if rule.event_type == "pdufa_date" and GENERIC_PDUFA.search(window) and not DATE_HINT.search(window):
+        return True
+    if rule.event_type == "partnership_license":
+        if PARTNERSHIP_NEGATIVE_OR_GENERIC.search(window):
+            return True
+        if stale_historical_window(window, filing_date=filing_date):
+            return True
     return False
 
 
 def detect_events(row: FilingText, *, min_confidence: float, max_per_type: int) -> list[SecEvent]:
-    scan_text = str(row.text_content or "")
+    scan_text = clean_text(row.text_content)
     if not scan_text.strip():
         return []
     lower_text = scan_text.lower()
@@ -387,15 +462,20 @@ def detect_events(row: FilingText, *, min_confidence: float, max_per_type: int) 
         for pattern in rule.patterns:
             for match in pattern.finditer(scan_text):
                 window = extract_window(scan_text, match.start(), match.end())
-                if should_skip(rule, window):
+                if should_skip(rule, window, filing_date=row.filing_date):
                     continue
                 dedupe_key = window[:220].lower()
                 if dedupe_key in seen_windows:
                     continue
                 seen_windows.add(dedupe_key)
                 event_value = extract_value(rule, window)
+                if rule.event_type == "pdufa_date" and not event_value:
+                    continue
+                if rule.event_type == "pdufa_date" and stale_event_value_date(event_value, filing_date=row.filing_date):
+                    continue
                 source_payload = json.dumps(
                     {
+                        "parser_logic_version": PARSER_LOGIC_VERSION,
                         "pattern": pattern.pattern,
                         "document_url": row.document_url,
                         "match_start": match.start(),
@@ -432,10 +512,12 @@ def detect_events(row: FilingText, *, min_confidence: float, max_per_type: int) 
 
 def filing_text_where(
     *,
+    cutoff: str,
+    asof: str,
     ticker_filter: set[str],
 ) -> tuple[list[str], list[Any]]:
-    params: list[Any] = []
-    where = ["f.filing_date >= ?"]
+    params: list[Any] = [cutoff, asof]
+    where = ["f.filing_date >= ?", "f.filing_date <= ?"]
     if ticker_filter:
         placeholders = ",".join("?" for _ in ticker_filter)
         where.append(f"upper(c.ticker) IN ({placeholders})")
@@ -463,19 +545,22 @@ def count_filing_texts(
     conn: sqlite3.Connection,
     *,
     cutoff: str,
+    asof: str,
     ticker_filter: set[str],
     incremental_only: bool,
+    parser_signature: str,
 ) -> int:
-    where, params = filing_text_where(ticker_filter=ticker_filter)
-    params.insert(0, cutoff)
+    where, params = filing_text_where(cutoff=cutoff, asof=asof, ticker_filter=ticker_filter)
     where_sql = " AND ".join(where)
     target_sql = target_filings_sql(where_sql)
     join_clause = "LEFT JOIN sec_event_parse_state s ON s.accession_nodash = f.accession_nodash"
     incremental_clause = (
-        " AND (s.accession_nodash IS NULL OR COALESCE(s.text_hash, '') <> COALESCE(NULLIF(f.filing_text_hash, ''), d.text_hash, ''))"
+        " AND (s.accession_nodash IS NULL OR COALESCE(s.text_hash, '') <> COALESCE(d.text_hash, '') OR COALESCE(s.parser_signature, '') <> ?)"
         if incremental_only
         else ""
     )
+    if incremental_only:
+        params.append(parser_signature)
     return int(
         conn.execute(
             f"""{latest_docs_cte(target_sql)}
@@ -495,12 +580,13 @@ def load_filing_texts_to_parse(
     conn: sqlite3.Connection,
     *,
     cutoff: str,
+    asof: str,
     ticker_filter: set[str],
     max_filings: int,
     offset: int,
+    parser_signature: str,
 ) -> list[FilingText]:
-    where, params = filing_text_where(ticker_filter=ticker_filter)
-    params.insert(0, cutoff)
+    where, params = filing_text_where(cutoff=cutoff, asof=asof, ticker_filter=ticker_filter)
     where_sql = " AND ".join(where)
     target_sql = target_filings_sql(where_sql)
     sql = f"""{latest_docs_cte(target_sql)}
@@ -512,14 +598,17 @@ def load_filing_texts_to_parse(
             f.filing_date,
             f.form,
             d.document_url,
-            COALESCE(NULLIF(f.filing_text_hash, ''), d.text_hash, '') AS text_hash,
+            COALESCE(d.text_hash, '') AS text_hash,
             d.text_content
         FROM target_filings f
         JOIN latest_docs d ON d.accession_nodash = f.accession_nodash
         LEFT JOIN sec_event_parse_state s ON s.accession_nodash = f.accession_nodash
-        WHERE s.accession_nodash IS NULL OR COALESCE(s.text_hash, '') <> COALESCE(NULLIF(f.filing_text_hash, ''), d.text_hash, '')
+        WHERE s.accession_nodash IS NULL
+           OR COALESCE(s.text_hash, '') <> COALESCE(d.text_hash, '')
+           OR COALESCE(s.parser_signature, '') <> ?
         ORDER BY f.filing_date DESC, f.accession_nodash DESC
     """
+    params.append(parser_signature)
     if max_filings > 0:
         sql += " LIMIT ? OFFSET ?"
         params.extend([max_filings, max(0, offset)])
@@ -547,12 +636,12 @@ def load_filing_texts_full(
     conn: sqlite3.Connection,
     *,
     cutoff: str,
+    asof: str,
     ticker_filter: set[str],
     max_filings: int,
     offset: int,
 ) -> list[FilingText]:
-    where, params = filing_text_where(ticker_filter=ticker_filter)
-    params.insert(0, cutoff)
+    where, params = filing_text_where(cutoff=cutoff, asof=asof, ticker_filter=ticker_filter)
     where_sql = " AND ".join(where)
     target_sql = target_filings_sql(where_sql)
     sql = f"""{latest_docs_cte(target_sql)}
@@ -564,7 +653,7 @@ def load_filing_texts_full(
             f.filing_date,
             f.form,
             d.document_url,
-            COALESCE(NULLIF(f.filing_text_hash, ''), d.text_hash, '') AS text_hash,
+            COALESCE(d.text_hash, '') AS text_hash,
             d.text_content
         FROM target_filings f
         JOIN latest_docs d ON d.accession_nodash = f.accession_nodash
@@ -594,7 +683,7 @@ def load_filing_texts_full(
     ]
 
 
-def replace_events(conn: sqlite3.Connection, events: list[SecEvent], *, filings: Iterable[FilingText]) -> None:
+def replace_events(conn: sqlite3.Connection, events: list[SecEvent], *, filings: Iterable[FilingText], parser_signature: str) -> None:
     now = utc_now()
     filing_list = [filing for filing in filings if filing.accession_nodash]
     accession_list = sorted({filing.accession_nodash for filing in filing_list})
@@ -633,10 +722,11 @@ def replace_events(conn: sqlite3.Connection, events: list[SecEvent], *, filings:
         for filing in filing_list:
             conn.execute(
                 """
-                INSERT INTO sec_event_parse_state(accession_nodash, text_hash, parsed_at, event_count, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO sec_event_parse_state(accession_nodash, text_hash, parser_signature, parsed_at, event_count, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(accession_nodash) DO UPDATE SET
                     text_hash = excluded.text_hash,
+                    parser_signature = excluded.parser_signature,
                     parsed_at = excluded.parsed_at,
                     event_count = excluded.event_count,
                     updated_at = excluded.updated_at
@@ -644,12 +734,40 @@ def replace_events(conn: sqlite3.Connection, events: list[SecEvent], *, filings:
                 (
                     filing.accession_nodash,
                     filing.text_hash,
+                    parser_signature,
                     now,
                     event_counts.get(filing.accession_nodash, 0),
                     now,
                     now,
                 ),
             )
+
+
+def parse_filing_batch(
+    conn: sqlite3.Connection,
+    filings: list[FilingText],
+    *,
+    min_confidence: float,
+    max_per_type: int,
+    max_workers: int,
+    parser_signature: str,
+) -> int:
+    if not filings:
+        return 0
+    events_out: list[SecEvent] = []
+    if max_workers <= 1:
+        for filing in filings:
+            events_out.extend(detect_events(filing, min_confidence=min_confidence, max_per_type=max_per_type))
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(detect_events, filing, min_confidence=min_confidence, max_per_type=max_per_type): filing
+                for filing in filings
+            }
+            for future in as_completed(futures):
+                events_out.extend(future.result())
+    replace_events(conn, events_out, filings=filings, parser_signature=parser_signature)
+    return len(events_out)
 
 
 def write_csv(path: Path, events: list[SecEvent]) -> None:
@@ -706,8 +824,37 @@ def append_csv(path: Path, events: list[SecEvent]) -> None:
             )
 
 
-def export_events_from_db(conn: sqlite3.Connection, output_csv: Path) -> int:
-    target_sql = "SELECT DISTINCT accession_nodash FROM sec_events"
+def export_events_from_db(
+    conn: sqlite3.Connection,
+    output_csv: Path,
+    *,
+    cutoff: str = "",
+    asof: str = "",
+    ticker_filter: set[str] | None = None,
+) -> int:
+    target_filters: list[str] = []
+    row_filters: list[str] = []
+    target_params: list[Any] = []
+    row_params: list[Any] = []
+    if cutoff:
+        target_filters.append("filing_date >= ?")
+        row_filters.append("e.filing_date >= ?")
+        target_params.append(cutoff)
+        row_params.append(cutoff)
+    if asof:
+        target_filters.append("filing_date <= ?")
+        row_filters.append("e.filing_date <= ?")
+        target_params.append(asof)
+        row_params.append(asof)
+    if ticker_filter:
+        placeholders = ",".join("?" for _ in ticker_filter)
+        target_filters.append(f"company_id IN (SELECT company_id FROM companies WHERE ticker IN ({placeholders}))")
+        row_filters.append(f"e.company_id IN (SELECT company_id FROM companies WHERE ticker IN ({placeholders}))")
+        target_params.extend(sorted(ticker_filter))
+        row_params.extend(sorted(ticker_filter))
+    target_where = f" WHERE {' AND '.join(target_filters)}" if target_filters else ""
+    row_where = f" WHERE {' AND '.join(row_filters)}" if row_filters else ""
+    target_sql = f"SELECT DISTINCT accession_nodash FROM sec_events{target_where}"
     rows = conn.execute(
         f"""{latest_docs_cte(target_sql)}
         SELECT
@@ -726,8 +873,10 @@ def export_events_from_db(conn: sqlite3.Connection, output_csv: Path) -> int:
         FROM sec_events e
         JOIN companies c ON c.company_id = e.company_id
         LEFT JOIN latest_docs d ON d.accession_nodash = e.accession_nodash
+        {row_where}
         ORDER BY c.ticker, e.filing_date, e.event_type, e.accession_nodash
-        """
+        """,
+        target_params + row_params,
     ).fetchall()
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     with output_csv.open("w", encoding="utf-8", newline="") as handle:
@@ -765,9 +914,11 @@ def main() -> None:
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_csv = resolve_path(cfg_get(config, "sec_event_parser.output_csv"), base_dir=base_dir)
     lookback_days = int(cfg_get(config, "sec_event_parser.lookback_days", 730))
+    asof_str = asof.isoformat()
     cutoff = (asof - timedelta(days=max(1, lookback_days))).isoformat()
     min_confidence = float(cfg_get(config, "sec_event_parser.min_confidence", 0.65))
     max_per_type = int(cfg_get(config, "sec_event_parser.max_events_per_filing_type", 1))
+    parser_signature = build_parser_signature(min_confidence=min_confidence, max_per_type=max_per_type)
     ticker_filter = {x.strip().upper().replace(".", "-") for x in args.tickers.split(",") if x.strip()}
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
@@ -775,7 +926,7 @@ def main() -> None:
         if args.export_only:
             run_id = start_run(conn, run_type="parse_sec_biotech_events_export", input_path=db_path)
             try:
-                row_count = export_events_from_db(conn, output_csv)
+                row_count = export_events_from_db(conn, output_csv, cutoff=cutoff, asof=asof_str, ticker_filter=ticker_filter)
                 finish_run(conn, run_id=run_id, status="success", row_count=row_count, message=f"output={output_csv}")
                 LOGGER.info("Exported SEC biotech events: rows=%d output=%s", row_count, output_csv)
                 return
@@ -785,35 +936,47 @@ def main() -> None:
         run_id = start_run(conn, run_type="parse_sec_biotech_events", input_path=db_path)
         try:
             incremental_only = not args.full_rescan
-            total_available = count_filing_texts(conn, cutoff=cutoff, ticker_filter=ticker_filter, incremental_only=incremental_only)
-            if total_available <= 0:
-                filings = []
-            else:
-                filings = (
-                    load_filing_texts_to_parse(
-                        conn,
-                        cutoff=cutoff,
-                        ticker_filter=ticker_filter,
-                        max_filings=int(args.max_filings),
-                        offset=int(args.offset),
-                    )
-                    if incremental_only
-                    else load_filing_texts_full(
-                        conn,
-                        cutoff=cutoff,
-                        ticker_filter=ticker_filter,
-                        max_filings=int(args.max_filings),
-                        offset=int(args.offset),
-                    )
-                )
-            total_filings = len(filings)
-            if int(args.max_filings) <= 0:
+            total_available = count_filing_texts(
+                conn,
+                cutoff=cutoff,
+                asof=asof_str,
+                ticker_filter=ticker_filter,
+                incremental_only=incremental_only,
+                parser_signature=parser_signature,
+            )
+            batch_size = max(1, int(cfg_get(config, "sec_event_parser.batch_size", 250)))
+            max_workers = max(1, int(cfg_get(config, "sec_event_parser.max_workers", 1)))
+            total_filings = 0
+            event_count = 0
+            explicit_chunk = int(args.max_filings) > 0 or int(args.offset) > 0
+            if not explicit_chunk:
                 LOGGER.info(
                     "SEC event parser eligible filings=%d mode=%s",
                     total_available,
                     "incremental" if incremental_only else "full_rescan",
                 )
             else:
+                filings = (
+                    load_filing_texts_to_parse(
+                        conn,
+                        cutoff=cutoff,
+                        asof=asof_str,
+                        ticker_filter=ticker_filter,
+                        max_filings=int(args.max_filings),
+                        offset=int(args.offset),
+                        parser_signature=parser_signature,
+                    )
+                    if incremental_only
+                    else load_filing_texts_full(
+                        conn,
+                        cutoff=cutoff,
+                        asof=asof_str,
+                        ticker_filter=ticker_filter,
+                        max_filings=int(args.max_filings),
+                        offset=int(args.offset),
+                    )
+                )
+                total_filings = len(filings)
                 LOGGER.info(
                     "SEC event parser chunk offset=%d limit=%d filings=%d eligible_total=%d mode=%s",
                     int(args.offset),
@@ -822,51 +985,67 @@ def main() -> None:
                     total_available,
                     "incremental" if incremental_only else "full_rescan",
                 )
-            batch_size = max(1, int(cfg_get(config, "sec_event_parser.batch_size", 250)))
-            max_workers = max(1, int(cfg_get(config, "sec_event_parser.max_workers", 1)))
-            all_events: list[SecEvent] = []
-            batch_events: list[SecEvent] = []
-            batch_filings: list[FilingText] = []
-            event_count = 0
-            if max_workers <= 1:
-                parsed_iter: Iterable[tuple[FilingText, list[SecEvent]]] = (
-                    (filing, detect_events(filing, min_confidence=min_confidence, max_per_type=max_per_type))
-                    for filing in filings
+                event_count += parse_filing_batch(
+                    conn,
+                    filings,
+                    min_confidence=min_confidence,
+                    max_per_type=max_per_type,
+                    max_workers=max_workers,
+                    parser_signature=parser_signature,
                 )
-                for idx, (filing, events) in enumerate(parsed_iter, start=1):
-                    all_events.extend(events)
-                    batch_events.extend(events)
-                    batch_filings.append(filing)
-                    event_count += len(events)
-                    if len(batch_filings) >= batch_size:
-                        replace_events(conn, batch_events, filings=batch_filings)
-                        batch_events = []
-                        batch_filings = []
-                    if idx % 500 == 0:
-                        LOGGER.info("Parsed %d/%d SEC filing texts; events=%d", idx, total_filings, event_count)
-            else:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(detect_events, filing, min_confidence=min_confidence, max_per_type=max_per_type): filing
-                        for filing in filings
-                    }
-                    for idx, future in enumerate(as_completed(futures), start=1):
-                        filing = futures[future]
-                        events = future.result()
-                        all_events.extend(events)
-                        batch_events.extend(events)
-                        batch_filings.append(filing)
-                        event_count += len(events)
-                        if len(batch_filings) >= batch_size:
-                            replace_events(conn, batch_events, filings=batch_filings)
-                            batch_events = []
-                            batch_filings = []
-                        if idx % 500 == 0:
-                            LOGGER.info("Parsed %d/%d SEC filing texts; events=%d max_workers=%d", idx, total_filings, event_count, max_workers)
-            if batch_filings:
-                replace_events(conn, batch_events, filings=batch_filings)
-            write_csv(output_csv, all_events)
-            finish_run(conn, run_id=run_id, status="success", row_count=event_count, message=f"filings={total_filings} output={output_csv}")
+            if not explicit_chunk and total_available > 0:
+                page_offset = 0
+                while True:
+                    filings = (
+                        load_filing_texts_to_parse(
+                            conn,
+                            cutoff=cutoff,
+                            asof=asof_str,
+                            ticker_filter=ticker_filter,
+                            max_filings=batch_size,
+                            offset=0,
+                            parser_signature=parser_signature,
+                        )
+                        if incremental_only
+                        else load_filing_texts_full(
+                            conn,
+                            cutoff=cutoff,
+                            asof=asof_str,
+                            ticker_filter=ticker_filter,
+                            max_filings=batch_size,
+                            offset=page_offset,
+                        )
+                    )
+                    if not filings:
+                        break
+                    parsed_events = parse_filing_batch(
+                        conn,
+                        filings,
+                        min_confidence=min_confidence,
+                        max_per_type=max_per_type,
+                        max_workers=max_workers,
+                        parser_signature=parser_signature,
+                    )
+                    total_filings += len(filings)
+                    event_count += parsed_events
+                    if total_filings % max(500, batch_size) == 0 or total_filings >= total_available:
+                        LOGGER.info(
+                            "Parsed %d/%d SEC filing texts; events=%d max_workers=%d",
+                            total_filings,
+                            total_available,
+                            event_count,
+                            max_workers,
+                        )
+                    if not incremental_only:
+                        page_offset += batch_size
+            output_rows = export_events_from_db(conn, output_csv, cutoff=cutoff, asof=asof_str, ticker_filter=ticker_filter)
+            finish_run(
+                conn,
+                run_id=run_id,
+                status="success",
+                row_count=output_rows,
+                message=f"filings={total_filings} parsed_events={event_count} output={output_csv}",
+            )
         except Exception as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise

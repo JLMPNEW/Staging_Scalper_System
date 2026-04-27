@@ -105,7 +105,7 @@ def as_bool(raw: object) -> bool:
 
 def read_scoring_tickers(path: Path) -> set[str]:
     if not path.exists():
-        return set()
+        raise FileNotFoundError(f"Final scoring universe CSV not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         out: set[str] = set()
@@ -113,7 +113,9 @@ def read_scoring_tickers(path: Path) -> set[str]:
             ticker = str(row.get("ticker") or "").strip().upper()
             if ticker and str(row.get("final_status") or "").strip().lower() == "keep" and as_bool(row.get("scoring_include")):
                 out.add(ticker)
-        return out
+    if not out:
+        raise ValueError(f"Final scoring universe CSV contains no scoring tickers: {path}")
+    return out
 
 
 def load_companies(conn: sqlite3.Connection, *, scoring_tickers: set[str], ticker_filter: set[str], max_companies: int) -> list[dict[str, Any]]:
@@ -143,10 +145,12 @@ def load_fact_rows(conn: sqlite3.Connection, company_id: int, asof_date: date) -
         """
         SELECT *
         FROM company_facts_quarterly
-        WHERE company_id = ? AND period_end <= ?
+        WHERE company_id = ?
+          AND period_end <= ?
+          AND (filed_date IS NULL OR filed_date = '' OR filed_date <= ?)
         ORDER BY period_end DESC, filed_date DESC
         """,
-        (company_id, asof_date.isoformat()),
+        (company_id, asof_date.isoformat(), asof_date.isoformat()),
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -159,10 +163,12 @@ def load_fact_rows_bulk(conn: sqlite3.Connection, company_ids: list[int], asof_d
         f"""
         SELECT *
         FROM company_facts_quarterly
-        WHERE company_id IN ({placeholders}) AND period_end <= ?
+        WHERE company_id IN ({placeholders})
+          AND period_end <= ?
+          AND (filed_date IS NULL OR filed_date = '' OR filed_date <= ?)
         ORDER BY company_id, period_end DESC, filed_date DESC
         """,
-        tuple(company_ids) + (asof_date.isoformat(),),
+        tuple(company_ids) + (asof_date.isoformat(), asof_date.isoformat()),
     ).fetchall()
     out: dict[int, list[dict[str, Any]]] = {company_id: [] for company_id in company_ids}
     for row in rows:
@@ -552,12 +558,27 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
     }
 
 
-def upsert_features(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_date: str) -> None:
+def upsert_features(
+    conn: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+    asof_date: str,
+    *,
+    target_company_ids: set[int] | None = None,
+) -> None:
     now = utc_now()
     update_fields = [field for field in COMMERCIAL_FIELDS if field not in {"asof_date", "company_id"}]
     update_clause = ",\n                    ".join(f"{field} = excluded.{field}" for field in update_fields)
     with conn:
-        conn.execute("DELETE FROM commercial_value_features_daily WHERE asof_date = ?", (asof_date,))
+        if target_company_ids is None:
+            conn.execute("DELETE FROM commercial_value_features_daily WHERE asof_date = ?", (asof_date,))
+        elif target_company_ids:
+            company_placeholders = ",".join("?" for _ in target_company_ids)
+            conn.execute(
+                f"DELETE FROM commercial_value_features_daily WHERE asof_date = ? AND company_id IN ({company_placeholders})",
+                (asof_date, *sorted(target_company_ids)),
+            )
+        else:
+            return
         conn.executemany(
             f"""
             INSERT INTO commercial_value_features_daily({", ".join(COMMERCIAL_FIELDS)}, created_at, updated_at)
@@ -611,7 +632,13 @@ def main() -> None:
                 rows.append(build_feature(company, fact_rows, market, asof_date, config))
                 if idx % 50 == 0:
                     LOGGER.info("Built commercial features for %d/%d companies", idx, len(companies))
-            upsert_features(conn, rows, asof_date.isoformat())
+            partial_run = bool(ticker_filter) or int(args.max_companies) > 0
+            upsert_features(
+                conn,
+                rows,
+                asof_date.isoformat(),
+                target_company_ids=set(company_ids) if partial_run else None,
+            )
             write_csv(output_csv, rows)
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=f"asof={asof_date.isoformat()} output={output_csv}")
         except Exception as exc:

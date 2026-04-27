@@ -87,7 +87,7 @@ def as_bool(raw: object) -> bool:
 
 def read_scoring_tickers(path: Path) -> set[str]:
     if not path.exists():
-        return set()
+        raise FileNotFoundError(f"Final scoring universe CSV not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         out: set[str] = set()
@@ -95,7 +95,9 @@ def read_scoring_tickers(path: Path) -> set[str]:
             ticker = str(row.get("ticker") or "").strip().upper()
             if ticker and str(row.get("final_status") or "").strip().lower() == "keep" and as_bool(row.get("scoring_include")):
                 out.add(ticker)
-        return out
+    if not out:
+        raise ValueError(f"Final scoring universe CSV contains no scoring tickers: {path}")
+    return out
 
 
 def load_companies(conn: sqlite3.Connection, *, scoring_tickers: set[str], ticker_filter: set[str], max_tickers: int) -> list[Company]:
@@ -125,11 +127,14 @@ def load_latest_shares(conn: sqlite3.Connection, company_id: int, asof_date: dat
         """
         SELECT shares_outstanding
         FROM company_facts_quarterly
-        WHERE company_id = ? AND period_end <= ? AND shares_outstanding IS NOT NULL
+        WHERE company_id = ?
+          AND period_end <= ?
+          AND (filed_date IS NULL OR filed_date = '' OR filed_date <= ?)
+          AND shares_outstanding IS NOT NULL
         ORDER BY period_end DESC, filed_date DESC
         LIMIT 1
         """,
-        (company_id, asof_date.isoformat()),
+        (company_id, asof_date.isoformat(), asof_date.isoformat()),
     ).fetchone()
     return to_float(row["shares_outstanding"]) if row else None
 
@@ -154,7 +159,11 @@ def score_liquidity(avg_dollar_volume_20d: float | None) -> float:
     return 15.0
 
 
-def fetch_bars(ib: Any, ticker: str, *, currency: str, duration: str, sleep_sec: float) -> list[dict[str, Any]]:
+def ib_end_datetime(asof_date: date) -> str:
+    return f"{asof_date.strftime('%Y%m%d')} 23:59:59 US/Eastern"
+
+
+def fetch_bars(ib: Any, ticker: str, *, currency: str, duration: str, sleep_sec: float, asof_date: date) -> list[dict[str, Any]]:
     from ib_insync import Stock  # type: ignore
 
     contract = Stock(ticker, "SMART", currency or "USD")
@@ -163,7 +172,7 @@ def fetch_bars(ib: Any, ticker: str, *, currency: str, duration: str, sleep_sec:
         raise ValueError(f"IB could not qualify contract for {ticker}")
     bars = ib.reqHistoricalData(
         qualified[0],
-        endDateTime="",
+        endDateTime=ib_end_datetime(asof_date),
         durationStr=duration,
         barSizeSetting="1 day",
         whatToShow="TRADES",
@@ -350,15 +359,23 @@ def main() -> None:
             companies = load_companies(conn, scoring_tickers=scoring_tickers, ticker_filter=ticker_filter, max_tickers=args.max_tickers)
             LOGGER.info("Loaded %d company job(s) for IB market sync", len(companies))
             ib.connect(host, port, clientId=client_id, timeout=float(cfg_get(config, "ib_market_data.connect_timeout_sec", 15.0)))
-            xbi_bars = fetch_bars(ib, "XBI", currency="USD", duration=duration, sleep_sec=sleep_sec)
+            xbi_bars = fetch_bars(ib, "XBI", currency="USD", duration=duration, sleep_sec=sleep_sec, asof_date=asof_date)
             xbi_closes = [value for value in (to_float(row.get("close")) for row in xbi_bars) if value is not None and value > 0]
             all_bars: list[dict[str, Any]] = list(xbi_bars)
             snapshots: list[dict[str, Any]] = []
             features: list[dict[str, Any]] = []
             csv_rows: list[dict[str, Any]] = []
+            failed_tickers: list[str] = []
             for idx, company in enumerate(companies, start=1):
                 try:
-                    bars = fetch_bars(ib, company.ticker, currency=company.currency or "USD", duration=duration, sleep_sec=sleep_sec)
+                    bars = fetch_bars(
+                        ib,
+                        company.ticker,
+                        currency=company.currency or "USD",
+                        duration=duration,
+                        sleep_sec=sleep_sec,
+                        asof_date=asof_date,
+                    )
                     shares = load_latest_shares(conn, company.company_id, asof_date)
                     snapshot, feature = build_market_rows(company, bars, xbi_closes, shares, asof_date)
                     all_bars.extend(bars)
@@ -367,10 +384,17 @@ def main() -> None:
                     csv_rows.append({"company_name": company.company_name, **feature})
                     LOGGER.info("[%d/%d] %s bars=%d quality=%s", idx, len(companies), company.ticker, len(bars), feature.get("market_data_quality"))
                 except Exception as exc:
+                    failed_tickers.append(company.ticker)
                     LOGGER.warning("IB market sync failed for %s: %s", company.ticker, exc)
+            if companies and not features:
+                raise RuntimeError(f"IB market sync produced no company feature rows; failed_tickers={','.join(failed_tickers)}")
             upsert_market_rows(conn, bars=all_bars, snapshots=snapshots, features=features)
             write_csv(output_csv, csv_rows)
-            finish_run(conn, run_id=run_id, status="success", row_count=len(features), message=f"asof={asof_date.isoformat()} output={output_csv}")
+            status = "partial" if failed_tickers else "success"
+            message = f"asof={asof_date.isoformat()} output={output_csv}"
+            if failed_tickers:
+                message += f" failed_tickers={','.join(failed_tickers)}"
+            finish_run(conn, run_id=run_id, status=status, row_count=len(features), message=message)
         except Exception as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise

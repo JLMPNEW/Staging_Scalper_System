@@ -127,8 +127,10 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def read_csv_rows(path: Path) -> list[dict[str, str]]:
+def read_csv_rows(path: Path, *, required: bool = False) -> list[dict[str, str]]:
     if not path.exists():
+        if required:
+            raise FileNotFoundError(f"Required CSV not found: {path}")
         return []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -646,7 +648,10 @@ def main() -> None:
             cards = build_evidence_cards(scores, features, top_n)
             trial_validation_rows = build_trial_validation_rows(
                 scores=scores,
-                evidence_rows=apply_trial_status_overrides(read_csv_rows(ctgov_evidence_csv), read_csv_rows(trial_status_overrides_csv) if trial_status_overrides_csv else []),
+                evidence_rows=apply_trial_status_overrides(
+                    read_csv_rows(ctgov_evidence_csv, required=True),
+                    read_csv_rows(trial_status_overrides_csv) if trial_status_overrides_csv else [],
+                ),
                 top_n=top_n,
                 extra_tickers=validation_extra_tickers,
                 max_trials_per_ticker=validation_max_trials,

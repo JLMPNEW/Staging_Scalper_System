@@ -174,7 +174,7 @@ def normalize_cik(raw: object) -> str:
 
 def read_scoring_tickers(path: Path) -> set[str]:
     if not path.exists():
-        return set()
+        raise FileNotFoundError(f"Final scoring universe CSV not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         out: set[str] = set()
@@ -182,7 +182,9 @@ def read_scoring_tickers(path: Path) -> set[str]:
             ticker = normalize_ticker(row.get("ticker"))
             if ticker and str(row.get("final_status") or "").strip().lower() == "keep" and as_bool(row.get("scoring_include")):
                 out.add(ticker)
-        return out
+    if not out:
+        raise ValueError(f"Final scoring universe CSV contains no scoring tickers: {path}")
+    return out
 
 
 def load_companies(
@@ -748,12 +750,27 @@ def build_row(
     }
 
 
-def upsert_rows(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_date: str) -> None:
+def upsert_rows(
+    conn: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+    asof_date: str,
+    *,
+    target_company_ids: set[int] | None = None,
+) -> None:
     now = utc_now()
     placeholders = ", ".join("?" for _ in GOVERNANCE_FIELDS)
     update_cols = [field for field in GOVERNANCE_FIELDS if field not in {"asof_date", "company_id"}]
     with conn:
-        conn.execute("DELETE FROM governance_event_features_daily WHERE asof_date = ?", (asof_date,))
+        if target_company_ids is None:
+            conn.execute("DELETE FROM governance_event_features_daily WHERE asof_date = ?", (asof_date,))
+        elif target_company_ids:
+            company_placeholders = ",".join("?" for _ in target_company_ids)
+            conn.execute(
+                f"DELETE FROM governance_event_features_daily WHERE asof_date = ? AND company_id IN ({company_placeholders})",
+                (asof_date, *sorted(target_company_ids)),
+            )
+        else:
+            return
         conn.executemany(
             f"""
             INSERT INTO governance_event_features_daily({", ".join(GOVERNANCE_FIELDS)}, created_at, updated_at)
@@ -841,7 +858,13 @@ def main() -> None:
                 rows.append(row)
                 if idx % 25 == 0 or idx == len(companies):
                     LOGGER.info("[%d/%d] governance features built", idx, len(companies))
-            upsert_rows(conn, rows, asof_date.isoformat())
+            partial_run = bool(ticker_filter) or int(args.max_companies) > 0
+            upsert_rows(
+                conn,
+                rows,
+                asof_date.isoformat(),
+                target_company_ids=set(company_ids) if partial_run else None,
+            )
             write_csv(output_csv, rows)
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=f"asof={asof_date.isoformat()} output={output_csv}")
         except Exception as exc:

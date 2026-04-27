@@ -752,6 +752,15 @@ SEC_EVENT_OPTIONAL_COLUMNS = {
     "updated_at": "TEXT",
 }
 
+SEC_EVENT_PARSE_STATE_OPTIONAL_COLUMNS = {
+    "parser_signature": "TEXT",
+}
+
+
+FORWARD_GUIDANCE_PARSE_STATE_OPTIONAL_COLUMNS = {
+    "parser_signature": "TEXT",
+}
+
 
 COMPANY_FACTS_QUARTERLY_OPTIONAL_COLUMNS = {
     "cost_of_revenue": "REAL",
@@ -819,6 +828,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_table_optional_columns(conn, "governance_event_features_daily", GOVERNANCE_EVENT_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "multibagger_features_daily", MULTIBAGGER_FEATURE_OPTIONAL_COLUMNS)
     ensure_state_tables_created_at(conn)
+    ensure_table_optional_columns(conn, "sec_event_parse_state", SEC_EVENT_PARSE_STATE_OPTIONAL_COLUMNS)
+    ensure_table_optional_columns(conn, "forward_guidance_parse_state", FORWARD_GUIDANCE_PARSE_STATE_OPTIONAL_COLUMNS)
     conn.execute("DROP INDEX IF EXISTS idx_forward_guidance_overrides_unique_key")
     conn.execute(
         """

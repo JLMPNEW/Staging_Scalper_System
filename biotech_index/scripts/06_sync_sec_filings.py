@@ -85,6 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync SEC filings and filing text for Tier-1 biotech event parsing.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--asof", type=str, default="", help="Optional YYYY-MM-DD upper bound for SEC filing_date. Defaults to UTC today.")
     parser.add_argument("--max-companies", type=int, default=0, help="Limit companies for smoke tests. 0 means all.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
     parser.add_argument("--skip-text", action="store_true", help="Only sync filing metadata; do not fetch filing text.")
@@ -110,6 +111,19 @@ def parse_date(raw: object) -> date | None:
         return datetime.strptime(text[:10], "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def parse_utc_datetime(raw: object) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def normalize_cik(raw: object) -> str:
@@ -142,13 +156,16 @@ def matches_form(form: str, allowed_forms: set[str]) -> bool:
 
 def read_scoring_tickers(path: Path) -> set[str]:
     if not path.exists():
-        return set()
+        raise FileNotFoundError(f"Final scoring universe CSV not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        return {
+        tickers = {
             str(row.get("ticker") or "").strip().upper().replace(".", "-")
             for row in csv.DictReader(handle)
             if str(row.get("ticker") or "").strip()
         }
+    if not tickers:
+        raise ValueError(f"Final scoring universe CSV contains no tickers: {path}")
+    return tickers
 
 
 def load_companies(
@@ -195,6 +212,7 @@ def parse_recent_filings(
     company: Company,
     allowed_forms: set[str],
     cutoff: date,
+    asof: date,
     archives_base_url: str,
     max_filings: int,
 ) -> list[Filing]:
@@ -211,7 +229,7 @@ def parse_recent_filings(
         form = str(forms[idx] or "").strip().upper()
         filing_dt = parse_date(filing_dates[idx])
         accession = str(accession_numbers[idx] or "").replace("-", "").strip()
-        if not form or not filing_dt or filing_dt < cutoff or not accession:
+        if not form or not filing_dt or filing_dt < cutoff or filing_dt > asof or not accession:
             continue
         if not matches_form(form, allowed_forms):
             continue
@@ -255,6 +273,37 @@ def fetch_filing_text(http: CachedHttpClient, filing: Filing, *, headers: dict[s
     if last_exc is not None:
         raise last_exc
     raise RuntimeError(f"No filing text URL candidates for {filing.accession_nodash}")
+
+
+def existing_document_payload(existing_doc: dict[str, Any] | None) -> tuple[str, str, str, int]:
+    if not existing_doc:
+        return "", "", "", 0
+    return (
+        str(existing_doc.get("document_url") or ""),
+        str(existing_doc.get("document_type") or ""),
+        str(existing_doc.get("text_hash") or ""),
+        int(existing_doc.get("text_length") or 0),
+    )
+
+
+def existing_document_is_reusable(
+    existing_doc: dict[str, Any] | None,
+    *,
+    text_ttl_hours: float,
+    now: datetime,
+) -> bool:
+    doc_url, doc_type, digest, text_length = existing_document_payload(existing_doc)
+    if not doc_url or not digest or text_length <= 0:
+        return False
+    if doc_type != "complete_submission_text":
+        return False
+    if text_ttl_hours < 0:
+        return True
+    fetched_at = parse_utc_datetime(existing_doc.get("fetched_at") if existing_doc else "")
+    if fetched_at is None:
+        return False
+    age_seconds = (now - fetched_at).total_seconds()
+    return age_seconds <= text_ttl_hours * 3600.0
 
 
 def upsert_filing(
@@ -318,13 +367,14 @@ def load_existing_documents(
     *,
     company_ids: list[int],
     cutoff: date,
+    asof: date,
     allowed_forms: set[str],
 ) -> dict[str, dict[str, Any]]:
     if not company_ids:
         return {}
     company_placeholders = ",".join("?" for _ in company_ids)
     form_clause = ""
-    params: list[Any] = [*company_ids, cutoff.isoformat()]
+    params: list[Any] = [*company_ids, cutoff.isoformat(), asof.isoformat()]
     if allowed_forms:
         form_clause = f"AND ({' OR '.join('f.form = ?' if not form.endswith('*') else 'f.form LIKE ?' for form in sorted(allowed_forms))})"
         params.extend([form[:-1] + "%" if form.endswith("*") else form for form in sorted(allowed_forms)])
@@ -335,6 +385,7 @@ def load_existing_documents(
             FROM sec_filings f
             WHERE f.company_id IN ({company_placeholders})
               AND f.filing_date >= ?
+              AND f.filing_date <= ?
               {form_clause}
         ),
         ranked_docs AS (
@@ -343,6 +394,7 @@ def load_existing_documents(
                 d.document_url,
                 d.document_type,
                 d.text_hash,
+                d.fetched_at,
                 length(d.text_content) AS text_length,
                 ROW_NUMBER() OVER (
                     PARTITION BY d.accession_nodash
@@ -356,7 +408,7 @@ def load_existing_documents(
             WHERE d.text_content IS NOT NULL
               AND length(d.text_content) > 0
         )
-        SELECT accession_nodash, document_url, document_type, text_hash, text_length
+        SELECT accession_nodash, document_url, document_type, text_hash, fetched_at, text_length
         FROM ranked_docs
         WHERE doc_rank = 1
         """
@@ -371,6 +423,7 @@ def load_existing_documents(
                 "document_url": str(row["document_url"] or ""),
                 "document_type": str(row["document_type"] or ""),
                 "text_hash": str(row["text_hash"] or ""),
+                "fetched_at": str(row["fetched_at"] or ""),
                 "text_length": int(row["text_length"] or 0),
             }
     return existing
@@ -390,6 +443,7 @@ def sync_company(
     submissions_template: str,
     allowed_forms: set[str],
     cutoff: date,
+    asof: date,
     archives_base_url: str,
     max_filings: int,
     fetch_text: bool,
@@ -425,6 +479,7 @@ def sync_company(
                 company=company,
                 allowed_forms=allowed_forms,
                 cutoff=cutoff,
+                asof=asof,
                 archives_base_url=archives_base_url,
                 max_filings=max_filings,
             )
@@ -442,11 +497,12 @@ def sync_company(
                 else:
                     existing_doc = existing_documents.get(filing.accession_nodash)
                 if fetch_text:
-                    if existing_doc:
-                        doc_url = str(existing_doc.get("document_url") or "")
-                        doc_type = str(existing_doc.get("document_type") or "")
-                        digest = str(existing_doc.get("text_hash") or "")
-                        text_length = int(existing_doc.get("text_length") or 0)
+                    if existing_document_is_reusable(
+                        existing_doc,
+                        text_ttl_hours=text_ttl_hours,
+                        now=datetime.now(timezone.utc),
+                    ):
+                        doc_url, doc_type, digest, text_length = existing_document_payload(existing_doc)
                     else:
                         try:
                             doc_url, doc_type, text = fetch_filing_text(
@@ -459,6 +515,7 @@ def sync_company(
                             text_length = len(text)
                         except Exception as exc:
                             text_errors += 1
+                            doc_url, doc_type, digest, text_length = existing_document_payload(existing_doc)
                             LOGGER.warning("SEC filing text failed for %s %s: %s", company.ticker, filing.accession_nodash, exc)
                 payloads.append(
                     FilingPayload(
@@ -549,7 +606,10 @@ def main() -> None:
     if not allowed_forms:
         raise ValueError("sec_filings.forms must contain at least one SEC form.")
     lookback_days = int(cfg_get(config, "sec_filings.lookback_days", 730))
-    cutoff = datetime.now(timezone.utc).date() - timedelta(days=max(1, lookback_days))
+    asof = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
+    if asof is None:
+        raise ValueError("--asof must be a valid YYYY-MM-DD date.")
+    cutoff = asof - timedelta(days=max(1, lookback_days))
     max_filings = int(cfg_get(config, "sec_filings.max_filings_per_company", 40))
     fetch_text = bool(cfg_get(config, "sec_filings.fetch_text", True)) and not bool(args.skip_text)
     max_workers = max(1, int(cfg_get(config, "sec_filings.max_workers", 1)))
@@ -569,6 +629,7 @@ def main() -> None:
             conn,
             company_ids=[company.company_id for company in companies],
             cutoff=cutoff,
+            asof=asof,
             allowed_forms=allowed_forms,
         )
         existing_documents_lock = Lock()
@@ -581,6 +642,7 @@ def main() -> None:
                 "submissions_template": submissions_template,
                 "allowed_forms": allowed_forms,
                 "cutoff": cutoff,
+                "asof": asof,
                 "archives_base_url": archives_base_url,
                 "max_filings": max_filings,
                 "fetch_text": fetch_text,

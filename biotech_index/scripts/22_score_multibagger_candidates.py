@@ -362,6 +362,8 @@ def main() -> None:
         run_id = start_run(conn, run_type="score_multibagger_candidates", input_path=db_path)
         try:
             feature_rows = load_feature_rows(conn, asof_date)
+            if not feature_rows:
+                raise ValueError(f"No multibagger_features_daily rows found for asof_date={asof_date}")
             feature_by_company = {int(row["company_id"]): row for row in feature_rows}
             scored = [score_one(row, config) for row in feature_rows]
             scored.sort(key=lambda item: (-to_float(item["multibagger_score"]), str(item["ticker"])))
