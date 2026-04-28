@@ -156,7 +156,8 @@ def matches_form(form: str, allowed_forms: set[str]) -> bool:
 
 def read_scoring_tickers(path: Path) -> set[str]:
     if not path.exists():
-        raise FileNotFoundError(f"Final scoring universe CSV not found: {path}")
+        LOGGER.warning("Final scoring universe CSV not found; SEC sync will run with no scoring-universe filter: %s", path)
+        return set()
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         tickers = {
             str(row.get("ticker") or "").strip().upper().replace(".", "-")

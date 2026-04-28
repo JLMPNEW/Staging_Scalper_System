@@ -537,7 +537,7 @@ def main() -> None:
         cfg_get(config, "ctgov_reactivation.policy_overrides_csv"),
         base_dir=base_dir,
     )
-    trial_status_overrides_csv = resolve_path(cfg_get(config, "ctgov_audit.trial_status_overrides_csv"), base_dir=base_dir)
+    trial_status_overrides_csv = resolve_optional_path(cfg_get(config, "ctgov_audit.trial_status_overrides_csv"), base_dir=base_dir)
     source_review_csv = resolve_path(
         cfg_get(config, "ctgov_reactivation.source_review_csv", "../output/biotech_index_reports/ctgov_trial_link_review.csv"),
         base_dir=base_dir,

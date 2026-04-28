@@ -22,7 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.clients.ctgov_client import as_list, get_nested
-from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_path
+from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_optional_path, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.text_norm import normalize_org_name
 
@@ -970,7 +970,7 @@ def main() -> None:
     non_therapeutic_keywords = normalize_string_list(cfg_get(config, "ctgov_audit.non_therapeutic_keywords"), [])
     qualifying_device_keywords = normalize_string_list(cfg_get(config, "ctgov_audit.qualifying_device_keywords"), [])
     diagnostic_keywords = normalize_string_list(cfg_get(config, "ctgov_audit.diagnostic_company_keywords"), [])
-    trial_status_overrides_csv = resolve_path(cfg_get(config, "ctgov_audit.trial_status_overrides_csv"), base_dir=base_dir)
+    trial_status_overrides_csv = resolve_optional_path(cfg_get(config, "ctgov_audit.trial_status_overrides_csv"), base_dir=base_dir)
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     trial_status_overrides = {
         (str(row.get("ticker") or "").strip().upper(), str(row.get("nct_id") or "").strip().upper()): row

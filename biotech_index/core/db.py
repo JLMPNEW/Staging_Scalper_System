@@ -440,6 +440,15 @@ CREATE TABLE IF NOT EXISTS market_snapshots_daily (
     fifty_two_week_high REAL,
     fifty_two_week_low REAL,
     currency TEXT,
+    price_adjustment TEXT,
+    is_adjusted INTEGER,
+    is_provisional INTEGER,
+    first_bar_date TEXT,
+    last_bar_date TEXT,
+    bar_count INTEGER,
+    expected_bar_count INTEGER,
+    missing_bar_count INTEGER,
+    continuity_status TEXT,
     data_quality TEXT,
     payload_json TEXT,
     created_at TEXT NOT NULL,
@@ -458,8 +467,21 @@ CREATE TABLE IF NOT EXISTS market_bars_daily (
     close REAL,
     volume REAL,
     wap REAL,
+    price_adjustment TEXT,
+    raw_open REAL,
+    raw_high REAL,
+    raw_low REAL,
+    raw_close REAL,
+    adj_close REAL,
+    adjustment_factor REAL,
+    dividend_amount REAL,
+    split_factor REAL,
+    corporate_action_source TEXT,
+    is_adjusted INTEGER NOT NULL DEFAULT 0,
+    is_provisional INTEGER NOT NULL DEFAULT 0,
     data_quality TEXT,
     created_at TEXT NOT NULL,
+    updated_at TEXT,
     PRIMARY KEY(ticker, bar_date, source)
 );
 
@@ -479,6 +501,15 @@ CREATE TABLE IF NOT EXISTS market_features_daily (
     distance_from_52w_high_pct REAL,
     avg_dollar_volume_20d REAL,
     liquidity_score REAL,
+    price_adjustment TEXT,
+    is_adjusted INTEGER,
+    is_provisional INTEGER,
+    first_bar_date TEXT,
+    last_bar_date TEXT,
+    bar_count INTEGER,
+    expected_bar_count INTEGER,
+    missing_bar_count INTEGER,
+    continuity_status TEXT,
     market_data_quality TEXT,
     payload_json TEXT,
     created_at TEXT NOT NULL,
@@ -719,6 +750,7 @@ CREATE INDEX IF NOT EXISTS idx_company_facts_sync_state_status ON company_facts_
 CREATE INDEX IF NOT EXISTS idx_financial_survival_asof_company ON financial_survival_features(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_data_quality_issues_asof_company ON data_quality_issues(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_market_bars_ticker_date ON market_bars_daily(ticker, bar_date);
+CREATE INDEX IF NOT EXISTS idx_market_bars_source_ticker_date ON market_bars_daily(source, ticker, bar_date);
 CREATE INDEX IF NOT EXISTS idx_market_features_asof_company ON market_features_daily(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_commercial_value_asof_company ON commercial_value_features_daily(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_forward_guidance_company_date ON company_forward_guidance(company_id, filing_date);
@@ -787,6 +819,34 @@ DAILY_SCORES_OPTIONAL_COLUMNS = {
     "investment_score": "REAL",
 }
 
+MARKET_BARS_OPTIONAL_COLUMNS = {
+    "price_adjustment": "TEXT",
+    "raw_open": "REAL",
+    "raw_high": "REAL",
+    "raw_low": "REAL",
+    "raw_close": "REAL",
+    "adj_close": "REAL",
+    "adjustment_factor": "REAL",
+    "dividend_amount": "REAL",
+    "split_factor": "REAL",
+    "corporate_action_source": "TEXT",
+    "is_adjusted": "INTEGER NOT NULL DEFAULT 0",
+    "is_provisional": "INTEGER NOT NULL DEFAULT 0",
+    "updated_at": "TEXT",
+}
+
+MARKET_DAILY_OPTIONAL_COLUMNS = {
+    "price_adjustment": "TEXT",
+    "is_adjusted": "INTEGER",
+    "is_provisional": "INTEGER",
+    "first_bar_date": "TEXT",
+    "last_bar_date": "TEXT",
+    "bar_count": "INTEGER",
+    "expected_bar_count": "INTEGER",
+    "missing_bar_count": "INTEGER",
+    "continuity_status": "TEXT",
+}
+
 FORWARD_GUIDANCE_OVERRIDES_OPTIONAL_COLUMNS = {
     "unique_key": "TEXT",
 }
@@ -808,14 +868,31 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def connect(db_path: Path, *, timeout_sec: float = 30.0) -> sqlite3.Connection:
+class ManagedConnection:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def __enter__(self) -> sqlite3.Connection:
+        return self._conn
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return self._conn.__exit__(exc_type, exc_value, traceback)
+        finally:
+            self._conn.close()
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
+
+
+def connect(db_path: Path, *, timeout_sec: float = 30.0) -> ManagedConnection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=timeout_sec)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
-    return conn
+    return ManagedConnection(conn)
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -824,16 +901,18 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_table_optional_columns(conn, "sec_events", SEC_EVENT_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "company_facts_quarterly", COMPANY_FACTS_QUARTERLY_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "daily_scores", DAILY_SCORES_OPTIONAL_COLUMNS)
+    ensure_table_optional_columns(conn, "market_bars_daily", MARKET_BARS_OPTIONAL_COLUMNS)
+    ensure_table_optional_columns(conn, "market_snapshots_daily", MARKET_DAILY_OPTIONAL_COLUMNS)
+    ensure_table_optional_columns(conn, "market_features_daily", MARKET_DAILY_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "company_forward_guidance_overrides", FORWARD_GUIDANCE_OVERRIDES_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "governance_event_features_daily", GOVERNANCE_EVENT_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "multibagger_features_daily", MULTIBAGGER_FEATURE_OPTIONAL_COLUMNS)
     ensure_state_tables_created_at(conn)
     ensure_table_optional_columns(conn, "sec_event_parse_state", SEC_EVENT_PARSE_STATE_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "forward_guidance_parse_state", FORWARD_GUIDANCE_PARSE_STATE_OPTIONAL_COLUMNS)
-    conn.execute("DROP INDEX IF EXISTS idx_forward_guidance_overrides_unique_key")
     conn.execute(
         """
-        CREATE UNIQUE INDEX idx_forward_guidance_overrides_unique_key
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_forward_guidance_overrides_unique_key
         ON company_forward_guidance_overrides(unique_key)
         """
     )
@@ -844,15 +923,25 @@ def ensure_company_optional_columns(conn: sqlite3.Connection) -> None:
     ensure_table_optional_columns(conn, "companies", COMPANY_OPTIONAL_COLUMNS)
 
 
+def _table_column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    columns: set[str] = set()
+    for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall():
+        try:
+            columns.add(str(row["name"]))
+        except (TypeError, IndexError):
+            columns.add(str(row[1]))
+    return columns
+
+
 def ensure_table_optional_columns(conn: sqlite3.Connection, table_name: str, columns: dict[str, str]) -> None:
-    existing = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    existing = _table_column_names(conn, table_name)
     for column, column_type in columns.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column} {column_type}")
 
 
 def ensure_state_tables_created_at(conn: sqlite3.Connection) -> None:
-    sec_event_cols = {str(row["name"]) for row in conn.execute("PRAGMA table_info(sec_event_parse_state)").fetchall()}
+    sec_event_cols = _table_column_names(conn, "sec_event_parse_state")
     if "created_at" not in sec_event_cols:
         now = utc_now()
         conn.execute("DROP INDEX IF EXISTS idx_sec_event_parse_state_hash")
@@ -883,7 +972,7 @@ def ensure_state_tables_created_at(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE sec_event_parse_state_legacy")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sec_event_parse_state_hash ON sec_event_parse_state(text_hash)")
 
-    facts_sync_cols = {str(row["name"]) for row in conn.execute("PRAGMA table_info(company_facts_sync_state)").fetchall()}
+    facts_sync_cols = _table_column_names(conn, "company_facts_sync_state")
     if "created_at" not in facts_sync_cols:
         now = utc_now()
         conn.execute("DROP INDEX IF EXISTS idx_company_facts_sync_state_status")

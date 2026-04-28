@@ -588,6 +588,10 @@ def main() -> None:
         default_filename=str(cfg_get(config, "ctgov_reactivation.scan_csv", "ctgov_reactivation_scan.csv")),
     )
     asof = args.asof or datetime.now(timezone.utc).date().isoformat()
+    try:
+        asof_date = date.fromisoformat(asof)
+    except ValueError as exc:
+        raise ValueError(f"Invalid --asof date: {args.asof}") from exc
     ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if normalize_ticker(value)}
 
     active_listing_statuses = {

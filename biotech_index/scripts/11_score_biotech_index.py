@@ -57,8 +57,17 @@ def parse_date(raw: object) -> date | None:
 
 
 def to_float(raw: object, default: float = 0.0) -> float:
+    if raw is None:
+        return default
+    candidate: int | float | str
+    if isinstance(raw, bool):
+        candidate = int(raw)
+    elif isinstance(raw, (int, float, str)):
+        candidate = raw
+    else:
+        candidate = str(raw).strip()
     try:
-        value = float(raw)
+        value = float(candidate)
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default

@@ -282,7 +282,7 @@ sec_event_parser:
   min_confidence: 0.65
   max_events_per_filing_type: 1
   batch_size: 250
-  max_workers: 1
+  max_workers: 2
 
 sec_companyfacts_history:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
@@ -305,7 +305,27 @@ ib_market_data:
   client_id: 7717
   connect_timeout_sec: 15.0
   duration: "1 Y"
+  what_to_show: "ADJUSTED_LAST"
+  fallback_what_to_show: "TRADES"
+  use_rth: true
+  market_close_guard: true
+  market_timezone: "America/New_York"
+  market_close_time: "16:15"
+  continuity_max_missing_days: 2
   sleep_sec: 0.15
+
+yahoo_market_data:
+  final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
+  output_csv: "../output/biotech_index_reports/yahoo_adjusted_market_features.csv"
+  source: "yahoo_adjusted"
+  benchmark_ticker: "XBI"
+  start_date: "2023-04-24"
+  # 0 reloads the full adjusted history each run so splits/dividends can restate prior bars correctly.
+  refetch_days: 0
+  market_close_guard: true
+  market_timezone: "America/New_York"
+  market_close_time: "16:15"
+  continuity_max_missing_days: 2
 
 commercial_value:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
@@ -388,8 +408,9 @@ biotech_scoring:
     risk_penalty: 0.35
   investment_weights:
     clinical_opportunity: 0.25
-    commercial_quality: 0.25
-    valuation: 0.20
+    commercial_value: 0.25
+    forward_guidance: 0.05
+    valuation: 0.15
     upside_capacity: 0.10
     financial_quality: 0.15
     momentum: 0.05
@@ -507,7 +528,7 @@ multibagger:
     risk_penalty: 0.20
 
 fmp_reverse_split:
-  input_csv: "../ticker_mapping/second_check_reverse_plit.csv"
+  input_csv: "../ticker_mapping/second_check_reverse_split.csv"
   output_csv: "../ticker_mapping/reverse_split_events_fmp.csv"
   audit_output_csv: "../ticker_mapping/reverse_split_second_check_results.csv"
   cache_dir: "../ticker_mapping/_fmp_reverse_split_cache"
@@ -518,7 +539,7 @@ fmp_reverse_split:
   max_tickers: 0
 
 yahoo_reverse_split:
-  input_csv: "../ticker_mapping/second_check_reverse_plit.csv"
+  input_csv: "../ticker_mapping/second_check_reverse_split.csv"
   output_csv: "../ticker_mapping/reverse_split_events_yahoo.csv"
   audit_output_csv: "../ticker_mapping/reverse_split_second_check_results_yahoo.csv"
   cache_dir: "../ticker_mapping/_yahoo_reverse_split_cache"
