@@ -23,6 +23,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.pipeline_guards import (
+    normalize_ticker,
+    read_final_scoring_tickers,
+    subset_mode_enabled,
+    subset_output_path,
+    validate_full_universe_coverage,
+    validate_nonempty_selection,
+    validate_requested_tickers,
+)
 
 
 LOGGER = logging.getLogger("sync_market_data_ib")
@@ -79,6 +88,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tickers", type=int, default=0, help="Smoke-test limit. 0 means all.")
     parser.add_argument("--duration", type=str, default="", help="Override IB duration string, for example '4 Y'.")
     parser.add_argument("--start-date", type=str, default="", help="Only store bars on or after this YYYY-MM-DD date.")
+    parser.add_argument("--full-refresh", action="store_true", help="Refetch the configured duration for every ticker instead of using incremental DB-backed refresh.")
+    parser.add_argument("--repair-window-days", type=int, default=None, help="Refetch at least this many recent calendar days for every ticker in incremental mode.")
+    parser.add_argument("--allow-partial", action="store_true", help="Return success even if one or more ticker updates fail.")
     return parser.parse_args()
 
 
@@ -183,18 +195,7 @@ def resolve_effective_asof(
 
 
 def read_scoring_tickers(path: Path) -> set[str]:
-    if not path.exists():
-        raise FileNotFoundError(f"Final scoring universe CSV not found: {path}")
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        out: set[str] = set()
-        for row in reader:
-            ticker = str(row.get("ticker") or "").strip().upper()
-            if ticker and str(row.get("final_status") or "").strip().lower() == "keep" and as_bool(row.get("scoring_include")):
-                out.add(ticker)
-    if not out:
-        raise ValueError(f"Final scoring universe CSV contains no scoring tickers: {path}")
-    return out
+    return read_final_scoring_tickers(path)
 
 
 def load_companies(conn: sqlite3.Connection, *, scoring_tickers: set[str], ticker_filter: set[str], max_tickers: int) -> list[Company]:
@@ -208,7 +209,7 @@ def load_companies(conn: sqlite3.Connection, *, scoring_tickers: set[str], ticke
     ).fetchall()
     out: list[Company] = []
     for row in rows:
-        ticker = str(row["ticker"] or "").upper().replace(".", "-")
+        ticker = normalize_ticker(row["ticker"])
         if scoring_tickers and ticker not in scoring_tickers:
             continue
         if ticker_filter and ticker not in ticker_filter:
@@ -377,6 +378,96 @@ def filter_bars_from_start(bars: list[dict[str, Any]], start_date: date | None) 
     if start_date is None:
         return bars
     return [row for row in bars if (day := parse_bar_day(row)) is not None and day >= start_date]
+
+
+def load_bars_from_db(conn: sqlite3.Connection, ticker: str, *, start_date: date, asof_date: date) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT ticker, bar_date, source, open, high, low, close, volume, wap,
+               price_adjustment, is_adjusted, is_provisional, data_quality
+        FROM market_bars_daily
+        WHERE source = ?
+          AND ticker = ?
+          AND bar_date >= ?
+          AND bar_date <= ?
+        ORDER BY bar_date
+        """,
+        (SOURCE, ticker, start_date.isoformat(), asof_date.isoformat()),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        is_adjusted = int(row["is_adjusted"] or 0)
+        out.append(
+            {
+                "ticker": str(row["ticker"] or ticker),
+                "bar_date": str(row["bar_date"] or ""),
+                "source": str(row["source"] or SOURCE),
+                "open": to_float(row["open"]),
+                "high": to_float(row["high"]),
+                "low": to_float(row["low"]),
+                "close": to_float(row["close"]),
+                "volume": to_float(row["volume"]),
+                "wap": to_float(row["wap"]),
+                "price_adjustment": str(row["price_adjustment"] or ("adjusted" if is_adjusted else "raw")),
+                "is_adjusted": is_adjusted,
+                "is_provisional": int(row["is_provisional"] or 0),
+                "what_to_show": "ADJUSTED_LAST" if is_adjusted else "",
+                "data_quality": str(row["data_quality"] or "medium"),
+            }
+        )
+    return out
+
+
+def latest_bar_date(conn: sqlite3.Connection, ticker: str, *, asof_date: date) -> date | None:
+    row = conn.execute(
+        """
+        SELECT MAX(bar_date) AS max_date
+        FROM market_bars_daily
+        WHERE source = ?
+          AND ticker = ?
+          AND bar_date <= ?
+        """,
+        (SOURCE, ticker, asof_date.isoformat()),
+    ).fetchone()
+    return parse_date(row["max_date"]) if row and row["max_date"] else None
+
+
+def merge_bar_rows(*groups: list[dict[str, Any]], asof_date: date) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for group in groups:
+        for row in group:
+            bar_day = parse_bar_day(row)
+            if bar_day is None or bar_day > asof_date:
+                continue
+            ticker = str(row.get("ticker") or "").upper().replace(".", "-")
+            bar_date = str(row.get("bar_date") or "")[:10]
+            source = str(row.get("source") or SOURCE)
+            if not ticker or not bar_date:
+                continue
+            merged[(ticker, bar_date, source)] = row
+    return sorted(merged.values(), key=lambda row: (str(row.get("ticker") or ""), str(row.get("bar_date") or "")))
+
+
+def incremental_duration(latest_date: date | None, asof_date: date, *, default_duration: str, repair_window_days: int) -> str:
+    if latest_date is None:
+        return default_duration
+    missing_days = max(1, (asof_date - latest_date).days + 3)
+    days = max(missing_days, repair_window_days)
+    if days <= 7:
+        return "1 W"
+    if days <= 31:
+        return "1 M"
+    if days <= 93:
+        return "3 M"
+    if days <= 186:
+        return "6 M"
+    return default_duration
+
+
+def should_fetch_incremental(latest_date: date | None, asof_date: date, *, repair_window_days: int) -> bool:
+    if latest_date is None or latest_date < asof_date:
+        return True
+    return repair_window_days > 0
 
 
 def reference_dates_from_bars(bars: list[dict[str, Any]], asof_date: date) -> list[date]:
@@ -731,6 +822,28 @@ def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], 
             )
 
 
+def delete_market_rows_for_companies(
+    conn: sqlite3.Connection,
+    *,
+    company_ids: set[int],
+    asof_date: date,
+    source: str,
+) -> None:
+    if not company_ids:
+        return
+    placeholders = ",".join("?" for _ in company_ids)
+    params = (asof_date.isoformat(), source, *sorted(company_ids))
+    with conn:
+        conn.execute(
+            f"DELETE FROM market_snapshots_daily WHERE asof_date = ? AND source = ? AND company_id IN ({placeholders})",
+            params,
+        )
+        conn.execute(
+            f"DELETE FROM market_features_daily WHERE asof_date = ? AND source = ? AND company_id IN ({placeholders})",
+            params,
+        )
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -777,7 +890,7 @@ def main() -> None:
     start_date = parse_date(args.start_date) if args.start_date else None
     if args.start_date and start_date is None:
         raise ValueError(f"Invalid --start-date: {args.start_date}")
-    ticker_filter = {value.strip().upper().replace(".", "-") for value in args.tickers.split(",") if value.strip()}
+    ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if normalize_ticker(value)}
 
     host = str(cfg_get(config, "ib_market_data.host", "127.0.0.1"))
     port = int(cfg_get(config, "ib_market_data.port", 7497))
@@ -807,6 +920,14 @@ def main() -> None:
     if start_date is not None and start_date > asof_date:
         raise ValueError(f"--start-date {start_date.isoformat()} is after effective as-of date {asof_date.isoformat()}")
     duration = duration_override or str(cfg_get(config, "ib_market_data.duration", "1 Y"))
+    full_refresh = bool(args.full_refresh or duration_override or start_date is not None)
+    repair_window_days = (
+        max(0, int(args.repair_window_days))
+        if args.repair_window_days is not None
+        else max(0, int(cfg_get(config, "ib_market_data.repair_window_days", 0)))
+    )
+    incremental_lookback_days = max(365, int(cfg_get(config, "ib_market_data.incremental_lookback_days", 400)))
+    history_start = start_date or (asof_date - timedelta(days=incremental_lookback_days))
     sleep_sec = float(cfg_get(config, "ib_market_data.sleep_sec", 0.15))
     continuity_max_missing_days = int(cfg_get(config, "ib_market_data.continuity_max_missing_days", 2))
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
@@ -823,36 +944,65 @@ def main() -> None:
         try:
             scoring_tickers = read_scoring_tickers(final_universe_csv)
             companies = load_companies(conn, scoring_tickers=scoring_tickers, ticker_filter=ticker_filter, max_tickers=args.max_tickers)
-            LOGGER.info("Loaded %d company job(s) for IB market sync", len(companies))
-            ib.connect(host, port, clientId=client_id, timeout=float(cfg_get(config, "ib_market_data.connect_timeout_sec", 15.0)))
-            xbi_bars = fetch_bars(
-                ib,
-                "XBI",
-                currency="USD",
-                duration=duration,
-                sleep_sec=sleep_sec,
-                asof_date=asof_date,
-                what_to_show=what_to_show,
-                fallback_what_to_show=fallback_what_to_show,
-                use_rth=use_rth,
-                provisional_asof=asof_decision.provisional_asof,
+            subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_tickers))
+            output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
+            validate_nonempty_selection(count=len(companies), context="IB market sync", subset_mode=subset_mode)
+            loaded_tickers = [company.ticker for company in companies]
+            validate_requested_tickers(requested_tickers=ticker_filter, loaded_tickers=loaded_tickers, context="IB market sync")
+            validate_full_universe_coverage(
+                expected_tickers=scoring_tickers,
+                observed_tickers=loaded_tickers,
+                context="IB market sync",
+                subset_mode=subset_mode,
             )
-            xbi_bars = filter_bars_from_start(xbi_bars, start_date)
-            xbi_ordered = sorted_bar_rows(xbi_bars)
-            reference_dates = reference_dates_from_bars(xbi_ordered, asof_date)
-            xbi_closes = [value for value in (to_float(row.get("close")) for row in xbi_ordered) if value is not None and value > 0]
-            all_bars: list[dict[str, Any]] = list(xbi_bars)
-            snapshots: list[dict[str, Any]] = []
-            features: list[dict[str, Any]] = []
-            csv_rows: list[dict[str, Any]] = []
+            LOGGER.info(
+                "Loaded %d company job(s) for IB market sync mode=%s",
+                len(companies),
+                "full_refresh" if full_refresh else "incremental",
+            )
+
+            def ensure_ib_connected() -> None:
+                if not ib.isConnected():
+                    ib.connect(
+                        host,
+                        port,
+                        clientId=client_id,
+                        timeout=float(cfg_get(config, "ib_market_data.connect_timeout_sec", 15.0)),
+                    )
+
+            all_bars: list[dict[str, Any]] = []
+            fetched_tickers: list[str] = []
+            skipped_tickers: list[str] = []
+            stale_feature_tickers: list[str] = []
             failed_tickers: list[str] = []
-            for idx, company in enumerate(companies, start=1):
+
+            xbi_existing = [] if full_refresh else load_bars_from_db(conn, "XBI", start_date=history_start, asof_date=asof_date)
+            xbi_latest = None if full_refresh else latest_bar_date(conn, "XBI", asof_date=asof_date)
+            xbi_fetch_needed = full_refresh or should_fetch_incremental(
+                xbi_latest,
+                asof_date,
+                repair_window_days=repair_window_days,
+            )
+            xbi_fetched: list[dict[str, Any]] = []
+            benchmark_refresh_failed = False
+            if xbi_fetch_needed:
                 try:
-                    bars = fetch_bars(
+                    ensure_ib_connected()
+                    xbi_fetch_duration = (
+                        duration
+                        if full_refresh
+                        else incremental_duration(
+                            xbi_latest,
+                            asof_date,
+                            default_duration=duration,
+                            repair_window_days=repair_window_days,
+                        )
+                    )
+                    xbi_fetched = fetch_bars(
                         ib,
-                        company.ticker,
-                        currency=company.currency or "USD",
-                        duration=duration,
+                        "XBI",
+                        currency="USD",
+                        duration=xbi_fetch_duration,
                         sleep_sec=sleep_sec,
                         asof_date=asof_date,
                         what_to_show=what_to_show,
@@ -860,7 +1010,84 @@ def main() -> None:
                         use_rth=use_rth,
                         provisional_asof=asof_decision.provisional_asof,
                     )
-                    bars = filter_bars_from_start(bars, start_date)
+                    xbi_fetched = filter_bars_from_start(xbi_fetched, start_date)
+                    all_bars.extend(xbi_fetched)
+                    LOGGER.info("XBI benchmark fetched bars=%d duration=%s", len(xbi_fetched), xbi_fetch_duration)
+                except Exception as exc:
+                    if not xbi_existing:
+                        raise
+                    benchmark_refresh_failed = True
+                    LOGGER.warning("XBI benchmark refresh failed; using existing bars: %s", exc)
+            else:
+                LOGGER.info("XBI benchmark already current through %s; using DB bars", asof_date.isoformat())
+            xbi_bars = xbi_fetched if full_refresh else merge_bar_rows(xbi_existing, xbi_fetched, asof_date=asof_date)
+            xbi_ordered = sorted_bar_rows(xbi_bars)
+            reference_dates = reference_dates_from_bars(xbi_ordered, asof_date)
+            xbi_closes = [value for value in (to_float(row.get("close")) for row in xbi_ordered) if value is not None and value > 0]
+            if not xbi_closes:
+                raise RuntimeError("IB market sync has no usable XBI benchmark bars")
+            snapshots: list[dict[str, Any]] = []
+            features: list[dict[str, Any]] = []
+            csv_rows: list[dict[str, Any]] = []
+            for idx, company in enumerate(companies, start=1):
+                try:
+                    existing_bars = [] if full_refresh else load_bars_from_db(
+                        conn,
+                        company.ticker,
+                        start_date=history_start,
+                        asof_date=asof_date,
+                    )
+                    latest_date = None if full_refresh else latest_bar_date(conn, company.ticker, asof_date=asof_date)
+                    fetch_needed = full_refresh or should_fetch_incremental(
+                        latest_date,
+                        asof_date,
+                        repair_window_days=repair_window_days,
+                    )
+                    fetched_bars: list[dict[str, Any]] = []
+                    fetch_error: Exception | None = None
+                    action = "skipped"
+                    if fetch_needed:
+                        fetch_duration = (
+                            duration
+                            if full_refresh
+                            else incremental_duration(
+                                latest_date,
+                                asof_date,
+                                default_duration=duration,
+                                repair_window_days=repair_window_days,
+                            )
+                        )
+                        action = "fetched"
+                        try:
+                            ensure_ib_connected()
+                            fetched_bars = fetch_bars(
+                                ib,
+                                company.ticker,
+                                currency=company.currency or "USD",
+                                duration=fetch_duration,
+                                sleep_sec=sleep_sec,
+                                asof_date=asof_date,
+                                what_to_show=what_to_show,
+                                fallback_what_to_show=fallback_what_to_show,
+                                use_rth=use_rth,
+                                provisional_asof=asof_decision.provisional_asof,
+                            )
+                            fetched_bars = filter_bars_from_start(fetched_bars, start_date)
+                            all_bars.extend(fetched_bars)
+                            fetched_tickers.append(company.ticker)
+                        except Exception as exc:
+                            fetch_error = exc
+                            failed_tickers.append(company.ticker)
+                            LOGGER.warning("IB market sync failed for %s: %s", company.ticker, exc)
+                    else:
+                        skipped_tickers.append(company.ticker)
+
+                    if fetch_error is not None and (full_refresh or not existing_bars):
+                        continue
+                    bars = fetched_bars if full_refresh else merge_bar_rows(existing_bars, fetched_bars, asof_date=asof_date)
+                    if fetch_error is not None:
+                        stale_feature_tickers.append(company.ticker)
+                        action = "stale_existing"
                     shares = load_latest_shares(conn, company.company_id, asof_date)
                     snapshot, feature = build_market_rows(
                         company,
@@ -871,16 +1098,17 @@ def main() -> None:
                         reference_dates=reference_dates,
                         continuity_max_missing_days=continuity_max_missing_days,
                     )
-                    all_bars.extend(bars)
                     snapshots.append(snapshot)
                     features.append(feature)
                     csv_rows.append({"company_name": company.company_name, **feature})
                     LOGGER.info(
-                        "[%d/%d] %s bars=%d continuity=%s quality=%s adjustment=%s",
+                        "[%d/%d] %s action=%s bars=%d fetched=%d continuity=%s quality=%s adjustment=%s",
                         idx,
                         len(companies),
                         company.ticker,
+                        action,
                         len(bars),
+                        len(fetched_bars),
                         feature.get("continuity_status"),
                         feature.get("market_data_quality"),
                         feature.get("price_adjustment"),
@@ -891,21 +1119,32 @@ def main() -> None:
             if companies and not features:
                 raise RuntimeError(f"IB market sync produced no company feature rows; failed_tickers={','.join(failed_tickers)}")
             upsert_market_rows(conn, bars=all_bars, snapshots=snapshots, features=features)
-            csv_rows = load_current_feature_csv_rows(conn, companies, asof_date)
+            unique_failed_tickers = list(dict.fromkeys(failed_tickers))
+            failed_company_ids = {company.company_id for company in companies if company.ticker in set(unique_failed_tickers)}
+            delete_market_rows_for_companies(conn, company_ids=failed_company_ids, asof_date=asof_date, source=SOURCE)
+            successful_companies = [company for company in companies if company.company_id not in failed_company_ids]
+            csv_rows = load_current_feature_csv_rows(conn, successful_companies, asof_date)
             csv_tickers = {str(row.get("ticker") or "").upper() for row in csv_rows}
             missing_csv_tickers = sorted({company.ticker for company in companies} - csv_tickers)
             write_csv(output_csv, csv_rows)
-            status = "partial" if failed_tickers else "success"
+            status = "partial" if benchmark_refresh_failed or unique_failed_tickers or missing_csv_tickers else "success"
             message = (
                 f"requested_asof={asof_decision.requested_asof.isoformat()} "
-                f"effective_asof={asof_date.isoformat()} duration={duration} start_date={start_date.isoformat() if start_date else ''} "
-                f"adjustment={what_to_show} output={output_csv}"
+                f"effective_asof={asof_date.isoformat()} mode={'full_refresh' if full_refresh else 'incremental'} "
+                f"duration={duration} start_date={start_date.isoformat() if start_date else ''} "
+                f"repair_window_days={repair_window_days if not full_refresh else ''} "
+                f"fetched={len(fetched_tickers)} skipped={len(skipped_tickers)} stale_existing={len(stale_feature_tickers)} "
+                f"bars_upserted={len(all_bars)} adjustment={what_to_show} output={output_csv}"
             )
-            if failed_tickers:
-                message += f" failed_tickers={','.join(failed_tickers)}"
+            if unique_failed_tickers:
+                message += f" failed_tickers={','.join(unique_failed_tickers)}"
             if missing_csv_tickers:
                 message += f" missing_output_tickers={','.join(missing_csv_tickers)}"
+            if benchmark_refresh_failed:
+                message += " benchmark_refresh_failed=1"
             finish_run(conn, run_id=run_id, status=status, row_count=len(features), message=message)
+            if status != "success" and not args.allow_partial:
+                raise SystemExit(2)
         except Exception as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise

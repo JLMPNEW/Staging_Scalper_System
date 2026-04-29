@@ -6,7 +6,6 @@ import csv
 import logging
 import sqlite3
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -19,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_optional_path, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.text_norm import alias_token_sets, meaningful_org_tokens, normalize_org_name, strip_corporate_suffixes
 
 
@@ -79,14 +79,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def load_companies(conn: sqlite3.Connection, *, status_filter: set[str], ticker_filter: set[str]) -> list[CompanyAliases]:

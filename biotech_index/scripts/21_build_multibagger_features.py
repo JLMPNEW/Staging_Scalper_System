@@ -21,6 +21,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.pipeline_guards import (
+    read_final_scoring_tickers,
+    subset_mode_enabled,
+    subset_output_path,
+    validate_full_universe_coverage,
+    validate_nonempty_selection,
+    validate_output_coverage,
+    validate_requested_tickers,
+)
 
 
 LOGGER = logging.getLogger("build_multibagger_features")
@@ -114,6 +123,16 @@ def parse_json(raw: object) -> dict[str, Any]:
 
 def normalize_ticker(raw: object) -> str:
     return str(raw or "").strip().upper().replace(".", "-")
+
+
+def missing_layer_tickers(base_rows: list[dict[str, Any]], layer: dict[int, dict[str, Any]]) -> list[str]:
+    return sorted(
+        {
+            normalize_ticker(row.get("ticker"))
+            for row in base_rows
+            if int(row["company_id"]) not in layer and normalize_ticker(row.get("ticker"))
+        }
+    )
 
 
 def latest_feature_date(conn: sqlite3.Connection) -> str:
@@ -584,10 +603,21 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    universe_csv = resolve_path(
+        cfg_get(
+            config,
+            "multibagger.final_scoring_universe_csv",
+            cfg_get(config, "biotech_features.final_scoring_universe_csv", cfg_get(config, "governance_events.final_scoring_universe_csv")),
+        ),
+        base_dir=base_dir,
+    )
     output_dir = resolve_path(cfg_get(config, "multibagger.output_dir"), base_dir=base_dir)
     output_csv = output_dir / str(cfg_get(config, "multibagger.features_csv", "multibagger_features.csv"))
     ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if value.strip()}
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
+    scoring_tickers = read_final_scoring_tickers(universe_csv)
+    subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_companies))
+    output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         init_db(conn)
@@ -598,6 +628,15 @@ def main() -> None:
         run_id = start_run(conn, run_type="build_multibagger_features", input_path=db_path)
         try:
             base_rows = load_base_rows(conn, asof_date, ticker_filter, args.max_companies)
+            validate_nonempty_selection(count=len(base_rows), context="multibagger feature build", subset_mode=subset_mode)
+            loaded_tickers = [str(row["ticker"]) for row in base_rows]
+            validate_requested_tickers(requested_tickers=ticker_filter, loaded_tickers=loaded_tickers, context="multibagger feature build")
+            validate_full_universe_coverage(
+                expected_tickers=scoring_tickers,
+                observed_tickers=loaded_tickers,
+                context="multibagger feature build",
+                subset_mode=subset_mode,
+            )
             commercial = load_latest_table(conn, "commercial_value_features_daily", asof_date)
             survival = load_latest_table(conn, "financial_survival_features", asof_date)
             market = load_latest_table(
@@ -608,6 +647,21 @@ def main() -> None:
             )
             governance = load_latest_table(conn, "governance_event_features_daily", asof_date)
             forward = load_latest_table(conn, "forward_guidance_features_daily", asof_date)
+            if not subset_mode:
+                missing_layers = {
+                    "commercial_value_features_daily": missing_layer_tickers(base_rows, commercial),
+                    "financial_survival_features": missing_layer_tickers(base_rows, survival),
+                    "market_features_daily": missing_layer_tickers(base_rows, market),
+                    "governance_event_features_daily": missing_layer_tickers(base_rows, governance),
+                    "forward_guidance_features_daily": missing_layer_tickers(base_rows, forward),
+                }
+                failures = [
+                    f"{name} missing {len(tickers)} ticker(s): {','.join(tickers[:25])}{'...' if len(tickers) > 25 else ''}"
+                    for name, tickers in missing_layers.items()
+                    if tickers
+                ]
+                if failures:
+                    raise RuntimeError("Multibagger feature build missing upstream layer rows: " + " | ".join(failures))
             rows = [
                 build_row(
                     row,
@@ -622,6 +676,12 @@ def main() -> None:
                 for row in base_rows
             ]
             partial_run = bool(ticker_filter) or int(args.max_companies) > 0
+            validate_output_coverage(
+                expected_tickers=scoring_tickers,
+                output_tickers=[row["ticker"] for row in rows],
+                context="multibagger feature build",
+                subset_mode=subset_mode,
+            )
             upsert_rows(
                 conn,
                 rows,

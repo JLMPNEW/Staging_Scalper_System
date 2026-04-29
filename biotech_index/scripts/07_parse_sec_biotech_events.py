@@ -10,7 +10,6 @@ import logging
 import re
 import sqlite3
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -24,7 +23,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
-from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.db import connect, finish_run, init_db, refresh_sec_latest_documents, start_run, utc_now
+from biotech_index.core.logging_utils import configure_utc_logging
 
 
 LOGGER = logging.getLogger("parse_sec_biotech_events")
@@ -259,7 +259,7 @@ RULE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "clinical_hold": ("clinical hold",),
     "endpoint_missed": ("endpoint", "not statistically significant", "failed to", "did not"),
     "endpoint_met": ("endpoint", "statistically significant", "achieved", "met"),
-    "clinical_update_negative": ("negative", "discontinue", "discontinued", "terminate", "terminated", "pause", "paused", "halt", "halted", "safety signal"),
+    "clinical_update_negative": ("negative", "disappointing", "unfavorable", "discontinue", "discontinued", "terminate", "terminated", "pause", "paused", "halt", "halted", "safety signal"),
     "clinical_update_positive": ("positive", "promising", "topline", "clinical"),
     "partnership_license": ("license agreement", "collaboration agreement", "strategic collaboration", "strategic partnership", "exclusive license"),
 }
@@ -296,27 +296,9 @@ WITH target_filings AS (
 {target_filings_sql}
 ),
 latest_docs AS (
-    SELECT accession_nodash, document_url, text_hash, text_content
-    FROM (
-        SELECT
-            d.accession_nodash,
-            d.document_url,
-            d.text_hash,
-            d.text_content,
-            d.document_type,
-            ROW_NUMBER() OVER (
-                PARTITION BY d.accession_nodash
-                ORDER BY
-                    CASE WHEN d.document_type = 'complete_submission_text' THEN 0 ELSE 1 END,
-                    COALESCE(d.fetched_at, d.updated_at, d.created_at) DESC,
-                    d.document_id DESC
-            ) AS rn
-        FROM sec_filing_documents d
-        JOIN target_filings t ON t.accession_nodash = d.accession_nodash
-        WHERE d.text_content IS NOT NULL
-          AND length(d.text_content) > 0
-    )
-    WHERE rn = 1
+    SELECT accession_nodash, document_id, document_url, text_hash, text_length
+    FROM sec_filing_latest_document
+    WHERE COALESCE(text_hash, '') <> ''
 )
 """
 
@@ -331,18 +313,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", type=str, default="", help="Parser as-of date in YYYY-MM-DD. Defaults to UTC today.")
     parser.add_argument("--export-only", action="store_true", help="Only export current sec_events table to CSV.")
     parser.add_argument("--full-rescan", action="store_true", help="Parse all eligible filing texts, not just new/changed documents.")
+    parser.add_argument("--all-db-companies", action="store_true", help="Parse all SEC filings in the DB window instead of the final scoring universe.")
     return parser.parse_args()
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -541,6 +517,60 @@ def target_filings_sql(where_sql: str) -> str:
 """.strip()
 
 
+def read_scoring_tickers(path: Path) -> set[str]:
+    if not path.exists():
+        raise FileNotFoundError(f"Final scoring universe CSV not found: {path}")
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        tickers = {
+            str(row.get("ticker") or "").strip().upper().replace(".", "-")
+            for row in csv.DictReader(handle)
+            if str(row.get("ticker") or "").strip()
+        }
+    if not tickers:
+        raise ValueError(f"Final scoring universe CSV contains no tickers: {path}")
+    return tickers
+
+
+def load_target_accessions(
+    conn: sqlite3.Connection,
+    *,
+    cutoff: str,
+    asof: str,
+    ticker_filter: set[str],
+) -> list[str]:
+    where, params = filing_text_where(cutoff=cutoff, asof=asof, ticker_filter=ticker_filter)
+    where_sql = " AND ".join(where)
+    rows = conn.execute(
+        f"""
+        SELECT f.accession_nodash
+        FROM sec_filings f
+        JOIN companies c ON c.company_id = f.company_id
+        WHERE {where_sql}
+        ORDER BY f.filing_date DESC, f.accession_nodash DESC
+        """,
+        params,
+    ).fetchall()
+    return [str(row["accession_nodash"] or "") for row in rows if str(row["accession_nodash"] or "")]
+
+
+def ensure_latest_documents_for_accessions(conn: sqlite3.Connection, accessions: list[str]) -> int:
+    if not accessions:
+        return 0
+    existing: set[str] = set()
+    for start in range(0, len(accessions), 800):
+        chunk = accessions[start : start + 800]
+        placeholders = ",".join("?" for _ in chunk)
+        existing.update(
+            str(row["accession_nodash"])
+            for row in conn.execute(
+                f"SELECT accession_nodash FROM sec_filing_latest_document WHERE accession_nodash IN ({placeholders})",
+                chunk,
+            )
+        )
+    missing = [accession for accession in accessions if accession not in existing]
+    return refresh_sec_latest_documents(conn, missing) if missing else 0
+
+
 def count_filing_texts(
     conn: sqlite3.Connection,
     *,
@@ -553,7 +583,11 @@ def count_filing_texts(
     where, params = filing_text_where(cutoff=cutoff, asof=asof, ticker_filter=ticker_filter)
     where_sql = " AND ".join(where)
     target_sql = target_filings_sql(where_sql)
-    join_clause = "LEFT JOIN sec_event_parse_state s ON s.accession_nodash = f.accession_nodash"
+    join_clause = (
+        "LEFT JOIN sec_event_parse_state s ON s.accession_nodash = f.accession_nodash"
+        if incremental_only
+        else ""
+    )
     incremental_clause = (
         " AND (s.accession_nodash IS NULL OR COALESCE(s.text_hash, '') <> COALESCE(d.text_hash, '') OR COALESCE(s.parser_signature, '') <> ?)"
         if incremental_only
@@ -567,8 +601,11 @@ def count_filing_texts(
             SELECT COUNT(*)
             FROM target_filings f
             JOIN latest_docs d ON d.accession_nodash = f.accession_nodash
+            JOIN sec_filing_documents doc ON doc.document_id = d.document_id
             {join_clause}
             WHERE 1 = 1
+              AND doc.text_content IS NOT NULL
+              AND doc.text_content <> ''
               {incremental_clause}
             """,
             params,
@@ -589,24 +626,31 @@ def load_filing_texts_to_parse(
     where, params = filing_text_where(cutoff=cutoff, asof=asof, ticker_filter=ticker_filter)
     where_sql = " AND ".join(where)
     target_sql = target_filings_sql(where_sql)
-    sql = f"""{latest_docs_cte(target_sql)}
-        SELECT
-            f.company_id,
-            f.ticker,
-            f.company_name,
-            f.accession_nodash,
-            f.filing_date,
-            f.form,
-            d.document_url,
-            COALESCE(d.text_hash, '') AS text_hash,
-            d.text_content
-        FROM target_filings f
-        JOIN latest_docs d ON d.accession_nodash = f.accession_nodash
-        LEFT JOIN sec_event_parse_state s ON s.accession_nodash = f.accession_nodash
-        WHERE s.accession_nodash IS NULL
-           OR COALESCE(s.text_hash, '') <> COALESCE(d.text_hash, '')
-           OR COALESCE(s.parser_signature, '') <> ?
-        ORDER BY f.filing_date DESC, f.accession_nodash DESC
+    sql = f"""{latest_docs_cte(target_sql)},
+        eligible_filings AS (
+            SELECT
+                f.company_id,
+                f.ticker,
+                f.company_name,
+                f.accession_nodash,
+                f.filing_date,
+                f.form,
+                d.document_id,
+                d.document_url,
+                COALESCE(d.text_hash, '') AS text_hash,
+                doc.text_content
+            FROM target_filings f
+            JOIN latest_docs d ON d.accession_nodash = f.accession_nodash
+            JOIN sec_filing_documents doc ON doc.document_id = d.document_id
+            LEFT JOIN sec_event_parse_state s ON s.accession_nodash = f.accession_nodash
+            WHERE (
+                   s.accession_nodash IS NULL
+                OR COALESCE(s.text_hash, '') <> COALESCE(d.text_hash, '')
+                OR COALESCE(s.parser_signature, '') <> ?
+            )
+              AND doc.text_content IS NOT NULL
+              AND doc.text_content <> ''
+            ORDER BY f.filing_date DESC, f.accession_nodash DESC
     """
     params.append(parser_signature)
     if max_filings > 0:
@@ -615,6 +659,21 @@ def load_filing_texts_to_parse(
     elif offset > 0:
         sql += " LIMIT -1 OFFSET ?"
         params.append(max(0, offset))
+    sql += """
+        )
+        SELECT
+            f.company_id,
+            f.ticker,
+            f.company_name,
+            f.accession_nodash,
+            f.filing_date,
+            f.form,
+            f.document_url,
+            f.text_hash,
+            f.text_content
+        FROM eligible_filings f
+        ORDER BY f.filing_date DESC, f.accession_nodash DESC
+    """
     rows = conn.execute(sql, params).fetchall()
     return [
         FilingText(
@@ -644,21 +703,25 @@ def load_filing_texts_full(
     where, params = filing_text_where(cutoff=cutoff, asof=asof, ticker_filter=ticker_filter)
     where_sql = " AND ".join(where)
     target_sql = target_filings_sql(where_sql)
-    sql = f"""{latest_docs_cte(target_sql)}
-        SELECT
-            f.company_id,
-            f.ticker,
-            f.company_name,
-            f.accession_nodash,
-            f.filing_date,
-            f.form,
-            d.document_url,
-            COALESCE(d.text_hash, '') AS text_hash,
-            d.text_content
-        FROM target_filings f
-        JOIN latest_docs d ON d.accession_nodash = f.accession_nodash
-        WHERE 1 = 1
-        ORDER BY f.filing_date DESC, f.accession_nodash DESC
+    sql = f"""{latest_docs_cte(target_sql)},
+        eligible_filings AS (
+            SELECT
+                f.company_id,
+                f.ticker,
+                f.company_name,
+                f.accession_nodash,
+                f.filing_date,
+                f.form,
+                d.document_id,
+                d.document_url,
+                COALESCE(d.text_hash, '') AS text_hash,
+                doc.text_content
+            FROM target_filings f
+            JOIN latest_docs d ON d.accession_nodash = f.accession_nodash
+            JOIN sec_filing_documents doc ON doc.document_id = d.document_id
+            WHERE doc.text_content IS NOT NULL
+              AND doc.text_content <> ''
+            ORDER BY f.filing_date DESC, f.accession_nodash DESC
     """
     if max_filings > 0:
         sql += " LIMIT ? OFFSET ?"
@@ -666,6 +729,21 @@ def load_filing_texts_full(
     elif offset > 0:
         sql += " LIMIT -1 OFFSET ?"
         params.append(max(0, offset))
+    sql += """
+        )
+        SELECT
+            f.company_id,
+            f.ticker,
+            f.company_name,
+            f.accession_nodash,
+            f.filing_date,
+            f.form,
+            f.document_url,
+            f.text_hash,
+            f.text_content
+        FROM eligible_filings f
+        ORDER BY f.filing_date DESC, f.accession_nodash DESC
+    """
     rows = conn.execute(sql, params).fetchall()
     return [
         FilingText(
@@ -832,34 +910,60 @@ def export_events_from_db(
     asof: str = "",
     ticker_filter: set[str] | None = None,
 ) -> int:
-    target_filters: list[str] = []
     row_filters: list[str] = []
-    target_params: list[Any] = []
     row_params: list[Any] = []
     if cutoff:
-        target_filters.append("filing_date >= ?")
         row_filters.append("e.filing_date >= ?")
-        target_params.append(cutoff)
         row_params.append(cutoff)
     if asof:
-        target_filters.append("filing_date <= ?")
         row_filters.append("e.filing_date <= ?")
-        target_params.append(asof)
         row_params.append(asof)
     if ticker_filter:
         placeholders = ",".join("?" for _ in ticker_filter)
-        target_filters.append(f"company_id IN (SELECT company_id FROM companies WHERE ticker IN ({placeholders}))")
         row_filters.append(f"e.company_id IN (SELECT company_id FROM companies WHERE ticker IN ({placeholders}))")
-        target_params.extend(sorted(ticker_filter))
         row_params.extend(sorted(ticker_filter))
-    target_where = f" WHERE {' AND '.join(target_filters)}" if target_filters else ""
     row_where = f" WHERE {' AND '.join(row_filters)}" if row_filters else ""
-    target_sql = f"SELECT DISTINCT accession_nodash FROM sec_events{target_where}"
-    rows = conn.execute(
-        f"""{latest_docs_cte(target_sql)}
+    cursor = conn.execute(
+        f"""
+        WITH event_rows AS (
+            SELECT
+                c.ticker,
+                c.company_name,
+                e.accession_nodash,
+                e.filing_date,
+                e.form,
+                e.event_type,
+                e.event_date,
+                e.event_value,
+                e.polarity,
+                e.confidence,
+                e.extracted_text
+            FROM sec_events e
+            JOIN companies c ON c.company_id = e.company_id
+            {row_where}
+        ),
+        doc_urls AS (
+            SELECT accession_nodash, document_url
+            FROM (
+                SELECT
+                    d.accession_nodash,
+                    d.document_url,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY d.accession_nodash
+                        ORDER BY
+                            CASE WHEN d.document_type = 'complete_submission_text' THEN 0 ELSE 1 END,
+                            COALESCE(d.fetched_at, d.updated_at, d.created_at) DESC,
+                            d.document_id DESC
+                    ) AS rn
+                FROM sec_filing_documents d
+                JOIN (SELECT DISTINCT accession_nodash FROM event_rows) a
+                  ON a.accession_nodash = d.accession_nodash
+            )
+            WHERE rn = 1
+        )
         SELECT
-            c.ticker,
-            c.company_name,
+            e.ticker,
+            e.company_name,
             e.accession_nodash,
             e.filing_date,
             e.form,
@@ -869,20 +973,20 @@ def export_events_from_db(
             e.polarity,
             e.confidence,
             e.extracted_text,
-            d.document_url
-        FROM sec_events e
-        JOIN companies c ON c.company_id = e.company_id
-        LEFT JOIN latest_docs d ON d.accession_nodash = e.accession_nodash
-        {row_where}
-        ORDER BY c.ticker, e.filing_date, e.event_type, e.accession_nodash
+            COALESCE(d.document_url, f.archive_url, '') AS document_url
+        FROM event_rows e
+        LEFT JOIN doc_urls d ON d.accession_nodash = e.accession_nodash
+        LEFT JOIN sec_filings f ON f.accession_nodash = e.accession_nodash
+        ORDER BY e.ticker, e.filing_date, e.event_type, e.accession_nodash
         """,
-        target_params + row_params,
-    ).fetchall()
+        row_params,
+    )
     output_csv.parent.mkdir(parents=True, exist_ok=True)
+    row_count = 0
     with output_csv.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS, lineterminator="\n", extrasaction="ignore")
         writer.writeheader()
-        for row in rows:
+        for row in cursor:
             writer.writerow(
                 {
                     "ticker": str(row["ticker"] or ""),
@@ -899,7 +1003,8 @@ def export_events_from_db(
                     "document_url": str(row["document_url"] or ""),
                 }
             )
-    return len(rows)
+            row_count += 1
+    return row_count
 
 
 def main() -> None:
@@ -913,6 +1018,12 @@ def main() -> None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_csv = resolve_path(cfg_get(config, "sec_event_parser.output_csv"), base_dir=base_dir)
+    final_universe_value = cfg_get(
+        config,
+        "sec_event_parser.final_scoring_universe_csv",
+        cfg_get(config, "sec_filings.final_scoring_universe_csv"),
+    )
+    final_universe_csv = resolve_path(final_universe_value, base_dir=base_dir) if final_universe_value else None
     lookback_days = int(cfg_get(config, "sec_event_parser.lookback_days", 730))
     asof_str = asof.isoformat()
     cutoff = (asof - timedelta(days=max(1, lookback_days))).isoformat()
@@ -920,9 +1031,24 @@ def main() -> None:
     max_per_type = int(cfg_get(config, "sec_event_parser.max_events_per_filing_type", 1))
     parser_signature = build_parser_signature(min_confidence=min_confidence, max_per_type=max_per_type)
     ticker_filter = {x.strip().upper().replace(".", "-") for x in args.tickers.split(",") if x.strip()}
+    scope_label = "tickers_arg" if ticker_filter else "all_db_companies"
+    if not ticker_filter and not args.all_db_companies:
+        if final_universe_csv is None:
+            raise ValueError("sec_event_parser.final_scoring_universe_csv or sec_filings.final_scoring_universe_csv is required.")
+        ticker_filter = read_scoring_tickers(final_universe_csv)
+        scope_label = "final_scoring_universe"
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
+        target_accessions = load_target_accessions(conn, cutoff=cutoff, asof=asof_str, ticker_filter=ticker_filter)
+        refreshed_manifest = ensure_latest_documents_for_accessions(conn, target_accessions)
+        LOGGER.info(
+            "SEC event parser scope=%s target_tickers=%d target_filings=%d latest_manifest_refreshed=%d",
+            scope_label,
+            len(ticker_filter),
+            len(target_accessions),
+            refreshed_manifest,
+        )
         if args.export_only:
             run_id = start_run(conn, run_type="parse_sec_biotech_events_export", input_path=db_path)
             try:

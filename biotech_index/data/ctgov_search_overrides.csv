@@ -113,3 +113,12 @@ DRUG,NCT06401538,query.term,manual_nct,0.95,true,CTGov verified active Bright Mi
 DRUG,NCT07266324,query.term,manual_nct,0.95,true,CTGov verified active Bright Minds BMB-101 Phase 2 Prader-Willi NCT
 SXTP,NCT06207370,query.term,manual_nct,0.95,true,CTGov verified 60 Degrees Pharma tafenoquine babesiosis NCT
 ATRA,NCT04554914,query.term,manual_nct,0.95,true,CTGov verified active tab-cel program NCT with Pierre Fabre sponsor
+ACIU,NCT05462106,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
+ARTV,NCT06991114,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
+AURA,NCT06007690,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
+COYA,NCT07161999,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
+JSPR,NCT06162728,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
+JSPR,NCT06353971,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
+JSPR,NCT06736262,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
+KRRO,NCT06677307,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
+PASG,NCT04747431,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26

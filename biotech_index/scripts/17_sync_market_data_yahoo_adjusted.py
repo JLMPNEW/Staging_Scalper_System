@@ -23,6 +23,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.pipeline_guards import (
+    read_final_scoring_tickers,
+    subset_mode_enabled,
+    subset_output_path,
+    validate_full_universe_coverage,
+    validate_nonempty_selection,
+    validate_requested_tickers,
+)
 
 
 LOGGER = logging.getLogger("sync_market_data_yahoo_adjusted")
@@ -81,6 +89,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tickers", type=int, default=0, help="Smoke-test limit. 0 means all.")
     parser.add_argument("--start-date", type=str, default="", help="Reload Yahoo adjusted history on or after this YYYY-MM-DD date.")
     parser.add_argument("--refetch-days", type=int, default=-1, help="Rolling refetch window. 0 means reload from configured start date.")
+    parser.add_argument("--allow-partial", action="store_true", help="Return success even if one or more ticker updates fail.")
     return parser.parse_args()
 
 
@@ -187,18 +196,7 @@ def normalize_ticker(raw: object) -> str:
 
 
 def read_scoring_tickers(path: Path) -> set[str]:
-    if not path.exists():
-        raise FileNotFoundError(f"Final scoring universe CSV not found: {path}")
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        out: set[str] = set()
-        for row in reader:
-            ticker = normalize_ticker(row.get("ticker"))
-            if ticker and str(row.get("final_status") or "").strip().lower() == "keep" and as_bool(row.get("scoring_include")):
-                out.add(ticker)
-    if not out:
-        raise ValueError(f"Final scoring universe CSV contains no scoring tickers: {path}")
-    return out
+    return read_final_scoring_tickers(path)
 
 
 def load_companies(conn: sqlite3.Connection, *, scoring_tickers: set[str], ticker_filter: set[str], max_tickers: int) -> list[Company]:
@@ -793,6 +791,28 @@ def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], 
             )
 
 
+def delete_market_rows_for_companies(
+    conn: sqlite3.Connection,
+    *,
+    company_ids: set[int],
+    asof_date: date,
+    source: str,
+) -> None:
+    if not company_ids:
+        return
+    placeholders = ",".join("?" for _ in company_ids)
+    params = (asof_date.isoformat(), source, *sorted(company_ids))
+    with conn:
+        conn.execute(
+            f"DELETE FROM market_snapshots_daily WHERE asof_date = ? AND source = ? AND company_id IN ({placeholders})",
+            params,
+        )
+        conn.execute(
+            f"DELETE FROM market_features_daily WHERE asof_date = ? AND source = ? AND company_id IN ({placeholders})",
+            params,
+        )
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -884,6 +904,21 @@ def main() -> None:
         try:
             scoring_tickers = read_scoring_tickers(final_universe_csv)
             companies = load_companies(conn, scoring_tickers=scoring_tickers, ticker_filter=ticker_filter, max_tickers=args.max_tickers)
+            subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_tickers))
+            output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
+            validate_nonempty_selection(count=len(companies), context="Yahoo adjusted market sync", subset_mode=subset_mode)
+            loaded_tickers = [company.ticker for company in companies]
+            validate_requested_tickers(
+                requested_tickers=ticker_filter,
+                loaded_tickers=loaded_tickers,
+                context="Yahoo adjusted market sync",
+            )
+            validate_full_universe_coverage(
+                expected_tickers=scoring_tickers,
+                observed_tickers=loaded_tickers,
+                context="Yahoo adjusted market sync",
+                subset_mode=subset_mode,
+            )
             LOGGER.info("Loaded %d company job(s) for Yahoo adjusted market sync", len(companies))
             all_symbols = [benchmark_ticker, *[company.ticker for company in companies]]
             latest_bar_dates = load_latest_bar_dates(conn, tickers=all_symbols, source=source)
@@ -893,6 +928,7 @@ def main() -> None:
                 latest_bar_dates.get(benchmark_ticker),
                 refetch_days,
             )
+            benchmark_refresh_failed = False
             try:
                 benchmark_fetched = fetch_yahoo_bars(
                     benchmark_ticker,
@@ -903,6 +939,7 @@ def main() -> None:
                 )
             except Exception as exc:
                 benchmark_fetched = []
+                benchmark_refresh_failed = True
                 LOGGER.warning("Yahoo adjusted benchmark fetch failed for %s; trying existing DB bars: %s", benchmark_ticker, exc)
             benchmark_existing = load_existing_bars(
                 conn,
@@ -952,6 +989,8 @@ def main() -> None:
                         asof_date=asof_date,
                     )
                     bars = merge_bars(existing, fetched)
+                    if fetch_error is not None and existing:
+                        failed_tickers.append(company.ticker)
                     if not bars and fetch_error is not None:
                         raise fetch_error
                     if not fetched and existing:
@@ -986,24 +1025,32 @@ def main() -> None:
             if companies and not features:
                 raise RuntimeError(f"Yahoo adjusted market sync produced no company feature rows; failed_tickers={','.join(failed_tickers)}")
             upsert_market_rows(conn, bars=bars_to_upsert, snapshots=snapshots, features=features)
-            csv_rows = load_current_feature_csv_rows(conn, companies, asof_date, source=source)
+            unique_failed_tickers = list(dict.fromkeys(failed_tickers))
+            failed_company_ids = {company.company_id for company in companies if company.ticker in set(unique_failed_tickers)}
+            delete_market_rows_for_companies(conn, company_ids=failed_company_ids, asof_date=asof_date, source=source)
+            successful_companies = [company for company in companies if company.company_id not in failed_company_ids]
+            csv_rows = load_current_feature_csv_rows(conn, successful_companies, asof_date, source=source)
             csv_tickers = {str(row.get("ticker") or "").upper() for row in csv_rows}
             missing_csv_tickers = sorted({company.ticker for company in companies} - csv_tickers)
             write_csv(output_csv, csv_rows)
-            status = "partial" if failed_tickers else "success"
+            status = "partial" if benchmark_refresh_failed or unique_failed_tickers or missing_csv_tickers else "success"
             message = (
                 f"requested_asof={asof_decision.requested_asof.isoformat()} "
                 f"effective_asof={asof_date.isoformat()} source={source} "
                 f"start_date={explicit_start_date.isoformat() if explicit_start_date else configured_start_date.isoformat()} "
                 f"refetch_days={refetch_days} output={output_csv}"
             )
-            if failed_tickers:
-                message += f" failed_tickers={','.join(failed_tickers)}"
+            if unique_failed_tickers:
+                message += f" failed_tickers={','.join(unique_failed_tickers)}"
             if reused_existing_tickers:
                 message += f" reused_existing_tickers={','.join(reused_existing_tickers)}"
             if missing_csv_tickers:
                 message += f" missing_output_tickers={','.join(missing_csv_tickers)}"
+            if benchmark_refresh_failed:
+                message += " benchmark_refresh_failed=1"
             finish_run(conn, run_id=run_id, status=status, row_count=len(features), message=message)
+            if status != "success" and not args.allow_partial:
+                raise SystemExit(2)
         except Exception as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise

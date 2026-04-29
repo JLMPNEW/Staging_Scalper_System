@@ -6,7 +6,6 @@ import csv
 import hashlib
 import logging
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -21,8 +20,18 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_path
-from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.db import connect, finish_run, init_db, refresh_sec_latest_documents, start_run, utc_now
 from biotech_index.core.http_cache import CachedHttpClient, HostThrottle
+from biotech_index.core.logging_utils import configure_utc_logging
+from biotech_index.core.pipeline_guards import (
+    normalize_ticker,
+    read_final_scoring_tickers,
+    subset_mode_enabled,
+    subset_output_path,
+    validate_full_universe_coverage,
+    validate_nonempty_selection,
+    validate_requested_tickers,
+)
 
 
 LOGGER = logging.getLogger("sync_sec_filings")
@@ -89,18 +98,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-companies", type=int, default=0, help="Limit companies for smoke tests. 0 means all.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
     parser.add_argument("--skip-text", action="store_true", help="Only sync filing metadata; do not fetch filing text.")
+    parser.add_argument("--allow-partial", action="store_true", help="Return success even if company or filing-text fetches fail.")
     return parser.parse_args()
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -155,18 +158,7 @@ def matches_form(form: str, allowed_forms: set[str]) -> bool:
 
 
 def read_scoring_tickers(path: Path) -> set[str]:
-    if not path.exists():
-        LOGGER.warning("Final scoring universe CSV not found; SEC sync will run with no scoring-universe filter: %s", path)
-        return set()
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        tickers = {
-            str(row.get("ticker") or "").strip().upper().replace(".", "-")
-            for row in csv.DictReader(handle)
-            if str(row.get("ticker") or "").strip()
-        }
-    if not tickers:
-        raise ValueError(f"Final scoring universe CSV contains no tickers: {path}")
-    return tickers
+    return read_final_scoring_tickers(path)
 
 
 def load_companies(
@@ -176,35 +168,31 @@ def load_companies(
     ticker_filter: set[str],
     max_companies: int,
 ) -> list[Company]:
-    params: list[Any] = []
-    where = ["is_active = 1"]
-    if scoring_tickers:
-        placeholders = ",".join("?" for _ in scoring_tickers)
-        where.append(f"ticker IN ({placeholders})")
-        params.extend(sorted(scoring_tickers))
-    if ticker_filter:
-        placeholders = ",".join("?" for _ in ticker_filter)
-        where.append(f"ticker IN ({placeholders})")
-        params.extend(sorted(ticker_filter))
-    sql = f"""
+    sql = """
         SELECT company_id, ticker, company_name, cik
         FROM companies
-        WHERE {' AND '.join(where)}
+        WHERE is_active = 1
         ORDER BY ticker
     """
-    if max_companies > 0:
-        sql += " LIMIT ?"
-        params.append(max_companies)
-    rows = conn.execute(sql, params).fetchall()
-    return [
-        Company(
-            company_id=int(row["company_id"]),
-            ticker=str(row["ticker"]).upper(),
-            company_name=str(row["company_name"] or ""),
-            cik=normalize_cik(row["cik"]),
+    rows = conn.execute(sql).fetchall()
+    out: list[Company] = []
+    for row in rows:
+        ticker = normalize_ticker(row["ticker"])
+        if scoring_tickers and ticker not in scoring_tickers:
+            continue
+        if ticker_filter and ticker not in ticker_filter:
+            continue
+        out.append(
+            Company(
+                company_id=int(row["company_id"]),
+                ticker=ticker,
+                company_name=str(row["company_name"] or ""),
+                cik=normalize_cik(row["cik"]),
+            )
         )
-        for row in rows
-    ]
+        if max_companies > 0 and len(out) >= max_companies:
+            break
+    return out
 
 
 def parse_recent_filings(
@@ -294,7 +282,7 @@ def existing_document_is_reusable(
     now: datetime,
 ) -> bool:
     doc_url, doc_type, digest, text_length = existing_document_payload(existing_doc)
-    if not doc_url or not digest or text_length <= 0:
+    if not doc_url or not digest:
         return False
     if doc_type != "complete_submission_text":
         return False
@@ -315,9 +303,11 @@ def upsert_filing(
     doc_type: str = "",
     text: str = "",
     text_hash_value: str = "",
+    text_length_value: int = 0,
 ) -> None:
     now = utc_now()
     digest = text_hash(text) if text else (text_hash_value or None)
+    stored_text_length = len(text) if text else max(0, int(text_length_value or 0))
     conn.execute(
         """
         INSERT INTO sec_filings(
@@ -349,18 +339,20 @@ def upsert_filing(
         conn.execute(
             """
             INSERT INTO sec_filing_documents(
-                accession_nodash, document_url, document_type, text_content, text_hash, fetched_at, created_at, updated_at
+                accession_nodash, document_url, document_type, text_content, text_hash, text_length, fetched_at, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(accession_nodash, document_url) DO UPDATE SET
                 document_type = excluded.document_type,
                 text_content = excluded.text_content,
                 text_hash = excluded.text_hash,
+                text_length = excluded.text_length,
                 fetched_at = excluded.fetched_at,
                 updated_at = excluded.updated_at
             """,
-            (filing.accession_nodash, doc_url, doc_type, text, digest, now, now, now),
+            (filing.accession_nodash, doc_url, doc_type, text, digest, stored_text_length, now, now, now),
         )
+        refresh_sec_latest_documents(conn, [filing.accession_nodash])
 
 
 def load_existing_documents(
@@ -379,54 +371,57 @@ def load_existing_documents(
     if allowed_forms:
         form_clause = f"AND ({' OR '.join('f.form = ?' if not form.endswith('*') else 'f.form LIKE ?' for form in sorted(allowed_forms))})"
         params.extend([form[:-1] + "%" if form.endswith("*") else form for form in sorted(allowed_forms)])
-    rows = conn.execute(
+    accession_rows = conn.execute(
         f"""
-        WITH target_filings AS (
-            SELECT accession_nodash
-            FROM sec_filings f
-            WHERE f.company_id IN ({company_placeholders})
-              AND f.filing_date >= ?
-              AND f.filing_date <= ?
-              {form_clause}
-        ),
-        ranked_docs AS (
-            SELECT
-                d.accession_nodash,
-                d.document_url,
-                d.document_type,
-                d.text_hash,
-                d.fetched_at,
-                length(d.text_content) AS text_length,
-                ROW_NUMBER() OVER (
-                    PARTITION BY d.accession_nodash
-                    ORDER BY
-                        CASE WHEN d.document_type = 'complete_submission_text' THEN 0 ELSE 1 END,
-                        d.fetched_at DESC,
-                        d.document_url DESC
-                ) AS doc_rank
-            FROM sec_filing_documents d
-            JOIN target_filings f ON f.accession_nodash = d.accession_nodash
-            WHERE d.text_content IS NOT NULL
-              AND length(d.text_content) > 0
-        )
-        SELECT accession_nodash, document_url, document_type, text_hash, fetched_at, text_length
-        FROM ranked_docs
-        WHERE doc_rank = 1
-        """
-        ,
+        SELECT accession_nodash
+        FROM sec_filings f
+        WHERE f.company_id IN ({company_placeholders})
+          AND f.filing_date >= ?
+          AND f.filing_date <= ?
+          {form_clause}
+        """,
         tuple(params),
     ).fetchall()
+    target_accessions = [str(row["accession_nodash"] or "") for row in accession_rows if str(row["accession_nodash"] or "")]
+    if not target_accessions:
+        return {}
+    existing_manifest: set[str] = set()
+    for start in range(0, len(target_accessions), 800):
+        chunk = target_accessions[start : start + 800]
+        placeholders = ",".join("?" for _ in chunk)
+        existing_manifest.update(
+            str(row["accession_nodash"])
+            for row in conn.execute(
+                f"SELECT accession_nodash FROM sec_filing_latest_document WHERE accession_nodash IN ({placeholders})",
+                chunk,
+            )
+        )
+    missing_manifest = [accession for accession in target_accessions if accession not in existing_manifest]
+    if missing_manifest:
+        refresh_sec_latest_documents(conn, missing_manifest)
+
     existing: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        accession = str(row["accession_nodash"] or "")
-        if accession and accession not in existing:
-            existing[accession] = {
-                "document_url": str(row["document_url"] or ""),
-                "document_type": str(row["document_type"] or ""),
-                "text_hash": str(row["text_hash"] or ""),
-                "fetched_at": str(row["fetched_at"] or ""),
-                "text_length": int(row["text_length"] or 0),
-            }
+    for start in range(0, len(target_accessions), 800):
+        chunk = target_accessions[start : start + 800]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT accession_nodash, document_url, document_type, text_hash, fetched_at, text_length
+            FROM sec_filing_latest_document
+            WHERE accession_nodash IN ({placeholders})
+            """,
+            chunk,
+        ).fetchall()
+        for row in rows:
+            accession = str(row["accession_nodash"] or "")
+            if accession and accession not in existing:
+                existing[accession] = {
+                    "document_url": str(row["document_url"] or ""),
+                    "document_type": str(row["document_type"] or ""),
+                    "text_hash": str(row["text_hash"] or ""),
+                    "fetched_at": str(row["fetched_at"] or ""),
+                    "text_length": int(row["text_length"] or 0),
+                }
     return existing
 
 
@@ -552,23 +547,22 @@ def persist_company_result(
                 doc_type=payload.document_type,
                 text=payload.text,
                 text_hash_value=payload.text_hash,
+                text_length_value=payload.text_length,
             )
             if payload.document_url and payload.text_hash:
+                fetched_at = utc_now()
+                cache_entry = {
+                    "document_url": payload.document_url,
+                    "document_type": payload.document_type,
+                    "text_hash": payload.text_hash,
+                    "fetched_at": fetched_at,
+                    "text_length": payload.text_length,
+                }
                 if existing_documents_lock is not None:
                     with existing_documents_lock:
-                        existing_documents[filing.accession_nodash] = {
-                            "document_url": payload.document_url,
-                            "document_type": payload.document_type,
-                            "text_hash": payload.text_hash,
-                            "text_length": payload.text_length,
-                        }
+                        existing_documents[filing.accession_nodash] = cache_entry
                 else:
-                    existing_documents[filing.accession_nodash] = {
-                        "document_url": payload.document_url,
-                        "document_type": payload.document_type,
-                        "text_hash": payload.text_hash,
-                        "text_length": payload.text_length,
-                    }
+                    existing_documents[filing.accession_nodash] = cache_entry
             csv_rows.append(
                 {
                     "ticker": filing.ticker,
@@ -614,7 +608,7 @@ def main() -> None:
     max_filings = int(cfg_get(config, "sec_filings.max_filings_per_company", 40))
     fetch_text = bool(cfg_get(config, "sec_filings.fetch_text", True)) and not bool(args.skip_text)
     max_workers = max(1, int(cfg_get(config, "sec_filings.max_workers", 1)))
-    ticker_filter = {x.strip().upper().replace(".", "-") for x in args.tickers.split(",") if x.strip()}
+    ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
     rows_out: list[dict[str, Any]] = []
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
@@ -625,6 +619,17 @@ def main() -> None:
             scoring_tickers=scoring_tickers,
             ticker_filter=ticker_filter,
             max_companies=int(args.max_companies),
+        )
+        subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_companies))
+        output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
+        validate_nonempty_selection(count=len(companies), context="SEC filings sync", subset_mode=subset_mode)
+        loaded_tickers = [company.ticker for company in companies]
+        validate_requested_tickers(requested_tickers=ticker_filter, loaded_tickers=loaded_tickers, context="SEC filings sync")
+        validate_full_universe_coverage(
+            expected_tickers=scoring_tickers,
+            observed_tickers=loaded_tickers,
+            context="SEC filings sync",
+            subset_mode=subset_mode,
         )
         existing_documents = load_existing_documents(
             conn,
@@ -637,6 +642,8 @@ def main() -> None:
         LOGGER.info("Loaded %d existing SEC filing documents for resume", len(existing_documents))
         run_id = start_run(conn, run_type="sync_sec_filings", input_path=universe_csv)
         try:
+            error_count = 0
+            text_error_count = 0
             headers = {"User-Agent": user_agent, "Accept": "application/json,text/plain,*/*"}
             throttle = HostThrottle()
             sync_kwargs = {
@@ -662,7 +669,9 @@ def main() -> None:
                 for idx, company in enumerate(companies, start=1):
                     result = sync_company(company, **sync_kwargs)
                     if result.error:
+                        error_count += 1
                         LOGGER.warning("[%d/%d] %s skipped: %s", idx, len(companies), company.ticker, result.error)
+                    text_error_count += int(result.text_errors)
                     persist_company_result(
                         conn,
                         result,
@@ -691,7 +700,9 @@ def main() -> None:
                         except Exception as exc:
                             result = CompanySyncResult(company=company, filings=[], error=f"{type(exc).__name__}: {exc}")
                         if result.error:
+                            error_count += 1
                             LOGGER.warning("[%d/%d complete=%d] %s skipped: %s", idx, len(companies), done_count, company.ticker, result.error)
+                        text_error_count += int(result.text_errors)
                         persist_company_result(
                             conn,
                             result,
@@ -709,7 +720,11 @@ def main() -> None:
                             result.text_errors,
                         )
             write_csv(output_csv, rows_out)
-            finish_run(conn, run_id=run_id, status="success", row_count=len(rows_out), message=f"companies={len(companies)} output={output_csv}")
+            status = "success" if error_count == 0 and text_error_count == 0 else "partial"
+            message = f"companies={len(companies)} errors={error_count} text_errors={text_error_count} output={output_csv}"
+            finish_run(conn, run_id=run_id, status=status, row_count=len(rows_out), message=message)
+            if status != "success" and not args.allow_partial:
+                raise SystemExit(2)
         except Exception as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise

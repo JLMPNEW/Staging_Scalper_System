@@ -5,7 +5,6 @@ import argparse
 import csv
 import logging
 import sys
-import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_optional_path, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.text_norm import AliasCandidate, build_company_aliases, normalize_cik, normalize_org_name, normalize_ticker
 
 
@@ -61,14 +61,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def read_csv_flexible(path: Path) -> list[dict[str, str]]:
@@ -180,6 +173,17 @@ def load_status_overrides(path: Optional[Path]) -> dict[str, dict[str, str]]:
             "notes": row_get(row, "notes", "Notes"),
         }
     return overrides
+
+
+def as_bool(raw: object) -> bool:
+    return str(raw or "").strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
+def override_protects_absent_ticker(override: dict[str, str], *, active_decisions: set[str]) -> bool:
+    if as_bool(override.get("manual_exclude")):
+        return False
+    decision = str(override.get("decision") or "").strip().lower()
+    return decision in active_decisions or as_bool(override.get("manual_include")) or as_bool(override.get("manual_review"))
 
 
 def apply_status_override(company: ScreenCompany, overrides: dict[str, dict[str, str]]) -> ScreenCompany:
@@ -319,10 +323,18 @@ def insert_history(conn: Any, *, company_id: int, company: ScreenCompany, source
     )
 
 
-def deactivate_absent_companies(conn: Any, *, present_tickers: set[str], source_file: Path, run_id: int) -> int:
+def deactivate_absent_companies(
+    conn: Any,
+    *,
+    present_tickers: set[str],
+    protected_tickers: set[str],
+    source_file: Path,
+    run_id: int,
+) -> int:
     if not present_tickers:
         return 0
-    placeholders = ",".join("?" for _ in present_tickers)
+    retained_tickers = set(present_tickers) | set(protected_tickers)
+    placeholders = ",".join("?" for _ in retained_tickers)
     rows = conn.execute(
         f"""
         SELECT company_id, ticker
@@ -331,7 +343,7 @@ def deactivate_absent_companies(conn: Any, *, present_tickers: set[str], source_
           AND ticker NOT IN ({placeholders})
         ORDER BY ticker
         """,
-        tuple(sorted(present_tickers)),
+        tuple(sorted(retained_tickers)),
     ).fetchall()
     if not rows:
         return 0
@@ -408,6 +420,19 @@ def main() -> None:
         LOGGER.info("Loaded manual aliases from %s", alias_path)
     if status_path and status_path.exists():
         LOGGER.info("Loaded %d company status override(s) from %s", len(status_overrides), status_path)
+    protected_override_tickers = {
+        ticker
+        for ticker, override in status_overrides.items()
+        if override_protects_absent_ticker(override, active_decisions=active_decisions)
+    }
+    parsed_tickers = {company.ticker for company in companies}
+    protected_absent_tickers = protected_override_tickers - parsed_tickers
+    if protected_absent_tickers:
+        LOGGER.warning(
+            "Protecting %d active override ticker(s) absent from latest screen: %s",
+            len(protected_absent_tickers),
+            ",".join(sorted(protected_absent_tickers)[:25]),
+        )
 
     with connect(db_path, timeout_sec=timeout_sec) as conn:
         init_db(conn)
@@ -429,7 +454,8 @@ def main() -> None:
                 absent_count = (
                     deactivate_absent_companies(
                         conn,
-                        present_tickers={company.ticker for company in companies},
+                        present_tickers=parsed_tickers,
+                        protected_tickers=protected_absent_tickers,
                         source_file=screen_path,
                         run_id=run_id,
                     )

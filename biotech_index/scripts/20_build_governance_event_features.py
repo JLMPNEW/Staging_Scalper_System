@@ -22,6 +22,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.pipeline_guards import (
+    read_final_scoring_tickers,
+    subset_mode_enabled,
+    subset_output_path,
+    validate_full_universe_coverage,
+    validate_nonempty_selection,
+    validate_output_coverage,
+    validate_requested_tickers,
+)
 
 
 LOGGER = logging.getLogger("build_governance_event_features")
@@ -111,6 +120,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", type=str, default="", help="Feature date in YYYY-MM-DD. Defaults to UTC today.")
     parser.add_argument("--max-companies", type=int, default=0, help="Smoke-test limit. 0 means all.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
+    parser.add_argument("--allow-missing-form4", action="store_true", help="Build SEC-only governance features if the Form 4 database is unavailable.")
     return parser.parse_args()
 
 
@@ -173,18 +183,7 @@ def normalize_cik(raw: object) -> str:
 
 
 def read_scoring_tickers(path: Path) -> set[str]:
-    if not path.exists():
-        raise FileNotFoundError(f"Final scoring universe CSV not found: {path}")
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        out: set[str] = set()
-        for row in reader:
-            ticker = normalize_ticker(row.get("ticker"))
-            if ticker and str(row.get("final_status") or "").strip().lower() == "keep" and as_bool(row.get("scoring_include")):
-                out.add(ticker)
-    if not out:
-        raise ValueError(f"Final scoring universe CSV contains no scoring tickers: {path}")
-    return out
+    return read_final_scoring_tickers(path)
 
 
 def load_companies(
@@ -209,7 +208,9 @@ def load_companies(
             continue
         if ticker_filter and ticker not in ticker_filter:
             continue
-        out.append(dict(row))
+        company = dict(row)
+        company["ticker"] = ticker
+        out.append(company)
         if max_companies > 0 and len(out) >= max_companies:
             break
     return out
@@ -806,6 +807,7 @@ def main() -> None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
     ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if value.strip()}
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
+    form4_required = as_bool(cfg_get(config, "governance_events.form4_required", True)) and not bool(args.allow_missing_form4)
 
     form4_conn: sqlite3.Connection | None = None
     snapshot_date = ""
@@ -813,6 +815,8 @@ def main() -> None:
         form4_conn = connect_form4_readonly(form4_db_path)
         snapshot_date = form4_snapshot_date(form4_conn, str(cfg_get(config, "governance_events.form4_snapshot_table", "sec_form4_daily_state")))
     except Exception as exc:
+        if form4_required:
+            raise RuntimeError(f"Form 4 database is required for governance features but is unavailable: {form4_db_path}") from exc
         LOGGER.warning("Form 4 database unavailable; governance rows will use SEC-only evidence: %s", exc)
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
@@ -821,6 +825,21 @@ def main() -> None:
         try:
             scoring_tickers = read_scoring_tickers(universe_csv)
             companies = load_companies(conn, scoring_tickers=scoring_tickers, ticker_filter=ticker_filter, max_companies=args.max_companies)
+            subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_companies))
+            output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
+            validate_nonempty_selection(count=len(companies), context="governance event feature build", subset_mode=subset_mode)
+            loaded_tickers = [str(company["ticker"]) for company in companies]
+            validate_requested_tickers(
+                requested_tickers=ticker_filter,
+                loaded_tickers=loaded_tickers,
+                context="governance event feature build",
+            )
+            validate_full_universe_coverage(
+                expected_tickers=scoring_tickers,
+                observed_tickers=loaded_tickers,
+                context="governance event feature build",
+                subset_mode=subset_mode,
+            )
             company_ids = [int(company["company_id"]) for company in companies]
             table = str(cfg_get(config, "governance_events.form4_table", "form4_events_tier1"))
             lookback_days = int(cfg_get(config, "governance_events.lookback_days", 365))
@@ -859,6 +878,12 @@ def main() -> None:
                 if idx % 25 == 0 or idx == len(companies):
                     LOGGER.info("[%d/%d] governance features built", idx, len(companies))
             partial_run = bool(ticker_filter) or int(args.max_companies) > 0
+            validate_output_coverage(
+                expected_tickers=scoring_tickers,
+                output_tickers=[row["ticker"] for row in rows],
+                context="governance event feature build",
+                subset_mode=subset_mode,
+            )
             upsert_rows(
                 conn,
                 rows,

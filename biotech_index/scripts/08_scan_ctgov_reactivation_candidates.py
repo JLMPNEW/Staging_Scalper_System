@@ -10,7 +10,6 @@ import json
 import logging
 import sqlite3
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +25,7 @@ from biotech_index.clients.ctgov_client import parse_sponsors, parse_study
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_optional_path, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.http_cache import HostThrottle
+from biotech_index.core.logging_utils import configure_utc_logging
 
 
 LOGGER = logging.getLogger("scan_ctgov_reactivation_candidates")
@@ -187,18 +187,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-workers", type=int, default=None)
     parser.add_argument("--max-companies", type=int, default=0, help="Optional limit for smoke tests. 0 means all.")
     parser.add_argument("--asof", type=str, default="", help="Review date in YYYY-MM-DD. Defaults to today.")
+    parser.add_argument("--all-removed", action="store_true", help="Scan all removed companies instead of the audit review CSV.")
+    parser.add_argument("--allow-partial", action="store_true", help="Return success even if one or more CTGov scan jobs fail.")
     return parser.parse_args()
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def to_int(raw: object) -> int:
@@ -234,7 +229,7 @@ def as_bool(raw: object) -> bool:
 
 def load_source_review_rows(path: Path, *, final_status_filter: set[str], ticker_filter: set[str]) -> dict[str, dict[str, str]]:
     if not path.exists():
-        return {}
+        raise FileNotFoundError(f"CTGov source review CSV not found: {path}")
     out: dict[str, dict[str, str]] = {}
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -285,11 +280,105 @@ def load_policy_overrides(path: Path | None, *, ticker_filter: set[str]) -> dict
     return out
 
 
+def load_audit_companies_for_scan(
+    conn: sqlite3.Connection,
+    *,
+    status_filter: set[str],
+    ticker_filter: set[str],
+    include_inactive: bool,
+) -> list[Any]:
+    if not include_inactive:
+        return AUDIT_HELPERS.load_companies(conn, status_filter=status_filter, ticker_filter=ticker_filter)
+    rows = conn.execute(
+        """
+        SELECT company_id, ticker, company_name, universe_status, industry, industry_aggregate, reason_codes
+        FROM companies
+        ORDER BY ticker
+        """
+    ).fetchall()
+    companies: list[Any] = []
+    for row in rows:
+        ticker = str(row["ticker"] or "").upper()
+        status = str(row["universe_status"] or "").lower()
+        if status_filter and status not in status_filter:
+            continue
+        if ticker_filter and ticker not in ticker_filter:
+            continue
+        companies.append(
+            AUDIT_HELPERS.Company(
+                company_id=int(row["company_id"]),
+                ticker=ticker,
+                company_name=str(row["company_name"] or ""),
+                universe_status=status,
+                industry=str(row["industry"] or ""),
+                industry_aggregate=str(row["industry_aggregate"] or ""),
+                reason_codes=str(row["reason_codes"] or ""),
+            )
+        )
+    return companies
+
+
+def load_link_companies_for_scan(
+    conn: sqlite3.Connection,
+    *,
+    status_filter: set[str],
+    ticker_filter: set[str],
+    include_inactive: bool,
+) -> list[Any]:
+    if not include_inactive:
+        return LINK_HELPERS.load_companies(conn, status_filter=status_filter, ticker_filter=ticker_filter)
+    rows = conn.execute(
+        """
+        SELECT company_id, ticker, company_name, universe_status
+        FROM companies
+        ORDER BY ticker
+        """
+    ).fetchall()
+    companies: list[Any] = []
+    for row in rows:
+        ticker = str(row["ticker"] or "").upper()
+        status = str(row["universe_status"] or "").lower()
+        if status_filter and status not in status_filter:
+            continue
+        if ticker_filter and ticker not in ticker_filter:
+            continue
+        alias_rows = conn.execute(
+            """
+            SELECT alias_norm
+            FROM company_aliases
+            WHERE company_id = ?
+            ORDER BY is_manual DESC, confidence DESC, LENGTH(alias_norm) DESC
+            """,
+            (int(row["company_id"]),),
+        ).fetchall()
+        alias_norms = {
+            LINK_HELPERS.normalize_org_name(alias_row["alias_norm"])
+            for alias_row in alias_rows
+            if str(alias_row["alias_norm"] or "").strip()
+        }
+        company_name = str(row["company_name"] or "")
+        alias_norms.add(LINK_HELPERS.normalize_org_name(company_name))
+        alias_norms.add(LINK_HELPERS.strip_corporate_suffixes(LINK_HELPERS.normalize_org_name(company_name)))
+        alias_norms = {alias for alias in alias_norms if alias}
+        tokens = tuple(frozenset(value) for value in LINK_HELPERS.alias_token_sets(alias_norms))
+        companies.append(
+            LINK_HELPERS.CompanyAliases(
+                company_id=int(row["company_id"]),
+                ticker=ticker,
+                company_name=company_name,
+                alias_norms=frozenset(alias_norms),
+                alias_tokens=tokens,
+            )
+        )
+    return companies
+
+
 def load_jobs(
     conn: sqlite3.Connection,
     *,
     status_filter: set[str],
     source_rows: dict[str, dict[str, str]],
+    restrict_to_source_rows: bool,
     ticker_filter: set[str],
     max_companies: int,
     min_alias_length: int,
@@ -298,23 +387,26 @@ def load_jobs(
     search_overrides: dict[str, list[Any]],
 ) -> list[ReactivationJob]:
     effective_ticker_filter = set(ticker_filter)
-    if source_rows:
+    if restrict_to_source_rows:
         effective_ticker_filter |= set(source_rows)
     effective_status_filter = set(status_filter)
-    if source_rows:
+    if restrict_to_source_rows:
         effective_status_filter = set()
 
-    audit_companies = AUDIT_HELPERS.load_companies(
+    include_inactive = not restrict_to_source_rows
+    audit_companies = load_audit_companies_for_scan(
         conn,
         status_filter=effective_status_filter,
         ticker_filter=effective_ticker_filter,
+        include_inactive=include_inactive,
     )
     link_companies = {
         company.company_id: company
-        for company in LINK_HELPERS.load_companies(
+        for company in load_link_companies_for_scan(
             conn,
             status_filter=effective_status_filter,
             ticker_filter=effective_ticker_filter,
+            include_inactive=include_inactive,
         )
     }
     jobs: list[ReactivationJob] = []
@@ -322,7 +414,7 @@ def load_jobs(
         link_company = link_companies.get(company.company_id)
         if link_company is None:
             continue
-        if source_rows and company.ticker not in source_rows:
+        if restrict_to_source_rows and company.ticker not in source_rows:
             continue
         search_aliases = SYNC_HELPERS.load_company_aliases(
             conn,
@@ -476,6 +568,11 @@ def main() -> None:
         for value in normalize_string_list(cfg_get(config, "ctgov_reactivation.status_filter"), ["remove"])
     }
     ticker_filter = {value.strip().upper().replace(".", "-") for value in args.tickers.split(",") if value.strip()}
+    if (ticker_filter or int(args.max_companies) > 0) and args.output_dir is None:
+        raise ValueError(
+            "--tickers and --max-companies are subset/smoke-test modes and must be paired with --output-dir "
+            "so canonical CTGov reactivation outputs are not overwritten."
+        )
     query_fields = normalize_string_list(cfg_get(config, "ctgov.query_fields"), ["query.spons", "query.lead"])
     override_default_query_fields = normalize_string_list(
         cfg_get(config, "ctgov.override_default_query_fields"), ["query.intr"]
@@ -544,7 +641,10 @@ def main() -> None:
     )
     source_final_status_filter = {
         value.lower()
-        for value in normalize_string_list(cfg_get(config, "ctgov_reactivation.source_final_status_filter"), ["review", "remove"])
+        for value in normalize_string_list(
+            cfg_get(config, "ctgov_reactivation.source_final_status_filter"),
+            ["review", "remove", "remove_candidate"],
+        )
     }
     scan_csv = output_dir / str(cfg_get(config, "ctgov_reactivation.scan_csv", "ctgov_reactivation_scan.csv"))
     review_csv = output_dir / str(cfg_get(config, "ctgov_reactivation.review_csv", "ctgov_reactivation_review.csv"))
@@ -555,11 +655,16 @@ def main() -> None:
         search_overrides_path,
         default_query_fields=override_default_query_fields,
     )
-    source_rows = load_source_review_rows(
-        source_review_csv,
-        final_status_filter=source_final_status_filter,
-        ticker_filter=ticker_filter,
+    source_rows = (
+        {}
+        if args.all_removed
+        else load_source_review_rows(
+            source_review_csv,
+            final_status_filter=source_final_status_filter,
+            ticker_filter=ticker_filter,
+        )
     )
+    selection_mode = "all_removed_status_filter" if args.all_removed else "source_review_rows"
     policy_overrides = load_policy_overrides(policy_overrides_path, ticker_filter=ticker_filter)
     trial_status_overrides = {
         (str(row.get("ticker") or "").strip().upper(), str(row.get("nct_id") or "").strip().upper()): row
@@ -579,6 +684,7 @@ def main() -> None:
                 conn,
                 status_filter=status_filter,
                 source_rows=source_rows,
+                restrict_to_source_rows=not args.all_removed,
                 ticker_filter=ticker_filter,
                 max_companies=args.max_companies,
                 min_alias_length=min_alias_length,
@@ -586,7 +692,14 @@ def main() -> None:
                 query_fields=query_fields,
                 search_overrides=search_overrides,
             )
-            LOGGER.info("Loaded %d removed companies for reactivation scan", len(jobs))
+            LOGGER.info(
+                "Loaded %d companies for reactivation scan mode=%s status_filter_applied=%s status_filter=%s source_rows=%d",
+                len(jobs),
+                selection_mode,
+                bool(args.all_removed),
+                sorted(status_filter),
+                len(source_rows),
+            )
 
             throttle = HostThrottle()
             results: list[Any] = []
@@ -900,12 +1013,15 @@ def main() -> None:
             write_csv(review_csv, review_rows, SCAN_FIELDS)
             write_csv(evidence_csv, evidence_rows, EVIDENCE_FIELDS)
 
+            error_count = sum(1 for row in scan_rows if str(row["scan_error"]).strip())
             manifest = {
                 "generated_at_utc": utc_now(),
                 "asof_date": asof_date.isoformat(),
                 "db_path": str(db_path),
                 "db_signature": AUDIT_HELPERS.db_signature(conn),
+                "selection_mode": selection_mode,
                 "status_filter": sorted(status_filter),
+                "status_filter_applied": bool(args.all_removed),
                 "source_review_csv": str(source_review_csv),
                 "source_final_status_filter": sorted(source_final_status_filter),
                 "ticker_filter": sorted(ticker_filter),
@@ -918,7 +1034,7 @@ def main() -> None:
                 "program_owner_override_count": len(program_owner_overrides),
                 "policy_override_count": len(policy_overrides),
                 "link_count": len(links),
-                "error_count": sum(1 for row in scan_rows if str(row["scan_error"]).strip()),
+                "error_count": error_count,
                 "reactivation_status_counts": dict(Counter(str(row["reactivation_status"]) for row in scan_rows)),
                 "reactivation_priority_counts": dict(Counter(str(row["reactivation_priority"]) for row in scan_rows)),
                 "review_bucket_counts": dict(Counter(str(row["review_bucket"]) for row in scan_rows if row["review_bucket"])),
@@ -937,10 +1053,13 @@ def main() -> None:
             message = (
                 f"companies={len(jobs)} candidates={sum(1 for row in scan_rows if row['reactivation_status'] == 'reactivation_candidate')} "
                 f"reviews={sum(1 for row in scan_rows if row['reactivation_status'] == 'reactivation_review')} "
-                f"errors={sum(1 for row in scan_rows if str(row['scan_error']).strip())} studies={len(studies_by_nct)}"
+                f"errors={error_count} studies={len(studies_by_nct)}"
             )
-            finish_run(conn, run_id=run_id, status="success", row_count=len(scan_rows), message=message)
+            status = "success" if error_count == 0 else "partial"
+            finish_run(conn, run_id=run_id, status=status, row_count=len(scan_rows), message=message)
             LOGGER.info("CTGov reactivation scan complete: %s", message)
+            if error_count > 0 and not args.allow_partial:
+                raise SystemExit(2)
         except Exception as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise

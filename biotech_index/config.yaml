@@ -160,6 +160,7 @@ ctgov_reactivation:
   source_final_status_filter:
     - review
     - remove
+    - remove_candidate
   status_filter:
     - remove
   scan_csv: "ctgov_reactivation_scan.csv"
@@ -305,6 +306,8 @@ ib_market_data:
   client_id: 7717
   connect_timeout_sec: 15.0
   duration: "1 Y"
+  incremental_lookback_days: 400
+  repair_window_days: 0
   what_to_show: "ADJUSTED_LAST"
   fallback_what_to_show: "TRADES"
   use_rth: true

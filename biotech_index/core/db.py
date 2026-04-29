@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 
 SCHEMA_SQL = """
@@ -200,11 +200,26 @@ CREATE TABLE IF NOT EXISTS sec_filing_documents (
     document_type TEXT NOT NULL,
     text_content TEXT,
     text_hash TEXT,
+    text_length INTEGER NOT NULL DEFAULT 0,
     fetched_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (accession_nodash) REFERENCES sec_filings(accession_nodash) ON DELETE CASCADE,
     UNIQUE(accession_nodash, document_url)
+);
+
+CREATE TABLE IF NOT EXISTS sec_filing_latest_document (
+    accession_nodash TEXT PRIMARY KEY,
+    document_id INTEGER NOT NULL,
+    document_url TEXT NOT NULL,
+    document_type TEXT NOT NULL,
+    text_hash TEXT NOT NULL,
+    text_length INTEGER NOT NULL DEFAULT 0,
+    fetched_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (accession_nodash) REFERENCES sec_filings(accession_nodash) ON DELETE CASCADE,
+    FOREIGN KEY (document_id) REFERENCES sec_filing_documents(document_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS sec_events (
@@ -229,6 +244,7 @@ CREATE TABLE IF NOT EXISTS sec_events (
 CREATE TABLE IF NOT EXISTS sec_event_parse_state (
     accession_nodash TEXT PRIMARY KEY,
     text_hash TEXT,
+    parser_signature TEXT,
     parsed_at TEXT NOT NULL,
     event_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -758,7 +774,10 @@ CREATE INDEX IF NOT EXISTS idx_forward_guidance_overrides_asof_company ON compan
 CREATE INDEX IF NOT EXISTS idx_forward_guidance_features_asof_company ON forward_guidance_features_daily(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_forward_guidance_parse_state_hash ON forward_guidance_parse_state(text_hash);
 CREATE INDEX IF NOT EXISTS idx_sec_filing_documents_accession_type ON sec_filing_documents(accession_nodash, document_type, fetched_at);
+CREATE INDEX IF NOT EXISTS idx_sec_filing_latest_document_hash ON sec_filing_latest_document(text_hash);
+CREATE INDEX IF NOT EXISTS idx_sec_filing_latest_document_type ON sec_filing_latest_document(document_type, fetched_at);
 CREATE INDEX IF NOT EXISTS idx_sec_filings_form_date_company ON sec_filings(form, filing_date, company_id);
+CREATE INDEX IF NOT EXISTS idx_sec_filings_date_company ON sec_filings(filing_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_governance_features_asof_company ON governance_event_features_daily(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_multibagger_features_asof_company ON multibagger_features_daily(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_multibagger_scores_asof_rank ON multibagger_scores_daily(asof_date, rank);
@@ -782,6 +801,10 @@ SEC_EVENT_OPTIONAL_COLUMNS = {
     "event_value": "TEXT",
     "source_payload": "TEXT",
     "updated_at": "TEXT",
+}
+
+SEC_FILING_DOCUMENT_OPTIONAL_COLUMNS = {
+    "text_length": "INTEGER NOT NULL DEFAULT 0",
 }
 
 SEC_EVENT_PARSE_STATE_OPTIONAL_COLUMNS = {
@@ -898,6 +921,13 @@ def connect(db_path: Path, *, timeout_sec: float = 30.0) -> ManagedConnection:
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
     ensure_company_optional_columns(conn)
+    ensure_table_optional_columns(conn, "sec_filing_documents", SEC_FILING_DOCUMENT_OPTIONAL_COLUMNS)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sec_filing_documents_latest_meta
+        ON sec_filing_documents(accession_nodash, document_type, fetched_at, document_id, text_hash, text_length)
+        """
+    )
     ensure_table_optional_columns(conn, "sec_events", SEC_EVENT_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "company_facts_quarterly", COMPANY_FACTS_QUARTERLY_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "daily_scores", DAILY_SCORES_OPTIONAL_COLUMNS)
@@ -910,6 +940,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_state_tables_created_at(conn)
     ensure_table_optional_columns(conn, "sec_event_parse_state", SEC_EVENT_PARSE_STATE_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "forward_guidance_parse_state", FORWARD_GUIDANCE_PARSE_STATE_OPTIONAL_COLUMNS)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sec_event_parse_state_signature ON sec_event_parse_state(parser_signature)")
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_forward_guidance_overrides_unique_key
@@ -940,10 +971,72 @@ def ensure_table_optional_columns(conn: sqlite3.Connection, table_name: str, col
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column} {column_type}")
 
 
+def refresh_sec_latest_documents(conn: sqlite3.Connection, accessions: Iterable[str]) -> int:
+    """Refresh latest SEC document metadata without reading large text_content blobs."""
+    now = utc_now()
+    refreshed = 0
+    for accession in sorted({str(value or "").strip() for value in accessions if str(value or "").strip()}):
+        row = conn.execute(
+            """
+            SELECT
+                document_id,
+                accession_nodash,
+                document_url,
+                document_type,
+                text_hash,
+                COALESCE(text_length, 0) AS text_length,
+                fetched_at
+            FROM sec_filing_documents
+            WHERE accession_nodash = ?
+              AND COALESCE(text_hash, '') <> ''
+            ORDER BY
+                CASE WHEN document_type = 'complete_submission_text' THEN 0 ELSE 1 END,
+                COALESCE(fetched_at, updated_at, created_at) DESC,
+                document_id DESC
+            LIMIT 1
+            """,
+            (accession,),
+        ).fetchone()
+        if row is None:
+            conn.execute("DELETE FROM sec_filing_latest_document WHERE accession_nodash = ?", (accession,))
+            continue
+        conn.execute(
+            """
+            INSERT INTO sec_filing_latest_document(
+                accession_nodash, document_id, document_url, document_type, text_hash,
+                text_length, fetched_at, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(accession_nodash) DO UPDATE SET
+                document_id = excluded.document_id,
+                document_url = excluded.document_url,
+                document_type = excluded.document_type,
+                text_hash = excluded.text_hash,
+                text_length = excluded.text_length,
+                fetched_at = excluded.fetched_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                str(row["accession_nodash"]),
+                int(row["document_id"]),
+                str(row["document_url"] or ""),
+                str(row["document_type"] or ""),
+                str(row["text_hash"] or ""),
+                int(row["text_length"] or 0),
+                str(row["fetched_at"] or ""),
+                now,
+                now,
+            ),
+        )
+        refreshed += 1
+    return refreshed
+
+
 def ensure_state_tables_created_at(conn: sqlite3.Connection) -> None:
     sec_event_cols = _table_column_names(conn, "sec_event_parse_state")
     if "created_at" not in sec_event_cols:
         now = utc_now()
+        parser_signature_expr = "parser_signature" if "parser_signature" in sec_event_cols else "'' AS parser_signature"
         conn.execute("DROP INDEX IF EXISTS idx_sec_event_parse_state_hash")
         conn.execute("ALTER TABLE sec_event_parse_state RENAME TO sec_event_parse_state_legacy")
         conn.execute(
@@ -951,6 +1044,7 @@ def ensure_state_tables_created_at(conn: sqlite3.Connection) -> None:
             CREATE TABLE sec_event_parse_state (
                 accession_nodash TEXT PRIMARY KEY,
                 text_hash TEXT,
+                parser_signature TEXT,
                 parsed_at TEXT NOT NULL,
                 event_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
@@ -961,12 +1055,12 @@ def ensure_state_tables_created_at(conn: sqlite3.Connection) -> None:
         )
         conn.execute(
             """
-            INSERT INTO sec_event_parse_state(accession_nodash, text_hash, parsed_at, event_count, created_at, updated_at)
-            SELECT accession_nodash, text_hash, parsed_at, event_count,
+            INSERT INTO sec_event_parse_state(accession_nodash, text_hash, parser_signature, parsed_at, event_count, created_at, updated_at)
+            SELECT accession_nodash, text_hash, {parser_signature_expr}, parsed_at, event_count,
                    COALESCE(updated_at, parsed_at, ?) AS created_at,
                    COALESCE(updated_at, parsed_at, ?) AS updated_at
             FROM sec_event_parse_state_legacy
-            """,
+            """.format(parser_signature_expr=parser_signature_expr),
             (now, now),
         )
         conn.execute("DROP TABLE sec_event_parse_state_legacy")

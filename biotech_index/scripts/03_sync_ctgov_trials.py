@@ -6,7 +6,6 @@ import csv
 import logging
 import sqlite3
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -23,6 +22,7 @@ from biotech_index.clients.ctgov_client import CtgovClient, parse_sponsors, pars
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_optional_path, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.http_cache import CachedHttpClient, HostThrottle
+from biotech_index.core.logging_utils import configure_utc_logging
 
 
 LOGGER = logging.getLogger("sync_ctgov_trials")
@@ -77,18 +77,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-workers", type=int, default=None)
     parser.add_argument("--max-companies", type=int, default=0, help="Limit companies for smoke tests. 0 means all.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
+    parser.add_argument("--allow-partial", action="store_true", help="Return success even if one or more company syncs fail.")
     return parser.parse_args()
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -544,20 +538,30 @@ def main() -> None:
             if max_workers <= 1:
                 for idx, job in enumerate(jobs, start=1):
                     LOGGER.info("[%d/%d] CTGov %s aliases=%d searches=%d", idx, len(jobs), job.ticker, len(job.aliases), len(job.searches))
-                    results.append(
-                        sync_one_company(
-                            job,
-                            cache_dir=cache_dir,
-                            studies_url=studies_url,
-                            query_fields=query_fields,
-                            page_size=page_size,
-                            max_pages=max_pages,
-                            ttl_hours=ttl_hours,
-                            sleep_sec=sleep_sec,
-                            timeout_sec=timeout_sec,
-                            max_retries=max_retries,
-                            throttle=throttle,
-                        )
+                    result = sync_one_company(
+                        job,
+                        cache_dir=cache_dir,
+                        studies_url=studies_url,
+                        query_fields=query_fields,
+                        page_size=page_size,
+                        max_pages=max_pages,
+                        ttl_hours=ttl_hours,
+                        sleep_sec=sleep_sec,
+                        timeout_sec=timeout_sec,
+                        max_retries=max_retries,
+                        throttle=throttle,
+                    )
+                    results.append(result)
+                    LOGGER.info(
+                        "[%d/%d] CTGov complete %s aliases=%d searches=%d studies=%d query_hits=%d error=%s",
+                        idx,
+                        len(jobs),
+                        result.ticker,
+                        result.alias_count,
+                        result.search_count,
+                        result.study_count,
+                        len(result.query_hits),
+                        result.error,
                     )
             else:
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -626,8 +630,11 @@ def main() -> None:
                 ).fetchone()[0]
             )
             message = f"companies={len(jobs)} errors={error_count} unique_trials={written} query_hits={query_hit_count} sponsors={sponsor_count} snapshots_asof={snapshot_count}"
-            finish_run(conn, run_id=run_id, status="success" if error_count == 0 else "partial", row_count=written, message=message)
+            status = "success" if error_count == 0 else "partial"
+            finish_run(conn, run_id=run_id, status=status, row_count=written, message=message)
             LOGGER.info("CTGov sync complete: %s", message)
+            if error_count > 0 and not args.allow_partial:
+                raise SystemExit(2)
         except Exception as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise

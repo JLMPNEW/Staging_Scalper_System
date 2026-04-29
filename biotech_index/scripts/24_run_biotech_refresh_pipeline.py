@@ -9,9 +9,10 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +57,48 @@ def configure_logging() -> None:
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
     logging.Formatter.converter = time.gmtime
+
+
+def parse_date(raw: object) -> date | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def as_bool(raw: object) -> bool:
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def parse_clock_time(raw: object, default: str = "16:15") -> dt_time:
+    text = str(raw or default).strip()
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            return datetime.strptime(text, fmt).time()
+        except ValueError:
+            continue
+    raise ValueError(f"Invalid market close time: {raw}")
+
+
+def previous_business_day(day: date) -> date:
+    out = day - timedelta(days=1)
+    while out.weekday() >= 5:
+        out -= timedelta(days=1)
+    return out
+
+
+def default_pipeline_asof(config: dict[str, Any]) -> date:
+    market_timezone = str(cfg_get(config, "ib_market_data.market_timezone", "America/New_York"))
+    market_close_time = parse_clock_time(cfg_get(config, "ib_market_data.market_close_time", "16:15"))
+    guard_enabled = as_bool(cfg_get(config, "ib_market_data.market_close_guard", True))
+    now_local = datetime.now(timezone.utc).astimezone(ZoneInfo(market_timezone))
+    local_today = now_local.date()
+    if guard_enabled and (local_today.weekday() >= 5 or now_local.time() < market_close_time):
+        return previous_business_day(local_today)
+    return local_today
 
 
 def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bool) -> list[Step]:
@@ -175,7 +218,14 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    asof = args.asof or datetime.now(timezone.utc).date().isoformat()
+    if args.asof:
+        parsed_asof = parse_date(args.asof)
+        if parsed_asof is None:
+            raise ValueError(f"Invalid --asof date: {args.asof}")
+        asof = parsed_asof.isoformat()
+    else:
+        asof = default_pipeline_asof(config).isoformat()
+    LOGGER.info("Pipeline as-of date: %s", asof)
     timing_csv = resolve_path(
         cfg_get(config, "biotech_refresh.timing_csv", "../output/biotech_index_reports/biotech_refresh_timing.csv"),
         base_dir=base_dir,

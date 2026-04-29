@@ -25,6 +25,15 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.http_cache import CachedHttpClient, HostThrottle
+from biotech_index.core.pipeline_guards import (
+    normalize_ticker,
+    read_final_scoring_tickers,
+    subset_mode_enabled,
+    subset_output_path,
+    validate_full_universe_coverage,
+    validate_nonempty_selection,
+    validate_requested_tickers,
+)
 
 
 LOGGER = logging.getLogger("sync_sec_companyfacts_history")
@@ -164,6 +173,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-companies", type=int, default=0, help="Smoke-test limit. 0 means all.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
     parser.add_argument("--full-refresh", action="store_true", help="Force refresh for all eligible companies regardless of sync state.")
+    parser.add_argument("--allow-partial", action="store_true", help="Return success even if one or more companyfacts fetches fail.")
     return parser.parse_args()
 
 
@@ -208,20 +218,7 @@ def as_bool(raw: object) -> bool:
 
 
 def read_scoring_tickers(path: Path) -> set[str]:
-    if not path.exists():
-        raise FileNotFoundError(f"Final scoring universe CSV not found: {path}")
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        out: set[str] = set()
-        for row in reader:
-            ticker = str(row.get("ticker") or "").strip().upper()
-            if not ticker:
-                continue
-            if str(row.get("final_status") or "").strip().lower() == "keep" and as_bool(row.get("scoring_include")):
-                out.add(ticker)
-    if not out:
-        raise ValueError(f"Final scoring universe CSV contains no scoring tickers: {path}")
-    return out
+    return read_final_scoring_tickers(path)
 
 
 def load_companies(
@@ -241,7 +238,7 @@ def load_companies(
     ).fetchall()
     companies: list[Company] = []
     for row in rows:
-        ticker = str(row["ticker"] or "").upper()
+        ticker = normalize_ticker(row["ticker"])
         if scoring_tickers and ticker not in scoring_tickers:
             continue
         if ticker_filter and ticker not in ticker_filter:
@@ -811,7 +808,7 @@ def main() -> None:
     if asof_obj is None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
     cutoff = asof_obj - timedelta(days=max(1, lookback_years) * 366)
-    ticker_filter = {x.strip().upper() for x in args.tickers.split(",") if x.strip()}
+    ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     asof = asof_obj.isoformat()
     ttl_hours = float(cfg_get(config, "sec_companyfacts_history.ttl_hours", 24.0))
@@ -830,8 +827,20 @@ def main() -> None:
             ticker_filter=ticker_filter,
             max_companies=int(args.max_companies),
         )
+        subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_companies))
+        output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
+        validate_nonempty_selection(count=len(companies), context="SEC companyfacts sync", subset_mode=subset_mode)
+        loaded_tickers = [company.ticker for company in companies]
+        validate_requested_tickers(requested_tickers=ticker_filter, loaded_tickers=loaded_tickers, context="SEC companyfacts sync")
+        validate_full_universe_coverage(
+            expected_tickers=scoring_tickers,
+            observed_tickers=loaded_tickers,
+            context="SEC companyfacts sync",
+            subset_mode=subset_mode,
+        )
         run_id = start_run(conn, run_type="sync_sec_companyfacts_history", input_path=universe_csv)
         try:
+            error_count = 0
             company_ids = [company.company_id for company in companies]
             sync_state_by_company = load_companyfacts_sync_state(conn, company_ids)
             fact_summary_by_company = load_companyfacts_fact_summary(conn, company_ids)
@@ -901,6 +910,7 @@ def main() -> None:
             for idx, result in enumerate(sorted(results, key=lambda item: item.company.ticker), start=1):
                 company = result.company
                 if result.error == "missing_cik":
+                    error_count += 1
                     with conn:
                         log_data_quality_issue(
                             conn,
@@ -913,6 +923,7 @@ def main() -> None:
                         )
                     continue
                 if result.error:
+                    error_count += 1
                     LOGGER.warning("SEC companyfacts failed for %s: %s", company.ticker, result.error)
                     with conn:
                         log_data_quality_issue(conn, company=company, asof_date=asof, issue_type="fetch_error", severity="high", message=result.error)
@@ -969,10 +980,12 @@ def main() -> None:
             finish_run(
                 conn,
                 run_id=run_id,
-                status="success",
+                status="success" if error_count == 0 else "partial",
                 row_count=len(all_csv_rows),
-                message=f"companies={len(companies)} refreshed={len(refresh_targets)} output={output_csv}",
+                message=f"companies={len(companies)} refreshed={len(refresh_targets)} errors={error_count} output={output_csv}",
             )
+            if error_count > 0 and not args.allow_partial:
+                raise SystemExit(2)
         except Exception as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise

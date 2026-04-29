@@ -9,7 +9,6 @@ import json
 import logging
 import sqlite3
 import sys
-import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -24,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.clients.ctgov_client import as_list, get_nested
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_optional_path, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.text_norm import normalize_org_name
 
 
@@ -50,6 +50,8 @@ ROOT_CAUSE_CATEGORIES = {
     "manual_remove_override",
     "mixed_review_case",
 }
+STRONG_LINK_METHODS = {"exact_norm", "suffix_stripped_exact", "ticker_token_match"}
+STRONG_LINK_METHOD_PREFIXES = ("manual_search_term:", "program_owner_override:")
 
 
 @dataclass(frozen=True)
@@ -82,14 +84,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -131,6 +126,11 @@ def contains_any(text: str, keywords: Iterable[str]) -> list[str]:
         if needle and needle in haystack:
             hits.append(needle)
     return hits
+
+
+def is_strong_company_link_method(method: str) -> bool:
+    method = str(method or "").strip()
+    return method in STRONG_LINK_METHODS or any(method.startswith(prefix) for prefix in STRONG_LINK_METHOD_PREFIXES)
 
 
 def phase_rank(phase_text: str) -> int:
@@ -378,7 +378,7 @@ def classify_trial(
     roles = sorted({link.match_role for link in links if link.match_role})
     methods = sorted({link.match_method for link in links if link.match_method})
     max_conf = max((link.confidence for link in links), default=0.0)
-    strong_company_link = any(not method.startswith("alias_token_") for method in methods)
+    strong_company_link = any(is_strong_company_link_method(method) for method in methods)
     has_lead = "lead" in roles
     has_program = "program" in roles
     has_collab = "collaborator" in roles
@@ -452,8 +452,6 @@ def classify_trial(
     exclusion_reasons: list[str] = []
     if hard_non_therapeutic:
         exclusion_reasons.append("non_therapeutic")
-    if qualifying_device:
-        exclusion_reasons.append("qualifying_device")
     if non_therapeutic_type_only:
         exclusion_reasons.append("non_therapeutic_intervention_type")
     if non_therapeutic_purpose and not therapeutic_type_hit and not qualifying_device:
@@ -486,7 +484,7 @@ def classify_trial(
         "is_qualifying_device": qualifying_device,
         "is_therapeutic": therapeutic,
         "is_non_therapeutic": hard_non_therapeutic,
-        "qualifying_trial": therapeutic and not hard_non_therapeutic,
+        "qualifying_trial": therapeutic,
         "trial_score": round(score, 4),
         "days_since_last_update": last_update_days if last_update_days is not None else "",
         "last_update_post_date": str(row["last_update_post_date"] or ""),
@@ -816,11 +814,17 @@ def build_manual_verification_rows(
     manual_decisions: dict[str, dict[str, str]],
 ) -> list[dict[str, Any]]:
     verification_rows: list[dict[str, Any]] = []
+    seen_tickers: set[str] = set()
     for row in rows:
-        if str(row.get("recommended_status") or "") == "keep":
-            continue
         ticker = str(row.get("ticker") or "").strip().upper().replace(".", "-")
+        if not ticker:
+            continue
+        seen_tickers.add(ticker)
         manual = manual_decisions.get(ticker, {})
+        manual_verdict = str(manual.get("manual_verdict") or row.get("manual_verdict") or "").strip().lower()
+        final_status = str(row.get("final_status") or row.get("recommended_status") or "").strip().lower()
+        if final_status == "keep" and manual_verdict not in MANUAL_VERDICTS:
+            continue
         out = {
             "ticker": row.get("ticker", ""),
             "company_name": row.get("company_name", ""),
@@ -864,6 +868,13 @@ def build_manual_verification_rows(
             "manual_verified_date": manual.get("manual_verified_date", ""),
         }
         verification_rows.append(out)
+    for ticker, manual in sorted(manual_decisions.items()):
+        if ticker in seen_tickers:
+            continue
+        manual_verdict = str(manual.get("manual_verdict") or "").strip().lower()
+        if manual_verdict not in MANUAL_VERDICTS:
+            continue
+        verification_rows.append({field: manual.get(field, "") for field in MANUAL_VERIFICATION_FIELDS})
     verification_rows.sort(key=lambda item: (str(item["recommended_status"]), str(item["ticker"])))
     return verification_rows
 
@@ -948,6 +959,10 @@ def main() -> None:
         for value in normalize_string_list(cfg_get(config, "ctgov_audit.status_filter"), ["keep", "review"])
     }
     ticker_filter = {value.strip().upper().replace(".", "-") for value in args.tickers.split(",") if value.strip()}
+    if ticker_filter and args.output_dir is None:
+        raise ValueError(
+            "--tickers is a subset/smoke-test mode and must be paired with --output-dir so canonical CTGov outputs are not overwritten."
+        )
     active_statuses = {
         value.upper()
         for value in normalize_string_list(

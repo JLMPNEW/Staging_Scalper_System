@@ -23,6 +23,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_optional_path, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.pipeline_guards import (
+    normalize_ticker,
+    read_final_scoring_tickers,
+    validate_full_universe_coverage,
+    validate_nonempty_selection,
+)
 
 
 LOGGER = logging.getLogger("build_biotech_features")
@@ -178,7 +184,7 @@ def read_csv(path: Path) -> pd.DataFrame:
 
 def load_company_ids(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute("SELECT company_id, ticker FROM companies WHERE is_active = 1").fetchall()
-    return {str(row["ticker"]).upper(): int(row["company_id"]) for row in rows}
+    return {normalize_ticker(row["ticker"]): int(row["company_id"]) for row in rows}
 
 
 def load_latest_facts(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
@@ -832,6 +838,7 @@ def main() -> None:
     low_liquidity = float(cfg_get(config, "biotech_features.low_liquidity_addv20", 2_000_000))
     strong_liquidity = float(cfg_get(config, "biotech_features.strong_liquidity_addv20", 10_000_000))
 
+    expected_tickers = read_final_scoring_tickers(universe_csv)
     universe = read_csv(universe_csv)
     evidence_df = read_csv(evidence_csv)
     evidence_df = apply_trial_status_overrides(evidence_df, read_optional_csv(trial_status_overrides_csv))
@@ -855,7 +862,7 @@ def main() -> None:
             rows: list[dict[str, Any]] = []
             skipped: list[str] = []
             for _, universe_row in universe.iterrows():
-                ticker = str(universe_row["ticker"]).upper()
+                ticker = normalize_ticker(universe_row["ticker"])
                 company_id = company_ids.get(ticker)
                 if company_id is None:
                     skipped.append(ticker)
@@ -875,6 +882,19 @@ def main() -> None:
                         sec_events=sec_event_summary.get(company_id),
                     )
                 )
+            validate_nonempty_selection(count=len(rows), context="biotech feature build")
+            if skipped:
+                raise RuntimeError(
+                    "biotech feature build missing active DB company_id for final-universe ticker(s): "
+                    + ",".join(sorted(skipped)[:25])
+                    + (f"...(+{len(skipped) - 25})" if len(skipped) > 25 else "")
+                )
+            validate_full_universe_coverage(
+                expected_tickers=expected_tickers,
+                observed_tickers=[row["ticker"] for row in rows],
+                context="biotech feature build",
+                subset_mode=False,
+            )
             upsert_features(conn, rows, asof_date.isoformat())
             write_csv(output_csv, rows)
             finish_run(

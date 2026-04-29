@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.pipeline_guards import read_final_scoring_tickers, validate_full_universe_coverage
 
 
 LOGGER = logging.getLogger("score_biotech_index")
@@ -535,6 +536,11 @@ def main() -> None:
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_dir = resolve_path(cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
     output_csv = output_dir / str(cfg_get(config, "biotech_scoring.output_csv", "biotech_daily_scores.csv"))
+    universe_csv = resolve_path(
+        cfg_get(config, "biotech_features.final_scoring_universe_csv"),
+        base_dir=base_dir,
+    )
+    expected_tickers = read_final_scoring_tickers(universe_csv)
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
@@ -551,9 +557,35 @@ def main() -> None:
             features = load_feature_rows(conn, asof_date)
             if not features:
                 raise ValueError(f"No features found for asof_date={asof_date}")
+            validate_full_universe_coverage(
+                expected_tickers=expected_tickers,
+                observed_tickers=[row["ticker"] for row in features],
+                context="biotech scoring input features",
+                subset_mode=False,
+            )
             commercial_by_company = load_commercial_rows(conn, asof_date)
             forward_by_company = load_forward_guidance_rows(conn, asof_date)
+            missing_commercial = [str(row["ticker"]) for row in features if int(row["company_id"]) not in commercial_by_company]
+            if missing_commercial:
+                raise RuntimeError(
+                    "biotech scoring missing commercial_value_features_daily row(s): "
+                    + ",".join(sorted(missing_commercial)[:25])
+                    + (f"...(+{len(missing_commercial) - 25})" if len(missing_commercial) > 25 else "")
+                )
+            missing_forward = [str(row["ticker"]) for row in features if int(row["company_id"]) not in forward_by_company]
+            if missing_forward:
+                raise RuntimeError(
+                    "biotech scoring missing forward_guidance_features_daily row(s): "
+                    + ",".join(sorted(missing_forward)[:25])
+                    + (f"...(+{len(missing_forward) - 25})" if len(missing_forward) > 25 else "")
+                )
             scored = score_rows(features, config, commercial_by_company, forward_by_company)
+            validate_full_universe_coverage(
+                expected_tickers=expected_tickers,
+                observed_tickers=[row["ticker"] for row in scored],
+                context="biotech scoring output",
+                subset_mode=False,
+            )
             upsert_scores(conn, scored, asof_date)
             write_csv(output_csv, scored)
             finish_run(conn, run_id=run_id, status="success", row_count=len(scored), message=f"asof={asof_date} output={output_csv}")
