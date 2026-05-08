@@ -9,7 +9,6 @@ import logging
 import math
 import sqlite3
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -25,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.http_cache import CachedHttpClient, HostThrottle
+from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
     normalize_ticker,
     read_final_scoring_tickers,
@@ -38,6 +38,12 @@ from biotech_index.core.pipeline_guards import (
 
 LOGGER = logging.getLogger("sync_sec_companyfacts_history")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+SQLITE_PARAM_CHUNK_SIZE = 800
+
+
+def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
+    step = max(1, int(size))
+    return [list(values[start : start + step]) for start in range(0, len(values), step)]
 
 
 CONCEPT_GROUPS: dict[str, list[str]] = {
@@ -178,14 +184,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -324,6 +323,10 @@ def prefer_observation(current: dict[str, Any] | None, candidate: dict[str, Any]
         return candidate
     candidate_unit = str(candidate.get("unit") or "").upper()
     current_unit = str(current.get("unit") or "").upper()
+    if current_unit == "USD" and candidate_unit != "USD":
+        return current
+    if current_unit == "SHARES" and candidate_unit != "SHARES":
+        return current
     if candidate_unit == "USD" and current_unit != "USD":
         return candidate
     if candidate_unit == "SHARES" and current_unit != "SHARES":
@@ -507,6 +510,11 @@ def payload_hash_for_json(payload: dict[str, Any]) -> str:
 def load_companyfacts_sync_state(conn: sqlite3.Connection, company_ids: list[int]) -> dict[int, dict[str, Any]]:
     if not company_ids:
         return {}
+    if len(company_ids) > SQLITE_PARAM_CHUNK_SIZE:
+        out: dict[int, dict[str, Any]] = {}
+        for company_chunk in chunked(company_ids):
+            out.update(load_companyfacts_sync_state(conn, [int(value) for value in company_chunk]))
+        return out
     placeholders = ",".join("?" for _ in company_ids)
     rows = conn.execute(
         f"""
@@ -522,6 +530,11 @@ def load_companyfacts_sync_state(conn: sqlite3.Connection, company_ids: list[int
 def load_companyfacts_fact_summary(conn: sqlite3.Connection, company_ids: list[int]) -> dict[int, dict[str, Any]]:
     if not company_ids:
         return {}
+    if len(company_ids) > SQLITE_PARAM_CHUNK_SIZE:
+        out: dict[int, dict[str, Any]] = {}
+        for company_chunk in chunked(company_ids):
+            out.update(load_companyfacts_fact_summary(conn, [int(value) for value in company_chunk]))
+        return out
     placeholders = ",".join("?" for _ in company_ids)
     rows = conn.execute(
         f"""
@@ -538,6 +551,11 @@ def load_companyfacts_fact_summary(conn: sqlite3.Connection, company_ids: list[i
 def load_latest_source_filing_dates(conn: sqlite3.Connection, company_ids: list[int]) -> dict[int, str]:
     if not company_ids:
         return {}
+    if len(company_ids) > SQLITE_PARAM_CHUNK_SIZE:
+        out: dict[int, str] = {}
+        for company_chunk in chunked(company_ids):
+            out.update(load_latest_source_filing_dates(conn, [int(value) for value in company_chunk]))
+        return out
     placeholders = ",".join("?" for _ in company_ids)
     form_placeholders = ",".join("?" for _ in ALLOWED_FORMS)
     rows = conn.execute(
@@ -742,6 +760,18 @@ def write_quarterly_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def export_quarterly_rows(conn: sqlite3.Connection, company_ids: list[int]) -> list[dict[str, Any]]:
     if not company_ids:
         return []
+    if len(company_ids) > SQLITE_PARAM_CHUNK_SIZE:
+        rows: list[dict[str, Any]] = []
+        for company_chunk in chunked(company_ids):
+            rows.extend(export_quarterly_rows(conn, [int(value) for value in company_chunk]))
+        rows.sort(
+            key=lambda row: (
+                str(row.get("ticker") or ""),
+                -int(str(row.get("period_end") or "").replace("-", "") or "0"),
+                -int(str(row.get("filed_date") or "").replace("-", "") or "0"),
+            )
+        )
+        return rows
     placeholders = ",".join("?" for _ in company_ids)
     rows = conn.execute(
         f"""
@@ -986,7 +1016,7 @@ def main() -> None:
             )
             if error_count > 0 and not args.allow_partial:
                 raise SystemExit(2)
-        except Exception as exc:
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
     LOGGER.info("Synced SEC companyfacts history: companies=%d rows=%d output=%s", len(companies), len(all_csv_rows), output_csv)

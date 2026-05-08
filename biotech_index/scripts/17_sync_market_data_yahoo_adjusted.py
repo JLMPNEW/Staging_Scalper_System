@@ -8,7 +8,6 @@ import logging
 import math
 import sqlite3
 import sys
-import time
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
@@ -23,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
     read_final_scoring_tickers,
     subset_mode_enabled,
@@ -37,6 +37,14 @@ LOGGER = logging.getLogger("sync_market_data_yahoo_adjusted")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_SOURCE = "yahoo_adjusted"
 DEFAULT_BENCHMARK = "XBI"
+SQLITE_PARAM_CHUNK_SIZE = 800
+
+
+def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
+    step = max(1, int(size))
+    return [list(values[start : start + step]) for start in range(0, len(values), step)]
+
+
 CSV_FIELDNAMES = [
     "asof_date",
     "source",
@@ -94,14 +102,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
     logging.getLogger("yfinance").setLevel(logging.WARNING)
 
 
@@ -241,6 +242,11 @@ def load_latest_shares(conn: sqlite3.Connection, company_id: int, asof_date: dat
 def load_latest_bar_dates(conn: sqlite3.Connection, *, tickers: list[str], source: str) -> dict[str, date]:
     if not tickers:
         return {}
+    if len(tickers) > SQLITE_PARAM_CHUNK_SIZE:
+        out: dict[str, date] = {}
+        for ticker_chunk in chunked(tickers):
+            out.update(load_latest_bar_dates(conn, tickers=[str(value) for value in ticker_chunk], source=source))
+        return out
     placeholders = ",".join("?" for _ in tickers)
     rows = conn.execute(
         f"""
@@ -800,17 +806,18 @@ def delete_market_rows_for_companies(
 ) -> None:
     if not company_ids:
         return
-    placeholders = ",".join("?" for _ in company_ids)
-    params = (asof_date.isoformat(), source, *sorted(company_ids))
     with conn:
-        conn.execute(
-            f"DELETE FROM market_snapshots_daily WHERE asof_date = ? AND source = ? AND company_id IN ({placeholders})",
-            params,
-        )
-        conn.execute(
-            f"DELETE FROM market_features_daily WHERE asof_date = ? AND source = ? AND company_id IN ({placeholders})",
-            params,
-        )
+        for company_chunk in chunked(sorted(company_ids)):
+            placeholders = ",".join("?" for _ in company_chunk)
+            params = (asof_date.isoformat(), source, *company_chunk)
+            conn.execute(
+                f"DELETE FROM market_snapshots_daily WHERE asof_date = ? AND source = ? AND company_id IN ({placeholders})",
+                params,
+            )
+            conn.execute(
+                f"DELETE FROM market_features_daily WHERE asof_date = ? AND source = ? AND company_id IN ({placeholders})",
+                params,
+            )
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -824,6 +831,13 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def load_current_feature_csv_rows(conn: sqlite3.Connection, companies: list[Company], asof_date: date, *, source: str) -> list[dict[str, Any]]:
     if not companies:
         return []
+    if len(companies) > SQLITE_PARAM_CHUNK_SIZE:
+        rows: list[dict[str, Any]] = []
+        company_order = {company.company_id: idx for idx, company in enumerate(companies)}
+        for company_chunk in chunked(companies):
+            rows.extend(load_current_feature_csv_rows(conn, [company for company in company_chunk], asof_date, source=source))
+        rows.sort(key=lambda row: (company_order.get(int(row.get("company_id") or 0), len(company_order)), str(row.get("ticker") or "")))
+        return rows
     company_names = {company.company_id: company.company_name for company in companies}
     company_order = {company.company_id: idx for idx, company in enumerate(companies)}
     placeholders = ",".join("?" for _ in company_names)
@@ -1049,12 +1063,12 @@ def main() -> None:
             if benchmark_refresh_failed:
                 message += " benchmark_refresh_failed=1"
             finish_run(conn, run_id=run_id, status=status, row_count=len(features), message=message)
+            LOGGER.info("Yahoo adjusted market sync complete: rows=%d output=%s", len(features), output_csv)
             if status != "success" and not args.allow_partial:
                 raise SystemExit(2)
-        except Exception as exc:
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
-    LOGGER.info("Yahoo adjusted market sync complete: rows=%d output=%s", len(features), output_csv)
 
 
 if __name__ == "__main__":

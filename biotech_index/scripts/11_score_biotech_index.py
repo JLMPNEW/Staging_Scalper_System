@@ -8,7 +8,6 @@ import logging
 import math
 import sqlite3
 import sys
-import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,7 +20,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
-from biotech_index.core.pipeline_guards import read_final_scoring_tickers, validate_full_universe_coverage
+from biotech_index.core.logging_utils import configure_utc_logging
+from biotech_index.core.pipeline_guards import (
+    read_final_scoring_tickers,
+    validate_full_universe_coverage,
+    validate_layer_freshness,
+)
 
 
 LOGGER = logging.getLogger("score_biotech_index")
@@ -37,14 +41,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -84,6 +81,88 @@ def parse_json(raw: object) -> dict[str, Any]:
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
+
+
+def as_bool(raw: object, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "enabled", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
+        return False
+    return default
+
+
+def count_missing_fields(raw: object) -> int:
+    if raw is None:
+        return 0
+    if isinstance(raw, (list, tuple, set)):
+        return len(raw)
+    if isinstance(raw, dict):
+        return len(raw)
+    text = str(raw or "").strip()
+    if not text or text in {"[]", "{}", "null", "None"}:
+        return 0
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, (list, tuple, set)):
+        return len(payload)
+    if isinstance(payload, dict):
+        return len(payload)
+    return len([part for part in text.replace(";", ",").split(",") if part.strip()])
+
+
+def convex_risk_drag(risk: float, weight: float, config: dict[str, Any], section: str) -> float:
+    base_drag = weight * risk
+    if not as_bool(cfg_get(config, f"{section}.convex_risk_penalty_enabled", False), False):
+        return base_drag
+    convexity = float(cfg_get(config, f"{section}.risk_penalty_convexity", 0.35))
+    inflection = float(cfg_get(config, f"{section}.risk_penalty_inflection", 50.0))
+    excess = max(0.0, risk - inflection) / max(1.0, 100.0 - inflection)
+    return base_drag * (1.0 + convexity * excess)
+
+
+def score_confidence_multiplier(
+    config: dict[str, Any],
+    payload: dict[str, Any],
+    commercial: dict[str, Any],
+    forward_guidance: dict[str, Any],
+    profile_name: str,
+) -> float:
+    if not as_bool(cfg_get(config, "biotech_scoring.data_quality_adjustment.enabled", False), False):
+        return 1.0
+    min_multiplier = float(cfg_get(config, "biotech_scoring.data_quality_adjustment.min_multiplier", 0.82))
+    low_quality_penalty = float(cfg_get(config, "biotech_scoring.data_quality_adjustment.low_quality_penalty", 0.06))
+    missing_field_penalty = float(cfg_get(config, "biotech_scoring.data_quality_adjustment.missing_field_penalty", 0.006))
+    max_missing_penalty = float(cfg_get(config, "biotech_scoring.data_quality_adjustment.max_missing_penalty", 0.08))
+
+    survival = payload.get("financial_survival", {}) if isinstance(payload, dict) else {}
+    qualities = [str(survival.get("data_quality") or "").lower()]
+    commercial_stage = bool(to_float(commercial.get("commercial_stage_flag"), 0.0))
+    profitable = bool(to_float(commercial.get("profitable_flag"), 0.0))
+    has_guidance = bool(str(forward_guidance.get("latest_guidance_filing_date") or "").strip())
+    if profile_name == "commercial_stage" or commercial_stage or profitable:
+        qualities.append(str(commercial.get("data_quality") or "").lower())
+    if has_guidance:
+        qualities.append(str(forward_guidance.get("data_quality") or "").lower())
+
+    low_quality_count = sum(1 for quality in qualities if quality in {"low", "poor", "stale"})
+    missing_count = 0
+    if profile_name == "commercial_stage" or commercial_stage or profitable:
+        missing_count += count_missing_fields(commercial.get("missing_fields"))
+    if has_guidance:
+        missing_count += count_missing_fields(forward_guidance.get("missing_fields"))
+    penalty = low_quality_count * low_quality_penalty + min(max_missing_penalty, missing_count * missing_field_penalty)
+    return clamp(1.0 - penalty, min_multiplier, 1.0)
+
+
+def tier1_selection_gate_score(opportunity: float, risk: float, confidence_multiplier: float) -> float:
+    return clamp((0.70 * opportunity + 0.30 * (100.0 - risk)) * confidence_multiplier)
 
 
 def latest_feature_date(conn: sqlite3.Connection) -> str:
@@ -238,7 +317,7 @@ def score_rows(
     momentum_w = float(weights.get("momentum", 0.10))
     risk_w = float(weights.get("risk_penalty", 0.35))
 
-    investment_enabled = bool(cfg_get(config, "biotech_scoring.use_investment_score", True))
+    investment_enabled = as_bool(cfg_get(config, "biotech_scoring.use_investment_score", True), True)
 
     scored: list[dict[str, Any]] = []
     for row in rows:
@@ -259,7 +338,8 @@ def score_rows(
             + financial_w * financial_quality
             + momentum_w * momentum
         )
-        clinical_opportunity = clamp(clinical_positive - risk_w * risk)
+        clinical_risk_drag = convex_risk_drag(risk, risk_w, config, "biotech_scoring")
+        clinical_opportunity = clamp(clinical_positive - clinical_risk_drag)
 
         commercial_quality = clamp(to_float(commercial.get("commercial_quality_score"), 35.0))
         commercial_value = clamp(to_float(commercial.get("commercial_value_score"), 35.0))
@@ -276,8 +356,11 @@ def score_rows(
             + profile_weights["financial_quality"] * financial_quality
             + profile_weights["momentum"] * momentum
         )
-        investment_score = clamp(investment_positive - profile_weights["risk_penalty"] * risk)
+        investment_risk_drag = convex_risk_drag(risk, profile_weights["risk_penalty"], config, "biotech_scoring")
+        confidence_multiplier = score_confidence_multiplier(config, payload, commercial, forward_guidance, profile_name)
+        investment_score = clamp((investment_positive - investment_risk_drag) * confidence_multiplier)
         opportunity = investment_score if investment_enabled else clinical_opportunity
+        selection_gate = tier1_selection_gate_score(opportunity, risk, confidence_multiplier)
 
         ctgov = payload.get("ctgov", {}) if isinstance(payload, dict) else {}
         sec_liq = payload.get("sec_and_liquidity", {}) if isinstance(payload, dict) else {}
@@ -351,15 +434,26 @@ def score_rows(
                 "guidance_records": forward_payload.get("guidance_records", []) if isinstance(forward_payload, dict) else [],
             },
             "score_components": {
+                "model_role": "tier1_core_investability_gate",
                 "clinical_opportunity_score": round(clinical_opportunity, 4),
                 "investment_score": round(investment_score, 4),
+                "tier1_selection_gate_score": round(selection_gate, 4),
                 "investment_profile": profile_name,
                 "investment_weights": profile_weights,
+                "clinical_risk_drag": round(clinical_risk_drag, 4),
+                "investment_risk_drag": round(investment_risk_drag, 4),
+                "data_quality_confidence_multiplier": round(confidence_multiplier, 4),
                 "commercial_quality_score": round(commercial_quality, 4),
                 "commercial_value_score": round(commercial_value, 4),
                 "forward_guidance_score": round(forward_guidance_score, 4),
                 "valuation_score": round(valuation_score, 4),
                 "upside_capacity_score": round(upside_capacity_score, 4),
+            },
+            "downstream_interaction": {
+                "recommended_use": "gate_or_cap_multibagger_candidates_do_not_add_as_duplicate_alpha",
+                "selection_gate_score": round(selection_gate, 4),
+                "opportunity_score": round(opportunity, 4),
+                "risk_score": round(risk, 4),
             },
             "sec_events": sec_events,
             "risk_flags": {
@@ -392,6 +486,10 @@ def score_rows(
                 "upside_capacity_score": round(upside_capacity_score, 4),
                 "investment_score": round(investment_score, 4),
                 "opportunity_score": round(opportunity, 4),
+                "tier1_selection_gate_score": round(selection_gate, 4),
+                "data_quality_confidence_multiplier": round(confidence_multiplier, 4),
+                "clinical_risk_drag": round(clinical_risk_drag, 4),
+                "investment_risk_drag": round(investment_risk_drag, 4),
                 "bucket": score_bucket(opportunity, risk, config, payload, commercial),
                 "primary_nct": ctgov.get("primary_nct", ""),
                 "primary_trial_title": ctgov.get("primary_trial_title", ""),
@@ -433,26 +531,10 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
                     asof_date, company_id, catalyst_score, credibility_score,
                     financial_quality_score, risk_score, momentum_score, clinical_opportunity_score,
                     commercial_value_score, forward_guidance_score, valuation_score, upside_capacity_score, investment_score, opportunity_score,
+                    tier1_selection_gate_score, data_quality_confidence_multiplier, clinical_risk_drag, investment_risk_drag,
                     rank, bucket, top_evidence_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(asof_date, company_id) DO UPDATE SET
-                    catalyst_score = excluded.catalyst_score,
-                    credibility_score = excluded.credibility_score,
-                    financial_quality_score = excluded.financial_quality_score,
-                    risk_score = excluded.risk_score,
-                    momentum_score = excluded.momentum_score,
-                    clinical_opportunity_score = excluded.clinical_opportunity_score,
-                    commercial_value_score = excluded.commercial_value_score,
-                    forward_guidance_score = excluded.forward_guidance_score,
-                    valuation_score = excluded.valuation_score,
-                    upside_capacity_score = excluded.upside_capacity_score,
-                    investment_score = excluded.investment_score,
-                    opportunity_score = excluded.opportunity_score,
-                    rank = excluded.rank,
-                    bucket = excluded.bucket,
-                    top_evidence_json = excluded.top_evidence_json,
-                    updated_at = excluded.updated_at
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["asof_date"],
@@ -469,6 +551,10 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
                     row["upside_capacity_score"],
                     row["investment_score"],
                     row["opportunity_score"],
+                    row["tier1_selection_gate_score"],
+                    row["data_quality_confidence_multiplier"],
+                    row["clinical_risk_drag"],
+                    row["investment_risk_drag"],
                     row["rank"],
                     row["bucket"],
                     row["top_evidence_json"],
@@ -489,6 +575,10 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "opportunity_score",
         "investment_score",
         "clinical_opportunity_score",
+        "tier1_selection_gate_score",
+        "data_quality_confidence_multiplier",
+        "clinical_risk_drag",
+        "investment_risk_drag",
         "commercial_value_score",
         "forward_guidance_score",
         "valuation_score",
@@ -579,6 +669,21 @@ def main() -> None:
                     + ",".join(sorted(missing_forward)[:25])
                     + (f"...(+{len(missing_forward) - 25})" if len(missing_forward) > 25 else "")
                 )
+            max_upstream_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0))
+            validate_layer_freshness(
+                base_rows=features,
+                layer_rows_by_company=commercial_by_company,
+                asof_date=asof_date,
+                context="biotech scoring commercial_value_features_daily",
+                max_staleness_days=max_upstream_staleness_days,
+            )
+            validate_layer_freshness(
+                base_rows=features,
+                layer_rows_by_company=forward_by_company,
+                asof_date=asof_date,
+                context="biotech scoring forward_guidance_features_daily",
+                max_staleness_days=max_upstream_staleness_days,
+            )
             scored = score_rows(features, config, commercial_by_company, forward_by_company)
             validate_full_universe_coverage(
                 expected_tickers=expected_tickers,
@@ -589,10 +694,10 @@ def main() -> None:
             upsert_scores(conn, scored, asof_date)
             write_csv(output_csv, scored)
             finish_run(conn, run_id=run_id, status="success", row_count=len(scored), message=f"asof={asof_date} output={output_csv}")
-        except Exception as exc:
+            LOGGER.info("Scored biotech index: rows=%d output=%s", len(scored), output_csv)
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
-    LOGGER.info("Scored biotech index: rows=%d output=%s", len(scored), output_csv)
 
 
 if __name__ == "__main__":

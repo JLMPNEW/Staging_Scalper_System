@@ -19,11 +19,13 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_optional_path, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.logging_utils import configure_utc_logging
+from biotech_index.core.pipeline_guards import validate_nonempty_selection, validate_requested_tickers
 from biotech_index.core.text_norm import alias_token_sets, meaningful_org_tokens, normalize_org_name, strip_corporate_suffixes
 
 
 LOGGER = logging.getLogger("link_trials_to_companies")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+SQLITE_IN_CLAUSE_CHUNK_SIZE = 800
 
 
 @dataclass(frozen=True)
@@ -149,21 +151,29 @@ def load_sponsors(conn: sqlite3.Connection) -> list[SponsorRow]:
 
 
 def load_query_hits(conn: sqlite3.Connection, *, company_ids: set[int] | None = None) -> list[QueryHitRow]:
-    params: tuple[int, ...] = ()
-    where = ""
-    if company_ids:
-        placeholders = ",".join("?" for _ in sorted(company_ids))
-        where = f"WHERE company_id IN ({placeholders})"
-        params = tuple(sorted(company_ids))
-    rows = conn.execute(
-        f"""
-        SELECT company_id, nct_id, query_field, source, confidence
-        FROM ctgov_query_hits
-        {where}
-        ORDER BY company_id, nct_id, confidence DESC
-        """,
-        params,
-    ).fetchall()
+    def fetch(where: str = "", params: tuple[int, ...] = ()) -> list[sqlite3.Row]:
+        return conn.execute(
+            f"""
+            SELECT company_id, nct_id, query_field, source, confidence
+            FROM ctgov_query_hits
+            {where}
+            ORDER BY company_id, nct_id, confidence DESC
+            """,
+            params,
+        ).fetchall()
+
+    if company_ids is None:
+        rows = fetch()
+    elif not company_ids:
+        rows = []
+    else:
+        rows = []
+        sorted_ids = sorted(company_ids)
+        for idx in range(0, len(sorted_ids), SQLITE_IN_CLAUSE_CHUNK_SIZE):
+            chunk = tuple(sorted_ids[idx : idx + SQLITE_IN_CLAUSE_CHUNK_SIZE])
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(fetch(f"WHERE company_id IN ({placeholders})", chunk))
+        rows.sort(key=lambda row: (int(row["company_id"]), str(row["nct_id"] or ""), -float(row["confidence"] or 0.0)))
     return [
         QueryHitRow(
             nct_id=str(row["nct_id"] or ""),
@@ -452,11 +462,15 @@ def dedupe_links(links: Iterable[LinkCandidate]) -> list[LinkCandidate]:
 
 def replace_links(conn: sqlite3.Connection, links: list[LinkCandidate], *, company_ids: set[int] | None = None) -> None:
     now = utc_now()
+    links = dedupe_links(links)
     if company_ids is not None:
         if not company_ids:
             return
-        placeholders = ",".join("?" for _ in sorted(company_ids))
-        conn.execute(f"DELETE FROM trial_company_links WHERE company_id IN ({placeholders})", tuple(sorted(company_ids)))
+        sorted_ids = sorted(company_ids)
+        for idx in range(0, len(sorted_ids), SQLITE_IN_CLAUSE_CHUNK_SIZE):
+            chunk = tuple(sorted_ids[idx : idx + SQLITE_IN_CLAUSE_CHUNK_SIZE])
+            placeholders = ",".join("?" for _ in chunk)
+            conn.execute(f"DELETE FROM trial_company_links WHERE company_id IN ({placeholders})", chunk)
     else:
         conn.execute("DELETE FROM trial_company_links")
     for link in links:
@@ -466,10 +480,6 @@ def replace_links(conn: sqlite3.Connection, links: list[LinkCandidate], *, compa
                 nct_id, company_id, match_role, match_method, confidence, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(nct_id, company_id, match_role) DO UPDATE SET
-                match_method = excluded.match_method,
-                confidence = excluded.confidence,
-                updated_at = excluded.updated_at
             """,
             (
                 link.nct_id,
@@ -514,6 +524,16 @@ def main() -> None:
         run_id = start_run(conn, run_type="link_trials_to_companies", input_path=db_path)
         try:
             companies = load_companies(conn, status_filter=status_filter, ticker_filter=ticker_filter)
+            validate_nonempty_selection(
+                count=len(companies),
+                context="trial linking",
+                subset_mode=bool(ticker_filter),
+            )
+            validate_requested_tickers(
+                requested_tickers=ticker_filter,
+                loaded_tickers=[company.ticker for company in companies],
+                context="trial linking",
+            )
             company_ids = {company.company_id for company in companies}
             sponsors = load_sponsors(conn)
             manual_query_hits = load_query_hits(conn, company_ids=company_ids)
@@ -559,7 +579,7 @@ def main() -> None:
             message = f"links={len(links)} linked_companies={linked_companies} linked_trials={linked_trials}"
             finish_run(conn, run_id=run_id, status="success", row_count=len(links), message=message)
             LOGGER.info("Trial linking complete: %s", message)
-        except Exception as exc:
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 

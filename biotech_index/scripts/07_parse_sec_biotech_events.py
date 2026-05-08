@@ -30,6 +30,14 @@ from biotech_index.core.logging_utils import configure_utc_logging
 LOGGER = logging.getLogger("parse_sec_biotech_events")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 PARSER_LOGIC_VERSION = "2026-04-27-sec-event-parser-v3"
+SQLITE_PARAM_CHUNK_SIZE = 800
+
+
+def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
+    step = max(1, int(size))
+    return [list(values[start : start + step]) for start in range(0, len(values), step)]
+
+
 OUTPUT_FIELDS = [
     "ticker",
     "company_name",
@@ -770,10 +778,29 @@ def replace_events(conn: sqlite3.Connection, events: list[SecEvent], *, filings:
         event_counts[event.accession_nodash] = event_counts.get(event.accession_nodash, 0) + 1
     with conn:
         if accession_list:
-            placeholders = ",".join("?" for _ in accession_list)
-            conn.execute(f"DELETE FROM sec_events WHERE accession_nodash IN ({placeholders})", accession_list)
-        for event in events:
-            conn.execute(
+            for accession_chunk in chunked(accession_list):
+                placeholders = ",".join("?" for _ in accession_chunk)
+                conn.execute(f"DELETE FROM sec_events WHERE accession_nodash IN ({placeholders})", accession_chunk)
+        event_params = [
+            (
+                event.company_id,
+                event.accession_nodash,
+                event.filing_date,
+                event.form,
+                event.event_type,
+                event.event_date,
+                event.event_value,
+                event.polarity,
+                event.confidence,
+                event.extracted_text,
+                event.source_payload,
+                now,
+                now,
+            )
+            for event in events
+        ]
+        if event_params:
+            conn.executemany(
                 """
                 INSERT INTO sec_events(
                     company_id, accession_nodash, filing_date, form, event_type, event_date, event_value,
@@ -781,24 +808,22 @@ def replace_events(conn: sqlite3.Connection, events: list[SecEvent], *, filings:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    event.company_id,
-                    event.accession_nodash,
-                    event.filing_date,
-                    event.form,
-                    event.event_type,
-                    event.event_date,
-                    event.event_value,
-                    event.polarity,
-                    event.confidence,
-                    event.extracted_text,
-                    event.source_payload,
-                    now,
-                    now,
-                ),
+                event_params,
             )
-        for filing in filing_list:
-            conn.execute(
+        state_params = [
+            (
+                filing.accession_nodash,
+                filing.text_hash,
+                parser_signature,
+                now,
+                event_counts.get(filing.accession_nodash, 0),
+                now,
+                now,
+            )
+            for filing in filing_list
+        ]
+        if state_params:
+            conn.executemany(
                 """
                 INSERT INTO sec_event_parse_state(accession_nodash, text_hash, parser_signature, parsed_at, event_count, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -809,15 +834,7 @@ def replace_events(conn: sqlite3.Connection, events: list[SecEvent], *, filings:
                     event_count = excluded.event_count,
                     updated_at = excluded.updated_at
                 """,
-                (
-                    filing.accession_nodash,
-                    filing.text_hash,
-                    parser_signature,
-                    now,
-                    event_counts.get(filing.accession_nodash, 0),
-                    now,
-                    now,
-                ),
+                state_params,
             )
 
 
@@ -1040,27 +1057,28 @@ def main() -> None:
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
-        target_accessions = load_target_accessions(conn, cutoff=cutoff, asof=asof_str, ticker_filter=ticker_filter)
-        refreshed_manifest = ensure_latest_documents_for_accessions(conn, target_accessions)
-        LOGGER.info(
-            "SEC event parser scope=%s target_tickers=%d target_filings=%d latest_manifest_refreshed=%d",
-            scope_label,
-            len(ticker_filter),
-            len(target_accessions),
-            refreshed_manifest,
-        )
-        if args.export_only:
-            run_id = start_run(conn, run_type="parse_sec_biotech_events_export", input_path=db_path)
-            try:
+        run_type = "parse_sec_biotech_events_export" if args.export_only else "parse_sec_biotech_events"
+        run_id = start_run(conn, run_type=run_type, input_path=db_path)
+        try:
+            target_accessions = load_target_accessions(conn, cutoff=cutoff, asof=asof_str, ticker_filter=ticker_filter)
+            refreshed_manifest = ensure_latest_documents_for_accessions(conn, target_accessions)
+            LOGGER.info(
+                "SEC event parser scope=%s target_tickers=%d target_filings=%d latest_manifest_refreshed=%d",
+                scope_label,
+                len(ticker_filter),
+                len(target_accessions),
+                refreshed_manifest,
+            )
+            if args.export_only:
                 row_count = export_events_from_db(conn, output_csv, cutoff=cutoff, asof=asof_str, ticker_filter=ticker_filter)
                 finish_run(conn, run_id=run_id, status="success", row_count=row_count, message=f"output={output_csv}")
                 LOGGER.info("Exported SEC biotech events: rows=%d output=%s", row_count, output_csv)
                 return
-            except Exception as exc:
-                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
-                raise
-        run_id = start_run(conn, run_type="parse_sec_biotech_events", input_path=db_path)
-        try:
+            if not target_accessions:
+                raise RuntimeError(
+                    f"SEC event parser selected zero target filings for scope={scope_label} "
+                    f"asof={asof_str}; refusing to continue"
+                )
             incremental_only = not args.full_rescan
             total_available = count_filing_texts(
                 conn,
@@ -1172,10 +1190,10 @@ def main() -> None:
                 row_count=output_rows,
                 message=f"filings={total_filings} parsed_events={event_count} output={output_csv}",
             )
-        except Exception as exc:
+            LOGGER.info("Parsed SEC biotech events: filings=%d events=%d output=%s", total_filings, event_count, output_csv)
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
-    LOGGER.info("Parsed SEC biotech events: filings=%d events=%d output=%s", total_filings, event_count, output_csv)
 
 
 if __name__ == "__main__":

@@ -21,11 +21,36 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
-from biotech_index.core.db import connect, init_db
+from biotech_index.core.db import connect, quote_identifier
+from biotech_index.core.logging_utils import configure_utc_logging
+from biotech_index.core.pipeline_guards import format_ticker_sample, read_final_scoring_tickers, universe_coverage
 
 
 LOGGER = logging.getLogger("run_biotech_refresh_pipeline")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+
+BIOTECH_SCORE_REQUIRED_COLUMNS = [
+    "tier1_selection_gate_score",
+    "data_quality_confidence_multiplier",
+    "clinical_risk_drag",
+    "investment_risk_drag",
+]
+
+MULTIBAGGER_SCORE_BASE_REQUIRED_COLUMNS = [
+    "base_multibagger_score",
+    "orthogonal_alpha_score",
+    "distinctive_acceleration_score",
+    "tier1_available",
+    "tier1_interaction_reason",
+]
+
+MULTIBAGGER_SCORE_TIER1_REQUIRED_COLUMNS = [
+    "tier1_opportunity_score",
+    "tier1_risk_score",
+    "tier1_bucket",
+    "tier1_gate_score",
+    "tier1_gate_multiplier",
+]
 
 
 @dataclass(frozen=True)
@@ -47,16 +72,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-ib", action="store_true", help="Skip the IB market-data step.")
     parser.add_argument("--skip-yahoo", action="store_true", help="Skip the Yahoo adjusted market-data step.")
     parser.add_argument("--skip-analyze", action="store_true", help="Skip SQLite ANALYZE at the end.")
+    parser.add_argument("--skip-final-validation", action="store_true", help="Skip final as-of/coverage validation after a full pipeline run.")
+    parser.add_argument("--reuse-unchanged-historical", action="store_true", help="Reuse exact-signature governance rows for historical snapshot runs.")
     return parser.parse_args()
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)sZ %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    )
-    logging.Formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -101,10 +123,12 @@ def default_pipeline_asof(config: dict[str, Any]) -> date:
     return local_today
 
 
-def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bool) -> list[Step]:
+def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bool, reuse_unchanged_historical: bool = False) -> list[Step]:
     sec_event_args: tuple[str, ...] = ("--full-rescan",) if mode in {"weekly_reconcile", "full_backfill"} else ()
     companyfacts_args: tuple[str, ...] = ("--full-refresh",) if mode == "full_backfill" else ()
     forward_args: tuple[str, ...] = ("--run-mode", mode)
+    governance_args: tuple[str, ...] = ("--reuse-unchanged-historical",) if reuse_unchanged_historical else ()
+    # 08_scan_ctgov_reactivation_candidates.py is an audit/discovery utility, not a deterministic refresh step.
     steps = [
         Step("company_master", "02_build_company_master.py", supports_asof=False),
     ]
@@ -132,7 +156,7 @@ def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bo
         [
             Step("commercial_value", "18_build_commercial_value_features.py"),
             Step("forward_guidance", "19_parse_forward_guidance.py", forward_args),
-            Step("governance_events", "20_build_governance_event_features.py"),
+            Step("governance_events", "20_build_governance_event_features.py", governance_args),
             Step("biotech_features", "10_build_biotech_features.py"),
             Step("biotech_scores", "11_score_biotech_index.py"),
             Step("biotech_reports", "12_publish_biotech_reports.py"),
@@ -173,10 +197,24 @@ def run_step(
     command: list[str],
     mode: str,
     run_started_at: str,
+    timeout_sec: float | None = None,
 ) -> dict[str, Any]:
     start = time.monotonic()
     LOGGER.info("Starting %s", step.name)
-    completed = subprocess.run(command, cwd=str(PROJECT_ROOT))
+    try:
+        completed = subprocess.run(command, cwd=str(PROJECT_ROOT), timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        elapsed = round(time.monotonic() - start, 3)
+        LOGGER.error("Step %s timed out after %.3fs", step.name, elapsed)
+        return {
+            "run_started_at": run_started_at,
+            "mode": mode,
+            "step": step.name,
+            "status": "failed",
+            "elapsed_sec": elapsed,
+            "returncode": -1,
+            "command": " ".join(command),
+        }
     elapsed = round(time.monotonic() - start, 3)
     status = "success" if completed.returncode == 0 else "failed"
     LOGGER.info("Finished %s status=%s elapsed=%.3fs", step.name, status, elapsed)
@@ -195,9 +233,7 @@ def analyze_db(db_path: Path, *, run_started_at: str, mode: str) -> dict[str, An
     start = time.monotonic()
     LOGGER.info("Starting sqlite_analyze")
     with connect(db_path) as conn:
-        init_db(conn)
         conn.execute("ANALYZE")
-        conn.commit()
     elapsed = round(time.monotonic() - start, 3)
     LOGGER.info("Finished sqlite_analyze status=success elapsed=%.3fs", elapsed)
     return {
@@ -208,6 +244,284 @@ def analyze_db(db_path: Path, *, run_started_at: str, mode: str) -> dict[str, An
         "elapsed_sec": elapsed,
         "returncode": 0,
         "command": f"ANALYZE {db_path}",
+    }
+
+
+def observed_table_tickers(conn: sqlite3.Connection, table: str, *, asof: str, source: str = "") -> list[str]:
+    table_sql = quote_identifier(table)
+    source_clause = " AND t.source = ?" if source else ""
+    params: tuple[Any, ...] = (asof, source) if source else (asof,)
+    rows = conn.execute(
+        f"""
+        SELECT c.ticker
+        FROM {table_sql} t
+        JOIN companies c ON c.company_id = t.company_id
+        WHERE t.asof_date = ?{source_clause}
+        """,
+        params,
+    ).fetchall()
+    return [str(row["ticker"] or "") for row in rows]
+
+
+def validate_table_coverage(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    asof: str,
+    expected_tickers: set[str],
+    source: str = "",
+    allow_extra: bool = False,
+) -> None:
+    observed = observed_table_tickers(conn, table, asof=asof, source=source)
+    coverage = universe_coverage(expected_tickers, observed)
+    failures: list[str] = []
+    label = f"{table}{':' + source if source else ''}"
+    if coverage.missing_tickers:
+        failures.append(f"missing {len(coverage.missing_tickers)}: {format_ticker_sample(coverage.missing_tickers)}")
+    if coverage.extra_tickers and not allow_extra:
+        failures.append(f"extra {len(coverage.extra_tickers)}: {format_ticker_sample(coverage.extra_tickers)}")
+    if failures:
+        raise RuntimeError(f"{label} coverage failed for asof={asof}: " + " | ".join(failures))
+
+def is_blank(raw: object) -> bool:
+    return raw is None or str(raw).strip() == ""
+
+
+def validate_table_required_columns(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    asof: str,
+    required_columns: list[str],
+) -> None:
+    table_sql = quote_identifier(table)
+    columns = {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table_sql})").fetchall()
+    }
+    failures: list[str] = []
+    missing_columns = [column for column in required_columns if column not in columns]
+    if missing_columns:
+        failures.append("missing required columns: " + ",".join(missing_columns))
+
+    for column in required_columns:
+        if column not in columns:
+            continue
+        column_sql = quote_identifier(column)
+        blank_condition = f"t.{column_sql} IS NULL OR TRIM(CAST(t.{column_sql} AS TEXT)) = ''"
+        count_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS blank_count
+            FROM {table_sql} t
+            WHERE t.asof_date = ? AND ({blank_condition})
+            """,
+            (asof,),
+        ).fetchone()
+        blank_count = int(count_row["blank_count"] or 0) if count_row else 0
+        if blank_count:
+            sample_rows = conn.execute(
+                f"""
+                SELECT c.ticker
+                FROM {table_sql} t
+                JOIN companies c ON c.company_id = t.company_id
+                WHERE t.asof_date = ? AND ({blank_condition})
+                ORDER BY c.ticker
+                LIMIT 10
+                """,
+                (asof,),
+            ).fetchall()
+            sample = ",".join(str(row["ticker"] or "") for row in sample_rows)
+            failures.append(f"{column} blank for {blank_count} row(s): {sample}")
+
+    if failures:
+        raise RuntimeError(f"{table} required column validation failed for asof={asof}: " + " | ".join(failures))
+
+
+def validate_paired_score_dates(conn: sqlite3.Connection) -> None:
+    daily_dates = {
+        str(row["asof_date"] or "")
+        for row in conn.execute("SELECT DISTINCT asof_date FROM daily_scores WHERE asof_date IS NOT NULL").fetchall()
+    }
+    multibagger_dates = {
+        str(row["asof_date"] or "")
+        for row in conn.execute("SELECT DISTINCT asof_date FROM multibagger_scores_daily WHERE asof_date IS NOT NULL").fetchall()
+    }
+    daily_only = sorted(daily_dates - multibagger_dates)
+    multibagger_only = sorted(multibagger_dates - daily_dates)
+    failures: list[str] = []
+    if daily_only:
+        sample = ",".join(daily_only[:10])
+        failures.append(f"daily_scores only {len(daily_only)} date(s): {sample}")
+    if multibagger_only:
+        sample = ",".join(multibagger_only[:10])
+        failures.append(f"multibagger_scores_daily only {len(multibagger_only)} date(s): {sample}")
+    if failures:
+        raise RuntimeError("Paired score date validation failed: " + " | ".join(failures))
+
+
+def validate_score_csv(
+    path: Path,
+    *,
+    asof: str,
+    expected_tickers: set[str],
+    required_columns: list[str],
+) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"Required pipeline output CSV not found: {path}")
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        fieldnames = [str(field or "") for field in (reader.fieldnames or [])]
+    observed_tickers = [str(row.get("ticker") or "") for row in rows]
+    coverage = universe_coverage(expected_tickers, observed_tickers)
+    asof_values = {str(row.get("asof_date") or "") for row in rows}
+    failures: list[str] = []
+    missing_columns = [column for column in required_columns if column not in fieldnames]
+    if missing_columns:
+        failures.append("missing required columns: " + ",".join(missing_columns))
+    if coverage.missing_tickers:
+        failures.append(f"missing {len(coverage.missing_tickers)}: {format_ticker_sample(coverage.missing_tickers)}")
+    if coverage.extra_tickers:
+        failures.append(f"extra {len(coverage.extra_tickers)}: {format_ticker_sample(coverage.extra_tickers)}")
+    if asof_values != {asof}:
+        sample = ",".join(sorted(asof_values)[:5])
+        failures.append(f"asof_date values are {sample or '<blank>'}, expected {asof}")
+    for column in required_columns:
+        if column not in fieldnames:
+            continue
+        blank_tickers = [str(row.get("ticker") or "") for row in rows if is_blank(row.get(column))]
+        if blank_tickers:
+            sample = ",".join(sorted(blank_tickers)[:10])
+            failures.append(f"{column} blank for {len(blank_tickers)} row(s): {sample}")
+    if failures:
+        raise RuntimeError(f"{path} validation failed: " + " | ".join(failures))
+
+
+def validate_required_csv_columns(path: Path, *, asof: str, required_columns: list[str]) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"Required pipeline output CSV not found: {path}")
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        fieldnames = [str(field or "") for field in (reader.fieldnames or [])]
+
+    failures: list[str] = []
+    missing_columns = [column for column in required_columns if column not in fieldnames]
+    if missing_columns:
+        failures.append("missing required columns: " + ",".join(missing_columns))
+    if rows:
+        asof_values = {str(row.get("asof_date") or "") for row in rows}
+        if asof_values != {asof}:
+            sample = ",".join(sorted(asof_values)[:5])
+            failures.append(f"asof_date values are {sample or '<blank>'}, expected {asof}")
+        for column in required_columns:
+            if column not in fieldnames:
+                continue
+            blank_tickers = [str(row.get("ticker") or "") for row in rows if is_blank(row.get(column))]
+            if blank_tickers:
+                sample = ",".join(sorted(blank_tickers)[:10])
+                failures.append(f"{column} blank for {len(blank_tickers)} row(s): {sample}")
+    if failures:
+        raise RuntimeError(f"{path} required column validation failed: " + " | ".join(failures))
+
+
+def validate_final_outputs(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+    db_path: Path,
+    asof: str,
+    run_started_at: str,
+    mode: str,
+) -> dict[str, Any]:
+    start = time.monotonic()
+    LOGGER.info("Starting final_output_validation")
+    universe_csv = resolve_path(
+        cfg_get(config, "biotech_features.final_scoring_universe_csv", "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"),
+        base_dir=base_dir,
+    )
+    expected_tickers = read_final_scoring_tickers(universe_csv)
+    biotech_output_dir = resolve_path(cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
+    biotech_reports_output_dir = resolve_path(cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
+    multibagger_output_dir = resolve_path(cfg_get(config, "multibagger.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
+    biotech_scores_csv = biotech_output_dir / str(cfg_get(config, "biotech_scoring.output_csv", "biotech_daily_scores.csv"))
+    biotech_top_candidates_csv = biotech_reports_output_dir / str(cfg_get(config, "biotech_reports.top_candidates_csv", "biotech_top_candidates.csv"))
+    multibagger_scores_csv = multibagger_output_dir / str(cfg_get(config, "multibagger.scores_csv", "biotech_multibagger_scores.csv"))
+    multibagger_candidates_csv = multibagger_output_dir / str(cfg_get(config, "multibagger.candidates_csv", "biotech_multibagger_candidates.csv"))
+    preferred_market_sources = {
+        str(cfg_get(config, "commercial_value.preferred_market_source", "interactive_brokers") or "interactive_brokers"),
+        str(cfg_get(config, "multibagger.preferred_market_source", "interactive_brokers") or "interactive_brokers"),
+    }
+    multibagger_required_columns = list(MULTIBAGGER_SCORE_BASE_REQUIRED_COLUMNS)
+    if as_bool(cfg_get(config, "multibagger.tier1_interaction.enabled", False)):
+        multibagger_required_columns.extend(MULTIBAGGER_SCORE_TIER1_REQUIRED_COLUMNS)
+    with connect(db_path) as conn:
+        for table in (
+            "financial_survival_features",
+            "commercial_value_features_daily",
+            "forward_guidance_features_daily",
+            "governance_event_features_daily",
+            "daily_features",
+            "daily_scores",
+            "multibagger_features_daily",
+            "multibagger_scores_daily",
+        ):
+            validate_table_coverage(conn, table=table, asof=asof, expected_tickers=expected_tickers)
+        for source in sorted(source for source in preferred_market_sources if source):
+            # Market features can include extra symbols from the vendor cache; downstream layers filter to the final universe.
+            validate_table_coverage(
+                conn,
+                table="market_features_daily",
+                asof=asof,
+                expected_tickers=expected_tickers,
+                source=source,
+                allow_extra=True,
+            )
+        validate_table_required_columns(
+            conn,
+            table="daily_scores",
+            asof=asof,
+            required_columns=BIOTECH_SCORE_REQUIRED_COLUMNS,
+        )
+        validate_table_required_columns(
+            conn,
+            table="multibagger_scores_daily",
+            asof=asof,
+            required_columns=multibagger_required_columns,
+        )
+        validate_paired_score_dates(conn)
+    validate_score_csv(
+        biotech_scores_csv,
+        asof=asof,
+        expected_tickers=expected_tickers,
+        required_columns=BIOTECH_SCORE_REQUIRED_COLUMNS,
+    )
+    validate_required_csv_columns(
+        biotech_top_candidates_csv,
+        asof=asof,
+        required_columns=BIOTECH_SCORE_REQUIRED_COLUMNS,
+    )
+    validate_score_csv(
+        multibagger_scores_csv,
+        asof=asof,
+        expected_tickers=expected_tickers,
+        required_columns=multibagger_required_columns,
+    )
+    validate_required_csv_columns(
+        multibagger_candidates_csv,
+        asof=asof,
+        required_columns=multibagger_required_columns,
+    )
+    elapsed = round(time.monotonic() - start, 3)
+    LOGGER.info("Finished final_output_validation status=success elapsed=%.3fs expected_tickers=%d", elapsed, len(expected_tickers))
+    return {
+        "run_started_at": run_started_at,
+        "mode": mode,
+        "step": "final_output_validation",
+        "status": "success",
+        "elapsed_sec": elapsed,
+        "returncode": 0,
+        "command": f"validate outputs asof={asof}",
     }
 
 
@@ -230,20 +544,23 @@ def main() -> None:
         cfg_get(config, "biotech_refresh.timing_csv", "../output/biotech_index_reports/biotech_refresh_timing.csv"),
         base_dir=base_dir,
     )
+    raw_timeout = float(cfg_get(config, "biotech_refresh.step_timeout_sec", 7200.0))
+    step_timeout_sec = raw_timeout if raw_timeout > 0 else None
     selected_steps = {step.strip() for step in args.steps.split(",") if step.strip()}
-    steps = [
-        step
-        for step in pipeline_steps(args.mode, skip_ctgov=args.skip_ctgov, skip_ib=args.skip_ib, skip_yahoo=args.skip_yahoo)
-        if not selected_steps or step.name in selected_steps
-    ]
+    all_steps = pipeline_steps(
+        args.mode,
+        skip_ctgov=args.skip_ctgov,
+        skip_ib=args.skip_ib,
+        skip_yahoo=args.skip_yahoo,
+        reuse_unchanged_historical=args.reuse_unchanged_historical,
+    )
     if selected_steps:
-        known = {
-            step.name
-            for step in pipeline_steps(args.mode, skip_ctgov=args.skip_ctgov, skip_ib=args.skip_ib, skip_yahoo=args.skip_yahoo)
-        }
+        known = {step.name for step in all_steps}
         unknown = sorted(selected_steps - known)
         if unknown:
             raise ValueError(f"Unknown pipeline step(s): {', '.join(unknown)}")
+    steps = [step for step in all_steps if not selected_steps or step.name in selected_steps]
+    final_validation_enabled = as_bool(cfg_get(config, "biotech_refresh.validate_final_outputs", True))
 
     run_started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     timing_rows: list[dict[str, Any]] = []
@@ -261,13 +578,61 @@ def main() -> None:
             }
             timing_rows.append(row)
             write_timing_csv(timing_csv, timing_rows)
-            timing_rows[-1] = run_step(step, command=command, mode=args.mode, run_started_at=run_started_at)
+            timing_rows[-1] = run_step(
+                step,
+                command=command,
+                mode=args.mode,
+                run_started_at=run_started_at,
+                timeout_sec=step_timeout_sec,
+            )
             write_timing_csv(timing_csv, timing_rows)
             if timing_rows[-1]["status"] != "success":
-                raise SystemExit(int(timing_rows[-1]["returncode"]) or 1)
+                raise SystemExit(int(timing_rows[-1]["returncode"]))
         if not args.skip_analyze:
             timing_rows.append(analyze_db(db_path, run_started_at=run_started_at, mode=args.mode))
             write_timing_csv(timing_csv, timing_rows)
+        if not selected_steps and not args.skip_final_validation and final_validation_enabled:
+            validation_start = time.monotonic()
+            timing_rows.append(
+                {
+                    "run_started_at": run_started_at,
+                    "mode": args.mode,
+                    "step": "final_output_validation",
+                    "status": "running",
+                    "elapsed_sec": "",
+                    "returncode": "",
+                    "command": f"validate outputs asof={asof}",
+                }
+            )
+            write_timing_csv(timing_csv, timing_rows)
+            try:
+                timing_rows[-1] = validate_final_outputs(
+                    config,
+                    base_dir=base_dir,
+                    db_path=db_path,
+                    asof=asof,
+                    run_started_at=run_started_at,
+                    mode=args.mode,
+                )
+            except Exception as exc:
+                timing_rows[-1] = {
+                    "run_started_at": run_started_at,
+                    "mode": args.mode,
+                    "step": "final_output_validation",
+                    "status": "failed",
+                    "elapsed_sec": round(time.monotonic() - validation_start, 3),
+                    "returncode": 1,
+                    "command": f"validate outputs asof={asof}: {type(exc).__name__}: {exc}",
+                }
+                write_timing_csv(timing_csv, timing_rows)
+                raise
+            write_timing_csv(timing_csv, timing_rows)
+        elif selected_steps:
+            LOGGER.warning("Final output validation skipped because --steps was used.")
+        elif args.skip_final_validation:
+            LOGGER.warning("Final output validation skipped via --skip-final-validation.")
+        elif not final_validation_enabled:
+            LOGGER.warning("Final output validation skipped because biotech_refresh.validate_final_outputs=false.")
     finally:
         write_timing_csv(timing_csv, timing_rows)
 

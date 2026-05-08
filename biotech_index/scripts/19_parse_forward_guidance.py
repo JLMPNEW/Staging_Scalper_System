@@ -27,12 +27,14 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.core.config import cfg_get, load_yaml, resolve_optional_path, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.http_cache import CachedHttpClient, HostThrottle
+from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
     normalize_ticker,
     read_final_scoring_tickers,
     subset_mode_enabled,
     subset_output_path,
     validate_full_universe_coverage,
+    validate_layer_freshness,
     validate_nonempty_selection,
     validate_output_coverage,
     validate_requested_tickers,
@@ -42,6 +44,7 @@ from biotech_index.core.pipeline_guards import (
 LOGGER = logging.getLogger("parse_forward_guidance")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 PARSER_LOGIC_VERSION = "2026-04-27-forward-guidance-parser-v2"
+SQLITE_PARAM_CHUNK_SIZE = 800
 
 GUIDANCE_FIELDS = [
     "asof_date",
@@ -86,6 +89,16 @@ FEATURE_FIELDS = [
     "missing_fields",
     "payload_json",
 ]
+
+
+def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
+    step = max(1, int(size))
+    return [list(values[start : start + step]) for start in range(0, len(values), step)]
+
+
+def filing_sort_key(filing: "FilingText") -> tuple[str, int, str]:
+    date_key = int(re.sub(r"\D", "", filing.filing_date or "") or "0")
+    return filing.ticker, -date_key, filing.accession_nodash
 
 OVERRIDE_FIELDS = [
     "enabled",
@@ -206,14 +219,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -247,8 +253,10 @@ def to_int(raw: object) -> int | None:
 
 def enabled_flag(raw: object) -> bool:
     text = str(raw or "").strip().lower()
-    if text in {"", "1", "true", "yes", "y", "enabled", "include"}:
+    if text in {"1", "true", "yes", "y", "enabled", "include"}:
         return True
+    if text == "":
+        return False
     if text in {"0", "false", "no", "n", "disabled", "exclude"}:
         return False
     raise ValueError(f"Invalid enabled value: {raw}")
@@ -433,7 +441,7 @@ def detect_guidance(filing: FilingText, *, asof_date: date, min_confidence: floa
         return []
     filing_dt = parse_date(filing.filing_date)
     records: list[GuidanceRecord] = []
-    seen: set[tuple[str, int | None, float | None, float | None]] = set()
+    seen: set[tuple[str, int | None, str, str]] = set()
     for window in guidance_windows(text, max_windows=max_windows):
         lower_window = window.lower()
         if (
@@ -461,7 +469,12 @@ def detect_guidance(filing: FilingText, *, asof_date: date, min_confidence: floa
             confidence = confidence_for(form=filing.form, window=window, has_range=has_range, filing_date=filing_dt, asof_date=asof_date)
             if confidence < min_confidence:
                 continue
-            key = (metric, guidance_year, round(low_value or 0.0, 4), round(high_value or 0.0, 4))
+            key = (
+                metric,
+                guidance_year,
+                normalize_guidance_number(low_value, null_token="<NULL>"),
+                normalize_guidance_number(high_value, null_token="<NULL>"),
+            )
             if key in seen:
                 continue
             seen.add(key)
@@ -528,7 +541,7 @@ def guidance_record_id(*, ticker: str, metric: str, guidance_year: int | None, m
         [
             ticker.upper(),
             metric,
-            str(guidance_year or ""),
+            "" if guidance_year is None else str(guidance_year),
             f"{midpoint_value:.4f}" if midpoint_value is not None else "",
             source_name,
         ]
@@ -705,6 +718,21 @@ def load_filing_texts_bulk(
 ) -> list[FilingText]:
     if not company_ids:
         return []
+    if len(company_ids) > SQLITE_PARAM_CHUNK_SIZE:
+        out: list[FilingText] = []
+        for company_chunk in chunked(company_ids):
+            out.extend(
+                load_filing_texts_bulk(
+                    conn,
+                    company_ids=[int(value) for value in company_chunk],
+                    asof_date=asof_date,
+                    lookback_days=lookback_days,
+                    forms=forms,
+                    max_filings_per_company=max_filings_per_company,
+                )
+            )
+        out.sort(key=filing_sort_key)
+        return out
     cutoff = (asof_date - timedelta(days=max(1, lookback_days))).isoformat()
     company_placeholders = ",".join("?" for _ in company_ids)
     form_clause = ""
@@ -778,9 +806,173 @@ def load_filing_texts_bulk(
     ]
 
 
+def load_filing_metadata_bulk(
+    conn: sqlite3.Connection,
+    *,
+    company_ids: list[int],
+    asof_date: date,
+    lookback_days: int,
+    forms: set[str],
+    max_filings_per_company: int,
+) -> list[FilingText]:
+    """Select candidate filings without loading large SEC document text bodies."""
+    if not company_ids:
+        return []
+    if len(company_ids) > SQLITE_PARAM_CHUNK_SIZE:
+        out: list[FilingText] = []
+        for company_chunk in chunked(company_ids):
+            out.extend(
+                load_filing_metadata_bulk(
+                    conn,
+                    company_ids=[int(value) for value in company_chunk],
+                    asof_date=asof_date,
+                    lookback_days=lookback_days,
+                    forms=forms,
+                    max_filings_per_company=max_filings_per_company,
+                )
+            )
+        out.sort(key=filing_sort_key)
+        return out
+    cutoff = (asof_date - timedelta(days=max(1, lookback_days))).isoformat()
+    company_placeholders = ",".join("?" for _ in company_ids)
+    form_clause = ""
+    params: list[Any] = [*company_ids, cutoff, asof_date.isoformat()]
+    if forms:
+        form_clause = f"AND f.form IN ({','.join('?' for _ in forms)})"
+        params.extend(sorted(forms))
+    params.append(max(1, max_filings_per_company))
+    rows = conn.execute(
+        f"""
+        WITH target_filings AS (
+            SELECT f.company_id, c.ticker, c.company_name, f.accession_nodash,
+                   f.filing_date, f.form, f.archive_url
+            FROM sec_filings f
+            JOIN companies c ON c.company_id = f.company_id
+            WHERE f.company_id IN ({company_placeholders})
+              AND f.filing_date >= ?
+              AND f.filing_date <= ?
+              {form_clause}
+        ),
+        latest_docs AS (
+            SELECT f.accession_nodash, l.document_type, l.text_hash
+            FROM target_filings f
+            JOIN sec_filing_latest_document l ON l.accession_nodash = f.accession_nodash
+            UNION ALL
+            SELECT accession_nodash, document_type, text_hash
+            FROM (
+                SELECT d.accession_nodash, d.document_type, d.text_hash,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY d.accession_nodash
+                           ORDER BY
+                               CASE WHEN d.document_type = 'complete_submission_text' THEN 0 ELSE 1 END,
+                               d.fetched_at DESC,
+                               d.document_url DESC
+                       ) AS doc_rank
+                FROM sec_filing_documents d
+                JOIN target_filings f ON f.accession_nodash = d.accession_nodash
+                LEFT JOIN sec_filing_latest_document l ON l.accession_nodash = d.accession_nodash
+                WHERE l.accession_nodash IS NULL
+                  AND (
+                    COALESCE(d.text_length, 0) > 0
+                    OR d.text_hash IS NOT NULL
+                    OR d.text_content IS NOT NULL
+                  )
+            )
+            WHERE doc_rank = 1
+        ),
+        ranked_filings AS (
+            SELECT f.*, d.document_type,
+                   COALESCE(d.text_hash, '') AS source_text_hash,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY f.company_id
+                       ORDER BY f.filing_date DESC, f.accession_nodash DESC
+                   ) AS filing_rank
+            FROM target_filings f
+            JOIN latest_docs d ON d.accession_nodash = f.accession_nodash
+        )
+        SELECT *
+        FROM ranked_filings
+        WHERE filing_rank <= ?
+        ORDER BY ticker, filing_date DESC, accession_nodash DESC
+        """,
+        tuple(params),
+    ).fetchall()
+    return [
+        FilingText(
+            company_id=int(row["company_id"]),
+            ticker=str(row["ticker"] or "").upper(),
+            company_name=str(row["company_name"] or ""),
+            accession_nodash=str(row["accession_nodash"] or ""),
+            filing_date=str(row["filing_date"] or ""),
+            form=str(row["form"] or ""),
+            archive_url=str(row["archive_url"] or ""),
+            document_type=str(row["document_type"] or ""),
+            text_content="",
+            text_hash=str(row["source_text_hash"] or ""),
+        )
+        for row in rows
+    ]
+
+
+def load_filing_text_content_bulk(conn: sqlite3.Connection, filings: list[FilingText]) -> list[FilingText]:
+    """Load full document text only for filings that must be parsed."""
+    if not filings:
+        return []
+    filing_by_accession = {filing.accession_nodash: filing for filing in filings}
+    text_by_accession: dict[str, dict[str, Any]] = {}
+    accessions = list(filing_by_accession)
+    chunk_size = 900
+    for start in range(0, len(accessions), chunk_size):
+        chunk = accessions[start : start + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT accession_nodash, document_type, text_content, text_hash
+            FROM (
+                SELECT d.accession_nodash, d.document_type, d.text_content, d.text_hash,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY d.accession_nodash
+                           ORDER BY
+                               CASE WHEN d.document_type = 'complete_submission_text' THEN 0 ELSE 1 END,
+                               d.fetched_at DESC,
+                               d.document_url DESC
+                       ) AS doc_rank
+                FROM sec_filing_documents d
+                WHERE d.accession_nodash IN ({placeholders})
+                  AND d.text_content IS NOT NULL
+                  AND LENGTH(d.text_content) > 0
+            )
+            WHERE doc_rank = 1
+            """,
+            tuple(chunk),
+        ).fetchall()
+        for row in rows:
+            text_by_accession[str(row["accession_nodash"] or "")] = dict(row)
+
+    out: list[FilingText] = []
+    for filing in filings:
+        row = text_by_accession.get(filing.accession_nodash)
+        if not row:
+            out.append(filing)
+            continue
+        text = str(row.get("text_content") or "")
+        out.append(
+            FilingText(
+                **{
+                    **filing.__dict__,
+                    "document_type": str(row.get("document_type") or filing.document_type),
+                    "text_content": text,
+                    "text_hash": str(row.get("text_hash") or "") or text_hash(text),
+                }
+            )
+        )
+    return out
+
+
 def dashed_accession(accession_nodash: str) -> str:
     text = str(accession_nodash or "")
-    if len(text) < 18:
+    if len(text) != 18 or not text.isdigit():
+        LOGGER.warning("Malformed SEC accession_nodash for complete submission fetch: %s", text)
         return text
     return f"{text[:10]}-{text[10:12]}-{text[12:]}"
 
@@ -1362,6 +1554,96 @@ def build_feature_row(
     }
 
 
+def normalize_guidance_number(raw: object, *, null_token: str = "") -> str:
+    if raw is None:
+        return null_token
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return str(raw)
+    if not math.isfinite(value):
+        return null_token
+    return f"{value:.12g}"
+
+
+def guidance_unique_key_from_values(
+    asof_date: object,
+    company_id: object,
+    accession_nodash: object,
+    metric: object,
+    guidance_year: object,
+    low_value: object,
+    high_value: object,
+) -> str:
+    parts = [
+        str(asof_date or ""),
+        int(company_id),
+        str(accession_nodash or ""),
+        str(metric or ""),
+        "<NULL>" if guidance_year is None else str(guidance_year),
+        normalize_guidance_number(low_value, null_token="<NULL>"),
+        normalize_guidance_number(high_value, null_token="<NULL>"),
+    ]
+    return json.dumps(parts, ensure_ascii=True, separators=(",", ":"))
+
+
+def guidance_unique_key(record: GuidanceRecord) -> str:
+    return guidance_unique_key_from_values(
+        record.asof_date,
+        record.company_id,
+        record.accession_nodash,
+        record.metric,
+        record.guidance_year,
+        record.low_value,
+        record.high_value,
+    )
+
+
+def load_existing_guidance_created_at(
+    conn: sqlite3.Connection,
+    asof_date: str,
+    target_company_ids: set[int] | None,
+) -> dict[str, str]:
+    params: list[object] = [asof_date]
+    company_clause = ""
+    if target_company_ids is not None:
+        if not target_company_ids:
+            return {}
+        if len(target_company_ids) > SQLITE_PARAM_CHUNK_SIZE:
+            out: dict[str, str] = {}
+            for company_chunk in chunked(sorted(target_company_ids)):
+                out.update(load_existing_guidance_created_at(conn, asof_date, {int(value) for value in company_chunk}))
+            return out
+        company_placeholders = ",".join("?" for _ in target_company_ids)
+        company_clause = f" AND company_id IN ({company_placeholders})"
+        params.extend(sorted(target_company_ids))
+    rows = conn.execute(
+        f"""
+        SELECT asof_date, company_id, accession_nodash, metric, guidance_year,
+               COALESCE(guidance_unique_key, '') AS guidance_unique_key,
+               low_value, high_value, created_at
+        FROM company_forward_guidance
+        WHERE asof_date = ?{company_clause}
+        """,
+        params,
+    ).fetchall()
+    return {
+        (
+            str(row["guidance_unique_key"] or "")
+            or guidance_unique_key_from_values(
+                row["asof_date"],
+                row["company_id"],
+                row["accession_nodash"],
+                row["metric"],
+                row["guidance_year"],
+                row["low_value"],
+                row["high_value"],
+            )
+        ): str(row["created_at"] or "")
+        for row in rows
+    }
+
+
 def replace_guidance(
     conn: sqlite3.Connection,
     records: list[GuidanceRecord],
@@ -1373,37 +1655,33 @@ def replace_guidance(
 ) -> None:
     now = utc_now()
     with conn:
+        existing_guidance_created_at = load_existing_guidance_created_at(conn, asof_date, target_company_ids)
         if target_company_ids is None:
             conn.execute("DELETE FROM company_forward_guidance WHERE asof_date = ?", (asof_date,))
             conn.execute("DELETE FROM company_forward_guidance_overrides WHERE asof_date = ?", (asof_date,))
             conn.execute("DELETE FROM forward_guidance_features_daily WHERE asof_date = ?", (asof_date,))
         elif target_company_ids:
-            company_placeholders = ",".join("?" for _ in target_company_ids)
-            params = (asof_date, *sorted(target_company_ids))
-            conn.execute(
-                f"DELETE FROM company_forward_guidance WHERE asof_date = ? AND company_id IN ({company_placeholders})",
-                params,
-            )
-            conn.execute(
-                f"DELETE FROM company_forward_guidance_overrides WHERE asof_date = ? AND company_id IN ({company_placeholders})",
-                params,
-            )
-            conn.execute(
-                f"DELETE FROM forward_guidance_features_daily WHERE asof_date = ? AND company_id IN ({company_placeholders})",
-                params,
-            )
+            for company_chunk in chunked(sorted(target_company_ids)):
+                company_placeholders = ",".join("?" for _ in company_chunk)
+                params = (asof_date, *company_chunk)
+                conn.execute(
+                    f"DELETE FROM company_forward_guidance WHERE asof_date = ? AND company_id IN ({company_placeholders})",
+                    params,
+                )
+                conn.execute(
+                    f"DELETE FROM company_forward_guidance_overrides WHERE asof_date = ? AND company_id IN ({company_placeholders})",
+                    params,
+                )
+                conn.execute(
+                    f"DELETE FROM forward_guidance_features_daily WHERE asof_date = ? AND company_id IN ({company_placeholders})",
+                    params,
+                )
         else:
             return
+        guidance_params: list[tuple[Any, ...]] = []
         for record in records:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO company_forward_guidance(
-                    asof_date, company_id, ticker, company_name, accession_nodash, filing_date, form,
-                    metric, guidance_year, period_label, low_value, high_value, midpoint_value,
-                    unit, currency, confidence, source_excerpt, source_payload, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+            unique_key = guidance_unique_key(record)
+            guidance_params.append(
                 (
                     record.asof_date,
                     record.company_id,
@@ -1417,42 +1695,47 @@ def replace_guidance(
                     record.period_label,
                     record.low_value,
                     record.high_value,
+                    unique_key,
                     record.midpoint_value,
                     record.unit,
                     record.currency,
                     record.confidence,
                     record.source_excerpt,
                     record.source_payload,
-                    now,
+                    existing_guidance_created_at.get(unique_key, now),
                     now,
                 ),
             )
-        for record in override_records:
-            payload = safe_json_loads(record.source_payload)
-            conn.execute(
+        if guidance_params:
+            conn.executemany(
                 """
-                INSERT INTO company_forward_guidance_overrides(
-                    asof_date, company_id, ticker, company_name, unique_key, metric, guidance_year, period_label,
-                    low_value, high_value, midpoint_value, unit, currency, filing_date, form,
-                    confidence, source_name, source_url, source_excerpt, override_reason, enabled,
-                    created_at, updated_at
+                INSERT INTO company_forward_guidance(
+                    asof_date, company_id, ticker, company_name, accession_nodash, filing_date, form,
+                    metric, guidance_year, period_label, low_value, high_value, guidance_unique_key, midpoint_value,
+                    unit, currency, confidence, source_excerpt, source_payload, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(unique_key) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guidance_unique_key)
+                DO UPDATE SET
+                    ticker = excluded.ticker,
                     company_name = excluded.company_name,
+                    filing_date = excluded.filing_date,
+                    form = excluded.form,
                     period_label = excluded.period_label,
                     midpoint_value = excluded.midpoint_value,
                     unit = excluded.unit,
                     currency = excluded.currency,
-                    filing_date = excluded.filing_date,
-                    form = excluded.form,
                     confidence = excluded.confidence,
-                    source_url = excluded.source_url,
                     source_excerpt = excluded.source_excerpt,
-                    override_reason = excluded.override_reason,
-                    enabled = excluded.enabled,
+                    source_payload = excluded.source_payload,
                     updated_at = excluded.updated_at
                 """,
+                guidance_params,
+            )
+        override_params: list[tuple[Any, ...]] = []
+        for record in override_records:
+            payload = safe_json_loads(record.source_payload)
+            override_params.append(
                 (
                     record.asof_date,
                     record.company_id,
@@ -1477,10 +1760,67 @@ def replace_guidance(
                     1,
                     now,
                     now,
-                ),
+                )
             )
-        for row in features:
-            conn.execute(
+        if override_params:
+            conn.executemany(
+                """
+                INSERT INTO company_forward_guidance_overrides(
+                    asof_date, company_id, ticker, company_name, unique_key, metric, guidance_year, period_label,
+                    low_value, high_value, midpoint_value, unit, currency, filing_date, form,
+                    confidence, source_name, source_url, source_excerpt, override_reason, enabled,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(unique_key) DO UPDATE SET
+                    company_name = excluded.company_name,
+                    period_label = excluded.period_label,
+                    midpoint_value = excluded.midpoint_value,
+                    unit = excluded.unit,
+                    currency = excluded.currency,
+                    filing_date = excluded.filing_date,
+                    form = excluded.form,
+                    confidence = excluded.confidence,
+                    source_url = excluded.source_url,
+                    source_excerpt = excluded.source_excerpt,
+                    override_reason = excluded.override_reason,
+                    enabled = excluded.enabled,
+                    updated_at = excluded.updated_at
+                """,
+                override_params,
+            )
+        feature_params = [
+            (
+                row["asof_date"],
+                row["company_id"],
+                row["ticker"],
+                row["company_name"],
+                row["latest_guidance_filing_date"],
+                row["forward_revenue_midpoint"],
+                row["forward_revenue_low"],
+                row["forward_revenue_high"],
+                row["forward_revenue_year"],
+                row["forward_revenue_growth_pct"],
+                row["forward_ebitda_midpoint"],
+                row["forward_ebitda_margin_pct"],
+                row["forward_eps_midpoint"],
+                row["guidance_confidence"],
+                row["guidance_recency_days"],
+                row["forward_profitability_flag"],
+                row["guidance_score"],
+                row["forward_growth_score"],
+                row["forward_profitability_score"],
+                row["forward_valuation_score"],
+                row["data_quality"],
+                row["missing_fields"],
+                row["payload_json"],
+                now,
+                now,
+            )
+            for row in features
+        ]
+        if feature_params:
+            conn.executemany(
                 """
                 INSERT INTO forward_guidance_features_daily(
                     asof_date, company_id, ticker, company_name, latest_guidance_filing_date,
@@ -1514,33 +1854,7 @@ def replace_guidance(
                     payload_json = excluded.payload_json,
                     updated_at = excluded.updated_at
                 """,
-                (
-                    row["asof_date"],
-                    row["company_id"],
-                    row["ticker"],
-                    row["company_name"],
-                    row["latest_guidance_filing_date"],
-                    row["forward_revenue_midpoint"],
-                    row["forward_revenue_low"],
-                    row["forward_revenue_high"],
-                    row["forward_revenue_year"],
-                    row["forward_revenue_growth_pct"],
-                    row["forward_ebitda_midpoint"],
-                    row["forward_ebitda_margin_pct"],
-                    row["forward_eps_midpoint"],
-                    row["guidance_confidence"],
-                    row["guidance_recency_days"],
-                    row["forward_profitability_flag"],
-                    row["guidance_score"],
-                    row["forward_growth_score"],
-                    row["forward_profitability_score"],
-                    row["forward_valuation_score"],
-                    row["data_quality"],
-                    row["missing_fields"],
-                    row["payload_json"],
-                    now,
-                    now,
-                ),
+                feature_params,
             )
 
 
@@ -1615,12 +1929,21 @@ def main() -> None:
         companies_by_ticker = {normalize_ticker(company["ticker"]): company for company in companies}
         override_records = load_guidance_overrides(overrides_csv, companies_by_ticker, asof_date=asof_date)
         commercial_by_company = latest_commercial_rows(conn, asof_date)
+        validate_layer_freshness(
+            base_rows=companies,
+            layer_rows_by_company=commercial_by_company,
+            asof_date=asof_date,
+            context="forward guidance parse commercial_value_features_daily",
+            max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0)),
+        )
         run_id = start_run(conn, run_type="parse_forward_guidance", input_path=universe_csv)
         try:
+            overall_start = time.perf_counter()
             all_records: list[GuidanceRecord] = []
             records_by_company: dict[int, list[GuidanceRecord]] = {}
             company_ids = [int(company["company_id"]) for company in companies]
-            selected_filings = load_filing_texts_bulk(
+            phase_start = time.perf_counter()
+            selected_filings = load_filing_metadata_bulk(
                 conn,
                 company_ids=company_ids,
                 asof_date=asof_date,
@@ -1628,6 +1951,8 @@ def main() -> None:
                 forms=forms,
                 max_filings_per_company=max_filings_per_company,
             )
+            LOGGER.info("Forward guidance metadata selected: companies=%d filings=%d elapsed=%.3fs", len(companies), len(selected_filings), time.perf_counter() - phase_start)
+            phase_start = time.perf_counter()
             parse_state = load_forward_guidance_parse_state(conn, [filing.accession_nodash for filing in selected_filings])
             if run_mode == "daily_delta":
                 unchanged_filings = [
@@ -1644,7 +1969,14 @@ def main() -> None:
             else:
                 unchanged_filings = []
                 filings_to_parse = selected_filings
+            LOGGER.info(
+                "Forward guidance parse-state split: unchanged=%d to_parse=%d elapsed=%.3fs",
+                len(unchanged_filings),
+                len(filings_to_parse),
+                time.perf_counter() - phase_start,
+            )
 
+            phase_start = time.perf_counter()
             reused_records = load_previous_guidance_records(conn, filings=unchanged_filings, asof_date=asof_date)
             reused_accessions = {record.accession_nodash for record in reused_records}
             missing_reuse = [
@@ -1658,6 +1990,9 @@ def main() -> None:
                 filings_to_parse.extend(missing_reuse)
                 unchanged_filings = [filing for filing in unchanged_filings if filing.accession_nodash not in missing_reuse_accessions]
                 LOGGER.info("Forward guidance reparsing %d unchanged filings with missing prior parsed rows", len(missing_reuse))
+            LOGGER.info("Forward guidance prior-record reuse loaded: records=%d elapsed=%.3fs", len(reused_records), time.perf_counter() - phase_start)
+            phase_start = time.perf_counter()
+            filings_to_parse = load_filing_text_content_bulk(conn, filings_to_parse)
             prepared_filings = prepare_filing_texts(
                 conn,
                 filings_to_parse,
@@ -1671,6 +2006,8 @@ def main() -> None:
                 max_retries=max_retries,
                 max_workers=max_workers,
             )
+            LOGGER.info("Forward guidance text preparation complete: filings=%d elapsed=%.3fs", len(prepared_filings), time.perf_counter() - phase_start)
+            phase_start = time.perf_counter()
             parsed_records, guidance_counts = parse_guidance_records(
                 prepared_filings,
                 asof_date=asof_date,
@@ -1678,6 +2015,7 @@ def main() -> None:
                 max_windows_per_filing=max_windows_per_filing,
                 max_workers=max_workers,
             )
+            LOGGER.info("Forward guidance parsing complete: filings=%d records=%d elapsed=%.3fs", len(prepared_filings), len(parsed_records), time.perf_counter() - phase_start)
             upsert_forward_guidance_parse_state(
                 conn,
                 filings=prepared_filings,
@@ -1701,6 +2039,7 @@ def main() -> None:
             for record in override_records:
                 records_by_company.setdefault(record.company_id, []).append(record)
             combined_records = [*all_records, *override_records]
+            phase_start = time.perf_counter()
             feature_rows = [
                 build_feature_row(
                     company=company,
@@ -1710,6 +2049,7 @@ def main() -> None:
                 )
                 for company in companies
             ]
+            LOGGER.info("Forward guidance feature rows built: rows=%d elapsed=%.3fs", len(feature_rows), time.perf_counter() - phase_start)
             partial_run = bool(ticker_filter) or int(args.max_companies) > 0
             validate_output_coverage(
                 expected_tickers=scoring_tickers,
@@ -1727,6 +2067,7 @@ def main() -> None:
             )
             write_csv(guidance_csv, [record.__dict__ for record in combined_records], ["company_id", *GUIDANCE_FIELDS, "source_payload"])
             write_csv(features_csv, feature_rows, ["company_id", *FEATURE_FIELDS])
+            LOGGER.info("Built forward guidance features: companies=%d records=%d overrides=%d elapsed=%.3fs output=%s", len(companies), len(combined_records), len(override_records), time.perf_counter() - overall_start, features_csv)
             finish_run(
                 conn,
                 run_id=run_id,
@@ -1741,7 +2082,6 @@ def main() -> None:
         except Exception as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
-    LOGGER.info("Built forward guidance features: companies=%d records=%d overrides=%d output=%s", len(companies), len(combined_records), len(override_records), features_csv)
 
 
 if __name__ == "__main__":

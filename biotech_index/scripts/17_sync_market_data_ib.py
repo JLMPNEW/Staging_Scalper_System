@@ -8,7 +8,6 @@ import logging
 import math
 import sqlite3
 import sys
-import time
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
@@ -23,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
     normalize_ticker,
     read_final_scoring_tickers,
@@ -37,6 +37,14 @@ from biotech_index.core.pipeline_guards import (
 LOGGER = logging.getLogger("sync_market_data_ib")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 SOURCE = "interactive_brokers"
+SQLITE_PARAM_CHUNK_SIZE = 800
+
+
+def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
+    step = max(1, int(size))
+    return [list(values[start : start + step]) for start in range(0, len(values), step)]
+
+
 CSV_FIELDNAMES = [
     "asof_date",
     "ticker",
@@ -91,18 +99,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--full-refresh", action="store_true", help="Refetch the configured duration for every ticker instead of using incremental DB-backed refresh.")
     parser.add_argument("--repair-window-days", type=int, default=None, help="Refetch at least this many recent calendar days for every ticker in incremental mode.")
     parser.add_argument("--allow-partial", action="store_true", help="Return success even if one or more ticker updates fail.")
+    parser.add_argument(
+        "--offline-existing-bars",
+        action="store_true",
+        help="Build historical market snapshots/features only from existing market_bars_daily rows without connecting to IB.",
+    )
     return parser.parse_args()
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
     logging.getLogger("ib_insync.wrapper").setLevel(logging.WARNING)
     logging.getLogger("ib_insync.client").setLevel(logging.WARNING)
     logging.getLogger("ib_insync.ib").setLevel(logging.WARNING)
@@ -831,17 +837,18 @@ def delete_market_rows_for_companies(
 ) -> None:
     if not company_ids:
         return
-    placeholders = ",".join("?" for _ in company_ids)
-    params = (asof_date.isoformat(), source, *sorted(company_ids))
     with conn:
-        conn.execute(
-            f"DELETE FROM market_snapshots_daily WHERE asof_date = ? AND source = ? AND company_id IN ({placeholders})",
-            params,
-        )
-        conn.execute(
-            f"DELETE FROM market_features_daily WHERE asof_date = ? AND source = ? AND company_id IN ({placeholders})",
-            params,
-        )
+        for company_chunk in chunked(sorted(company_ids)):
+            placeholders = ",".join("?" for _ in company_chunk)
+            params = (asof_date.isoformat(), source, *company_chunk)
+            conn.execute(
+                f"DELETE FROM market_snapshots_daily WHERE asof_date = ? AND source = ? AND company_id IN ({placeholders})",
+                params,
+            )
+            conn.execute(
+                f"DELETE FROM market_features_daily WHERE asof_date = ? AND source = ? AND company_id IN ({placeholders})",
+                params,
+            )
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -855,6 +862,13 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def load_current_feature_csv_rows(conn: sqlite3.Connection, companies: list[Company], asof_date: date) -> list[dict[str, Any]]:
     if not companies:
         return []
+    if len(companies) > SQLITE_PARAM_CHUNK_SIZE:
+        rows: list[dict[str, Any]] = []
+        company_order = {company.company_id: idx for idx, company in enumerate(companies)}
+        for company_chunk in chunked(companies):
+            rows.extend(load_current_feature_csv_rows(conn, [company for company in company_chunk], asof_date))
+        rows.sort(key=lambda row: (company_order.get(int(row.get("company_id") or 0), len(company_order)), str(row.get("ticker") or "")))
+        return rows
     company_names = {company.company_id: company.company_name for company in companies}
     company_order = {company.company_id: idx for idx, company in enumerate(companies)}
     placeholders = ",".join("?" for _ in company_names)
@@ -921,6 +935,9 @@ def main() -> None:
         raise ValueError(f"--start-date {start_date.isoformat()} is after effective as-of date {asof_date.isoformat()}")
     duration = duration_override or str(cfg_get(config, "ib_market_data.duration", "1 Y"))
     full_refresh = bool(args.full_refresh or duration_override or start_date is not None)
+    offline_existing_bars = bool(args.offline_existing_bars)
+    if offline_existing_bars and full_refresh:
+        raise ValueError("--offline-existing-bars cannot be combined with --full-refresh, --duration, or --start-date")
     repair_window_days = (
         max(0, int(args.repair_window_days))
         if args.repair_window_days is not None
@@ -932,15 +949,18 @@ def main() -> None:
     continuity_max_missing_days = int(cfg_get(config, "ib_market_data.continuity_max_missing_days", 2))
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
 
-    try:
-        from ib_insync import IB  # type: ignore
-    except Exception as exc:
-        raise RuntimeError("ib_insync is required for IB market data sync. Install package 'ib_insync'.") from exc
+    if offline_existing_bars:
+        IB = None
+    else:
+        try:
+            from ib_insync import IB  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("ib_insync is required for IB market data sync. Install package 'ib_insync'.") from exc
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         init_db(conn)
         run_id = start_run(conn, run_type="sync_market_data_ib", input_path=db_path)
-        ib = IB()
+        ib = IB() if IB is not None else None
         try:
             scoring_tickers = read_scoring_tickers(final_universe_csv)
             companies = load_companies(conn, scoring_tickers=scoring_tickers, ticker_filter=ticker_filter, max_tickers=args.max_tickers)
@@ -958,10 +978,12 @@ def main() -> None:
             LOGGER.info(
                 "Loaded %d company job(s) for IB market sync mode=%s",
                 len(companies),
-                "full_refresh" if full_refresh else "incremental",
+                "offline_existing_bars" if offline_existing_bars else ("full_refresh" if full_refresh else "incremental"),
             )
 
             def ensure_ib_connected() -> None:
+                if ib is None:
+                    raise RuntimeError("IB connection requested while --offline-existing-bars is enabled")
                 if not ib.isConnected():
                     ib.connect(
                         host,
@@ -978,10 +1000,12 @@ def main() -> None:
 
             xbi_existing = [] if full_refresh else load_bars_from_db(conn, "XBI", start_date=history_start, asof_date=asof_date)
             xbi_latest = None if full_refresh else latest_bar_date(conn, "XBI", asof_date=asof_date)
-            xbi_fetch_needed = full_refresh or should_fetch_incremental(
-                xbi_latest,
-                asof_date,
-                repair_window_days=repair_window_days,
+            xbi_fetch_needed = False if offline_existing_bars else (
+                full_refresh or should_fetch_incremental(
+                    xbi_latest,
+                    asof_date,
+                    repair_window_days=repair_window_days,
+                )
             )
             xbi_fetched: list[dict[str, Any]] = []
             benchmark_refresh_failed = False
@@ -1018,6 +1042,8 @@ def main() -> None:
                         raise
                     benchmark_refresh_failed = True
                     LOGGER.warning("XBI benchmark refresh failed; using existing bars: %s", exc)
+            elif offline_existing_bars:
+                LOGGER.info("XBI benchmark using existing DB bars for offline snapshot through %s", asof_date.isoformat())
             else:
                 LOGGER.info("XBI benchmark already current through %s; using DB bars", asof_date.isoformat())
             xbi_bars = xbi_fetched if full_refresh else merge_bar_rows(xbi_existing, xbi_fetched, asof_date=asof_date)
@@ -1038,14 +1064,20 @@ def main() -> None:
                         asof_date=asof_date,
                     )
                     latest_date = None if full_refresh else latest_bar_date(conn, company.ticker, asof_date=asof_date)
-                    fetch_needed = full_refresh or should_fetch_incremental(
-                        latest_date,
-                        asof_date,
-                        repair_window_days=repair_window_days,
+                    fetch_needed = False if offline_existing_bars else (
+                        full_refresh or should_fetch_incremental(
+                            latest_date,
+                            asof_date,
+                            repair_window_days=repair_window_days,
+                        )
                     )
                     fetched_bars: list[dict[str, Any]] = []
                     fetch_error: Exception | None = None
-                    action = "skipped"
+                    action = "offline_existing" if offline_existing_bars else "skipped"
+                    if offline_existing_bars and not existing_bars:
+                        failed_tickers.append(company.ticker)
+                        LOGGER.warning("IB market offline snapshot has no existing bars for %s", company.ticker)
+                        continue
                     if fetch_needed:
                         fetch_duration = (
                             duration
@@ -1128,9 +1160,10 @@ def main() -> None:
             missing_csv_tickers = sorted({company.ticker for company in companies} - csv_tickers)
             write_csv(output_csv, csv_rows)
             status = "partial" if benchmark_refresh_failed or unique_failed_tickers or missing_csv_tickers else "success"
+            mode_label = "offline_existing_bars" if offline_existing_bars else ("full_refresh" if full_refresh else "incremental")
             message = (
                 f"requested_asof={asof_decision.requested_asof.isoformat()} "
-                f"effective_asof={asof_date.isoformat()} mode={'full_refresh' if full_refresh else 'incremental'} "
+                f"effective_asof={asof_date.isoformat()} mode={mode_label} "
                 f"duration={duration} start_date={start_date.isoformat() if start_date else ''} "
                 f"repair_window_days={repair_window_days if not full_refresh else ''} "
                 f"fetched={len(fetched_tickers)} skipped={len(skipped_tickers)} stale_existing={len(stale_feature_tickers)} "
@@ -1143,15 +1176,15 @@ def main() -> None:
             if benchmark_refresh_failed:
                 message += " benchmark_refresh_failed=1"
             finish_run(conn, run_id=run_id, status=status, row_count=len(features), message=message)
+            LOGGER.info("IB market sync complete: rows=%d output=%s", len(features), output_csv)
             if status != "success" and not args.allow_partial:
                 raise SystemExit(2)
-        except Exception as exc:
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
         finally:
-            if ib.isConnected():
+            if ib is not None and ib.isConnected():
                 ib.disconnect()
-    LOGGER.info("IB market sync complete: rows=%d output=%s", len(features), output_csv)
 
 
 if __name__ == "__main__":

@@ -8,9 +8,9 @@ import logging
 import math
 import sqlite3
 import sys
-import time
 from datetime import date, datetime
 from pathlib import Path
+from statistics import median as statistics_median
 from typing import Any
 
 
@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run
+from biotech_index.core.logging_utils import configure_utc_logging
 
 
 LOGGER = logging.getLogger("publish_multibagger_report")
@@ -34,6 +35,16 @@ CANDIDATE_FIELDS = [
     "company_name",
     "bucket",
     "multibagger_score",
+    "base_multibagger_score",
+    "orthogonal_alpha_score",
+    "distinctive_acceleration_score",
+    "tier1_opportunity_score",
+    "tier1_risk_score",
+    "tier1_bucket",
+    "tier1_gate_score",
+    "tier1_gate_multiplier",
+    "tier1_available",
+    "tier1_interaction_reason",
     "commercial_acceleration_score",
     "upside_capacity_score",
     "cash_flow_acceleration_score",
@@ -95,6 +106,10 @@ SUMMARY_FIELDS = [
     "speculative_count",
     "large_cap_quality_count",
     "avoid_count",
+    "avoid_tier1_conflict_count",
+    "avoid_tier1_risk_count",
+    "tier1_context_count",
+    "tier1_missing_count",
 ]
 
 
@@ -107,14 +122,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -156,6 +164,9 @@ def load_rows(conn: sqlite3.Connection, asof_date: str) -> list[dict[str, Any]]:
         """
         SELECT
             s.asof_date, s.company_id, s.ticker, s.company_name, s.multibagger_score, s.rank,
+            s.base_multibagger_score, s.orthogonal_alpha_score, s.distinctive_acceleration_score,
+            s.tier1_opportunity_score, s.tier1_risk_score, s.tier1_bucket, s.tier1_gate_score,
+            s.tier1_gate_multiplier, s.tier1_available, s.tier1_interaction_reason,
             s.bucket, s.top_evidence_json,
             f.commercial_acceleration_score, f.upside_capacity_score, f.cash_flow_acceleration_score,
             f.survival_quality_score, f.governance_event_score, f.market_confirmation_score,
@@ -189,6 +200,16 @@ def flatten(row: dict[str, Any]) -> dict[str, Any]:
         "company_name": row.get("company_name"),
         "bucket": row.get("bucket"),
         "multibagger_score": row.get("multibagger_score"),
+        "base_multibagger_score": row.get("base_multibagger_score"),
+        "orthogonal_alpha_score": row.get("orthogonal_alpha_score"),
+        "distinctive_acceleration_score": row.get("distinctive_acceleration_score"),
+        "tier1_opportunity_score": row.get("tier1_opportunity_score"),
+        "tier1_risk_score": row.get("tier1_risk_score"),
+        "tier1_bucket": row.get("tier1_bucket"),
+        "tier1_gate_score": row.get("tier1_gate_score"),
+        "tier1_gate_multiplier": row.get("tier1_gate_multiplier"),
+        "tier1_available": row.get("tier1_available"),
+        "tier1_interaction_reason": row.get("tier1_interaction_reason"),
         "commercial_acceleration_score": row.get("commercial_acceleration_score"),
         "upside_capacity_score": row.get("upside_capacity_score"),
         "cash_flow_acceleration_score": row.get("cash_flow_acceleration_score"),
@@ -240,25 +261,26 @@ def flatten(row: dict[str, Any]) -> dict[str, Any]:
 
 def build_summary(rows: list[dict[str, Any]], candidate_rows: list[dict[str, Any]], top_n: int, asof_date: str) -> dict[str, Any]:
     scores = [to_float(row.get("multibagger_score")) for row in rows]
-    sorted_scores = sorted(scores)
-    median = 0.0
-    if sorted_scores:
-        mid = len(sorted_scores) // 2
-        median = sorted_scores[mid] if len(sorted_scores) % 2 else (sorted_scores[mid - 1] + sorted_scores[mid]) / 2.0
+    median_score = statistics_median(scores) if scores else 0.0
     top_scores = [to_float(row.get("multibagger_score")) for row in candidate_rows[:top_n]]
     buckets = [str(row.get("bucket") or "") for row in rows]
+    tier1_available = [str(row.get("tier1_available") or "").strip().lower() for row in rows]
     return {
         "asof_date": asof_date,
         "score_count": len(rows),
         "candidate_count": len(candidate_rows),
         "top_n": top_n,
         "top_n_avg_score": round(sum(top_scores) / len(top_scores), 4) if top_scores else 0.0,
-        "median_score": round(median, 4),
+        "median_score": round(median_score, 4),
         "high_conviction_count": sum(1 for bucket in buckets if bucket == "high_conviction_multibagger"),
         "watchlist_count": sum(1 for bucket in buckets if bucket == "multibagger_watchlist"),
         "speculative_count": sum(1 for bucket in buckets if bucket == "speculative_multibagger"),
         "large_cap_quality_count": sum(1 for bucket in buckets if bucket == "large_cap_quality"),
         "avoid_count": sum(1 for bucket in buckets if bucket.startswith("avoid")),
+        "avoid_tier1_conflict_count": sum(1 for bucket in buckets if bucket == "avoid_tier1_conflict"),
+        "avoid_tier1_risk_count": sum(1 for bucket in buckets if bucket == "avoid_tier1_risk"),
+        "tier1_context_count": sum(1 for value in tier1_available if value in {"1", "true", "yes"}),
+        "tier1_missing_count": sum(1 for value in tier1_available if value not in {"1", "true", "yes"}),
     }
 
 
@@ -315,6 +337,10 @@ def main() -> None:
                     "company_name": row["company_name"],
                     "bucket": row["bucket"],
                     "multibagger_score": row["multibagger_score"],
+                    "tier1_bucket": row.get("tier1_bucket", ""),
+                    "tier1_gate_score": row.get("tier1_gate_score", ""),
+                    "tier1_gate_multiplier": row.get("tier1_gate_multiplier", ""),
+                    "tier1_interaction_reason": row.get("tier1_interaction_reason", ""),
                     "evidence": evidence_by_ticker.get(str(row["ticker"] or ""), {}),
                 }
                 for row in candidate_rows
@@ -323,11 +349,11 @@ def main() -> None:
             write_csv(candidates_csv, candidate_rows, CANDIDATE_FIELDS)
             write_csv(summary_csv, [summary], SUMMARY_FIELDS)
             write_json(evidence_json, evidence_cards)
+            LOGGER.info("Multibagger report published: candidates=%d output=%s", len(candidate_rows), candidates_csv)
             finish_run(conn, run_id=run_id, status="success", row_count=len(candidate_rows), message=f"asof={asof_date} output={candidates_csv}")
-        except Exception as exc:
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
-    LOGGER.info("Multibagger report published: candidates=%d output=%s", len(candidate_rows), candidates_csv)
 
 
 if __name__ == "__main__":

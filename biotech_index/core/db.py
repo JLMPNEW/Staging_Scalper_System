@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 import sqlite3
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
@@ -357,6 +359,25 @@ CREATE TABLE IF NOT EXISTS forward_guidance_parse_state (
     FOREIGN KEY (accession_nodash) REFERENCES sec_filings(accession_nodash) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS sec_governance_signal_cache (
+    accession_nodash TEXT NOT NULL,
+    text_hash TEXT NOT NULL,
+    parser_signature TEXT NOT NULL,
+    buyback_flag INTEGER NOT NULL DEFAULT 0,
+    asr_flag INTEGER NOT NULL DEFAULT 0,
+    leadership_flag INTEGER NOT NULL DEFAULT 0,
+    cfo_departure_flag INTEGER NOT NULL DEFAULT 0,
+    regulatory_setback_flag INTEGER NOT NULL DEFAULT 0,
+    adverse_legal_flag INTEGER NOT NULL DEFAULT 0,
+    generic_competition_flag INTEGER NOT NULL DEFAULT 0,
+    product_concentration_flag INTEGER NOT NULL DEFAULT 0,
+    matches TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(accession_nodash, text_hash, parser_signature),
+    FOREIGN KEY (accession_nodash) REFERENCES sec_filings(accession_nodash) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS financial_survival_features (
     asof_date TEXT NOT NULL,
     company_id INTEGER NOT NULL,
@@ -602,6 +623,7 @@ CREATE TABLE IF NOT EXISTS company_forward_guidance (
     period_label TEXT,
     low_value REAL,
     high_value REAL,
+    guidance_unique_key TEXT,
     midpoint_value REAL,
     unit TEXT,
     currency TEXT,
@@ -770,9 +792,11 @@ CREATE INDEX IF NOT EXISTS idx_market_bars_source_ticker_date ON market_bars_dai
 CREATE INDEX IF NOT EXISTS idx_market_features_asof_company ON market_features_daily(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_commercial_value_asof_company ON commercial_value_features_daily(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_forward_guidance_company_date ON company_forward_guidance(company_id, filing_date);
+CREATE INDEX IF NOT EXISTS idx_forward_guidance_accession_asof ON company_forward_guidance(accession_nodash, asof_date);
 CREATE INDEX IF NOT EXISTS idx_forward_guidance_overrides_asof_company ON company_forward_guidance_overrides(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_forward_guidance_features_asof_company ON forward_guidance_features_daily(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_forward_guidance_parse_state_hash ON forward_guidance_parse_state(text_hash);
+CREATE INDEX IF NOT EXISTS idx_sec_governance_signal_cache_signature ON sec_governance_signal_cache(parser_signature, accession_nodash, text_hash);
 CREATE INDEX IF NOT EXISTS idx_sec_filing_documents_accession_type ON sec_filing_documents(accession_nodash, document_type, fetched_at);
 CREATE INDEX IF NOT EXISTS idx_sec_filing_latest_document_hash ON sec_filing_latest_document(text_hash);
 CREATE INDEX IF NOT EXISTS idx_sec_filing_latest_document_type ON sec_filing_latest_document(document_type, fetched_at);
@@ -783,6 +807,17 @@ CREATE INDEX IF NOT EXISTS idx_multibagger_features_asof_company ON multibagger_
 CREATE INDEX IF NOT EXISTS idx_multibagger_scores_asof_rank ON multibagger_scores_daily(asof_date, rank);
 CREATE INDEX IF NOT EXISTS idx_daily_scores_asof_rank ON daily_scores(asof_date, rank);
 """
+
+SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def quote_identifier(identifier: str) -> str:
+    """Quote a trusted SQLite identifier after a strict identifier safety check."""
+    text = str(identifier or "").strip()
+    if not SAFE_IDENTIFIER_RE.fullmatch(text):
+        raise ValueError(f"Unsafe SQLite identifier: {identifier!r}")
+    return f'"{text}"'
+
 
 COMPANY_OPTIONAL_COLUMNS = {
     "security_type": "TEXT",
@@ -840,6 +875,10 @@ DAILY_SCORES_OPTIONAL_COLUMNS = {
     "valuation_score": "REAL",
     "upside_capacity_score": "REAL",
     "investment_score": "REAL",
+    "tier1_selection_gate_score": "REAL",
+    "data_quality_confidence_multiplier": "REAL",
+    "clinical_risk_drag": "REAL",
+    "investment_risk_drag": "REAL",
 }
 
 MARKET_BARS_OPTIONAL_COLUMNS = {
@@ -853,8 +892,6 @@ MARKET_BARS_OPTIONAL_COLUMNS = {
     "dividend_amount": "REAL",
     "split_factor": "REAL",
     "corporate_action_source": "TEXT",
-    "is_adjusted": "INTEGER NOT NULL DEFAULT 0",
-    "is_provisional": "INTEGER NOT NULL DEFAULT 0",
     "updated_at": "TEXT",
 }
 
@@ -874,6 +911,10 @@ FORWARD_GUIDANCE_OVERRIDES_OPTIONAL_COLUMNS = {
     "unique_key": "TEXT",
 }
 
+FORWARD_GUIDANCE_OPTIONAL_COLUMNS = {
+    "guidance_unique_key": "TEXT",
+}
+
 GOVERNANCE_EVENT_OPTIONAL_COLUMNS = {
     "regulatory_setback_count_365d": "INTEGER",
     "adverse_legal_event_count_365d": "INTEGER",
@@ -884,6 +925,19 @@ GOVERNANCE_EVENT_OPTIONAL_COLUMNS = {
 
 MULTIBAGGER_FEATURE_OPTIONAL_COLUMNS = {
     "commercial_fragility_risk_score": "REAL",
+}
+
+MULTIBAGGER_SCORES_OPTIONAL_COLUMNS = {
+    "base_multibagger_score": "REAL",
+    "orthogonal_alpha_score": "REAL",
+    "distinctive_acceleration_score": "REAL",
+    "tier1_opportunity_score": "REAL",
+    "tier1_risk_score": "REAL",
+    "tier1_bucket": "TEXT",
+    "tier1_gate_score": "REAL",
+    "tier1_gate_multiplier": "REAL",
+    "tier1_available": "INTEGER NOT NULL DEFAULT 0",
+    "tier1_interaction_reason": "TEXT",
 }
 
 
@@ -900,9 +954,19 @@ class ManagedConnection:
 
     def __exit__(self, exc_type, exc_value, traceback):
         try:
-            return self._conn.__exit__(exc_type, exc_value, traceback)
-        finally:
+            suppress = self._conn.__exit__(exc_type, exc_value, traceback)
+        except Exception:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            raise
+        try:
             self._conn.close()
+        except Exception:
+            if exc_type is None:
+                raise
+        return suppress
 
     def __getattr__(self, name: str):
         return getattr(self._conn, name)
@@ -919,6 +983,8 @@ def connect(db_path: Path, *, timeout_sec: float = 30.0) -> ManagedConnection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
+    if conn.in_transaction:
+        raise RuntimeError("init_db() must be called outside an active transaction; sqlite3.executescript() commits ambient transactions.")
     conn.executescript(SCHEMA_SQL)
     ensure_company_optional_columns(conn)
     ensure_table_optional_columns(conn, "sec_filing_documents", SEC_FILING_DOCUMENT_OPTIONAL_COLUMNS)
@@ -934,9 +1000,17 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_table_optional_columns(conn, "market_bars_daily", MARKET_BARS_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "market_snapshots_daily", MARKET_DAILY_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "market_features_daily", MARKET_DAILY_OPTIONAL_COLUMNS)
+    ensure_table_optional_columns(conn, "company_forward_guidance", FORWARD_GUIDANCE_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "company_forward_guidance_overrides", FORWARD_GUIDANCE_OVERRIDES_OPTIONAL_COLUMNS)
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_forward_guidance_unique_key
+        ON company_forward_guidance(guidance_unique_key)
+        """
+    )
     ensure_table_optional_columns(conn, "governance_event_features_daily", GOVERNANCE_EVENT_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "multibagger_features_daily", MULTIBAGGER_FEATURE_OPTIONAL_COLUMNS)
+    ensure_table_optional_columns(conn, "multibagger_scores_daily", MULTIBAGGER_SCORES_OPTIONAL_COLUMNS)
     ensure_state_tables_created_at(conn)
     ensure_table_optional_columns(conn, "sec_event_parse_state", SEC_EVENT_PARSE_STATE_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "forward_guidance_parse_state", FORWARD_GUIDANCE_PARSE_STATE_OPTIONAL_COLUMNS)
@@ -964,6 +1038,14 @@ def _table_column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return columns
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
 def ensure_table_optional_columns(conn: sqlite3.Connection, table_name: str, columns: dict[str, str]) -> None:
     existing = _table_column_names(conn, table_name)
     for column, column_type in columns.items():
@@ -971,137 +1053,216 @@ def ensure_table_optional_columns(conn: sqlite3.Connection, table_name: str, col
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column} {column_type}")
 
 
+def _run_schema_migration(conn: sqlite3.Connection, name: str, callback) -> None:
+    if not SAFE_IDENTIFIER_RE.fullmatch(str(name or "")):
+        raise ValueError(f"Unsafe schema migration name: {name!r}")
+    savepoint = f"schema_migration_{name}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        callback()
+    except Exception:
+        conn.execute(f"ROLLBACK TO {savepoint}")
+        conn.execute(f"RELEASE {savepoint}")
+        raise
+    conn.execute(f"RELEASE {savepoint}")
+
+
+def _coalesce_existing_expr(columns: set[str], candidates: list[str], fallback: str) -> str:
+    present = [column for column in candidates if column in columns]
+    if not present:
+        return fallback
+    return f"COALESCE({', '.join([*present, fallback])})"
+
+
 def refresh_sec_latest_documents(conn: sqlite3.Connection, accessions: Iterable[str]) -> int:
     """Refresh latest SEC document metadata without reading large text_content blobs."""
     now = utc_now()
     refreshed = 0
-    for accession in sorted({str(value or "").strip() for value in accessions if str(value or "").strip()}):
-        row = conn.execute(
-            """
-            SELECT
-                document_id,
-                accession_nodash,
-                document_url,
-                document_type,
-                text_hash,
-                COALESCE(text_length, 0) AS text_length,
-                fetched_at
-            FROM sec_filing_documents
-            WHERE accession_nodash = ?
-              AND COALESCE(text_hash, '') <> ''
-            ORDER BY
-                CASE WHEN document_type = 'complete_submission_text' THEN 0 ELSE 1 END,
-                COALESCE(fetched_at, updated_at, created_at) DESC,
-                document_id DESC
-            LIMIT 1
-            """,
-            (accession,),
-        ).fetchone()
-        if row is None:
-            conn.execute("DELETE FROM sec_filing_latest_document WHERE accession_nodash = ?", (accession,))
-            continue
-        conn.execute(
-            """
-            INSERT INTO sec_filing_latest_document(
-                accession_nodash, document_id, document_url, document_type, text_hash,
-                text_length, fetched_at, created_at, updated_at
+    transaction = nullcontext() if conn.in_transaction else conn
+    with transaction:
+        for accession in sorted({str(value or "").strip() for value in accessions if str(value or "").strip()}):
+            row = conn.execute(
+                """
+                SELECT
+                    document_id,
+                    accession_nodash,
+                    document_url,
+                    document_type,
+                    text_hash,
+                    COALESCE(text_length, 0) AS text_length,
+                    fetched_at
+                FROM sec_filing_documents
+                WHERE accession_nodash = ?
+                  AND COALESCE(text_hash, '') <> ''
+                ORDER BY
+                    CASE WHEN document_type = 'complete_submission_text' THEN 0 ELSE 1 END,
+                    COALESCE(fetched_at, updated_at, created_at) DESC,
+                    document_id DESC
+                LIMIT 1
+                """,
+                (accession,),
+            ).fetchone()
+            if row is None:
+                conn.execute("DELETE FROM sec_filing_latest_document WHERE accession_nodash = ?", (accession,))
+                continue
+            conn.execute(
+                """
+                INSERT INTO sec_filing_latest_document(
+                    accession_nodash, document_id, document_url, document_type, text_hash,
+                    text_length, fetched_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(accession_nodash) DO UPDATE SET
+                    document_id = excluded.document_id,
+                    document_url = excluded.document_url,
+                    document_type = excluded.document_type,
+                    text_hash = excluded.text_hash,
+                    text_length = excluded.text_length,
+                    fetched_at = excluded.fetched_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(row["accession_nodash"]),
+                    int(row["document_id"]),
+                    str(row["document_url"] or ""),
+                    str(row["document_type"] or ""),
+                    str(row["text_hash"] or ""),
+                    int(row["text_length"] or 0),
+                    str(row["fetched_at"] or ""),
+                    now,
+                    now,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(accession_nodash) DO UPDATE SET
-                document_id = excluded.document_id,
-                document_url = excluded.document_url,
-                document_type = excluded.document_type,
-                text_hash = excluded.text_hash,
-                text_length = excluded.text_length,
-                fetched_at = excluded.fetched_at,
-                updated_at = excluded.updated_at
-            """,
-            (
-                str(row["accession_nodash"]),
-                int(row["document_id"]),
-                str(row["document_url"] or ""),
-                str(row["document_type"] or ""),
-                str(row["text_hash"] or ""),
-                int(row["text_length"] or 0),
-                str(row["fetched_at"] or ""),
-                now,
-                now,
-            ),
-        )
-        refreshed += 1
+            refreshed += 1
     return refreshed
 
 
+def _create_sec_event_parse_state(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sec_event_parse_state (
+            accession_nodash TEXT PRIMARY KEY,
+            text_hash TEXT,
+            parser_signature TEXT,
+            parsed_at TEXT NOT NULL,
+            event_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (accession_nodash) REFERENCES sec_filings(accession_nodash) ON DELETE CASCADE
+        )
+        """
+    )
+
+
+def _copy_sec_event_parse_state_legacy(conn: sqlite3.Connection) -> None:
+    columns = _table_column_names(conn, "sec_event_parse_state_legacy")
+    if "accession_nodash" not in columns:
+        return
+    now = utc_now()
+    text_hash_expr = "text_hash" if "text_hash" in columns else "''"
+    parser_signature_expr = "parser_signature" if "parser_signature" in columns else "''"
+    parsed_at_expr = _coalesce_existing_expr(columns, ["parsed_at", "updated_at", "created_at"], "?")
+    event_count_expr = "COALESCE(event_count, 0)" if "event_count" in columns else "0"
+    created_at_expr = _coalesce_existing_expr(columns, ["created_at", "updated_at", "parsed_at"], "?")
+    updated_at_expr = _coalesce_existing_expr(columns, ["updated_at", "parsed_at", "created_at"], "?")
+    sql = f"""
+        INSERT OR IGNORE INTO sec_event_parse_state(
+            accession_nodash, text_hash, parser_signature, parsed_at, event_count, created_at, updated_at
+        )
+        SELECT accession_nodash, {text_hash_expr}, {parser_signature_expr}, {parsed_at_expr}, {event_count_expr},
+               {created_at_expr}, {updated_at_expr}
+        FROM sec_event_parse_state_legacy
+        WHERE COALESCE(accession_nodash, '') <> ''
+        """
+    conn.execute(sql, tuple(now for _ in range(sql.count("?"))))
+
+
+def _create_company_facts_sync_state(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS company_facts_sync_state (
+            company_id INTEGER PRIMARY KEY,
+            latest_source_filing_date TEXT,
+            payload_hash TEXT,
+            last_synced_at TEXT NOT NULL,
+            sync_status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (company_id) REFERENCES companies(company_id) ON DELETE CASCADE
+        )
+        """
+    )
+
+
+def _copy_company_facts_sync_state_legacy(conn: sqlite3.Connection) -> None:
+    columns = _table_column_names(conn, "company_facts_sync_state_legacy")
+    if "company_id" not in columns:
+        return
+    now = utc_now()
+    latest_source_expr = "latest_source_filing_date" if "latest_source_filing_date" in columns else "''"
+    payload_hash_expr = "payload_hash" if "payload_hash" in columns else "''"
+    last_synced_expr = _coalesce_existing_expr(columns, ["last_synced_at", "updated_at", "created_at"], "?")
+    sync_status_expr = _coalesce_existing_expr(columns, ["sync_status"], "'unknown'")
+    created_at_expr = _coalesce_existing_expr(columns, ["created_at", "updated_at", "last_synced_at"], "?")
+    updated_at_expr = _coalesce_existing_expr(columns, ["updated_at", "last_synced_at", "created_at"], "?")
+    sql = f"""
+        INSERT OR IGNORE INTO company_facts_sync_state(
+            company_id, latest_source_filing_date, payload_hash, last_synced_at, sync_status, created_at, updated_at
+        )
+        SELECT company_id, {latest_source_expr}, {payload_hash_expr}, {last_synced_expr},
+               {sync_status_expr}, {created_at_expr}, {updated_at_expr}
+        FROM company_facts_sync_state_legacy
+        WHERE company_id IS NOT NULL
+        """
+    conn.execute(sql, tuple(now for _ in range(sql.count("?"))))
+
+
 def ensure_state_tables_created_at(conn: sqlite3.Connection) -> None:
+    if _table_exists(conn, "sec_event_parse_state_legacy"):
+        def recover_sec_event_legacy() -> None:
+            _create_sec_event_parse_state(conn)
+            _copy_sec_event_parse_state_legacy(conn)
+            conn.execute("DROP TABLE sec_event_parse_state_legacy")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sec_event_parse_state_hash ON sec_event_parse_state(text_hash)")
+
+        _run_schema_migration(conn, "recover_sec_event_parse_state", recover_sec_event_legacy)
+
     sec_event_cols = _table_column_names(conn, "sec_event_parse_state")
-    if "created_at" not in sec_event_cols:
-        now = utc_now()
-        parser_signature_expr = "parser_signature" if "parser_signature" in sec_event_cols else "'' AS parser_signature"
-        conn.execute("DROP INDEX IF EXISTS idx_sec_event_parse_state_hash")
-        conn.execute("ALTER TABLE sec_event_parse_state RENAME TO sec_event_parse_state_legacy")
-        conn.execute(
-            """
-            CREATE TABLE sec_event_parse_state (
-                accession_nodash TEXT PRIMARY KEY,
-                text_hash TEXT,
-                parser_signature TEXT,
-                parsed_at TEXT NOT NULL,
-                event_count INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (accession_nodash) REFERENCES sec_filings(accession_nodash) ON DELETE CASCADE
+    if sec_event_cols and "created_at" not in sec_event_cols:
+        def migrate_sec_event() -> None:
+            conn.execute("DROP INDEX IF EXISTS idx_sec_event_parse_state_hash")
+            conn.execute("ALTER TABLE sec_event_parse_state RENAME TO sec_event_parse_state_legacy")
+            _create_sec_event_parse_state(conn)
+            _copy_sec_event_parse_state_legacy(conn)
+            conn.execute("DROP TABLE sec_event_parse_state_legacy")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sec_event_parse_state_hash ON sec_event_parse_state(text_hash)")
+
+        _run_schema_migration(conn, "sec_event_parse_state_created_at", migrate_sec_event)
+
+    if _table_exists(conn, "company_facts_sync_state_legacy"):
+        def recover_company_facts_legacy() -> None:
+            _create_company_facts_sync_state(conn)
+            _copy_company_facts_sync_state_legacy(conn)
+            conn.execute("DROP TABLE company_facts_sync_state_legacy")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_company_facts_sync_state_status ON company_facts_sync_state(sync_status, last_synced_at)"
             )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO sec_event_parse_state(accession_nodash, text_hash, parser_signature, parsed_at, event_count, created_at, updated_at)
-            SELECT accession_nodash, text_hash, {parser_signature_expr}, parsed_at, event_count,
-                   COALESCE(updated_at, parsed_at, ?) AS created_at,
-                   COALESCE(updated_at, parsed_at, ?) AS updated_at
-            FROM sec_event_parse_state_legacy
-            """.format(parser_signature_expr=parser_signature_expr),
-            (now, now),
-        )
-        conn.execute("DROP TABLE sec_event_parse_state_legacy")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_sec_event_parse_state_hash ON sec_event_parse_state(text_hash)")
+
+        _run_schema_migration(conn, "recover_company_facts_sync_state", recover_company_facts_legacy)
 
     facts_sync_cols = _table_column_names(conn, "company_facts_sync_state")
-    if "created_at" not in facts_sync_cols:
-        now = utc_now()
-        conn.execute("DROP INDEX IF EXISTS idx_company_facts_sync_state_status")
-        conn.execute("ALTER TABLE company_facts_sync_state RENAME TO company_facts_sync_state_legacy")
-        conn.execute(
-            """
-            CREATE TABLE company_facts_sync_state (
-                company_id INTEGER PRIMARY KEY,
-                latest_source_filing_date TEXT,
-                payload_hash TEXT,
-                last_synced_at TEXT NOT NULL,
-                sync_status TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (company_id) REFERENCES companies(company_id) ON DELETE CASCADE
+    if facts_sync_cols and "created_at" not in facts_sync_cols:
+        def migrate_company_facts() -> None:
+            conn.execute("DROP INDEX IF EXISTS idx_company_facts_sync_state_status")
+            conn.execute("ALTER TABLE company_facts_sync_state RENAME TO company_facts_sync_state_legacy")
+            _create_company_facts_sync_state(conn)
+            _copy_company_facts_sync_state_legacy(conn)
+            conn.execute("DROP TABLE company_facts_sync_state_legacy")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_company_facts_sync_state_status ON company_facts_sync_state(sync_status, last_synced_at)"
             )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO company_facts_sync_state(
-                company_id, latest_source_filing_date, payload_hash, last_synced_at, sync_status, created_at, updated_at
-            )
-            SELECT company_id, latest_source_filing_date, payload_hash,
-                   last_synced_at, sync_status,
-                   COALESCE(updated_at, last_synced_at, ?) AS created_at,
-                   COALESCE(updated_at, last_synced_at, ?) AS updated_at
-            FROM company_facts_sync_state_legacy
-            """,
-            (now, now),
-        )
-        conn.execute("DROP TABLE company_facts_sync_state_legacy")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_company_facts_sync_state_status ON company_facts_sync_state(sync_status, last_synced_at)"
-        )
+
+        _run_schema_migration(conn, "company_facts_sync_state_created_at", migrate_company_facts)
 
 
 def start_run(conn: sqlite3.Connection, *, run_type: str, input_path: Optional[Path]) -> int:

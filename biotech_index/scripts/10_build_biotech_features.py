@@ -8,7 +8,6 @@ import logging
 import math
 import sqlite3
 import sys
-import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -23,10 +22,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_optional_path, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
     normalize_ticker,
     read_final_scoring_tickers,
     validate_full_universe_coverage,
+    validate_layer_freshness,
     validate_nonempty_selection,
 )
 
@@ -77,14 +78,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -185,12 +179,6 @@ def read_csv(path: Path) -> pd.DataFrame:
 def load_company_ids(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute("SELECT company_id, ticker FROM companies WHERE is_active = 1").fetchall()
     return {normalize_ticker(row["ticker"]): int(row["company_id"]) for row in rows}
-
-
-def load_latest_facts(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
-    # Legacy table retained for schema compatibility. The Tier-1 financial
-    # quality signal now comes from financial_survival_features.
-    return {}
 
 
 def load_latest_survival_features(conn: sqlite3.Connection, asof_date: date) -> dict[int, dict[str, Any]]:
@@ -435,7 +423,6 @@ def compute_feature_row(
     min_liquidity_addv20: float,
     low_liquidity_addv20: float,
     strong_liquidity_addv20: float,
-    facts: dict[str, Any] | None,
     survival: dict[str, Any] | None,
     sec_events: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -638,14 +625,6 @@ def compute_feature_row(
     financial_quality_raw -= filing_risk * 0.9
     if recent_sec:
         financial_quality_raw += 5.0
-    if facts:
-        runway = to_float(facts.get("runway_months"), 0.0)
-        if runway >= 24:
-            financial_quality_raw += 12.0
-        elif runway >= 12:
-            financial_quality_raw += 6.0
-        elif 0 < runway < 6:
-            financial_quality_raw -= 18.0
     if survival:
         financial_quality_raw = (financial_quality_raw * 0.45) + (survival_score * 0.55)
     else:
@@ -790,12 +769,6 @@ def upsert_features(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_d
                     risk_score_raw, feature_json, created_at, updated_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(asof_date, company_id) DO UPDATE SET
-                    catalyst_score_raw = excluded.catalyst_score_raw,
-                    credibility_score_raw = excluded.credibility_score_raw,
-                    risk_score_raw = excluded.risk_score_raw,
-                    feature_json = excluded.feature_json,
-                    updated_at = excluded.updated_at
                 """,
                 (
                     row["asof_date"],
@@ -843,7 +816,7 @@ def main() -> None:
     evidence_df = read_csv(evidence_csv)
     evidence_df = apply_trial_status_overrides(evidence_df, read_optional_csv(trial_status_overrides_csv))
     screen = read_csv(screen_csv)
-    universe = universe[universe["scoring_include"].map(as_bool) & universe["final_status"].str.lower().eq("keep")].copy()
+    universe = universe[universe["scoring_include"].map(as_bool)].copy()
     screen_by_ticker = {str(row["ticker"]).upper(): row for _, row in screen.iterrows()}
 
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
@@ -852,7 +825,6 @@ def main() -> None:
         run_id = start_run(conn, run_type="build_biotech_features", input_path=universe_csv)
         try:
             company_ids = load_company_ids(conn)
-            facts = load_latest_facts(conn)
             survival_features = load_latest_survival_features(conn, asof_date)
             sec_event_summary = load_recent_sec_event_summary(
                 conn,
@@ -877,7 +849,6 @@ def main() -> None:
                         min_liquidity_addv20=min_liquidity,
                         low_liquidity_addv20=low_liquidity,
                         strong_liquidity_addv20=strong_liquidity,
-                        facts=facts.get(company_id),
                         survival=survival_features.get(company_id),
                         sec_events=sec_event_summary.get(company_id),
                     )
@@ -895,8 +866,16 @@ def main() -> None:
                 context="biotech feature build",
                 subset_mode=False,
             )
+            validate_layer_freshness(
+                base_rows=rows,
+                layer_rows_by_company=survival_features,
+                asof_date=asof_date,
+                context="biotech feature build financial_survival_features",
+                max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0)),
+            )
             upsert_features(conn, rows, asof_date.isoformat())
             write_csv(output_csv, rows)
+            LOGGER.info("Built biotech features: rows=%d output=%s", len(rows), output_csv)
             finish_run(
                 conn,
                 run_id=run_id,
@@ -904,10 +883,9 @@ def main() -> None:
                 row_count=len(rows),
                 message=f"skipped_missing_company_id={len(skipped)} output={output_csv}",
             )
-        except Exception as exc:
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
-    LOGGER.info("Built biotech features: rows=%d output=%s", len(rows), output_csv)
 
 
 if __name__ == "__main__":

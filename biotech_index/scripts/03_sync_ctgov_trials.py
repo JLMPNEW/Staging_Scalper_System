@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -23,10 +23,17 @@ from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list,
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.http_cache import CachedHttpClient, HostThrottle
 from biotech_index.core.logging_utils import configure_utc_logging
+from biotech_index.core.pipeline_guards import validate_nonempty_selection, validate_requested_tickers
 
 
 LOGGER = logging.getLogger("sync_ctgov_trials")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+SQLITE_PARAM_CHUNK_SIZE = 800
+
+
+def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
+    step = max(1, int(size))
+    return [list(values[start : start + step]) for start in range(0, len(values), step)]
 
 
 @dataclass(frozen=True)
@@ -357,6 +364,28 @@ def sync_one_company(
         )
 
 
+def dedupe_sponsors(sponsors: Iterable[Any]) -> list[Any]:
+    seen: set[tuple[str, str, str]] = set()
+    out: list[Any] = []
+    for sponsor in sponsors:
+        key = (str(sponsor.nct_id), str(sponsor.sponsor_name_norm), str(sponsor.sponsor_role))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(sponsor)
+    return out
+
+
+def dedupe_query_hits(hits: Iterable[QueryHit]) -> list[QueryHit]:
+    best: dict[tuple[int, str, str, str], QueryHit] = {}
+    for hit in hits:
+        key = (int(hit.company_id), str(hit.nct_id), str(hit.search_term), str(hit.query_field))
+        old = best.get(key)
+        if old is None or float(hit.confidence) > float(old.confidence):
+            best[key] = hit
+    return list(best.values())
+
+
 def upsert_trial(conn: sqlite3.Connection, study: dict[str, Any], *, asof_date: str | None = None) -> bool:
     parsed = parse_study(study)
     if parsed is None:
@@ -394,7 +423,7 @@ def upsert_trial(conn: sqlite3.Connection, study: dict[str, Any], *, asof_date: 
             now,
         ),
     )
-    sponsors = parse_sponsors(study)
+    sponsors = dedupe_sponsors(parse_sponsors(study))
     conn.execute("DELETE FROM trial_sponsors WHERE nct_id = ?", (parsed.nct_id,))
     for sponsor in sponsors:
         conn.execute(
@@ -403,9 +432,6 @@ def upsert_trial(conn: sqlite3.Connection, study: dict[str, Any], *, asof_date: 
                 nct_id, sponsor_name, sponsor_name_norm, sponsor_role, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(nct_id, sponsor_name_norm, sponsor_role) DO UPDATE SET
-                sponsor_name = excluded.sponsor_name,
-                updated_at = excluded.updated_at
             """,
             (
                 sponsor.nct_id,
@@ -452,35 +478,32 @@ def replace_query_hits(conn: sqlite3.Connection, results: list[SyncResult]) -> i
     company_ids = sorted({result.company_id for result in successful_results})
     if not company_ids:
         return 0
-    placeholders = ",".join("?" for _ in company_ids)
-    conn.execute(f"DELETE FROM ctgov_query_hits WHERE company_id IN ({placeholders})", tuple(company_ids))
+    for company_chunk in chunked(company_ids):
+        placeholders = ",".join("?" for _ in company_chunk)
+        conn.execute(f"DELETE FROM ctgov_query_hits WHERE company_id IN ({placeholders})", tuple(company_chunk))
     written = 0
     now = utc_now()
-    for result in successful_results:
-        for hit in result.query_hits:
-            conn.execute(
-                """
-                INSERT INTO ctgov_query_hits(
-                    company_id, nct_id, search_term, query_field, source, confidence, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(company_id, nct_id, search_term, query_field) DO UPDATE SET
-                    source = excluded.source,
-                    confidence = excluded.confidence,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    hit.company_id,
-                    hit.nct_id,
-                    hit.search_term,
-                    hit.query_field,
-                    hit.source,
-                    float(hit.confidence),
-                    now,
-                    now,
-                ),
+    hits = dedupe_query_hits(hit for result in successful_results for hit in result.query_hits)
+    for hit in hits:
+        conn.execute(
+            """
+            INSERT INTO ctgov_query_hits(
+                company_id, nct_id, search_term, query_field, source, confidence, created_at, updated_at
             )
-            written += 1
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                hit.company_id,
+                hit.nct_id,
+                hit.search_term,
+                hit.query_field,
+                hit.source,
+                float(hit.confidence),
+                now,
+                now,
+            ),
+        )
+        written += 1
     return written
 
 
@@ -528,13 +551,20 @@ def main() -> None:
         )
         run_id = start_run(conn, run_type="sync_ctgov_trials", input_path=db_path)
         LOGGER.info("Loaded %d active company job(s) from %s", len(jobs), db_path)
-        if not jobs:
-            finish_run(conn, run_id=run_id, status="success", row_count=0, message="no active companies")
-            return
 
         throttle = HostThrottle()
         results: list[SyncResult] = []
         try:
+            validate_nonempty_selection(
+                count=len(jobs),
+                context="CTGov sync",
+                subset_mode=bool(ticker_filter) or int(args.max_companies) > 0,
+            )
+            validate_requested_tickers(
+                requested_tickers=ticker_filter,
+                loaded_tickers=[job.ticker for job in jobs],
+                context="CTGov sync",
+            )
             if max_workers <= 1:
                 for idx, job in enumerate(jobs, start=1):
                     LOGGER.info("[%d/%d] CTGov %s aliases=%d searches=%d", idx, len(jobs), job.ticker, len(job.aliases), len(job.searches))
@@ -635,7 +665,7 @@ def main() -> None:
             LOGGER.info("CTGov sync complete: %s", message)
             if error_count > 0 and not args.allow_partial:
                 raise SystemExit(2)
-        except Exception as exc:
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 

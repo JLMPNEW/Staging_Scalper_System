@@ -8,7 +8,6 @@ import logging
 import math
 import sqlite3
 import sys
-import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,11 +20,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
     read_final_scoring_tickers,
     subset_mode_enabled,
     subset_output_path,
     validate_full_universe_coverage,
+    validate_layer_freshness,
     validate_nonempty_selection,
     validate_output_coverage,
     validate_requested_tickers,
@@ -34,6 +35,12 @@ from biotech_index.core.pipeline_guards import (
 
 LOGGER = logging.getLogger("build_multibagger_features")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+SQLITE_PARAM_CHUNK_SIZE = 800
+
+
+def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
+    step = max(1, int(size))
+    return [list(values[start : start + step]) for start in range(0, len(values), step)]
 
 
 FEATURE_FIELDS = [
@@ -57,6 +64,14 @@ FEATURE_FIELDS = [
     "payload_json",
 ]
 
+LATEST_SOURCE_TABLES = {
+    "commercial_value_features_daily",
+    "financial_survival_features",
+    "market_features_daily",
+    "governance_event_features_daily",
+    "forward_guidance_features_daily",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build multibagger composite features from clinical, SEC, Form 4, financial, and market layers.")
@@ -69,14 +84,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -173,6 +181,8 @@ def load_latest_table(
     *,
     preferred_source: str = "",
 ) -> dict[int, dict[str, Any]]:
+    if table not in LATEST_SOURCE_TABLES:
+        raise ValueError(f"Unsupported source table for latest-row load: {table}")
     rows = conn.execute(
         f"""
         SELECT t.*
@@ -563,29 +573,25 @@ def upsert_rows(
 ) -> None:
     now = utc_now()
     placeholders = ", ".join("?" for _ in FEATURE_FIELDS)
-    update_cols = [field for field in FEATURE_FIELDS if field not in {"asof_date", "company_id"}]
     with conn:
         if target_company_ids is None:
             conn.execute("DELETE FROM multibagger_features_daily WHERE asof_date = ?", (asof_date,))
         elif target_company_ids:
-            company_placeholders = ",".join("?" for _ in target_company_ids)
-            conn.execute(
-                f"DELETE FROM multibagger_features_daily WHERE asof_date = ? AND company_id IN ({company_placeholders})",
-                (asof_date, *sorted(target_company_ids)),
-            )
+            for company_chunk in chunked(sorted(target_company_ids)):
+                company_placeholders = ",".join("?" for _ in company_chunk)
+                conn.execute(
+                    f"DELETE FROM multibagger_features_daily WHERE asof_date = ? AND company_id IN ({company_placeholders})",
+                    (asof_date, *company_chunk),
+                )
         else:
             return
-        for row in rows:
-            conn.execute(
-                f"""
-                INSERT INTO multibagger_features_daily({", ".join(FEATURE_FIELDS)}, created_at, updated_at)
-                VALUES ({placeholders}, ?, ?)
-                ON CONFLICT(asof_date, company_id) DO UPDATE SET
-                    {", ".join(f"{field} = excluded.{field}" for field in update_cols)},
-                    updated_at = excluded.updated_at
-                """,
-                tuple(row.get(field) for field in FEATURE_FIELDS) + (now, now),
-            )
+        conn.executemany(
+            f"""
+            INSERT INTO multibagger_features_daily({", ".join(FEATURE_FIELDS)}, created_at, updated_at)
+            VALUES ({placeholders}, ?, ?)
+            """,
+            [tuple(row.get(field) for field in FEATURE_FIELDS) + (now, now) for row in rows],
+        )
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -662,6 +668,21 @@ def main() -> None:
                 ]
                 if failures:
                     raise RuntimeError("Multibagger feature build missing upstream layer rows: " + " | ".join(failures))
+                max_upstream_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0))
+                for layer_name, layer_rows in (
+                    ("commercial_value_features_daily", commercial),
+                    ("financial_survival_features", survival),
+                    ("market_features_daily", market),
+                    ("governance_event_features_daily", governance),
+                    ("forward_guidance_features_daily", forward),
+                ):
+                    validate_layer_freshness(
+                        base_rows=base_rows,
+                        layer_rows_by_company=layer_rows,
+                        asof_date=asof_date,
+                        context=f"multibagger feature build {layer_name}",
+                        max_staleness_days=max_upstream_staleness_days,
+                    )
             rows = [
                 build_row(
                     row,
@@ -689,11 +710,11 @@ def main() -> None:
                 target_company_ids={int(row["company_id"]) for row in base_rows} if partial_run else None,
             )
             write_csv(output_csv, rows)
+            LOGGER.info("Multibagger feature build complete: rows=%d output=%s", len(rows), output_csv)
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=f"asof={asof_date} output={output_csv}")
-        except Exception as exc:
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
-    LOGGER.info("Multibagger feature build complete: rows=%d output=%s", len(rows), output_csv)
 
 
 if __name__ == "__main__":

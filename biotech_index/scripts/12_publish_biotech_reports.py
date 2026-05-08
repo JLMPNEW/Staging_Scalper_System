@@ -8,7 +8,6 @@ import logging
 import math
 import sqlite3
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from statistics import median
@@ -22,10 +21,76 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_optional_path, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run
+from biotech_index.core.logging_utils import configure_utc_logging
 
 
 LOGGER = logging.getLogger("publish_biotech_reports")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+
+TOP_SCORE_FIELDS = [
+    "asof_date",
+    "rank",
+    "ticker",
+    "company_name",
+    "bucket",
+    "opportunity_score",
+    "investment_score",
+    "investment_profile",
+    "clinical_opportunity_score",
+    "tier1_selection_gate_score",
+    "data_quality_confidence_multiplier",
+    "clinical_risk_drag",
+    "investment_risk_drag",
+    "commercial_value_score",
+    "forward_guidance_score",
+    "valuation_score",
+    "upside_capacity_score",
+    "catalyst_score",
+    "credibility_score",
+    "financial_quality_score",
+    "risk_score",
+    "momentum_score",
+    "primary_nct",
+    "primary_trial_title",
+    "lead_phase2_3_active_trials",
+    "program_phase2_3_active_trials",
+    "collaborator_phase2_3_active_trials",
+    "effective_phase2_3_trials",
+    "core_pipeline_quality_score",
+    "collaborator_dependency_ratio",
+    "collaborator_heavy_flag",
+    "going_concern_status",
+    "reverse_split_hits_2y",
+    "median_addv20",
+    "cash_runway_months",
+    "financial_survival_score",
+    "ttm_revenue",
+    "revenue_yoy_growth_pct",
+    "gross_margin_pct",
+    "net_margin_pct",
+    "market_cap",
+    "ev_to_sales",
+    "pe_ratio",
+    "commercial_stage_flag",
+    "profitable_flag",
+    "latest_guidance_filing_date",
+    "forward_revenue_midpoint",
+    "forward_revenue_growth_pct",
+    "forward_ebitda_midpoint",
+    "forward_ebitda_margin_pct",
+    "guidance_confidence",
+    "forward_guidance_data_quality",
+    "forward_guidance_source_type",
+    "forward_guidance_source_name",
+    "forward_guidance_source_url",
+    "forward_guidance_override_reason",
+    "financial_data_quality",
+    "sec_regulatory_catalyst_count",
+    "sec_dilution_event_count",
+    "sec_negative_clinical_event_count",
+    "industry",
+    "industry_aggregate",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,14 +102,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date_text(raw: object) -> str:
@@ -89,6 +147,8 @@ def load_scores(conn: sqlite3.Connection, asof_date: str) -> list[dict[str, Any]
             s.financial_quality_score, s.risk_score, s.momentum_score,
             s.clinical_opportunity_score, s.commercial_value_score, s.valuation_score,
             s.forward_guidance_score, s.upside_capacity_score, s.investment_score, s.opportunity_score,
+            s.tier1_selection_gate_score, s.data_quality_confidence_multiplier,
+            s.clinical_risk_drag, s.investment_risk_drag,
             s.rank, s.bucket, s.top_evidence_json,
             c.ticker, c.company_name, c.exchange, c.industry, c.industry_aggregate
         FROM daily_scores s
@@ -241,6 +301,10 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "investment_score": row.get("investment_score", score_components.get("investment_score", "") if isinstance(score_components, dict) else ""),
         "investment_profile": score_components.get("investment_profile", "") if isinstance(score_components, dict) else "",
         "clinical_opportunity_score": row.get("clinical_opportunity_score", score_components.get("clinical_opportunity_score", "") if isinstance(score_components, dict) else ""),
+        "tier1_selection_gate_score": row.get("tier1_selection_gate_score", score_components.get("tier1_selection_gate_score", "") if isinstance(score_components, dict) else ""),
+        "data_quality_confidence_multiplier": row.get("data_quality_confidence_multiplier", score_components.get("data_quality_confidence_multiplier", "") if isinstance(score_components, dict) else ""),
+        "clinical_risk_drag": row.get("clinical_risk_drag", score_components.get("clinical_risk_drag", "") if isinstance(score_components, dict) else ""),
+        "investment_risk_drag": row.get("investment_risk_drag", score_components.get("investment_risk_drag", "") if isinstance(score_components, dict) else ""),
         "commercial_value_score": row.get("commercial_value_score", commercial_value.get("commercial_value_score", "") if isinstance(commercial_value, dict) else ""),
         "forward_guidance_score": row.get("forward_guidance_score", score_components.get("forward_guidance_score", "") if isinstance(score_components, dict) else ""),
         "valuation_score": row.get("valuation_score", commercial_value.get("valuation_score", "") if isinstance(commercial_value, dict) else ""),
@@ -659,7 +723,7 @@ def main() -> None:
             trial_validation_summary_rows = build_trial_validation_summary_rows(trial_validation_rows, validation_max_trials)
 
             write_csv(index_csv, [summary], list(summary.keys()))
-            write_csv(top_csv, top_rows, list(flatten_score_row({}).keys()))
+            write_csv(top_csv, top_rows, TOP_SCORE_FIELDS)
             write_csv(
                 alerts_csv,
                 alerts,
@@ -710,6 +774,7 @@ def main() -> None:
                     "outcome_override_excluded_rows", "outcome_override_review_rows", "review_flags",
                 ],
             )
+            LOGGER.info("Published biotech reports: rows=%d output_dir=%s", len(scores), output_dir)
             finish_run(
                 conn,
                 run_id=run_id,
@@ -717,10 +782,9 @@ def main() -> None:
                 row_count=len(scores),
                 message=f"asof={asof_date} top_n={top_n} alerts={len(alerts)} output_dir={output_dir}",
             )
-        except Exception as exc:
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
-    LOGGER.info("Published biotech reports: rows=%d output_dir=%s", len(scores), output_dir)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list,
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.http_cache import HostThrottle
 from biotech_index.core.logging_utils import configure_utc_logging
+from biotech_index.core.pipeline_guards import validate_nonempty_selection, validate_requested_tickers
 
 
 LOGGER = logging.getLogger("scan_ctgov_reactivation_candidates")
@@ -39,7 +40,10 @@ def load_script_module(filename: str, module_name: str) -> Any:
         raise ImportError(f"Could not load script module: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise ImportError(f"Failed to load helper script {path}: {type(exc).__name__}: {exc}") from exc
     return module
 
 
@@ -568,9 +572,9 @@ def main() -> None:
         for value in normalize_string_list(cfg_get(config, "ctgov_reactivation.status_filter"), ["remove"])
     }
     ticker_filter = {value.strip().upper().replace(".", "-") for value in args.tickers.split(",") if value.strip()}
-    if (ticker_filter or int(args.max_companies) > 0) and args.output_dir is None:
+    if (ticker_filter or int(args.max_companies) > 0 or args.all_removed) and args.output_dir is None:
         raise ValueError(
-            "--tickers and --max-companies are subset/smoke-test modes and must be paired with --output-dir "
+            "--tickers, --max-companies, and --all-removed are subset/broad-review modes and must be paired with --output-dir "
             "so canonical CTGov reactivation outputs are not overwritten."
         )
     query_fields = normalize_string_list(cfg_get(config, "ctgov.query_fields"), ["query.spons", "query.lead"])
@@ -699,6 +703,16 @@ def main() -> None:
                 bool(args.all_removed),
                 sorted(status_filter),
                 len(source_rows),
+            )
+            validate_nonempty_selection(
+                count=len(jobs),
+                context="CTGov reactivation scan",
+                subset_mode=bool(ticker_filter) or int(args.max_companies) > 0,
+            )
+            validate_requested_tickers(
+                requested_tickers=ticker_filter,
+                loaded_tickers=[job.audit_company.ticker for job in jobs],
+                context="CTGov reactivation scan",
             )
 
             throttle = HostThrottle()
@@ -1021,8 +1035,11 @@ def main() -> None:
                 "db_signature": AUDIT_HELPERS.db_signature(conn),
                 "selection_mode": selection_mode,
                 "status_filter": sorted(status_filter),
+                "all_removed_mode": bool(args.all_removed),
+                "status_filter_active": bool(args.all_removed),
                 "status_filter_applied": bool(args.all_removed),
-                "source_review_csv": str(source_review_csv),
+                "source_review_csv": "" if args.all_removed else str(source_review_csv),
+                "source_review_csv_used": not bool(args.all_removed),
                 "source_final_status_filter": sorted(source_final_status_filter),
                 "ticker_filter": sorted(ticker_filter),
                 "company_count": len(jobs),
@@ -1060,7 +1077,7 @@ def main() -> None:
             LOGGER.info("CTGov reactivation scan complete: %s", message)
             if error_count > 0 and not args.allow_partial:
                 raise SystemExit(2)
-        except Exception as exc:
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 

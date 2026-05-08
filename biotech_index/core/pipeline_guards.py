@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import csv
+from datetime import date, datetime
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 
 TRUE_VALUES = {"1", "true", "t", "yes", "y"}
@@ -30,7 +31,6 @@ def read_final_scoring_tickers(path: Path) -> set[str]:
             ticker
             for row in reader
             if (ticker := normalize_ticker(row.get("ticker")))
-            and str(row.get("final_status") or "").strip().lower() == "keep"
             and as_bool(row.get("scoring_include"))
         }
     if not out:
@@ -61,6 +61,63 @@ def format_ticker_sample(tickers: Sequence[str], *, limit: int = 25) -> str:
     sample = list(tickers[:limit])
     suffix = "" if len(tickers) <= limit else f"...(+{len(tickers) - limit})"
     return ",".join(sample) + suffix
+
+
+def parse_asof_date(raw: object) -> date | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def validate_layer_freshness(
+    *,
+    base_rows: Iterable[Mapping[str, Any]],
+    layer_rows_by_company: Mapping[int, Mapping[str, Any]],
+    asof_date: date | str,
+    context: str,
+    max_staleness_days: int = 0,
+) -> None:
+    target_date = parse_asof_date(asof_date)
+    if target_date is None:
+        raise ValueError(f"Invalid asof_date for {context}: {asof_date}")
+    missing: list[str] = []
+    stale: list[str] = []
+    future: list[str] = []
+    invalid_date: list[str] = []
+    for base_row in base_rows:
+        company_id = int(base_row["company_id"])
+        ticker = normalize_ticker(base_row.get("ticker")) or str(company_id)
+        layer_row = layer_rows_by_company.get(company_id)
+        if not layer_row:
+            missing.append(ticker)
+            continue
+        layer_date = parse_asof_date(layer_row.get("asof_date"))
+        if layer_date is None:
+            invalid_date.append(ticker)
+            continue
+        age_days = (target_date - layer_date).days
+        if age_days < 0:
+            future.append(f"{ticker}:{layer_date.isoformat()}")
+        elif age_days > max_staleness_days:
+            stale.append(f"{ticker}:{layer_date.isoformat()}")
+    failures: list[str] = []
+    if missing:
+        failures.append(f"missing {len(missing)} ticker(s): {format_ticker_sample(sorted(missing))}")
+    if stale:
+        failures.append(
+            f"stale {len(stale)} ticker(s) older than {max_staleness_days} day(s): "
+            f"{format_ticker_sample(sorted(stale))}"
+        )
+    if future:
+        failures.append(f"future-dated {len(future)} ticker(s): {format_ticker_sample(sorted(future))}")
+    if invalid_date:
+        failures.append(f"invalid asof_date {len(invalid_date)} ticker(s): {format_ticker_sample(sorted(invalid_date))}")
+    if failures:
+        raise RuntimeError(f"{context} freshness validation failed for asof={target_date.isoformat()}: " + " | ".join(failures))
 
 
 def validate_requested_tickers(*, requested_tickers: set[str], loaded_tickers: Iterable[str], context: str) -> None:

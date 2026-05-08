@@ -8,7 +8,6 @@ import logging
 import math
 import sqlite3
 import sys
-import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,12 +20,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
     normalize_ticker,
     read_final_scoring_tickers,
     subset_mode_enabled,
     subset_output_path,
     validate_full_universe_coverage,
+    validate_layer_freshness,
     validate_nonempty_selection,
     validate_output_coverage,
     validate_requested_tickers,
@@ -35,7 +36,14 @@ from biotech_index.core.pipeline_guards import (
 
 LOGGER = logging.getLogger("build_commercial_value_features")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+SQLITE_PARAM_CHUNK_SIZE = 800
 QUARTER_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
+
+
+def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
+    step = max(1, int(size))
+    return [list(values[start : start + step]) for start in range(0, len(values), step)]
+
 
 COMMERCIAL_FIELDS = [
     "asof_date", "company_id", "ticker", "company_name", "latest_period_end",
@@ -63,14 +71,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -157,6 +158,11 @@ def load_fact_rows(conn: sqlite3.Connection, company_id: int, asof_date: date) -
 def load_fact_rows_bulk(conn: sqlite3.Connection, company_ids: list[int], asof_date: date) -> dict[int, list[dict[str, Any]]]:
     if not company_ids:
         return {}
+    if len(company_ids) > SQLITE_PARAM_CHUNK_SIZE:
+        out: dict[int, list[dict[str, Any]]] = {int(company_id): [] for company_id in company_ids}
+        for company_chunk in chunked(company_ids):
+            out.update(load_fact_rows_bulk(conn, [int(value) for value in company_chunk], asof_date))
+        return out
     placeholders = ",".join("?" for _ in company_ids)
     rows = conn.execute(
         f"""
@@ -198,6 +204,18 @@ def load_latest_market_bulk(
 ) -> dict[int, dict[str, Any]]:
     if not company_ids:
         return {}
+    if len(company_ids) > SQLITE_PARAM_CHUNK_SIZE:
+        out: dict[int, dict[str, Any]] = {}
+        for company_chunk in chunked(company_ids):
+            out.update(
+                load_latest_market_bulk(
+                    conn,
+                    [int(value) for value in company_chunk],
+                    asof_date,
+                    preferred_source=preferred_source,
+                )
+            )
+        return out
     placeholders = ",".join("?" for _ in company_ids)
     rows = conn.execute(
         f"""
@@ -565,26 +583,22 @@ def upsert_features(
     target_company_ids: set[int] | None = None,
 ) -> None:
     now = utc_now()
-    update_fields = [field for field in COMMERCIAL_FIELDS if field not in {"asof_date", "company_id"}]
-    update_clause = ",\n                    ".join(f"{field} = excluded.{field}" for field in update_fields)
     with conn:
         if target_company_ids is None:
             conn.execute("DELETE FROM commercial_value_features_daily WHERE asof_date = ?", (asof_date,))
         elif target_company_ids:
-            company_placeholders = ",".join("?" for _ in target_company_ids)
-            conn.execute(
-                f"DELETE FROM commercial_value_features_daily WHERE asof_date = ? AND company_id IN ({company_placeholders})",
-                (asof_date, *sorted(target_company_ids)),
-            )
+            for company_chunk in chunked(sorted(target_company_ids)):
+                company_placeholders = ",".join("?" for _ in company_chunk)
+                conn.execute(
+                    f"DELETE FROM commercial_value_features_daily WHERE asof_date = ? AND company_id IN ({company_placeholders})",
+                    (asof_date, *company_chunk),
+                )
         else:
             return
         conn.executemany(
             f"""
             INSERT INTO commercial_value_features_daily({", ".join(COMMERCIAL_FIELDS)}, created_at, updated_at)
             VALUES ({", ".join("?" for _ in COMMERCIAL_FIELDS)}, ?, ?)
-            ON CONFLICT(asof_date, company_id) DO UPDATE SET
-                {update_clause},
-                updated_at = excluded.updated_at
             """,
             [tuple(row.get(field) for field in COMMERCIAL_FIELDS) + (now, now) for row in rows],
         )
@@ -634,6 +648,13 @@ def main() -> None:
             fact_rows_by_company = load_fact_rows_bulk(conn, company_ids, asof_date)
             preferred_source = str(cfg_get(config, "commercial_value.preferred_market_source", "interactive_brokers") or "interactive_brokers")
             market_by_company = load_latest_market_bulk(conn, company_ids, asof_date, preferred_source=preferred_source)
+            validate_layer_freshness(
+                base_rows=companies,
+                layer_rows_by_company=market_by_company,
+                asof_date=asof_date,
+                context="commercial value feature build market_features_daily",
+                max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0)),
+            )
             rows: list[dict[str, Any]] = []
             for idx, company in enumerate(companies, start=1):
                 company_id = int(company["company_id"])
@@ -656,11 +677,11 @@ def main() -> None:
                 target_company_ids=set(company_ids) if partial_run else None,
             )
             write_csv(output_csv, rows)
+            LOGGER.info("Built commercial value features: rows=%d output=%s", len(rows), output_csv)
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=f"asof={asof_date.isoformat()} output={output_csv}")
-        except Exception as exc:
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
-    LOGGER.info("Built commercial value features: rows=%d output=%s", len(rows), output_csv)
 
 
 if __name__ == "__main__":

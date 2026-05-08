@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import math
@@ -21,8 +22,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_path
-from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now
+from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
+    normalize_ticker,
     read_final_scoring_tickers,
     subset_mode_enabled,
     subset_output_path,
@@ -35,6 +38,12 @@ from biotech_index.core.pipeline_guards import (
 
 LOGGER = logging.getLogger("build_governance_event_features")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+SQLITE_PARAM_CHUNK_SIZE = 800
+
+
+def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
+    step = max(1, int(size))
+    return [list(values[start : start + step]) for start in range(0, len(values), step)]
 
 
 GOVERNANCE_FIELDS = [
@@ -111,6 +120,42 @@ PRODUCT_CONCENTRATION_PATTERNS = [
     re.compile(r"\b(currently|primarily)\b.{0,100}\b(rely|depend)\b.{0,120}\b(sales|revenue)\b", re.IGNORECASE),
 ]
 SEC_SCAN_FORMS = ("8-K", "8-K/A", "10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A", "6-K", "6-K/A", "S-3", "S-3/A", "424B5", "424B3", "424B4")
+SEC_GOVERNANCE_CACHE_VERSION = "2026-05-08-sec-governance-signal-cache-v3"
+GOVERNANCE_FEATURE_SIGNATURE_VERSION = "2026-05-08-governance-feature-signature-v1"
+SEC_GOVERNANCE_HEAD_SCAN_CHARS = 350_000
+SEC_GOVERNANCE_CONTEXT_CHARS = 35_000
+SEC_GOVERNANCE_DEFAULT_MAX_SCAN_CHARS = 1_250_000
+SEC_GOVERNANCE_FORM_MAX_SCAN_CHARS = {
+    "10-K": 1_500_000,
+    "10-K/A": 1_500_000,
+    "20-F": 1_500_000,
+    "20-F/A": 1_500_000,
+    "40-F": 1_500_000,
+    "40-F/A": 1_500_000,
+    "10-Q": 800_000,
+    "10-Q/A": 800_000,
+}
+SEC_GOVERNANCE_ANCHOR_RE = re.compile(
+    r"\b("
+    r"share repurchase|stock repurchase|repurchase program|accelerated share repurchase|"
+    r"Item\s+5\.02|appointed|resigned|retired|terminated|departed|departure|"
+    r"complete response letter|FDA|regulatory|clinical hold|"
+    r"court|federal circuit|appeals court|district court|litigation|lawsuit|patent|"
+    r"generic|ANDA|Paragraph IV|"
+    r"substantially all of|depend|depends|dependent|rely|relies|reliant"
+    r")\b",
+    re.IGNORECASE,
+)
+SEC_GOVERNANCE_SIGNAL_FIELDS = [
+    "buyback_flag",
+    "asr_flag",
+    "leadership_flag",
+    "cfo_departure_flag",
+    "regulatory_setback_flag",
+    "adverse_legal_flag",
+    "generic_competition_flag",
+    "product_concentration_flag",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -121,18 +166,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-companies", type=int, default=0, help="Smoke-test limit. 0 means all.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
     parser.add_argument("--allow-missing-form4", action="store_true", help="Build SEC-only governance features if the Form 4 database is unavailable.")
+    parser.add_argument("--reuse-unchanged-historical", action="store_true", help="Reuse prior governance rows when historical input signatures match exactly.")
     return parser.parse_args()
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -168,8 +207,12 @@ def as_bool(raw: object) -> bool:
     return str(raw or "").strip().lower() in {"1", "true", "yes", "y"}
 
 
-def normalize_ticker(raw: object) -> str:
-    return str(raw or "").strip().upper().replace(".", "-")
+def safe_json_loads(raw: object) -> dict[str, Any]:
+    try:
+        payload = json.loads(str(raw or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def normalize_cik(raw: object) -> str:
@@ -227,17 +270,17 @@ def connect_form4_readonly(path: Path) -> sqlite3.Connection:
 def form4_snapshot_date(conn: sqlite3.Connection, snapshot_table: str) -> str:
     try:
         if snapshot_table:
-            row = conn.execute(f"SELECT MAX(last_index_date) AS snapshot_date FROM {snapshot_table}").fetchone()
+            row = conn.execute(f"SELECT MAX(last_index_date) AS snapshot_date FROM {quote_identifier(snapshot_table)}").fetchone()
             if row and row["snapshot_date"]:
                 return str(row["snapshot_date"])
-    except sqlite3.Error:
+    except (sqlite3.Error, ValueError):
         pass
     for table, field in [("form4_events_tier1", "filing_date"), ("form4_buy_events_v1", "filing_date")]:
         try:
-            row = conn.execute(f"SELECT MAX({field}) AS snapshot_date FROM {table}").fetchone()
+            row = conn.execute(f"SELECT MAX({quote_identifier(field)}) AS snapshot_date FROM {quote_identifier(table)}").fetchone()
             if row and row["snapshot_date"]:
                 return str(row["snapshot_date"])
-        except sqlite3.Error:
+        except (sqlite3.Error, ValueError):
             continue
     return ""
 
@@ -259,10 +302,11 @@ def load_form4_rows(
     if form4_conn is None:
         return [], "form4_db_unavailable"
     try:
+        table_sql = quote_identifier(table)
         rows = form4_conn.execute(
             f"""
             SELECT *
-            FROM {table}
+            FROM {table_sql}
             WHERE is_current_truth = 1
               AND COALESCE(trans_date, filing_date) >= ?
               AND COALESCE(trans_date, filing_date) <= ?
@@ -274,7 +318,7 @@ def load_form4_rows(
             """,
             (start_date.isoformat(), asof_date.isoformat(), ticker, cik_int, cik_int),
         ).fetchall()
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, ValueError) as exc:
         LOGGER.warning("Form 4 query failed for %s: %s", ticker, exc)
         return [], f"form4_query_error:{type(exc).__name__}"
     return [dict(row) for row in rows], ""
@@ -302,35 +346,39 @@ def load_form4_rows_bulk(
             ticker_to_company_ids.setdefault(ticker, []).append(company_id)
         if cik_int:
             cik_to_company_ids.setdefault(cik_int, []).append(company_id)
-    clauses: list[str] = []
-    params: list[Any] = [start_date.isoformat(), asof_date.isoformat()]
-    if tickers:
-        clauses.append(f"UPPER(issuer_trading_symbol) IN ({','.join('?' for _ in tickers)})")
-        params.extend(tickers)
-    if ciks:
-        clauses.append(f"LTRIM(issuer_cik, '0') IN ({','.join('?' for _ in ciks)})")
-        params.extend(ciks)
-    if not clauses:
+    if not tickers and not ciks:
         return {int(company["company_id"]): [] for company in companies}, ""
+    rows_by_key: dict[str, dict[str, Any]] = {}
     try:
-        rows = form4_conn.execute(
-            f"""
-            SELECT *
-            FROM {table}
-            WHERE is_current_truth = 1
-              AND COALESCE(trans_date, filing_date) >= ?
-              AND COALESCE(trans_date, filing_date) <= ?
-              AND ({' OR '.join(clauses)})
-            ORDER BY COALESCE(trans_date, filing_date) DESC
-            """,
-            tuple(params),
-        ).fetchall()
-    except sqlite3.Error as exc:
+        table_sql = quote_identifier(table)
+        for field_expr, values in [
+            ("UPPER(issuer_trading_symbol)", tickers),
+            ("LTRIM(issuer_cik, '0')", ciks),
+        ]:
+            for value_chunk in chunked(values):
+                placeholders = ",".join("?" for _ in value_chunk)
+                rows = form4_conn.execute(
+                    f"""
+                    SELECT rowid AS __rowid__, *
+                    FROM {table_sql}
+                    WHERE is_current_truth = 1
+                      AND COALESCE(trans_date, filing_date) >= ?
+                      AND COALESCE(trans_date, filing_date) <= ?
+                      AND {field_expr} IN ({placeholders})
+                    ORDER BY COALESCE(trans_date, filing_date) DESC
+                    """,
+                    (start_date.isoformat(), asof_date.isoformat(), *value_chunk),
+                ).fetchall()
+                for row in rows:
+                    item = dict(row)
+                    row_key = str(item.pop("__rowid__", "")) or json.dumps(item, ensure_ascii=True, sort_keys=True, default=str)
+                    rows_by_key[row_key] = item
+    except (sqlite3.Error, ValueError) as exc:
         LOGGER.warning("Bulk Form 4 query failed: %s", exc)
         return {}, f"form4_query_error:{type(exc).__name__}"
     grouped: dict[int, list[dict[str, Any]]] = {int(company["company_id"]): [] for company in companies}
-    for row in rows:
-        item = dict(row)
+    rows = sorted(rows_by_key.values(), key=lambda item: str(item.get("trans_date") or item.get("filing_date") or ""), reverse=True)
+    for item in rows:
         matched_ids: set[int] = set()
         ticker = normalize_ticker(item.get("issuer_trading_symbol"))
         cik_int = normalize_cik(item.get("issuer_cik"))
@@ -500,6 +548,185 @@ def form4_metrics(
     }
 
 
+def stable_hash(payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def governance_input_signature(
+    *,
+    sec_docs: list[dict[str, Any]],
+    activist_count: int,
+    form4_rows: list[dict[str, Any]],
+    form4_error: str,
+    asof_date: date,
+    snapshot_date: str,
+    config: dict[str, Any],
+    form4_table: str,
+) -> str:
+    sec_items = [
+        {
+            "accession_nodash": str(row.get("accession_nodash") or ""),
+            "filing_date": str(row.get("filing_date") or ""),
+            "form": str(row.get("form") or ""),
+            "text_hash": str(row.get("text_hash") or ""),
+        }
+        for row in sorted(sec_docs, key=lambda item: (str(item.get("accession_nodash") or ""), str(item.get("text_hash") or "")))
+    ]
+    form4_items = [
+        {
+            "trans_date": str(row.get("trans_date") or ""),
+            "filing_date": str(row.get("filing_date") or ""),
+            "issuer_trading_symbol": normalize_ticker(row.get("issuer_trading_symbol")),
+            "issuer_cik": normalize_cik(row.get("issuer_cik")),
+            "trans_code": str(row.get("trans_code") or "").strip().upper(),
+            "signal_side": str(row.get("signal_side") or row.get("trans_direction") or "").strip().lower(),
+            "trade_value_usd": round(to_float(row.get("trade_value_usd"), 0.0) or 0.0, 4),
+            "rptowner_name": str(row.get("rptowner_name") or ""),
+            "rptowner_title": str(row.get("rptowner_title") or ""),
+            "rptowner_relationship": str(row.get("rptowner_relationship") or ""),
+            "aff10b5one_flag": to_int(row.get("aff10b5one_flag")),
+            "cluster_insiders_5bd": to_int(row.get("cluster_insiders_5bd")),
+            "cluster_insiders_10bd": to_int(row.get("cluster_insiders_10bd")),
+            "cluster_insiders_20bd": to_int(row.get("cluster_insiders_20bd")),
+        }
+        for row in sorted(
+            form4_rows,
+            key=lambda item: (
+                str(item.get("trans_date") or item.get("filing_date") or ""),
+                normalize_ticker(item.get("issuer_trading_symbol")),
+                normalize_cik(item.get("issuer_cik")),
+                str(item.get("rptowner_name") or ""),
+                str(item.get("trans_code") or ""),
+            ),
+        )
+    ]
+    governance_cfg = cfg_get(config, "governance_events", {}) or {}
+    form4_metric_state = {
+        key: value
+        for key, value in form4_metrics(form4_rows, asof_date=asof_date, config=config).items()
+        if key != "sample_form4_events"
+    }
+    return stable_hash(
+        {
+            "version": GOVERNANCE_FEATURE_SIGNATURE_VERSION,
+            "parser_signature": governance_parser_signature(),
+            "snapshot_date": snapshot_date,
+            "form4_table": form4_table,
+            "form4_error": form4_error,
+            "config": governance_cfg,
+            "activist_count": int(activist_count),
+            "sec_docs": sec_items,
+            "form4_rows": form4_items,
+            "form4_metric_state": form4_metric_state,
+        }
+    )
+
+
+def governance_parser_signature() -> str:
+    payload = {
+        "version": SEC_GOVERNANCE_CACHE_VERSION,
+        "forms": SEC_SCAN_FORMS,
+        "patterns": {
+            "buyback": [pattern.pattern for pattern in BUYBACK_PATTERNS],
+            "asr": [pattern.pattern for pattern in ASR_PATTERNS],
+            "leadership": [pattern.pattern for pattern in LEADERSHIP_PATTERNS],
+            "cfo_departure": [pattern.pattern for pattern in CFO_DEPARTURE_PATTERNS],
+            "regulatory_setback": [pattern.pattern for pattern in REGULATORY_SETBACK_PATTERNS],
+            "adverse_legal": [pattern.pattern for pattern in ADVERSE_LEGAL_PATTERNS],
+            "generic_competition": [pattern.pattern for pattern in GENERIC_COMPETITION_PATTERNS],
+            "product_concentration": [pattern.pattern for pattern in PRODUCT_CONCENTRATION_PATTERNS],
+        },
+        "scan_limits": {
+            "head_chars": SEC_GOVERNANCE_HEAD_SCAN_CHARS,
+            "context_chars": SEC_GOVERNANCE_CONTEXT_CHARS,
+            "default_max_chars": SEC_GOVERNANCE_DEFAULT_MAX_SCAN_CHARS,
+            "form_max_chars": SEC_GOVERNANCE_FORM_MAX_SCAN_CHARS,
+        },
+    }
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def governance_scan_text(text: str, *, form: str = "") -> str:
+    """Scan the filing head plus targeted deep-context windows from large filings."""
+    if len(text) <= SEC_GOVERNANCE_HEAD_SCAN_CHARS:
+        return text
+    max_scan_chars = int(
+        SEC_GOVERNANCE_FORM_MAX_SCAN_CHARS.get(
+            str(form or "").strip().upper(),
+            SEC_GOVERNANCE_DEFAULT_MAX_SCAN_CHARS,
+        )
+    )
+    segments: list[tuple[int, int]] = [(0, SEC_GOVERNANCE_HEAD_SCAN_CHARS)]
+    scanned_chars = SEC_GOVERNANCE_HEAD_SCAN_CHARS
+    for match in SEC_GOVERNANCE_ANCHOR_RE.finditer(text, SEC_GOVERNANCE_HEAD_SCAN_CHARS):
+        start = max(SEC_GOVERNANCE_HEAD_SCAN_CHARS, match.start() - SEC_GOVERNANCE_CONTEXT_CHARS)
+        end = min(len(text), match.end() + SEC_GOVERNANCE_CONTEXT_CHARS)
+        if segments and start <= segments[-1][1]:
+            old_start, old_end = segments[-1]
+            new_end = max(old_end, end)
+            scanned_chars += max(0, new_end - old_end)
+            segments[-1] = (old_start, new_end)
+        else:
+            scanned_chars += end - start
+            segments.append((start, end))
+        if scanned_chars >= max_scan_chars:
+            break
+    return "\n".join(text[start:end] for start, end in segments)
+
+
+def empty_sec_governance_signal(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "accession_nodash": str(row.get("accession_nodash") or ""),
+        "filing_date": str(row.get("filing_date") or ""),
+        "form": str(row.get("form") or ""),
+        "text_hash": str(row.get("text_hash") or ""),
+        "matches": "",
+        **{field: 0 for field in SEC_GOVERNANCE_SIGNAL_FIELDS},
+    }
+
+
+def classify_sec_governance_text(row: dict[str, Any]) -> dict[str, Any]:
+    signal = empty_sec_governance_signal(row)
+    text = str(row.get("text_content") or "")
+    if not text:
+        return signal
+    signal["text_hash"] = str(row.get("text_hash") or "") or text_hash(text)
+    scan_text = governance_scan_text(text, form=str(row.get("form") or ""))
+    matches: list[str] = []
+    if any(pattern.search(scan_text) for pattern in BUYBACK_PATTERNS):
+        signal["buyback_flag"] = 1
+        matches.append("buyback")
+    if any(pattern.search(scan_text) for pattern in ASR_PATTERNS):
+        signal["asr_flag"] = 1
+        matches.append("asr")
+    if any(pattern.search(scan_text) for pattern in LEADERSHIP_PATTERNS):
+        signal["leadership_flag"] = 1
+        matches.append("leadership")
+    if any(pattern.search(scan_text) for pattern in CFO_DEPARTURE_PATTERNS):
+        signal["cfo_departure_flag"] = 1
+        matches.append("cfo_departure")
+    if any(pattern.search(scan_text) for pattern in REGULATORY_SETBACK_PATTERNS):
+        signal["regulatory_setback_flag"] = 1
+        matches.append("regulatory_setback")
+    if any(pattern.search(scan_text) for pattern in ADVERSE_LEGAL_PATTERNS):
+        signal["adverse_legal_flag"] = 1
+        matches.append("adverse_legal")
+    if any(pattern.search(scan_text) for pattern in GENERIC_COMPETITION_PATTERNS):
+        signal["generic_competition_flag"] = 1
+        matches.append("generic_competition")
+    if any(pattern.search(scan_text) for pattern in PRODUCT_CONCENTRATION_PATTERNS):
+        signal["product_concentration_flag"] = 1
+        matches.append("product_concentration")
+    signal["matches"] = ",".join(dict.fromkeys(matches))
+    return signal
+
+
 def scan_sec_governance_rows(rows: list[dict[str, Any]], activist_count: int) -> dict[str, Any]:
     buyback_accessions: set[str] = set()
     asr_accessions: set[str] = set()
@@ -512,35 +739,24 @@ def scan_sec_governance_rows(rows: list[dict[str, Any]], activist_count: int) ->
     examples: list[dict[str, str]] = []
     for row in rows:
         accession = str(row["accession_nodash"] or "")
-        text = str(row["text_content"] or "")
-        if not text:
-            continue
-        head = text[:350_000]
-        matched = []
-        if any(pattern.search(head) for pattern in BUYBACK_PATTERNS):
+        signal = row if all(field in row for field in SEC_GOVERNANCE_SIGNAL_FIELDS) else classify_sec_governance_text(row)
+        matched = [part for part in str(signal.get("matches") or "").split(",") if part]
+        if int(signal.get("buyback_flag") or 0):
             buyback_accessions.add(accession)
-            matched.append("buyback")
-        if any(pattern.search(head) for pattern in ASR_PATTERNS):
+        if int(signal.get("asr_flag") or 0):
             asr_accessions.add(accession)
-            matched.append("asr")
-        if any(pattern.search(head) for pattern in LEADERSHIP_PATTERNS):
+        if int(signal.get("leadership_flag") or 0):
             leadership_accessions.add(accession)
-            matched.append("leadership")
-        if any(pattern.search(head) for pattern in CFO_DEPARTURE_PATTERNS):
+        if int(signal.get("cfo_departure_flag") or 0):
             cfo_departure = True
-            matched.append("cfo_departure")
-        if any(pattern.search(head) for pattern in REGULATORY_SETBACK_PATTERNS):
+        if int(signal.get("regulatory_setback_flag") or 0):
             regulatory_accessions.add(accession)
-            matched.append("regulatory_setback")
-        if any(pattern.search(head) for pattern in ADVERSE_LEGAL_PATTERNS):
+        if int(signal.get("adverse_legal_flag") or 0):
             adverse_legal_accessions.add(accession)
-            matched.append("adverse_legal")
-        if any(pattern.search(head) for pattern in GENERIC_COMPETITION_PATTERNS):
+        if int(signal.get("generic_competition_flag") or 0):
             generic_accessions.add(accession)
-            matched.append("generic_competition")
-        if any(pattern.search(head) for pattern in PRODUCT_CONCENTRATION_PATTERNS):
+        if int(signal.get("product_concentration_flag") or 0):
             concentration_accessions.add(accession)
-            matched.append("product_concentration")
         if matched and len(examples) < 6:
             examples.append(
                 {
@@ -565,6 +781,196 @@ def scan_sec_governance_rows(rows: list[dict[str, Any]], activist_count: int) ->
     }
 
 
+def load_cached_sec_governance_signals(
+    conn: sqlite3.Connection,
+    docs: list[dict[str, Any]],
+    *,
+    parser_signature: str,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    accessions = sorted({str(row.get("accession_nodash") or "") for row in docs if str(row.get("accession_nodash") or "")})
+    wanted = {
+        (str(row.get("accession_nodash") or ""), str(row.get("text_hash") or ""))
+        for row in docs
+        if str(row.get("accession_nodash") or "") and str(row.get("text_hash") or "")
+    }
+    if not accessions or not wanted:
+        return {}
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    chunk_size = 900
+    for start in range(0, len(accessions), chunk_size):
+        chunk = accessions[start : start + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT accession_nodash, text_hash, buyback_flag, asr_flag, leadership_flag,
+                   cfo_departure_flag, regulatory_setback_flag, adverse_legal_flag,
+                   generic_competition_flag, product_concentration_flag, matches
+            FROM sec_governance_signal_cache
+            WHERE parser_signature = ?
+              AND accession_nodash IN ({placeholders})
+            """,
+            (parser_signature, *chunk),
+        ).fetchall()
+        for row in rows:
+            key = (str(row["accession_nodash"] or ""), str(row["text_hash"] or ""))
+            if key in wanted:
+                out[key] = dict(row)
+    return out
+
+
+def load_sec_governance_document_texts(
+    conn: sqlite3.Connection,
+    docs: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    accessions = sorted({str(row.get("accession_nodash") or "") for row in docs if str(row.get("accession_nodash") or "")})
+    if not accessions:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    chunk_size = 900
+    for start in range(0, len(accessions), chunk_size):
+        chunk = accessions[start : start + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT accession_nodash, document_url, document_type, text_content, text_hash
+            FROM (
+                SELECT d.accession_nodash, d.document_url, d.document_type, d.text_content, d.text_hash,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY d.accession_nodash
+                           ORDER BY
+                               CASE WHEN d.document_type = 'complete_submission_text' THEN 0 ELSE 1 END,
+                               COALESCE(d.fetched_at, d.updated_at, d.created_at) DESC,
+                               d.document_id DESC
+                       ) AS rn
+                FROM sec_filing_documents d
+                WHERE d.accession_nodash IN ({placeholders})
+                  AND d.text_content IS NOT NULL
+                  AND LENGTH(d.text_content) > 0
+            )
+            WHERE rn = 1
+            """,
+            tuple(chunk),
+        ).fetchall()
+        for row in rows:
+            out[str(row["accession_nodash"] or "")] = dict(row)
+    return out
+
+
+def upsert_sec_governance_signal_cache(
+    conn: sqlite3.Connection,
+    signals: list[dict[str, Any]],
+    *,
+    parser_signature: str,
+) -> None:
+    if not signals:
+        return
+    now = utc_now()
+    rows_to_upsert: list[tuple[Any, ...]] = []
+    for signal in signals:
+        accession = str(signal.get("accession_nodash") or "")
+        digest = str(signal.get("text_hash") or "")
+        if not accession or not digest:
+            continue
+        rows_to_upsert.append(
+            (
+                accession,
+                digest,
+                parser_signature,
+                *[int(signal.get(field) or 0) for field in SEC_GOVERNANCE_SIGNAL_FIELDS],
+                str(signal.get("matches") or ""),
+                now,
+                now,
+            )
+        )
+    if not rows_to_upsert:
+        return
+    with conn:
+        conn.executemany(
+            """
+            INSERT INTO sec_governance_signal_cache(
+                accession_nodash, text_hash, parser_signature,
+                buyback_flag, asr_flag, leadership_flag, cfo_departure_flag,
+                regulatory_setback_flag, adverse_legal_flag, generic_competition_flag,
+                product_concentration_flag, matches, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(accession_nodash, text_hash, parser_signature) DO UPDATE SET
+                buyback_flag = excluded.buyback_flag,
+                asr_flag = excluded.asr_flag,
+                leadership_flag = excluded.leadership_flag,
+                cfo_departure_flag = excluded.cfo_departure_flag,
+                regulatory_setback_flag = excluded.regulatory_setback_flag,
+                adverse_legal_flag = excluded.adverse_legal_flag,
+                generic_competition_flag = excluded.generic_competition_flag,
+                product_concentration_flag = excluded.product_concentration_flag,
+                matches = excluded.matches,
+                updated_at = excluded.updated_at
+            """,
+            rows_to_upsert,
+        )
+
+
+def hydrate_sec_governance_signals(
+    conn: sqlite3.Connection,
+    docs_by_company: dict[int, list[dict[str, Any]]],
+    *,
+    parser_signature: str,
+) -> dict[int, list[dict[str, Any]]]:
+    all_docs = [row for rows in docs_by_company.values() for row in rows]
+    if not all_docs:
+        return docs_by_company
+    cached = load_cached_sec_governance_signals(conn, all_docs, parser_signature=parser_signature)
+    missing_docs = [
+        row
+        for row in all_docs
+        if not str(row.get("text_hash") or "")
+        or (str(row.get("accession_nodash") or ""), str(row.get("text_hash") or "")) not in cached
+    ]
+    text_rows = load_sec_governance_document_texts(conn, missing_docs)
+    classified: dict[tuple[str, str], dict[str, Any]] = {}
+    classified_by_accession: dict[str, dict[str, Any]] = {}
+    cache_updates: list[dict[str, Any]] = []
+    for row in missing_docs:
+        accession = str(row.get("accession_nodash") or "")
+        text_row = text_rows.get(accession)
+        if not text_row:
+            continue
+        text = str(text_row.get("text_content") or "")
+        digest = str(text_row.get("text_hash") or "") or text_hash(text)
+        signal = classify_sec_governance_text(
+            {
+                **row,
+                "document_url": text_row.get("document_url"),
+                "document_type": text_row.get("document_type"),
+                "text_content": text,
+                "text_hash": digest,
+            }
+        )
+        key = (accession, str(signal.get("text_hash") or ""))
+        classified[key] = signal
+        classified_by_accession[accession] = signal
+        cache_updates.append(signal)
+    upsert_sec_governance_signal_cache(conn, cache_updates, parser_signature=parser_signature)
+
+    out: dict[int, list[dict[str, Any]]] = {company_id: [] for company_id in docs_by_company}
+    for company_id, rows in docs_by_company.items():
+        for row in rows:
+            key = (str(row.get("accession_nodash") or ""), str(row.get("text_hash") or ""))
+            signal = cached.get(key) or classified.get(key)
+            if signal is None and key[0]:
+                signal = classified_by_accession.get(key[0])
+            out.setdefault(company_id, []).append({**row, **(signal or empty_sec_governance_signal(row))})
+    LOGGER.info(
+        "SEC governance signal cache docs=%d hits=%d misses=%d text_loaded=%d classified=%d",
+        len(all_docs),
+        len(cached),
+        len(missing_docs),
+        len(text_rows),
+        len(cache_updates),
+    )
+    return out
+
+
 def load_sec_governance_inputs_bulk(
     conn: sqlite3.Connection,
     *,
@@ -574,6 +980,19 @@ def load_sec_governance_inputs_bulk(
 ) -> tuple[dict[int, list[dict[str, Any]]], dict[int, int]]:
     if not company_ids:
         return {}, {}
+    if len(company_ids) > SQLITE_PARAM_CHUNK_SIZE:
+        docs_by_company: dict[int, list[dict[str, Any]]] = {int(company_id): [] for company_id in company_ids}
+        activist_counts: dict[int, int] = {int(company_id): 0 for company_id in company_ids}
+        for company_chunk in chunked(company_ids):
+            chunk_docs, chunk_activists = load_sec_governance_inputs_bulk(
+                conn,
+                company_ids=[int(value) for value in company_chunk],
+                asof_date=asof_date,
+                config=config,
+            )
+            docs_by_company.update(chunk_docs)
+            activist_counts.update(chunk_activists)
+        return docs_by_company, activist_counts
     lookback_days = int(cfg_get(config, "governance_events.sec_event_lookback_days", 365))
     max_docs = int(cfg_get(config, "governance_events.sec_document_max_per_company", 40))
     start_date = (asof_date - timedelta(days=lookback_days)).isoformat()
@@ -590,13 +1009,17 @@ def load_sec_governance_inputs_bulk(
               AND form IN ({form_placeholders})
         ),
         latest_docs AS (
-            SELECT accession_nodash, document_url, text_content
+            SELECT tf.accession_nodash, l.document_url, l.document_type, l.text_hash
+            FROM target_filings tf
+            JOIN sec_filing_latest_document l ON l.accession_nodash = tf.accession_nodash
+            UNION ALL
+            SELECT accession_nodash, document_url, document_type, text_hash
             FROM (
                 SELECT
                     d.accession_nodash,
                     d.document_url,
-                    d.text_content,
                     d.document_type,
+                    d.text_hash,
                     ROW_NUMBER() OVER (
                         PARTITION BY d.accession_nodash
                         ORDER BY
@@ -606,8 +1029,13 @@ def load_sec_governance_inputs_bulk(
                     ) AS rn
                 FROM sec_filing_documents d
                 JOIN target_filings tf ON tf.accession_nodash = d.accession_nodash
-                WHERE d.text_content IS NOT NULL
-                  AND length(d.text_content) > 0
+                LEFT JOIN sec_filing_latest_document l ON l.accession_nodash = d.accession_nodash
+                WHERE l.accession_nodash IS NULL
+                  AND (
+                    COALESCE(d.text_length, 0) > 0
+                    OR d.text_hash IS NOT NULL
+                    OR d.text_content IS NOT NULL
+                  )
             )
             WHERE rn = 1
         ),
@@ -618,7 +1046,8 @@ def load_sec_governance_inputs_bulk(
                 tf.form,
                 tf.filing_date,
                 d.document_url,
-                d.text_content,
+                d.document_type,
+                COALESCE(d.text_hash, '') AS text_hash,
                 ROW_NUMBER() OVER (
                     PARTITION BY tf.company_id
                     ORDER BY tf.filing_date DESC, tf.accession_nodash DESC
@@ -626,7 +1055,7 @@ def load_sec_governance_inputs_bulk(
             FROM target_filings tf
             JOIN latest_docs d ON d.accession_nodash = tf.accession_nodash
         )
-        SELECT company_id, accession_nodash, form, filing_date, document_url, text_content
+        SELECT company_id, accession_nodash, form, filing_date, document_url, document_type, text_hash
         FROM ranked_docs
         WHERE rn <= ?
         ORDER BY company_id, filing_date DESC, accession_nodash DESC
@@ -682,6 +1111,7 @@ def build_row(
     preloaded_form4_rows: list[dict[str, Any]] | None = None,
     preloaded_form4_error: str = "",
     preloaded_sec_events: dict[str, Any] | None = None,
+    input_signature: str = "",
 ) -> dict[str, Any]:
     ticker = normalize_ticker(company.get("ticker"))
     cik_int = normalize_cik(company.get("cik"))
@@ -737,6 +1167,7 @@ def build_row(
     payload = {
         "form4_row_count_365d": len(form4_rows),
         "form4_lookup": {"ticker": ticker, "cik_int": cik_int},
+        "input_signature": input_signature,
         "sample_form4_events": form4.get("sample_form4_events", []),
         "sample_sec_events": sec_events.get("sample_sec_events", []),
         "method": "form4_current_truth_plus_sec_text_governance_scan",
@@ -760,28 +1191,70 @@ def upsert_rows(
 ) -> None:
     now = utc_now()
     placeholders = ", ".join("?" for _ in GOVERNANCE_FIELDS)
-    update_cols = [field for field in GOVERNANCE_FIELDS if field not in {"asof_date", "company_id"}]
     with conn:
         if target_company_ids is None:
             conn.execute("DELETE FROM governance_event_features_daily WHERE asof_date = ?", (asof_date,))
         elif target_company_ids:
-            company_placeholders = ",".join("?" for _ in target_company_ids)
-            conn.execute(
-                f"DELETE FROM governance_event_features_daily WHERE asof_date = ? AND company_id IN ({company_placeholders})",
-                (asof_date, *sorted(target_company_ids)),
-            )
+            for company_chunk in chunked(sorted(target_company_ids)):
+                company_placeholders = ",".join("?" for _ in company_chunk)
+                conn.execute(
+                    f"DELETE FROM governance_event_features_daily WHERE asof_date = ? AND company_id IN ({company_placeholders})",
+                    (asof_date, *company_chunk),
+                )
         else:
             return
         conn.executemany(
             f"""
             INSERT INTO governance_event_features_daily({", ".join(GOVERNANCE_FIELDS)}, created_at, updated_at)
             VALUES ({placeholders}, ?, ?)
-            ON CONFLICT(asof_date, company_id) DO UPDATE SET
-                {", ".join(f"{field} = excluded.{field}" for field in update_cols)},
-                updated_at = excluded.updated_at
             """,
             [tuple(row.get(field) for field in GOVERNANCE_FIELDS) + (now, now) for row in rows],
         )
+
+
+def load_previous_governance_rows(
+    conn: sqlite3.Connection,
+    *,
+    asof_date: date,
+    company_ids: list[int],
+) -> dict[int, dict[str, Any]]:
+    if not company_ids:
+        return {}
+    out: dict[int, dict[str, Any]] = {}
+    for company_chunk in chunked(company_ids):
+        placeholders = ",".join("?" for _ in company_chunk)
+        rows = conn.execute(
+            f"""
+            WITH latest AS (
+                SELECT company_id, MAX(asof_date) AS max_asof
+                FROM governance_event_features_daily
+                WHERE asof_date < ?
+                  AND company_id IN ({placeholders})
+                GROUP BY company_id
+            )
+            SELECT g.*
+            FROM governance_event_features_daily g
+            JOIN latest l
+              ON l.company_id = g.company_id
+             AND l.max_asof = g.asof_date
+            """,
+            (asof_date.isoformat(), *company_chunk),
+        ).fetchall()
+        out.update({int(row["company_id"]): dict(row) for row in rows})
+    return out
+
+
+def row_input_signature(row: dict[str, Any]) -> str:
+    return str(safe_json_loads(row.get("payload_json")).get("input_signature") or "")
+
+
+def copy_governance_row_for_asof(row: dict[str, Any], company: dict[str, Any], asof_date: date) -> dict[str, Any]:
+    copied = {field: row.get(field) for field in GOVERNANCE_FIELDS}
+    copied["asof_date"] = asof_date.isoformat()
+    copied["company_id"] = int(company["company_id"])
+    copied["ticker"] = normalize_ticker(company.get("ticker"))
+    copied["company_name"] = str(company.get("company_name") or "")
+    return copied
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -808,6 +1281,7 @@ def main() -> None:
     ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if value.strip()}
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     form4_required = as_bool(cfg_get(config, "governance_events.form4_required", True)) and not bool(args.allow_missing_form4)
+    reuse_unchanged = bool(args.reuse_unchanged_historical or as_bool(cfg_get(config, "governance_events.reuse_unchanged_historical", False)))
 
     form4_conn: sqlite3.Connection | None = None
     snapshot_date = ""
@@ -815,14 +1289,19 @@ def main() -> None:
         form4_conn = connect_form4_readonly(form4_db_path)
         snapshot_date = form4_snapshot_date(form4_conn, str(cfg_get(config, "governance_events.form4_snapshot_table", "sec_form4_daily_state")))
     except Exception as exc:
+        if form4_conn is not None:
+            form4_conn.close()
+            form4_conn = None
         if form4_required:
             raise RuntimeError(f"Form 4 database is required for governance features but is unavailable: {form4_db_path}") from exc
         LOGGER.warning("Form 4 database unavailable; governance rows will use SEC-only evidence: %s", exc)
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
-        init_db(conn)
-        run_id = start_run(conn, run_type="build_governance_event_features", input_path=form4_db_path)
+        run_id: int | None = None
         try:
+            overall_start = time.perf_counter()
+            init_db(conn)
+            run_id = start_run(conn, run_type="build_governance_event_features", input_path=form4_db_path)
             scoring_tickers = read_scoring_tickers(universe_csv)
             companies = load_companies(conn, scoring_tickers=scoring_tickers, ticker_filter=ticker_filter, max_companies=args.max_companies)
             subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_companies))
@@ -843,6 +1322,7 @@ def main() -> None:
             company_ids = [int(company["company_id"]) for company in companies]
             table = str(cfg_get(config, "governance_events.form4_table", "form4_events_tier1"))
             lookback_days = int(cfg_get(config, "governance_events.lookback_days", 365))
+            phase_start = time.perf_counter()
             form4_rows_by_company, form4_preload_error = load_form4_rows_bulk(
                 form4_conn,
                 table=table,
@@ -850,15 +1330,77 @@ def main() -> None:
                 start_date=asof_date - timedelta(days=lookback_days),
                 asof_date=asof_date,
             )
+            LOGGER.info(
+                "Governance Form 4 preload complete: companies=%d rows=%d elapsed=%.3fs error=%s",
+                len(companies),
+                sum(len(rows) for rows in form4_rows_by_company.values()),
+                time.perf_counter() - phase_start,
+                form4_preload_error or "",
+            )
+            phase_start = time.perf_counter()
             sec_docs_by_company, activist_counts_by_company = load_sec_governance_inputs_bulk(
                 conn,
                 company_ids=company_ids,
                 asof_date=asof_date,
                 config=config,
             )
+            LOGGER.info(
+                "Governance SEC metadata preload complete: companies=%d docs=%d elapsed=%.3fs",
+                len(companies),
+                sum(len(rows) for rows in sec_docs_by_company.values()),
+                time.perf_counter() - phase_start,
+            )
+            signature_by_company = {
+                int(company["company_id"]): governance_input_signature(
+                    sec_docs=sec_docs_by_company.get(int(company["company_id"]), []),
+                    activist_count=activist_counts_by_company.get(int(company["company_id"]), 0),
+                    form4_rows=form4_rows_by_company.get(int(company["company_id"]), []),
+                    form4_error=form4_preload_error,
+                    asof_date=asof_date,
+                    snapshot_date=snapshot_date,
+                    config=config,
+                    form4_table=table,
+                )
+                for company in companies
+            }
+            previous_rows = load_previous_governance_rows(conn, asof_date=asof_date, company_ids=company_ids) if reuse_unchanged else {}
+            reused_rows_by_company: dict[int, dict[str, Any]] = {}
+            dirty_companies: list[dict[str, Any]] = []
+            for company in companies:
+                company_id = int(company["company_id"])
+                previous = previous_rows.get(company_id)
+                if previous and row_input_signature(previous) == signature_by_company.get(company_id, ""):
+                    reused_rows_by_company[company_id] = copy_governance_row_for_asof(previous, company, asof_date)
+                else:
+                    dirty_companies.append(company)
+            LOGGER.info(
+                "Governance historical reuse: enabled=%s reused=%d dirty=%d",
+                reuse_unchanged,
+                len(reused_rows_by_company),
+                len(dirty_companies),
+            )
+            dirty_company_ids = {int(company["company_id"]) for company in dirty_companies}
+            phase_start = time.perf_counter()
+            hydrated_dirty_docs = hydrate_sec_governance_signals(
+                conn,
+                {company_id: rows for company_id, rows in sec_docs_by_company.items() if company_id in dirty_company_ids},
+                parser_signature=governance_parser_signature(),
+            )
+            LOGGER.info(
+                "Governance SEC signal hydration complete: dirty_companies=%d dirty_docs=%d elapsed=%.3fs",
+                len(dirty_companies),
+                sum(len(rows) for rows in hydrated_dirty_docs.values()),
+                time.perf_counter() - phase_start,
+            )
+            phase_start = time.perf_counter()
             rows = []
             for idx, company in enumerate(companies, start=1):
                 company_id = int(company["company_id"])
+                if company_id in reused_rows_by_company:
+                    rows.append(reused_rows_by_company[company_id])
+                    if idx % 25 == 0 or idx == len(companies):
+                        LOGGER.info("[%d/%d] governance features built/reused", idx, len(companies))
+                    continue
                 row = build_row(
                     conn,
                     form4_conn,
@@ -870,13 +1412,15 @@ def main() -> None:
                     preloaded_form4_rows=form4_rows_by_company.get(company_id, []),
                     preloaded_form4_error=form4_preload_error,
                     preloaded_sec_events=scan_sec_governance_rows(
-                        sec_docs_by_company.get(company_id, []),
+                        hydrated_dirty_docs.get(company_id, []),
                         activist_counts_by_company.get(company_id, 0),
                     ),
+                    input_signature=signature_by_company.get(company_id, ""),
                 )
                 rows.append(row)
                 if idx % 25 == 0 or idx == len(companies):
-                    LOGGER.info("[%d/%d] governance features built", idx, len(companies))
+                    LOGGER.info("[%d/%d] governance features built/reused", idx, len(companies))
+            LOGGER.info("Governance row assembly complete: rows=%d reused=%d elapsed=%.3fs", len(rows), len(reused_rows_by_company), time.perf_counter() - phase_start)
             partial_run = bool(ticker_filter) or int(args.max_companies) > 0
             validate_output_coverage(
                 expected_tickers=scoring_tickers,
@@ -891,14 +1435,15 @@ def main() -> None:
                 target_company_ids=set(company_ids) if partial_run else None,
             )
             write_csv(output_csv, rows)
+            LOGGER.info("Governance feature build complete: rows=%d elapsed=%.3fs output=%s", len(rows), time.perf_counter() - overall_start, output_csv)
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=f"asof={asof_date.isoformat()} output={output_csv}")
         except Exception as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if run_id is not None:
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
         finally:
             if form4_conn is not None:
                 form4_conn.close()
-    LOGGER.info("Governance feature build complete: rows=%d output=%s", len(rows), output_csv)
 
 
 if __name__ == "__main__":

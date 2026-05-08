@@ -8,7 +8,6 @@ import logging
 import math
 import sqlite3
 import sys
-import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.logging_utils import configure_utc_logging
 
 
 LOGGER = logging.getLogger("score_multibagger_candidates")
@@ -33,6 +33,16 @@ SCORE_FIELDS = [
     "ticker",
     "company_name",
     "multibagger_score",
+    "base_multibagger_score",
+    "orthogonal_alpha_score",
+    "distinctive_acceleration_score",
+    "tier1_opportunity_score",
+    "tier1_risk_score",
+    "tier1_bucket",
+    "tier1_gate_score",
+    "tier1_gate_multiplier",
+    "tier1_available",
+    "tier1_interaction_reason",
     "rank",
     "bucket",
     "top_evidence_json",
@@ -46,6 +56,16 @@ CSV_FIELDS = [
     "company_name",
     "bucket",
     "multibagger_score",
+    "base_multibagger_score",
+    "orthogonal_alpha_score",
+    "distinctive_acceleration_score",
+    "tier1_opportunity_score",
+    "tier1_risk_score",
+    "tier1_bucket",
+    "tier1_gate_score",
+    "tier1_gate_multiplier",
+    "tier1_available",
+    "tier1_interaction_reason",
     "commercial_acceleration_score",
     "upside_capacity_score",
     "cash_flow_acceleration_score",
@@ -91,14 +111,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    for handler in logging.getLogger().handlers:
-        if handler.formatter is not None:
-            handler.formatter.converter = time.gmtime
+    configure_utc_logging()
 
 
 def parse_date(raw: object) -> date | None:
@@ -136,6 +149,29 @@ def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
 
 
+def as_bool(raw: object, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "enabled", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
+        return False
+    return default
+
+
+def convex_risk_drag(risk: float, weight: float, config: dict[str, Any], section: str) -> float:
+    base_drag = weight * risk
+    if not as_bool(cfg_get(config, f"{section}.convex_risk_penalty_enabled", False), False):
+        return base_drag
+    convexity = float(cfg_get(config, f"{section}.risk_penalty_convexity", 0.35))
+    inflection = float(cfg_get(config, f"{section}.risk_penalty_inflection", 50.0))
+    excess = max(0.0, risk - inflection) / max(1.0, 100.0 - inflection)
+    return base_drag * (1.0 + convexity * excess)
+
+
 def parse_json(raw: object) -> dict[str, Any]:
     try:
         payload = json.loads(str(raw or "{}"))
@@ -165,7 +201,109 @@ def load_feature_rows(conn: sqlite3.Connection, asof_date: str) -> list[dict[str
     return [dict(row) for row in rows]
 
 
-def bucket_for(score: float, risk: float, evidence: bool, liquidity_ok: bool, payload: dict[str, Any], config: dict[str, Any]) -> str:
+def load_tier1_score_rows(conn: sqlite3.Connection, asof_date: str) -> dict[int, dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT
+            s.asof_date, s.company_id, s.opportunity_score, s.investment_score,
+            s.clinical_opportunity_score, s.commercial_value_score, s.upside_capacity_score,
+            s.risk_score, s.bucket, s.tier1_selection_gate_score, s.top_evidence_json
+        FROM daily_scores s
+        JOIN (
+            SELECT company_id, MAX(asof_date) AS max_asof
+            FROM daily_scores
+            WHERE asof_date <= ?
+            GROUP BY company_id
+        ) latest
+          ON latest.company_id = s.company_id AND latest.max_asof = s.asof_date
+        """,
+        (asof_date,),
+    ).fetchall()
+    return {int(row["company_id"]): dict(row) for row in rows}
+
+
+def normalized_config_list(raw: object, default: list[str]) -> set[str]:
+    if raw is None:
+        return {item.lower() for item in default}
+    if isinstance(raw, str):
+        return {part.strip().lower() for part in raw.split(",") if part.strip()}
+    if isinstance(raw, (list, tuple, set)):
+        return {str(item).strip().lower() for item in raw if str(item).strip()}
+    return {item.lower() for item in default}
+
+
+def tier1_gate_values(tier1: dict[str, Any] | None, config: dict[str, Any]) -> tuple[float | None, float | None]:
+    if not tier1:
+        return None, None
+    stored_gate = to_float(tier1.get("tier1_selection_gate_score"), math.nan)
+    if math.isfinite(stored_gate):
+        gate_score = clamp(stored_gate)
+    else:
+        opportunity = to_float(tier1.get("opportunity_score"), 0.0)
+        risk = to_float(tier1.get("risk_score"), 100.0)
+        gate_score = clamp(0.70 * opportunity + 0.30 * (100.0 - risk))
+    min_multiplier = float(cfg_get(config, "multibagger.tier1_interaction.min_gate_multiplier", 0.55))
+    multiplier = min_multiplier + (1.0 - min_multiplier) * gate_score / 100.0
+    return gate_score, clamp(multiplier, min_multiplier, 1.0)
+
+
+def tier1_reason_disabled(config: dict[str, Any], tier1: dict[str, Any] | None) -> str:
+    if not as_bool(cfg_get(config, "multibagger.tier1_interaction.enabled", False), False):
+        return "disabled"
+    if not tier1:
+        return "missing_tier1_context"
+    return "pending_tier1_interaction"
+
+
+def build_tier1_interaction_reason(
+    row: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    residualization_status: str,
+    pre_cap_score: float,
+    final_score: float,
+) -> str:
+    if not as_bool(cfg_get(config, "multibagger.tier1_interaction.enabled", False), False):
+        return "disabled"
+    if not bool(row.get("tier1_available")):
+        return "missing_tier1_context"
+
+    reasons: list[str] = []
+    tier1_bucket = str(row.get("tier1_bucket") or "").lower()
+    tier1_risk = to_float(row.get("tier1_risk_score"), 0.0)
+    gate_multiplier = to_float(row.get("tier1_gate_multiplier"), 1.0)
+    veto_buckets = normalized_config_list(
+        cfg_get(config, "multibagger.tier1_interaction.veto_buckets", ["avoid"]),
+        ["avoid"],
+    )
+    tier1_risk_veto = float(cfg_get(config, "multibagger.tier1_interaction.tier1_risk_veto", 80.0))
+    tier1_avoid_cap = float(cfg_get(config, "multibagger.tier1_interaction.tier1_avoid_score_cap", 49.0))
+    tier1_risk_cap = float(cfg_get(config, "multibagger.tier1_interaction.tier1_risk_score_cap", 55.0))
+
+    if residualization_status:
+        reasons.append(f"orthogonal_alpha={residualization_status}")
+    if gate_multiplier < 0.9999:
+        reasons.append(f"tier1_gate_multiplier={gate_multiplier:.4f}")
+    if tier1_bucket in veto_buckets:
+        reasons.append(f"tier1_bucket_veto={tier1_bucket};cap<={tier1_avoid_cap:.1f}")
+    if tier1_risk >= tier1_risk_veto:
+        reasons.append(f"tier1_risk_veto={tier1_risk:.1f};cap<={tier1_risk_cap:.1f}")
+    if final_score < pre_cap_score - 1e-6:
+        reasons.append(f"score_after_caps={final_score:.4f};score_before_caps={pre_cap_score:.4f}")
+    if not reasons:
+        return "tier1_interaction_applied_no_penalty"
+    return "|".join(reasons)
+
+
+def bucket_for(
+    score: float,
+    risk: float,
+    evidence: bool,
+    liquidity_ok: bool,
+    payload: dict[str, Any],
+    config: dict[str, Any],
+    tier1: dict[str, Any] | None = None,
+) -> str:
     high_min = float(cfg_get(config, "multibagger.high_conviction_min", 80))
     watch_min = float(cfg_get(config, "multibagger.watchlist_min", 65))
     spec_min = float(cfg_get(config, "multibagger.speculative_min", 50))
@@ -180,9 +318,22 @@ def bucket_for(score: float, risk: float, evidence: bool, liquidity_ok: bool, pa
     market_cap = to_float(commercial.get("market_cap"), 0.0)
     fragility = to_float(components.get("commercial_fragility_risk_score"), 0.0)
     hard_cap = float(cfg_get(config, "multibagger.market_cap_hard_cap", 75_000_000_000))
+    tier1_enabled = as_bool(cfg_get(config, "multibagger.tier1_interaction.enabled", False), False)
 
     if not liquidity_ok:
         return "avoid_illiquid"
+    if tier1_enabled and tier1 and bool(tier1.get("tier1_available", True)):
+        tier1_bucket = str(tier1.get("tier1_bucket") or tier1.get("bucket") or "").lower()
+        tier1_risk = to_float(tier1.get("tier1_risk_score", tier1.get("risk_score")), 0.0)
+        veto_buckets = normalized_config_list(
+            cfg_get(config, "multibagger.tier1_interaction.veto_buckets", ["avoid"]),
+            ["avoid"],
+        )
+        tier1_risk_veto = float(cfg_get(config, "multibagger.tier1_interaction.tier1_risk_veto", 80.0))
+        if tier1_bucket in veto_buckets:
+            return "avoid_tier1_conflict"
+        if tier1_risk >= tier1_risk_veto:
+            return "avoid_tier1_risk"
     if risk >= avoid_risk_min:
         return "avoid_high_risk"
     if fragility >= avoid_fragility_min:
@@ -200,7 +351,7 @@ def bucket_for(score: float, risk: float, evidence: bool, liquidity_ok: bool, pa
     return "avoid"
 
 
-def score_one(row: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+def score_one(row: dict[str, Any], config: dict[str, Any], tier1: dict[str, Any] | None = None) -> dict[str, Any]:
     weights = cfg_get(config, "multibagger.weights", {}) or {}
     commercial_w = float(weights.get("commercial_acceleration", 0.25))
     upside_w = float(weights.get("upside_capacity", 0.20))
@@ -231,12 +382,32 @@ def score_one(row: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         + market_w * market
         + catalyst_w * catalyst
     )
-    score = round(clamp(positive - risk_w * risk), 4)
+    risk_drag = convex_risk_drag(risk, risk_w, config, "multibagger")
+    score = round(clamp(positive - risk_drag), 4)
     market_payload = payload.get("market", {}) if isinstance(payload, dict) else {}
     avg_dollar_volume = to_float(market_payload.get("avg_dollar_volume_20d"), 0.0)
     min_addv = float(cfg_get(config, "multibagger.min_addv20", 1_000_000))
     evidence = bool(to_int(row.get("evidence_or_catalyst_flag")))
-    bucket = bucket_for(score, risk, evidence, avg_dollar_volume >= min_addv, payload, config)
+    liquidity_ok = avg_dollar_volume >= min_addv
+    gate_score, gate_multiplier = tier1_gate_values(tier1, config)
+    tier1_context = {
+        "tier1_available": bool(tier1),
+        "tier1_opportunity_score": round(to_float(tier1.get("opportunity_score"), 0.0), 4) if tier1 else "",
+        "tier1_risk_score": round(to_float(tier1.get("risk_score"), 0.0), 4) if tier1 else "",
+        "tier1_bucket": str(tier1.get("bucket") or "") if tier1 else "",
+        "tier1_gate_score": round(gate_score, 4) if gate_score is not None else "",
+        "tier1_gate_multiplier": round(gate_multiplier, 4) if gate_multiplier is not None else "",
+    }
+    bucket = bucket_for(score, risk, evidence, liquidity_ok, payload, config, tier1_context)
+    distinct_score = distinctive_acceleration_score(
+        {
+            "commercial_acceleration_score": commercial,
+            "cash_flow_acceleration_score": cash_flow,
+            "governance_event_score": governance,
+            "market_confirmation_score": market,
+            "commercial_fragility_risk_score": fragility,
+        }
+    )
     evidence_json = {
         "component_scores": {
             "commercial_acceleration_score": commercial,
@@ -248,6 +419,7 @@ def score_one(row: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
             "catalyst_quality_score": catalyst,
             "commercial_fragility_risk_score": fragility,
             "multibagger_risk_penalty": risk,
+            "risk_drag": round(risk_drag, 4),
         },
         "commercial": payload.get("commercial", {}),
         "survival": payload.get("survival", {}),
@@ -262,6 +434,7 @@ def score_one(row: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
             "active_pivotal_trials": payload.get("clinical", {}).get("active_pivotal_trials", 0) if isinstance(payload.get("clinical", {}), dict) else 0,
         },
         "risk": payload.get("risk", {}),
+        "tier1_context": tier1_context,
         "source_dates": payload.get("source_dates", {}),
         "data_quality": row.get("data_quality", ""),
         "missing_fields": row.get("missing_fields", ""),
@@ -271,11 +444,193 @@ def score_one(row: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         "company_id": int(row["company_id"]),
         "ticker": str(row["ticker"] or ""),
         "company_name": str(row["company_name"] or ""),
+        "base_multibagger_score": score,
         "multibagger_score": score,
+        "orthogonal_alpha_score": score,
+        "distinctive_acceleration_score": round(distinct_score, 4),
+        "tier1_opportunity_score": tier1_context["tier1_opportunity_score"],
+        "tier1_risk_score": tier1_context["tier1_risk_score"],
+        "tier1_bucket": tier1_context["tier1_bucket"],
+        "tier1_gate_score": tier1_context["tier1_gate_score"],
+        "tier1_gate_multiplier": tier1_context["tier1_gate_multiplier"],
+        "tier1_available": 1 if tier1_context["tier1_available"] else 0,
+        "tier1_interaction_reason": tier1_reason_disabled(config, tier1),
+        "commercial_acceleration_score": commercial,
+        "cash_flow_acceleration_score": cash_flow,
+        "governance_event_score": governance,
+        "market_confirmation_score": market,
+        "commercial_fragility_risk_score": fragility,
+        "multibagger_risk_penalty": risk,
+        "evidence_or_catalyst_flag": int(evidence),
+        "liquidity_ok": 1 if liquidity_ok else 0,
+        "payload_json": row.get("payload_json"),
         "rank": 0,
         "bucket": bucket,
         "top_evidence_json": json.dumps(evidence_json, ensure_ascii=True, sort_keys=True),
     }
+
+
+def percentile_scores(indexed_values: dict[int, float]) -> dict[int, float]:
+    if not indexed_values:
+        return {}
+    if len(indexed_values) == 1:
+        return {next(iter(indexed_values)): 50.0}
+    sorted_items = sorted(indexed_values.items(), key=lambda item: item[1])
+    scores: dict[int, float] = {}
+    n = len(sorted_items)
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and sorted_items[j + 1][1] == sorted_items[i][1]:
+            j += 1
+        percentile = 100.0 * ((i + j) / 2.0) / float(n - 1)
+        for k in range(i, j + 1):
+            scores[sorted_items[k][0]] = percentile
+        i = j + 1
+    return scores
+
+
+def solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float] | None:
+    n = len(vector)
+    augmented = [row[:] + [rhs] for row, rhs in zip(matrix, vector)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda row_idx: abs(augmented[row_idx][col]))
+        if abs(augmented[pivot][col]) < 1e-10:
+            return None
+        augmented[col], augmented[pivot] = augmented[pivot], augmented[col]
+        scale = augmented[col][col]
+        augmented[col] = [value / scale for value in augmented[col]]
+        for row_idx in range(n):
+            if row_idx == col:
+                continue
+            factor = augmented[row_idx][col]
+            augmented[row_idx] = [
+                value - factor * pivot_value
+                for value, pivot_value in zip(augmented[row_idx], augmented[col])
+            ]
+    return [augmented[row_idx][-1] for row_idx in range(n)]
+
+
+def orthogonal_alpha_scores(rows: list[dict[str, Any]], config: dict[str, Any]) -> tuple[dict[int, float], str]:
+    min_rows = int(cfg_get(config, "multibagger.tier1_interaction.min_residualization_rows", 10))
+    ridge = float(cfg_get(config, "multibagger.tier1_interaction.residualization_ridge", 1e-6))
+    predictor_keys = ["tier1_opportunity_score", "tier1_risk_score"]
+    observations: list[tuple[int, float, list[float]]] = []
+    for idx, row in enumerate(rows):
+        if not bool(row.get("tier1_available")):
+            continue
+        predictors = [to_float(row.get(key), math.nan) for key in predictor_keys]
+        if any(not math.isfinite(value) for value in predictors):
+            continue
+        observations.append((idx, to_float(row.get("base_multibagger_score")), predictors))
+    if len(observations) < min_rows:
+        return ({idx: to_float(row.get("base_multibagger_score")) for idx, row in enumerate(rows)}, "not_enough_tier1_rows")
+
+    means = [sum(obs[2][col] for obs in observations) / len(observations) for col in range(len(predictor_keys))]
+    stdevs = []
+    for col, mean in enumerate(means):
+        variance = sum((obs[2][col] - mean) ** 2 for obs in observations) / max(1, len(observations) - 1)
+        stdevs.append(math.sqrt(variance) or 1.0)
+
+    size = len(predictor_keys) + 1
+    xtx = [[0.0 for _ in range(size)] for _ in range(size)]
+    xty = [0.0 for _ in range(size)]
+    for _, y, predictors in observations:
+        x = [1.0] + [(predictors[col] - means[col]) / stdevs[col] for col in range(len(predictor_keys))]
+        for i in range(size):
+            xty[i] += x[i] * y
+            for j in range(size):
+                xtx[i][j] += x[i] * x[j]
+    for i in range(1, size):
+        xtx[i][i] += ridge
+    beta = solve_linear_system(xtx, xty)
+    if beta is None:
+        return ({idx: to_float(row.get("base_multibagger_score")) for idx, row in enumerate(rows)}, "singular_residualization")
+
+    residuals: dict[int, float] = {}
+    for idx, y, predictors in observations:
+        x = [1.0] + [(predictors[col] - means[col]) / stdevs[col] for col in range(len(predictor_keys))]
+        residuals[idx] = y - sum(coef * value for coef, value in zip(beta, x))
+    return percentile_scores(residuals), "applied"
+
+
+def distinctive_acceleration_score(row: dict[str, Any]) -> float:
+    return clamp(
+        0.30 * to_float(row.get("commercial_acceleration_score"))
+        + 0.25 * to_float(row.get("cash_flow_acceleration_score"))
+        + 0.20 * to_float(row.get("governance_event_score"))
+        + 0.15 * to_float(row.get("market_confirmation_score"))
+        + 0.10 * (100.0 - to_float(row.get("commercial_fragility_risk_score")))
+    )
+
+
+def apply_tier1_interaction(rows: list[dict[str, Any]], config: dict[str, Any]) -> None:
+    if not rows or not as_bool(cfg_get(config, "multibagger.tier1_interaction.enabled", False), False):
+        return
+    alpha_scores, residualization_status = orthogonal_alpha_scores(rows, config)
+    alpha_weight = float(cfg_get(config, "multibagger.tier1_interaction.orthogonal_alpha_weight", 0.30))
+    distinctive_weight = float(cfg_get(config, "multibagger.tier1_interaction.distinctive_acceleration_weight", 0.15))
+    base_weight = max(0.0, 1.0 - alpha_weight - distinctive_weight)
+    veto_buckets = normalized_config_list(
+        cfg_get(config, "multibagger.tier1_interaction.veto_buckets", ["avoid"]),
+        ["avoid"],
+    )
+    tier1_avoid_cap = float(cfg_get(config, "multibagger.tier1_interaction.tier1_avoid_score_cap", 49.0))
+    tier1_risk_cap = float(cfg_get(config, "multibagger.tier1_interaction.tier1_risk_score_cap", 55.0))
+    tier1_risk_veto = float(cfg_get(config, "multibagger.tier1_interaction.tier1_risk_veto", 80.0))
+
+    for idx, row in enumerate(rows):
+        alpha_score = clamp(alpha_scores.get(idx, to_float(row.get("base_multibagger_score"))))
+        distinct_score = distinctive_acceleration_score(row)
+        gate_multiplier = to_float(row.get("tier1_gate_multiplier"), 1.0)
+        pre_gate = (
+            base_weight * to_float(row.get("base_multibagger_score"))
+            + alpha_weight * alpha_score
+            + distinctive_weight * distinct_score
+        )
+        final_score = clamp(pre_gate * gate_multiplier)
+        pre_cap_score = final_score
+        tier1_bucket = str(row.get("tier1_bucket") or "").lower()
+        tier1_risk = to_float(row.get("tier1_risk_score"), 0.0)
+        if bool(row.get("tier1_available")) and tier1_bucket in veto_buckets:
+            final_score = min(final_score, tier1_avoid_cap)
+        if bool(row.get("tier1_available")) and tier1_risk >= tier1_risk_veto:
+            final_score = min(final_score, tier1_risk_cap)
+
+        row["orthogonal_alpha_score"] = round(alpha_score, 4)
+        row["distinctive_acceleration_score"] = round(distinct_score, 4)
+        row["multibagger_score"] = round(final_score, 4)
+        row["tier1_interaction_reason"] = build_tier1_interaction_reason(
+            row,
+            config,
+            residualization_status=residualization_status,
+            pre_cap_score=pre_cap_score,
+            final_score=final_score,
+        )
+        payload = parse_json(row.get("payload_json"))
+        row["bucket"] = bucket_for(
+            final_score,
+            to_float(row.get("multibagger_risk_penalty")),
+            bool(to_int(row.get("evidence_or_catalyst_flag"))),
+            bool(row.get("liquidity_ok")),
+            payload,
+            config,
+            row,
+        )
+        evidence_json = parse_json(row.get("top_evidence_json"))
+        evidence_json["tier1_interaction"] = {
+            "enabled": True,
+            "residualization_status": residualization_status,
+            "base_multibagger_score": row.get("base_multibagger_score"),
+            "orthogonal_alpha_score": row.get("orthogonal_alpha_score"),
+            "distinctive_acceleration_score": row.get("distinctive_acceleration_score"),
+            "tier1_gate_score": row.get("tier1_gate_score"),
+            "tier1_gate_multiplier": row.get("tier1_gate_multiplier"),
+            "tier1_interaction_reason": row.get("tier1_interaction_reason"),
+            "final_multibagger_score": row.get("multibagger_score"),
+            "method": "residualize_base_score_vs_tier1_opportunity_and_risk_then_gate_by_tier1_quality",
+        }
+        row["top_evidence_json"] = json.dumps(evidence_json, ensure_ascii=True, sort_keys=True)
 
 
 def flatten_for_csv(score_row: dict[str, Any], feature_row: dict[str, Any]) -> dict[str, Any]:
@@ -327,20 +682,15 @@ def flatten_for_csv(score_row: dict[str, Any], feature_row: dict[str, Any]) -> d
 def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_date: str) -> None:
     now = utc_now()
     placeholders = ", ".join("?" for _ in SCORE_FIELDS)
-    update_cols = [field for field in SCORE_FIELDS if field not in {"asof_date", "company_id"}]
     with conn:
         conn.execute("DELETE FROM multibagger_scores_daily WHERE asof_date = ?", (asof_date,))
-        for row in rows:
-            conn.execute(
-                f"""
-                INSERT INTO multibagger_scores_daily({", ".join(SCORE_FIELDS)}, created_at, updated_at)
-                VALUES ({placeholders}, ?, ?)
-                ON CONFLICT(asof_date, company_id) DO UPDATE SET
-                    {", ".join(f"{field} = excluded.{field}" for field in update_cols)},
-                    updated_at = excluded.updated_at
-                """,
-                tuple(row.get(field) for field in SCORE_FIELDS) + (now, now),
-            )
+        conn.executemany(
+            f"""
+            INSERT INTO multibagger_scores_daily({", ".join(SCORE_FIELDS)}, created_at, updated_at)
+            VALUES ({placeholders}, ?, ?)
+            """,
+            [tuple(row[field] for field in SCORE_FIELDS) + (now, now) for row in rows],
+        )
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -373,8 +723,39 @@ def main() -> None:
             feature_rows = load_feature_rows(conn, asof_date)
             if not feature_rows:
                 raise ValueError(f"No multibagger_features_daily rows found for asof_date={asof_date}")
+            tier1_by_company = load_tier1_score_rows(conn, asof_date)
+            tier1_enabled = as_bool(cfg_get(config, "multibagger.tier1_interaction.enabled", False), False)
+            missing_tier1 = [
+                str(row["ticker"])
+                for row in feature_rows
+                if int(row["company_id"]) not in tier1_by_company
+            ]
+            if tier1_enabled and missing_tier1 and as_bool(cfg_get(config, "multibagger.tier1_interaction.fail_on_missing_tier1", True), True):
+                raise RuntimeError(
+                    "multibagger Tier 1 interaction enabled but no daily_scores row exists on or before asof for: "
+                    + ",".join(sorted(missing_tier1)[:25])
+                    + (f"...(+{len(missing_tier1) - 25})" if len(missing_tier1) > 25 else "")
+                )
+            max_staleness_days = int(cfg_get(config, "multibagger.tier1_interaction.max_staleness_days", 7))
+            stale_tier1: list[str] = []
+            if tier1_enabled and max_staleness_days >= 0:
+                target_date = parse_date(asof_date)
+                for row in feature_rows:
+                    tier1 = tier1_by_company.get(int(row["company_id"]))
+                    tier1_date = parse_date(tier1.get("asof_date")) if tier1 else None
+                    if target_date is not None and tier1_date is not None and (target_date - tier1_date).days > max_staleness_days:
+                        stale_tier1.append(str(row["ticker"]))
+                if stale_tier1 and as_bool(cfg_get(config, "multibagger.tier1_interaction.fail_on_missing_tier1", True), True):
+                    raise RuntimeError(
+                        "multibagger Tier 1 interaction enabled but latest daily_scores row(s) are stale: "
+                        + ",".join(sorted(stale_tier1)[:25])
+                        + (f"...(+{len(stale_tier1) - 25})" if len(stale_tier1) > 25 else "")
+                    )
+            if not tier1_by_company:
+                LOGGER.warning("No daily_scores rows found for asof_date=%s; multibagger Tier 1 context will be blank", asof_date)
             feature_by_company = {int(row["company_id"]): row for row in feature_rows}
-            scored = [score_one(row, config) for row in feature_rows]
+            scored = [score_one(row, config, tier1_by_company.get(int(row["company_id"]))) for row in feature_rows]
+            apply_tier1_interaction(scored, config)
             scored.sort(key=lambda item: (-to_float(item["multibagger_score"]), str(item["ticker"])))
             for idx, row in enumerate(scored, start=1):
                 row["rank"] = idx
@@ -382,10 +763,10 @@ def main() -> None:
             csv_rows = [flatten_for_csv(row, feature_by_company[int(row["company_id"])]) for row in scored]
             write_csv(output_csv, csv_rows)
             finish_run(conn, run_id=run_id, status="success", row_count=len(scored), message=f"asof={asof_date} output={output_csv}")
-        except Exception as exc:
+            LOGGER.info("Multibagger scoring complete: rows=%d output=%s", len(scored), output_csv)
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
-    LOGGER.info("Multibagger scoring complete: rows=%d output=%s", len(scored), output_csv)
 
 
 if __name__ == "__main__":

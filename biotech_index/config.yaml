@@ -403,6 +403,15 @@ biotech_scoring:
   output_dir: "../output/biotech_index_reports"
   output_csv: "biotech_daily_scores.csv"
   use_investment_score: true
+  convex_risk_penalty_enabled: true
+  risk_penalty_convexity: 0.35
+  risk_penalty_inflection: 50.0
+  data_quality_adjustment:
+    enabled: true
+    min_multiplier: 0.82
+    low_quality_penalty: 0.06
+    missing_field_penalty: 0.006
+    max_missing_penalty: 0.08
   weights:
     catalyst: 0.45
     credibility: 0.30
@@ -471,6 +480,8 @@ biotech_reports:
 
 biotech_refresh:
   timing_csv: "../output/biotech_index_reports/biotech_refresh_timing.csv"
+  max_upstream_staleness_days: 0
+  validate_final_outputs: true
 
 governance_events:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
@@ -520,6 +531,23 @@ multibagger:
   max_speculative_risk: 75
   avoid_risk_min: 75
   avoid_fragility_min: 70
+  convex_risk_penalty_enabled: true
+  risk_penalty_convexity: 0.35
+  risk_penalty_inflection: 50.0
+  tier1_interaction:
+    enabled: true
+    fail_on_missing_tier1: true
+    veto_buckets:
+      - avoid
+    tier1_risk_veto: 80.0
+    max_staleness_days: 7
+    min_gate_multiplier: 0.55
+    orthogonal_alpha_weight: 0.30
+    distinctive_acceleration_weight: 0.15
+    min_residualization_rows: 10
+    residualization_ridge: 0.000001
+    tier1_avoid_score_cap: 49.0
+    tier1_risk_score_cap: 55.0
   weights:
     commercial_acceleration: 0.25
     upside_capacity: 0.20

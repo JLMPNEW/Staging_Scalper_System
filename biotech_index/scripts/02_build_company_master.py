@@ -282,7 +282,7 @@ def upsert_company(conn: Any, company: ScreenCompany, *, active_decisions: set[s
     return int(row["company_id"])
 
 
-def upsert_alias(conn: Any, *, company_id: int, alias: AliasCandidate) -> None:
+def insert_alias(conn: Any, *, company_id: int, alias: AliasCandidate) -> None:
     now = utc_now()
     conn.execute(
         """
@@ -290,11 +290,6 @@ def upsert_alias(conn: Any, *, company_id: int, alias: AliasCandidate) -> None:
             company_id, alias_raw, alias_norm, source, confidence, is_manual, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(company_id, alias_norm, source) DO UPDATE SET
-            alias_raw = excluded.alias_raw,
-            confidence = MAX(company_aliases.confidence, excluded.confidence),
-            is_manual = MAX(company_aliases.is_manual, excluded.is_manual),
-            updated_at = excluded.updated_at
         """,
         (
             company_id,
@@ -333,18 +328,16 @@ def deactivate_absent_companies(
 ) -> int:
     if not present_tickers:
         return 0
-    retained_tickers = set(present_tickers) | set(protected_tickers)
-    placeholders = ",".join("?" for _ in retained_tickers)
-    rows = conn.execute(
-        f"""
+    retained_tickers = {str(ticker or "").upper() for ticker in (set(present_tickers) | set(protected_tickers))}
+    active_rows = conn.execute(
+        """
         SELECT company_id, ticker
         FROM companies
         WHERE is_active = 1
-          AND ticker NOT IN ({placeholders})
         ORDER BY ticker
         """,
-        tuple(sorted(retained_tickers)),
     ).fetchall()
+    rows = [row for row in active_rows if str(row["ticker"] or "").upper() not in retained_tickers]
     if not rows:
         return 0
 
@@ -448,7 +441,7 @@ def main() -> None:
                     if company.decision in active_decisions:
                         active_count += 1
                     for alias in build_aliases(company, manual_aliases):
-                        upsert_alias(conn, company_id=company_id, alias=alias)
+                        insert_alias(conn, company_id=company_id, alias=alias)
                         alias_count += 1
                     insert_history(conn, company_id=company_id, company=company, source_file=screen_path, run_id=run_id)
                 absent_count = (
@@ -469,12 +462,11 @@ def main() -> None:
                 row_count=len(companies),
                 message=f"active={active_count} aliases={alias_count} deactivated_absent={absent_count}",
             )
-        except Exception as exc:
+            LOGGER.info("Wrote company master DB: %s", db_path)
+            LOGGER.info("Companies=%d Active=%d Aliases=%d DeactivatedAbsent=%d", len(companies), active_count, alias_count, absent_count)
+        except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
-
-    LOGGER.info("Wrote company master DB: %s", db_path)
-    LOGGER.info("Companies=%d Active=%d Aliases=%d DeactivatedAbsent=%d", len(companies), active_count, alias_count, absent_count)
 
 
 if __name__ == "__main__":

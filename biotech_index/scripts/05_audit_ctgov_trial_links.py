@@ -24,6 +24,7 @@ from biotech_index.clients.ctgov_client import as_list, get_nested
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_optional_path, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.logging_utils import configure_utc_logging
+from biotech_index.core.pipeline_guards import validate_nonempty_selection, validate_requested_tickers
 from biotech_index.core.text_norm import normalize_org_name
 
 
@@ -116,6 +117,17 @@ def split_codes(raw: object) -> list[str]:
 
 def as_bool(raw: object) -> bool:
     return str(raw or "").strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
+def should_include_in_scoring(row: dict[str, Any]) -> bool:
+    """Keep CTGov review as a warning for source-valid companies, not a hard universe drop."""
+    final_status = str(row.get("final_status") or row.get("recommended_status") or "").strip().lower()
+    universe_status = str(row.get("universe_status") or "").strip().lower()
+    if final_status == "keep":
+        return True
+    if final_status == "review" and universe_status == "keep":
+        return True
+    return False
 
 
 def contains_any(text: str, keywords: Iterable[str]) -> list[str]:
@@ -456,7 +468,7 @@ def classify_trial(
         exclusion_reasons.append("non_therapeutic_intervention_type")
     if non_therapeutic_purpose and not therapeutic_type_hit and not qualifying_device:
         exclusion_reasons.append(f"primary_purpose:{purpose}")
-    if non_therapeutic_hits:
+    if non_therapeutic_hits and hard_non_therapeutic:
         exclusion_reasons.append("keyword:" + "|".join(non_therapeutic_hits[:3]))
     if completed_stale:
         exclusion_reasons.append("completed_stale")
@@ -749,6 +761,14 @@ def mark_current_run_failed(exc: BaseException) -> None:
         LOGGER.exception("Could not mark audit run %s as failed", run_id)
 
 
+def write_output_with_run_failure(writer: Any, *args: Any, **kwargs: Any) -> None:
+    try:
+        writer(*args, **kwargs)
+    except Exception as exc:
+        mark_current_run_failed(exc)
+        raise
+
+
 MANUAL_VERIFICATION_FIELDS = [
     "ticker",
     "company_name",
@@ -919,7 +939,7 @@ def apply_manual_decisions(rows: list[dict[str, Any]], manual_decisions: dict[st
         row["root_cause_category"] = root_cause_category
         row["final_status"] = final_status
         row["final_status_reason"] = final_reason
-        row["scoring_include"] = final_status == "keep"
+        row["scoring_include"] = should_include_in_scoring(row)
 
 
 def db_signature(conn: sqlite3.Connection) -> str:
@@ -1004,6 +1024,16 @@ def main() -> None:
         run_id = start_run(conn, run_type="audit_ctgov_trial_links", input_path=db_path)
         _RUN_CONTEXT.update({"db_path": db_path, "timeout_sec": sqlite_timeout_sec, "run_id": run_id, "finished": False})
         companies = load_companies(conn, status_filter=status_filter, ticker_filter=ticker_filter)
+        validate_nonempty_selection(
+            count=len(companies),
+            context="CTGov audit",
+            subset_mode=bool(ticker_filter),
+        )
+        validate_requested_tickers(
+            requested_tickers=ticker_filter,
+            loaded_tickers=[company.ticker for company in companies],
+            context="CTGov audit",
+        )
         LOGGER.info("Loaded %d active companies for CTGov audit", len(companies))
         for idx, company in enumerate(companies, start=1):
             aliases, manual_aliases = load_aliases(conn, company.company_id)
@@ -1179,13 +1209,13 @@ def main() -> None:
     final_scoring_rows.sort(key=lambda row: str(row["ticker"]))
     evidence_rows.sort(key=lambda row: (str(row["ticker"]), str(row["nct_id"])))
 
-    write_csv(audit_csv, audit_rows, audit_fields)
-    write_csv(review_csv, review_rows, audit_fields)
-    write_csv(manual_verification_csv, manual_verification_rows, MANUAL_VERIFICATION_FIELDS)
-    write_csv(evidence_csv, evidence_rows, evidence_fields)
-    write_csv(clean_csv, clean_rows, audit_fields)
-    write_csv(final_scoring_universe_csv, final_scoring_rows, audit_fields)
-    write_json(clean_json, clean_rows)
+    write_output_with_run_failure(write_csv, audit_csv, audit_rows, audit_fields)
+    write_output_with_run_failure(write_csv, review_csv, review_rows, audit_fields)
+    write_output_with_run_failure(write_csv, manual_verification_csv, manual_verification_rows, MANUAL_VERIFICATION_FIELDS)
+    write_output_with_run_failure(write_csv, evidence_csv, evidence_rows, evidence_fields)
+    write_output_with_run_failure(write_csv, clean_csv, clean_rows, audit_fields)
+    write_output_with_run_failure(write_csv, final_scoring_universe_csv, final_scoring_rows, audit_fields)
+    write_output_with_run_failure(write_json, clean_json, clean_rows)
     manifest = {
         "created_at": utc_now(),
         "asof_date": asof_date.isoformat(),
@@ -1214,7 +1244,7 @@ def main() -> None:
         },
         "config": cfg_get(config, "ctgov_audit", {}),
     }
-    write_json(manifest_json, manifest)
+    write_output_with_run_failure(write_json, manifest_json, manifest)
     if run_id is not None:
         with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
             finish_run(
@@ -1244,6 +1274,6 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except Exception as exc:
+    except BaseException as exc:
         mark_current_run_failed(exc)
         raise
