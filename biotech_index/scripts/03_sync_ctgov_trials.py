@@ -350,7 +350,9 @@ def sync_one_company(
             studies=studies,
             query_hits=tuple(query_hits),
         )
-    except Exception as exc:
+    except BaseException as exc:
+        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            raise
         LOGGER.exception("CTGov sync failed for %s (%s): %s", job.ticker, job.company_name, exc)
         return SyncResult(
             company_id=job.company_id,
@@ -424,24 +426,29 @@ def upsert_trial(conn: sqlite3.Connection, study: dict[str, Any], *, asof_date: 
         ),
     )
     sponsors = dedupe_sponsors(parse_sponsors(study))
-    conn.execute("DELETE FROM trial_sponsors WHERE nct_id = ?", (parsed.nct_id,))
-    for sponsor in sponsors:
-        conn.execute(
+    if sponsors:
+        conn.execute("DELETE FROM trial_sponsors WHERE nct_id = ?", (parsed.nct_id,))
+        conn.executemany(
             """
             INSERT INTO trial_sponsors(
                 nct_id, sponsor_name, sponsor_name_norm, sponsor_role, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (
-                sponsor.nct_id,
-                sponsor.sponsor_name,
-                sponsor.sponsor_name_norm,
-                sponsor.sponsor_role,
-                now,
-                now,
-            ),
+            [
+                (
+                    sponsor.nct_id,
+                    sponsor.sponsor_name,
+                    sponsor.sponsor_name_norm,
+                    sponsor.sponsor_role,
+                    now,
+                    now,
+                )
+                for sponsor in sponsors
+            ],
         )
+    else:
+        LOGGER.warning("No sponsors parsed for %s; preserving existing trial_sponsors rows", parsed.nct_id)
     snapshot_date = asof_date or datetime.now(timezone.utc).date().isoformat()
     conn.execute(
         """
@@ -484,26 +491,29 @@ def replace_query_hits(conn: sqlite3.Connection, results: list[SyncResult]) -> i
     written = 0
     now = utc_now()
     hits = dedupe_query_hits(hit for result in successful_results for hit in result.query_hits)
-    for hit in hits:
-        conn.execute(
+    if hits:
+        conn.executemany(
             """
             INSERT INTO ctgov_query_hits(
                 company_id, nct_id, search_term, query_field, source, confidence, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                hit.company_id,
-                hit.nct_id,
-                hit.search_term,
-                hit.query_field,
-                hit.source,
-                float(hit.confidence),
-                now,
-                now,
-            ),
+            [
+                (
+                    hit.company_id,
+                    hit.nct_id,
+                    hit.search_term,
+                    hit.query_field,
+                    hit.source,
+                    float(hit.confidence),
+                    now,
+                    now,
+                )
+                for hit in hits
+            ],
         )
-        written += 1
+        written = len(hits)
     return written
 
 
@@ -660,13 +670,20 @@ def main() -> None:
                 ).fetchone()[0]
             )
             message = f"companies={len(jobs)} errors={error_count} unique_trials={written} query_hits={query_hit_count} sponsors={sponsor_count} snapshots_asof={snapshot_count}"
-            status = "success" if error_count == 0 else "partial"
+            status = (
+                "success"
+                if error_count == 0
+                else "failed"
+                if (not args.allow_partial or (jobs and error_count == len(jobs)))
+                else "partial"
+            )
             finish_run(conn, run_id=run_id, status=status, row_count=written, message=message)
             LOGGER.info("CTGov sync complete: %s", message)
             if error_count > 0 and not args.allow_partial:
                 raise SystemExit(2)
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 

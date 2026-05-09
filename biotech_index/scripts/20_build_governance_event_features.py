@@ -960,13 +960,17 @@ def hydrate_sec_governance_signals(
             if signal is None and key[0]:
                 signal = classified_by_accession.get(key[0])
             out.setdefault(company_id, []).append({**row, **(signal or empty_sec_governance_signal(row))})
+    cache_hit_count = len(all_docs) - len(missing_docs)
+    cache_hit_rate = (100.0 * cache_hit_count / float(len(all_docs))) if all_docs else 0.0
     LOGGER.info(
-        "SEC governance signal cache docs=%d hits=%d misses=%d text_loaded=%d classified=%d",
+        "SEC governance signal cache docs=%d hits=%d misses=%d hit_rate=%.1f%% text_loaded=%d classified=%d fallback_empty=%d",
         len(all_docs),
-        len(cached),
+        cache_hit_count,
         len(missing_docs),
+        cache_hit_rate,
         len(text_rows),
         len(cache_updates),
+        max(0, len(missing_docs) - len(cache_updates)),
     )
     return out
 
@@ -1437,8 +1441,8 @@ def main() -> None:
             write_csv(output_csv, rows)
             LOGGER.info("Governance feature build complete: rows=%d elapsed=%.3fs output=%s", len(rows), time.perf_counter() - overall_start, output_csv)
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=f"asof={asof_date.isoformat()} output={output_csv}")
-        except Exception as exc:
-            if run_id is not None:
+        except BaseException as exc:
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
         finally:

@@ -193,7 +193,10 @@ def load_trial_status_overrides(path: Path | None) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
+            LOGGER.warning("Trial status override CSV has no header; ignoring file: %s", path)
             return []
+        if not any(str(field or "").strip() for field in reader.fieldnames):
+            raise ValueError(f"Trial status override CSV has an empty header row: {path}")
         return [{str(k): str(v or "") for k, v in row.items()} for row in reader]
 
 
@@ -219,6 +222,7 @@ def apply_trial_status_override(evidence: dict[str, Any], overrides: dict[tuple[
     evidence["outcome_override_manual_review"] = as_bool(override.get("manual_review"))
     if as_bool(override.get("exclude_from_scoring")):
         evidence["is_active_status"] = False
+        evidence["is_therapeutic"] = False
         evidence["qualifying_trial"] = False
         evidence["trial_score"] = 0.0
         suffix = f"outcome_override:{status}" if status else "outcome_override"
@@ -742,13 +746,13 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def mark_current_run_failed(exc: BaseException) -> None:
+def mark_current_run_failed(exc: BaseException, conn: Any | None = None) -> None:
     run_id = _RUN_CONTEXT.get("run_id")
     db_path = _RUN_CONTEXT.get("db_path")
     if not run_id or not db_path or _RUN_CONTEXT.get("finished"):
         return
     try:
-        with connect(Path(str(db_path)), timeout_sec=float(_RUN_CONTEXT.get("timeout_sec") or 30.0)) as conn:
+        if conn is not None:
             finish_run(
                 conn,
                 run_id=int(run_id),
@@ -756,6 +760,15 @@ def mark_current_run_failed(exc: BaseException) -> None:
                 row_count=0,
                 message=f"{type(exc).__name__}: {exc}",
             )
+        else:
+            with connect(Path(str(db_path)), timeout_sec=float(_RUN_CONTEXT.get("timeout_sec") or 30.0)) as failure_conn:
+                finish_run(
+                    failure_conn,
+                    run_id=int(run_id),
+                    status="failed",
+                    row_count=0,
+                    message=f"{type(exc).__name__}: {exc}",
+                )
         _RUN_CONTEXT["finished"] = True
     except Exception:
         LOGGER.exception("Could not mark audit run %s as failed", run_id)
@@ -961,6 +974,8 @@ def db_signature(conn: sqlite3.Connection) -> str:
 
 def main() -> None:
     configure_logging()
+    _RUN_CONTEXT.clear()
+    _RUN_CONTEXT.update({"db_path": None, "timeout_sec": 30.0, "run_id": None, "finished": False})
     args = parse_args()
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
@@ -1072,10 +1087,6 @@ def main() -> None:
                 low_confidence_threshold=low_confidence_threshold,
             )
             audit_rows.append(audit)
-            if audit["recommended_status"] == "keep":
-                clean_rows.append(audit)
-            else:
-                review_rows.append(audit)
             if idx % 50 == 0:
                 LOGGER.info("Audited %d/%d companies", idx, len(companies))
         signature = db_signature(conn)
@@ -1275,5 +1286,6 @@ if __name__ == "__main__":
     try:
         main()
     except BaseException as exc:
-        mark_current_run_failed(exc)
+        if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            mark_current_run_failed(exc)
         raise

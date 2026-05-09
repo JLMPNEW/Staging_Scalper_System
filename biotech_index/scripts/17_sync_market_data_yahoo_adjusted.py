@@ -24,6 +24,7 @@ from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
+    normalize_ticker,
     read_final_scoring_tickers,
     subset_mode_enabled,
     subset_output_path,
@@ -190,10 +191,6 @@ def resolve_effective_asof(
         provisional_asof=provisional,
         reason=reason,
     )
-
-
-def normalize_ticker(raw: object) -> str:
-    return str(raw or "").strip().upper().replace(".", "-")
 
 
 def read_scoring_tickers(path: Path) -> set[str]:
@@ -377,7 +374,7 @@ def fetch_yahoo_bars(
     if frame is None or frame.empty:
         return []
     out: list[dict[str, Any]] = []
-    for idx, row in frame.iterrows():
+    for idx, row in zip(frame.index, frame.to_dict("records")):
         try:
             bar_day = idx.date()
         except AttributeError:
@@ -618,8 +615,8 @@ def build_market_rows(
 def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], snapshots: list[dict[str, Any]], features: list[dict[str, Any]]) -> None:
     now = utc_now()
     with conn:
-        for row in bars:
-            conn.execute(
+        if bars:
+            conn.executemany(
                 """
                 INSERT INTO market_bars_daily(
                     ticker, bar_date, source, open, high, low, close, volume, wap,
@@ -646,35 +643,64 @@ def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], 
                     data_quality = excluded.data_quality,
                     updated_at = excluded.updated_at
                 """,
-                (
-                    row["ticker"],
-                    row["bar_date"],
-                    row["source"],
-                    row["open"],
-                    row["high"],
-                    row["low"],
-                    row["close"],
-                    row["volume"],
-                    row["wap"],
-                    row.get("price_adjustment"),
-                    row.get("raw_open"),
-                    row.get("raw_high"),
-                    row.get("raw_low"),
-                    row.get("raw_close"),
-                    row.get("adj_close"),
-                    row.get("adjustment_factor"),
-                    row.get("dividend_amount"),
-                    row.get("split_factor"),
-                    row.get("corporate_action_source"),
-                    int(row.get("is_adjusted") or 0),
-                    int(row.get("is_provisional") or 0),
-                    row["data_quality"],
-                    now,
-                    now,
-                ),
+                [
+                    (
+                        row["ticker"],
+                        row["bar_date"],
+                        row["source"],
+                        row["open"],
+                        row["high"],
+                        row["low"],
+                        row["close"],
+                        row["volume"],
+                        row["wap"],
+                        row.get("price_adjustment"),
+                        row.get("raw_open"),
+                        row.get("raw_high"),
+                        row.get("raw_low"),
+                        row.get("raw_close"),
+                        row.get("adj_close"),
+                        row.get("adjustment_factor"),
+                        row.get("dividend_amount"),
+                        row.get("split_factor"),
+                        row.get("corporate_action_source"),
+                        int(row.get("is_adjusted") or 0),
+                        int(row.get("is_provisional") or 0),
+                        row["data_quality"],
+                        now,
+                        now,
+                    )
+                    for row in bars
+                ],
             )
-        for row in snapshots:
-            conn.execute(
+        snapshot_fields = [
+            "asof_date",
+            "company_id",
+            "ticker",
+            "source",
+            "last_price",
+            "close_price",
+            "market_cap",
+            "shares_outstanding",
+            "avg_volume_20d",
+            "avg_dollar_volume_20d",
+            "fifty_two_week_high",
+            "fifty_two_week_low",
+            "currency",
+            "price_adjustment",
+            "is_adjusted",
+            "is_provisional",
+            "first_bar_date",
+            "last_bar_date",
+            "bar_count",
+            "expected_bar_count",
+            "missing_bar_count",
+            "continuity_status",
+            "data_quality",
+            "payload_json",
+        ]
+        if snapshots:
+            conn.executemany(
                 """
                 INSERT INTO market_snapshots_daily(
                     asof_date, company_id, ticker, source, last_price, close_price, market_cap, shares_outstanding,
@@ -700,39 +726,38 @@ def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], 
                     data_quality = excluded.data_quality,
                     payload_json = excluded.payload_json, updated_at = excluded.updated_at
                 """,
-                tuple(
-                    row.get(field)
-                    for field in [
-                        "asof_date",
-                        "company_id",
-                        "ticker",
-                        "source",
-                        "last_price",
-                        "close_price",
-                        "market_cap",
-                        "shares_outstanding",
-                        "avg_volume_20d",
-                        "avg_dollar_volume_20d",
-                        "fifty_two_week_high",
-                        "fifty_two_week_low",
-                        "currency",
-                        "price_adjustment",
-                        "is_adjusted",
-                        "is_provisional",
-                        "first_bar_date",
-                        "last_bar_date",
-                        "bar_count",
-                        "expected_bar_count",
-                        "missing_bar_count",
-                        "continuity_status",
-                        "data_quality",
-                        "payload_json",
-                    ]
-                )
-                + (now, now),
+                [tuple(row.get(field) for field in snapshot_fields) + (now, now) for row in snapshots],
             )
-        for row in features:
-            conn.execute(
+        feature_fields = [
+            "asof_date",
+            "company_id",
+            "ticker",
+            "source",
+            "close_price",
+            "market_cap",
+            "shares_outstanding",
+            "price_vs_200d_pct",
+            "return_1m_pct",
+            "return_3m_pct",
+            "xbi_return_3m_pct",
+            "relative_strength_3m_vs_xbi",
+            "distance_from_52w_high_pct",
+            "avg_dollar_volume_20d",
+            "liquidity_score",
+            "market_data_quality",
+            "price_adjustment",
+            "is_adjusted",
+            "is_provisional",
+            "first_bar_date",
+            "last_bar_date",
+            "bar_count",
+            "expected_bar_count",
+            "missing_bar_count",
+            "continuity_status",
+            "payload_json",
+        ]
+        if features:
+            conn.executemany(
                 """
                 INSERT INTO market_features_daily(
                     asof_date, company_id, ticker, source, close_price, market_cap, shares_outstanding, price_vs_200d_pct,
@@ -762,38 +787,7 @@ def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], 
                     payload_json = excluded.payload_json,
                     updated_at = excluded.updated_at
                 """,
-                tuple(
-                    row.get(field)
-                    for field in [
-                        "asof_date",
-                        "company_id",
-                        "ticker",
-                        "source",
-                        "close_price",
-                        "market_cap",
-                        "shares_outstanding",
-                        "price_vs_200d_pct",
-                        "return_1m_pct",
-                        "return_3m_pct",
-                        "xbi_return_3m_pct",
-                        "relative_strength_3m_vs_xbi",
-                        "distance_from_52w_high_pct",
-                        "avg_dollar_volume_20d",
-                        "liquidity_score",
-                        "market_data_quality",
-                        "price_adjustment",
-                        "is_adjusted",
-                        "is_provisional",
-                        "first_bar_date",
-                        "last_bar_date",
-                        "bar_count",
-                        "expected_bar_count",
-                        "missing_bar_count",
-                        "continuity_status",
-                        "payload_json",
-                    ]
-                )
-                + (now, now),
+                [tuple(row.get(field) for field in feature_fields) + (now, now) for row in features],
             )
 
 
@@ -913,9 +907,10 @@ def main() -> None:
     ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if value.strip()}
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
-        init_db(conn)
-        run_id = start_run(conn, run_type="sync_market_data_yahoo_adjusted", input_path=db_path)
+        run_id: int | None = None
         try:
+            init_db(conn)
+            run_id = start_run(conn, run_type="sync_market_data_yahoo_adjusted", input_path=db_path)
             scoring_tickers = read_scoring_tickers(final_universe_csv)
             companies = load_companies(conn, scoring_tickers=scoring_tickers, ticker_filter=ticker_filter, max_tickers=args.max_tickers)
             subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_tickers))
@@ -1067,7 +1062,8 @@ def main() -> None:
             if status != "success" and not args.allow_partial:
                 raise SystemExit(2)
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 

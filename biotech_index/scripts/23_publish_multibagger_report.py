@@ -129,6 +129,8 @@ def parse_date(raw: object) -> date | None:
     text = str(raw or "").strip()
     if not text:
         return None
+    if len(text) < 10:
+        return None
     try:
         return datetime.strptime(text[:10], "%Y-%m-%d").date()
     except ValueError:
@@ -193,7 +195,7 @@ def flatten(row: dict[str, Any]) -> dict[str, Any]:
     forward = payload.get("forward_guidance", {}) if isinstance(payload, dict) else {}
     clinical = payload.get("clinical", {}) if isinstance(payload, dict) else {}
     risk = payload.get("risk", {}) if isinstance(payload, dict) else {}
-    return {
+    out = {
         "asof_date": row.get("asof_date"),
         "rank": row.get("rank"),
         "ticker": row.get("ticker"),
@@ -257,6 +259,10 @@ def flatten(row: dict[str, Any]) -> dict[str, Any]:
         "data_quality": row.get("data_quality"),
         "missing_fields": row.get("missing_fields"),
     }
+    missing = [field for field in CANDIDATE_FIELDS if field not in out]
+    if missing:
+        raise RuntimeError(f"flatten() missing required multibagger report field(s): {', '.join(missing)}")
+    return out
 
 
 def build_summary(rows: list[dict[str, Any]], candidate_rows: list[dict[str, Any]], top_n: int, asof_date: str) -> dict[str, Any]:
@@ -312,6 +318,7 @@ def main() -> None:
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
+        run_id: int | None = None
         init_db(conn)
         asof_obj = parse_date(args.asof) if args.asof else None
         if args.asof and asof_obj is None:
@@ -322,8 +329,11 @@ def main() -> None:
             rows = load_rows(conn, asof_date)
             if not rows:
                 raise ValueError(f"No multibagger score rows found for asof_date={asof_date}")
-            flattened = [flatten(row) for row in rows]
-            all_candidate_rows = [row for row in flattened if not str(row.get("bucket") or "").startswith("avoid")]
+            rows_with_bucket = [row for row in rows if row.get("bucket")]
+            flattened = [flatten(row) for row in rows_with_bucket]
+            all_candidate_rows = [
+                row for row in flattened if row.get("bucket") and not str(row.get("bucket")).startswith("avoid")
+            ]
             candidate_rows = all_candidate_rows[:top_n]
             evidence_by_ticker = {
                 str(raw.get("ticker") or ""): parse_json(raw.get("top_evidence_json"))
@@ -352,7 +362,8 @@ def main() -> None:
             LOGGER.info("Multibagger report published: candidates=%d output=%s", len(candidate_rows), candidates_csv)
             finish_run(conn, run_id=run_id, status="success", row_count=len(candidate_rows), message=f"asof={asof_date} output={candidates_csv}")
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 

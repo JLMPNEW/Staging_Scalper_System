@@ -49,9 +49,17 @@ def load_script_module(filename: str, module_name: str) -> Any:
 
 # Reuse the current numbered pipeline scripts directly so reactivation review
 # stays aligned with the production CTGov search, linking, and audit rules.
-SYNC_HELPERS = load_script_module("03_sync_ctgov_trials.py", "biotech_index_scripts_03_sync_ctgov_trials")
-LINK_HELPERS = load_script_module("04_link_trials_to_companies.py", "biotech_index_scripts_04_link_trials_to_companies")
-AUDIT_HELPERS = load_script_module("05_audit_ctgov_trial_links.py", "biotech_index_scripts_05_audit_ctgov_trial_links")
+# Load lazily from main() so importing this module does not execute helper scripts.
+SYNC_HELPERS: Any | None = None
+LINK_HELPERS: Any | None = None
+AUDIT_HELPERS: Any | None = None
+
+
+def load_helper_modules() -> None:
+    global SYNC_HELPERS, LINK_HELPERS, AUDIT_HELPERS
+    SYNC_HELPERS = load_script_module("03_sync_ctgov_trials.py", "biotech_index_scripts_03_sync_ctgov_trials")
+    LINK_HELPERS = load_script_module("04_link_trials_to_companies.py", "biotech_index_scripts_04_link_trials_to_companies")
+    AUDIT_HELPERS = load_script_module("05_audit_ctgov_trial_links.py", "biotech_index_scripts_05_audit_ctgov_trial_links")
 
 
 SCAN_FIELDS = [
@@ -555,6 +563,7 @@ def main() -> None:
     args = parse_args()
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
+    load_helper_modules()
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_dir = (
@@ -756,7 +765,9 @@ def main() -> None:
                     for future in as_completed(futures):
                         try:
                             result = future.result()
-                        except Exception as exc:
+                        except BaseException as exc:
+                            if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                                raise
                             job = futures[future]
                             LOGGER.exception("Unexpected worker failure for %s: %s", job.sync_job.ticker, exc)
                             result = SYNC_HELPERS.SyncResult(
@@ -1072,13 +1083,14 @@ def main() -> None:
                 f"reviews={sum(1 for row in scan_rows if row['reactivation_status'] == 'reactivation_review')} "
                 f"errors={error_count} studies={len(studies_by_nct)}"
             )
-            status = "success" if error_count == 0 else "partial"
+            status = "failed" if jobs and error_count == len(jobs) else "partial" if error_count > 0 else "success"
             finish_run(conn, run_id=run_id, status=status, row_count=len(scan_rows), message=message)
             LOGGER.info("CTGov reactivation scan complete: %s", message)
             if error_count > 0 and not args.allow_partial:
                 raise SystemExit(2)
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 

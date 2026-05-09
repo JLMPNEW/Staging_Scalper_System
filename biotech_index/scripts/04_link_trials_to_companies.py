@@ -373,8 +373,9 @@ def build_links(
                     remember(candidates, company, "single_token_match", 0.72)
 
         if allow_single_token_prefix_match:
-            first_token = sponsor_stripped.split()[0] if sponsor_stripped.split() else ""
-            if first_token and sponsor_stripped.startswith(f"{first_token} "):
+            sponsor_parts = sponsor_stripped.split()
+            first_token = sponsor_parts[0] if sponsor_parts else ""
+            if first_token and len(sponsor_parts) > 1:
                 for company in single_token_index.get(first_token, []):
                     if (
                         len(first_token) >= single_token_prefix_min_length
@@ -473,23 +474,26 @@ def replace_links(conn: sqlite3.Connection, links: list[LinkCandidate], *, compa
             conn.execute(f"DELETE FROM trial_company_links WHERE company_id IN ({placeholders})", chunk)
     else:
         conn.execute("DELETE FROM trial_company_links")
-    for link in links:
-        conn.execute(
+    if links:
+        conn.executemany(
             """
             INSERT INTO trial_company_links(
                 nct_id, company_id, match_role, match_method, confidence, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                link.nct_id,
-                link.company_id,
-                link.match_role,
-                link.match_method,
-                float(link.confidence),
-                now,
-                now,
-            ),
+            [
+                (
+                    link.nct_id,
+                    link.company_id,
+                    link.match_role,
+                    link.match_method,
+                    float(link.confidence),
+                    now,
+                    now,
+                )
+                for link in links
+            ],
         )
 
 
@@ -580,7 +584,8 @@ def main() -> None:
             finish_run(conn, run_id=run_id, status="success", row_count=len(links), message=message)
             LOGGER.info("Trial linking complete: %s", message)
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 

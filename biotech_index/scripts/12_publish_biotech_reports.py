@@ -208,30 +208,33 @@ def apply_trial_status_overrides(rows: list[dict[str, str]], overrides: list[dic
         row.setdefault("outcome_override_source_url", "")
         row.setdefault("outcome_override_manual_review", "")
 
-    for override in overrides:
-        if not bool_text(override.get("enabled", "true")):
-            continue
-        ticker = str(override.get("ticker") or "").strip().upper()
-        nct_id = str(override.get("nct_id") or "").strip().upper()
-        if not ticker or not nct_id:
+    override_index = {
+        (str(override.get("ticker") or "").strip().upper(), str(override.get("nct_id") or "").strip().upper()): override
+        for override in overrides
+        if bool_text(override.get("enabled", "true"))
+        and str(override.get("ticker") or "").strip()
+        and str(override.get("nct_id") or "").strip()
+    }
+    for row in out:
+        override = override_index.get(
+            (str(row.get("ticker") or "").strip().upper(), str(row.get("nct_id") or "").strip().upper())
+        )
+        if not override:
             continue
         status = str(override.get("override_status") or "").strip()
         reason = str(override.get("override_reason") or "").strip()
         source_url = str(override.get("source_url") or "").strip()
-        for row in out:
-            if str(row.get("ticker") or "").strip().upper() != ticker or str(row.get("nct_id") or "").strip().upper() != nct_id:
-                continue
-            row["outcome_override_applied"] = "True"
-            row["outcome_override_status"] = status
-            row["outcome_override_reason"] = reason
-            row["outcome_override_source_url"] = source_url
-            row["outcome_override_manual_review"] = "True" if bool_text(override.get("manual_review")) else "False"
-            if bool_text(override.get("exclude_from_scoring")):
-                row["is_active_status"] = "False"
-                row["qualifying_trial"] = "False"
-                row["trial_score"] = "0.0"
-                suffix = f"outcome_override:{status}" if status else "outcome_override"
-                row["exclusion_reasons"] = ";".join(part for part in [str(row.get("exclusion_reasons") or ""), suffix] if part)
+        row["outcome_override_applied"] = "True"
+        row["outcome_override_status"] = status
+        row["outcome_override_reason"] = reason
+        row["outcome_override_source_url"] = source_url
+        row["outcome_override_manual_review"] = "True" if bool_text(override.get("manual_review")) else "False"
+        if bool_text(override.get("exclude_from_scoring")):
+            row["is_active_status"] = "False"
+            row["qualifying_trial"] = "False"
+            row["trial_score"] = "0.0"
+            suffix = f"outcome_override:{status}" if status else "outcome_override"
+            row["exclusion_reasons"] = ";".join(part for part in [str(row.get("exclusion_reasons") or ""), suffix] if part)
     return out
 
 
@@ -277,8 +280,17 @@ def build_index_summary(scores: list[dict[str, Any]], asof_date: str, top_n: int
     }
 
 
+def parse_json_object(raw: object, *, context: str, ticker: object = "") -> dict[str, Any]:
+    try:
+        payload = json.loads(str(raw or "{}"))
+    except json.JSONDecodeError as exc:
+        LOGGER.error("Malformed JSON in %s for ticker=%s: %s", context, ticker, exc)
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
-    evidence = json.loads(str(row.get("top_evidence_json") or "{}"))
+    evidence = parse_json_object(row.get("top_evidence_json"), context="top_evidence_json", ticker=row.get("ticker"))
     risk_flags = evidence.get("risk_flags", {}) if isinstance(evidence, dict) else {}
     sec_events = evidence.get("sec_events", {}) if isinstance(evidence, dict) else {}
     ctgov_quality = evidence.get("ctgov_quality", {}) if isinstance(evidence, dict) else {}
@@ -581,7 +593,14 @@ def build_trial_validation_summary_rows(trial_rows: list[dict[str, Any]], valida
         non_qualifying = [row for row in rows if not bool_text(row.get("qualifying_trial"))]
         terminal = [row for row in rows if is_terminal_status(row)]
         outcome_overridden = [row for row in rows if bool_text(row.get("outcome_override_applied"))]
-        outcome_excluded = [row for row in outcome_overridden if str(row.get("exclusion_reasons") or "").find("outcome_override") >= 0]
+        outcome_excluded = [
+            row
+            for row in outcome_overridden
+            if any(
+                part == "outcome_override" or part.startswith("outcome_override:")
+                for part in str(row.get("exclusion_reasons") or "").split(";")
+            )
+        ]
         outcome_review = [row for row in outcome_overridden if bool_text(row.get("outcome_override_manual_review"))]
 
         review_flags: list[str] = []
@@ -641,8 +660,12 @@ def build_evidence_cards(scores: list[dict[str, Any]], features: dict[int, dict[
     cards: list[dict[str, Any]] = []
     for row in scores[:top_n]:
         company_id = int(row["company_id"])
-        evidence = json.loads(str(row.get("top_evidence_json") or "{}"))
-        feature_payload = json.loads(str(features.get(company_id, {}).get("feature_json") or "{}"))
+        evidence = parse_json_object(row.get("top_evidence_json"), context="top_evidence_json", ticker=row.get("ticker"))
+        feature_payload = parse_json_object(
+            features.get(company_id, {}).get("feature_json"),
+            context="feature_json",
+            ticker=row.get("ticker"),
+        )
         cards.append(
             {
                 "asof_date": row.get("asof_date", ""),
@@ -783,7 +806,8 @@ def main() -> None:
                 message=f"asof={asof_date} top_n={top_n} alerts={len(alerts)} output_dir={output_dir}",
             )
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 

@@ -127,7 +127,8 @@ def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bo
     sec_event_args: tuple[str, ...] = ("--full-rescan",) if mode in {"weekly_reconcile", "full_backfill"} else ()
     companyfacts_args: tuple[str, ...] = ("--full-refresh",) if mode == "full_backfill" else ()
     forward_args: tuple[str, ...] = ("--run-mode", mode)
-    governance_args: tuple[str, ...] = ("--reuse-unchanged-historical",) if reuse_unchanged_historical else ()
+    governance_reuse = reuse_unchanged_historical or mode == "weekly_reconcile"
+    governance_args: tuple[str, ...] = ("--reuse-unchanged-historical",) if governance_reuse else ()
     # 08_scan_ctgov_reactivation_candidates.py is an audit/discovery utility, not a deterministic refresh step.
     steps = [
         Step("company_master", "02_build_company_master.py", supports_asof=False),
@@ -231,19 +232,19 @@ def run_step(
 
 def analyze_db(db_path: Path, *, run_started_at: str, mode: str) -> dict[str, Any]:
     start = time.monotonic()
-    LOGGER.info("Starting sqlite_analyze")
+    LOGGER.info("Starting sqlite_optimize")
     with connect(db_path) as conn:
-        conn.execute("ANALYZE")
+        conn.execute("PRAGMA optimize")
     elapsed = round(time.monotonic() - start, 3)
-    LOGGER.info("Finished sqlite_analyze status=success elapsed=%.3fs", elapsed)
+    LOGGER.info("Finished sqlite_optimize status=success elapsed=%.3fs", elapsed)
     return {
         "run_started_at": run_started_at,
         "mode": mode,
-        "step": "sqlite_analyze",
+        "step": "sqlite_optimize",
         "status": "success",
         "elapsed_sec": elapsed,
         "returncode": 0,
-        "command": f"ANALYZE {db_path}",
+        "command": f"PRAGMA optimize {db_path}",
     }
 
 
@@ -544,7 +545,11 @@ def main() -> None:
         cfg_get(config, "biotech_refresh.timing_csv", "../output/biotech_index_reports/biotech_refresh_timing.csv"),
         base_dir=base_dir,
     )
-    raw_timeout = float(cfg_get(config, "biotech_refresh.step_timeout_sec", 7200.0))
+    raw_timeout_value = cfg_get(config, "biotech_refresh.step_timeout_sec", 7200.0)
+    try:
+        raw_timeout = float(raw_timeout_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid biotech_refresh.step_timeout_sec value: {raw_timeout_value!r}") from exc
     step_timeout_sec = raw_timeout if raw_timeout > 0 else None
     selected_steps = {step.strip() for step in args.steps.split(",") if step.strip()}
     all_steps = pipeline_steps(

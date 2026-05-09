@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
-from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
     read_final_scoring_tickers,
@@ -90,6 +90,8 @@ def configure_logging() -> None:
 def parse_date(raw: object) -> date | None:
     text = str(raw or "").strip()
     if not text:
+        return None
+    if len(text) < 10:
         return None
     try:
         return datetime.strptime(text[:10], "%Y-%m-%d").date()
@@ -183,13 +185,14 @@ def load_latest_table(
 ) -> dict[int, dict[str, Any]]:
     if table not in LATEST_SOURCE_TABLES:
         raise ValueError(f"Unsupported source table for latest-row load: {table}")
+    table_sql = quote_identifier(table)
     rows = conn.execute(
         f"""
         SELECT t.*
-        FROM {table} t
+        FROM {table_sql} t
         JOIN (
             SELECT company_id, MAX(asof_date) AS max_asof
-            FROM {table}
+            FROM {table_sql}
             WHERE asof_date <= ?
             GROUP BY company_id
         ) latest
@@ -626,6 +629,7 @@ def main() -> None:
     output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
+        run_id: int | None = None
         init_db(conn)
         asof_obj = parse_date(args.asof) if args.asof else None
         if args.asof and asof_obj is None:
@@ -713,7 +717,8 @@ def main() -> None:
             LOGGER.info("Multibagger feature build complete: rows=%d output=%s", len(rows), output_csv)
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=f"asof={asof_date} output={output_csv}")
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 

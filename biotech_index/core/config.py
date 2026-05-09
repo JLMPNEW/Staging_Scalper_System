@@ -1,7 +1,26 @@
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 from typing import Any, Optional
+
+ENV_DEFAULT_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
+
+
+def expand_env_vars(raw: Any) -> str:
+    """Expand $VAR, ${VAR}, and ${VAR:-default} path config values."""
+    text = str(raw)
+
+    def replace_default(match: re.Match[str]) -> str:
+        name = match.group(1)
+        default = match.group(2)
+        value = os.environ.get(name)
+        if value not in (None, ""):
+            return value
+        return default if default is not None else match.group(0)
+
+    return os.path.expandvars(ENV_DEFAULT_RE.sub(replace_default, text))
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -31,14 +50,14 @@ def cfg_get(config: dict[str, Any], dotted_key: str, default: Any = None) -> Any
 def resolve_path(raw: Any, *, base_dir: Path) -> Path:
     if raw is None or str(raw).strip() == "":
         raise ValueError("Path config value is empty")
-    path = Path(str(raw)).expanduser()
+    path = Path(expand_env_vars(raw)).expanduser()
     return path if path.is_absolute() else (base_dir / path).resolve()
 
 
 def resolve_optional_path(raw: Any, *, base_dir: Path) -> Optional[Path]:
     if raw is None or str(raw).strip() == "":
         return None
-    path = Path(str(raw)).expanduser()
+    path = Path(expand_env_vars(raw)).expanduser()
     return path if path.is_absolute() else (base_dir / path).resolve()
 
 

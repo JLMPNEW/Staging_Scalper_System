@@ -25,7 +25,6 @@ from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_n
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
     normalize_ticker,
-    read_final_scoring_tickers,
     validate_full_universe_coverage,
     validate_layer_freshness,
     validate_nonempty_selection,
@@ -134,7 +133,7 @@ def apply_trial_status_overrides(evidence_df: pd.DataFrame, overrides_df: pd.Dat
         if column not in out.columns:
             out[column] = ""
 
-    for _, override in overrides_df.iterrows():
+    for override in overrides_df.to_dict("records"):
         if not as_bool(override.get("enabled", "true")):
             continue
         ticker = str(override.get("ticker") or "").strip().upper()
@@ -154,6 +153,7 @@ def apply_trial_status_overrides(evidence_df: pd.DataFrame, overrides_df: pd.Dat
         out.loc[mask, "outcome_override_manual_review"] = "True" if as_bool(override.get("manual_review")) else "False"
         if as_bool(override.get("exclude_from_scoring")):
             out.loc[mask, "is_active_status"] = "False"
+            out.loc[mask, "is_therapeutic"] = "False"
             out.loc[mask, "qualifying_trial"] = "False"
             out.loc[mask, "trial_score"] = "0.0"
             existing = out.loc[mask, "exclusion_reasons"].astype(str)
@@ -332,7 +332,13 @@ def evidence_summary(evidence_df: pd.DataFrame, ticker: str) -> dict[str, Any]:
     if ev.empty:
         return empty_evidence_summary()
     override_mask = ev["outcome_override_applied"].astype(str).map(as_bool).astype(bool) if "outcome_override_applied" in ev else pd.Series(False, index=ev.index)
-    override_excluded_mask = ev["exclusion_reasons"].astype(str).str.contains("outcome_override", na=False) if "exclusion_reasons" in ev else pd.Series(False, index=ev.index)
+    override_excluded_mask = (
+        ev["exclusion_reasons"]
+        .astype(str)
+        .map(lambda value: any(part == "outcome_override" or part.startswith("outcome_override:") for part in value.split(";")))
+        if "exclusion_reasons" in ev
+        else pd.Series(False, index=ev.index)
+    )
     override_review_mask = ev["outcome_override_manual_review"].astype(str).map(as_bool).astype(bool) if "outcome_override_manual_review" in ev else pd.Series(False, index=ev.index)
     override_counts = {
         "outcome_override_rows": int(override_mask.sum()),
@@ -408,9 +414,23 @@ def evidence_summary(evidence_df: pd.DataFrame, ticker: str) -> dict[str, Any]:
                 "match_roles": str(row.get("match_roles", "")),
                 "score": to_float(row.get("trial_score", 0.0)),
             }
-            for _, row in top.iterrows()
+            for row in top.to_dict("records")
         ],
     }
+
+
+def build_evidence_summary_index(evidence_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    if evidence_df.empty or "ticker" not in evidence_df.columns:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    ticker_series = evidence_df["ticker"].astype(str).str.upper()
+    for ticker, group in evidence_df.groupby(ticker_series, sort=False):
+        normalized = normalize_ticker(ticker)
+        if not normalized:
+            LOGGER.warning("Skipping blank ticker in evidence summary index")
+            continue
+        out[normalized] = evidence_summary(group, normalized)
+    return out
 
 
 def compute_feature_row(
@@ -761,26 +781,31 @@ def upsert_features(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_d
     now = utc_now()
     with conn:
         conn.execute("DELETE FROM daily_features WHERE asof_date = ?", (asof_date,))
-        for row in rows:
-            conn.execute(
-                """
-                INSERT INTO daily_features(
-                    asof_date, company_id, catalyst_score_raw, credibility_score_raw,
-                    risk_score_raw, feature_json, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+        conn.executemany(
+            """
+            INSERT INTO daily_features(
+                asof_date, company_id, catalyst_score_raw, credibility_score_raw,
+                financial_quality_score_raw, risk_score_raw, momentum_score_raw,
+                feature_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
                 (
                     row["asof_date"],
                     row["company_id"],
                     row["catalyst_score_raw"],
                     row["credibility_score_raw"],
+                    row["financial_quality_score_raw"],
                     row["risk_score_raw"],
+                    row["momentum_score_raw"],
                     row["feature_json"],
                     now,
                     now,
-                ),
-            )
+                )
+                for row in rows
+            ],
+        )
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -811,13 +836,17 @@ def main() -> None:
     low_liquidity = float(cfg_get(config, "biotech_features.low_liquidity_addv20", 2_000_000))
     strong_liquidity = float(cfg_get(config, "biotech_features.strong_liquidity_addv20", 10_000_000))
 
-    expected_tickers = read_final_scoring_tickers(universe_csv)
     universe = read_csv(universe_csv)
     evidence_df = read_csv(evidence_csv)
     evidence_df = apply_trial_status_overrides(evidence_df, read_optional_csv(trial_status_overrides_csv))
     screen = read_csv(screen_csv)
     universe = universe[universe["scoring_include"].map(as_bool)].copy()
-    screen_by_ticker = {str(row["ticker"]).upper(): row for _, row in screen.iterrows()}
+    universe_records = universe.to_dict("records")
+    expected_tickers = {normalize_ticker(row.get("ticker")) for row in universe_records if normalize_ticker(row.get("ticker"))}
+    if not expected_tickers:
+        raise ValueError(f"No scoring_include tickers found in final scoring universe CSV: {universe_csv}")
+    screen_by_ticker = {normalize_ticker(row.get("ticker")): row for row in screen.to_dict("records")}
+    evidence_by_ticker = build_evidence_summary_index(evidence_df)
 
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
@@ -833,7 +862,7 @@ def main() -> None:
             )
             rows: list[dict[str, Any]] = []
             skipped: list[str] = []
-            for _, universe_row in universe.iterrows():
+            for universe_row in universe_records:
                 ticker = normalize_ticker(universe_row["ticker"])
                 company_id = company_ids.get(ticker)
                 if company_id is None:
@@ -843,7 +872,7 @@ def main() -> None:
                     compute_feature_row(
                         universe_row=universe_row,
                         screen_row=screen_by_ticker.get(ticker),
-                        evidence=evidence_summary(evidence_df, ticker),
+                        evidence=evidence_by_ticker.get(ticker, empty_evidence_summary()),
                         company_id=company_id,
                         asof_date=asof_date,
                         min_liquidity_addv20=min_liquidity,
@@ -884,7 +913,8 @@ def main() -> None:
                 message=f"skipped_missing_company_id={len(skipped)} output={output_csv}",
             )
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 

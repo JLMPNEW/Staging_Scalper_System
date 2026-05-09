@@ -646,7 +646,9 @@ def fetch_companyfacts_result(
             observations=tuple(observations),
             normalized=tuple(normalized),
         )
-    except Exception as exc:
+    except BaseException as exc:
+        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            raise
         return CompanyFactsFetchResult(company=company, latest_source_filing_date=latest_source_filing_date, error=f"{type(exc).__name__}: {exc}")
 
 
@@ -1017,7 +1019,8 @@ def main() -> None:
             if error_count > 0 and not args.allow_partial:
                 raise SystemExit(2)
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
     LOGGER.info("Synced SEC companyfacts history: companies=%d rows=%d output=%s", len(companies), len(all_csv_rows), output_csv)
 

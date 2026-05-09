@@ -262,6 +262,19 @@ def enabled_flag(raw: object) -> bool:
     raise ValueError(f"Invalid enabled value: {raw}")
 
 
+def config_bool(raw: object, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "y", "enabled", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "disabled", "off"}:
+        return False
+    return default
+
+
 def safe_json_loads(raw: object) -> dict[str, Any]:
     try:
         payload = json.loads(str(raw or "{}"))
@@ -921,7 +934,7 @@ def load_filing_text_content_bulk(conn: sqlite3.Connection, filings: list[Filing
     filing_by_accession = {filing.accession_nodash: filing for filing in filings}
     text_by_accession: dict[str, dict[str, Any]] = {}
     accessions = list(filing_by_accession)
-    chunk_size = 900
+    chunk_size = SQLITE_PARAM_CHUNK_SIZE
     for start in range(0, len(accessions), chunk_size):
         chunk = accessions[start : start + chunk_size]
         placeholders = ",".join("?" for _ in chunk)
@@ -972,8 +985,7 @@ def load_filing_text_content_bulk(conn: sqlite3.Connection, filings: list[Filing
 def dashed_accession(accession_nodash: str) -> str:
     text = str(accession_nodash or "")
     if len(text) != 18 or not text.isdigit():
-        LOGGER.warning("Malformed SEC accession_nodash for complete submission fetch: %s", text)
-        return text
+        raise ValueError(f"Malformed SEC accession_nodash for complete submission fetch: {text!r}")
     return f"{text[:10]}-{text[10:12]}-{text[12:]}"
 
 
@@ -1061,8 +1073,8 @@ def ensure_complete_submission_text(
         return FilingText(**{**filing.__dict__, "document_type": "complete_submission_text", "text_content": cached, "text_hash": text_hash(cached)})
     if not fetch_enabled or http is None or not filing.archive_url or filing.form.upper() not in fetch_forms:
         return filing
-    url = f"{filing.archive_url}/{dashed_accession(filing.accession_nodash)}.txt"
     try:
+        url = f"{filing.archive_url}/{dashed_accession(filing.accession_nodash)}.txt"
         text = http.fetch_text(namespace="sec_complete_submission_text", url=url, headers=headers, ttl_hours=ttl_hours)
         if text.strip():
             upsert_complete_submission_document(conn, filing, url, text)
@@ -1089,8 +1101,9 @@ def fetch_complete_submission_worker(
     max_retries: int,
     throttle: HostThrottle,
 ) -> CompleteSubmissionFetch:
-    url = f"{filing.archive_url}/{dashed_accession(filing.accession_nodash)}.txt"
+    url = ""
     try:
+        url = f"{filing.archive_url}/{dashed_accession(filing.accession_nodash)}.txt"
         with CachedHttpClient(
             cache_dir=cache_dir,
             sleep_sec=sleep_sec,
@@ -1214,7 +1227,7 @@ def load_forward_guidance_parse_state(conn: sqlite3.Connection, accessions: list
     if not accessions:
         return {}
     out: dict[str, dict[str, Any]] = {}
-    chunk_size = 900
+    chunk_size = SQLITE_PARAM_CHUNK_SIZE
     for start in range(0, len(accessions), chunk_size):
         chunk = accessions[start : start + chunk_size]
         placeholders = ",".join("?" for _ in chunk)
@@ -1237,13 +1250,34 @@ def is_unchanged_guidance_parse(
     asof_date: date,
     parser_signature: str,
 ) -> bool:
+    return guidance_parse_reuse_miss_reason(
+        filing,
+        state,
+        asof_date=asof_date,
+        parser_signature=parser_signature,
+    ) == ""
+
+
+def guidance_parse_reuse_miss_reason(
+    filing: FilingText,
+    state: dict[str, Any] | None,
+    *,
+    asof_date: date,
+    parser_signature: str,
+) -> str:
+    if not str(filing.text_hash or ""):
+        return "missing_current_text_hash"
     if not state:
-        return False
+        return "missing_parse_state"
+    if not str(state.get("text_hash") or ""):
+        return "missing_state_text_hash"
     if int(state.get("asof_year") or 0) != asof_date.year:
-        return False
+        return "asof_year_mismatch"
     if str(state.get("parser_signature") or "") != parser_signature:
-        return False
-    return str(state.get("text_hash") or "") == str(filing.text_hash or "")
+        return "parser_signature_mismatch"
+    if str(state.get("text_hash") or "") != str(filing.text_hash or ""):
+        return "text_hash_mismatch"
+    return ""
 
 
 def load_previous_guidance_records(
@@ -1554,7 +1588,7 @@ def build_feature_row(
     }
 
 
-def normalize_guidance_number(raw: object, *, null_token: str = "") -> str:
+def normalize_guidance_number(raw: object, *, null_token: str = "<NULL>") -> str:
     if raw is None:
         return null_token
     try:
@@ -1681,6 +1715,11 @@ def replace_guidance(
         guidance_params: list[tuple[Any, ...]] = []
         for record in records:
             unique_key = guidance_unique_key(record)
+            if not unique_key:
+                raise ValueError(
+                    f"Could not compute guidance_unique_key for company_id={record.company_id} "
+                    f"accession={record.accession_nodash} metric={record.metric}"
+                )
             guidance_params.append(
                 (
                     record.asof_date,
@@ -1936,7 +1975,7 @@ def main() -> None:
             context="forward guidance parse commercial_value_features_daily",
             max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0)),
         )
-        run_id = start_run(conn, run_type="parse_forward_guidance", input_path=universe_csv)
+        run_id: int | None = start_run(conn, run_type="parse_forward_guidance", input_path=universe_csv)
         try:
             overall_start = time.perf_counter()
             all_records: list[GuidanceRecord] = []
@@ -1954,25 +1993,39 @@ def main() -> None:
             LOGGER.info("Forward guidance metadata selected: companies=%d filings=%d elapsed=%.3fs", len(companies), len(selected_filings), time.perf_counter() - phase_start)
             phase_start = time.perf_counter()
             parse_state = load_forward_guidance_parse_state(conn, [filing.accession_nodash for filing in selected_filings])
-            if run_mode == "daily_delta":
-                unchanged_filings = [
-                    filing
-                    for filing in selected_filings
-                    if is_unchanged_guidance_parse(
+            reuse_parse_state = run_mode in {"daily_delta", "weekly_reconcile"} and config_bool(
+                cfg_get(config, "forward_guidance.reuse_unchanged_parse_state", True),
+                True,
+            )
+            reuse_miss_reasons: dict[str, int] = {}
+            if reuse_parse_state:
+                unchanged_filings: list[FilingText] = []
+                filings_to_parse: list[FilingText] = []
+                for filing in selected_filings:
+                    reason = guidance_parse_reuse_miss_reason(
                         filing,
                         parse_state.get(filing.accession_nodash),
                         asof_date=asof_date,
                         parser_signature=parser_signature,
                     )
-                ]
-                filings_to_parse = [filing for filing in selected_filings if filing.accession_nodash not in {item.accession_nodash for item in unchanged_filings}]
+                    if reason:
+                        reuse_miss_reasons[reason] = reuse_miss_reasons.get(reason, 0) + 1
+                        filings_to_parse.append(filing)
+                    else:
+                        unchanged_filings.append(filing)
             else:
                 unchanged_filings = []
                 filings_to_parse = selected_filings
+                if selected_filings:
+                    reuse_miss_reasons["reuse_disabled"] = len(selected_filings)
+            reuse_hit_rate = (100.0 * len(unchanged_filings) / float(len(selected_filings))) if selected_filings else 0.0
             LOGGER.info(
-                "Forward guidance parse-state split: unchanged=%d to_parse=%d elapsed=%.3fs",
+                "Forward guidance parse-state split: enabled=%s hits=%d misses=%d hit_rate=%.1f%% miss_reasons=%s elapsed=%.3fs",
+                reuse_parse_state,
                 len(unchanged_filings),
                 len(filings_to_parse),
+                reuse_hit_rate,
+                ",".join(f"{key}:{value}" for key, value in sorted(reuse_miss_reasons.items())) or "none",
                 time.perf_counter() - phase_start,
             )
 
@@ -2079,8 +2132,9 @@ def main() -> None:
                     f"guidance_records={len(combined_records)} overrides={len(override_records)} output={features_csv}"
                 ),
             )
-        except Exception as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+        except BaseException as exc:
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 

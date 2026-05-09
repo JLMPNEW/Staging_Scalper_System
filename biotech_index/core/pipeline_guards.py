@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import csv
+import logging
+import re
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
 TRUE_VALUES = {"1", "true", "t", "yes", "y"}
+DATE_PREFIX_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:$|[T\s])")
+TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{0,14}$")
+LOGGER = logging.getLogger(__name__)
 
 
 def as_bool(raw: object) -> bool:
@@ -15,7 +20,13 @@ def as_bool(raw: object) -> bool:
 
 
 def normalize_ticker(raw: object) -> str:
-    return str(raw or "").strip().upper().replace(".", "-")
+    ticker = str(raw or "").strip().upper().replace(".", "-")
+    if not ticker:
+        return ""
+    if not TICKER_RE.fullmatch(ticker):
+        LOGGER.debug("Invalid ticker value ignored: %r", raw)
+        return ""
+    return ticker
 
 
 def split_ticker_filter(raw: object) -> set[str]:
@@ -27,6 +38,10 @@ def read_final_scoring_tickers(path: Path) -> set[str]:
         raise FileNotFoundError(f"Final scoring universe CSV not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
+        fieldnames = {str(field or "").strip() for field in (reader.fieldnames or [])}
+        missing = {"ticker", "scoring_include"} - fieldnames
+        if missing:
+            raise ValueError(f"Final scoring universe CSV missing required column(s) {sorted(missing)}: {path}")
         out = {
             ticker
             for row in reader
@@ -58,6 +73,8 @@ def universe_coverage(expected_tickers: Iterable[str], observed_tickers: Iterabl
 
 
 def format_ticker_sample(tickers: Sequence[str], *, limit: int = 25) -> str:
+    if not tickers:
+        return "(none)"
     sample = list(tickers[:limit])
     suffix = "" if len(tickers) <= limit else f"...(+{len(tickers) - limit})"
     return ",".join(sample) + suffix
@@ -67,9 +84,14 @@ def parse_asof_date(raw: object) -> date | None:
     text = str(raw or "").strip()
     if not text:
         return None
+    match = DATE_PREFIX_RE.match(text)
+    if not match:
+        LOGGER.debug("Invalid asof date ignored: %r", raw)
+        return None
     try:
-        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+        return datetime.strptime(match.group(1), "%Y-%m-%d").date()
     except ValueError:
+        LOGGER.debug("Invalid asof date ignored: %r", raw)
         return None
 
 

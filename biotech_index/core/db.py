@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import json
+import logging
+import math
 import re
 import sqlite3
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
+
+LOGGER = logging.getLogger(__name__)
 
 SCHEMA_SQL = """
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS runs (
     run_id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_type TEXT NOT NULL,
@@ -436,7 +439,9 @@ CREATE TABLE IF NOT EXISTS daily_features (
     company_id INTEGER NOT NULL,
     catalyst_score_raw REAL,
     credibility_score_raw REAL,
+    financial_quality_score_raw REAL,
     risk_score_raw REAL,
+    momentum_score_raw REAL,
     feature_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -623,7 +628,7 @@ CREATE TABLE IF NOT EXISTS company_forward_guidance (
     period_label TEXT,
     low_value REAL,
     high_value REAL,
-    guidance_unique_key TEXT,
+    guidance_unique_key TEXT NOT NULL,
     midpoint_value REAL,
     unit TEXT,
     currency TEXT,
@@ -776,6 +781,7 @@ CREATE INDEX IF NOT EXISTS idx_company_aliases_norm ON company_aliases(alias_nor
 CREATE INDEX IF NOT EXISTS idx_companies_cik ON companies(cik);
 CREATE INDEX IF NOT EXISTS idx_companies_status ON companies(universe_status, is_active);
 CREATE INDEX IF NOT EXISTS idx_trial_company_links_company ON trial_company_links(company_id, nct_id);
+CREATE INDEX IF NOT EXISTS idx_trial_company_links_nct ON trial_company_links(nct_id);
 CREATE INDEX IF NOT EXISTS idx_ctgov_query_hits_company ON ctgov_query_hits(company_id, nct_id);
 CREATE INDEX IF NOT EXISTS idx_sec_filings_company_date ON sec_filings(company_id, filing_date);
 CREATE INDEX IF NOT EXISTS idx_ctgov_events_asof_company ON ctgov_events(asof_date, company_id);
@@ -784,19 +790,23 @@ CREATE INDEX IF NOT EXISTS idx_sec_events_type_date ON sec_events(event_type, fi
 CREATE INDEX IF NOT EXISTS idx_sec_event_parse_state_hash ON sec_event_parse_state(text_hash);
 CREATE INDEX IF NOT EXISTS idx_financial_observations_company_concept ON financial_fact_observations(company_id, concept, period_end);
 CREATE INDEX IF NOT EXISTS idx_company_facts_quarterly_company_period ON company_facts_quarterly(company_id, period_end);
+CREATE INDEX IF NOT EXISTS idx_company_facts_quarterly_company_period_desc ON company_facts_quarterly(company_id, period_end DESC);
 CREATE INDEX IF NOT EXISTS idx_company_facts_sync_state_status ON company_facts_sync_state(sync_status, last_synced_at);
 CREATE INDEX IF NOT EXISTS idx_financial_survival_asof_company ON financial_survival_features(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_data_quality_issues_asof_company ON data_quality_issues(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_market_bars_ticker_date ON market_bars_daily(ticker, bar_date);
 CREATE INDEX IF NOT EXISTS idx_market_bars_source_ticker_date ON market_bars_daily(source, ticker, bar_date);
 CREATE INDEX IF NOT EXISTS idx_market_features_asof_company ON market_features_daily(asof_date, company_id);
+CREATE INDEX IF NOT EXISTS idx_market_features_company_asof ON market_features_daily(company_id, asof_date DESC, source);
 CREATE INDEX IF NOT EXISTS idx_commercial_value_asof_company ON commercial_value_features_daily(asof_date, company_id);
+CREATE INDEX IF NOT EXISTS idx_commercial_value_company_asof ON commercial_value_features_daily(company_id, asof_date DESC);
 CREATE INDEX IF NOT EXISTS idx_forward_guidance_company_date ON company_forward_guidance(company_id, filing_date);
 CREATE INDEX IF NOT EXISTS idx_forward_guidance_accession_asof ON company_forward_guidance(accession_nodash, asof_date);
 CREATE INDEX IF NOT EXISTS idx_forward_guidance_overrides_asof_company ON company_forward_guidance_overrides(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_forward_guidance_features_asof_company ON forward_guidance_features_daily(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_forward_guidance_parse_state_hash ON forward_guidance_parse_state(text_hash);
 CREATE INDEX IF NOT EXISTS idx_sec_governance_signal_cache_signature ON sec_governance_signal_cache(parser_signature, accession_nodash, text_hash);
+CREATE INDEX IF NOT EXISTS idx_sec_filing_documents_accession ON sec_filing_documents(accession_nodash);
 CREATE INDEX IF NOT EXISTS idx_sec_filing_documents_accession_type ON sec_filing_documents(accession_nodash, document_type, fetched_at);
 CREATE INDEX IF NOT EXISTS idx_sec_filing_latest_document_hash ON sec_filing_latest_document(text_hash);
 CREATE INDEX IF NOT EXISTS idx_sec_filing_latest_document_type ON sec_filing_latest_document(document_type, fetched_at);
@@ -911,6 +921,11 @@ FORWARD_GUIDANCE_OVERRIDES_OPTIONAL_COLUMNS = {
     "unique_key": "TEXT",
 }
 
+DAILY_FEATURES_OPTIONAL_COLUMNS = {
+    "financial_quality_score_raw": "REAL",
+    "momentum_score_raw": "REAL",
+}
+
 FORWARD_GUIDANCE_OPTIONAL_COLUMNS = {
     "guidance_unique_key": "TEXT",
 }
@@ -979,6 +994,9 @@ def connect(db_path: Path, *, timeout_sec: float = 30.0) -> ManagedConnection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA cache_size = -65536")
+    conn.execute("PRAGMA mmap_size = 268435456")
+    conn.execute("PRAGMA temp_store = MEMORY")
     return ManagedConnection(conn)
 
 
@@ -986,6 +1004,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     if conn.in_transaction:
         raise RuntimeError("init_db() must be called outside an active transaction; sqlite3.executescript() commits ambient transactions.")
     conn.executescript(SCHEMA_SQL)
+    ensure_company_universe_history_unique_index(conn)
     ensure_company_optional_columns(conn)
     ensure_table_optional_columns(conn, "sec_filing_documents", SEC_FILING_DOCUMENT_OPTIONAL_COLUMNS)
     conn.execute(
@@ -996,11 +1015,13 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     ensure_table_optional_columns(conn, "sec_events", SEC_EVENT_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "company_facts_quarterly", COMPANY_FACTS_QUARTERLY_OPTIONAL_COLUMNS)
+    ensure_table_optional_columns(conn, "daily_features", DAILY_FEATURES_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "daily_scores", DAILY_SCORES_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "market_bars_daily", MARKET_BARS_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "market_snapshots_daily", MARKET_DAILY_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "market_features_daily", MARKET_DAILY_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "company_forward_guidance", FORWARD_GUIDANCE_OPTIONAL_COLUMNS)
+    ensure_forward_guidance_unique_keys(conn)
     ensure_table_optional_columns(conn, "company_forward_guidance_overrides", FORWARD_GUIDANCE_OVERRIDES_OPTIONAL_COLUMNS)
     conn.execute(
         """
@@ -1029,12 +1050,16 @@ def ensure_company_optional_columns(conn: sqlite3.Connection) -> None:
 
 
 def _table_column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    table_sql = quote_identifier(table_name)
     columns: set[str] = set()
-    for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall():
+    for row in conn.execute(f"PRAGMA table_info({table_sql})").fetchall():
         try:
             columns.add(str(row["name"]))
         except (TypeError, IndexError):
-            columns.add(str(row[1]))
+            try:
+                columns.add(str(row[1]))
+            except (TypeError, IndexError):
+                LOGGER.warning("Could not read column name from PRAGMA table_info(%s) row: %r", table_name, row)
     return columns
 
 
@@ -1048,30 +1073,205 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
 
 def ensure_table_optional_columns(conn: sqlite3.Connection, table_name: str, columns: dict[str, str]) -> None:
     existing = _table_column_names(conn, table_name)
+    table_sql = quote_identifier(table_name)
     for column, column_type in columns.items():
         if column not in existing:
-            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column} {column_type}")
+            column_sql = quote_identifier(column)
+            conn.execute(f"ALTER TABLE {table_sql} ADD COLUMN {column_sql} {column_type}")
 
 
 def _run_schema_migration(conn: sqlite3.Connection, name: str, callback) -> None:
     if not SAFE_IDENTIFIER_RE.fullmatch(str(name or "")):
         raise ValueError(f"Unsafe schema migration name: {name!r}")
     savepoint = f"schema_migration_{name}"
-    conn.execute(f"SAVEPOINT {savepoint}")
+    savepoint_sql = quote_identifier(savepoint)
+    conn.execute(f"SAVEPOINT {savepoint_sql}")
     try:
         callback()
     except Exception:
-        conn.execute(f"ROLLBACK TO {savepoint}")
-        conn.execute(f"RELEASE {savepoint}")
+        conn.execute(f"ROLLBACK TO {savepoint_sql}")
+        conn.execute(f"RELEASE {savepoint_sql}")
         raise
-    conn.execute(f"RELEASE {savepoint}")
+    conn.execute(f"RELEASE {savepoint_sql}")
 
 
 def _coalesce_existing_expr(columns: set[str], candidates: list[str], fallback: str) -> str:
     present = [column for column in candidates if column in columns]
     if not present:
         return fallback
-    return f"COALESCE({', '.join([*present, fallback])})"
+    return f"COALESCE({', '.join([*(quote_identifier(column) for column in present), fallback])})"
+
+
+def _normalize_guidance_key_number(raw: object, *, null_token: str = "<NULL>") -> str:
+    if raw is None:
+        return null_token
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return str(raw)
+    if not math.isfinite(value):
+        return null_token
+    return f"{value:.12g}"
+
+
+def _guidance_unique_key_from_values(
+    asof_date: object,
+    company_id: object,
+    accession_nodash: object,
+    metric: object,
+    guidance_year: object,
+    low_value: object,
+    high_value: object,
+) -> str:
+    return json.dumps(
+        [
+            str(asof_date or ""),
+            int(company_id),
+            str(accession_nodash or ""),
+            str(metric or ""),
+            "<NULL>" if guidance_year is None else str(guidance_year),
+            _normalize_guidance_key_number(low_value),
+            _normalize_guidance_key_number(high_value),
+        ],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def ensure_company_universe_history_unique_index(conn: sqlite3.Connection) -> None:
+    if not _table_exists(conn, "company_universe_history"):
+        return
+    duplicate_row = conn.execute(
+        """
+        SELECT COUNT(*) AS duplicate_count
+        FROM company_universe_history
+        WHERE history_id NOT IN (
+            SELECT MIN(history_id)
+            FROM company_universe_history
+            GROUP BY asof_date, company_id, COALESCE(run_id, -1)
+        )
+        """
+    ).fetchone()
+    try:
+        duplicate_count = int(duplicate_row["duplicate_count"])
+    except (TypeError, IndexError):
+        duplicate_count = int(duplicate_row[0])
+    if duplicate_count:
+        LOGGER.warning("Removing %d duplicate company_universe_history row(s) before adding unique index", duplicate_count)
+        conn.execute(
+            """
+            DELETE FROM company_universe_history
+            WHERE history_id NOT IN (
+                SELECT MIN(history_id)
+                FROM company_universe_history
+                GROUP BY asof_date, company_id, COALESCE(run_id, -1)
+            )
+            """
+        )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_company_universe_history_unique_key
+        ON company_universe_history(asof_date, company_id, COALESCE(run_id, -1))
+        """
+    )
+
+
+def ensure_forward_guidance_unique_keys(conn: sqlite3.Connection) -> None:
+    if not _table_exists(conn, "company_forward_guidance"):
+        return
+    columns = _table_column_names(conn, "company_forward_guidance")
+    if "guidance_unique_key" not in columns:
+        return
+
+    existing_keys = {
+        str(row["guidance_unique_key"])
+        for row in conn.execute(
+            """
+            SELECT DISTINCT guidance_unique_key
+            FROM company_forward_guidance
+            WHERE COALESCE(guidance_unique_key, '') <> ''
+            """
+        ).fetchall()
+    }
+    rows = conn.execute(
+        """
+        SELECT guidance_id, asof_date, company_id, accession_nodash, metric,
+               guidance_year, low_value, high_value
+        FROM company_forward_guidance
+        WHERE COALESCE(guidance_unique_key, '') = ''
+        ORDER BY guidance_id
+        """
+    ).fetchall()
+
+    ids_to_delete: list[int] = []
+    updates: list[tuple[str, int]] = []
+    seen_keys: set[str] = set()
+    for row in rows:
+        guidance_id = int(row["guidance_id"])
+        unique_key = _guidance_unique_key_from_values(
+            row["asof_date"],
+            row["company_id"],
+            row["accession_nodash"],
+            row["metric"],
+            row["guidance_year"],
+            row["low_value"],
+            row["high_value"],
+        )
+        if unique_key in existing_keys or unique_key in seen_keys:
+            ids_to_delete.append(guidance_id)
+            continue
+        seen_keys.add(unique_key)
+        updates.append((unique_key, guidance_id))
+
+    if ids_to_delete:
+        for start in range(0, len(ids_to_delete), 800):
+            chunk = ids_to_delete[start : start + 800]
+            if not all(isinstance(value, int) for value in chunk):
+                raise TypeError("Non-integer guidance_id in company_forward_guidance cleanup")
+            placeholders = ",".join("?" for _ in chunk)
+            conn.execute(f"DELETE FROM company_forward_guidance WHERE guidance_id IN ({placeholders})", chunk)
+    if updates:
+        conn.executemany(
+            """
+            UPDATE company_forward_guidance
+            SET guidance_unique_key = ?
+            WHERE guidance_id = ?
+            """,
+            updates,
+        )
+    conn.execute(
+        """
+        DELETE FROM company_forward_guidance
+        WHERE COALESCE(guidance_unique_key, '') <> ''
+          AND guidance_id NOT IN (
+              SELECT MIN(guidance_id)
+              FROM company_forward_guidance
+              WHERE COALESCE(guidance_unique_key, '') <> ''
+              GROUP BY guidance_unique_key
+          )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_forward_guidance_key_required_insert
+        BEFORE INSERT ON company_forward_guidance
+        WHEN NEW.guidance_unique_key IS NULL OR NEW.guidance_unique_key = ''
+        BEGIN
+            SELECT RAISE(ABORT, 'company_forward_guidance.guidance_unique_key is required');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_forward_guidance_key_required_update
+        BEFORE UPDATE OF guidance_unique_key ON company_forward_guidance
+        WHEN NEW.guidance_unique_key IS NULL OR NEW.guidance_unique_key = ''
+        BEGIN
+            SELECT RAISE(ABORT, 'company_forward_guidance.guidance_unique_key is required');
+        END
+        """
+    )
 
 
 def refresh_sec_latest_documents(conn: sqlite3.Connection, accessions: Iterable[str]) -> int:
@@ -1159,20 +1359,21 @@ def _copy_sec_event_parse_state_legacy(conn: sqlite3.Connection) -> None:
     if "accession_nodash" not in columns:
         return
     now = utc_now()
-    text_hash_expr = "text_hash" if "text_hash" in columns else "''"
-    parser_signature_expr = "parser_signature" if "parser_signature" in columns else "''"
+    accession_expr = quote_identifier("accession_nodash")
+    text_hash_expr = quote_identifier("text_hash") if "text_hash" in columns else "''"
+    parser_signature_expr = quote_identifier("parser_signature") if "parser_signature" in columns else "''"
     parsed_at_expr = _coalesce_existing_expr(columns, ["parsed_at", "updated_at", "created_at"], "?")
-    event_count_expr = "COALESCE(event_count, 0)" if "event_count" in columns else "0"
+    event_count_expr = f"COALESCE({quote_identifier('event_count')}, 0)" if "event_count" in columns else "0"
     created_at_expr = _coalesce_existing_expr(columns, ["created_at", "updated_at", "parsed_at"], "?")
     updated_at_expr = _coalesce_existing_expr(columns, ["updated_at", "parsed_at", "created_at"], "?")
     sql = f"""
         INSERT OR IGNORE INTO sec_event_parse_state(
             accession_nodash, text_hash, parser_signature, parsed_at, event_count, created_at, updated_at
         )
-        SELECT accession_nodash, {text_hash_expr}, {parser_signature_expr}, {parsed_at_expr}, {event_count_expr},
+        SELECT {accession_expr}, {text_hash_expr}, {parser_signature_expr}, {parsed_at_expr}, {event_count_expr},
                {created_at_expr}, {updated_at_expr}
-        FROM sec_event_parse_state_legacy
-        WHERE COALESCE(accession_nodash, '') <> ''
+        FROM {quote_identifier("sec_event_parse_state_legacy")}
+        WHERE COALESCE({accession_expr}, '') <> ''
         """
     conn.execute(sql, tuple(now for _ in range(sql.count("?"))))
 
@@ -1199,8 +1400,9 @@ def _copy_company_facts_sync_state_legacy(conn: sqlite3.Connection) -> None:
     if "company_id" not in columns:
         return
     now = utc_now()
-    latest_source_expr = "latest_source_filing_date" if "latest_source_filing_date" in columns else "''"
-    payload_hash_expr = "payload_hash" if "payload_hash" in columns else "''"
+    company_id_expr = quote_identifier("company_id")
+    latest_source_expr = quote_identifier("latest_source_filing_date") if "latest_source_filing_date" in columns else "''"
+    payload_hash_expr = quote_identifier("payload_hash") if "payload_hash" in columns else "''"
     last_synced_expr = _coalesce_existing_expr(columns, ["last_synced_at", "updated_at", "created_at"], "?")
     sync_status_expr = _coalesce_existing_expr(columns, ["sync_status"], "'unknown'")
     created_at_expr = _coalesce_existing_expr(columns, ["created_at", "updated_at", "last_synced_at"], "?")
@@ -1209,10 +1411,10 @@ def _copy_company_facts_sync_state_legacy(conn: sqlite3.Connection) -> None:
         INSERT OR IGNORE INTO company_facts_sync_state(
             company_id, latest_source_filing_date, payload_hash, last_synced_at, sync_status, created_at, updated_at
         )
-        SELECT company_id, {latest_source_expr}, {payload_hash_expr}, {last_synced_expr},
+        SELECT {company_id_expr}, {latest_source_expr}, {payload_hash_expr}, {last_synced_expr},
                {sync_status_expr}, {created_at_expr}, {updated_at_expr}
-        FROM company_facts_sync_state_legacy
-        WHERE company_id IS NOT NULL
+        FROM {quote_identifier("company_facts_sync_state_legacy")}
+        WHERE {company_id_expr} IS NOT NULL
         """
     conn.execute(sql, tuple(now for _ in range(sql.count("?"))))
 

@@ -448,7 +448,7 @@ def detect_events(row: FilingText, *, min_confidence: float, max_per_type: int) 
                 window = extract_window(scan_text, match.start(), match.end())
                 if should_skip(rule, window, filing_date=row.filing_date):
                     continue
-                dedupe_key = window[:220].lower()
+                dedupe_key = hashlib.sha256(window.lower().encode("utf-8", errors="ignore")).hexdigest()
                 if dedupe_key in seen_windows:
                     continue
                 seen_windows.add(dedupe_key)
@@ -937,7 +937,7 @@ def export_events_from_db(
         row_params.append(asof)
     if ticker_filter:
         placeholders = ",".join("?" for _ in ticker_filter)
-        row_filters.append(f"e.company_id IN (SELECT company_id FROM companies WHERE ticker IN ({placeholders}))")
+        row_filters.append(f"e.company_id IN (SELECT company_id FROM companies WHERE upper(ticker) IN ({placeholders}))")
         row_params.extend(sorted(ticker_filter))
     row_where = f" WHERE {' AND '.join(row_filters)}" if row_filters else ""
     cursor = conn.execute(
@@ -1139,6 +1139,7 @@ def main() -> None:
                 )
             if not explicit_chunk and total_available > 0:
                 page_offset = 0
+                processed_incremental_accessions: set[str] = set()
                 while True:
                     filings = (
                         load_filing_texts_to_parse(
@@ -1162,6 +1163,11 @@ def main() -> None:
                     )
                     if not filings:
                         break
+                    batch_accessions = {filing.accession_nodash for filing in filings}
+                    if incremental_only and batch_accessions and batch_accessions.issubset(processed_incremental_accessions):
+                        raise RuntimeError(
+                            "SEC event parser made no incremental progress; refusing to reprocess the same filing batch"
+                        )
                     parsed_events = parse_filing_batch(
                         conn,
                         filings,
@@ -1172,6 +1178,8 @@ def main() -> None:
                     )
                     total_filings += len(filings)
                     event_count += parsed_events
+                    if incremental_only:
+                        processed_incremental_accessions.update(batch_accessions)
                     if total_filings % max(500, batch_size) == 0 or total_filings >= total_available:
                         LOGGER.info(
                             "Parsed %d/%d SEC filing texts; events=%d max_workers=%d",
@@ -1192,7 +1200,8 @@ def main() -> None:
             )
             LOGGER.info("Parsed SEC biotech events: filings=%d events=%d output=%s", total_filings, event_count, output_csv)
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 

@@ -6,6 +6,7 @@ import csv
 import json
 import logging
 import math
+import re
 import sqlite3
 import sys
 from datetime import date, datetime
@@ -25,6 +26,7 @@ from biotech_index.core.logging_utils import configure_utc_logging
 
 LOGGER = logging.getLogger("score_multibagger_candidates")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+DATE_PREFIX_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:$|[T\s])")
 
 
 SCORE_FIELDS = [
@@ -118,9 +120,14 @@ def parse_date(raw: object) -> date | None:
     text = str(raw or "").strip()
     if not text:
         return None
+    match = DATE_PREFIX_RE.match(text)
+    if not match:
+        LOGGER.debug("Invalid multibagger date ignored: %r", raw)
+        return None
     try:
-        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+        return datetime.strptime(match.group(1), "%Y-%m-%d").date()
     except ValueError:
+        LOGGER.debug("Invalid multibagger date ignored: %r", raw)
         return None
 
 
@@ -713,6 +720,7 @@ def main() -> None:
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
+        run_id: int | None = None
         init_db(conn)
         asof_obj = parse_date(args.asof) if args.asof else None
         if args.asof and asof_obj is None:
@@ -738,13 +746,25 @@ def main() -> None:
                 )
             max_staleness_days = int(cfg_get(config, "multibagger.tier1_interaction.max_staleness_days", 7))
             stale_tier1: list[str] = []
-            if tier1_enabled and max_staleness_days >= 0:
+            if max_staleness_days < 0:
+                raise ValueError("multibagger.tier1_interaction.max_staleness_days must be >= 0")
+            if tier1_enabled:
                 target_date = parse_date(asof_date)
+                invalid_tier1_dates: list[str] = []
                 for row in feature_rows:
                     tier1 = tier1_by_company.get(int(row["company_id"]))
                     tier1_date = parse_date(tier1.get("asof_date")) if tier1 else None
+                    if tier1 and tier1_date is None:
+                        invalid_tier1_dates.append(str(row["ticker"]))
+                        continue
                     if target_date is not None and tier1_date is not None and (target_date - tier1_date).days > max_staleness_days:
                         stale_tier1.append(str(row["ticker"]))
+                if invalid_tier1_dates:
+                    LOGGER.warning(
+                        "Invalid daily_scores asof_date for %d multibagger Tier 1 row(s); sample=%s",
+                        len(invalid_tier1_dates),
+                        ",".join(sorted(invalid_tier1_dates)[:10]),
+                    )
                 if stale_tier1 and as_bool(cfg_get(config, "multibagger.tier1_interaction.fail_on_missing_tier1", True), True):
                     raise RuntimeError(
                         "multibagger Tier 1 interaction enabled but latest daily_scores row(s) are stale: "
@@ -765,7 +785,8 @@ def main() -> None:
             finish_run(conn, run_id=run_id, status="success", row_count=len(scored), message=f"asof={asof_date} output={output_csv}")
             LOGGER.info("Multibagger scoring complete: rows=%d output=%s", len(scored), output_csv)
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 

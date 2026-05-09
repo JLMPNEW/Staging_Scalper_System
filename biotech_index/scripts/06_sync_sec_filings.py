@@ -36,6 +36,7 @@ from biotech_index.core.pipeline_guards import (
 
 LOGGER = logging.getLogger("sync_sec_filings")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+SQLITE_PARAM_CHUNK_SIZE = 800
 OUTPUT_FIELDS = [
     "ticker",
     "company_name",
@@ -49,6 +50,11 @@ OUTPUT_FIELDS = [
     "text_hash",
     "text_length",
 ]
+
+
+def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
+    step = max(1, int(size))
+    return [list(values[start : start + step]) for start in range(0, len(values), step)]
 
 
 @dataclass(frozen=True)
@@ -109,6 +115,8 @@ def configure_logging() -> None:
 def parse_date(raw: object) -> date | None:
     text = str(raw or "").strip()
     if not text:
+        return None
+    if len(text) < 10:
         return None
     try:
         return datetime.strptime(text[:10], "%Y-%m-%d").date()
@@ -365,24 +373,32 @@ def load_existing_documents(
 ) -> dict[str, dict[str, Any]]:
     if not company_ids:
         return {}
-    company_placeholders = ",".join("?" for _ in company_ids)
     form_clause = ""
-    params: list[Any] = [*company_ids, cutoff.isoformat(), asof.isoformat()]
+    form_params: list[Any] = []
     if allowed_forms:
         form_clause = f"AND ({' OR '.join('f.form = ?' if not form.endswith('*') else 'f.form LIKE ?' for form in sorted(allowed_forms))})"
-        params.extend([form[:-1] + "%" if form.endswith("*") else form for form in sorted(allowed_forms)])
-    accession_rows = conn.execute(
-        f"""
-        SELECT accession_nodash
-        FROM sec_filings f
-        WHERE f.company_id IN ({company_placeholders})
-          AND f.filing_date >= ?
-          AND f.filing_date <= ?
-          {form_clause}
-        """,
-        tuple(params),
-    ).fetchall()
-    target_accessions = [str(row["accession_nodash"] or "") for row in accession_rows if str(row["accession_nodash"] or "")]
+        form_params = [form[:-1] + "%" if form.endswith("*") else form for form in sorted(allowed_forms)]
+    target_accessions: list[str] = []
+    seen_accessions: set[str] = set()
+    for company_chunk in chunked([int(company_id) for company_id in company_ids]):
+        company_placeholders = ",".join("?" for _ in company_chunk)
+        params: list[Any] = [*company_chunk, cutoff.isoformat(), asof.isoformat(), *form_params]
+        accession_rows = conn.execute(
+            f"""
+            SELECT accession_nodash
+            FROM sec_filings f
+            WHERE f.company_id IN ({company_placeholders})
+              AND f.filing_date >= ?
+              AND f.filing_date <= ?
+              {form_clause}
+            """,
+            tuple(params),
+        ).fetchall()
+        for row in accession_rows:
+            accession = str(row["accession_nodash"] or "")
+            if accession and accession not in seen_accessions:
+                seen_accessions.add(accession)
+                target_accessions.append(accession)
     if not target_accessions:
         return {}
     existing_manifest: set[str] = set()
@@ -720,13 +736,20 @@ def main() -> None:
                             result.text_errors,
                         )
             write_csv(output_csv, rows_out)
-            status = "success" if error_count == 0 and text_error_count == 0 else "partial"
+            status = (
+                "success"
+                if error_count == 0 and text_error_count == 0
+                else "failed"
+                if (not args.allow_partial or (companies and error_count == len(companies)))
+                else "partial"
+            )
             message = f"companies={len(companies)} errors={error_count} text_errors={text_error_count} output={output_csv}"
             finish_run(conn, run_id=run_id, status=status, row_count=len(rows_out), message=message)
             if status != "success" and not args.allow_partial:
                 raise SystemExit(2)
-        except Exception as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+        except BaseException as exc:
+            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
     LOGGER.info("Synced SEC filings: companies=%d rows=%d output=%s", len(companies), len(rows_out), output_csv)
 

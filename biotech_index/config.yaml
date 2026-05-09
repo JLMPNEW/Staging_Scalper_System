@@ -2,7 +2,7 @@ paths:
   screen_results_csv: "../output/preload_biotech_screen/biotech_screen_results_all.csv"
   manual_alias_overrides_csv: "data/company_alias_overrides.csv"
   company_status_overrides_csv: "data/company_status_overrides.csv"
-  database_path: "C:/Users/josel/Documents/STAGING/DB/biotech_index.sqlite"
+  database_path: "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/biotech_index.sqlite"
 
 company_master:
   active_decisions:
@@ -365,6 +365,7 @@ forward_guidance:
   max_filings_per_company: 8
   max_windows_per_filing: 40
   run_mode: "daily_delta"
+  reuse_unchanged_parse_state: true
   max_workers: 4
   min_confidence: 0.68
   text_ttl_hours: 168.0
@@ -486,7 +487,7 @@ biotech_refresh:
 governance_events:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
   output_csv: "../output/biotech_index_reports/governance_event_features.csv"
-  form4_db_path: "C:/Users/josel/Documents/PROD/DB/sec_insider.sqlite"
+  form4_db_path: "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/sec_insider.sqlite"
   form4_table: "form4_events_tier1"
   form4_snapshot_table: "sec_form4_daily_state"
   lookback_days: 365

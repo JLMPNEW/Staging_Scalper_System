@@ -53,6 +53,7 @@ class ScreenCompany:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build persistent biotech company master and aliases from screen output.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--asof", type=str, default="", help="Optional YYYY-MM-DD history as-of date. Defaults to UTC today.")
     parser.add_argument("--screen-all", type=Path, default=None, help="Override screen results CSV.")
     parser.add_argument("--db", type=Path, default=None, help="Override SQLite database path.")
     parser.add_argument("--alias-overrides", type=Path, default=None, help="Optional manual alias overrides CSV.")
@@ -62,6 +63,16 @@ def parse_args() -> argparse.Namespace:
 
 def configure_logging() -> None:
     configure_utc_logging()
+
+
+def parse_date(raw: object) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return datetime.now(timezone.utc).date().isoformat()
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date().isoformat()
+    except ValueError as exc:
+        raise ValueError(f"Invalid --asof date: {raw}") from exc
 
 
 def read_csv_flexible(path: Path) -> list[dict[str, str]]:
@@ -219,7 +230,7 @@ def dedupe_aliases(aliases: Iterable[AliasCandidate]) -> list[AliasCandidate]:
 def upsert_company(conn: Any, company: ScreenCompany, *, active_decisions: set[str]) -> int:
     now = utc_now()
     is_active = 1 if company.decision in active_decisions else 0
-    conn.execute(
+    row = conn.execute(
         """
         INSERT INTO companies(
             ticker, cik, company_name, exchange, sector, industry, industry_aggregate,
@@ -250,6 +261,7 @@ def upsert_company(conn: Any, company: ScreenCompany, *, active_decisions: set[s
             source_screen_decision = excluded.source_screen_decision,
             reason_codes = excluded.reason_codes,
             updated_at = excluded.updated_at
+        RETURNING company_id
         """,
         (
             company.ticker,
@@ -275,8 +287,7 @@ def upsert_company(conn: Any, company: ScreenCompany, *, active_decisions: set[s
             now,
             now,
         ),
-    )
-    row = conn.execute("SELECT company_id FROM companies WHERE ticker = ?", (company.ticker,)).fetchone()
+    ).fetchone()
     if row is None:
         raise RuntimeError(f"Company upsert failed for {company.ticker}")
     return int(row["company_id"])
@@ -304,9 +315,8 @@ def insert_alias(conn: Any, *, company_id: int, alias: AliasCandidate) -> None:
     )
 
 
-def insert_history(conn: Any, *, company_id: int, company: ScreenCompany, source_file: Path, run_id: int) -> None:
+def insert_history(conn: Any, *, company_id: int, company: ScreenCompany, source_file: Path, run_id: int, asof_date: str) -> None:
     now = utc_now()
-    asof_date = datetime.now(timezone.utc).date().isoformat()
     conn.execute(
         """
         INSERT OR IGNORE INTO company_universe_history(
@@ -344,30 +354,44 @@ def deactivate_absent_companies(
     now = utc_now()
     asof_date = datetime.now(timezone.utc).date().isoformat()
     reason_codes = "absent_from_latest_screen"
-    for row in rows:
-        company_id = int(row["company_id"])
-        ticker = str(row["ticker"] or "").upper()
-        conn.execute(
-            """
-            UPDATE companies
-            SET is_active = 0,
-                universe_status = ?,
-                source_screen_decision = ?,
-                reason_codes = ?,
-                updated_at = ?
-            WHERE company_id = ?
-            """,
-            ("remove", "absent_from_latest_screen", reason_codes, now, company_id),
+    update_params = [
+        ("remove", "absent_from_latest_screen", reason_codes, now, int(row["company_id"]))
+        for row in rows
+    ]
+    history_params = [
+        (
+            asof_date,
+            int(row["company_id"]),
+            str(row["ticker"] or "").upper(),
+            "remove",
+            reason_codes,
+            str(source_file),
+            run_id,
+            now,
         )
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO company_universe_history(
-                asof_date, company_id, ticker, universe_status, reason_codes, source_file, run_id, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (asof_date, company_id, ticker, "remove", reason_codes, str(source_file), run_id, now),
+        for row in rows
+    ]
+    conn.executemany(
+        """
+        UPDATE companies
+        SET is_active = 0,
+            universe_status = ?,
+            source_screen_decision = ?,
+            reason_codes = ?,
+            updated_at = ?
+        WHERE company_id = ?
+        """,
+        update_params,
+    )
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO company_universe_history(
+            asof_date, company_id, ticker, universe_status, reason_codes, source_file, run_id, created_at
         )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        history_params,
+    )
     return len(rows)
 
 
@@ -401,6 +425,7 @@ def main() -> None:
         "y",
     }
     timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
+    history_asof_date = parse_date(args.asof)
 
     if not screen_path.exists():
         raise FileNotFoundError(f"Screen results CSV not found: {screen_path}")
@@ -433,17 +458,50 @@ def main() -> None:
         try:
             active_count = 0
             alias_count = 0
+            alias_delete_ids: list[tuple[int]] = []
+            alias_rows: list[tuple[Any, ...]] = []
+            alias_now = utc_now()
             with conn:
                 for company in companies:
                     company = apply_status_override(company, status_overrides)
                     company_id = upsert_company(conn, company, active_decisions=active_decisions)
-                    conn.execute("DELETE FROM company_aliases WHERE company_id = ?", (company_id,))
+                    alias_delete_ids.append((company_id,))
                     if company.decision in active_decisions:
                         active_count += 1
                     for alias in build_aliases(company, manual_aliases):
-                        insert_alias(conn, company_id=company_id, alias=alias)
+                        alias_rows.append(
+                            (
+                                company_id,
+                                alias.alias_raw,
+                                alias.alias_norm,
+                                alias.source,
+                                float(alias.confidence),
+                                1 if alias.is_manual else 0,
+                                alias_now,
+                                alias_now,
+                            )
+                        )
                         alias_count += 1
-                    insert_history(conn, company_id=company_id, company=company, source_file=screen_path, run_id=run_id)
+                    insert_history(
+                        conn,
+                        company_id=company_id,
+                        company=company,
+                        source_file=screen_path,
+                        run_id=run_id,
+                        asof_date=history_asof_date,
+                    )
+                if alias_delete_ids:
+                    conn.executemany("DELETE FROM company_aliases WHERE company_id = ?", alias_delete_ids)
+                if alias_rows:
+                    conn.executemany(
+                        """
+                        INSERT INTO company_aliases(
+                            company_id, alias_raw, alias_norm, source, confidence, is_manual, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        alias_rows,
+                    )
                 absent_count = (
                     deactivate_absent_companies(
                         conn,
@@ -465,7 +523,8 @@ def main() -> None:
             LOGGER.info("Wrote company master DB: %s", db_path)
             LOGGER.info("Companies=%d Active=%d Aliases=%d DeactivatedAbsent=%d", len(companies), active_count, alias_count, absent_count)
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 

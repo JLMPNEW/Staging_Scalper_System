@@ -74,7 +74,8 @@ def to_float(raw: object, default: float = 0.0) -> float:
 def parse_json(raw: object) -> dict[str, Any]:
     try:
         payload = json.loads(str(raw or "{}"))
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        LOGGER.warning("Malformed JSON payload skipped: %s", exc)
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -178,7 +179,7 @@ def load_feature_rows(conn: sqlite3.Connection, asof_date: str) -> list[dict[str
         """
         SELECT
             f.asof_date, f.company_id, f.catalyst_score_raw, f.credibility_score_raw,
-            f.risk_score_raw, f.feature_json,
+            f.financial_quality_score_raw, f.risk_score_raw, f.momentum_score_raw, f.feature_json,
             c.ticker, c.company_name
         FROM daily_features f
         JOIN companies c ON c.company_id = f.company_id
@@ -298,6 +299,14 @@ def investment_weight_profile(config: dict[str, Any], commercial: dict[str, Any]
         "momentum": float(raw_weights.get("momentum", 0.05)),
         "risk_penalty": float(raw_weights.get("risk_penalty", 0.15)),
     }
+    negative = [name for name, value in weights.items() if value < 0.0]
+    if negative:
+        raise ValueError(f"Investment weight profile '{profile_name}' has negative weight(s): {', '.join(negative)}")
+    positive_total = sum(value for name, value in weights.items() if name != "risk_penalty")
+    if positive_total > 1.001:
+        raise ValueError(
+            f"Investment weight profile '{profile_name}' positive weights sum to {positive_total:.4f}; must be <= 1.0"
+        )
     return (
         profile_name,
         weights,
@@ -320,18 +329,24 @@ def score_rows(
     investment_enabled = as_bool(cfg_get(config, "biotech_scoring.use_investment_score", True), True)
 
     scored: list[dict[str, Any]] = []
+    missing_financial_raw: list[str] = []
+    missing_momentum_raw: list[str] = []
     for row in rows:
         company_id = int(row["company_id"])
-        payload = json.loads(str(row["feature_json"] or "{}"))
+        payload = parse_json(row.get("feature_json"))
         raw_scores = payload.get("raw_scores", {}) if isinstance(payload, dict) else {}
         commercial = commercial_by_company.get(company_id, {})
         forward_guidance = forward_by_company.get(company_id, {})
         forward_payload = parse_json(forward_guidance.get("payload_json"))
         catalyst = clamp(to_float(raw_scores.get("catalyst_score_raw", row["catalyst_score_raw"])))
         credibility = clamp(to_float(raw_scores.get("credibility_score_raw", row["credibility_score_raw"])))
-        financial_quality = clamp(to_float(raw_scores.get("financial_quality_score_raw", 0.0)))
+        if "financial_quality_score_raw" not in raw_scores and row.get("financial_quality_score_raw") in (None, ""):
+            missing_financial_raw.append(str(row.get("ticker") or company_id))
+        if "momentum_score_raw" not in raw_scores and row.get("momentum_score_raw") in (None, ""):
+            missing_momentum_raw.append(str(row.get("ticker") or company_id))
+        financial_quality = clamp(to_float(raw_scores.get("financial_quality_score_raw", row.get("financial_quality_score_raw", 0.0))))
         risk = clamp(to_float(raw_scores.get("risk_score_raw", row["risk_score_raw"])))
-        momentum = clamp(to_float(raw_scores.get("momentum_score_raw", 0.0)))
+        momentum = clamp(to_float(raw_scores.get("momentum_score_raw", row.get("momentum_score_raw", 0.0))))
         clinical_positive = (
             catalyst_w * catalyst
             + credibility_w * credibility
@@ -515,53 +530,74 @@ def score_rows(
                 "top_evidence_json": json.dumps(top_evidence, ensure_ascii=True, sort_keys=True),
             }
         )
-    scored.sort(key=lambda item: (-float(item["opportunity_score"]), float(item["risk_score"]), str(item["ticker"])))
+    scored.sort(
+        key=lambda item: (
+            -clamp(to_float(item.get("opportunity_score"), 0.0)),
+            clamp(to_float(item.get("risk_score"), 100.0)),
+            str(item["ticker"]),
+        )
+    )
     for idx, row in enumerate(scored, start=1):
         row["rank"] = idx
+    if missing_financial_raw:
+        LOGGER.warning(
+            "financial_quality_score_raw missing for %d row(s); used 0.0 fallback for sample=%s",
+            len(missing_financial_raw),
+            ",".join(missing_financial_raw[:10]),
+        )
+    if missing_momentum_raw:
+        LOGGER.warning(
+            "momentum_score_raw missing for %d row(s); used 0.0 fallback for sample=%s",
+            len(missing_momentum_raw),
+            ",".join(missing_momentum_raw[:10]),
+        )
     return scored
 
 def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_date: str) -> None:
     now = utc_now()
+    params = [
+        (
+            row["asof_date"],
+            row["company_id"],
+            row["catalyst_score"],
+            row["credibility_score"],
+            row["financial_quality_score"],
+            row["risk_score"],
+            row["momentum_score"],
+            row["clinical_opportunity_score"],
+            row["commercial_value_score"],
+            row["forward_guidance_score"],
+            row["valuation_score"],
+            row["upside_capacity_score"],
+            row["investment_score"],
+            row["opportunity_score"],
+            row["tier1_selection_gate_score"],
+            row["data_quality_confidence_multiplier"],
+            row["clinical_risk_drag"],
+            row["investment_risk_drag"],
+            row["rank"],
+            row["bucket"],
+            row["top_evidence_json"],
+            now,
+            now,
+        )
+        for row in rows
+    ]
     with conn:
         conn.execute("DELETE FROM daily_scores WHERE asof_date = ?", (asof_date,))
-        for row in rows:
-            conn.execute(
-                """
-                INSERT INTO daily_scores(
-                    asof_date, company_id, catalyst_score, credibility_score,
-                    financial_quality_score, risk_score, momentum_score, clinical_opportunity_score,
-                    commercial_value_score, forward_guidance_score, valuation_score, upside_capacity_score, investment_score, opportunity_score,
-                    tier1_selection_gate_score, data_quality_confidence_multiplier, clinical_risk_drag, investment_risk_drag,
-                    rank, bucket, top_evidence_json, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    row["asof_date"],
-                    row["company_id"],
-                    row["catalyst_score"],
-                    row["credibility_score"],
-                    row["financial_quality_score"],
-                    row["risk_score"],
-                    row["momentum_score"],
-                    row["clinical_opportunity_score"],
-                    row["commercial_value_score"],
-                    row["forward_guidance_score"],
-                    row["valuation_score"],
-                    row["upside_capacity_score"],
-                    row["investment_score"],
-                    row["opportunity_score"],
-                    row["tier1_selection_gate_score"],
-                    row["data_quality_confidence_multiplier"],
-                    row["clinical_risk_drag"],
-                    row["investment_risk_drag"],
-                    row["rank"],
-                    row["bucket"],
-                    row["top_evidence_json"],
-                    now,
-                    now,
-                ),
+        conn.executemany(
+            """
+            INSERT INTO daily_scores(
+                asof_date, company_id, catalyst_score, credibility_score,
+                financial_quality_score, risk_score, momentum_score, clinical_opportunity_score,
+                commercial_value_score, forward_guidance_score, valuation_score, upside_capacity_score, investment_score, opportunity_score,
+                tier1_selection_gate_score, data_quality_confidence_multiplier, clinical_risk_drag, investment_risk_drag,
+                rank, bucket, top_evidence_json, created_at, updated_at
             )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            params,
+        )
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -634,16 +670,17 @@ def main() -> None:
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
-        init_db(conn)
-        if args.asof:
-            parsed_asof = parse_date(args.asof)
-            if parsed_asof is None:
-                raise ValueError(f"Invalid --asof date: {args.asof}")
-            asof_date = parsed_asof.isoformat()
-        else:
-            asof_date = latest_feature_date(conn)
-        run_id = start_run(conn, run_type="score_biotech_index", input_path=db_path)
+        run_id: int | None = None
         try:
+            init_db(conn)
+            if args.asof:
+                parsed_asof = parse_date(args.asof)
+                if parsed_asof is None:
+                    raise ValueError(f"Invalid --asof date: {args.asof}")
+                asof_date = parsed_asof.isoformat()
+            else:
+                asof_date = latest_feature_date(conn)
+            run_id = start_run(conn, run_type="score_biotech_index", input_path=db_path)
             features = load_feature_rows(conn, asof_date)
             if not features:
                 raise ValueError(f"No features found for asof_date={asof_date}")
@@ -696,7 +733,8 @@ def main() -> None:
             finish_run(conn, run_id=run_id, status="success", row_count=len(scored), message=f"asof={asof_date} output={output_csv}")
             LOGGER.info("Scored biotech index: rows=%d output=%s", len(scored), output_csv)
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 
