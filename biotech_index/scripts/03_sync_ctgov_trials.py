@@ -120,6 +120,7 @@ def load_company_jobs(
         ORDER BY ticker
     """
     jobs: list[CompanyJob] = []
+    alias_rows_by_company = load_company_alias_rows_by_company(conn)
     for row in conn.execute(sql):
         status = str(row["universe_status"] or "").lower()
         ticker = str(row["ticker"] or "").upper()
@@ -127,9 +128,9 @@ def load_company_jobs(
             continue
         if ticker_filter and ticker not in ticker_filter:
             continue
-        aliases = load_company_aliases(
-            conn,
-            company_id=int(row["company_id"]),
+        company_id = int(row["company_id"])
+        aliases = select_company_aliases(
+            alias_rows_by_company.get(company_id, []),
             fallback_name=str(row["company_name"] or ""),
             min_alias_length=min_alias_length,
             max_aliases=max_aliases_per_company,
@@ -141,7 +142,7 @@ def load_company_jobs(
         )
         jobs.append(
             CompanyJob(
-                company_id=int(row["company_id"]),
+                company_id=company_id,
                 ticker=ticker,
                 company_name=str(row["company_name"] or ""),
                 aliases=tuple(aliases),
@@ -153,23 +154,27 @@ def load_company_jobs(
     return jobs
 
 
-def load_company_aliases(
-    conn: sqlite3.Connection,
+def load_company_alias_rows_by_company(conn: sqlite3.Connection) -> dict[int, list[sqlite3.Row]]:
+    rows = conn.execute(
+        """
+        SELECT company_id, alias_raw, source, confidence, is_manual
+        FROM company_aliases
+        ORDER BY company_id, is_manual DESC, confidence DESC, source ASC, LENGTH(alias_raw) DESC
+        """
+    ).fetchall()
+    out: dict[int, list[sqlite3.Row]] = {}
+    for row in rows:
+        out.setdefault(int(row["company_id"]), []).append(row)
+    return out
+
+
+def select_company_aliases(
+    rows: Iterable[sqlite3.Row],
     *,
-    company_id: int,
     fallback_name: str,
     min_alias_length: int,
     max_aliases: int,
 ) -> list[str]:
-    rows = conn.execute(
-        """
-        SELECT alias_raw, source, confidence, is_manual
-        FROM company_aliases
-        WHERE company_id = ?
-        ORDER BY is_manual DESC, confidence DESC, source ASC, LENGTH(alias_raw) DESC
-        """,
-        (company_id,),
-    ).fetchall()
     aliases: list[str] = []
     seen: set[str] = set()
     for row in rows:
@@ -191,6 +196,26 @@ def load_company_aliases(
     if not aliases and len(fallback_name.strip()) >= min_alias_length:
         aliases.append(fallback_name.strip())
     return aliases
+
+
+def load_company_aliases(
+    conn: sqlite3.Connection,
+    *,
+    company_id: int,
+    fallback_name: str,
+    min_alias_length: int,
+    max_aliases: int,
+) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT alias_raw, source, confidence, is_manual
+        FROM company_aliases
+        WHERE company_id = ?
+        ORDER BY is_manual DESC, confidence DESC, source ASC, LENGTH(alias_raw) DESC
+        """,
+        (company_id,),
+    ).fetchall()
+    return select_company_aliases(rows, fallback_name=fallback_name, min_alias_length=min_alias_length, max_aliases=max_aliases)
 
 
 def split_query_fields(raw: str, default_fields: list[str]) -> tuple[str, ...]:
@@ -370,7 +395,13 @@ def dedupe_sponsors(sponsors: Iterable[Any]) -> list[Any]:
     seen: set[tuple[str, str, str]] = set()
     out: list[Any] = []
     for sponsor in sponsors:
-        key = (str(sponsor.nct_id), str(sponsor.sponsor_name_norm), str(sponsor.sponsor_role))
+        key = (
+            str(getattr(sponsor, "nct_id", "") or ""),
+            str(getattr(sponsor, "sponsor_name_norm", "") or ""),
+            str(getattr(sponsor, "sponsor_role", "") or ""),
+        )
+        if not key[0] or not key[1]:
+            continue
         if key in seen:
             continue
         seen.add(key)
@@ -383,7 +414,7 @@ def dedupe_query_hits(hits: Iterable[QueryHit]) -> list[QueryHit]:
     for hit in hits:
         key = (int(hit.company_id), str(hit.nct_id), str(hit.search_term), str(hit.query_field))
         old = best.get(key)
-        if old is None or float(hit.confidence) > float(old.confidence):
+        if old is None or float(hit.confidence or 0.0) > float(old.confidence or 0.0):
             best[key] = hit
     return list(best.values())
 
@@ -506,7 +537,7 @@ def replace_query_hits(conn: sqlite3.Connection, results: list[SyncResult]) -> i
                     hit.search_term,
                     hit.query_field,
                     hit.source,
-                    float(hit.confidence),
+                    float(hit.confidence or 0.0),
                     now,
                     now,
                 )
@@ -626,7 +657,9 @@ def main() -> None:
                         job = futures[future]
                         try:
                             result = future.result()
-                        except Exception as exc:
+                        except BaseException as exc:
+                            if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                                raise
                             LOGGER.exception("Unexpected CTGov worker failure for %s: %s", job.ticker, exc)
                             result = SyncResult(
                                 company_id=job.company_id,

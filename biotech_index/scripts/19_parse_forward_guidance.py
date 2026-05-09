@@ -1417,11 +1417,33 @@ def parse_guidance_records(
             ): filing
             for filing in filings
         }
+        pending_raise: BaseException | None = None
         for future in as_completed(futures):
             filing = futures[future]
-            filing_records = future.result()
+            try:
+                filing_records = future.result()
+            except BaseException as exc:
+                pending_raise = exc
+                if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                    LOGGER.warning(
+                        "Forward guidance worker interrupted for accession=%s ticker=%s",
+                        filing.accession_nodash,
+                        filing.ticker,
+                    )
+                else:
+                    LOGGER.exception(
+                        "Forward guidance worker failed for accession=%s ticker=%s",
+                        filing.accession_nodash,
+                        filing.ticker,
+                    )
+                for other in futures:
+                    if other is not future:
+                        other.cancel()
+                break
             records.extend(filing_records)
             counts[filing.accession_nodash] = len(filing_records)
+        if pending_raise is not None:
+            raise pending_raise
     records.sort(key=lambda record: (record.ticker, record.filing_date, record.accession_nodash, record.metric))
     return records, counts
 

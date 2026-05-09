@@ -745,6 +745,7 @@ def main() -> None:
                     )
             else:
                 futures: dict[Any, ReactivationJob] = {}
+                pending_raise: BaseException | None = None
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     for job in jobs:
                         future = executor.submit(
@@ -767,7 +768,10 @@ def main() -> None:
                             result = future.result()
                         except BaseException as exc:
                             if isinstance(exc, (SystemExit, KeyboardInterrupt)):
-                                raise
+                                pending_raise = exc
+                                for pending in futures:
+                                    pending.cancel()
+                                break
                             job = futures[future]
                             LOGGER.exception("Unexpected worker failure for %s: %s", job.sync_job.ticker, exc)
                             result = SYNC_HELPERS.SyncResult(
@@ -781,6 +785,8 @@ def main() -> None:
                                 error=f"{type(exc).__name__}: {exc}",
                             )
                         results.append(result)
+                if pending_raise is not None:
+                    raise pending_raise
 
             job_by_company_id = {job.audit_company.company_id: job for job in jobs}
             scan_result_by_company_id = {int(result.company_id): result for result in results}
@@ -792,7 +798,7 @@ def main() -> None:
             for result in results:
                 for nct_id, study in result.studies.items():
                     studies_by_nct[nct_id] = study
-                for sponsor in [parsed for study in result.studies.values() for parsed in parse_sponsors(study)]:
+                for sponsor in (parsed for study in result.studies.values() for parsed in parse_sponsors(study)):
                     sponsor_rows.append(
                         LINK_HELPERS.SponsorRow(
                             nct_id=sponsor.nct_id,

@@ -11,6 +11,7 @@ import re
 import sqlite3
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -181,6 +182,7 @@ def parse_date(raw: object) -> date | None:
     try:
         return datetime.strptime(text[:10], "%Y-%m-%d").date()
     except ValueError:
+        LOGGER.debug("Invalid governance date ignored: %r", raw)
         return None
 
 
@@ -1292,7 +1294,9 @@ def main() -> None:
     try:
         form4_conn = connect_form4_readonly(form4_db_path)
         snapshot_date = form4_snapshot_date(form4_conn, str(cfg_get(config, "governance_events.form4_snapshot_table", "sec_form4_daily_state")))
-    except Exception as exc:
+    except BaseException as exc:
+        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            raise
         if form4_conn is not None:
             form4_conn.close()
             form4_conn = None
@@ -1397,15 +1401,13 @@ def main() -> None:
                 time.perf_counter() - phase_start,
             )
             phase_start = time.perf_counter()
-            rows = []
-            for idx, company in enumerate(companies, start=1):
+            row_workers = max(1, int(cfg_get(config, "governance_events.max_workers", 1)))
+
+            def build_company_output(company: dict[str, Any]) -> dict[str, Any]:
                 company_id = int(company["company_id"])
                 if company_id in reused_rows_by_company:
-                    rows.append(reused_rows_by_company[company_id])
-                    if idx % 25 == 0 or idx == len(companies):
-                        LOGGER.info("[%d/%d] governance features built/reused", idx, len(companies))
-                    continue
-                row = build_row(
+                    return reused_rows_by_company[company_id]
+                return build_row(
                     conn,
                     form4_conn,
                     company=company,
@@ -1421,9 +1423,37 @@ def main() -> None:
                     ),
                     input_signature=signature_by_company.get(company_id, ""),
                 )
-                rows.append(row)
-                if idx % 25 == 0 or idx == len(companies):
-                    LOGGER.info("[%d/%d] governance features built/reused", idx, len(companies))
+
+            rows_by_company: dict[int, dict[str, Any]] = {}
+            if row_workers <= 1 or len(companies) <= 1:
+                for idx, company in enumerate(companies, start=1):
+                    row = build_company_output(company)
+                    rows_by_company[int(company["company_id"])] = row
+                    if idx % 25 == 0 or idx == len(companies):
+                        LOGGER.info("[%d/%d] governance features built/reused", idx, len(companies))
+            else:
+                with ThreadPoolExecutor(max_workers=min(row_workers, len(companies))) as executor:
+                    futures = {executor.submit(build_company_output, company): company for company in companies}
+                    pending_raise: BaseException | None = None
+                    for idx, future in enumerate(as_completed(futures), start=1):
+                        company = futures[future]
+                        try:
+                            rows_by_company[int(company["company_id"])] = future.result()
+                        except BaseException as exc:
+                            pending_raise = exc
+                            if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                                LOGGER.warning("Governance row worker interrupted for ticker=%s", company.get("ticker"))
+                            else:
+                                LOGGER.exception("Governance row worker failed for ticker=%s", company.get("ticker"))
+                            for other in futures:
+                                if other is not future:
+                                    other.cancel()
+                            break
+                        if idx % 25 == 0 or idx == len(companies):
+                            LOGGER.info("[%d/%d] governance features built/reused", idx, len(companies))
+                    if pending_raise is not None:
+                        raise pending_raise
+            rows = [rows_by_company[int(company["company_id"])] for company in companies]
             LOGGER.info("Governance row assembly complete: rows=%d reused=%d elapsed=%.3fs", len(rows), len(reused_rows_by_company), time.perf_counter() - phase_start)
             partial_run = bool(ticker_filter) or int(args.max_companies) > 0
             validate_output_coverage(

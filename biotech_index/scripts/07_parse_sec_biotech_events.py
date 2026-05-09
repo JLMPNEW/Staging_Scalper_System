@@ -859,8 +859,31 @@ def parse_filing_batch(
                 executor.submit(detect_events, filing, min_confidence=min_confidence, max_per_type=max_per_type): filing
                 for filing in filings
             }
+            pending_raise: BaseException | None = None
             for future in as_completed(futures):
-                events_out.extend(future.result())
+                filing = futures[future]
+                try:
+                    events_out.extend(future.result())
+                except BaseException as exc:
+                    pending_raise = exc
+                    if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                        LOGGER.warning(
+                            "SEC event parser worker interrupted for accession=%s ticker=%s",
+                            filing.accession_nodash,
+                            filing.ticker,
+                        )
+                    else:
+                        LOGGER.exception(
+                            "SEC event parser worker failed for accession=%s ticker=%s",
+                            filing.accession_nodash,
+                            filing.ticker,
+                        )
+                    for other in futures:
+                        if other is not future:
+                            other.cancel()
+                    break
+            if pending_raise is not None:
+                raise pending_raise
     replace_events(conn, events_out, filings=filings, parser_signature=parser_signature)
     return len(events_out)
 

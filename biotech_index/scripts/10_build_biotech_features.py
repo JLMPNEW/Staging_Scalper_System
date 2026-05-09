@@ -389,8 +389,10 @@ def evidence_summary(evidence_df: pd.DataFrame, ticker: str) -> dict[str, Any]:
     collaborator_heavy = collab_ratio >= 0.60 and collab_only_active > (lead_active + program_active)
 
     top = active.copy()
-    top["_score"] = top["trial_score"].map(to_float)
+    top["_score"] = top["trial_score"].map(to_float) if "trial_score" in top.columns else 0.0
     top["_lead_or_program"] = lead_mask.astype(int) + program_mask.astype(int)
+    if "last_update_post_date" not in top.columns:
+        top["last_update_post_date"] = ""
     top = top.sort_values(["_lead_or_program", "_score", "last_update_post_date"], ascending=[False, False, False]).head(5)
     return {
         "active_pivotal_trials": int(pivotal_mask.sum()),
@@ -496,34 +498,45 @@ def compute_feature_row(
     burn_acceleration_flag = to_int(survival.get("burn_acceleration_flag") if survival else None)
     event_counts = dict(sec_events.get("counts", {}) if sec_events else {})
     polarity_counts = dict(sec_events.get("polarity_counts", {}) if sec_events else {})
-    regulatory_catalysts = (
-        to_int(event_counts.get("nda_bla_accepted"))
-        + to_int(event_counts.get("pdufa_date"))
-        + to_int(event_counts.get("regulatory_submission"))
-    )
-    positive_clinical_events = to_int(event_counts.get("endpoint_met")) + to_int(event_counts.get("clinical_update_positive"))
-    negative_clinical_events = (
-        to_int(event_counts.get("endpoint_missed"))
-        + to_int(event_counts.get("clinical_update_negative"))
-        + to_int(event_counts.get("clinical_hold"))
-        + to_int(event_counts.get("partial_clinical_hold"))
-        + to_int(event_counts.get("safety_signal"))
-    )
-    dilution_events = (
-        to_int(event_counts.get("atm_program"))
-        + to_int(event_counts.get("atm_facility"))
-        + to_int(event_counts.get("public_offering"))
-        + to_int(event_counts.get("pipe_financing"))
-        + to_int(event_counts.get("shelf_registration"))
-        + to_int(event_counts.get("financing_shelf"))
-    )
-    partnership_events = to_int(event_counts.get("partnership_license")) + to_int(event_counts.get("partnership_signed"))
-    sec_gc_events = to_int(event_counts.get("going_concern_confirmed")) + to_int(event_counts.get("going_concern"))
+    nda_bla_accepted = to_int(event_counts.get("nda_bla_accepted"))
+    pdufa_date = to_int(event_counts.get("pdufa_date"))
+    regulatory_submission = to_int(event_counts.get("regulatory_submission"))
+    endpoint_met = to_int(event_counts.get("endpoint_met"))
+    clinical_update_positive = to_int(event_counts.get("clinical_update_positive"))
+    endpoint_missed = to_int(event_counts.get("endpoint_missed"))
+    clinical_update_negative = to_int(event_counts.get("clinical_update_negative"))
+    clinical_hold = to_int(event_counts.get("clinical_hold"))
+    partial_clinical_hold = to_int(event_counts.get("partial_clinical_hold"))
+    safety_signal = to_int(event_counts.get("safety_signal"))
+    atm_program = to_int(event_counts.get("atm_program"))
+    atm_facility = to_int(event_counts.get("atm_facility"))
+    public_offering = to_int(event_counts.get("public_offering"))
+    pipe_financing = to_int(event_counts.get("pipe_financing"))
+    shelf_registration = to_int(event_counts.get("shelf_registration"))
+    financing_shelf = to_int(event_counts.get("financing_shelf"))
+    partnership_license = to_int(event_counts.get("partnership_license"))
+    partnership_signed = to_int(event_counts.get("partnership_signed"))
+    going_concern_confirmed = to_int(event_counts.get("going_concern_confirmed"))
+    going_concern = to_int(event_counts.get("going_concern"))
+    active_pivotal_trials = to_int(evidence.get("active_pivotal_trials"))
+    active_phase3_trials = to_int(evidence.get("active_phase3_trials"))
+    active_phase2_trials = to_int(evidence.get("active_phase2_trials"))
+    active_qualifying_device_trials = to_int(evidence.get("active_qualifying_device_trials"))
+    top_ncts = evidence.get("top_ncts", [])
+    if not isinstance(top_ncts, list):
+        top_ncts = []
+
+    regulatory_catalysts = nda_bla_accepted + pdufa_date + regulatory_submission
+    positive_clinical_events = endpoint_met + clinical_update_positive
+    negative_clinical_events = endpoint_missed + clinical_update_negative + clinical_hold + partial_clinical_hold + safety_signal
+    dilution_events = atm_program + atm_facility + public_offering + pipe_financing + shelf_registration + financing_shelf
+    partnership_events = partnership_license + partnership_signed
+    sec_gc_events = going_concern_confirmed + going_concern
 
     catalyst_raw = 0.0
     catalyst_raw += min(18.0, math.log1p(max(verified_active, 0)) * 5.0)
     catalyst_raw += min(30.0, math.log1p(max(effective_phase2_3, 0.0)) * 10.0)
-    catalyst_raw += min(18.0, math.log1p(max(evidence["active_pivotal_trials"], 0)) * 8.0)
+    catalyst_raw += min(18.0, math.log1p(max(active_pivotal_trials, 0)) * 8.0)
     catalyst_raw += min(15.0, math.log1p(max(active_lead, 0)) * 5.0)
     catalyst_raw += min(10.0, math.log1p(max(active_program, 0)) * 4.0)
     catalyst_raw += min(10.0, pipeline_density * 10.0)
@@ -538,11 +551,11 @@ def compute_feature_row(
         catalyst_raw -= 6.0
     catalyst_raw += min(
         25.0,
-        to_int(event_counts.get("pdufa_date")) * 18.0
-        + to_int(event_counts.get("nda_bla_accepted")) * 16.0
-        + to_int(event_counts.get("regulatory_submission")) * 7.0
-        + to_int(event_counts.get("endpoint_met")) * 10.0
-        + to_int(event_counts.get("clinical_update_positive")) * 5.0,
+        pdufa_date * 18.0
+        + nda_bla_accepted * 16.0
+        + regulatory_submission * 7.0
+        + endpoint_met * 10.0
+        + clinical_update_positive * 5.0,
     )
     catalyst_raw = clamp(catalyst_raw)
 
@@ -594,21 +607,21 @@ def compute_feature_row(
     if not recent_sec:
         filing_risk += 15.0
     critical_negative_events = (
-        to_int(event_counts.get("clinical_hold"))
-        + to_int(event_counts.get("partial_clinical_hold"))
-        + to_int(event_counts.get("endpoint_missed"))
-        + to_int(event_counts.get("safety_signal"))
+        clinical_hold
+        + partial_clinical_hold
+        + endpoint_missed
+        + safety_signal
     )
     if critical_negative_events > 0:
         filing_risk += min(
             35.0,
-            to_int(event_counts.get("clinical_hold")) * 30.0
-            + to_int(event_counts.get("partial_clinical_hold")) * 22.0
-            + to_int(event_counts.get("endpoint_missed")) * 20.0
-            + to_int(event_counts.get("safety_signal")) * 12.0,
+            clinical_hold * 30.0
+            + partial_clinical_hold * 22.0
+            + endpoint_missed * 20.0
+            + safety_signal * 12.0,
         )
-    elif to_int(event_counts.get("clinical_update_negative")) > 0:
-        filing_risk += min(6.0, to_int(event_counts.get("clinical_update_negative")) * 1.5)
+    elif clinical_update_negative > 0:
+        filing_risk += min(6.0, clinical_update_negative * 1.5)
     if survival:
         if severe_runway_flag:
             filing_risk += 30.0
@@ -679,13 +692,13 @@ def compute_feature_row(
             "outcome_override_rows": evidence.get("outcome_override_rows", 0),
             "outcome_override_excluded_rows": evidence.get("outcome_override_excluded_rows", 0),
             "outcome_override_review_rows": evidence.get("outcome_override_review_rows", 0),
-            "active_pivotal_trials": evidence["active_pivotal_trials"],
-            "active_phase3_trials": evidence["active_phase3_trials"],
-            "active_phase2_trials": evidence["active_phase2_trials"],
-            "active_qualifying_device_trials": evidence["active_qualifying_device_trials"],
+            "active_pivotal_trials": active_pivotal_trials,
+            "active_phase3_trials": active_phase3_trials,
+            "active_phase2_trials": active_phase2_trials,
+            "active_qualifying_device_trials": active_qualifying_device_trials,
             "pipeline_density": pipeline_density,
             "days_since_last_update": days_since_update,
-            "top_ncts": evidence["top_ncts"],
+            "top_ncts": top_ncts,
         },
         "sec_and_liquidity": {
             "recent_sec_filing_count_2y": recent_sec_count,
@@ -842,10 +855,15 @@ def main() -> None:
     screen = read_csv(screen_csv)
     universe = universe[universe["scoring_include"].map(as_bool)].copy()
     universe_records = universe.to_dict("records")
-    expected_tickers = {normalize_ticker(row.get("ticker")) for row in universe_records if normalize_ticker(row.get("ticker"))}
+    normalized_universe = [(normalize_ticker(row.get("ticker")), row) for row in universe_records]
+    expected_tickers = {ticker for ticker, _ in normalized_universe if ticker}
     if not expected_tickers:
         raise ValueError(f"No scoring_include tickers found in final scoring universe CSV: {universe_csv}")
-    screen_by_ticker = {normalize_ticker(row.get("ticker")): row for row in screen.to_dict("records")}
+    screen_by_ticker = {
+        ticker: row
+        for ticker, row in ((normalize_ticker(row.get("ticker")), row) for row in screen.to_dict("records"))
+        if ticker
+    }
     evidence_by_ticker = build_evidence_summary_index(evidence_df)
 
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
@@ -862,8 +880,9 @@ def main() -> None:
             )
             rows: list[dict[str, Any]] = []
             skipped: list[str] = []
-            for universe_row in universe_records:
-                ticker = normalize_ticker(universe_row["ticker"])
+            for ticker, universe_row in normalized_universe:
+                if not ticker:
+                    continue
                 company_id = company_ids.get(ticker)
                 if company_id is None:
                     skipped.append(ticker)

@@ -778,8 +778,10 @@ CREATE TABLE IF NOT EXISTS multibagger_scores_daily (
 );
 
 CREATE INDEX IF NOT EXISTS idx_company_aliases_norm ON company_aliases(alias_norm);
+CREATE INDEX IF NOT EXISTS idx_company_aliases_company_id ON company_aliases(company_id);
 CREATE INDEX IF NOT EXISTS idx_companies_cik ON companies(cik);
 CREATE INDEX IF NOT EXISTS idx_companies_status ON companies(universe_status, is_active);
+CREATE INDEX IF NOT EXISTS idx_trial_sponsors_nct_id ON trial_sponsors(nct_id);
 CREATE INDEX IF NOT EXISTS idx_trial_company_links_company ON trial_company_links(company_id, nct_id);
 CREATE INDEX IF NOT EXISTS idx_trial_company_links_nct ON trial_company_links(nct_id);
 CREATE INDEX IF NOT EXISTS idx_ctgov_query_hits_company ON ctgov_query_hits(company_id, nct_id);
@@ -788,6 +790,7 @@ CREATE INDEX IF NOT EXISTS idx_ctgov_events_asof_company ON ctgov_events(asof_da
 CREATE INDEX IF NOT EXISTS idx_sec_events_company_date ON sec_events(company_id, filing_date);
 CREATE INDEX IF NOT EXISTS idx_sec_events_type_date ON sec_events(event_type, filing_date);
 CREATE INDEX IF NOT EXISTS idx_sec_event_parse_state_hash ON sec_event_parse_state(text_hash);
+CREATE INDEX IF NOT EXISTS idx_sec_event_parse_state_accession ON sec_event_parse_state(accession_nodash);
 CREATE INDEX IF NOT EXISTS idx_financial_observations_company_concept ON financial_fact_observations(company_id, concept, period_end);
 CREATE INDEX IF NOT EXISTS idx_company_facts_quarterly_company_period ON company_facts_quarterly(company_id, period_end);
 CREATE INDEX IF NOT EXISTS idx_company_facts_quarterly_company_period_desc ON company_facts_quarterly(company_id, period_end DESC);

@@ -30,6 +30,7 @@ from biotech_index.core.text_norm import normalize_org_name
 
 LOGGER = logging.getLogger("audit_ctgov_trial_links")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+SQLITE_IN_CLAUSE_CHUNK_SIZE = 800
 _RUN_CONTEXT: dict[str, Any] = {
     "db_path": None,
     "timeout_sec": 30.0,
@@ -300,6 +301,45 @@ def load_aliases(conn: sqlite3.Connection, company_id: int) -> tuple[list[str], 
     return all_aliases, manual_aliases
 
 
+def load_aliases_by_company(
+    conn: sqlite3.Connection,
+    company_ids: set[int] | None = None,
+) -> dict[int, tuple[list[str], list[str]]]:
+    def fetch(where: str = "", params: tuple[int, ...] = ()) -> list[sqlite3.Row]:
+        return conn.execute(
+            f"""
+            SELECT company_id, alias_raw, alias_norm, source, is_manual
+            FROM company_aliases
+            {where}
+            ORDER BY company_id, is_manual DESC, confidence DESC, source ASC, LENGTH(alias_raw) DESC
+            """,
+            params,
+        ).fetchall()
+
+    if company_ids is None:
+        rows = fetch()
+    elif not company_ids:
+        rows = []
+    else:
+        rows = []
+        sorted_ids = sorted(company_ids)
+        for idx in range(0, len(sorted_ids), SQLITE_IN_CLAUSE_CHUNK_SIZE):
+            chunk = tuple(sorted_ids[idx : idx + SQLITE_IN_CLAUSE_CHUNK_SIZE])
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(fetch(f"WHERE company_id IN ({placeholders})", chunk))
+    out: dict[int, tuple[list[str], list[str]]] = {}
+    for row in rows:
+        company_id = int(row["company_id"])
+        alias = str(row["alias_raw"] or "").strip()
+        if not alias:
+            continue
+        all_aliases, manual_aliases = out.setdefault(company_id, ([], []))
+        all_aliases.append(alias)
+        if int(row["is_manual"] or 0) == 1:
+            manual_aliases.append(alias)
+    return out
+
+
 def load_trial_rows(conn: sqlite3.Connection, company_id: int, *, asof_date: date) -> dict[str, tuple[sqlite3.Row, list[TrialLink]]]:
     rows = conn.execute(
         """
@@ -361,6 +401,23 @@ def load_sponsors(conn: sqlite3.Connection, nct_id: str) -> list[str]:
         (nct_id,),
     ).fetchall()
     return [f"{row['sponsor_name']} [{row['sponsor_role']}]" for row in rows]
+
+
+def load_sponsors_by_nct(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    rows = conn.execute(
+        """
+        SELECT nct_id, sponsor_name, sponsor_role
+        FROM trial_sponsors
+        ORDER BY nct_id, sponsor_role, sponsor_name
+        """
+    ).fetchall()
+    out: dict[str, list[str]] = {}
+    for row in rows:
+        nct_id = str(row["nct_id"] or "")
+        if not nct_id:
+            continue
+        out.setdefault(nct_id, []).append(f"{row['sponsor_name']} [{row['sponsor_role']}]")
+    return out
 
 
 def company_is_diagnostic_like(company: Company, diagnostic_keywords: list[str]) -> bool:
@@ -770,7 +827,7 @@ def mark_current_run_failed(exc: BaseException, conn: Any | None = None) -> None
                     message=f"{type(exc).__name__}: {exc}",
                 )
         _RUN_CONTEXT["finished"] = True
-    except Exception:
+    except BaseException:
         LOGGER.exception("Could not mark audit run %s as failed", run_id)
 
 
@@ -1049,9 +1106,12 @@ def main() -> None:
             loaded_tickers=[company.ticker for company in companies],
             context="CTGov audit",
         )
+        company_ids = {company.company_id for company in companies}
+        aliases_by_company = load_aliases_by_company(conn, company_ids=company_ids)
+        sponsors_by_nct = load_sponsors_by_nct(conn)
         LOGGER.info("Loaded %d active companies for CTGov audit", len(companies))
         for idx, company in enumerate(companies, start=1):
-            aliases, manual_aliases = load_aliases(conn, company.company_id)
+            aliases, manual_aliases = aliases_by_company.get(company.company_id, ([], []))
             trial_rows = load_trial_rows(conn, company.company_id, asof_date=asof_date)
             company_evidence: list[dict[str, Any]] = []
             for nct_id, (row, links) in trial_rows.items():
@@ -1073,7 +1133,7 @@ def main() -> None:
                     non_therapeutic_keywords=non_therapeutic_keywords,
                 )
                 evidence = apply_trial_status_override(evidence, trial_status_overrides)
-                evidence["sponsors"] = ";".join(load_sponsors(conn, nct_id)[:12])
+                evidence["sponsors"] = ";".join(sponsors_by_nct.get(nct_id, [])[:12])
                 company_evidence.append(evidence)
                 evidence_rows.append(evidence)
             diagnostic_like = company_is_diagnostic_like(company, diagnostic_keywords)

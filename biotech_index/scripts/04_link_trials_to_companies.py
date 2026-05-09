@@ -6,6 +6,7 @@ import csv
 import logging
 import sqlite3
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -233,58 +234,6 @@ def load_program_owner_overrides(
     return overrides
 
 
-def best_match(
-    sponsor_norm: str,
-    company: CompanyAliases,
-    *,
-    allow_single_token_match: bool,
-    allow_single_token_prefix_match: bool,
-    single_token_prefix_min_length: int,
-) -> tuple[str, float]:
-    sponsor_norm = normalize_org_name(sponsor_norm)
-    sponsor_stripped = strip_corporate_suffixes(sponsor_norm)
-    if sponsor_norm in company.alias_norms:
-        return "exact_norm", 1.0
-    if sponsor_stripped and sponsor_stripped in company.alias_norms:
-        return "suffix_stripped_exact", 0.95
-
-    sponsor_tokens = set(meaningful_org_tokens(sponsor_norm))
-    if not sponsor_tokens:
-        return "", 0.0
-    if len(company.ticker) >= 4 and company.ticker in sponsor_tokens:
-        return "ticker_token_match", 0.90
-    best_method = ""
-    best_confidence = 0.0
-    for tokens_raw in company.alias_tokens:
-        tokens = set(tokens_raw)
-        if not tokens:
-            continue
-        if len(tokens) >= 2 and tokens.issubset(sponsor_tokens):
-            confidence = 0.88 if len(tokens) >= 3 else 0.82
-            if confidence > best_confidence:
-                best_method = "alias_token_subset"
-                best_confidence = confidence
-        elif allow_single_token_match and len(tokens) == 1:
-            token = next(iter(tokens))
-            if len(token) >= 5 and token in sponsor_tokens:
-                confidence = 0.72
-                if confidence > best_confidence:
-                    best_method = "single_token_match"
-                    best_confidence = confidence
-        elif allow_single_token_prefix_match and len(tokens) == 1:
-            token = next(iter(tokens))
-            if (
-                len(token) >= single_token_prefix_min_length
-                and sponsor_stripped.startswith(f"{token} ")
-                and token not in {"UNITED", "AMERICAN", "NATIONAL", "GLOBAL", "GENERAL", "ADVANCED"}
-            ):
-                confidence = 0.70
-                if confidence > best_confidence:
-                    best_method = "single_token_prefix"
-                    best_confidence = confidence
-    return best_method, best_confidence
-
-
 def build_links(
     sponsors: Iterable[SponsorRow],
     companies: Iterable[CompanyAliases],
@@ -296,20 +245,20 @@ def build_links(
 ) -> list[LinkCandidate]:
     best_by_key: dict[tuple[str, int, str], LinkCandidate] = {}
     company_list = list(companies)
-    exact_index: dict[str, list[CompanyAliases]] = {}
-    ticker_index: dict[str, list[CompanyAliases]] = {}
-    token_index: dict[str, list[tuple[frozenset[str], CompanyAliases]]] = {}
-    single_token_index: dict[str, list[CompanyAliases]] = {}
+    exact_index: defaultdict[str, list[CompanyAliases]] = defaultdict(list)
+    ticker_index: defaultdict[str, list[CompanyAliases]] = defaultdict(list)
+    token_index: defaultdict[str, list[tuple[frozenset[str], CompanyAliases]]] = defaultdict(list)
+    single_token_index: defaultdict[str, list[CompanyAliases]] = defaultdict(list)
 
     for company in company_list:
         if len(company.ticker) >= 4:
-            ticker_index.setdefault(company.ticker, []).append(company)
+            ticker_index[company.ticker].append(company)
         for alias in company.alias_norms:
             if alias:
-                exact_index.setdefault(alias, []).append(company)
+                exact_index[alias].append(company)
                 stripped = strip_corporate_suffixes(alias)
                 if stripped:
-                    exact_index.setdefault(stripped, []).append(company)
+                    exact_index[stripped].append(company)
         seen_token_sets: set[frozenset[str]] = set()
         for tokens_raw in company.alias_tokens:
             tokens = frozenset(tokens_raw)
@@ -318,10 +267,10 @@ def build_links(
             seen_token_sets.add(tokens)
             if len(tokens) == 1:
                 token = next(iter(tokens))
-                single_token_index.setdefault(token, []).append(company)
+                single_token_index[token].append(company)
             else:
                 for token in tokens:
-                    token_index.setdefault(token, []).append((tokens, company))
+                    token_index[token].append((tokens, company))
 
     def remember(
         candidates: dict[int, tuple[CompanyAliases, str, float]],
@@ -522,6 +471,7 @@ def main() -> None:
     ).strip().lower() in {"1", "true", "yes", "y"}
     single_token_prefix_min_length = int(cfg_get(config, "trial_linking.single_token_prefix_min_length", 7))
     ticker_filter = {value.strip().upper().replace(".", "-") for value in args.tickers.split(",") if value.strip()}
+    run_id: int | None = None
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)

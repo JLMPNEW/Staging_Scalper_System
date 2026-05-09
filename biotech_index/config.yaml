@@ -491,6 +491,7 @@ governance_events:
   form4_table: "form4_events_tier1"
   form4_snapshot_table: "sec_form4_daily_state"
   lookback_days: 365
+  max_workers: 4
   insider_buy_lookback_days: 90
   insider_sell_lookback_days: 90
   executive_buy_lookback_days: 180

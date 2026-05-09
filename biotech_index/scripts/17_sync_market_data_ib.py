@@ -996,6 +996,7 @@ def main() -> None:
             skipped_tickers: list[str] = []
             stale_feature_tickers: list[str] = []
             failed_tickers: list[str] = []
+            hard_failed_tickers: list[str] = []
 
             xbi_existing = [] if full_refresh else load_bars_from_db(conn, "XBI", start_date=history_start, asof_date=asof_date)
             xbi_latest = None if full_refresh else latest_bar_date(conn, "XBI", asof_date=asof_date)
@@ -1075,6 +1076,7 @@ def main() -> None:
                     action = "offline_existing" if offline_existing_bars else "skipped"
                     if offline_existing_bars and not existing_bars:
                         failed_tickers.append(company.ticker)
+                        hard_failed_tickers.append(company.ticker)
                         LOGGER.warning("IB market offline snapshot has no existing bars for %s", company.ticker)
                         continue
                     if fetch_needed:
@@ -1114,6 +1116,7 @@ def main() -> None:
                         skipped_tickers.append(company.ticker)
 
                     if fetch_error is not None and (full_refresh or not existing_bars):
+                        hard_failed_tickers.append(company.ticker)
                         continue
                     bars = fetched_bars if full_refresh else merge_bar_rows(existing_bars, fetched_bars, asof_date=asof_date)
                     if fetch_error is not None:
@@ -1146,19 +1149,21 @@ def main() -> None:
                     )
                 except Exception as exc:
                     failed_tickers.append(company.ticker)
+                    hard_failed_tickers.append(company.ticker)
                     LOGGER.warning("IB market sync failed for %s: %s", company.ticker, exc)
             if companies and not features:
                 raise RuntimeError(f"IB market sync produced no company feature rows; failed_tickers={','.join(failed_tickers)}")
             upsert_market_rows(conn, bars=all_bars, snapshots=snapshots, features=features)
             unique_failed_tickers = list(dict.fromkeys(failed_tickers))
-            failed_company_ids = {company.company_id for company in companies if company.ticker in set(unique_failed_tickers)}
-            delete_market_rows_for_companies(conn, company_ids=failed_company_ids, asof_date=asof_date, source=SOURCE)
-            successful_companies = [company for company in companies if company.company_id not in failed_company_ids]
+            unique_hard_failed_tickers = list(dict.fromkeys(hard_failed_tickers))
+            hard_failed_company_ids = {company.company_id for company in companies if company.ticker in set(unique_hard_failed_tickers)}
+            delete_market_rows_for_companies(conn, company_ids=hard_failed_company_ids, asof_date=asof_date, source=SOURCE)
+            successful_companies = [company for company in companies if company.company_id not in hard_failed_company_ids]
             csv_rows = load_current_feature_csv_rows(conn, successful_companies, asof_date)
             csv_tickers = {str(row.get("ticker") or "").upper() for row in csv_rows}
             missing_csv_tickers = sorted({company.ticker for company in companies} - csv_tickers)
             write_csv(output_csv, csv_rows)
-            status = "partial" if benchmark_refresh_failed or unique_failed_tickers or missing_csv_tickers else "success"
+            status = "partial" if benchmark_refresh_failed or unique_hard_failed_tickers or missing_csv_tickers else "success"
             mode_label = "offline_existing_bars" if offline_existing_bars else ("full_refresh" if full_refresh else "incremental")
             message = (
                 f"requested_asof={asof_decision.requested_asof.isoformat()} "
@@ -1169,7 +1174,11 @@ def main() -> None:
                 f"bars_upserted={len(all_bars)} adjustment={what_to_show} output={output_csv}"
             )
             if unique_failed_tickers:
-                message += f" failed_tickers={','.join(unique_failed_tickers)}"
+                message += f" fetch_failed_tickers={','.join(unique_failed_tickers)}"
+            if stale_feature_tickers:
+                message += f" stale_existing_tickers={','.join(dict.fromkeys(stale_feature_tickers))}"
+            if unique_hard_failed_tickers:
+                message += f" hard_failed_tickers={','.join(unique_hard_failed_tickers)}"
             if missing_csv_tickers:
                 message += f" missing_output_tickers={','.join(missing_csv_tickers)}"
             if benchmark_refresh_failed:

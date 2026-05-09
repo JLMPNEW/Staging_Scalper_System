@@ -711,6 +711,7 @@ def main() -> None:
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
+        run_id: int | None = None
         init_db(conn)
         asof_date = parse_date_text(args.asof) if args.asof else latest_score_date(conn)
         run_id = start_run(conn, run_type="publish_biotech_reports", input_path=db_path)
@@ -806,7 +807,7 @@ def main() -> None:
                 message=f"asof={asof_date} top_n={top_n} alerts={len(alerts)} output_dir={output_dir}",
             )
         except BaseException as exc:
-            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 

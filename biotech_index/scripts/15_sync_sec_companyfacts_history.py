@@ -9,6 +9,7 @@ import logging
 import math
 import sqlite3
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -619,18 +620,27 @@ def fetch_companyfacts_result(
     throttle: HostThrottle,
     cutoff: date,
     latest_source_filing_date: str,
+    http: CachedHttpClient | None = None,
 ) -> CompanyFactsFetchResult:
     if not company.cik:
         return CompanyFactsFetchResult(company=company, latest_source_filing_date=latest_source_filing_date, error="missing_cik")
     url = url_template.format(cik=company.cik)
     try:
-        with CachedHttpClient(
-            cache_dir=cache_dir,
-            sleep_sec=sleep_sec,
-            timeout_sec=timeout_sec,
-            max_retries=max_retries,
-            throttle=throttle,
-        ) as http:
+        if http is None:
+            with CachedHttpClient(
+                cache_dir=cache_dir,
+                sleep_sec=sleep_sec,
+                timeout_sec=timeout_sec,
+                max_retries=max_retries,
+                throttle=throttle,
+            ) as client:
+                payload = client.fetch_json(
+                    namespace="sec_companyfacts",
+                    url=url,
+                    headers=headers,
+                    ttl_hours=ttl_hours,
+                )
+        else:
             payload = http.fetch_json(
                 namespace="sec_companyfacts",
                 url=url,
@@ -898,46 +908,80 @@ def main() -> None:
             headers = {"User-Agent": user_agent, "Accept": "application/json"}
             throttle = HostThrottle()
             results: list[CompanyFactsFetchResult] = []
-            if max_workers == 1:
-                for company in refresh_targets:
-                    results.append(
-                        fetch_companyfacts_result(
-                            company,
-                            url_template=url_template,
-                            headers=headers,
-                            cache_dir=cache_dir,
-                            ttl_hours=ttl_hours,
-                            sleep_sec=sleep_sec,
-                            timeout_sec=timeout_sec,
-                            max_retries=max_retries,
-                            throttle=throttle,
-                            cutoff=cutoff,
-                            latest_source_filing_date=latest_source_dates.get(company.company_id, ""),
-                        )
+            thread_local = threading.local()
+            thread_clients: list[CachedHttpClient] = []
+            thread_clients_lock = threading.Lock()
+
+            def get_thread_http_client() -> CachedHttpClient:
+                client = getattr(thread_local, "http_client", None)
+                if client is None:
+                    client = CachedHttpClient(
+                        cache_dir=cache_dir,
+                        sleep_sec=sleep_sec,
+                        timeout_sec=timeout_sec,
+                        max_retries=max_retries,
+                        throttle=throttle,
                     )
+                    thread_local.http_client = client
+                    with thread_clients_lock:
+                        thread_clients.append(client)
+                return client
+
+            def fetch_with_thread_client(company: Company) -> CompanyFactsFetchResult:
+                return fetch_companyfacts_result(
+                    company,
+                    url_template=url_template,
+                    headers=headers,
+                    cache_dir=cache_dir,
+                    ttl_hours=ttl_hours,
+                    sleep_sec=sleep_sec,
+                    timeout_sec=timeout_sec,
+                    max_retries=max_retries,
+                    throttle=throttle,
+                    cutoff=cutoff,
+                    latest_source_filing_date=latest_source_dates.get(company.company_id, ""),
+                    http=get_thread_http_client(),
+                )
+
+            if max_workers == 1:
+                with CachedHttpClient(
+                    cache_dir=cache_dir,
+                    sleep_sec=sleep_sec,
+                    timeout_sec=timeout_sec,
+                    max_retries=max_retries,
+                    throttle=throttle,
+                ) as http_client:
+                    for company in refresh_targets:
+                        results.append(
+                            fetch_companyfacts_result(
+                                company,
+                                url_template=url_template,
+                                headers=headers,
+                                cache_dir=cache_dir,
+                                ttl_hours=ttl_hours,
+                                sleep_sec=sleep_sec,
+                                timeout_sec=timeout_sec,
+                                max_retries=max_retries,
+                                throttle=throttle,
+                                cutoff=cutoff,
+                                latest_source_filing_date=latest_source_dates.get(company.company_id, ""),
+                                http=http_client,
+                            )
+                        )
             else:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(
-                            fetch_companyfacts_result,
-                            company,
-                            url_template=url_template,
-                            headers=headers,
-                            cache_dir=cache_dir,
-                            ttl_hours=ttl_hours,
-                            sleep_sec=sleep_sec,
-                            timeout_sec=timeout_sec,
-                            max_retries=max_retries,
-                            throttle=throttle,
-                            cutoff=cutoff,
-                            latest_source_filing_date=latest_source_dates.get(company.company_id, ""),
-                        ): company
-                        for company in refresh_targets
-                    }
-                    for idx, future in enumerate(as_completed(futures), start=1):
-                        results.append(future.result())
-                        if idx % 25 == 0 or idx == len(futures):
-                            LOGGER.info("Fetched SEC companyfacts for %d/%d targets", idx, len(futures))
+                try:
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = {
+                            executor.submit(fetch_with_thread_client, company): company
+                            for company in refresh_targets
+                        }
+                        for idx, future in enumerate(as_completed(futures), start=1):
+                            results.append(future.result())
+                            if idx % 25 == 0 or idx == len(futures):
+                                LOGGER.info("Fetched SEC companyfacts for %d/%d targets", idx, len(futures))
+                finally:
+                    for client in thread_clients:
+                        client.close()
 
             for idx, result in enumerate(sorted(results, key=lambda item: item.company.ticker), start=1):
                 company = result.company

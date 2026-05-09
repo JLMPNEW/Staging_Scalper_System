@@ -658,50 +658,49 @@ def main() -> None:
             )
             governance = load_latest_table(conn, "governance_event_features_daily", asof_date)
             forward = load_latest_table(conn, "forward_guidance_features_daily", asof_date)
-            if not subset_mode:
-                missing_market_tickers = missing_layer_tickers(base_rows, market)
-                if args.allow_missing_market and missing_market_tickers:
-                    LOGGER.warning(
-                        "Multibagger feature build continuing without market rows for %d ticker(s): %s",
-                        len(missing_market_tickers),
-                        ",".join(missing_market_tickers[:25]) + (f"...(+{len(missing_market_tickers) - 25})" if len(missing_market_tickers) > 25 else ""),
-                    )
-                missing_layers = {
-                    "commercial_value_features_daily": missing_layer_tickers(base_rows, commercial),
-                    "financial_survival_features": missing_layer_tickers(base_rows, survival),
-                    "governance_event_features_daily": missing_layer_tickers(base_rows, governance),
-                    "forward_guidance_features_daily": missing_layer_tickers(base_rows, forward),
-                }
-                if not args.allow_missing_market:
-                    missing_layers["market_features_daily"] = missing_market_tickers
-                failures = [
-                    f"{name} missing {len(tickers)} ticker(s): {','.join(tickers[:25])}{'...' if len(tickers) > 25 else ''}"
-                    for name, tickers in missing_layers.items()
-                    if tickers
-                ]
-                if failures:
-                    raise RuntimeError("Multibagger feature build missing upstream layer rows: " + " | ".join(failures))
-                max_upstream_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0))
-                for layer_name, layer_rows in (
-                    ("commercial_value_features_daily", commercial),
-                    ("financial_survival_features", survival),
-                    ("market_features_daily", market),
-                    ("governance_event_features_daily", governance),
-                    ("forward_guidance_features_daily", forward),
-                ):
-                    freshness_base_rows = base_rows
-                    if args.allow_missing_market and layer_name == "market_features_daily":
-                        market_company_ids = set(market)
-                        freshness_base_rows = [
-                            row for row in base_rows if int(row["company_id"]) in market_company_ids
-                        ]
-                    validate_layer_freshness(
-                        base_rows=freshness_base_rows,
-                        layer_rows_by_company=layer_rows,
-                        asof_date=asof_date,
-                        context=f"multibagger feature build {layer_name}",
-                        max_staleness_days=max_upstream_staleness_days,
-                    )
+            missing_market_tickers = missing_layer_tickers(base_rows, market)
+            if args.allow_missing_market and missing_market_tickers:
+                LOGGER.warning(
+                    "Multibagger feature build continuing without market rows for %d ticker(s): %s",
+                    len(missing_market_tickers),
+                    ",".join(missing_market_tickers[:25]) + (f"...(+{len(missing_market_tickers) - 25})" if len(missing_market_tickers) > 25 else ""),
+                )
+            missing_layers = {
+                "commercial_value_features_daily": missing_layer_tickers(base_rows, commercial),
+                "financial_survival_features": missing_layer_tickers(base_rows, survival),
+                "governance_event_features_daily": missing_layer_tickers(base_rows, governance),
+                "forward_guidance_features_daily": missing_layer_tickers(base_rows, forward),
+            }
+            if not args.allow_missing_market:
+                missing_layers["market_features_daily"] = missing_market_tickers
+            failures = [
+                f"{name} missing {len(tickers)} ticker(s): {','.join(tickers[:25])}{'...' if len(tickers) > 25 else ''}"
+                for name, tickers in missing_layers.items()
+                if tickers
+            ]
+            if failures:
+                raise RuntimeError("Multibagger feature build missing upstream layer rows: " + " | ".join(failures))
+            max_upstream_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0))
+            for layer_name, layer_rows in (
+                ("commercial_value_features_daily", commercial),
+                ("financial_survival_features", survival),
+                ("market_features_daily", market),
+                ("governance_event_features_daily", governance),
+                ("forward_guidance_features_daily", forward),
+            ):
+                freshness_base_rows = base_rows
+                if args.allow_missing_market and layer_name == "market_features_daily":
+                    market_company_ids = set(market)
+                    freshness_base_rows = [
+                        row for row in base_rows if int(row["company_id"]) in market_company_ids
+                    ]
+                validate_layer_freshness(
+                    base_rows=freshness_base_rows,
+                    layer_rows_by_company=layer_rows,
+                    asof_date=asof_date,
+                    context=f"multibagger feature build {layer_name}",
+                    max_staleness_days=max_upstream_staleness_days,
+                )
             rows = [
                 build_row(
                     row,

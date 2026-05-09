@@ -345,7 +345,7 @@ def score_rows(
         if "momentum_score_raw" not in raw_scores and row.get("momentum_score_raw") in (None, ""):
             missing_momentum_raw.append(str(row.get("ticker") or company_id))
         financial_quality = clamp(to_float(raw_scores.get("financial_quality_score_raw", row.get("financial_quality_score_raw", 0.0))))
-        risk = clamp(to_float(raw_scores.get("risk_score_raw", row["risk_score_raw"])))
+        risk = clamp(to_float(raw_scores.get("risk_score_raw", row.get("risk_score_raw", 0.0))))
         momentum = clamp(to_float(raw_scores.get("momentum_score_raw", row.get("momentum_score_raw", 0.0))))
         clinical_positive = (
             catalyst_w * catalyst
