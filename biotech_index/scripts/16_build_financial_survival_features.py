@@ -482,14 +482,18 @@ def compute_survival_row(
     working_capital, wc_row = latest_nonnull(rows, "working_capital")
     current_assets, _ = latest_nonnull(rows, "current_assets")
     current_liabilities, _ = latest_nonnull(rows, "current_liabilities")
-    working_capital_ratio = current_assets / current_liabilities if current_assets is not None and current_liabilities not in {None, 0} else None
+    working_capital_ratio = (
+        current_assets / current_liabilities
+        if current_assets is not None and current_liabilities is not None and current_liabilities != 0
+        else None
+    )
     if working_capital is None:
         missing.append("working_capital")
     if working_capital_ratio is None:
         missing.append("working_capital_ratio")
 
     total_debt, _ = latest_nonnull(rows, "total_debt")
-    debt_to_cash = total_debt / cash if total_debt is not None and cash not in {None, 0} else None
+    debt_to_cash = total_debt / cash if total_debt is not None and cash is not None and cash != 0 else None
 
     cash_period_date = parse_date(cash_row.get("period_end")) if cash_row else None
     cash_qoq = pct_change(cash, closest_prior_value(rows[1:] if rows else [], "cash_and_investments", cash_period_date or asof_date, 30, 140))

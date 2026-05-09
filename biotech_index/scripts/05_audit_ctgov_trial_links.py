@@ -25,7 +25,6 @@ from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list,
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import validate_nonempty_selection, validate_requested_tickers
-from biotech_index.core.text_norm import normalize_org_name
 
 
 LOGGER = logging.getLogger("audit_ctgov_trial_links")

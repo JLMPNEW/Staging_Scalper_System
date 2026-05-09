@@ -114,7 +114,7 @@ def test_companyfacts_fetch_reuses_supplied_http_client(monkeypatch: pytest.Monk
     monkeypatch.setattr(
         module,
         "parse_observations",
-        lambda _payload, company, _cutoff: [{"company_id": company.company_id, "concept": "x"}],
+        lambda _payload, *, company, cutoff: [{"company_id": company.company_id, "concept": f"x:{cutoff.isoformat()}"}],
     )
     monkeypatch.setattr(
         module,

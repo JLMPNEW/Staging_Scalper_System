@@ -1,0 +1,21 @@
+target-version = "py311"
+exclude = [
+  ".git",
+  ".uv-cache",
+  ".uv-python",
+  "__pycache__",
+  "output",
+  "SEC_FORM4_Runner",
+  "SEC_fundamentals",
+  "ticker_mapping",
+  "tmpomvpuh6h",
+  "_tmp_weekly_validation_logs",
+]
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = [
+  # Pipeline scripts intentionally patch sys.path before importing biotech_index
+  # so they can run both as files and as package-adjacent tools.
+  "E402",
+]

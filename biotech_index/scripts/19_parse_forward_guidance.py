@@ -1535,7 +1535,7 @@ def build_feature_row(
     revenue_mid = revenue.midpoint_value if revenue else None
     revenue_growth = pct_change(revenue_mid, ttm_revenue)
     ebitda_mid = ebitda.midpoint_value if ebitda else None
-    ebitda_margin = ebitda_mid / revenue_mid if ebitda_mid is not None and revenue_mid not in {None, 0} else None
+    ebitda_margin = ebitda_mid / revenue_mid if ebitda_mid is not None and revenue_mid is not None and revenue_mid != 0 else None
     eps_mid = eps.midpoint_value if eps else None
     confidence_values = [record.confidence for record in by_metric.values()]
     confidence = max(confidence_values) if confidence_values else 0.0
@@ -1614,7 +1614,7 @@ def normalize_guidance_number(raw: object, *, null_token: str = "<NULL>") -> str
     if raw is None:
         return null_token
     try:
-        value = float(raw)
+        value = float(str(raw).strip())
     except (TypeError, ValueError):
         return str(raw)
     if not math.isfinite(value):
@@ -1631,9 +1631,12 @@ def guidance_unique_key_from_values(
     low_value: object,
     high_value: object,
 ) -> str:
+    parsed_company_id = to_int(company_id)
+    if parsed_company_id is None:
+        raise ValueError(f"Invalid company_id for guidance_unique_key: {company_id!r}")
     parts = [
         str(asof_date or ""),
-        int(company_id),
+        parsed_company_id,
         str(accession_nodash or ""),
         str(metric or ""),
         "<NULL>" if guidance_year is None else str(guidance_year),

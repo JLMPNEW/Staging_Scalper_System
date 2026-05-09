@@ -8,7 +8,7 @@ import logging
 import math
 import sqlite3
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -244,7 +244,6 @@ def score_bucket(score: float, risk: float, config: dict[str, Any], payload: dic
     sec_liq = payload.get("sec_and_liquidity", {}) if isinstance(payload, dict) else {}
     survival = payload.get("financial_survival", {}) if isinstance(payload, dict) else {}
     verified_active = int(to_float(ctgov.get("verified_qualifying_active_trial_count", 0)))
-    phase2_3 = int(to_float(ctgov.get("phase2_3_active_trials", 0)))
     lead_phase2_3 = int(to_float(ctgov.get("lead_phase2_3_active_trials", 0)))
     program_phase2_3 = int(to_float(ctgov.get("program_phase2_3_active_trials", 0)))
     pivotal = int(to_float(ctgov.get("active_pivotal_trials", 0)))

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,8 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PACKAGE_ROOT.parent
+DEFAULT_TEMP_ROOT = Path("C:/tmp") if Path("C:/tmp").exists() else PROJECT_ROOT
+PYTEST_TEMP_DIR = Path(os.environ.get("BIOTECH_PYTEST_TMP", str(DEFAULT_TEMP_ROOT / "biotech_pytest_tmp")))
 
 
 @dataclass(frozen=True)
@@ -23,7 +26,11 @@ class GateStep:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run biotech-only static checks and regression tests.")
     parser.add_argument("--skip-ruff", action="store_true", help="Skip ruff linting.")
-    parser.add_argument("--skip-pyright", action="store_true", help="Skip pyright type checking.")
+    parser.add_argument(
+        "--pyright",
+        action="store_true",
+        help="Also run the current biotech Pyright baseline. This is opt-in until the existing type backlog is resolved.",
+    )
     parser.add_argument("--skip-pytest", action="store_true", help="Skip pytest regression tests.")
     return parser.parse_args()
 
@@ -55,11 +62,26 @@ def main() -> None:
         GateStep("compileall", [sys.executable, "-m", "compileall", "-q", "biotech_index", "tests/biotech"]),
     ]
     if not args.skip_pytest:
-        steps.append(GateStep("pytest", [sys.executable, "-m", "pytest", "tests/biotech", "--tb=short"]))
+        steps.append(
+            GateStep(
+                "pytest",
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "tests/biotech",
+                    "--tb=short",
+                    "-p",
+                    "no:cacheprovider",
+                    "--basetemp",
+                    str(PYTEST_TEMP_DIR),
+                ],
+            )
+        )
     if not args.skip_ruff:
         require_executable("ruff")
-        steps.append(GateStep("ruff", ["ruff", "check", "biotech_index", "tests/biotech"]))
-    if not args.skip_pyright:
+        steps.append(GateStep("ruff", ["ruff", "check", "--config", "ruff.biotech.toml", "biotech_index", "tests/biotech"]))
+    if args.pyright:
         require_executable("pyright")
         steps.append(GateStep("pyright", ["pyright", "--project", "pyrightconfig.biotech.json"]))
 

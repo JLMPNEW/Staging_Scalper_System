@@ -13,6 +13,8 @@ output/
 FileDepository/
 
 # --- Caches ---
+.pytest_cache/
+.biotech_pytest_tmp/
 ticker_mapping/_sec_cache/
 ticker_mapping/_identity_enrichment_cache/
 
@@ -30,8 +32,10 @@ ticker_mapping/_identity_enrichment_cache/
 *.log
 
 # --- Large data / generated files ---
+tmpomvpuh6h/
 *.xlsx
 *.json
+!pyrightconfig.biotech.json
 
 # --- CSVs: ignore all by default ---
 *.csv

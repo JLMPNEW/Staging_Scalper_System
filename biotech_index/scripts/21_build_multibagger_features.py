@@ -8,7 +8,7 @@ import logging
 import math
 import sqlite3
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +102,7 @@ def parse_date(raw: object) -> date | None:
 
 def to_float(raw: object, default: float = 0.0) -> float:
     try:
-        value = float(raw)
+        value = float(str(raw).strip())
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default
@@ -110,7 +110,7 @@ def to_float(raw: object, default: float = 0.0) -> float:
 
 def to_optional_float(raw: object) -> float | None:
     try:
-        value = float(raw)
+        value = float(str(raw).strip())
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) else None

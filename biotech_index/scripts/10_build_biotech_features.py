@@ -464,7 +464,6 @@ def compute_feature_row(
     outcome_override_excluded = to_int(evidence.get("outcome_override_excluded_rows"))
     outcome_override_review = to_int(evidence.get("outcome_override_review_rows"))
     total_trials = to_int(universe_row.get("total_linked_trials"))
-    active_trials = to_int(universe_row.get("active_trials"))
     pipeline_density = to_float(universe_row.get("pipeline_density"))
     stale_active = to_int(universe_row.get("stale_active_trials"))
     manual_keep = str(universe_row.get("manual_verdict") or "").strip().lower() == "manual_keep"

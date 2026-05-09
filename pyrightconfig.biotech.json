@@ -1,0 +1,25 @@
+{
+  "include": [
+    "biotech_index"
+  ],
+  "exclude": [
+    ".git",
+    ".uv-cache",
+    ".uv-python",
+    "__pycache__",
+    "output",
+    "SEC_FORM4_Runner",
+    "SEC_fundamentals",
+    "ticker_mapping",
+    "tmpomvpuh6h",
+    "_tmp_weekly_validation_logs",
+    "tests"
+  ],
+  "extraPaths": [
+    "."
+  ],
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.11",
+  "reportMissingImports": "none",
+  "reportMissingTypeStubs": "none"
+}

@@ -121,7 +121,7 @@ def to_float(raw: object) -> float | None:
     if raw is None:
         return None
     try:
-        value = float(raw)
+        value = float(str(raw).strip())
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) else None
