@@ -80,6 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", type=str, default="", help="Feature date in YYYY-MM-DD. Defaults to latest biotech feature date.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
     parser.add_argument("--max-companies", type=int, default=0, help="Smoke-test limit. 0 means all.")
+    parser.add_argument("--allow-missing-market", action="store_true", help="Build low-quality rows for companies without market features instead of failing historical snapshot validation.")
     return parser.parse_args()
 
 
@@ -658,13 +659,21 @@ def main() -> None:
             governance = load_latest_table(conn, "governance_event_features_daily", asof_date)
             forward = load_latest_table(conn, "forward_guidance_features_daily", asof_date)
             if not subset_mode:
+                missing_market_tickers = missing_layer_tickers(base_rows, market)
+                if args.allow_missing_market and missing_market_tickers:
+                    LOGGER.warning(
+                        "Multibagger feature build continuing without market rows for %d ticker(s): %s",
+                        len(missing_market_tickers),
+                        ",".join(missing_market_tickers[:25]) + (f"...(+{len(missing_market_tickers) - 25})" if len(missing_market_tickers) > 25 else ""),
+                    )
                 missing_layers = {
                     "commercial_value_features_daily": missing_layer_tickers(base_rows, commercial),
                     "financial_survival_features": missing_layer_tickers(base_rows, survival),
-                    "market_features_daily": missing_layer_tickers(base_rows, market),
                     "governance_event_features_daily": missing_layer_tickers(base_rows, governance),
                     "forward_guidance_features_daily": missing_layer_tickers(base_rows, forward),
                 }
+                if not args.allow_missing_market:
+                    missing_layers["market_features_daily"] = missing_market_tickers
                 failures = [
                     f"{name} missing {len(tickers)} ticker(s): {','.join(tickers[:25])}{'...' if len(tickers) > 25 else ''}"
                     for name, tickers in missing_layers.items()
@@ -680,8 +689,14 @@ def main() -> None:
                     ("governance_event_features_daily", governance),
                     ("forward_guidance_features_daily", forward),
                 ):
+                    freshness_base_rows = base_rows
+                    if args.allow_missing_market and layer_name == "market_features_daily":
+                        market_company_ids = set(market)
+                        freshness_base_rows = [
+                            row for row in base_rows if int(row["company_id"]) in market_company_ids
+                        ]
                     validate_layer_freshness(
-                        base_rows=base_rows,
+                        base_rows=freshness_base_rows,
                         layer_rows_by_company=layer_rows,
                         asof_date=asof_date,
                         context=f"multibagger feature build {layer_name}",

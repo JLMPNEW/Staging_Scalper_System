@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", type=str, default="", help="Feature date in YYYY-MM-DD. Defaults to UTC today.")
     parser.add_argument("--max-companies", type=int, default=0, help="Smoke-test limit. 0 means all.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
+    parser.add_argument("--allow-missing-market", action="store_true", help="Build low-quality rows for companies without market features instead of failing freshness validation.")
     return parser.parse_args()
 
 
@@ -648,8 +649,25 @@ def main() -> None:
             fact_rows_by_company = load_fact_rows_bulk(conn, company_ids, asof_date)
             preferred_source = str(cfg_get(config, "commercial_value.preferred_market_source", "interactive_brokers") or "interactive_brokers")
             market_by_company = load_latest_market_bulk(conn, company_ids, asof_date, preferred_source=preferred_source)
+            freshness_base_rows = companies
+            if args.allow_missing_market:
+                market_company_ids = set(market_by_company)
+                missing_market_tickers = [
+                    str(company.get("ticker") or "")
+                    for company in companies
+                    if int(company["company_id"]) not in market_company_ids
+                ]
+                freshness_base_rows = [
+                    company for company in companies if int(company["company_id"]) in market_company_ids
+                ]
+                if missing_market_tickers:
+                    LOGGER.warning(
+                        "Commercial value feature build continuing without market rows for %d ticker(s): %s",
+                        len(missing_market_tickers),
+                        ",".join(sorted(missing_market_tickers)[:25]) + (f"...(+{len(missing_market_tickers) - 25})" if len(missing_market_tickers) > 25 else ""),
+                    )
             validate_layer_freshness(
-                base_rows=companies,
+                base_rows=freshness_base_rows,
                 layer_rows_by_company=market_by_company,
                 asof_date=asof_date,
                 context="commercial value feature build market_features_daily",

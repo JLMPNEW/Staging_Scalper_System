@@ -129,6 +129,10 @@ def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bo
     forward_args: tuple[str, ...] = ("--run-mode", mode)
     governance_reuse = reuse_unchanged_historical or mode == "weekly_reconcile"
     governance_args: tuple[str, ...] = ("--reuse-unchanged-historical",) if governance_reuse else ()
+    ib_args: tuple[str, ...] = ("--allow-partial",) if mode in {"weekly_reconcile", "full_backfill"} else ()
+    yahoo_args: tuple[str, ...] = ("--allow-partial",) if mode in {"weekly_reconcile", "full_backfill"} else ()
+    commercial_args: tuple[str, ...] = ("--allow-missing-market",) if mode in {"weekly_reconcile", "full_backfill"} else ()
+    multibagger_feature_args: tuple[str, ...] = ("--allow-missing-market",) if mode in {"weekly_reconcile", "full_backfill"} else ()
     # 08_scan_ctgov_reactivation_candidates.py is an audit/discovery utility, not a deterministic refresh step.
     steps = [
         Step("company_master", "02_build_company_master.py", supports_asof=False),
@@ -150,18 +154,18 @@ def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bo
         ]
     )
     if not skip_ib:
-        steps.append(Step("ib_market", "17_sync_market_data_ib.py"))
+        steps.append(Step("ib_market", "17_sync_market_data_ib.py", ib_args))
     if not skip_yahoo:
-        steps.append(Step("yahoo_market_adjusted", "17_sync_market_data_yahoo_adjusted.py"))
+        steps.append(Step("yahoo_market_adjusted", "17_sync_market_data_yahoo_adjusted.py", yahoo_args))
     steps.extend(
         [
-            Step("commercial_value", "18_build_commercial_value_features.py"),
+            Step("commercial_value", "18_build_commercial_value_features.py", commercial_args),
             Step("forward_guidance", "19_parse_forward_guidance.py", forward_args),
             Step("governance_events", "20_build_governance_event_features.py", governance_args),
             Step("biotech_features", "10_build_biotech_features.py"),
             Step("biotech_scores", "11_score_biotech_index.py"),
             Step("biotech_reports", "12_publish_biotech_reports.py"),
-            Step("multibagger_features", "21_build_multibagger_features.py"),
+            Step("multibagger_features", "21_build_multibagger_features.py", multibagger_feature_args),
             Step("multibagger_scores", "22_score_multibagger_candidates.py"),
             Step("multibagger_reports", "23_publish_multibagger_report.py"),
         ]
