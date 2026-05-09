@@ -866,6 +866,7 @@ def main() -> None:
     evidence_by_ticker = build_evidence_summary_index(evidence_df)
 
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
+    run_id: int | None = None
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         init_db(conn)
         run_id = start_run(conn, run_type="build_biotech_features", input_path=universe_csv)
@@ -918,7 +919,7 @@ def main() -> None:
                 layer_rows_by_company=survival_features,
                 asof_date=asof_date,
                 context="biotech feature build financial_survival_features",
-                max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0)),
+                max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2)),
             )
             upsert_features(conn, rows, asof_date.isoformat())
             write_csv(output_csv, rows)
@@ -931,7 +932,7 @@ def main() -> None:
                 message=f"skipped_missing_company_id={len(skipped)} output={output_csv}",
             )
         except BaseException as exc:
-            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 

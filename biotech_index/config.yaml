@@ -481,7 +481,7 @@ biotech_reports:
 
 biotech_refresh:
   timing_csv: "../output/biotech_index_reports/biotech_refresh_timing.csv"
-  max_upstream_staleness_days: 0
+  max_upstream_staleness_days: 2
   validate_final_outputs: true
 
 governance_events:

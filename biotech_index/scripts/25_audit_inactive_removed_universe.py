@@ -286,7 +286,7 @@ def load_db_companies(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
         FROM companies
         """
     ).fetchall()
-    return {str(row["ticker"]).strip().upper(): dict(row) for row in rows}
+    return {normalize_ticker(row["ticker"]): dict(row) for row in rows if normalize_ticker(row["ticker"])}
 
 
 def connect_readonly(db_path: Path, *, timeout_sec: float) -> sqlite3.Connection:
@@ -787,4 +787,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        LOGGER.exception("Fatal inactive/removed universe audit error: %s", exc)
+        raise SystemExit(1) from exc

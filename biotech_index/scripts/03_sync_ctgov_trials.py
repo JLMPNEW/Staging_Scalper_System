@@ -577,6 +577,7 @@ def main() -> None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
     asof_date = asof_obj.isoformat()
 
+    run_id: int | None = None
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
         search_overrides = load_ctgov_search_overrides(overrides_path, default_query_fields=override_default_query_fields)
@@ -695,13 +696,13 @@ def main() -> None:
                     if upsert_trial(conn, study, asof_date=asof_date):
                         written += 1
                 query_hit_count = replace_query_hits(conn, results)
-            sponsor_count = int(conn.execute("SELECT COUNT(*) FROM trial_sponsors").fetchone()[0])
-            snapshot_count = int(
-                conn.execute(
-                    "SELECT COUNT(*) FROM trial_snapshot_daily WHERE asof_date = ?",
-                    (asof_date,),
-                ).fetchone()[0]
-            )
+            sponsor_row = conn.execute("SELECT COUNT(*) FROM trial_sponsors").fetchone()
+            sponsor_count = int(sponsor_row[0]) if sponsor_row else 0
+            snapshot_row = conn.execute(
+                "SELECT COUNT(*) FROM trial_snapshot_daily WHERE asof_date = ?",
+                (asof_date,),
+            ).fetchone()
+            snapshot_count = int(snapshot_row[0]) if snapshot_row else 0
             message = f"companies={len(jobs)} errors={error_count} unique_trials={written} query_hits={query_hit_count} sponsors={sponsor_count} snapshots_asof={snapshot_count}"
             status = (
                 "success"
@@ -715,7 +716,7 @@ def main() -> None:
             if error_count > 0 and not args.allow_partial:
                 raise SystemExit(2)
         except BaseException as exc:
-            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 

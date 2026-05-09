@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PACKAGE_ROOT.parent
 DEFAULT_TEMP_ROOT = Path("C:/tmp") if Path("C:/tmp").exists() else PROJECT_ROOT
 PYTEST_TEMP_DIR = Path(os.environ.get("BIOTECH_PYTEST_TMP", str(DEFAULT_TEMP_ROOT / "biotech_pytest_tmp")))
+LOGGER = logging.getLogger("run_biotech_quality_gate")
 
 
 @dataclass(frozen=True)
@@ -90,4 +92,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        logging.basicConfig(level=logging.ERROR, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+        LOGGER.exception("Fatal biotech quality gate error: %s", exc)
+        raise SystemExit(1) from exc

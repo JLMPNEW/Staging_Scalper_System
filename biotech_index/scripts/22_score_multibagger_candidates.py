@@ -689,6 +689,14 @@ def flatten_for_csv(score_row: dict[str, Any], feature_row: dict[str, Any]) -> d
 def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_date: str) -> None:
     now = utc_now()
     placeholders = ", ".join("?" for _ in SCORE_FIELDS)
+    missing_by_row = [
+        (str(row.get("ticker") or row.get("company_id") or "<unknown>"), [field for field in SCORE_FIELDS if field not in row])
+        for row in rows
+        if any(field not in row for field in SCORE_FIELDS)
+    ]
+    if missing_by_row:
+        sample = "; ".join(f"{label}: {','.join(fields)}" for label, fields in missing_by_row[:5])
+        raise ValueError(f"multibagger score rows missing required field(s): {sample}")
     with conn:
         conn.execute("DELETE FROM multibagger_scores_daily WHERE asof_date = ?", (asof_date,))
         conn.executemany(

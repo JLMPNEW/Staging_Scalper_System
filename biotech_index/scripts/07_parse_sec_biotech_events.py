@@ -435,6 +435,7 @@ def detect_events(row: FilingText, *, min_confidence: float, max_per_type: int) 
         return []
     lower_text = scan_text.lower()
     events: list[SecEvent] = []
+    seen_windows: set[tuple[str, str]] = set()
     for rule in RULES:
         if rule.confidence < min_confidence:
             continue
@@ -442,13 +443,12 @@ def detect_events(row: FilingText, *, min_confidence: float, max_per_type: int) 
         if keywords and not any(keyword in lower_text for keyword in keywords):
             continue
         per_type = 0
-        seen_windows: set[str] = set()
         for pattern in rule.patterns:
             for match in pattern.finditer(scan_text):
                 window = extract_window(scan_text, match.start(), match.end())
                 if should_skip(rule, window, filing_date=row.filing_date):
                     continue
-                dedupe_key = hashlib.sha256(window.lower().encode("utf-8", errors="ignore")).hexdigest()
+                dedupe_key = (rule.event_type, hashlib.sha256(window.lower().encode("utf-8", errors="ignore")).hexdigest())
                 if dedupe_key in seen_windows:
                     continue
                 seen_windows.add(dedupe_key)
@@ -1078,6 +1078,7 @@ def main() -> None:
         ticker_filter = read_scoring_tickers(final_universe_csv)
         scope_label = "final_scoring_universe"
 
+    run_id: int | None = None
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
         run_type = "parse_sec_biotech_events_export" if args.export_only else "parse_sec_biotech_events"
@@ -1223,7 +1224,7 @@ def main() -> None:
             )
             LOGGER.info("Parsed SEC biotech events: filings=%d events=%d output=%s", total_filings, event_count, output_csv)
         except BaseException as exc:
-            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 

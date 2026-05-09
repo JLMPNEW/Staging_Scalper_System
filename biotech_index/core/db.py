@@ -786,6 +786,7 @@ CREATE INDEX IF NOT EXISTS idx_trial_company_links_company ON trial_company_link
 CREATE INDEX IF NOT EXISTS idx_trial_company_links_nct ON trial_company_links(nct_id);
 CREATE INDEX IF NOT EXISTS idx_ctgov_query_hits_company ON ctgov_query_hits(company_id, nct_id);
 CREATE INDEX IF NOT EXISTS idx_sec_filings_company_date ON sec_filings(company_id, filing_date);
+CREATE INDEX IF NOT EXISTS idx_sec_filings_company_date_form ON sec_filings(company_id, filing_date, form);
 CREATE INDEX IF NOT EXISTS idx_ctgov_events_asof_company ON ctgov_events(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_sec_events_company_date ON sec_events(company_id, filing_date);
 CREATE INDEX IF NOT EXISTS idx_sec_events_type_date ON sec_events(event_type, filing_date);
@@ -796,6 +797,7 @@ CREATE INDEX IF NOT EXISTS idx_company_facts_quarterly_company_period ON company
 CREATE INDEX IF NOT EXISTS idx_company_facts_quarterly_company_period_desc ON company_facts_quarterly(company_id, period_end DESC);
 CREATE INDEX IF NOT EXISTS idx_company_facts_sync_state_status ON company_facts_sync_state(sync_status, last_synced_at);
 CREATE INDEX IF NOT EXISTS idx_financial_survival_asof_company ON financial_survival_features(asof_date, company_id);
+CREATE INDEX IF NOT EXISTS idx_financial_survival_company_asof ON financial_survival_features(company_id, asof_date DESC);
 CREATE INDEX IF NOT EXISTS idx_data_quality_issues_asof_company ON data_quality_issues(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_market_bars_ticker_date ON market_bars_daily(ticker, bar_date);
 CREATE INDEX IF NOT EXISTS idx_market_bars_source_ticker_date ON market_bars_daily(source, ticker, bar_date);
@@ -816,7 +818,12 @@ CREATE INDEX IF NOT EXISTS idx_sec_filing_latest_document_type ON sec_filing_lat
 CREATE INDEX IF NOT EXISTS idx_sec_filings_form_date_company ON sec_filings(form, filing_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_sec_filings_date_company ON sec_filings(filing_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_governance_features_asof_company ON governance_event_features_daily(asof_date, company_id);
+CREATE INDEX IF NOT EXISTS idx_governance_features_company_asof ON governance_event_features_daily(company_id, asof_date DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_features_company_asof ON daily_features(company_id, asof_date DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_scores_company_asof ON daily_scores(company_id, asof_date DESC);
 CREATE INDEX IF NOT EXISTS idx_multibagger_features_asof_company ON multibagger_features_daily(asof_date, company_id);
+CREATE INDEX IF NOT EXISTS idx_multibagger_features_company_asof ON multibagger_features_daily(company_id, asof_date DESC);
+CREATE INDEX IF NOT EXISTS idx_multibagger_scores_company_asof ON multibagger_scores_daily(company_id, asof_date DESC);
 CREATE INDEX IF NOT EXISTS idx_multibagger_scores_asof_rank ON multibagger_scores_daily(asof_date, rank);
 CREATE INDEX IF NOT EXISTS idx_daily_scores_asof_rank ON daily_scores(asof_date, rank);
 """
@@ -1007,6 +1014,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     if conn.in_transaction:
         raise RuntimeError("init_db() must be called outside an active transaction; sqlite3.executescript() commits ambient transactions.")
     conn.executescript(SCHEMA_SQL)
+    conn.commit()
     ensure_company_universe_history_unique_index(conn)
     ensure_company_optional_columns(conn)
     ensure_table_optional_columns(conn, "sec_filing_documents", SEC_FILING_DOCUMENT_OPTIONAL_COLUMNS)
@@ -1109,7 +1117,7 @@ def _normalize_guidance_key_number(raw: object, *, null_token: str = "<NULL>") -
     if raw is None:
         return null_token
     try:
-        value = float(raw)
+        value = float(str(raw).strip())
     except (TypeError, ValueError):
         return str(raw)
     if not math.isfinite(value):
@@ -1126,10 +1134,14 @@ def _guidance_unique_key_from_values(
     low_value: object,
     high_value: object,
 ) -> str:
+    try:
+        parsed_company_id = int(str(company_id).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid company_id for guidance unique key: {company_id!r}") from exc
     return json.dumps(
         [
             str(asof_date or ""),
-            int(company_id),
+            parsed_company_id,
             str(accession_nodash or ""),
             str(metric or ""),
             "<NULL>" if guidance_year is None else str(guidance_year),
@@ -1480,6 +1492,8 @@ def start_run(conn: sqlite3.Connection, *, run_type: str, input_path: Optional[P
         (run_type, now, "running", str(input_path) if input_path else None, now),
     )
     conn.commit()
+    if cur.lastrowid is None:
+        raise RuntimeError("Could not create pipeline run row; sqlite cursor returned no lastrowid.")
     return int(cur.lastrowid)
 
 

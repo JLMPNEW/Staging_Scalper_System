@@ -402,8 +402,8 @@ def load_existing_documents(
     if not target_accessions:
         return {}
     existing_manifest: set[str] = set()
-    for start in range(0, len(target_accessions), 800):
-        chunk = target_accessions[start : start + 800]
+    for start in range(0, len(target_accessions), SQLITE_PARAM_CHUNK_SIZE):
+        chunk = target_accessions[start : start + SQLITE_PARAM_CHUNK_SIZE]
         placeholders = ",".join("?" for _ in chunk)
         existing_manifest.update(
             str(row["accession_nodash"])
@@ -417,8 +417,8 @@ def load_existing_documents(
         refresh_sec_latest_documents(conn, missing_manifest)
 
     existing: dict[str, dict[str, Any]] = {}
-    for start in range(0, len(target_accessions), 800):
-        chunk = target_accessions[start : start + 800]
+    for start in range(0, len(target_accessions), SQLITE_PARAM_CHUNK_SIZE):
+        chunk = target_accessions[start : start + SQLITE_PARAM_CHUNK_SIZE]
         placeholders = ",".join("?" for _ in chunk)
         rows = conn.execute(
             f"""
@@ -512,7 +512,7 @@ def sync_company(
                     if existing_document_is_reusable(
                         existing_doc,
                         text_ttl_hours=text_ttl_hours,
-                        now=datetime.now(timezone.utc),
+                        now=datetime.fromisoformat(utc_now()),
                     ):
                         doc_url, doc_type, digest, text_length = existing_document_payload(existing_doc)
                     else:
@@ -626,6 +626,7 @@ def main() -> None:
     max_workers = max(1, int(cfg_get(config, "sec_filings.max_workers", 1)))
     ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
     rows_out: list[dict[str, Any]] = []
+    run_id: int | None = None
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
@@ -748,7 +749,9 @@ def main() -> None:
             if status != "success" and not args.allow_partial:
                 raise SystemExit(2)
         except BaseException as exc:
-            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            if isinstance(exc, SystemExit):
+                raise
+            if run_id is not None:
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
     LOGGER.info("Synced SEC filings: companies=%d rows=%d output=%s", len(companies), len(rows_out), output_csv)

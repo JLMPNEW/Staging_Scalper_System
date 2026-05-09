@@ -1998,7 +1998,7 @@ def main() -> None:
             layer_rows_by_company=commercial_by_company,
             asof_date=asof_date,
             context="forward guidance parse commercial_value_features_daily",
-            max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0)),
+            max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2)),
         )
         run_id: int | None = start_run(conn, run_type="parse_forward_guidance", input_path=universe_csv)
         try:

@@ -337,7 +337,10 @@ def apply_db_purge(db_path: Path, *, ticker: str, company_id: int | None, timeou
         with conn:
             purge_candidate_on_connection(conn, ticker=ticker, company_id=company_id)
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            LOGGER.exception("Could not close hard-remove purge connection cleanly")
 
 
 def csv_paths_for_reference_scan(base_dir: Path, configured_dirs: list[str]) -> list[Path]:
@@ -381,11 +384,21 @@ def scan_csv_references(paths: list[Path], candidates: list[Candidate]) -> list[
         counts: dict[str, int] = {ticker: 0 for ticker in tickers}
         columns: dict[str, set[str]] = {ticker: set() for ticker in tickers}
         for row in rows:
-            for ticker in tickers:
-                found, cols = row_references_ticker(row, ticker)
-                if found:
-                    counts[ticker] += 1
-                    columns[ticker].update(cols)
+            row_matches: dict[str, set[str]] = {}
+            for key, value in row.items():
+                key_norm = str(key or "").strip().lower()
+                if key_norm not in {"ticker", "tickers", "symbol", "symbols"}:
+                    continue
+                values = {
+                    normalized
+                    for part in str(value or "").replace(";", ",").split(",")
+                    if (normalized := normalize_ticker(part))
+                }
+                for ticker in values & tickers:
+                    row_matches.setdefault(ticker, set()).add(str(key))
+            for ticker, cols in row_matches.items():
+                counts[ticker] += 1
+                columns[ticker].update(cols)
         for ticker, count in counts.items():
             if count:
                 out.append(
@@ -631,4 +644,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        LOGGER.exception("Fatal hard-remove candidate audit error: %s", exc)
+        raise SystemExit(1) from exc

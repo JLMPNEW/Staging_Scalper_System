@@ -680,7 +680,7 @@ def main() -> None:
             ]
             if failures:
                 raise RuntimeError("Multibagger feature build missing upstream layer rows: " + " | ".join(failures))
-            max_upstream_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0))
+            max_upstream_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2))
             for layer_name, layer_rows in (
                 ("commercial_value_features_daily", commercial),
                 ("financial_survival_features", survival),

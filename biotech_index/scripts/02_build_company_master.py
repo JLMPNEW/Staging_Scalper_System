@@ -452,6 +452,7 @@ def main() -> None:
             ",".join(sorted(protected_absent_tickers)[:25]),
         )
 
+    run_id: int | None = None
     with connect(db_path, timeout_sec=timeout_sec) as conn:
         init_db(conn)
         run_id = start_run(conn, run_type="build_company_master", input_path=screen_path)
@@ -523,7 +524,7 @@ def main() -> None:
             LOGGER.info("Wrote company master DB: %s", db_path)
             LOGGER.info("Companies=%d Active=%d Aliases=%d DeactivatedAbsent=%d", len(companies), active_count, alias_count, absent_count)
         except BaseException as exc:
-            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 

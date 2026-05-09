@@ -1472,7 +1472,9 @@ def main() -> None:
             LOGGER.info("Governance feature build complete: rows=%d elapsed=%.3fs output=%s", len(rows), time.perf_counter() - overall_start, output_csv)
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=f"asof={asof_date.isoformat()} output={output_csv}")
         except BaseException as exc:
-            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            if isinstance(exc, KeyboardInterrupt) or (isinstance(exc, SystemExit) and exc.code in (0, None)):
+                raise
+            if run_id is not None:
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
         finally:

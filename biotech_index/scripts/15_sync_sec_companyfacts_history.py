@@ -859,6 +859,7 @@ def main() -> None:
     max_retries = int(cfg_get(config, "sec_companyfacts_history.max_retries", 3))
     max_workers = max(1, int(cfg_get(config, "sec_companyfacts_history.max_workers", 4)))
     all_csv_rows: list[dict[str, Any]] = []
+    run_id: int | None = None
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         init_db(conn)
@@ -975,10 +976,25 @@ def main() -> None:
                             executor.submit(fetch_with_thread_client, company): company
                             for company in refresh_targets
                         }
+                        pending_raise: BaseException | None = None
                         for idx, future in enumerate(as_completed(futures), start=1):
-                            results.append(future.result())
+                            company = futures[future]
+                            try:
+                                results.append(future.result())
+                            except BaseException as exc:
+                                pending_raise = exc
+                                if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                                    LOGGER.warning("SEC companyfacts worker interrupted for %s", company.ticker)
+                                else:
+                                    LOGGER.exception("SEC companyfacts worker failed for %s", company.ticker)
+                                for other in futures:
+                                    if other is not future:
+                                        other.cancel()
+                                break
                             if idx % 25 == 0 or idx == len(futures):
                                 LOGGER.info("Fetched SEC companyfacts for %d/%d targets", idx, len(futures))
+                        if pending_raise is not None:
+                            raise pending_raise
                 finally:
                     for client in thread_clients:
                         client.close()
@@ -1063,7 +1079,7 @@ def main() -> None:
             if error_count > 0 and not args.allow_partial:
                 raise SystemExit(2)
         except BaseException as exc:
-            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
     LOGGER.info("Synced SEC companyfacts history: companies=%d rows=%d output=%s", len(companies), len(all_csv_rows), output_csv)

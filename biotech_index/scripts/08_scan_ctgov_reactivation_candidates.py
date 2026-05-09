@@ -689,6 +689,7 @@ def main() -> None:
     review_rows: list[dict[str, Any]] = []
     evidence_rows: list[dict[str, Any]] = []
 
+    run_id: int | None = None
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         init_db(conn)
         run_id = start_run(conn, run_type="scan_ctgov_reactivation_candidates", input_path=db_path)
@@ -1095,7 +1096,7 @@ def main() -> None:
             if error_count > 0 and not args.allow_partial:
                 raise SystemExit(2)
         except BaseException as exc:
-            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
