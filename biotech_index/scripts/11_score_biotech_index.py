@@ -18,10 +18,10 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from biotech_index.core.config import cfg_get, load_yaml, resolve_path
-from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
-from biotech_index.core.logging_utils import configure_utc_logging
-from biotech_index.core.pipeline_guards import (
+from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.pipeline_guards import (  # noqa: E402
     read_final_scoring_tickers,
     validate_full_universe_coverage,
     validate_layer_freshness,
@@ -30,6 +30,14 @@ from biotech_index.core.pipeline_guards import (
 
 LOGGER = logging.getLogger("score_biotech_index")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+CORE_STRUCTURAL_VETO_DEFAULT_REASONS = [
+    "cash_runway_lt_9m",
+    "severe_runway_flag",
+    "going_concern_confirmed",
+    "reverse_split_history",
+    "no_active_trial_no_business_anchor",
+    "illiquid",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,6 +103,19 @@ def as_bool(raw: object, default: bool = False) -> bool:
     if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
         return False
     return default
+
+
+def parse_string_list(raw: object, default: list[str] | None = None) -> list[str]:
+    if raw is None:
+        return list(default or [])
+    if isinstance(raw, str):
+        parts = raw.replace(";", ",").split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        parts = [str(item) for item in raw]
+    else:
+        parts = [str(raw)]
+    values = [part.strip() for part in parts if part.strip()]
+    return values or list(default or [])
 
 
 def count_missing_fields(raw: object) -> int:
@@ -166,6 +187,92 @@ def tier1_selection_gate_score(opportunity: float, risk: float, confidence_multi
     return clamp((0.70 * opportunity + 0.30 * (100.0 - risk)) * confidence_multiplier)
 
 
+def core_structural_veto_settings(config: dict[str, Any]) -> dict[str, Any]:
+    min_addv20 = float(
+        cfg_get(
+            config,
+            "biotech_scoring.core_structural_veto.min_addv20",
+            cfg_get(config, "multibagger.min_addv20", 1_000_000.0),
+        )
+    )
+    return {
+        "enabled": as_bool(cfg_get(config, "biotech_scoring.core_structural_veto.enabled", False), False),
+        "apply_to_rank": as_bool(cfg_get(config, "biotech_scoring.core_structural_veto.apply_to_rank", True), True),
+        "force_avoid_bucket": as_bool(
+            cfg_get(config, "biotech_scoring.core_structural_veto.force_avoid_bucket", True),
+            True,
+        ),
+        "min_addv20": min_addv20,
+        "reasons": set(
+            parse_string_list(
+                cfg_get(config, "biotech_scoring.core_structural_veto.reasons", CORE_STRUCTURAL_VETO_DEFAULT_REASONS),
+                CORE_STRUCTURAL_VETO_DEFAULT_REASONS,
+            )
+        ),
+    }
+
+
+def tier1_production_baseline(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": as_bool(cfg_get(config, "biotech_scoring.production_baseline.enabled", True), True),
+        "score_model": str(cfg_get(config, "biotech_scoring.production_baseline.score_model", "biotech_opportunity_score")),
+        "selection_policy": str(
+            cfg_get(config, "biotech_scoring.production_baseline.selection_policy", "core_structural_veto")
+        ),
+        "primary_horizon_trading_days": int(
+            float(cfg_get(config, "biotech_scoring.production_baseline.primary_horizon_trading_days", 120))
+        ),
+        "alpha_multibagger_role": str(
+            cfg_get(config, "biotech_scoring.production_baseline.alpha_multibagger_role", "context_only")
+        ),
+        "calibration_output_dir": str(
+            cfg_get(
+                config,
+                "biotech_scoring.production_baseline.calibration_output_dir",
+                "../output/biotech_index_reports/calibration_tier1_120d_confirm",
+            )
+        ),
+    }
+
+
+def core_structural_veto_reasons(
+    payload: dict[str, Any],
+    commercial: dict[str, Any],
+    settings: dict[str, Any],
+) -> list[str]:
+    if not as_bool(settings.get("enabled"), False):
+        return []
+    ctgov = payload.get("ctgov", {}) if isinstance(payload, dict) else {}
+    sec_liq = payload.get("sec_and_liquidity", {}) if isinstance(payload, dict) else {}
+    survival = payload.get("financial_survival", {}) if isinstance(payload, dict) else {}
+    configured_reasons = set(settings.get("reasons") or CORE_STRUCTURAL_VETO_DEFAULT_REASONS)
+    reasons: list[str] = []
+
+    cash_runway = to_float(survival.get("cash_runway_months"), math.nan)
+    if math.isfinite(cash_runway) and cash_runway < 9.0:
+        reasons.append("cash_runway_lt_9m")
+    if as_bool(survival.get("severe_runway_flag"), False):
+        reasons.append("severe_runway_flag")
+    going_status = str(sec_liq.get("going_concern_status") or "").strip().lower()
+    if going_status == "confirmed":
+        reasons.append("going_concern_confirmed")
+    if to_float(sec_liq.get("reverse_split_hits_2y"), 0.0) > 0.0:
+        reasons.append("reverse_split_history")
+
+    verified_active = to_float(ctgov.get("verified_qualifying_active_trial_count"), 0.0)
+    commercial_stage = bool(to_float(commercial.get("commercial_stage_flag"), 0.0))
+    profitable = bool(to_float(commercial.get("profitable_flag"), 0.0))
+    if verified_active <= 0.0 and not (commercial_stage or profitable):
+        reasons.append("no_active_trial_no_business_anchor")
+
+    addv = to_float(sec_liq.get("median_addv20", sec_liq.get("avg_dollar_volume_20d")), math.nan)
+    min_addv20 = float(settings.get("min_addv20") or 0.0)
+    if math.isfinite(addv) and addv < min_addv20:
+        reasons.append("illiquid")
+
+    return [reason for reason in reasons if reason in configured_reasons]
+
+
 def latest_feature_date(conn: sqlite3.Connection) -> str:
     row = conn.execute("SELECT MAX(asof_date) AS asof_date FROM daily_features").fetchone()
     asof = str(row["asof_date"] or "") if row else ""
@@ -227,7 +334,16 @@ def load_forward_guidance_rows(conn: sqlite3.Connection, asof_date: str) -> dict
     return {int(row["company_id"]): dict(row) for row in rows}
 
 
-def score_bucket(score: float, risk: float, config: dict[str, Any], payload: dict[str, Any], commercial: dict[str, Any]) -> str:
+def score_bucket(
+    score: float,
+    risk: float,
+    config: dict[str, Any],
+    payload: dict[str, Any],
+    commercial: dict[str, Any],
+    *,
+    core_veto_reasons: list[str] | None = None,
+    force_core_veto_avoid: bool = False,
+) -> str:
     high_min = float(cfg_get(config, "biotech_scoring.buckets.high_conviction_min", 80))
     watch_min = float(cfg_get(config, "biotech_scoring.buckets.watchlist_min", 60))
     spec_min = float(cfg_get(config, "biotech_scoring.buckets.speculative_min", 45))
@@ -237,8 +353,14 @@ def score_bucket(score: float, risk: float, config: dict[str, Any], payload: dic
     avoid_risk_min = float(cfg_get(config, "biotech_scoring.buckets.avoid_risk_min", 80))
     min_high_runway = float(cfg_get(config, "biotech_scoring.buckets.high_conviction_min_runway_months", 12))
     terminal_runway = float(cfg_get(config, "biotech_scoring.buckets.terminal_runway_months", 3))
-    require_advanced = bool(cfg_get(config, "biotech_scoring.buckets.require_advanced_catalyst_for_high_conviction", True))
-    require_active_watch = bool(cfg_get(config, "biotech_scoring.buckets.require_active_trial_for_watchlist", True))
+    require_advanced = as_bool(
+        cfg_get(config, "biotech_scoring.buckets.require_advanced_catalyst_for_high_conviction", True),
+        True,
+    )
+    require_active_watch = as_bool(
+        cfg_get(config, "biotech_scoring.buckets.require_active_trial_for_watchlist", True),
+        True,
+    )
 
     ctgov = payload.get("ctgov", {}) if isinstance(payload, dict) else {}
     sec_liq = payload.get("sec_and_liquidity", {}) if isinstance(payload, dict) else {}
@@ -248,7 +370,7 @@ def score_bucket(score: float, risk: float, config: dict[str, Any], payload: dic
     program_phase2_3 = int(to_float(ctgov.get("program_phase2_3_active_trials", 0)))
     pivotal = int(to_float(ctgov.get("active_pivotal_trials", 0)))
     runway = to_float(survival.get("cash_runway_months"), 0.0)
-    severe_runway = bool(survival.get("severe_runway_flag"))
+    severe_runway = as_bool(survival.get("severe_runway_flag"), False)
     survival_quality = str(survival.get("data_quality") or "").lower()
     going_status = str(sec_liq.get("going_concern_status") or "").lower()
     recent_nt = int(to_float(sec_liq.get("recent_nt_filing_count_2y", 0)))
@@ -257,6 +379,8 @@ def score_bucket(score: float, risk: float, config: dict[str, Any], payload: dic
     profitable = bool(to_float(commercial.get("profitable_flag"), 0.0))
     has_business_anchor = commercial_stage or profitable
 
+    if force_core_veto_avoid and core_veto_reasons:
+        return "avoid"
     if risk >= avoid_risk_min or severe_runway or (going_status == "confirmed" and 0 < runway < terminal_runway):
         return "avoid"
     if verified_active <= 0 and not has_business_anchor:
@@ -326,6 +450,10 @@ def score_rows(
     risk_w = float(weights.get("risk_penalty", 0.35))
 
     investment_enabled = as_bool(cfg_get(config, "biotech_scoring.use_investment_score", True), True)
+    core_veto_settings = core_structural_veto_settings(config)
+    production_baseline = tier1_production_baseline(config)
+    apply_core_veto_to_rank = bool(core_veto_settings["enabled"] and core_veto_settings["apply_to_rank"])
+    force_core_veto_avoid = bool(core_veto_settings["enabled"] and core_veto_settings["force_avoid_bucket"])
 
     scored: list[dict[str, Any]] = []
     missing_financial_raw: list[str] = []
@@ -375,6 +503,8 @@ def score_rows(
         investment_score = clamp((investment_positive - investment_risk_drag) * confidence_multiplier)
         opportunity = investment_score if investment_enabled else clinical_opportunity
         selection_gate = tier1_selection_gate_score(opportunity, risk, confidence_multiplier)
+        core_veto_reasons = core_structural_veto_reasons(payload, commercial, core_veto_settings)
+        core_veto_flag = 1.0 if core_veto_reasons else 0.0
 
         ctgov = payload.get("ctgov", {}) if isinstance(payload, dict) else {}
         sec_liq = payload.get("sec_and_liquidity", {}) if isinstance(payload, dict) else {}
@@ -449,6 +579,10 @@ def score_rows(
             },
             "score_components": {
                 "model_role": "tier1_core_investability_gate",
+                "production_baseline_score_model": production_baseline["score_model"],
+                "primary_horizon_trading_days": production_baseline["primary_horizon_trading_days"],
+                "selection_policy": production_baseline["selection_policy"],
+                "alpha_multibagger_role": production_baseline["alpha_multibagger_role"],
                 "clinical_opportunity_score": round(clinical_opportunity, 4),
                 "investment_score": round(investment_score, 4),
                 "tier1_selection_gate_score": round(selection_gate, 4),
@@ -465,9 +599,20 @@ def score_rows(
             },
             "downstream_interaction": {
                 "recommended_use": "gate_or_cap_multibagger_candidates_do_not_add_as_duplicate_alpha",
+                "alpha_multibagger_role": production_baseline["alpha_multibagger_role"],
                 "selection_gate_score": round(selection_gate, 4),
                 "opportunity_score": round(opportunity, 4),
                 "risk_score": round(risk, 4),
+            },
+            "production_baseline": production_baseline,
+            "core_structural_veto": {
+                "enabled": bool(core_veto_settings["enabled"]),
+                "flag": bool(core_veto_reasons),
+                "reasons": core_veto_reasons,
+                "configured_reasons": sorted(core_veto_settings["reasons"]),
+                "apply_to_rank": bool(core_veto_settings["apply_to_rank"]),
+                "force_avoid_bucket": bool(core_veto_settings["force_avoid_bucket"]),
+                "min_addv20": core_veto_settings["min_addv20"],
             },
             "sec_events": sec_events,
             "risk_flags": {
@@ -479,6 +624,8 @@ def score_rows(
                 "financial_data_quality": survival.get("data_quality", ""),
                 "sec_dilution_event_count": sec_events.get("dilution_event_count", 0) if isinstance(sec_events, dict) else 0,
                 "sec_negative_clinical_event_count": sec_events.get("negative_clinical_event_count", 0) if isinstance(sec_events, dict) else 0,
+                "core_structural_veto_flag": bool(core_veto_reasons),
+                "core_structural_veto_reasons": "|".join(core_veto_reasons),
             },
             "manual": payload.get("manual", {}),
         }
@@ -501,10 +648,24 @@ def score_rows(
                 "investment_score": round(investment_score, 4),
                 "opportunity_score": round(opportunity, 4),
                 "tier1_selection_gate_score": round(selection_gate, 4),
+                "tier1_primary_horizon_trading_days": production_baseline["primary_horizon_trading_days"],
+                "tier1_production_score_model": production_baseline["score_model"],
+                "tier1_selection_policy": production_baseline["selection_policy"],
+                "alpha_multibagger_role": production_baseline["alpha_multibagger_role"],
+                "core_structural_veto_flag": core_veto_flag,
+                "core_structural_veto_reasons": "|".join(core_veto_reasons),
                 "data_quality_confidence_multiplier": round(confidence_multiplier, 4),
                 "clinical_risk_drag": round(clinical_risk_drag, 4),
                 "investment_risk_drag": round(investment_risk_drag, 4),
-                "bucket": score_bucket(opportunity, risk, config, payload, commercial),
+                "bucket": score_bucket(
+                    opportunity,
+                    risk,
+                    config,
+                    payload,
+                    commercial,
+                    core_veto_reasons=core_veto_reasons,
+                    force_core_veto_avoid=force_core_veto_avoid,
+                ),
                 "primary_nct": ctgov.get("primary_nct", ""),
                 "primary_trial_title": ctgov.get("primary_trial_title", ""),
                 "verified_qualifying_active_trial_count": ctgov.get("verified_qualifying_active_trial_count", 0),
@@ -531,6 +692,7 @@ def score_rows(
         )
     scored.sort(
         key=lambda item: (
+            1 if apply_core_veto_to_rank and to_float(item.get("core_structural_veto_flag"), 0.0) > 0.0 else 0,
             -clamp(to_float(item.get("opportunity_score"), 0.0)),
             clamp(to_float(item.get("risk_score"), 100.0)),
             str(item["ticker"]),
@@ -611,6 +773,12 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "investment_score",
         "clinical_opportunity_score",
         "tier1_selection_gate_score",
+        "tier1_primary_horizon_trading_days",
+        "tier1_production_score_model",
+        "tier1_selection_policy",
+        "alpha_multibagger_role",
+        "core_structural_veto_flag",
+        "core_structural_veto_reasons",
         "data_quality_confidence_multiplier",
         "clinical_risk_drag",
         "investment_risk_drag",

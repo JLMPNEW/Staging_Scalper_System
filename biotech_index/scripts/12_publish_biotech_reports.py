@@ -19,9 +19,9 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from biotech_index.core.config import cfg_get, load_yaml, resolve_optional_path, resolve_path
-from biotech_index.core.db import connect, finish_run, init_db, start_run
-from biotech_index.core.logging_utils import configure_utc_logging
+from biotech_index.core.config import cfg_get, load_yaml, resolve_optional_path, resolve_path  # noqa: E402
+from biotech_index.core.db import connect, finish_run, init_db, start_run  # noqa: E402
+from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 
 
 LOGGER = logging.getLogger("publish_biotech_reports")
@@ -38,6 +38,12 @@ TOP_SCORE_FIELDS = [
     "investment_profile",
     "clinical_opportunity_score",
     "tier1_selection_gate_score",
+    "tier1_primary_horizon_trading_days",
+    "tier1_production_score_model",
+    "tier1_selection_policy",
+    "alpha_multibagger_role",
+    "core_structural_veto_flag",
+    "core_structural_veto_reasons",
     "data_quality_confidence_multiplier",
     "clinical_risk_drag",
     "investment_risk_drag",
@@ -116,8 +122,17 @@ def parse_date_text(raw: object) -> str:
 
 
 def to_float(raw: object, default: float = 0.0) -> float:
+    if raw is None:
+        return default
+    candidate: int | float | str
+    if isinstance(raw, bool):
+        candidate = int(raw)
+    elif isinstance(raw, (int, float, str)):
+        candidate = raw
+    else:
+        candidate = str(raw).strip()
     try:
-        value = float(raw)
+        value = float(candidate)
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default
@@ -303,6 +318,12 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
     if primary_guidance is None:
         primary_guidance = next((item for item in guidance_records if isinstance(item, dict)), {})
     score_components = evidence.get("score_components", {}) if isinstance(evidence, dict) else {}
+    core_veto = evidence.get("core_structural_veto", {}) if isinstance(evidence, dict) else {}
+    production_baseline = evidence.get("production_baseline", {}) if isinstance(evidence, dict) else {}
+    core_veto_flag = core_veto.get("flag", risk_flags.get("core_structural_veto_flag", "")) if isinstance(core_veto, dict) else ""
+    core_veto_reasons = core_veto.get("reasons", risk_flags.get("core_structural_veto_reasons", "")) if isinstance(core_veto, dict) else ""
+    if isinstance(core_veto_reasons, list):
+        core_veto_reasons = "|".join(str(reason) for reason in core_veto_reasons)
     return {
         "asof_date": row.get("asof_date", ""),
         "rank": row.get("rank", ""),
@@ -314,6 +335,12 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "investment_profile": score_components.get("investment_profile", "") if isinstance(score_components, dict) else "",
         "clinical_opportunity_score": row.get("clinical_opportunity_score", score_components.get("clinical_opportunity_score", "") if isinstance(score_components, dict) else ""),
         "tier1_selection_gate_score": row.get("tier1_selection_gate_score", score_components.get("tier1_selection_gate_score", "") if isinstance(score_components, dict) else ""),
+        "tier1_primary_horizon_trading_days": production_baseline.get("primary_horizon_trading_days", score_components.get("primary_horizon_trading_days", "") if isinstance(score_components, dict) else "") if isinstance(production_baseline, dict) else "",
+        "tier1_production_score_model": production_baseline.get("score_model", score_components.get("production_baseline_score_model", "") if isinstance(score_components, dict) else "") if isinstance(production_baseline, dict) else "",
+        "tier1_selection_policy": production_baseline.get("selection_policy", score_components.get("selection_policy", "") if isinstance(score_components, dict) else "") if isinstance(production_baseline, dict) else "",
+        "alpha_multibagger_role": production_baseline.get("alpha_multibagger_role", score_components.get("alpha_multibagger_role", "") if isinstance(score_components, dict) else "") if isinstance(production_baseline, dict) else "",
+        "core_structural_veto_flag": core_veto_flag,
+        "core_structural_veto_reasons": core_veto_reasons,
         "data_quality_confidence_multiplier": row.get("data_quality_confidence_multiplier", score_components.get("data_quality_confidence_multiplier", "") if isinstance(score_components, dict) else ""),
         "clinical_risk_drag": row.get("clinical_risk_drag", score_components.get("clinical_risk_drag", "") if isinstance(score_components, dict) else ""),
         "investment_risk_drag": row.get("investment_risk_drag", score_components.get("investment_risk_drag", "") if isinstance(score_components, dict) else ""),

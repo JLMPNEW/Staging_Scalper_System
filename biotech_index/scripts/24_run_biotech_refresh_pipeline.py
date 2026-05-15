@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
 import logging
+import shutil
 import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
@@ -20,10 +24,10 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from biotech_index.core.config import cfg_get, load_yaml, resolve_path
-from biotech_index.core.db import connect, quote_identifier
-from biotech_index.core.logging_utils import configure_utc_logging
-from biotech_index.core.pipeline_guards import format_ticker_sample, read_final_scoring_tickers, universe_coverage
+from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from biotech_index.core.db import connect, quote_identifier  # noqa: E402
+from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.pipeline_guards import format_ticker_sample, read_final_scoring_tickers, universe_coverage  # noqa: E402
 
 
 LOGGER = logging.getLogger("run_biotech_refresh_pipeline")
@@ -34,6 +38,19 @@ BIOTECH_SCORE_REQUIRED_COLUMNS = [
     "data_quality_confidence_multiplier",
     "clinical_risk_drag",
     "investment_risk_drag",
+]
+
+BIOTECH_SCORE_CSV_REQUIRED_COLUMNS = [
+    *BIOTECH_SCORE_REQUIRED_COLUMNS,
+    "tier1_primary_horizon_trading_days",
+    "tier1_production_score_model",
+    "tier1_selection_policy",
+    "alpha_multibagger_role",
+    "core_structural_veto_flag",
+]
+
+BIOTECH_SCORE_CSV_PRESENT_COLUMNS = [
+    "core_structural_veto_reasons",
 ]
 
 MULTIBAGGER_SCORE_BASE_REQUIRED_COLUMNS = [
@@ -73,6 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-yahoo", action="store_true", help="Skip the Yahoo adjusted market-data step.")
     parser.add_argument("--skip-analyze", action="store_true", help="Skip SQLite ANALYZE at the end.")
     parser.add_argument("--skip-final-validation", action="store_true", help="Skip final as-of/coverage validation after a full pipeline run.")
+    parser.add_argument("--skip-form4-preflight", action="store_true", help="Skip the staging Form 4 database freshness preflight.")
     parser.add_argument("--reuse-unchanged-historical", action="store_true", help="Reuse exact-signature governance rows for historical snapshot runs.")
     return parser.parse_args()
 
@@ -91,8 +109,28 @@ def parse_date(raw: object) -> date | None:
         return None
 
 
-def as_bool(raw: object) -> bool:
-    return str(raw or "").strip().lower() in {"1", "true", "yes", "y"}
+def as_bool(raw: object, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "enabled", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
+        return False
+    return default
+
+
+def parse_string_list(raw: object, default: list[str] | None = None) -> list[str]:
+    if raw is None:
+        return list(default or [])
+    if isinstance(raw, str):
+        parts = raw.replace(";", ",").split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        parts = [str(item) for item in raw]
+    else:
+        parts = [str(raw)]
+    values = [part.strip() for part in parts if part.strip()]
+    return values or list(default or [])
 
 
 def parse_clock_time(raw: object, default: str = "16:15") -> dt_time:
@@ -182,6 +220,109 @@ def write_timing_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def snapshot_direct_output_files(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+    asof: str,
+    run_started_at: str,
+    mode: str,
+    selected_steps: set[str],
+) -> dict[str, Any]:
+    start = time.monotonic()
+    source_dir = resolve_path(
+        cfg_get(config, "biotech_refresh.snapshot_outputs.source_dir", cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports")),
+        base_dir=base_dir,
+    )
+    snapshot_root = resolve_path(
+        cfg_get(config, "biotech_refresh.snapshot_outputs.root_dir", str(source_dir)),
+        base_dir=base_dir,
+    )
+    include_extensions = {
+        value.lower() if str(value).startswith(".") else f".{str(value).lower()}"
+        for value in parse_string_list(
+            cfg_get(config, "biotech_refresh.snapshot_outputs.include_extensions", [".csv", ".json"]),
+            [".csv", ".json"],
+        )
+    }
+    snapshot_dir = snapshot_root / asof.replace("-", "")
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    copied_files: list[dict[str, Any]] = []
+    for stale in snapshot_dir.iterdir():
+        if stale.is_file() and (stale.suffix.lower() in include_extensions or stale.name == "snapshot_manifest.json"):
+            stale.unlink()
+
+    for source in sorted(source_dir.iterdir(), key=lambda item: item.name.lower()):
+        if not source.is_file() or source.suffix.lower() not in include_extensions:
+            continue
+        target = snapshot_dir / source.name
+        shutil.copy2(source, target)
+        stat = target.stat()
+        copied_files.append(
+            {
+                "name": target.name,
+                "size_bytes": stat.st_size,
+                "sha256": file_sha256(target),
+                "last_write_time_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0).isoformat(),
+            }
+        )
+
+    manifest = {
+        "asof_date": asof,
+        "created_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "run_started_at_utc": run_started_at,
+        "mode": mode,
+        "selected_steps": sorted(selected_steps),
+        "source_dir": str(source_dir),
+        "snapshot_dir": str(snapshot_dir),
+        "include_extensions": sorted(include_extensions),
+        "file_count": len(copied_files),
+        "files": copied_files,
+        "notes": [
+            "Snapshot folder name is derived from the data as-of date, not the wall-clock run date.",
+            "Only direct files in source_dir are copied; subdirectories and calibration folders are not copied.",
+            "Existing direct CSV/JSON files in this dated snapshot folder are replaced before copying.",
+        ],
+    }
+    manifest_path = snapshot_dir / "snapshot_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+    stat = manifest_path.stat()
+    copied_files.append(
+        {
+            "name": manifest_path.name,
+            "size_bytes": stat.st_size,
+            "sha256": file_sha256(manifest_path),
+            "last_write_time_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0).isoformat(),
+        }
+    )
+    elapsed = round(time.monotonic() - start, 3)
+    LOGGER.info(
+        "Snapshot outputs written: asof=%s files=%d snapshot_dir=%s elapsed=%.3fs",
+        asof,
+        len(copied_files),
+        snapshot_dir,
+        elapsed,
+    )
+    return {
+        "run_started_at": run_started_at,
+        "mode": mode,
+        "step": "snapshot_outputs",
+        "status": "success",
+        "elapsed_sec": elapsed,
+        "returncode": 0,
+        "command": f"snapshot outputs asof={asof} dir={snapshot_dir}",
+    }
+
+
 def build_step_command(
     step: Step,
     *,
@@ -231,6 +372,132 @@ def run_step(
         "elapsed_sec": elapsed,
         "returncode": completed.returncode,
         "command": " ".join(command),
+    }
+
+
+def connect_form4_readonly(path: Path) -> sqlite3.Connection:
+    uri = f"file:{path.as_posix()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    return conn
+
+
+def read_form4_snapshot_date(conn: sqlite3.Connection, snapshot_table: str) -> tuple[str, str]:
+    sources: list[tuple[str, str]] = []
+    if snapshot_table:
+        sources.append((snapshot_table, "last_index_date"))
+    sources.extend(
+        [
+            ("form4_events_tier1", "filing_date"),
+            ("form4_buy_events_v1", "filing_date"),
+        ]
+    )
+    for table, field in sources:
+        try:
+            table_sql = quote_identifier(table)
+            field_sql = quote_identifier(field)
+            row = conn.execute(f"SELECT MAX({field_sql}) AS snapshot_date FROM {table_sql}").fetchone()
+        except (sqlite3.Error, ValueError) as exc:
+            LOGGER.debug("Form 4 snapshot probe skipped source=%s.%s error=%s", table, field, exc)
+            continue
+        if row and row["snapshot_date"]:
+            return str(row["snapshot_date"]), f"{table}.{field}"
+    return "", ""
+
+
+def validate_form4_preflight(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+    asof: str,
+    run_started_at: str,
+    mode: str,
+) -> dict[str, Any]:
+    start = time.monotonic()
+    LOGGER.info("Starting form4_preflight")
+    target_date = parse_date(asof)
+    if target_date is None:
+        raise ValueError(f"Invalid pipeline as-of date for Form 4 preflight: {asof}")
+
+    form4_db_path = resolve_path(cfg_get(config, "governance_events.form4_db_path"), base_dir=base_dir)
+    snapshot_table = str(cfg_get(config, "governance_events.form4_snapshot_table", "sec_form4_daily_state") or "")
+    max_staleness_days = int(
+        cfg_get(
+            config,
+            "biotech_refresh.form4_preflight.max_staleness_days",
+            cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2),
+        )
+    )
+    required = as_bool(
+        cfg_get(
+            config,
+            "biotech_refresh.form4_preflight.required",
+            cfg_get(config, "governance_events.form4_required", True),
+        ),
+        True,
+    )
+    warn_only = as_bool(cfg_get(config, "biotech_refresh.form4_preflight.warn_only", False), False)
+
+    failures: list[str] = []
+    warnings: list[str] = []
+    snapshot_raw = ""
+    snapshot_source = ""
+    age_days: int | str = ""
+
+    if max_staleness_days < 0:
+        raise ValueError("biotech_refresh.form4_preflight.max_staleness_days must be >= 0")
+    if not form4_db_path.exists():
+        failures.append(f"Form 4 database not found: {form4_db_path}")
+    else:
+        try:
+            with closing(connect_form4_readonly(form4_db_path)) as conn:
+                snapshot_raw, snapshot_source = read_form4_snapshot_date(conn, snapshot_table)
+        except sqlite3.Error as exc:
+            failures.append(f"Form 4 database cannot be opened read-only: {form4_db_path} ({type(exc).__name__}: {exc})")
+
+    if not failures:
+        snapshot_date = parse_date(snapshot_raw)
+        if snapshot_date is None:
+            failures.append(f"Form 4 snapshot date is unavailable in {form4_db_path}")
+        else:
+            age_days = (target_date - snapshot_date).days
+            if isinstance(age_days, int) and age_days > max_staleness_days:
+                failures.append(
+                    f"Form 4 snapshot is stale: snapshot_date={snapshot_date.isoformat()} "
+                    f"asof={target_date.isoformat()} age_days={age_days} max_staleness_days={max_staleness_days}"
+                )
+
+    if failures and (required and not warn_only):
+        raise RuntimeError("Form 4 preflight failed: " + " | ".join(failures))
+    if failures:
+        warnings.extend(failures)
+
+    elapsed = round(time.monotonic() - start, 3)
+    if warnings:
+        LOGGER.warning("Finished form4_preflight status=warning elapsed=%.3fs warnings=%s", elapsed, " | ".join(warnings))
+        status = "warning"
+    else:
+        LOGGER.info(
+            "Finished form4_preflight status=success elapsed=%.3fs db=%s snapshot_date=%s source=%s age_days=%s",
+            elapsed,
+            form4_db_path,
+            snapshot_raw,
+            snapshot_source,
+            age_days,
+        )
+        status = "success"
+    return {
+        "run_started_at": run_started_at,
+        "mode": mode,
+        "step": "form4_preflight",
+        "status": status,
+        "elapsed_sec": elapsed,
+        "returncode": 0,
+        "command": (
+            f"validate Form 4 db={form4_db_path} asof={asof} snapshot_date={snapshot_raw or '<missing>'} "
+            f"source={snapshot_source or '<missing>'} age_days={age_days} max_staleness_days={max_staleness_days}"
+        ),
     }
 
 
@@ -370,6 +637,7 @@ def validate_score_csv(
     asof: str,
     expected_tickers: set[str],
     required_columns: list[str],
+    present_columns: list[str] | None = None,
 ) -> None:
     if not path.exists():
         raise FileNotFoundError(f"Required pipeline output CSV not found: {path}")
@@ -381,7 +649,8 @@ def validate_score_csv(
     coverage = universe_coverage(expected_tickers, observed_tickers)
     asof_values = {str(row.get("asof_date") or "") for row in rows}
     failures: list[str] = []
-    missing_columns = [column for column in required_columns if column not in fieldnames]
+    presence_columns = list(present_columns or [])
+    missing_columns = [column for column in [*required_columns, *presence_columns] if column not in fieldnames]
     if missing_columns:
         failures.append("missing required columns: " + ",".join(missing_columns))
     if coverage.missing_tickers:
@@ -403,6 +672,16 @@ def validate_score_csv(
 
 
 def validate_required_csv_columns(path: Path, *, asof: str, required_columns: list[str]) -> None:
+    validate_required_csv_columns_with_presence(path, asof=asof, required_columns=required_columns)
+
+
+def validate_required_csv_columns_with_presence(
+    path: Path,
+    *,
+    asof: str,
+    required_columns: list[str],
+    present_columns: list[str] | None = None,
+) -> None:
     if not path.exists():
         raise FileNotFoundError(f"Required pipeline output CSV not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -411,7 +690,8 @@ def validate_required_csv_columns(path: Path, *, asof: str, required_columns: li
         fieldnames = [str(field or "") for field in (reader.fieldnames or [])]
 
     failures: list[str] = []
-    missing_columns = [column for column in required_columns if column not in fieldnames]
+    presence_columns = list(present_columns or [])
+    missing_columns = [column for column in [*required_columns, *presence_columns] if column not in fieldnames]
     if missing_columns:
         failures.append("missing required columns: " + ",".join(missing_columns))
     if rows:
@@ -499,12 +779,14 @@ def validate_final_outputs(
         biotech_scores_csv,
         asof=asof,
         expected_tickers=expected_tickers,
-        required_columns=BIOTECH_SCORE_REQUIRED_COLUMNS,
+        required_columns=BIOTECH_SCORE_CSV_REQUIRED_COLUMNS,
+        present_columns=BIOTECH_SCORE_CSV_PRESENT_COLUMNS,
     )
-    validate_required_csv_columns(
+    validate_required_csv_columns_with_presence(
         biotech_top_candidates_csv,
         asof=asof,
-        required_columns=BIOTECH_SCORE_REQUIRED_COLUMNS,
+        required_columns=BIOTECH_SCORE_CSV_REQUIRED_COLUMNS,
+        present_columns=BIOTECH_SCORE_CSV_PRESENT_COLUMNS,
     )
     validate_score_csv(
         multibagger_scores_csv,
@@ -570,10 +852,52 @@ def main() -> None:
             raise ValueError(f"Unknown pipeline step(s): {', '.join(unknown)}")
     steps = [step for step in all_steps if not selected_steps or step.name in selected_steps]
     final_validation_enabled = as_bool(cfg_get(config, "biotech_refresh.validate_final_outputs", True))
+    snapshot_outputs_enabled = as_bool(cfg_get(config, "biotech_refresh.snapshot_outputs.enabled", True))
+    form4_preflight_enabled = as_bool(cfg_get(config, "biotech_refresh.form4_preflight.enabled", True), True)
+    form4_preflight_needed = any(step.name == "governance_events" for step in steps)
 
     run_started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     timing_rows: list[dict[str, Any]] = []
     try:
+        if form4_preflight_needed and form4_preflight_enabled and not args.skip_form4_preflight:
+            preflight_start = time.monotonic()
+            timing_rows.append(
+                {
+                    "run_started_at": run_started_at,
+                    "mode": args.mode,
+                    "step": "form4_preflight",
+                    "status": "running",
+                    "elapsed_sec": "",
+                    "returncode": "",
+                    "command": f"validate Form 4 db freshness asof={asof}",
+                }
+            )
+            write_timing_csv(timing_csv, timing_rows)
+            try:
+                timing_rows[-1] = validate_form4_preflight(
+                    config,
+                    base_dir=base_dir,
+                    asof=asof,
+                    run_started_at=run_started_at,
+                    mode=args.mode,
+                )
+            except Exception as exc:
+                timing_rows[-1] = {
+                    "run_started_at": run_started_at,
+                    "mode": args.mode,
+                    "step": "form4_preflight",
+                    "status": "failed",
+                    "elapsed_sec": round(time.monotonic() - preflight_start, 3),
+                    "returncode": 1,
+                    "command": f"validate Form 4 db freshness asof={asof}: {type(exc).__name__}: {exc}",
+                }
+                write_timing_csv(timing_csv, timing_rows)
+                raise
+            write_timing_csv(timing_csv, timing_rows)
+        elif form4_preflight_needed and args.skip_form4_preflight:
+            LOGGER.warning("Form 4 preflight skipped via --skip-form4-preflight.")
+        elif form4_preflight_needed and not form4_preflight_enabled:
+            LOGGER.warning("Form 4 preflight skipped because biotech_refresh.form4_preflight.enabled=false.")
         for step in steps:
             command = build_step_command(step, config_path=config_path, db_path=db_path, asof=asof)
             row = {
@@ -642,6 +966,20 @@ def main() -> None:
             LOGGER.warning("Final output validation skipped via --skip-final-validation.")
         elif not final_validation_enabled:
             LOGGER.warning("Final output validation skipped because biotech_refresh.validate_final_outputs=false.")
+        if snapshot_outputs_enabled and not selected_steps:
+            timing_rows.append(
+                snapshot_direct_output_files(
+                    config,
+                    base_dir=base_dir,
+                    asof=asof,
+                    run_started_at=run_started_at,
+                    mode=args.mode,
+                    selected_steps=selected_steps,
+                )
+            )
+            write_timing_csv(timing_csv, timing_rows)
+        elif snapshot_outputs_enabled and selected_steps:
+            LOGGER.warning("Snapshot output copy skipped because --steps was used.")
     finally:
         write_timing_csv(timing_csv, timing_rows)
 

@@ -4,6 +4,7 @@ ACLX,remove,inactive,,true,,inactive_ticker;manual_exclude,User confirmed ticker
 FOLD,remove,inactive,,true,,inactive_ticker;manual_exclude,User confirmed ticker is no longer active on 2026-05-04; remove from active scoring universe.
 GLPG,remove,inactive,,true,,inactive_ticker;manual_exclude,User confirmed ticker is delisted/no longer active on 2026-05-09; remove from active scoring universe.
 TERN,remove,inactive,,true,,inactive_ticker;manual_exclude,User confirmed ticker is delisted/no longer active on 2026-05-09; remove from active scoring universe.
+APLS,remove,active,,true,,manual_exclude;removed_from_biotech_universe,User confirmed ticker should be removed from active biotech scoring universe on 2026-05-09.
 ABT,review,active,true,,true,batch_44_active_review;manual_reactivation_review,Controlled 44-ticker full-pipeline validation as of 2026-04-26; include for scoring/review.
 ACIU,review,active,true,,true,batch_44_active_review;manual_reactivation_review,Controlled 44-ticker full-pipeline validation as of 2026-04-26; include for scoring/review.
 ALMS,review,active,true,,true,batch_44_active_review;manual_reactivation_review,Controlled 44-ticker full-pipeline validation as of 2026-04-26; include for scoring/review.
@@ -19,7 +20,7 @@ CAMP,review,active,true,,true,batch_44_active_review;manual_reactivation_review,
 CATX,review,active,true,,true,batch_44_active_review;manual_reactivation_review,Controlled 44-ticker full-pipeline validation as of 2026-04-26; include for scoring/review.
 CBIO,review,active,true,,true,batch_44_active_review;manual_reactivation_review,Controlled 44-ticker full-pipeline validation as of 2026-04-26; include for scoring/review.
 COYA,review,active,true,,true,batch_44_active_review;manual_reactivation_review,Controlled 44-ticker full-pipeline validation as of 2026-04-26; include for scoring/review.
-CPRX,review,active,true,,true,batch_44_active_review;manual_reactivation_review,Controlled 44-ticker full-pipeline validation as of 2026-04-26; include for scoring/review.
+CPRX,remove,active,,true,,manual_exclude;removed_from_biotech_universe,User confirmed ticker should be removed from active biotech scoring universe on 2026-05-09.
 DTIL,review,active,true,,true,batch_44_active_review;manual_reactivation_review,Controlled 44-ticker full-pipeline validation as of 2026-04-26; include for scoring/review.
 DXCM,review,active,true,,true,batch_44_active_review;manual_reactivation_review,Controlled 44-ticker full-pipeline validation as of 2026-04-26; include for scoring/review.
 EDSA,review,active,true,,true,batch_44_active_review;manual_reactivation_review,Controlled 44-ticker full-pipeline validation as of 2026-04-26; include for scoring/review.

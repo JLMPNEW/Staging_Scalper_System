@@ -404,6 +404,16 @@ biotech_scoring:
   output_dir: "../output/biotech_index_reports"
   output_csv: "biotech_daily_scores.csv"
   use_investment_score: true
+  production_baseline:
+    enabled: true
+    score_model: "biotech_opportunity_score"
+    selection_policy: "core_structural_veto"
+    primary_horizon_trading_days: 120
+    alpha_multibagger_role: "context_only"
+    calibration_output_dir: "../output/biotech_index_reports/calibration_tier1_120d_confirm"
+    notes:
+      - "Tier-1 production ranking is calibrated for a 120-trading-day primary horizon."
+      - "Alpha and multibagger scores remain secondary context until Phase 2 calibration proves orthogonal value."
   convex_risk_penalty_enabled: true
   risk_penalty_convexity: 0.35
   risk_penalty_inflection: 50.0
@@ -413,6 +423,18 @@ biotech_scoring:
     low_quality_penalty: 0.06
     missing_field_penalty: 0.006
     max_missing_penalty: 0.08
+  core_structural_veto:
+    enabled: true
+    apply_to_rank: true
+    force_avoid_bucket: true
+    min_addv20: 1000000
+    reasons:
+      - cash_runway_lt_9m
+      - severe_runway_flag
+      - going_concern_confirmed
+      - reverse_split_history
+      - no_active_trial_no_business_anchor
+      - illiquid
   weights:
     catalyst: 0.45
     credibility: 0.30
@@ -483,6 +505,18 @@ biotech_refresh:
   timing_csv: "../output/biotech_index_reports/biotech_refresh_timing.csv"
   max_upstream_staleness_days: 2
   validate_final_outputs: true
+  form4_preflight:
+    enabled: true
+    required: true
+    warn_only: false
+    max_staleness_days: 2
+  snapshot_outputs:
+    enabled: true
+    source_dir: "../output/biotech_index_reports"
+    root_dir: "../output/biotech_index_reports"
+    include_extensions:
+      - ".csv"
+      - ".json"
 
 governance_events:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
@@ -580,3 +614,57 @@ yahoo_reverse_split:
   sleep_sec: 2.0
   max_tickers: 0
   use_stale_cache_on_error: true
+
+calibration:
+  phase1:
+    exclude_current_removals: false
+    next_bar_entry: true
+    costs:
+      long_round_trip_bps: 40
+  tier1:
+    output_dir: "../output/biotech_index_reports/calibration_tier1_120d_confirm"
+    exclude_current_removals: false
+    strict_feature_lag: true
+    train_fraction: 0.70
+    next_bar_entry: true
+    max_workers: 8
+    convex_risk_penalty_enabled: true
+    risk_penalty_convexity: 0.35
+    risk_penalty_inflection: 50.0
+    holdout_top_k: 25
+    bootstrap_iterations: 200
+    bootstrap_top_k: 10
+    bootstrap_seed: 1729
+    selected_ticker_diagnostic_top_ranks: 3
+    medium_term_horizons:
+      - 60
+      - 120
+    costs:
+      long_round_trip_bps: 40
+  phase2:
+    output_dir: "../output/biotech_index_reports/calibration_phase2_speculative_alpha"
+    exclude_current_removals: false
+    train_fraction: 0.70
+    next_bar_entry: true
+    max_workers: 8
+    bootstrap_iterations: 100
+    bootstrap_top_k: 8
+    bootstrap_seed: 3001
+    selected_ticker_top_ranks: 5
+    costs:
+      long_round_trip_bps: 40
+    recommended_stack:
+      lcb_z: 1.0
+      cvar_q: 0.05
+      min_selected_observations: 30
+      min_asof_dates: 8
+      min_net_lcb_return_pct: 0.0
+      min_sortino: 0.0
+      min_profit_factor: 1.15
+      max_core_hard_exposure_pct: 0.0
+      max_event_hard_exposure_pct: 0.0
+      max_soft_exposure_pct: 35.0
+      max_illiquid_exposure_pct: 0.0
+      max_top3_gain_contribution_pct: 60.0
+      max_large_loss_20_rate_pct: 35.0
+      max_large_loss_40_rate_pct: 15.0
