@@ -272,7 +272,7 @@ def build_tier1_interaction_reason(
 ) -> str:
     if not as_bool(cfg_get(config, "multibagger.tier1_interaction.enabled", False), False):
         return "disabled"
-    if not bool(row.get("tier1_available")):
+    if not as_bool(row.get("tier1_available")):
         return "missing_tier1_context"
 
     reasons: list[str] = []
@@ -319,7 +319,7 @@ def bucket_for(
     max_spec_risk = float(cfg_get(config, "multibagger.max_speculative_risk", 75))
     avoid_risk_min = float(cfg_get(config, "multibagger.avoid_risk_min", 75))
     avoid_fragility_min = float(cfg_get(config, "multibagger.avoid_fragility_min", 70))
-    require_evidence = bool(cfg_get(config, "multibagger.require_event_or_catalyst", True))
+    require_evidence = as_bool(cfg_get(config, "multibagger.require_event_or_catalyst", True), True)
     commercial = payload.get("commercial", {}) if isinstance(payload, dict) else {}
     components = payload.get("component_scores", {}) if isinstance(payload, dict) else {}
     market_cap = to_float(commercial.get("market_cap"), 0.0)
@@ -329,7 +329,7 @@ def bucket_for(
 
     if not liquidity_ok:
         return "avoid_illiquid"
-    if tier1_enabled and tier1 and bool(tier1.get("tier1_available", True)):
+    if tier1_enabled and tier1 and as_bool(tier1.get("tier1_available", True), True):
         tier1_bucket = str(tier1.get("tier1_bucket") or tier1.get("bucket") or "").lower()
         tier1_risk = to_float(tier1.get("tier1_risk_score", tier1.get("risk_score")), 0.0)
         veto_buckets = normalized_config_list(
@@ -481,7 +481,7 @@ def percentile_scores(indexed_values: dict[int, float]) -> dict[int, float]:
     if not indexed_values:
         return {}
     if len(indexed_values) == 1:
-        return {next(iter(indexed_values)): 50.0}
+        return {next(iter(indexed_values)): 100.0}
     sorted_items = sorted(indexed_values.items(), key=lambda item: item[1])
     scores: dict[int, float] = {}
     n = len(sorted_items)
@@ -524,7 +524,7 @@ def orthogonal_alpha_scores(rows: list[dict[str, Any]], config: dict[str, Any]) 
     predictor_keys = ["tier1_opportunity_score", "tier1_risk_score"]
     observations: list[tuple[int, float, list[float]]] = []
     for idx, row in enumerate(rows):
-        if not bool(row.get("tier1_available")):
+        if not as_bool(row.get("tier1_available")):
             continue
         predictors = [to_float(row.get(key), math.nan) for key in predictor_keys]
         if any(not math.isfinite(value) for value in predictors):
@@ -599,9 +599,9 @@ def apply_tier1_interaction(rows: list[dict[str, Any]], config: dict[str, Any]) 
         pre_cap_score = final_score
         tier1_bucket = str(row.get("tier1_bucket") or "").lower()
         tier1_risk = to_float(row.get("tier1_risk_score"), 0.0)
-        if bool(row.get("tier1_available")) and tier1_bucket in veto_buckets:
+        if as_bool(row.get("tier1_available")) and tier1_bucket in veto_buckets:
             final_score = min(final_score, tier1_avoid_cap)
-        if bool(row.get("tier1_available")) and tier1_risk >= tier1_risk_veto:
+        if as_bool(row.get("tier1_available")) and tier1_risk >= tier1_risk_veto:
             final_score = min(final_score, tier1_risk_cap)
 
         row["orthogonal_alpha_score"] = round(alpha_score, 4)

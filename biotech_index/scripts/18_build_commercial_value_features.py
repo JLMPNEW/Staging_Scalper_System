@@ -422,7 +422,9 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
     latest_revenue, latest_revenue_row = latest_nonnull(rows, "revenue")
     latest_quarter_revenue = amount_for_period(latest_revenue_row, "revenue", proxies) if latest_revenue_row else None
     latest_period_end = str(latest_revenue_row.get("period_end") if latest_revenue_row else rows[0].get("period_end") if rows else "")
-    latest_period_date = parse_date(latest_period_end) if latest_period_end else asof_date
+    latest_period_date = parse_date(latest_period_end)
+    if latest_period_date is None:
+        latest_period_date = asof_date
 
     ttm_revenue = ttm_amount(rows, "revenue", proxies)
     gross_profit_ttm = ttm_amount(rows, "gross_profit", proxies)
@@ -461,7 +463,7 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
     net_margin = safe_div(net_income_ttm, ttm_revenue)
     price_to_sales = safe_div(market_cap, ttm_revenue)
     ev_to_sales = safe_div(enterprise_value, ttm_revenue)
-    pe_ratio = safe_div(market_cap, net_income_ttm) if net_income_ttm and net_income_ttm > 0 else None
+    pe_ratio = safe_div(market_cap, net_income_ttm) if net_income_ttm not in {None, 0.0} else None
     fcf_yield = safe_div(free_cash_flow_ttm, market_cap)
 
     commercial_stage_flag = bool(ttm_revenue is not None and ttm_revenue >= float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000)))
@@ -469,6 +471,20 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
 
     if ttm_revenue is None:
         missing.append("ttm_revenue")
+    if gross_profit_ttm is None:
+        missing.append("gross_profit_ttm")
+    if operating_income_ttm is None:
+        missing.append("operating_income_ttm")
+    if net_income_ttm is None:
+        missing.append("net_income_ttm")
+    if rd_expense_ttm is None:
+        missing.append("rd_expense_ttm")
+    if sgna_expense_ttm is None:
+        missing.append("sgna_expense_ttm")
+    if operating_cash_flow_ttm is None:
+        missing.append("operating_cash_flow_ttm")
+    if free_cash_flow_ttm is None:
+        missing.append("free_cash_flow_ttm")
     if cash is None:
         missing.append("cash_and_investments")
     if shares is None:

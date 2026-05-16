@@ -47,6 +47,8 @@ BIOTECH_SCORE_CSV_REQUIRED_COLUMNS = [
     "tier1_selection_policy",
     "alpha_multibagger_role",
     "core_structural_veto_flag",
+    "rank_demoted_by_core_veto",
+    "effective_total_risk_drag",
 ]
 
 BIOTECH_SCORE_CSV_PRESENT_COLUMNS = [
@@ -257,21 +259,26 @@ def snapshot_direct_output_files(
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     copied_files: list[dict[str, Any]] = []
-    for stale in snapshot_dir.iterdir():
+    for stale in list(snapshot_dir.iterdir()):
         if stale.is_file() and (stale.suffix.lower() in include_extensions or stale.name == "snapshot_manifest.json"):
             stale.unlink()
 
-    for source in sorted(source_dir.iterdir(), key=lambda item: item.name.lower()):
+    for source in sorted(list(source_dir.iterdir()), key=lambda item: item.name.lower()):
         if not source.is_file() or source.suffix.lower() not in include_extensions:
             continue
         target = snapshot_dir / source.name
         shutil.copy2(source, target)
-        stat = target.stat()
+        try:
+            stat = target.stat()
+            digest = file_sha256(target)
+        except FileNotFoundError:
+            LOGGER.warning("Snapshot target disappeared before hashing: %s", target)
+            continue
         copied_files.append(
             {
                 "name": target.name,
                 "size_bytes": stat.st_size,
-                "sha256": file_sha256(target),
+                "sha256": digest,
                 "last_write_time_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0).isoformat(),
             }
         )
@@ -347,6 +354,7 @@ def run_step(
 ) -> dict[str, Any]:
     start = time.monotonic()
     LOGGER.info("Starting %s", step.name)
+    LOGGER.info("Command for %s: %s", step.name, " ".join(command))
     try:
         completed = subprocess.run(command, cwd=str(PROJECT_ROOT), timeout=timeout_sec)
     except subprocess.TimeoutExpired:

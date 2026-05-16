@@ -251,7 +251,7 @@ def build_links(
     single_token_index: defaultdict[str, list[CompanyAliases]] = defaultdict(list)
 
     for company in company_list:
-        if len(company.ticker) >= 4:
+        if company.ticker:
             ticker_index[company.ticker].append(company)
         for alias in company.alias_norms:
             if alias:

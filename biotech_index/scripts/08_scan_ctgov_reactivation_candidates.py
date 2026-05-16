@@ -50,9 +50,9 @@ def load_script_module(filename: str, module_name: str) -> Any:
 # Reuse the current numbered pipeline scripts directly so reactivation review
 # stays aligned with the production CTGov search, linking, and audit rules.
 # Load lazily from main() so importing this module does not execute helper scripts.
-SYNC_HELPERS: Any | None = None
-LINK_HELPERS: Any | None = None
-AUDIT_HELPERS: Any | None = None
+SYNC_HELPERS: Any = None
+LINK_HELPERS: Any = None
+AUDIT_HELPERS: Any = None
 
 
 def load_helper_modules() -> None:
@@ -235,8 +235,17 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def as_bool(raw: object) -> bool:
-    return str(raw or "").strip().lower() in {"1", "true", "t", "yes", "y"}
+def as_bool(raw: object, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "enabled", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
+        return False
+    return default
 
 
 def load_source_review_rows(path: Path, *, final_status_filter: set[str], ticker_filter: set[str]) -> dict[str, dict[str, str]]:
@@ -853,8 +862,10 @@ def main() -> None:
                     sponsor_text_by_nct[key] = ";".join(existing)
 
             trial_links_by_company: dict[int, dict[str, list[Any]]] = {}
+            dropped_link_count = 0
             for link in links:
                 if link.company_id not in job_by_company_id:
+                    dropped_link_count += 1
                     continue
                 trial_links_by_company.setdefault(int(link.company_id), {}).setdefault(str(link.nct_id), []).append(
                     AUDIT_HELPERS.TrialLink(
@@ -864,6 +875,8 @@ def main() -> None:
                         confidence=float(link.confidence),
                     )
                 )
+            if dropped_link_count:
+                LOGGER.debug("Dropped CTGov reactivation links outside scan job set: count=%d", dropped_link_count)
 
             for job in jobs:
                 company = job.audit_company

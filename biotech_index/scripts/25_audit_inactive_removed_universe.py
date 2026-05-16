@@ -203,11 +203,15 @@ def join_codes(values: Iterable[str]) -> str:
 
 def normalize_keyed_rows(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
     out: dict[str, dict[str, str]] = {}
+    skipped_missing_ticker = 0
     for row in rows:
         ticker = normalize_ticker(row_get(row, "ticker", "Ticker", "Tickers", "symbol", "Symbol"))
         if not ticker:
+            skipped_missing_ticker += 1
             continue
         out[ticker] = {str(k): str(v or "") for k, v in row.items()}
+    if skipped_missing_ticker:
+        LOGGER.warning("Skipped keyed CSV row(s) without ticker: count=%d", skipped_missing_ticker)
     return out
 
 

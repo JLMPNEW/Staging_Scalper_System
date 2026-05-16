@@ -23,7 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
-from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now
 from biotech_index.core.http_cache import CachedHttpClient, HostThrottle
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
@@ -295,6 +295,7 @@ def parse_observations(payload: dict[str, Any], *, company: Company, cutoff: dat
                     value = to_float(entry.get("val"))
                     if value is None:
                         continue
+                    fy_text = str(entry.get("fy") or "")
                     observations.append(
                         {
                             "company_id": company.company_id,
@@ -306,7 +307,7 @@ def parse_observations(payload: dict[str, Any], *, company: Company, cutoff: dat
                             "value": value,
                             "period_start": str(entry.get("start") or ""),
                             "period_end": end_date.isoformat(),
-                            "fiscal_year": int(entry["fy"]) if str(entry.get("fy") or "").isdigit() else None,
+                            "fiscal_year": int(fy_text) if fy_text.isdigit() else None,
                             "fiscal_period": str(entry.get("fp") or ""),
                             "form": form,
                             "filed_date": str(entry.get("filed") or ""),
@@ -492,6 +493,24 @@ QUARTERLY_FIELDS = [
     "confidence",
     "payload_json",
 ]
+
+
+def sql_field_list(fields: list[str]) -> str:
+    allowed = set(QUARTERLY_FIELDS)
+    unknown = [field for field in fields if field not in allowed]
+    if unknown:
+        raise ValueError(f"Unknown company_facts_quarterly field(s): {', '.join(unknown)}")
+    return ", ".join(quote_identifier(field) for field in fields)
+
+
+def excluded_update_clause(fields: list[str]) -> str:
+    allowed = set(QUARTERLY_FIELDS)
+    unknown = [field for field in fields if field not in allowed]
+    if unknown:
+        raise ValueError(f"Unknown company_facts_quarterly update field(s): {', '.join(unknown)}")
+    return ",\n                    ".join(
+        f"{quote_identifier(field)} = excluded.{quote_identifier(field)}" for field in fields
+    )
 
 
 def parse_timestamp(raw: object) -> datetime | None:
@@ -722,10 +741,11 @@ def replace_company_facts(
         ],
     )
     update_fields = [field for field in QUARTERLY_FIELDS if field not in {"company_id", "period_end", "fiscal_period", "form"}]
-    update_clause = ",\n                    ".join(f"{field} = excluded.{field}" for field in update_fields)
+    update_clause = excluded_update_clause(update_fields)
+    insert_fields_sql = sql_field_list(QUARTERLY_FIELDS)
     conn.executemany(
         f"""
-        INSERT INTO company_facts_quarterly({", ".join(QUARTERLY_FIELDS)}, created_at, updated_at)
+        INSERT INTO company_facts_quarterly({insert_fields_sql}, created_at, updated_at)
         VALUES ({", ".join("?" for _ in QUARTERLY_FIELDS)}, ?, ?)
         ON CONFLICT(company_id, period_end, fiscal_period, form) DO UPDATE SET
             {update_clause},

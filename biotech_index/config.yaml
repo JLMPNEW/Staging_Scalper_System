@@ -407,12 +407,25 @@ biotech_scoring:
   production_baseline:
     enabled: true
     score_model: "biotech_opportunity_score"
-    selection_policy: "core_structural_veto"
+    candidate_id: "tier1_1f24e704aacf"
+    candidate_name: "current_clinical_mix_risk030_clinical_risk_strict"
+    top_n: 20
+    selection_policy: "core_veto_event_soft_drag"
     primary_horizon_trading_days: 120
     alpha_multibagger_role: "context_only"
     calibration_output_dir: "../output/biotech_index_reports/calibration_tier1_120d_confirm"
+    calibration_test_metrics:
+      test_lcb_return_pct: 5.486824
+      test_sortino_like: 0.501776
+      test_profit_factor: 1.914178
+      test_large_loss_20pct_rate_pct: 17.222222
+      bootstrap_lcb_return_pct_ci05: 3.151838
+    runner_up_candidate_name: "catalyst_heavy_risk030_clinical_risk_strict"
+    runner_up_candidate_id: "tier1_1bfd24bdf1f4"
     notes:
       - "Tier-1 production ranking is calibrated for a 120-trading-day primary horizon."
+      - "Production candidate selected from 2026-05-15 calibration as all-sample Top-20 rank 1 by bootstrap-positive report."
+      - "Core structural weakness is vetoed for rank; event hard and soft weakness reduce the score but do not automatically remove the name."
       - "Alpha and multibagger scores remain secondary context until Phase 2 calibration proves orthogonal value."
   convex_risk_penalty_enabled: true
   risk_penalty_convexity: 0.35
@@ -423,6 +436,12 @@ biotech_scoring:
     low_quality_penalty: 0.06
     missing_field_penalty: 0.006
     max_missing_penalty: 0.08
+  missing_score_defaults:
+    commercial_quality_score: 35.0
+    commercial_value_score: 35.0
+    forward_guidance_score: 45.0
+    valuation_score: 50.0
+    upside_capacity_score: 50.0
   core_structural_veto:
     enabled: true
     apply_to_rank: true
@@ -435,12 +454,29 @@ biotech_scoring:
       - reverse_split_history
       - no_active_trial_no_business_anchor
       - illiquid
+  production_policy:
+    event_hard_penalty: 10.0
+    soft_weakness_penalty: 8.0
+    event_hard_reasons:
+      - negative_clinical_event
+      - repeated_dilution
+    soft_weakness_reasons:
+      - cash_runway_9_to_12m_clinical
+      - going_concern_warning
+      - single_dilution_event
+      - low_financial_data_quality
+      - high_commercial_fragility
+      - high_tier1_risk_score
+      - recent_nt_filing
+      - early_stage_or_unadvanced_trial_anchor
+    commercial_fragility_threshold: 70.0
+    high_risk_threshold: 75.0
   weights:
     catalyst: 0.45
     credibility: 0.30
     financial_quality: 0.15
     momentum: 0.10
-    risk_penalty: 0.35
+    risk_penalty: 0.30
   investment_weights:
     clinical_opportunity: 0.25
     commercial_value: 0.25
@@ -468,7 +504,7 @@ biotech_scoring:
       upside_capacity: 0.15
       financial_quality: 0.15
       momentum: 0.10
-      risk_penalty: 0.30
+      risk_penalty: 0.40
   buckets:
     high_conviction_min: 80
     watchlist_min: 60

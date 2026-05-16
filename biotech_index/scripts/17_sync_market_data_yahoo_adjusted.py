@@ -39,6 +39,7 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_SOURCE = "yahoo_adjusted"
 DEFAULT_BENCHMARK = "XBI"
 SQLITE_PARAM_CHUNK_SIZE = 800
+MIN_RETURN_BASE_PRICE = 0.01
 
 
 def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
@@ -48,6 +49,7 @@ def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_
 
 CSV_FIELDNAMES = [
     "asof_date",
+    "company_id",
     "source",
     "ticker",
     "company_name",
@@ -127,8 +129,17 @@ def to_float(raw: object) -> float | None:
     return value if math.isfinite(value) else None
 
 
-def as_bool(raw: object) -> bool:
-    return str(raw or "").strip().lower() in {"1", "true", "yes", "y"}
+def as_bool(raw: object, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "enabled", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
+        return False
+    return default
 
 
 def parse_clock_time(raw: object, default: str = "16:15") -> dt_time:
@@ -465,7 +476,7 @@ def continuity_report(
 
 
 def pct_return(values: list[float], days: int) -> float | None:
-    if len(values) <= days or values[-days - 1] == 0:
+    if len(values) <= days or abs(values[-days - 1]) < MIN_RETURN_BASE_PRICE:
         return None
     return (values[-1] / values[-days - 1]) - 1.0
 
@@ -835,7 +846,7 @@ def load_current_feature_csv_rows(conn: sqlite3.Connection, companies: list[Comp
     company_names = {company.company_id: company.company_name for company in companies}
     company_order = {company.company_id: idx for idx, company in enumerate(companies)}
     placeholders = ",".join("?" for _ in company_names)
-    fields = [field for field in CSV_FIELDNAMES if field != "company_name"]
+    fields = [field for field in CSV_FIELDNAMES if field not in {"company_name", "company_id"}]
     rows = conn.execute(
         f"""
         SELECT {", ".join(fields)}, company_id

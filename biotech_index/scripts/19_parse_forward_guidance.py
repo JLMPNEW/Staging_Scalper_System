@@ -96,8 +96,28 @@ def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_
     return [list(values[start : start + step]) for start in range(0, len(values), step)]
 
 
+def as_bool(raw: object, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "enabled", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
+        return False
+    return default
+
+
+def sortable_date_int(raw: object) -> int:
+    parsed = parse_date(raw)
+    if parsed is not None:
+        return int(parsed.strftime("%Y%m%d"))
+    return int(re.sub(r"\D", "", str(raw or "")) or "0")
+
+
 def filing_sort_key(filing: "FilingText") -> tuple[str, int, str]:
-    date_key = int(re.sub(r"\D", "", filing.filing_date or "") or "0")
+    date_key = sortable_date_int(filing.filing_date)
     return filing.ticker, -date_key, filing.accession_nodash
 
 OVERRIDE_FIELDS = [
@@ -335,7 +355,7 @@ def metric_regex(metric: str) -> str:
 
 def extract_year(window: str, asof_date: date) -> int | None:
     years = [int(match) for match in YEAR_RE.findall(window)]
-    future_years = [year for year in years if year >= asof_date.year]
+    future_years = [year for year in years if asof_date.year <= year <= asof_date.year + 5]
     if future_years:
         return min(future_years)
     return years[0] if years else None
@@ -1291,7 +1311,7 @@ def load_previous_guidance_records(
         return []
     filing_by_accession = {filing.accession_nodash: filing for filing in filings}
     records: list[GuidanceRecord] = []
-    chunk_size = 600
+    chunk_size = SQLITE_PARAM_CHUNK_SIZE
     for start in range(0, len(accessions), chunk_size):
         chunk = accessions[start : start + chunk_size]
         placeholders = ",".join("?" for _ in chunk)
@@ -1444,13 +1464,13 @@ def parse_guidance_records(
             counts[filing.accession_nodash] = len(filing_records)
         if pending_raise is not None:
             raise pending_raise
-    records.sort(key=lambda record: (record.ticker, record.filing_date, record.accession_nodash, record.metric))
+    records.sort(key=lambda record: (record.ticker, sortable_date_int(record.filing_date), record.accession_nodash, record.metric))
     return records, counts
 
 
 def latest_guidance_by_metric(records: list[GuidanceRecord], asof_date: date) -> dict[str, GuidanceRecord]:
     out: dict[str, GuidanceRecord] = {}
-    def sort_key(record: GuidanceRecord) -> tuple[int, str, float, float]:
+    def sort_key(record: GuidanceRecord) -> tuple[int, int, float, float]:
         year = record.guidance_year or 0
         if year == asof_date.year:
             year_priority = 3
@@ -1460,7 +1480,7 @@ def latest_guidance_by_metric(records: list[GuidanceRecord], asof_date: date) ->
             year_priority = 1
         else:
             year_priority = 0
-        return year_priority, record.filing_date, record.confidence, record.midpoint_value or 0.0
+        return year_priority, sortable_date_int(record.filing_date), record.confidence, record.midpoint_value or 0.0
 
     for record in records:
         existing = out.get(record.metric)
@@ -1950,7 +1970,7 @@ def main() -> None:
     max_filings_per_company = int(cfg_get(config, "forward_guidance.max_filings_per_company", 14))
     max_windows_per_filing = int(cfg_get(config, "forward_guidance.max_windows_per_filing", 40))
     min_confidence = float(cfg_get(config, "forward_guidance.min_confidence", 0.68))
-    fetch_complete = bool(cfg_get(config, "forward_guidance.fetch_complete_submission_text", True))
+    fetch_complete = as_bool(cfg_get(config, "forward_guidance.fetch_complete_submission_text", True), True)
     fetch_forms = {str(item).upper() for item in (cfg_get(config, "forward_guidance.fetch_complete_submission_forms", ["8-K", "8-K/A", "6-K", "6-K/A"]) or [])}
     cache_dir = resolve_path(cfg_get(config, "forward_guidance.cache_dir", "../output/biotech_index_cache"), base_dir=base_dir)
     user_agent = str(cfg_get(config, "forward_guidance.user_agent", cfg_get(config, "sec_filings.user_agent", "")) or "").strip()

@@ -44,9 +44,11 @@ TOP_SCORE_FIELDS = [
     "alpha_multibagger_role",
     "core_structural_veto_flag",
     "core_structural_veto_reasons",
+    "rank_demoted_by_core_veto",
     "data_quality_confidence_multiplier",
     "clinical_risk_drag",
     "investment_risk_drag",
+    "effective_total_risk_drag",
     "commercial_value_score",
     "forward_guidance_score",
     "valuation_score",
@@ -119,6 +121,38 @@ def parse_date_text(raw: object) -> str:
         return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
     except ValueError as exc:
         raise ValueError(f"Invalid date: {text}") from exc
+
+
+def compact_asof(asof_date: str) -> str:
+    parsed = parse_date_text(asof_date)
+    return datetime.strptime(parsed, "%Y-%m-%d").strftime("%Y%m%d") if parsed else str(asof_date).replace("-", "")
+
+
+def dated_output_dir(base_output_dir: Path, asof_date: str) -> Path:
+    compact = compact_asof(asof_date)
+    return base_output_dir if base_output_dir.name == compact else base_output_dir / compact
+
+
+def resolve_report_input_csv(configured_path: Path, *, base_output_dir: Path, asof_date: str) -> Path:
+    if configured_path.exists():
+        return configured_path
+    dated_candidate = dated_output_dir(base_output_dir, asof_date) / configured_path.name
+    if dated_candidate.exists():
+        return dated_candidate
+    candidates = sorted(
+        base_output_dir.glob(f"*/{configured_path.name}"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        LOGGER.warning(
+            "Configured report input not found at %s or %s; using latest dated copy %s",
+            configured_path,
+            dated_candidate,
+            candidates[0],
+        )
+        return candidates[0]
+    return configured_path
 
 
 def to_float(raw: object, default: float = 0.0) -> float:
@@ -296,6 +330,8 @@ def build_index_summary(scores: list[dict[str, Any]], asof_date: str, top_n: int
 
 
 def parse_json_object(raw: object, *, context: str, ticker: object = "") -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
     try:
         payload = json.loads(str(raw or "{}"))
     except json.JSONDecodeError as exc:
@@ -341,9 +377,11 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "alpha_multibagger_role": production_baseline.get("alpha_multibagger_role", score_components.get("alpha_multibagger_role", "") if isinstance(score_components, dict) else "") if isinstance(production_baseline, dict) else "",
         "core_structural_veto_flag": core_veto_flag,
         "core_structural_veto_reasons": core_veto_reasons,
+        "rank_demoted_by_core_veto": core_veto.get("rank_demoted_by_core_veto", "") if isinstance(core_veto, dict) else "",
         "data_quality_confidence_multiplier": row.get("data_quality_confidence_multiplier", score_components.get("data_quality_confidence_multiplier", "") if isinstance(score_components, dict) else ""),
         "clinical_risk_drag": row.get("clinical_risk_drag", score_components.get("clinical_risk_drag", "") if isinstance(score_components, dict) else ""),
         "investment_risk_drag": row.get("investment_risk_drag", score_components.get("investment_risk_drag", "") if isinstance(score_components, dict) else ""),
+        "effective_total_risk_drag": score_components.get("effective_total_risk_drag", "") if isinstance(score_components, dict) else "",
         "commercial_value_score": row.get("commercial_value_score", commercial_value.get("commercial_value_score", "") if isinstance(commercial_value, dict) else ""),
         "forward_guidance_score": row.get("forward_guidance_score", score_components.get("forward_guidance_score", "") if isinstance(score_components, dict) else ""),
         "valuation_score": row.get("valuation_score", commercial_value.get("valuation_score", "") if isinstance(commercial_value, dict) else ""),
@@ -722,16 +760,10 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    output_dir = resolve_path(cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
+    base_output_dir = resolve_path(cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
     top_n = int(cfg_get(config, "biotech_reports.top_n", 20))
     score_change_min = float(cfg_get(config, "biotech_reports.alerts_score_change_min", 12))
-    index_csv = output_dir / str(cfg_get(config, "biotech_reports.index_latest_csv", "biotech_index_latest.csv"))
-    top_csv = output_dir / str(cfg_get(config, "biotech_reports.top_candidates_csv", "biotech_top_candidates.csv"))
-    alerts_csv = output_dir / str(cfg_get(config, "biotech_reports.alerts_csv", "biotech_alerts.csv"))
-    evidence_json = output_dir / str(cfg_get(config, "biotech_reports.evidence_cards_json", "biotech_evidence_cards.json"))
-    trial_validation_csv = output_dir / str(cfg_get(config, "biotech_reports.trial_validation_csv", "biotech_top_trial_validation.csv"))
-    trial_validation_summary_csv = output_dir / str(cfg_get(config, "biotech_reports.trial_validation_summary_csv", "biotech_top_trial_validation_summary.csv"))
-    ctgov_evidence_csv = resolve_path(cfg_get(config, "biotech_features.ctgov_evidence_csv", "../output/biotech_index_reports/ctgov_trial_evidence.csv"), base_dir=base_dir)
+    configured_ctgov_evidence_csv = resolve_path(cfg_get(config, "biotech_features.ctgov_evidence_csv", "../output/biotech_index_reports/ctgov_trial_evidence.csv"), base_dir=base_dir)
     trial_status_overrides_csv = resolve_optional_path(cfg_get(config, "ctgov_audit.trial_status_overrides_csv"), base_dir=base_dir)
     validation_extra_tickers = [str(x).upper() for x in (cfg_get(config, "biotech_reports.trial_validation_extra_tickers", []) or [])]
     validation_max_trials = int(cfg_get(config, "biotech_reports.trial_validation_max_trials_per_ticker", 25))
@@ -743,6 +775,20 @@ def main() -> None:
         asof_date = parse_date_text(args.asof) if args.asof else latest_score_date(conn)
         run_id = start_run(conn, run_type="publish_biotech_reports", input_path=db_path)
         try:
+            output_dir = dated_output_dir(base_output_dir, asof_date)
+            index_csv = output_dir / str(cfg_get(config, "biotech_reports.index_latest_csv", "biotech_index_latest.csv"))
+            top_csv = output_dir / str(cfg_get(config, "biotech_reports.top_candidates_csv", "biotech_top_candidates.csv"))
+            alerts_csv = output_dir / str(cfg_get(config, "biotech_reports.alerts_csv", "biotech_alerts.csv"))
+            evidence_json = output_dir / str(cfg_get(config, "biotech_reports.evidence_cards_json", "biotech_evidence_cards.json"))
+            trial_validation_csv = output_dir / str(cfg_get(config, "biotech_reports.trial_validation_csv", "biotech_top_trial_validation.csv"))
+            trial_validation_summary_csv = output_dir / str(
+                cfg_get(config, "biotech_reports.trial_validation_summary_csv", "biotech_top_trial_validation_summary.csv")
+            )
+            ctgov_evidence_csv = resolve_report_input_csv(
+                configured_ctgov_evidence_csv,
+                base_output_dir=base_output_dir,
+                asof_date=asof_date,
+            )
             assert_output_paths_writable([index_csv, top_csv, alerts_csv, evidence_json, trial_validation_csv, trial_validation_summary_csv])
             scores = load_scores(conn, asof_date)
             if not scores:

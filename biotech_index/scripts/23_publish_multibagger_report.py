@@ -137,9 +137,24 @@ def parse_date(raw: object) -> date | None:
         return None
 
 
+def as_bool(raw: object, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "enabled", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
+        return False
+    return default
+
+
 def to_float(raw: object, default: float = 0.0) -> float:
+    if raw is None:
+        return default
     try:
-        value = float(raw)
+        value = float(str(raw).strip())
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default
@@ -270,7 +285,7 @@ def build_summary(rows: list[dict[str, Any]], candidate_rows: list[dict[str, Any
     median_score = statistics_median(scores) if scores else 0.0
     top_scores = [to_float(row.get("multibagger_score")) for row in candidate_rows[:top_n]]
     buckets = [str(row.get("bucket") or "") for row in rows]
-    tier1_available = [str(row.get("tier1_available") or "").strip().lower() for row in rows]
+    tier1_available = [as_bool(row.get("tier1_available")) for row in rows]
     return {
         "asof_date": asof_date,
         "score_count": len(rows),
@@ -285,8 +300,8 @@ def build_summary(rows: list[dict[str, Any]], candidate_rows: list[dict[str, Any
         "avoid_count": sum(1 for bucket in buckets if bucket.startswith("avoid")),
         "avoid_tier1_conflict_count": sum(1 for bucket in buckets if bucket == "avoid_tier1_conflict"),
         "avoid_tier1_risk_count": sum(1 for bucket in buckets if bucket == "avoid_tier1_risk"),
-        "tier1_context_count": sum(1 for value in tier1_available if value in {"1", "true", "yes"}),
-        "tier1_missing_count": sum(1 for value in tier1_available if value not in {"1", "true", "yes"}),
+        "tier1_context_count": sum(1 for value in tier1_available if value),
+        "tier1_missing_count": sum(1 for value in tier1_available if not value),
     }
 
 

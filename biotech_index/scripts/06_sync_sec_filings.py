@@ -57,6 +57,19 @@ def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_
     return [list(values[start : start + step]) for start in range(0, len(values), step)]
 
 
+def as_bool(raw: object, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "enabled", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
+        return False
+    return default
+
+
 @dataclass(frozen=True)
 class Company:
     company_id: int
@@ -220,6 +233,19 @@ def parse_recent_filings(
     accession_numbers = list(recent.get("accessionNumber") or [])
     filing_dates = list(recent.get("filingDate") or [])
     primary_documents = list(recent.get("primaryDocument") or [])
+    lengths = {
+        "form": len(forms),
+        "accessionNumber": len(accession_numbers),
+        "filingDate": len(filing_dates),
+        "primaryDocument": len(primary_documents),
+    }
+    required_lengths = {key: lengths[key] for key in ["form", "accessionNumber", "filingDate"]}
+    if len(set(required_lengths.values())) > 1:
+        LOGGER.warning(
+            "SEC recent filings length mismatch for %s: %s; truncating to shortest required list",
+            company.ticker,
+            required_lengths,
+        )
     count = min(len(forms), len(accession_numbers), len(filing_dates))
     filings: list[Filing] = []
     for idx in range(count):
@@ -298,6 +324,11 @@ def existing_document_is_reusable(
         return True
     fetched_at = parse_utc_datetime(existing_doc.get("fetched_at") if existing_doc else "")
     if fetched_at is None:
+        LOGGER.warning(
+            "Cached SEC filing document has invalid fetched_at; refetching accession=%s fetched_at=%r",
+            existing_doc.get("accession_nodash") if existing_doc else "",
+            existing_doc.get("fetched_at") if existing_doc else "",
+        )
         return False
     age_seconds = (now - fetched_at).total_seconds()
     return age_seconds <= text_ttl_hours * 3600.0
@@ -622,7 +653,7 @@ def main() -> None:
         raise ValueError("--asof must be a valid YYYY-MM-DD date.")
     cutoff = asof - timedelta(days=max(1, lookback_days))
     max_filings = int(cfg_get(config, "sec_filings.max_filings_per_company", 40))
-    fetch_text = bool(cfg_get(config, "sec_filings.fetch_text", True)) and not bool(args.skip_text)
+    fetch_text = as_bool(cfg_get(config, "sec_filings.fetch_text", True), True) and not bool(args.skip_text)
     max_workers = max(1, int(cfg_get(config, "sec_filings.max_workers", 1)))
     ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
     rows_out: list[dict[str, Any]] = []
@@ -705,6 +736,8 @@ def main() -> None:
                         result.text_errors,
                     )
             else:
+                if sync_kwargs.get("existing_documents_lock") is None:
+                    raise RuntimeError("SEC filing document cache lock is required when max_workers > 1")
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = {
                         executor.submit(sync_company, company, **sync_kwargs): (idx, company)

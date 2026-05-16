@@ -38,6 +38,8 @@ LOGGER = logging.getLogger("sync_market_data_ib")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 SOURCE = "interactive_brokers"
 SQLITE_PARAM_CHUNK_SIZE = 800
+MIN_RETURN_BASE_PRICE = 0.01
+INCREMENTAL_FETCH_BUFFER_DAYS = 3
 
 
 def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
@@ -244,7 +246,7 @@ def load_latest_shares(conn: sqlite3.Connection, company_id: int, asof_date: dat
 
 
 def pct_return(values: list[float], days: int) -> float | None:
-    if len(values) <= days or values[-days - 1] == 0:
+    if len(values) <= days or abs(values[-days - 1]) < MIN_RETURN_BASE_PRICE:
         return None
     return (values[-1] / values[-days - 1]) - 1.0
 
@@ -457,7 +459,8 @@ def merge_bar_rows(*groups: list[dict[str, Any]], asof_date: date) -> list[dict[
 def incremental_duration(latest_date: date | None, asof_date: date, *, default_duration: str, repair_window_days: int) -> str:
     if latest_date is None:
         return default_duration
-    missing_days = max(1, (asof_date - latest_date).days + 3)
+    # Add a short calendar-day buffer so weekend/holiday gaps and late adjustments are refetched.
+    missing_days = max(1, (asof_date - latest_date).days + INCREMENTAL_FETCH_BUFFER_DAYS)
     days = max(missing_days, repair_window_days)
     if days <= 7:
         return "1 W"

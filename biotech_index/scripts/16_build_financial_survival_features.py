@@ -478,6 +478,8 @@ def compute_survival_row(
     sgna_ttm = ttm_amount(rows, "sgna_expense", proxies)
     if rd_ttm is None:
         missing.append("rd_expense_ttm")
+    if sgna_ttm is None:
+        missing.append("sgna_expense_ttm")
 
     working_capital, wc_row = latest_nonnull(rows, "working_capital")
     current_assets, _ = latest_nonnull(rows, "current_assets")
@@ -506,6 +508,10 @@ def compute_survival_row(
 
     rd_growth_threshold = float(cfg_get(config, "financial_survival.rd_growth_threshold", 0.30))
     cash_decline_threshold = float(cfg_get(config, "financial_survival.cash_decline_threshold", -0.30))
+    if rd_yoy is None:
+        missing.append("rd_yoy_growth")
+    if cash_yoy is None:
+        missing.append("cash_yoy_change")
     burn_acceleration = int((rd_yoy is not None and rd_yoy > rd_growth_threshold) and (cash_yoy is not None and cash_yoy < cash_decline_threshold))
     short_runway_months = float(cfg_get(config, "financial_survival.short_runway_months", 6))
     severe_runway_months = float(cfg_get(config, "financial_survival.severe_runway_months", 3))

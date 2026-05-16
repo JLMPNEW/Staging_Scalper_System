@@ -6,6 +6,7 @@ from collections import Counter
 import csv
 import json
 import logging
+import re
 import sqlite3
 import sys
 import time
@@ -27,6 +28,19 @@ from biotech_index.core.text_norm import normalize_ticker
 LOGGER = logging.getLogger("audit_hard_remove_candidates")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 CONFIRM_TOKEN = "DELETE_INVALID_COMPANIES"
+SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SQL_RESERVED_WORDS = {
+    "delete",
+    "drop",
+    "from",
+    "index",
+    "insert",
+    "pragma",
+    "select",
+    "table",
+    "update",
+    "where",
+}
 
 SAFE_REASON_CODES = {
     "wrong_entity",
@@ -217,7 +231,14 @@ def load_candidates(path: Path | None, *, ticker_filter: set[str]) -> list[Candi
 
 
 def quote_ident(identifier: str) -> str:
-    return '"' + str(identifier).replace('"', '""') + '"'
+    text = str(identifier)
+    if "\x00" in text or any(ord(ch) < 32 for ch in text):
+        raise ValueError(f"Invalid SQL identifier contains control character: {identifier!r}")
+    if not SQL_IDENTIFIER_RE.fullmatch(text):
+        raise ValueError(f"Invalid SQL identifier: {identifier!r}")
+    if text.lower() in SQL_RESERVED_WORDS:
+        raise ValueError(f"SQL reserved word is not allowed as identifier: {identifier!r}")
+    return '"' + text.replace('"', '""') + '"'
 
 
 def connect_readonly(db_path: Path, *, timeout_sec: float) -> sqlite3.Connection:
@@ -334,6 +355,7 @@ def apply_db_purge(db_path: Path, *, ticker: str, company_id: int | None, timeou
     conn = sqlite3.connect(db_path, timeout=timeout_sec)
     try:
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA journal_mode=WAL")
         with conn:
             purge_candidate_on_connection(conn, ticker=ticker, company_id=company_id)
     finally:

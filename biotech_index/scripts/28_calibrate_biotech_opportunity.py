@@ -1210,6 +1210,12 @@ def load_observations(
     observations: list[dict[str, Any]] = []
     revenue_min = float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000.0))
     confidence_params = load_confidence_params(config)
+    missing_score_defaults = {
+        "commercial_value_score": float(cfg_get(config, "biotech_scoring.missing_score_defaults.commercial_value_score", 35.0)),
+        "forward_guidance_score": float(cfg_get(config, "biotech_scoring.missing_score_defaults.forward_guidance_score", 45.0)),
+        "valuation_score": float(cfg_get(config, "biotech_scoring.missing_score_defaults.valuation_score", 50.0)),
+        "upside_capacity_score": float(cfg_get(config, "biotech_scoring.missing_score_defaults.upside_capacity_score", 50.0)),
+    }
     for asof_date in dates:
         features = load_feature_rows(conn, asof_date, excluded_tickers)
         commercial_by_company = load_latest_table(
@@ -1257,10 +1263,16 @@ def load_observations(
                 "diag_raw_score_missing_count": float(len(missing_raw_score_fields)),
                 "diag_raw_score_missing_flag": 1.0 if missing_raw_score_fields else 0.0,
                 "diag_raw_score_missing_fields": "|".join(missing_raw_score_fields),
-                "commercial_value_score": clamp(to_float(commercial.get("commercial_value_score"), 35.0)),
-                "forward_guidance_score": clamp(to_float(forward.get("guidance_score"), 45.0)),
-                "valuation_score": clamp(to_float(commercial.get("valuation_score"), 50.0)),
-                "upside_capacity_score": clamp(to_float(commercial.get("upside_capacity_score"), 50.0)),
+                "commercial_value_score": clamp(
+                    to_float(commercial.get("commercial_value_score"), missing_score_defaults["commercial_value_score"])
+                ),
+                "forward_guidance_score": clamp(
+                    to_float(forward.get("guidance_score"), missing_score_defaults["forward_guidance_score"])
+                ),
+                "valuation_score": clamp(to_float(commercial.get("valuation_score"), missing_score_defaults["valuation_score"])),
+                "upside_capacity_score": clamp(
+                    to_float(commercial.get("upside_capacity_score"), missing_score_defaults["upside_capacity_score"])
+                ),
             }
             observation.update(
                 build_binary_weakness_fields(

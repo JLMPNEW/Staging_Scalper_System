@@ -227,7 +227,11 @@ def parse_bool(raw: object, *, default: bool = False) -> bool:
     text = str(raw or "").strip().lower()
     if not text:
         return default
-    return text in {"1", "true", "yes", "y"}
+    if text in {"1", "true", "t", "yes", "y", "enabled", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
+        return False
+    return default
 
 
 def row_get(row: dict[str, str], *keys: str) -> str:
@@ -422,6 +426,8 @@ def dedupe_query_hits(hits: Iterable[QueryHit]) -> list[QueryHit]:
 def upsert_trial(conn: sqlite3.Connection, study: dict[str, Any], *, asof_date: str | None = None) -> bool:
     parsed = parse_study(study)
     if parsed is None:
+        identification = study.get("protocolSection", {}).get("identificationModule", {}) if isinstance(study, dict) else {}
+        LOGGER.warning("Skipping malformed CTGov study; nct_id=%s", identification.get("nctId", ""))
         return False
     now = utc_now()
     conn.execute(
