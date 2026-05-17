@@ -111,6 +111,21 @@ def parse_date(raw: object) -> date | None:
         return None
 
 
+def compact_asof(asof: str) -> str:
+    parsed = parse_date(asof)
+    return parsed.strftime("%Y%m%d") if parsed is not None else str(asof).replace("-", "")
+
+
+def dated_output_file(base_dir: Path, asof: str, filename: str) -> Path:
+    dated_dir = base_dir if base_dir.name == compact_asof(asof) else base_dir / compact_asof(asof)
+    return dated_dir / filename
+
+
+def output_file_with_dated_fallback(base_dir: Path, asof: str, filename: str) -> Path:
+    root_file = base_dir / filename
+    return root_file if root_file.exists() else dated_output_file(base_dir, asof, filename)
+
+
 def as_bool(raw: object, default: bool = False) -> bool:
     if raw is None:
         return default
@@ -126,13 +141,62 @@ def parse_string_list(raw: object, default: list[str] | None = None) -> list[str
     if raw is None:
         return list(default or [])
     if isinstance(raw, str):
-        parts = raw.replace(";", ",").split(",")
+        parts = raw.replace(";", ",").replace("|", ",").split(",")
     elif isinstance(raw, (list, tuple, set)):
         parts = [str(item) for item in raw]
     else:
         parts = [str(raw)]
     values = [part.strip() for part in parts if part.strip()]
     return values or list(default or [])
+
+
+def validate_config(config: dict[str, Any]) -> None:
+    optional_defaults = {
+        "governance_events.form4_required": True,
+        "governance_events.reuse_unchanged_historical": False,
+        "biotech_refresh.step_timeout_sec": 7200.0,
+        "calibration.exclude_tickers": [],
+    }
+    for key, default in optional_defaults.items():
+        if cfg_get(config, key, None) is None:
+            LOGGER.warning("Config key %s is missing; defaulting to %r", key, default)
+
+    biotech_buckets = cfg_get(config, "biotech_scoring.buckets", {}) or {}
+    if biotech_buckets:
+        watch = float(biotech_buckets.get("watchlist_min", 60.0))
+        speculative = float(biotech_buckets.get("speculative_min", 45.0))
+        if watch <= speculative:
+            raise RuntimeError(
+                "Invalid biotech_scoring.buckets thresholds: watchlist_min must exceed speculative_min."
+            )
+
+    multibagger = cfg_get(config, "multibagger", {}) or {}
+    if multibagger:
+        weights = multibagger.get("weights", {}) if isinstance(multibagger.get("weights", {}), dict) else {}
+        positive_weight_keys = [
+            "commercial_acceleration",
+            "upside_capacity",
+            "cash_flow_acceleration",
+            "survival_quality",
+            "governance_event",
+            "market_confirmation",
+            "catalyst_quality",
+        ]
+        positive_total = sum(float(weights.get(key, 0.0)) for key in positive_weight_keys)
+        if weights and abs(positive_total - 1.0) > 1e-6:
+            LOGGER.warning(
+                "multibagger positive component weights sum to %.6f; scoring normalizes them to 1.0 at runtime.",
+                positive_total,
+            )
+        max_spec = float(multibagger.get("max_speculative_risk", 75.0))
+        avoid = float(multibagger.get("avoid_risk_min", 75.0))
+        if avoid <= max_spec:
+            LOGGER.warning(
+                "multibagger.avoid_risk_min (%s) is <= max_speculative_risk (%s); "
+                "boundary-risk names may fall to avoid by default.",
+                avoid,
+                max_spec,
+            )
 
 
 def parse_clock_time(raw: object, default: str = "16:15") -> dt_time:
@@ -257,17 +321,35 @@ def snapshot_direct_output_files(
     }
     snapshot_dir = snapshot_root / asof.replace("-", "")
     snapshot_dir.mkdir(parents=True, exist_ok=True)
+    run_start = datetime.fromisoformat(run_started_at.replace("Z", "+00:00"))
+    source_files = [
+        source
+        for source in sorted(list(source_dir.iterdir()), key=lambda item: item.name.lower())
+        if source.is_file() and source.suffix.lower() in include_extensions
+    ]
+    source_names = {source.name for source in source_files}
 
     copied_files: list[dict[str, Any]] = []
     for stale in list(snapshot_dir.iterdir()):
-        if stale.is_file() and (stale.suffix.lower() in include_extensions or stale.name == "snapshot_manifest.json"):
+        if stale.is_file() and stale.name == "snapshot_manifest.json":
+            stale.unlink()
+            continue
+        if (
+            stale.is_file()
+            and stale.suffix.lower() in include_extensions
+            and stale.name not in source_names
+            and datetime.fromtimestamp(stale.stat().st_mtime, timezone.utc) < run_start
+        ):
+            LOGGER.info("Removing stale dated snapshot file not refreshed in this run: %s", stale)
             stale.unlink()
 
-    for source in sorted(list(source_dir.iterdir()), key=lambda item: item.name.lower()):
-        if not source.is_file() or source.suffix.lower() not in include_extensions:
-            continue
+    for source in source_files:
         target = snapshot_dir / source.name
-        shutil.copy2(source, target)
+        action = "copied"
+        if target.exists() and target.stat().st_mtime >= source.stat().st_mtime:
+            action = "kept_existing_newer_or_equal"
+        else:
+            shutil.copy2(source, target)
         try:
             stat = target.stat()
             digest = file_sha256(target)
@@ -280,6 +362,7 @@ def snapshot_direct_output_files(
                 "size_bytes": stat.st_size,
                 "sha256": digest,
                 "last_write_time_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0).isoformat(),
+                "snapshot_action": action,
             }
         )
 
@@ -737,8 +820,16 @@ def validate_final_outputs(
     biotech_output_dir = resolve_path(cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
     biotech_reports_output_dir = resolve_path(cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
     multibagger_output_dir = resolve_path(cfg_get(config, "multibagger.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
-    biotech_scores_csv = biotech_output_dir / str(cfg_get(config, "biotech_scoring.output_csv", "biotech_daily_scores.csv"))
-    biotech_top_candidates_csv = biotech_reports_output_dir / str(cfg_get(config, "biotech_reports.top_candidates_csv", "biotech_top_candidates.csv"))
+    biotech_scores_csv = output_file_with_dated_fallback(
+        biotech_output_dir,
+        asof,
+        str(cfg_get(config, "biotech_scoring.output_csv", "biotech_daily_scores.csv")),
+    )
+    biotech_top_candidates_csv = output_file_with_dated_fallback(
+        biotech_reports_output_dir,
+        asof,
+        str(cfg_get(config, "biotech_reports.top_candidates_csv", "biotech_top_candidates.csv")),
+    )
     multibagger_scores_csv = multibagger_output_dir / str(cfg_get(config, "multibagger.scores_csv", "biotech_multibagger_scores.csv"))
     multibagger_candidates_csv = multibagger_output_dir / str(cfg_get(config, "multibagger.candidates_csv", "biotech_multibagger_candidates.csv"))
     preferred_market_sources = {
@@ -825,6 +916,7 @@ def main() -> None:
     args = parse_args()
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
+    validate_config(config)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     if args.asof:

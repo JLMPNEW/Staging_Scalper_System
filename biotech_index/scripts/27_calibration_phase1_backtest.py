@@ -238,16 +238,11 @@ def load_snapshot_dates(
 def load_excluded_tickers(conn: sqlite3.Connection, *, exclude_current_removals: bool, extra: set[str]) -> set[str]:
     out = set(extra)
     if exclude_current_removals:
-        rows = conn.execute(
-            """
-            SELECT ticker
-            FROM companies
-            WHERE is_active = 0
-               OR LOWER(COALESCE(universe_status, '')) = 'remove'
-               OR LOWER(COALESCE(manual_exclude, '')) IN ('1', 'true', 't', 'yes', 'y')
-            """
-        ).fetchall()
-        out.update(ticker for row in rows if (ticker := normalize_ticker(row["ticker"])))
+        raise ValueError(
+            "calibration.phase1.exclude_current_removals is disabled because current removal status "
+            "retroactively excludes historical snapshots. Use calibration.exclude_tickers for explicit "
+            "non-temporal exclusions until removal_date history is available."
+        )
     return {ticker for ticker in out if ticker}
 
 
@@ -531,6 +526,7 @@ def spearman_from_pairs(pairs: list[tuple[float, float]]) -> float | None:
 
 
 def linear_residual_pairs(rows: Iterable[dict[str, Any]], predictor_key: str, y_key: str, residual_score_key: str) -> list[tuple[float, float]]:
+    rows = list(rows)
     base_pairs = numeric_pairs(rows, predictor_key, y_key)
     if len(base_pairs) < 3:
         return []
@@ -1550,7 +1546,11 @@ def main() -> None:
         args.output_dir.expanduser().resolve()
         if args.output_dir
         else resolve_path(
-            cfg_get(config, "calibration.phase1_output_dir", "../output/biotech_index_reports/calibration_phase1"),
+            cfg_get(
+                config,
+                "calibration.phase1.output_dir",
+                cfg_get(config, "calibration.phase1_output_dir", "../output/biotech_index_reports/calibration_phase1"),
+            ),
             base_dir=base_dir,
         )
     )

@@ -141,7 +141,11 @@ def resolve_report_input_csv(configured_path: Path, *, base_output_dir: Path, as
         return dated_candidate
     candidates = sorted(
         base_output_dir.glob(f"*/{configured_path.name}"),
-        key=lambda path: path.stat().st_mtime,
+        key=lambda path: (
+            1 if path.parent.name.isdigit() and len(path.parent.name) == 8 else 0,
+            path.parent.name,
+            path.stat().st_mtime,
+        ),
         reverse=True,
     )
     if candidates:

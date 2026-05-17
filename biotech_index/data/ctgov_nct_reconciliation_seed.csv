@@ -1,0 +1,92 @@
+enabled,ticker,nct_id,expected_company,candidate,expected_relation,notes
+true,CRSP,NCT06925542,CRISPR Therapeutics,CTX112,sponsor,Autoimmune disease study supplied for NCT-first validation
+true,BMRN,NCT07126262,BioMarin,Vosoritide,sponsor,Hypochondroplasia infants study supplied for NCT-first validation
+true,ACAD,NCT07095465,Acadia Pharma,ACP-204,sponsor,Lewy Body Dementia psychosis extension supplied for NCT-first validation
+true,KROS,NCT05037760,Keros Therapeutics,KER-050,program,Reported KER-050 MDS study; verify sponsor/program ownership before treating as active Keros evidence
+true,VCEL,NCT06705478,Vericel Corp,MACI,sponsor,MACI cartilage repair platform study supplied for NCT-first validation
+true,BIIB,NCT07259980,Biogen,novel neuro-candidates,sponsor,Biogen Center Phase 1 study supplied for NCT-first validation
+true,PCRX,NCT07584915,Pacira BioSciences,EXPAREL,sponsor,EXPAREL post-surgical pain study supplied for NCT-first validation
+true,IMCR,NCT05315217,Immunocore,IMC-F106C,sponsor,PRAME advanced solid tumors study supplied for NCT-first validation
+true,TARS,NCT05675891,Tarsus Pharma,TP-03,sponsor,Carpo Meibomian Gland Disease study supplied for NCT-first validation
+true,COLL,NCT04996605,Collegium Pharma,Xtampza ER,sponsor,Observational Xtampza ER utilization study supplied for validation; likely non-interventional
+true,NVAX,NCT06291857,Novavax,COVID-19 + Influenza Combination vaccine,sponsor,Combination vaccine Phase 3 supplied for NCT-first validation
+true,UTHR,NCT05943535,United Therapeutics,Tyvaso,sponsor,TETON-PPF study supplied for NCT-first validation
+true,KRYS,NCT07016750,Krystal Biotech,KB803,sponsor,IOLITE/KB803 claim supplied for validation; verify title/candidate
+true,ARVN,NCT07023731,Arvinas,ARV-806,sponsor,KRAS mutation cancer study supplied for NCT-first validation
+true,EXEL,NCT06630247,Exelixis,Cabozantinib,sponsor,Reported STELLAR/CONTACT cabozantinib trial; verify exact NCT/status
+true,MNKD,NCT06418711,MannKind,MNKD-101,sponsor,ICoN-1 MNKD-101 study supplied for NCT-first validation
+true,BCRX,NCT07228559,BioCryst,Avoralstat,sponsor,DME avoralstat study supplied for NCT-first validation
+true,AUPH,NCT03597464,Aurinia Pharma,Voclosporin,sponsor,AURORA 2 extension study supplied for NCT-first validation
+true,LLY,NCT07219953,Eli Lilly,Brenipatide,sponsor,Alcohol Use Disorder study supplied for NCT-first validation
+true,BMY,NCT06951711,Bristol Myers Squibb,KarXT,sponsor,BALSAM-2 Bipolar I study supplied for NCT-first validation
+true,VRTX,NCT06832410,Vertex Pharma,VX-880,sponsor,Type 1 Diabetes islet-cell study supplied for NCT-first validation
+true,AMGN,NCT04257953,Amgen,AMG 510,sponsor,CodeBreaK 101 study supplied for NCT-first validation
+true,REGN,NCT04513953,Regeneron,REGN5458,sponsor,Linvoseltamab myeloma study supplied for NCT-first validation
+true,ALNY,NCT07052903,Alnylam,Nucresiran,sponsor,TRITON-CM study supplied for NCT-first validation
+true,NUVL,NCT07154706,Nuvalent,Taletrectinib,sponsor,Reported Nuvalent taletrectinib trial; verify ticker/company ownership
+true,NUVB,NCT05303519,Nuvation Bio,Safusidenib,sponsor,SIGMA glioma study supplied for NCT-first validation
+true,ARCT,NCT06488313,Arcturus,ARCT-810,sponsor,OTC deficiency study supplied for NCT-first validation
+true,BLTE,NCT05244304,Belite Bio,Tinlarebant,sponsor,DRAGON Stargardt Disease study supplied for NCT-first validation
+true,MAZE,NCT06830629,Maze Therapeutics,MZE829,sponsor,APOL1 kidney disease study supplied for NCT-first validation
+true,TBPH,NCT05696717,Theravance,Ampreloxetine,sponsor,CYPRESS MSA study supplied for NCT-first validation
+true,AMRX,NCT04381299,Amneal Pharma,IPX-203,sponsor,IPX-203 Parkinson extension/safety study supplied for validation
+true,PCVX,NCT05267506,Vaxcyte,VAX-24,sponsor,VAX-24 pneumococcal vaccine study supplied for NCT-first validation
+true,BCYC,NCT04561362,Bicycle Therapeutics,BT8009,sponsor,BT8009 advanced solid tumors study supplied for NCT-first validation
+true,ONC,NCT06742996,BeOne Medicines,Sonrotoclax,sponsor,BeOne sonrotoclax MCL study supplied for NCT-first validation
+true,ONC,NCT07414836,BeOne Medicines,BG-C0979,sponsor,BeOne BG-C0979 study supplied for NCT-first validation
+true,ONC,NCT06427941,BeOne Medicines,BGB-B2033,sponsor,BeOne BGB-B2033 study supplied for NCT-first validation
+true,ONC,NCT06589596,BeOne Medicines,BGB-58067,sponsor,BeOne BGB-58067 study supplied for NCT-first validation
+true,ONC,NCT06120283,BeOne Medicines,BGB-43395,sponsor,BeOne BGB-43395 study supplied for NCT-first validation
+true,CAI,NCT02678754,Caris Life Sciences,Caris Molecular Intelligence,registry,Caris molecular registry supplied for validation; likely observational/non-scoring
+true,CAI,NCT01499394,Caris Life Sciences,Caris Biorepository,registry,Caris biorepository supplied for validation; likely observational/non-scoring
+true,CAI,NCT05580562,Caris Life Sciences,ONC201,profiling_partner,ACTION glioma study sponsored by Jazz; verify whether Caris link is evidence-supported
+false,INCY,NCT05494615,Incyte,Ruxolitinib cream,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,GILD,NCT05186318,Gilead Sciences,Trodelvy,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,BEAM,NCT05456880,Beam Therapeutics,BEAM-101,sponsor,Batch 2 audit 2026-05-16: already present and linked; no DB update needed
+false,VTRS,NCT05552963,Viatris,Glatiramer Acetate depot,sponsor,Batch 2 audit 2026-05-16: CTGov status COMPLETED; do not apply to scoring
+false,CORT,NCT04832903,Corcept Therapeutics,Relacorilant,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,ADCT,NCT05151696,ADC Therapeutics,Zynlonta,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,PTGX,NCT05251269,Protagonist Therapeutics,Rusfertide,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,ANIP,NCT04902872,ANI Pharmaceuticals,Cortrophin Gel,sponsor,Batch 2 audit 2026-05-16: CTGov status COMPLETED and lead sponsor Cybrexa Therapeutics; do not apply
+false,ALT,NCT05677092,Altimmune,Pemvidutide,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,XERS,NCT04784251,Xeris Biopharma,Xeris Levodopa,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,IONS,NCT04865231,Ionis Pharmaceuticals,Olezarsen,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,MIRM,NCT05061784,Mirum Pharmaceuticals,Volixibat,sponsor,Batch 2 audit 2026-05-16: CTGov status COMPLETED and observational; do not apply
+false,INDV,NCT04801047,Indivior,Sublocade,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,TNGX,NCT05663156,Tango Therapeutics,TNG908,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,RYTM,NCT05141465,Rhythm Pharmaceuticals,Setmelanotide,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,IDYA,NCT04590963,Ideaya Biosciences,Darovasertib,sponsor,Batch 2 audit 2026-05-16: wrong-company/manual-review; CTGov lead sponsor AstraZeneca
+false,VERA,NCT05455957,Vera Therapeutics,Atacicept,sponsor,Batch 2 audit 2026-05-16: CTGov status COMPLETED and lead sponsor Yeditepe University; do not apply
+false,SMMT,NCT05434952,Summit Therapeutics,Ivonescimab,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,ALKS,NCT05378880,Alkermes,Nemvaleukin alfa,sponsor,Batch 2 audit 2026-05-16: CTGov status COMPLETED and unrelated sponsor; do not apply
+false,GMAB,NCT05069116,Genmab,Epcoritamab,sponsor,Batch 2 audit 2026-05-16: CTGov status COMPLETED and observational; do not apply
+false,PBYI,NCT04857210,Puma Biotechnology,Alisertib,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,ORGO,NCT05025589,Organogenesis,ReNu,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,GLUE,NCT05263255,Monte Rosa Therapeutics,MRT-2359,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,CGON,NCT04610671,CG Oncology,Cretostimogene Grenadenorep,sponsor,Batch 2 audit 2026-05-16: already in DB but CTGov status COMPLETED; do not score as active
+false,WVE,NCT05399888,Wave Life Sciences,WVE-N531,sponsor,Batch 2 audit 2026-05-16: wrong-company/manual-review; CTGov lead sponsor Biogen
+false,AMLX,NCT05021536,Amylyx Pharmaceuticals,AMX0035,sponsor,Batch 2 audit 2026-05-16: already present and linked; no DB update needed
+false,XENE,NCT05663754,Xenon Pharmaceuticals,XEN1101,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,NAMS,NCT05633620,NewAmsterdam Pharma,Obicetrapib,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,JAZZ,NCT04661475,Jazz Pharmaceuticals,Zanidatamab,sponsor,Batch 2 audit 2026-05-16: CTGov status UNKNOWN and unrelated sponsor; do not apply
+false,IRON,NCT05564247,Disc Medicine,Bitopertin,sponsor,Batch 2 audit 2026-05-16: wrong-company/manual-review; CTGov lead sponsor Laval University
+false,MBX,NCT07584915,MBX Biosciences,MBX 2109,sponsor,Batch 2 audit 2026-05-16: wrong-company/manual-review; CTGov lead sponsor Cedars-Sinai and NCT duplicates prior PCRX item
+false,NPCE,NCT02755652,NeuroPace,RNS System,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,AXSM,NCT04970020,Axsome Therapeutics,AXS-05,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,ANRO,NCT05670475,Alto Neuroscience,ALTO-100,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,MRK,NCT05187332,Merck & Co,Pembrolizumab and Vibostolimab,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,ROIV,NCT05279531,Roivant Sciences,Batoclimab,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,CNTX,NCT05476575,Context Therapeutics,ONA-XR,sponsor,Batch 2 audit 2026-05-16: CTGov status COMPLETED and unrelated sponsor; do not apply
+false,ABBV,NCT04677260,AbbVie,Skyrizi,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,NKTX,NCT05286801,Nkarta,NKX019,sponsor,Batch 2 audit 2026-05-16: wrong-company/manual-review; CTGov lead sponsor NCI
+false,ELVN,NCT05659929,Enliven Therapeutics,ELVN-001,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,CRBP,NCT05718167,Corbus Pharmaceuticals,CRB-701,sponsor,Batch 2 audit 2026-05-16: CTGov status UNKNOWN and unrelated sponsor; do not apply
+false,NBTX,NCT03589339,Nanobiotix,NBTXR3,sponsor,Batch 2 audit 2026-05-16: already present and linked; no DB update needed
+false,SLNO,NCT03440814,Soleno Therapeutics,DCCR,sponsor,Batch 2 audit 2026-05-16: already in DB but CTGov status COMPLETED; do not score as active
+false,IQV,NCT03800991,IQVIA,Real-world data registry,service_provider,Batch 2 audit 2026-05-16: missing_from_ctgov; service-provider relation not scoring evidence
+false,PSNL,NCT04653789,Personalis,NeXT Liquid Biopsy,service_provider,Batch 2 audit 2026-05-16: missing_from_ctgov; service-provider relation not scoring evidence
+false,IART,NCT04224764,Integra LifeSciences,PriMatrix,device_or_registry,Batch 2 audit 2026-05-16: missing_from_ctgov; device/registry relation not scoring evidence
+false,TMO,NCT03434613,Thermo Fisher,Oncomine test,diagnostic_provider,Batch 2 audit 2026-05-16: CTGov status COMPLETED and unrelated sponsor; provider relation not scoring evidence
+false,CELC,NCT04439103,Celcuity,Gedatolisib,sponsor,Batch 2 audit 2026-05-16: missing_from_ctgov; do not apply until NCT is corrected
+false,NVCR,NCT04471844,NovoCure,TTFields,sponsor,Batch 2 audit 2026-05-16: already in DB but CTGov status COMPLETED; do not score as active
+false,CVRX,NCT03463616,CVRx,Barostim Neo,sponsor,Batch 2 audit 2026-05-16: CTGov status COMPLETED and observational; do not apply

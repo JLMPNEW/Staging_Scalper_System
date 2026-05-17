@@ -122,3 +122,26 @@ JSPR,NCT06353971,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NC
 JSPR,NCT06736262,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
 KRRO,NCT06677307,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
 PASG,NCT04747431,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
+CRSP,NCT06925542,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+BMRN,NCT07126262,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+ACAD,NCT07095465,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+KROS,NCT05037760,query.term,manual_nct_reconcile_20260516_review,0.95,false,Exact NCT refresh seed pending program-owner review; does not create program link.
+PCRX,NCT07584915,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=collaborator
+NVAX,NCT06291857,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+UTHR,NCT05943535,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+KRYS,NCT07016750,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+ARVN,NCT07023731,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+LLY,NCT07219953,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+BMY,NCT06951711,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+VRTX,NCT06832410,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+ALNY,NCT07052903,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+NUVB,NCT05303519,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+ARCT,NCT06488313,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+MAZE,NCT06830629,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+TBPH,NCT05696717,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+BCYC,NCT04561362,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+ONC,NCT06742996,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+ONC,NCT07414836,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+ONC,NCT06427941,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+ONC,NCT06589596,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+ONC,NCT06120283,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead

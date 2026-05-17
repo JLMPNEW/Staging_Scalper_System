@@ -995,16 +995,11 @@ def load_snapshot_dates(
 def load_excluded_tickers(conn: sqlite3.Connection, *, exclude_current_removals: bool, extra: set[str]) -> set[str]:
     out = set(extra)
     if exclude_current_removals:
-        rows = conn.execute(
-            """
-            SELECT ticker
-            FROM companies
-            WHERE is_active = 0
-               OR LOWER(COALESCE(universe_status, '')) = 'remove'
-               OR LOWER(COALESCE(manual_exclude, '')) IN ('1', 'true', 't', 'yes', 'y')
-            """
-        ).fetchall()
-        out.update(ticker for row in rows if (ticker := normalize_ticker(row["ticker"])))
+        raise ValueError(
+            "calibration.tier1.exclude_current_removals is disabled because current removal status "
+            "retroactively excludes historical snapshots. Use calibration.exclude_tickers for explicit "
+            "non-temporal exclusions until removal_date history is available."
+        )
     return {ticker for ticker in out if ticker}
 
 
@@ -1397,7 +1392,8 @@ def score_observation(row: dict[str, Any], spec: WeightSpec, params: Calibration
     catalyst = clamp(to_float(row.get("catalyst_score_raw")))
     credibility = clamp(to_float(row.get("credibility_score_raw")))
     financial_quality = clamp(to_float(row.get("financial_quality_score_raw")))
-    risk = clamp(to_float(row.get("risk_score_raw")))
+    risk_raw = to_float(row.get("risk_score_raw"))
+    risk = clamp(risk_raw if risk_raw is not None else 100.0)
     momentum = clamp(to_float(row.get("momentum_score_raw")))
     clinical_positive = (
         spec.clinical_catalyst * catalyst
@@ -1831,7 +1827,8 @@ def policy_adjusted_score(
     params: CalibrationParams,
 ) -> tuple[float | None, dict[str, float]]:
     scores = score_observation(row, spec, params)
-    risk = clamp(to_float(row.get("risk_score_raw")))
+    risk_raw = to_float(row.get("risk_score_raw"))
+    risk = clamp(risk_raw if risk_raw is not None else 100.0)
     if policy.max_risk_score is not None and risk > policy.max_risk_score:
         return None, scores
     hard_reasons = set(reason_tuple(row.get("diag_hard_weakness_reasons")))

@@ -829,6 +829,7 @@ CREATE INDEX IF NOT EXISTS idx_daily_scores_asof_rank ON daily_scores(asof_date,
 """
 
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SAFE_COLUMN_TYPE_RE = re.compile(r"^[A-Z][A-Z0-9_]*(?:\s+[A-Z0-9_()'.+-]+)*$")
 
 
 def quote_identifier(identifier: str) -> str:
@@ -1087,8 +1088,11 @@ def ensure_table_optional_columns(conn: sqlite3.Connection, table_name: str, col
     table_sql = quote_identifier(table_name)
     for column, column_type in columns.items():
         if column not in existing:
+            normalized_type = str(column_type or "").strip().upper()
+            if not SAFE_COLUMN_TYPE_RE.fullmatch(normalized_type):
+                raise ValueError(f"Unsafe SQLite column type for {table_name}.{column}: {column_type!r}")
             column_sql = quote_identifier(column)
-            conn.execute(f"ALTER TABLE {table_sql} ADD COLUMN {column_sql} {column_type}")
+            conn.execute(f"ALTER TABLE {table_sql} ADD COLUMN {column_sql} {normalized_type}")
 
 
 def _run_schema_migration(conn: sqlite3.Connection, name: str, callback) -> None:

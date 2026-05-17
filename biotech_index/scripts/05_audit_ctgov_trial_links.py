@@ -456,8 +456,8 @@ def classify_trial(
     has_collab = "collaborator" in roles
     is_active = status in active_statuses
     last_update_days = days_since(row["last_update_post_date"], asof_date=asof_date)
-    completed_stale = status == "COMPLETED" and last_update_days is not None and last_update_days > completed_stale_days
-    active_stale = is_active and last_update_days is not None and last_update_days > stale_days
+    completed_stale = status == "COMPLETED" and (last_update_days is None or last_update_days > completed_stale_days)
+    active_stale = is_active and (last_update_days is None or last_update_days > stale_days)
     is_interventional = str(row["study_type"] or "").upper() == "INTERVENTIONAL"
     pivotal = rank == 3 or bool(contains_any(text, ["pivotal", "registrational", "phase 2/3", "phase ii/iii"]))
     therapeutic_type_hit = bool(set(intervention_types) & therapeutic_types)

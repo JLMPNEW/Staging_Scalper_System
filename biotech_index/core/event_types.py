@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-CTGOV_EVENT_TYPES = {
+CTGOV_EVENT_TYPES = frozenset({
     "new_trial_added",
     "status_changed",
     "entered_recruiting",
@@ -12,9 +12,9 @@ CTGOV_EVENT_TYPES = {
     "results_posted",
     "primary_completion_date_changed",
     "enrollment_changed",
-}
+})
 
-SEC_EVENT_TYPES = {
+SEC_EVENT_TYPES = frozenset({
     "financing_shelf",
     "shelf_registration",
     "atm_program",
@@ -37,6 +37,10 @@ SEC_EVENT_TYPES = {
     "pdufa_date",
     "regulatory_submission",
     "fda_feedback",
-}
+    "fda_approval",
+    "fda_rejection",
+    "complete_response_letter",
+    "fast_track_designation",
+})
 
-POLARITIES = {"positive", "negative", "neutral", "mixed"}
+POLARITIES = frozenset({"positive", "negative", "neutral", "mixed"})

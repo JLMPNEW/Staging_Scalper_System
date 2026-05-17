@@ -8,25 +8,16 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from biotech_index.core.text_norm import normalize_ticker
+
 
 TRUE_VALUES = {"1", "true", "t", "yes", "y"}
 DATE_PREFIX_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:$|[T\s])")
-TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{0,14}$")
 LOGGER = logging.getLogger(__name__)
 
 
 def as_bool(raw: object) -> bool:
     return str(raw or "").strip().lower() in TRUE_VALUES
-
-
-def normalize_ticker(raw: object) -> str:
-    ticker = str(raw or "").strip().upper().replace(".", "-")
-    if not ticker:
-        return ""
-    if not TICKER_RE.fullmatch(ticker):
-        LOGGER.debug("Invalid ticker value ignored: %r", raw)
-        return ""
-    return ticker
 
 
 def split_ticker_filter(raw: object) -> set[str]:

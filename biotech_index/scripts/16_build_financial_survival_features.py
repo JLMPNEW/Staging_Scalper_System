@@ -465,9 +465,11 @@ def compute_survival_row(
     latest_period_end = str((cash_row or rows[0] if rows else {}).get("period_end") or "")
 
     quarterly_burn, ttm_burn, ocf_ttm = burn_metrics(rows, proxies, missing)
-    if ttm_burn is not None and ttm_burn > 0 and cash is not None:
+    if cash is not None and cash <= 0:
+        runway = 0.0
+    elif ttm_burn is not None and ttm_burn > 0 and cash is not None:
         runway = cash / (ttm_burn / 12.0)
-    elif ocf_ttm is not None and ocf_ttm >= 0 and cash is not None:
+    elif ocf_ttm is not None and ocf_ttm > 0 and cash is not None:
         runway = 999.0
         proxies.append("positive_operating_cash_flow_runway_cap")
     else:

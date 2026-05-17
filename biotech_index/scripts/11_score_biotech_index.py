@@ -142,6 +142,16 @@ def to_float(raw: object, default: float = 0.0) -> float:
     return value if math.isfinite(value) else default
 
 
+def finite_value_or_blank(raw: object) -> float | str:
+    value = to_float(raw, math.nan)
+    return value if math.isfinite(value) else ""
+
+
+def finite_value_or_none(raw: object) -> float | None:
+    value = to_float(raw, math.nan)
+    return value if math.isfinite(value) else None
+
+
 def parse_json(raw: object) -> dict[str, Any]:
     try:
         payload = json.loads(str(raw or "{}"))
@@ -323,9 +333,15 @@ def tier1_production_baseline(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def production_policy_settings(config: dict[str, Any]) -> dict[str, Any]:
+    event_hard_penalty = cfg_get(config, "biotech_scoring.production_policy.event_hard_penalty", None)
+    soft_weakness_penalty = cfg_get(config, "biotech_scoring.production_policy.soft_weakness_penalty", None)
+    if event_hard_penalty is None:
+        raise ValueError("Missing required config key biotech_scoring.production_policy.event_hard_penalty")
+    if soft_weakness_penalty is None:
+        raise ValueError("Missing required config key biotech_scoring.production_policy.soft_weakness_penalty")
     return {
-        "event_hard_penalty": float(cfg_get(config, "biotech_scoring.production_policy.event_hard_penalty", 0.0)),
-        "soft_weakness_penalty": float(cfg_get(config, "biotech_scoring.production_policy.soft_weakness_penalty", 0.0)),
+        "event_hard_penalty": float(event_hard_penalty),
+        "soft_weakness_penalty": float(soft_weakness_penalty),
         "event_hard_reasons": set(
             parse_string_list(
                 cfg_get(config, "biotech_scoring.production_policy.event_hard_reasons", EVENT_HARD_WEAKNESS_DEFAULT_REASONS),
@@ -603,7 +619,8 @@ def investment_weight_profile(config: dict[str, Any], commercial: dict[str, Any]
     profile_name = "commercial_stage" if commercial_stage or profitable or ttm_revenue >= revenue_min else "clinical_stage"
     profiles = cfg_get(config, "biotech_scoring.investment_weight_profiles", {}) or {}
     fallback = cfg_get(config, "biotech_scoring.investment_weights", {}) or {}
-    raw_weights = dict(profiles.get(profile_name) or fallback)
+    raw_profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
+    raw_weights = dict(raw_profile if raw_profile is not None else fallback)
     if "commercial_value" not in raw_weights and "commercial_quality" in raw_weights:
         LOGGER.warning(
             "biotech_scoring.investment_weight_profiles.%s.commercial_quality is deprecated; rename to commercial_value",
@@ -639,14 +656,15 @@ def score_rows(
     config: dict[str, Any],
     commercial_by_company: dict[int, dict[str, Any]],
     forward_by_company: dict[int, dict[str, Any]],
-    governance_by_company: dict[int, dict[str, Any]],
+    governance_by_company: dict[int, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    governance_by_company = governance_by_company or {}
     weights = cfg_get(config, "biotech_scoring.weights", {}) or {}
     catalyst_w = float(weights.get("catalyst", 0.45))
     credibility_w = float(weights.get("credibility", 0.30))
     financial_w = float(weights.get("financial_quality", 0.15))
     momentum_w = float(weights.get("momentum", 0.10))
-    risk_w = float(weights.get("risk_penalty", 0.35))
+    risk_w = float(weights.get("risk_penalty", 0.30))
 
     investment_enabled = as_bool(cfg_get(config, "biotech_scoring.use_investment_score", True), True)
     core_veto_settings = core_structural_veto_settings(config)
@@ -864,8 +882,8 @@ def score_rows(
                 "going_concern_status": sec_liq.get("going_concern_status", ""),
                 "reverse_split_hits_2y": sec_liq.get("reverse_split_hits_2y", 0),
                 "median_addv20": sec_liq.get("median_addv20", 0),
-                "cash_runway_months": survival.get("cash_runway_months", 0),
-                "financial_survival_score": survival.get("financial_survival_score", 0),
+                "cash_runway_months": finite_value_or_none(survival.get("cash_runway_months")),
+                "financial_survival_score": finite_value_or_none(survival.get("financial_survival_score")),
                 "financial_data_quality": survival.get("data_quality", ""),
                 "sec_dilution_event_count": sec_events.get("dilution_event_count", 0) if isinstance(sec_events, dict) else 0,
                 "sec_negative_clinical_event_count": sec_events.get("negative_clinical_event_count", 0) if isinstance(sec_events, dict) else 0,
@@ -928,8 +946,8 @@ def score_rows(
                 "collaborator_heavy_flag": ctgov.get("collaborator_heavy_flag", False),
                 "active_pivotal_trials": ctgov.get("active_pivotal_trials", 0),
                 "median_addv20": sec_liq.get("median_addv20", 0),
-                "cash_runway_months": survival.get("cash_runway_months", ""),
-                "financial_survival_score": survival.get("financial_survival_score", ""),
+                "cash_runway_months": finite_value_or_blank(survival.get("cash_runway_months")),
+                "financial_survival_score": finite_value_or_blank(survival.get("financial_survival_score")),
                 "financial_data_quality": survival.get("data_quality", ""),
                 "going_concern_status": sec_liq.get("going_concern_status", ""),
                 "reverse_split_hits_2y": sec_liq.get("reverse_split_hits_2y", 0),

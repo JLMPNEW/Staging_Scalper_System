@@ -368,6 +368,26 @@ def score_one(row: dict[str, Any], config: dict[str, Any], tier1: dict[str, Any]
     market_w = float(weights.get("market_confirmation", 0.10))
     catalyst_w = float(weights.get("catalyst_quality", 0.05))
     risk_w = float(weights.get("risk_penalty", 0.20))
+    positive_weight_total = (
+        commercial_w
+        + upside_w
+        + cash_flow_w
+        + survival_w
+        + governance_w
+        + market_w
+        + catalyst_w
+    )
+    if positive_weight_total <= 0.0:
+        raise ValueError("multibagger.weights positive component total must be > 0")
+    if abs(positive_weight_total - 1.0) > 1e-6:
+        scale = 1.0 / positive_weight_total
+        commercial_w *= scale
+        upside_w *= scale
+        cash_flow_w *= scale
+        survival_w *= scale
+        governance_w *= scale
+        market_w *= scale
+        catalyst_w *= scale
 
     commercial = clamp(to_float(row.get("commercial_acceleration_score")))
     upside = clamp(to_float(row.get("upside_capacity_score")))
@@ -427,6 +447,7 @@ def score_one(row: dict[str, Any], config: dict[str, Any], tier1: dict[str, Any]
             "commercial_fragility_risk_score": fragility,
             "multibagger_risk_penalty": risk,
             "risk_drag": round(risk_drag, 4),
+            "positive_weight_total_before_normalization": round(positive_weight_total, 6),
         },
         "commercial": payload.get("commercial", {}),
         "survival": payload.get("survival", {}),
@@ -453,7 +474,7 @@ def score_one(row: dict[str, Any], config: dict[str, Any], tier1: dict[str, Any]
         "company_name": str(row["company_name"] or ""),
         "base_multibagger_score": score,
         "multibagger_score": score,
-        "orthogonal_alpha_score": score,
+        "orthogonal_alpha_score": None,
         "distinctive_acceleration_score": round(distinct_score, 4),
         "tier1_opportunity_score": tier1_context["tier1_opportunity_score"],
         "tier1_risk_score": tier1_context["tier1_risk_score"],
@@ -521,6 +542,7 @@ def solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[
 def orthogonal_alpha_scores(rows: list[dict[str, Any]], config: dict[str, Any]) -> tuple[dict[int, float], str]:
     min_rows = int(cfg_get(config, "multibagger.tier1_interaction.min_residualization_rows", 10))
     ridge = float(cfg_get(config, "multibagger.tier1_interaction.residualization_ridge", 1e-6))
+    leave_one_out = as_bool(cfg_get(config, "multibagger.tier1_interaction.leave_one_out_residualization", True), True)
     predictor_keys = ["tier1_opportunity_score", "tier1_risk_score"]
     observations: list[tuple[int, float, list[float]]] = []
     for idx, row in enumerate(rows):
@@ -533,32 +555,49 @@ def orthogonal_alpha_scores(rows: list[dict[str, Any]], config: dict[str, Any]) 
     if len(observations) < min_rows:
         return ({idx: to_float(row.get("base_multibagger_score")) for idx, row in enumerate(rows)}, "not_enough_tier1_rows")
 
-    means = [sum(obs[2][col] for obs in observations) / len(observations) for col in range(len(predictor_keys))]
-    stdevs = []
-    for col, mean in enumerate(means):
-        variance = sum((obs[2][col] - mean) ** 2 for obs in observations) / max(1, len(observations) - 1)
-        stdevs.append(math.sqrt(variance) or 1.0)
-
-    size = len(predictor_keys) + 1
-    xtx = [[0.0 for _ in range(size)] for _ in range(size)]
-    xty = [0.0 for _ in range(size)]
-    for _, y, predictors in observations:
-        x = [1.0] + [(predictors[col] - means[col]) / stdevs[col] for col in range(len(predictor_keys))]
-        for i in range(size):
-            xty[i] += x[i] * y
-            for j in range(size):
-                xtx[i][j] += x[i] * x[j]
-    for i in range(1, size):
-        xtx[i][i] += ridge
-    beta = solve_linear_system(xtx, xty)
-    if beta is None:
-        return ({idx: to_float(row.get("base_multibagger_score")) for idx, row in enumerate(rows)}, "singular_residualization")
+    def fit_model(training: list[tuple[int, float, list[float]]]) -> tuple[list[float], list[float], list[float]] | None:
+        means = [sum(obs[2][col] for obs in training) / len(training) for col in range(len(predictor_keys))]
+        stdevs = []
+        for col, mean in enumerate(means):
+            variance = sum((obs[2][col] - mean) ** 2 for obs in training) / max(1, len(training) - 1)
+            stdevs.append(max(math.sqrt(variance), 1e-6))
+        size = len(predictor_keys) + 1
+        xtx = [[0.0 for _ in range(size)] for _ in range(size)]
+        xty = [0.0 for _ in range(size)]
+        for _, y, predictors in training:
+            x = [1.0] + [(predictors[col] - means[col]) / stdevs[col] for col in range(len(predictor_keys))]
+            for i in range(size):
+                xty[i] += x[i] * y
+                for j in range(size):
+                    xtx[i][j] += x[i] * x[j]
+        for i in range(1, size):
+            xtx[i][i] += ridge
+        beta = solve_linear_system(xtx, xty)
+        return None if beta is None else (means, stdevs, beta)
 
     residuals: dict[int, float] = {}
+    failed_fits = 0
+    if leave_one_out and len(observations) > min_rows:
+        for obs_idx, (idx, y, predictors) in enumerate(observations):
+            model = fit_model(observations[:obs_idx] + observations[obs_idx + 1 :])
+            if model is None:
+                failed_fits += 1
+                continue
+            means, stdevs, beta = model
+            x = [1.0] + [(predictors[col] - means[col]) / stdevs[col] for col in range(len(predictor_keys))]
+            residuals[idx] = y - sum(coef * value for coef, value in zip(beta, x))
+        if residuals:
+            status = "applied_leave_one_out" if failed_fits == 0 else f"applied_leave_one_out_partial_failed_fits={failed_fits}"
+            return percentile_scores(residuals), status
+
+    model = fit_model(observations)
+    if model is None:
+        return ({idx: to_float(row.get("base_multibagger_score")) for idx, row in enumerate(rows)}, "singular_residualization")
+    means, stdevs, beta = model
     for idx, y, predictors in observations:
         x = [1.0] + [(predictors[col] - means[col]) / stdevs[col] for col in range(len(predictor_keys))]
         residuals[idx] = y - sum(coef * value for coef, value in zip(beta, x))
-    return percentile_scores(residuals), "applied"
+    return percentile_scores(residuals), "applied_in_sample"
 
 
 def distinctive_acceleration_score(row: dict[str, Any]) -> float:
@@ -575,8 +614,10 @@ def apply_tier1_interaction(rows: list[dict[str, Any]], config: dict[str, Any]) 
     if not rows or not as_bool(cfg_get(config, "multibagger.tier1_interaction.enabled", False), False):
         return
     alpha_scores, residualization_status = orthogonal_alpha_scores(rows, config)
-    alpha_weight = float(cfg_get(config, "multibagger.tier1_interaction.orthogonal_alpha_weight", 0.30))
+    requested_alpha_weight = float(cfg_get(config, "multibagger.tier1_interaction.orthogonal_alpha_weight", 0.30))
     distinctive_weight = float(cfg_get(config, "multibagger.tier1_interaction.distinctive_acceleration_weight", 0.15))
+    alpha_available = residualization_status.startswith("applied_leave_one_out")
+    alpha_weight = requested_alpha_weight if alpha_available else 0.0
     base_weight = max(0.0, 1.0 - alpha_weight - distinctive_weight)
     veto_buckets = normalized_config_list(
         cfg_get(config, "multibagger.tier1_interaction.veto_buckets", ["avoid"]),
@@ -587,12 +628,14 @@ def apply_tier1_interaction(rows: list[dict[str, Any]], config: dict[str, Any]) 
     tier1_risk_veto = float(cfg_get(config, "multibagger.tier1_interaction.tier1_risk_veto", 80.0))
 
     for idx, row in enumerate(rows):
-        alpha_score = clamp(alpha_scores.get(idx, to_float(row.get("base_multibagger_score"))))
+        alpha_score = clamp(alpha_scores[idx]) if alpha_available and idx in alpha_scores else None
+        row_alpha_weight = alpha_weight if alpha_score is not None else 0.0
+        row_base_weight = base_weight + (alpha_weight if alpha_score is None else 0.0)
         distinct_score = distinctive_acceleration_score(row)
         gate_multiplier = to_float(row.get("tier1_gate_multiplier"), 1.0)
         pre_gate = (
-            base_weight * to_float(row.get("base_multibagger_score"))
-            + alpha_weight * alpha_score
+            row_base_weight * to_float(row.get("base_multibagger_score"))
+            + row_alpha_weight * (alpha_score if alpha_score is not None else 0.0)
             + distinctive_weight * distinct_score
         )
         final_score = clamp(pre_gate * gate_multiplier)
@@ -604,7 +647,7 @@ def apply_tier1_interaction(rows: list[dict[str, Any]], config: dict[str, Any]) 
         if as_bool(row.get("tier1_available")) and tier1_risk >= tier1_risk_veto:
             final_score = min(final_score, tier1_risk_cap)
 
-        row["orthogonal_alpha_score"] = round(alpha_score, 4)
+        row["orthogonal_alpha_score"] = round(alpha_score, 4) if alpha_score is not None else None
         row["distinctive_acceleration_score"] = round(distinct_score, 4)
         row["multibagger_score"] = round(final_score, 4)
         row["tier1_interaction_reason"] = build_tier1_interaction_reason(
@@ -628,6 +671,10 @@ def apply_tier1_interaction(rows: list[dict[str, Any]], config: dict[str, Any]) 
         evidence_json["tier1_interaction"] = {
             "enabled": True,
             "residualization_status": residualization_status,
+            "orthogonal_alpha_available": alpha_available,
+            "requested_orthogonal_alpha_weight": requested_alpha_weight,
+            "effective_orthogonal_alpha_weight": row_alpha_weight,
+            "effective_base_multibagger_weight": row_base_weight,
             "base_multibagger_score": row.get("base_multibagger_score"),
             "orthogonal_alpha_score": row.get("orthogonal_alpha_score"),
             "distinctive_acceleration_score": row.get("distinctive_acceleration_score"),

@@ -185,12 +185,21 @@ def candidate_key(row: dict[str, Any], *, split: str | None = None) -> tuple[str
 
 def holdout_report_sort_key(row: dict[str, Any]) -> tuple[float, float, float, float, float, float, float]:
     ci05 = numeric_or_default(row.get("bootstrap_lcb_return_pct_ci05"), -1e9)
-    lcb = numeric_or_default(row.get("test_selected_lcb_return_pct"), -1e9)
-    sortino = numeric_or_default(row.get("test_selected_sortino_like"), -1e9)
-    profit = numeric_or_default(row.get("test_selected_profit_factor"), -1e9)
-    loss20 = numeric_or_default(row.get("test_selected_large_loss_20pct_rate_pct"), 100.0)
-    core = numeric_or_default(row.get("test_selected_core_hard_weakness_exposure_pct"), 100.0)
-    top3 = numeric_or_default(row.get("test_selected_top3_gain_contribution_pct"), 100.0)
+    lcb = numeric_or_default(first_value(row, "test_selected_lcb_return_pct", "test_lcb_return_pct"), -1e9)
+    sortino = numeric_or_default(first_value(row, "test_selected_sortino_like", "test_sortino_like"), -1e9)
+    profit = numeric_or_default(first_value(row, "test_selected_profit_factor", "test_profit_factor"), -1e9)
+    loss20 = numeric_or_default(
+        first_value(row, "test_selected_large_loss_20pct_rate_pct", "test_large_loss_20pct_rate_pct"),
+        100.0,
+    )
+    core = numeric_or_default(
+        first_value(row, "test_selected_core_hard_weakness_exposure_pct", "test_core_hard_weakness_exposure_pct"),
+        100.0,
+    )
+    top3 = numeric_or_default(
+        first_value(row, "test_selected_top3_gain_contribution_pct", "test_top3_gain_contribution_pct"),
+        100.0,
+    )
     return (ci05, lcb, sortino, profit, -loss20, -core, -top3)
 
 

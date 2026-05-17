@@ -25,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, refresh_sec_latest_documents, start_run, utc_now
 from biotech_index.core.logging_utils import configure_utc_logging
+from biotech_index.core.pipeline_guards import read_final_scoring_tickers
 
 
 LOGGER = logging.getLogger("parse_sec_biotech_events")
@@ -526,17 +527,7 @@ def target_filings_sql(where_sql: str) -> str:
 
 
 def read_scoring_tickers(path: Path) -> set[str]:
-    if not path.exists():
-        raise FileNotFoundError(f"Final scoring universe CSV not found: {path}")
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        tickers = {
-            str(row.get("ticker") or "").strip().upper().replace(".", "-")
-            for row in csv.DictReader(handle)
-            if str(row.get("ticker") or "").strip()
-        }
-    if not tickers:
-        raise ValueError(f"Final scoring universe CSV contains no tickers: {path}")
-    return tickers
+    return read_final_scoring_tickers(path)
 
 
 def load_target_accessions(

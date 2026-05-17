@@ -30,6 +30,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_path  # noqa: E402
 from biotech_index.core.db import connect  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("calibrate_speculative_alpha")
@@ -55,6 +56,7 @@ DEFAULT_BOOTSTRAP_ITERATIONS = 100
 DEFAULT_BOOTSTRAP_TOP_K = 8
 DEFAULT_BOOTSTRAP_SEED = 3001
 DEFAULT_SELECTED_TICKER_TOP_RANKS = 5
+DEFAULT_HOLDOUT_TOP_K = 25
 
 SCORE_COLUMNS = [
     "tier1_score",
@@ -182,6 +184,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-workers", type=int, default=None)
     parser.add_argument("--bootstrap-iterations", type=int, default=None, help="Use 0 to disable bootstrap CI output.")
     parser.add_argument("--bootstrap-top-k", type=int, default=None)
+    parser.add_argument("--holdout-top-k", type=int, default=None)
     parser.add_argument("--bootstrap-seed", type=int, default=None)
     parser.add_argument("--selected-ticker-top-ranks", type=int, default=None)
     parser.add_argument("--include-non-fridays", action="store_true", help="Include non-Friday snapshots.")
@@ -273,12 +276,12 @@ def parse_string_set(raw: object) -> set[str]:
     if raw is None:
         return set()
     if isinstance(raw, str):
-        parts = raw.replace(";", ",").split(",")
+        parts = raw.replace(";", ",").replace("|", ",").split(",")
     elif isinstance(raw, (list, tuple, set)):
         parts = [str(item) for item in raw]
     else:
         parts = [str(raw)]
-    return {part.strip().upper().replace(".", "-") for part in parts if part.strip()}
+    return {ticker for part in parts if (ticker := normalize_ticker(part))}
 
 
 def chunked(values: list[Any], size: int = SQLITE_PARAM_CHUNK_SIZE) -> Iterable[list[Any]]:
@@ -374,16 +377,11 @@ def load_snapshot_dates(
 def load_excluded_tickers(conn: sqlite3.Connection, *, exclude_current_removals: bool, extra: set[str]) -> set[str]:
     out = set(extra)
     if exclude_current_removals:
-        rows = conn.execute(
-            """
-            SELECT ticker
-            FROM companies
-            WHERE is_active = 0
-               OR LOWER(COALESCE(universe_status, '')) = 'remove'
-               OR LOWER(COALESCE(manual_exclude, '')) IN ('1', 'true', 't', 'yes', 'y')
-            """
-        ).fetchall()
-        out.update(str(row["ticker"] or "").upper().replace(".", "-") for row in rows)
+        raise ValueError(
+            "calibration.phase2.exclude_current_removals is disabled because current removal status "
+            "retroactively excludes historical snapshots. Use calibration.exclude_tickers for explicit "
+            "non-temporal exclusions until removal_date history is available."
+        )
     return {ticker for ticker in out if ticker}
 
 
@@ -444,8 +442,10 @@ def load_score_rows(conn: sqlite3.Connection, dates: list[str], excluded_tickers
         ).fetchall()
         for row in rows:
             record = dict(row)
-            ticker = str(record.get("ticker") or "").upper().replace(".", "-")
+            ticker = normalize_ticker(record.get("ticker"))
             if ticker in excluded_tickers:
+                continue
+            if not ticker:
                 continue
             record["ticker"] = ticker
             out.append(record)
@@ -736,7 +736,7 @@ def lower_confidence_bound(values: list[float], *, z: float) -> float | None:
     sigma = stdev(values)
     if sigma is None:
         return avg
-    return avg - z * sigma / math.sqrt(len(values))
+    return avg - max(0.0, z) * sigma / math.sqrt(len(values))
 
 
 def cvar_left_tail(values: list[float], *, q: float) -> float | None:
@@ -746,6 +746,8 @@ def cvar_left_tail(values: list[float], *, q: float) -> float | None:
     if threshold is None:
         return None
     tail = [value for value in values if value <= threshold]
+    if not tail:
+        return None
     return mean(tail)
 
 
@@ -1496,6 +1498,56 @@ def build_selected_ticker_rows(
     return out
 
 
+def split_reason_tokens(raw: object) -> list[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    return [part.strip() for part in text.split("|") if part.strip()]
+
+
+def build_phase2_weakness_component_rows(selected_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    group_keys = [
+        "sample",
+        "evaluation_split",
+        "horizon_days",
+        "top_n",
+        "train_rank",
+        "candidate_id",
+        "signal_name",
+        "pool_name",
+    ]
+    grouped: dict[tuple[str, ...], dict[str, Any]] = defaultdict(
+        lambda: {"selected_n": 0, "reason_counts": defaultdict(int)}
+    )
+    for row in selected_rows:
+        key = tuple(str(row.get(group_key) or "") for group_key in group_keys)
+        grouped[key]["selected_n"] += 1
+        for severity, reason_key in [
+            ("core_hard", "core_hard_reasons"),
+            ("event_hard", "event_hard_reasons"),
+            ("soft", "soft_reasons"),
+        ]:
+            for reason in split_reason_tokens(row.get(reason_key)):
+                grouped[key]["reason_counts"][(severity, reason)] += 1
+    out: list[dict[str, Any]] = []
+    for key, payload in sorted(grouped.items()):
+        selected_n = int(payload["selected_n"])
+        reason_counts = payload["reason_counts"]
+        for (severity, reason), count in sorted(reason_counts.items(), key=lambda item: (-item[1], item[0])):
+            record: dict[str, Any] = {group_keys[index]: key[index] for index in range(len(group_keys))}
+            record.update(
+                {
+                    "weakness_severity": severity,
+                    "weakness_reason": reason,
+                    "reason_count": count,
+                    "selected_n": selected_n,
+                    "reason_exposure_pct": round(100.0 * count / selected_n, 6) if selected_n else "",
+                }
+            )
+            out.append(record)
+    return out
+
+
 def selected_returns_by_date(
     rows: list[dict[str, Any]],
     signal: SignalSpec,
@@ -1805,6 +1857,12 @@ def main() -> None:
         if args.bootstrap_top_k is not None
         else cfg_get(config, "calibration.phase2.bootstrap_top_k", DEFAULT_BOOTSTRAP_TOP_K)
     )
+    holdout_top_k = int(
+        args.holdout_top_k
+        if args.holdout_top_k is not None
+        else cfg_get(config, "calibration.phase2.holdout_top_k", DEFAULT_HOLDOUT_TOP_K)
+    )
+    holdout_top_k = max(1, holdout_top_k)
     bootstrap_seed = int(
         args.bootstrap_seed
         if args.bootstrap_seed is not None
@@ -1912,12 +1970,13 @@ def main() -> None:
     train_grid_rows = [row for row in grid_rows if str(row.get("evaluation_split") or "") == "train"]
     test_grid_rows = [row for row in grid_rows if str(row.get("evaluation_split") or "") == "test"]
     best_rows = build_best_rows(grid_rows)
-    holdout_rows = build_holdout_rows(train_grid_rows, test_grid_rows, top_k=25)
+    holdout_rows = build_holdout_rows(train_grid_rows, test_grid_rows, top_k=holdout_top_k)
     selected_ticker_rows = build_selected_ticker_rows(
         split_rows_by_key,
         holdout_rows,
         top_train_ranks=selected_ticker_top_ranks,
     )
+    weakness_component_rows = build_phase2_weakness_component_rows(selected_ticker_rows)
     bootstrap_rows = build_bootstrap_rows(
         split_rows_by_key,
         holdout_rows,
@@ -1943,6 +2002,7 @@ def main() -> None:
     write_csv(output_dir / "phase2_speculative_alpha_bootstrap_ci.csv", bootstrap_rows)
     write_csv(output_dir / "phase2_orthogonality.csv", orthogonality_rows)
     write_csv(output_dir / "phase2_selected_ticker_diagnostics.csv", selected_ticker_rows)
+    write_csv(output_dir / "phase2_weakness_components.csv", weakness_component_rows)
 
     horizon_counts = {
         str(horizon): sum(1 for row in rows if to_float(row.get(f"fwd_{horizon}d_net_return")) is not None)
@@ -1970,6 +2030,7 @@ def main() -> None:
         "max_workers": max_workers,
         "bootstrap_iterations": bootstrap_iterations,
         "bootstrap_top_k": bootstrap_top_k,
+        "holdout_top_k": holdout_top_k,
         "selected_ticker_top_ranks": selected_ticker_top_ranks,
         "split_manifest": split_manifest,
         "calibration_params": params.__dict__,
@@ -1982,6 +2043,7 @@ def main() -> None:
             "Forward returns use next-bar entry by default to reduce same-day-close look-ahead bias.",
             "Composite signals are scored over available components and report component coverage, instead of dropping rows with one missing score.",
             "Calibration constraints and objective penalize core hard, event hard, soft weakness, illiquidity, large losses, and top-winner concentration.",
+            "phase2_weakness_components.csv aggregates selected-name weakness reasons by signal, pool, split, horizon, and Top-N cutoff.",
         ],
     }
     write_json(output_dir / "phase2_manifest.json", manifest)

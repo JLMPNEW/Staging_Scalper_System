@@ -492,11 +492,14 @@ def main() -> None:
                         asof_date=history_asof_date,
                     )
                 if alias_delete_ids:
-                    conn.executemany("DELETE FROM company_aliases WHERE company_id = ?", alias_delete_ids)
+                    conn.executemany(
+                        "DELETE FROM company_aliases WHERE company_id = ? AND COALESCE(is_manual, 0) = 0",
+                        alias_delete_ids,
+                    )
                 if alias_rows:
                     conn.executemany(
                         """
-                        INSERT INTO company_aliases(
+                        INSERT OR IGNORE INTO company_aliases(
                             company_id, alias_raw, alias_norm, source, confidence, is_manual, created_at, updated_at
                         )
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)

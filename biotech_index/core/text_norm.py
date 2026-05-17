@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import re
+import logging
 from dataclasses import dataclass
 
+
+LOGGER = logging.getLogger(__name__)
+TICKER_RE = re.compile(r"^[A-Z][A-Z0-9-]{0,14}$")
 
 CORPORATE_SUFFIXES = {
     "INC",
@@ -74,7 +78,13 @@ class AliasCandidate:
 
 
 def normalize_ticker(raw: object) -> str:
-    return str(raw or "").strip().upper().replace(".", "-")
+    ticker = str(raw or "").strip().upper().replace(".", "-")
+    if not ticker:
+        return ""
+    if not TICKER_RE.fullmatch(ticker):
+        LOGGER.debug("Invalid ticker value ignored: %r", raw)
+        return ""
+    return ticker
 
 
 def normalize_cik(raw: object) -> str:
@@ -108,7 +118,7 @@ def strip_security_suffixes(norm_name: str) -> str:
             tokens = tokens[:-2]
             continue
         if len(tokens) >= 2 and tokens[-2] in {"HOLDING", "HOLDINGS", "HOLDIN", "HOLDI"} and tokens[-1] in {"A", "B", "C"}:
-            tokens.pop()
+            tokens = tokens[:-2]
             continue
         if tokens[-1] in {"HOLDIN", "HOLDI", "MASS"}:
             tokens.pop()

@@ -22,6 +22,7 @@ from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
+    normalize_ticker,
     read_final_scoring_tickers,
     subset_mode_enabled,
     subset_output_path,
@@ -132,8 +133,10 @@ def parse_json(raw: object) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def normalize_ticker(raw: object) -> str:
-    return str(raw or "").strip().upper().replace(".", "-")
+def missing_score_prior(config: dict[str, Any], key: str, default: float | None = None) -> float:
+    defaults = cfg_get(config, "multibagger.missing_score_defaults", {}) or {}
+    fallback = cfg_get(config, "multibagger.missing_score_prior", 50.0 if default is None else default)
+    return float(defaults.get(key, fallback))
 
 
 def missing_layer_tickers(base_rows: list[dict[str, Any]], layer: dict[int, dict[str, Any]]) -> list[str]:
@@ -233,13 +236,13 @@ def data_quality(critical_values: list[str], optional_values: list[str]) -> str:
     return "high"
 
 
-def score_commercial_acceleration(commercial: dict[str, Any], forward: dict[str, Any]) -> float:
-    revenue_growth = clamp(to_float(commercial.get("revenue_growth_score"), 45.0))
-    margin = clamp(to_float(commercial.get("margin_score"), 45.0))
-    profitability = clamp(to_float(commercial.get("profitability_score"), 35.0))
-    commercial_quality = clamp(to_float(commercial.get("commercial_quality_score"), 35.0))
-    guidance = clamp(to_float(forward.get("guidance_score"), 45.0))
-    forward_growth = clamp(to_float(forward.get("forward_growth_score"), 45.0))
+def score_commercial_acceleration(commercial: dict[str, Any], forward: dict[str, Any], config: dict[str, Any]) -> float:
+    revenue_growth = clamp(to_float(commercial.get("revenue_growth_score"), missing_score_prior(config, "revenue_growth_score")))
+    margin = clamp(to_float(commercial.get("margin_score"), missing_score_prior(config, "margin_score")))
+    profitability = clamp(to_float(commercial.get("profitability_score"), missing_score_prior(config, "profitability_score")))
+    commercial_quality = clamp(to_float(commercial.get("commercial_quality_score"), missing_score_prior(config, "commercial_quality_score")))
+    guidance = clamp(to_float(forward.get("guidance_score"), missing_score_prior(config, "guidance_score")))
+    forward_growth = clamp(to_float(forward.get("forward_growth_score"), missing_score_prior(config, "forward_growth_score")))
     revenue = to_float(commercial.get("ttm_revenue"), 0.0)
     if revenue <= 0:
         return round(clamp(0.20 * revenue_growth + 0.20 * margin + 0.20 * profitability + 0.20 * commercial_quality + 0.20 * guidance), 4)
@@ -297,15 +300,16 @@ def score_survival(commercial: dict[str, Any], survival: dict[str, Any]) -> floa
     return round(clamp(0.60 * balance + 0.40 * dilution), 4)
 
 
-def score_market_confirmation(market: dict[str, Any]) -> float:
+def score_market_confirmation(market: dict[str, Any], config: dict[str, Any]) -> float:
+    prior = missing_score_prior(config, "market_confirmation_score")
     if not market:
-        return 35.0
-    score = 45.0
+        return prior
+    score = prior
     rs = to_optional_float(market.get("relative_strength_3m_vs_xbi"))
     price_200 = to_optional_float(market.get("price_vs_200d_pct"))
     return_3m = to_optional_float(market.get("return_3m_pct"))
     dist_52w = to_optional_float(market.get("distance_from_52w_high_pct"))
-    liquidity = clamp(to_float(market.get("liquidity_score"), 35.0))
+    liquidity = clamp(to_float(market.get("liquidity_score"), missing_score_prior(config, "liquidity_score")))
     if rs is not None:
         if rs > 0.20:
             score += 20.0
@@ -369,12 +373,16 @@ def risk_penalty(
     market: dict[str, Any],
     config: dict[str, Any],
 ) -> float:
-    penalty = 0.55 * clamp(risk_raw)
     fragility = clamp(to_float(governance.get("commercial_fragility_risk_score"), 0.0))
-    penalty += 0.15 * clamp(to_float(survival.get("dilution_pressure_score"), 0.0))
-    penalty += 0.15 * clamp(to_float(governance.get("governance_risk_score"), 0.0))
-    penalty += 0.35 * fragility
-    penalty += 0.10 * (100.0 - clamp(to_float(market.get("liquidity_score"), 45.0)))
+    base_terms = [
+        (0.55, clamp(risk_raw)),
+        (0.15, clamp(to_float(survival.get("dilution_pressure_score"), 0.0))),
+        (0.15, clamp(to_float(governance.get("governance_risk_score"), 0.0))),
+        (0.35, fragility),
+        (0.10, 100.0 - clamp(to_float(market.get("liquidity_score"), 45.0))),
+    ]
+    base_weight_total = sum(weight for weight, _ in base_terms)
+    penalty = sum(weight * value for weight, value in base_terms) / base_weight_total
     market_cap = to_optional_float(commercial.get("market_cap")) or to_optional_float(market.get("market_cap"))
     soft_cap = float(cfg_get(config, "multibagger.market_cap_soft_cap", 25_000_000_000))
     hard_cap = float(cfg_get(config, "multibagger.market_cap_hard_cap", 75_000_000_000))
@@ -438,13 +446,13 @@ def build_row(
     credibility_raw = clamp(to_float(base.get("credibility_score_raw"), 0.0))
     risk_raw = clamp(to_float(base.get("risk_score_raw"), 0.0))
     revenue_threshold = float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000))
-    commercial_acceleration = score_commercial_acceleration(commercial, forward)
+    commercial_acceleration = score_commercial_acceleration(commercial, forward, config)
     upside = clamp(to_float(commercial.get("upside_capacity_score"), 50.0))
     cash_flow = score_cash_flow(commercial, survival)
     survival_score = score_survival(commercial, survival)
     governance_score = clamp(to_float(governance.get("governance_event_score"), 15.0))
     commercial_fragility = clamp(to_float(governance.get("commercial_fragility_risk_score"), 0.0))
-    market_score = score_market_confirmation(market)
+    market_score = score_market_confirmation(market, config)
     catalyst_score = score_catalyst(payload, catalyst_raw, credibility_raw)
     risk = risk_penalty(payload, risk_raw, commercial, survival, governance, market, config)
     evidence = evidence_flag(payload, commercial, forward, governance, revenue_threshold=revenue_threshold)

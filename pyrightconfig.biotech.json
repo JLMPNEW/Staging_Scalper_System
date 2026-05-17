@@ -19,7 +19,7 @@
     "."
   ],
   "typeCheckingMode": "basic",
-  "pythonVersion": "3.11",
+  "pythonVersion": "3.12",
   "reportMissingImports": "none",
   "reportMissingTypeStubs": "none"
 }

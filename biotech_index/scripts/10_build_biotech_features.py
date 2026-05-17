@@ -67,6 +67,19 @@ FEATURE_CSV_FIELDNAMES = [
     "feature_json",
 ]
 
+CATALYST_COMPONENT_MAX = {
+    "verified_active_trials": 18.0,
+    "effective_phase2_3_trials": 30.0,
+    "active_pivotal_trials": 18.0,
+    "active_lead_sponsor_trials": 15.0,
+    "active_program_override_trials": 10.0,
+    "pipeline_density": 10.0,
+    "core_pipeline_quality": 18.0,
+    "recent_trial_update": 8.0,
+    "regulatory_or_positive_clinical_event": 25.0,
+}
+CATALYST_POSITIVE_MAX = sum(CATALYST_COMPONENT_MAX.values())
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build daily Tier-1 biotech index features.")
@@ -103,6 +116,10 @@ def to_float(raw: object, default: float = 0.0) -> float:
     if math.isnan(value) or math.isinf(value):
         return default
     return value
+
+
+def finite_or_none(value: float | None) -> float | None:
+    return value if value is not None and math.isfinite(value) else None
 
 
 def to_int(raw: object, default: int = 0) -> int:
@@ -488,11 +505,22 @@ def compute_feature_row(
     reverse_soft_2y = to_int(screen.get("reverse_split_soft_hits_2y"))
     google_reverse_confirmed = as_bool(screen.get("google_reverse_split_confirmed"))
     source_reason_codes = str(universe_row.get("source_reason_codes") or "")
-    survival_score = to_float(survival.get("financial_survival_score") if survival else None, 0.0)
+    survival_score = to_float(survival.get("financial_survival_score") if survival else None, math.nan)
+    survival_score_for_calc = survival_score if math.isfinite(survival_score) else 45.0
     survival_quality = str(survival.get("data_quality") if survival else "").strip().lower()
-    cash_runway_months = to_float(survival.get("cash_runway_months") if survival else None, 0.0)
-    severe_runway_flag = to_int(survival.get("severe_runway_flag") if survival else None)
-    short_runway_flag = to_int(survival.get("short_runway_flag") if survival else None)
+    cash_runway_months = to_float(survival.get("cash_runway_months") if survival else None, math.nan)
+    severe_runway_raw = survival.get("severe_runway_flag") if survival else None
+    short_runway_raw = survival.get("short_runway_flag") if survival else None
+    severe_runway_flag = (
+        to_int(severe_runway_raw)
+        if severe_runway_raw not in {None, ""}
+        else None
+    )
+    short_runway_flag = (
+        to_int(short_runway_raw)
+        if short_runway_raw not in {None, ""}
+        else None
+    )
     dilution_pressure_score = to_float(survival.get("dilution_pressure_score") if survival else None, 0.0)
     burn_acceleration_flag = to_int(survival.get("burn_acceleration_flag") if survival else None)
     event_counts = dict(sec_events.get("counts", {}) if sec_events else {})
@@ -532,31 +560,54 @@ def compute_feature_row(
     partnership_events = partnership_license + partnership_signed
     sec_gc_events = going_concern_confirmed + going_concern
 
-    catalyst_raw = 0.0
-    catalyst_raw += min(18.0, math.log1p(max(verified_active, 0)) * 5.0)
-    catalyst_raw += min(30.0, math.log1p(max(effective_phase2_3, 0.0)) * 10.0)
-    catalyst_raw += min(18.0, math.log1p(max(active_pivotal_trials, 0)) * 8.0)
-    catalyst_raw += min(15.0, math.log1p(max(active_lead, 0)) * 5.0)
-    catalyst_raw += min(10.0, math.log1p(max(active_program, 0)) * 4.0)
-    catalyst_raw += min(10.0, pipeline_density * 10.0)
-    catalyst_raw += min(18.0, core_pipeline_quality * 0.18)
+    catalyst_components = {
+        "verified_active_trials": min(
+            CATALYST_COMPONENT_MAX["verified_active_trials"],
+            math.log1p(max(verified_active, 0)) * 5.0,
+        ),
+        "effective_phase2_3_trials": min(
+            CATALYST_COMPONENT_MAX["effective_phase2_3_trials"],
+            math.log1p(max(effective_phase2_3, 0.0)) * 10.0,
+        ),
+        "active_pivotal_trials": min(
+            CATALYST_COMPONENT_MAX["active_pivotal_trials"],
+            math.log1p(max(active_pivotal_trials, 0)) * 8.0,
+        ),
+        "active_lead_sponsor_trials": min(
+            CATALYST_COMPONENT_MAX["active_lead_sponsor_trials"],
+            math.log1p(max(active_lead, 0)) * 5.0,
+        ),
+        "active_program_override_trials": min(
+            CATALYST_COMPONENT_MAX["active_program_override_trials"],
+            math.log1p(max(active_program, 0)) * 4.0,
+        ),
+        "pipeline_density": min(CATALYST_COMPONENT_MAX["pipeline_density"], pipeline_density * 10.0),
+        "core_pipeline_quality": min(
+            CATALYST_COMPONENT_MAX["core_pipeline_quality"],
+            core_pipeline_quality * 0.18,
+        ),
+        "recent_trial_update": 0.0,
+        "regulatory_or_positive_clinical_event": 0.0,
+    }
+    catalyst_penalty = 0.0
     if collaborator_heavy:
-        catalyst_raw -= min(15.0, max(0.0, collaborator_dependency_ratio - 0.50) * 30.0)
+        catalyst_penalty += min(15.0, max(0.0, collaborator_dependency_ratio - 0.50) * 30.0)
     if days_since_update <= 90:
-        catalyst_raw += 8.0
+        catalyst_components["recent_trial_update"] = 8.0
     elif days_since_update <= 180:
-        catalyst_raw += 4.0
+        catalyst_components["recent_trial_update"] = 4.0
     elif days_since_update >= 365 and verified_active > 0:
-        catalyst_raw -= 6.0
-    catalyst_raw += min(
-        25.0,
+        catalyst_penalty += 6.0
+    catalyst_components["regulatory_or_positive_clinical_event"] = min(
+        CATALYST_COMPONENT_MAX["regulatory_or_positive_clinical_event"],
         pdufa_date * 18.0
         + nda_bla_accepted * 16.0
         + regulatory_submission * 7.0
         + endpoint_met * 10.0
         + clinical_update_positive * 5.0,
     )
-    catalyst_raw = clamp(catalyst_raw)
+    catalyst_positive_raw = sum(catalyst_components.values())
+    catalyst_raw = clamp((catalyst_positive_raw / CATALYST_POSITIVE_MAX) * 100.0 - catalyst_penalty)
 
     credibility_raw = 0.0
     credibility_raw += min(25.0, active_lead * 5.0)
@@ -626,10 +677,10 @@ def compute_feature_row(
             filing_risk += 30.0
         elif short_runway_flag:
             filing_risk += 18.0
-        elif 0 < cash_runway_months < 12:
+        elif math.isfinite(cash_runway_months) and 0 < cash_runway_months < 12:
             filing_risk += 10.0
         if dilution_pressure_score > 0:
-            if cash_runway_months >= 24 or survival_score >= 80:
+            if (math.isfinite(cash_runway_months) and cash_runway_months >= 24) or survival_score_for_calc >= 80:
                 filing_risk += min(10.0, dilution_pressure_score * 0.25)
             else:
                 filing_risk += min(18.0, dilution_pressure_score * 0.45)
@@ -657,8 +708,9 @@ def compute_feature_row(
     financial_quality_raw -= filing_risk * 0.9
     if recent_sec:
         financial_quality_raw += 5.0
+    financial_quality_raw = clamp(financial_quality_raw)
     if survival:
-        financial_quality_raw = (financial_quality_raw * 0.45) + (survival_score * 0.55)
+        financial_quality_raw = (financial_quality_raw * 0.45) + (survival_score_for_calc * 0.55)
     else:
         financial_quality_raw -= 8.0
     financial_quality_raw = clamp(financial_quality_raw)
@@ -717,16 +769,16 @@ def compute_feature_row(
             "cash_and_investments": to_float(survival.get("cash_and_investments") if survival else None, 0.0),
             "quarterly_cash_burn": to_float(survival.get("quarterly_cash_burn") if survival else None, 0.0),
             "ttm_cash_burn": to_float(survival.get("ttm_cash_burn") if survival else None, 0.0),
-            "cash_runway_months": cash_runway_months,
+            "cash_runway_months": finite_or_none(cash_runway_months),
             "working_capital_ratio": to_float(survival.get("working_capital_ratio") if survival else None, 0.0),
             "debt_to_cash": to_float(survival.get("debt_to_cash") if survival else None, 0.0),
             "cash_yoy_change_pct": to_float(survival.get("cash_yoy_change_pct") if survival else None, 0.0),
             "rd_yoy_change_pct": to_float(survival.get("rd_yoy_change_pct") if survival else None, 0.0),
             "burn_acceleration_flag": bool(burn_acceleration_flag),
-            "short_runway_flag": bool(short_runway_flag),
-            "severe_runway_flag": bool(severe_runway_flag),
+            "short_runway_flag": None if short_runway_flag is None else bool(short_runway_flag),
+            "severe_runway_flag": None if severe_runway_flag is None else bool(severe_runway_flag),
             "dilution_pressure_score": dilution_pressure_score,
-            "financial_survival_score": survival_score,
+            "financial_survival_score": finite_or_none(survival_score),
             "data_quality": survival_quality,
             "missing_fields": str(survival.get("missing_fields") if survival else ""),
             "proxy_fields_used": str(survival.get("proxy_fields_used") if survival else ""),
@@ -748,6 +800,13 @@ def compute_feature_row(
             "financial_quality_score_raw": round(financial_quality_raw, 4),
             "risk_score_raw": round(risk_raw, 4),
             "momentum_score_raw": round(momentum_raw, 4),
+            "catalyst_component_scores": {
+                key: round(value, 4)
+                for key, value in sorted(catalyst_components.items())
+            },
+            "catalyst_positive_raw_sum": round(catalyst_positive_raw, 4),
+            "catalyst_positive_max_sum": round(CATALYST_POSITIVE_MAX, 4),
+            "catalyst_penalty": round(catalyst_penalty, 4),
         },
         "manual": {
             "manual_verdict": str(universe_row.get("manual_verdict") or ""),

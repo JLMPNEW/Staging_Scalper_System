@@ -11,12 +11,14 @@ ENV_DEFAULT_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
 def expand_env_vars(raw: Any) -> str:
     """Expand $VAR, ${VAR}, and ${VAR:-default} path config values."""
     text = str(raw)
+    if "$" not in text and "%" not in text:
+        return text
 
     def replace_default(match: re.Match[str]) -> str:
         name = match.group(1)
         default = match.group(2)
         value = os.environ.get(name)
-        if value not in (None, ""):
+        if value is not None:
             return value
         return default if default is not None else match.group(0)
 

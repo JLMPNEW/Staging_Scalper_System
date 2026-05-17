@@ -281,7 +281,7 @@ sec_event_parser:
   output_csv: "../output/biotech_index_reports/sec_events.csv"
   lookback_days: 730
   min_confidence: 0.65
-  max_events_per_filing_type: 1
+  max_events_per_filing_type: 2
   batch_size: 250
   max_workers: 2
 
@@ -539,6 +539,7 @@ biotech_reports:
 
 biotech_refresh:
   timing_csv: "../output/biotech_index_reports/biotech_refresh_timing.csv"
+  step_timeout_sec: 14400
   max_upstream_staleness_days: 2
   validate_final_outputs: true
   form4_preflight:
@@ -560,6 +561,8 @@ governance_events:
   form4_db_path: "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/sec_insider.sqlite"
   form4_table: "form4_events_tier1"
   form4_snapshot_table: "sec_form4_daily_state"
+  form4_required: true
+  reuse_unchanged_historical: false
   lookback_days: 365
   max_workers: 4
   insider_buy_lookback_days: 90
@@ -601,8 +604,18 @@ multibagger:
   max_high_conviction_risk: 35
   max_watchlist_risk: 55
   max_speculative_risk: 75
-  avoid_risk_min: 75
+  avoid_risk_min: 80
   avoid_fragility_min: 70
+  missing_score_prior: 50.0
+  missing_score_defaults:
+    revenue_growth_score: 50.0
+    margin_score: 50.0
+    profitability_score: 50.0
+    commercial_quality_score: 50.0
+    guidance_score: 50.0
+    forward_growth_score: 50.0
+    market_confirmation_score: 50.0
+    liquidity_score: 50.0
   convex_risk_penalty_enabled: true
   risk_penalty_convexity: 0.35
   risk_penalty_inflection: 50.0
@@ -618,6 +631,7 @@ multibagger:
     distinctive_acceleration_weight: 0.15
     min_residualization_rows: 10
     residualization_ridge: 0.000001
+    leave_one_out_residualization: true
     tier1_avoid_score_cap: 49.0
     tier1_risk_score_cap: 55.0
   weights:
@@ -652,7 +666,9 @@ yahoo_reverse_split:
   use_stale_cache_on_error: true
 
 calibration:
+  exclude_tickers: []
   phase1:
+    output_dir: "../output/biotech_index_reports/calibration_phase1"
     exclude_current_removals: false
     next_bar_entry: true
     costs:
@@ -677,6 +693,25 @@ calibration:
       - 120
     costs:
       long_round_trip_bps: 40
+    recommended_stack:
+      lcb_z: 1.0
+      cvar_q: 0.05
+      omega_hurdle: 0.0
+      min_selected_observations: 30
+      min_asof_dates: 8
+      min_net_lcb_return_pct: 0.0
+      min_sortino: 0.0
+      min_profit_factor: 1.15
+      min_omega: 1.05
+      legacy_binary_constraint_enabled: false
+      aggregate_hard_constraint_enabled: false
+      max_binary_weakness_exposure_pct: 10.0
+      max_hard_weakness_exposure_pct: 10.0
+      max_core_hard_weakness_exposure_pct: 10.0
+      max_illiquid_weakness_exposure_pct: 0.0
+      max_top3_gain_contribution_pct: 55.0
+      max_large_loss_20_rate_pct: 30.0
+      max_large_loss_40_rate_pct: 12.5
   phase2:
     output_dir: "../output/biotech_index_reports/calibration_phase2_speculative_alpha"
     exclude_current_removals: false
@@ -685,6 +720,7 @@ calibration:
     max_workers: 8
     bootstrap_iterations: 100
     bootstrap_top_k: 8
+    holdout_top_k: 25
     bootstrap_seed: 3001
     selected_ticker_top_ranks: 5
     costs:
