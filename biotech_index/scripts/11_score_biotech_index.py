@@ -20,7 +20,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from biotech_index.core.commercial_risk import commercial_risk_overlay_fields  # noqa: E402
+from biotech_index.core.db import (  # noqa: E402
+    DAILY_SCORES_OPTIONAL_COLUMNS,
+    connect,
+    ensure_table_optional_columns,
+    finish_run,
+    init_db,
+    start_run,
+    utc_now,
+)
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 from biotech_index.core.pipeline_guards import (  # noqa: E402
     read_final_scoring_tickers,
@@ -54,7 +63,7 @@ SOFT_WEAKNESS_DEFAULT_REASONS = [
     "early_stage_or_unadvanced_trial_anchor",
 ]
 GOING_CONCERN_HARD_STATUSES = frozenset({"confirmed"})
-GOING_CONCERN_SOFT_STATUSES = frozenset({"possible", "substantial_doubt", "going_concern_warning"})
+GOING_CONCERN_SOFT_STATUSES = frozenset({"possible", "substantial_doubt", "going_concern", "going_concern_warning"})
 
 
 @dataclass(frozen=True)
@@ -67,6 +76,8 @@ class BucketParams:
     max_spec_risk: float
     avoid_risk_min: float
     min_high_runway: float
+    terminal_runway: float
+    commercial_stage_revenue_min: float
     require_advanced: bool
     require_active_watch: bool
 
@@ -95,7 +106,9 @@ def parse_date(raw: object) -> date | None:
 
 def compact_asof(asof_date: str) -> str:
     parsed = parse_date(asof_date)
-    return parsed.strftime("%Y%m%d") if parsed is not None else str(asof_date).replace("-", "")
+    if parsed is None:
+        raise ValueError(f"Invalid as_of date for output folder: {asof_date!r}")
+    return parsed.strftime("%Y%m%d")
 
 
 def dated_output_dir(base_output_dir: Path, asof_date: str) -> Path:
@@ -152,16 +165,18 @@ def finite_value_or_none(raw: object) -> float | None:
     return value if math.isfinite(value) else None
 
 
-def parse_json(raw: object) -> dict[str, Any]:
+def parse_json(raw: object, *, context: str = "") -> dict[str, Any]:
     try:
         payload = json.loads(str(raw or "{}"))
     except json.JSONDecodeError as exc:
-        LOGGER.warning("Malformed JSON payload skipped: %s", exc)
+        LOGGER.warning("Malformed JSON payload skipped%s: %s", f" ({context})" if context else "", exc)
         return {}
     return payload if isinstance(payload, dict) else {}
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
+    if not math.isfinite(value):
+        return low
     return max(low, min(high, value))
 
 
@@ -184,7 +199,7 @@ def parse_string_list(raw: object, default: list[str] | None = None) -> list[str
     if isinstance(raw, str):
         parts = raw.replace(";", ",").replace("|", ",").split(",")
     elif isinstance(raw, (list, tuple, set)):
-        parts = [str(item) for item in raw]
+        parts = [str(item).strip() for item in raw]
     else:
         parts = [str(raw)]
     values = [part.strip() for part in parts if part.strip()]
@@ -212,13 +227,26 @@ def count_missing_fields(raw: object) -> int:
     return len([part for part in text.replace(";", ",").replace("|", ",").split(",") if part.strip()])
 
 
+def count_value(raw: object) -> int:
+    value = to_float(raw, 0.0)
+    return max(0, int(round(value)))
+
+
+def optional_score(raw_scores: dict[str, Any], row: dict[str, Any], key: str) -> float | None:
+    for raw in (raw_scores.get(key), row.get(key)):
+        value = to_float(raw, math.nan)
+        if math.isfinite(value):
+            return value
+    return None
+
+
 def convex_risk_drag(risk: float, weight: float, config: dict[str, Any], section: str) -> float:
     base_drag = weight * risk
     if not as_bool(cfg_get(config, f"{section}.convex_risk_penalty_enabled", False), False):
         return base_drag
     convexity = float(cfg_get(config, f"{section}.risk_penalty_convexity", 0.35))
     inflection = float(cfg_get(config, f"{section}.risk_penalty_inflection", 50.0))
-    excess = max(0.0, risk - inflection) / max(1.0, 100.0 - inflection)
+    excess = max(0.0, min(1.0, (risk - inflection) / max(1e-9, 100.0 - inflection)))
     return base_drag * (1.0 + convexity * excess)
 
 
@@ -276,6 +304,7 @@ def core_structural_veto_settings(config: dict[str, Any]) -> dict[str, Any]:
             True,
         ),
         "min_addv20": min_addv20,
+        "commercial_stage_revenue_min": float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000)),
         "reasons": set(
             parse_string_list(
                 cfg_get(config, "biotech_scoring.core_structural_veto.reasons", CORE_STRUCTURAL_VETO_DEFAULT_REASONS),
@@ -295,6 +324,8 @@ def bucket_params(config: dict[str, Any]) -> BucketParams:
         max_spec_risk=float(cfg_get(config, "biotech_scoring.buckets.max_speculative_risk", 75)),
         avoid_risk_min=float(cfg_get(config, "biotech_scoring.buckets.avoid_risk_min", 80)),
         min_high_runway=float(cfg_get(config, "biotech_scoring.buckets.high_conviction_min_runway_months", 12)),
+        terminal_runway=float(cfg_get(config, "biotech_scoring.buckets.terminal_runway_months", 3)),
+        commercial_stage_revenue_min=float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000)),
         require_advanced=as_bool(
             cfg_get(config, "biotech_scoring.buckets.require_advanced_catalyst_for_high_conviction", True),
             True,
@@ -314,7 +345,7 @@ def tier1_production_baseline(config: dict[str, Any]) -> dict[str, Any]:
         "candidate_name": str(cfg_get(config, "biotech_scoring.production_baseline.candidate_name", "")),
         "top_n": int(float(cfg_get(config, "biotech_scoring.production_baseline.top_n", 20))),
         "selection_policy": str(
-            cfg_get(config, "biotech_scoring.production_baseline.selection_policy", "core_structural_veto")
+            cfg_get(config, "biotech_scoring.production_baseline.selection_policy", "core_veto_event_drag")
         ),
         "primary_horizon_trading_days": int(
             float(cfg_get(config, "biotech_scoring.production_baseline.primary_horizon_trading_days", 120))
@@ -358,7 +389,51 @@ def production_policy_settings(config: dict[str, Any]) -> dict[str, Any]:
             cfg_get(config, "biotech_scoring.production_policy.commercial_fragility_threshold", 70.0)
         ),
         "high_risk_threshold": float(cfg_get(config, "biotech_scoring.production_policy.high_risk_threshold", 75.0)),
+        "commercial_stage_revenue_min": float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000)),
     }
+
+
+def commercial_risk_overlay_settings(config: dict[str, Any]) -> dict[str, Any]:
+    settings = dict(cfg_get(config, "biotech_scoring.commercial_risk_overlay", {}) or {})
+    settings.setdefault(
+        "commercial_stage_revenue_min",
+        float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000.0)),
+    )
+    settings.setdefault(
+        "commercial_fragility_threshold",
+        float(cfg_get(config, "biotech_scoring.production_policy.commercial_fragility_threshold", 70.0)),
+    )
+    return settings
+
+
+def commercial_risk_policy_penalty(fields: dict[str, Any], settings: dict[str, Any]) -> float:
+    if not as_bool(settings.get("enabled", True), True):
+        return 0.0
+    component_penalties = [
+        to_float(settings.get("commercial_deterioration_penalty"), 0.0) or 0.0,
+        to_float(settings.get("valuation_growth_mismatch_penalty"), 0.0) or 0.0,
+        to_float(settings.get("transient_revenue_anchor_penalty"), 0.0) or 0.0,
+        to_float(settings.get("commercial_business_shock_penalty"), 0.0) or 0.0,
+    ]
+    composite_penalty = to_float(settings.get("commercial_risk_overlay_penalty"), 0.0) or 0.0
+    if composite_penalty > 0.0 and any(value > 0.0 for value in component_penalties):
+        raise ValueError(
+            "Commercial risk overlay cannot use both sub-component penalties and "
+            "commercial_risk_overlay_penalty; calibrate one penalty architecture at a time."
+        )
+    penalty = 0.0
+    for field, setting in [
+        ("commercial_deterioration_score", "commercial_deterioration_penalty"),
+        ("valuation_growth_mismatch_score", "valuation_growth_mismatch_penalty"),
+        ("transient_revenue_anchor_score", "transient_revenue_anchor_penalty"),
+        ("commercial_business_shock_score", "commercial_business_shock_penalty"),
+        ("commercial_risk_overlay_score", "commercial_risk_overlay_penalty"),
+    ]:
+        score = to_float(fields.get(field), 0.0) or 0.0
+        max_penalty = to_float(settings.get(setting), 0.0) or 0.0
+        penalty += max(0.0, max_penalty) * max(0.0, min(100.0, score)) / 100.0
+    max_total = to_float(settings.get("max_total_penalty"), 25.0)
+    return min(penalty, max_total) if max_total is not None and max_total > 0.0 else penalty
 
 
 def core_structural_veto_reasons(
@@ -379,7 +454,7 @@ def core_structural_veto_reasons(
         reasons.append("cash_runway_lt_9m")
     if as_bool(survival.get("severe_runway_flag"), False):
         reasons.append("severe_runway_flag")
-    going_status = str(sec_liq.get("going_concern_status") or "").strip().lower()
+    going_status = str(sec_liq.get("going_concern_status") or survival.get("going_concern_status") or "").strip().lower()
     if going_status in GOING_CONCERN_HARD_STATUSES:
         reasons.append("going_concern_confirmed")
     if to_float(sec_liq.get("reverse_split_hits_2y"), 0.0) > 0.0:
@@ -388,7 +463,13 @@ def core_structural_veto_reasons(
     verified_active = to_float(ctgov.get("verified_qualifying_active_trial_count"), 0.0)
     commercial_stage = bool(to_float(commercial.get("commercial_stage_flag"), 0.0))
     profitable = bool(to_float(commercial.get("profitable_flag"), 0.0))
-    if verified_active <= 0.0 and not (commercial_stage or profitable):
+    ttm_revenue = to_float(commercial.get("ttm_revenue"), 0.0)
+    has_business_anchor = (
+        commercial_stage
+        or profitable
+        or ttm_revenue >= float(settings.get("commercial_stage_revenue_min") or 50_000_000.0)
+    )
+    if verified_active <= 0.0 and not has_business_anchor:
         reasons.append("no_active_trial_no_business_anchor")
 
     addv = to_float(sec_liq.get("median_addv20", sec_liq.get("avg_dollar_volume_20d")), math.nan)
@@ -403,7 +484,7 @@ def event_hard_weakness_reasons(payload: dict[str, Any], settings: dict[str, Any
     sec_events = payload.get("sec_events", {}) if isinstance(payload, dict) else {}
     configured_reasons = set(settings.get("event_hard_reasons") or EVENT_HARD_WEAKNESS_DEFAULT_REASONS)
     reasons: list[str] = []
-    if to_float(sec_events.get("dilution_event_count"), 0.0) >= 2.0:
+    if count_value(sec_events.get("dilution_event_count")) >= 2:
         reasons.append("repeated_dilution")
     if to_float(sec_events.get("negative_clinical_event_count"), 0.0) > 0.0:
         reasons.append("negative_clinical_event")
@@ -428,7 +509,12 @@ def soft_weakness_reasons(
     cash_runway = to_float(survival.get("cash_runway_months"), math.nan)
     commercial_stage = bool(to_float(commercial.get("commercial_stage_flag"), 0.0))
     profitable = bool(to_float(commercial.get("profitable_flag"), 0.0))
-    has_business_anchor = commercial_stage or profitable
+    ttm_revenue = to_float(commercial.get("ttm_revenue"), 0.0)
+    has_business_anchor = (
+        commercial_stage
+        or profitable
+        or ttm_revenue >= float(settings.get("commercial_stage_revenue_min") or 50_000_000.0)
+    )
     verified_active = to_float(ctgov.get("verified_qualifying_active_trial_count"), 0.0)
     lead_phase2_3 = to_float(ctgov.get("lead_phase2_3_active_trials"), 0.0)
     program_phase2_3 = to_float(ctgov.get("program_phase2_3_active_trials"), 0.0)
@@ -437,16 +523,17 @@ def soft_weakness_reasons(
 
     if math.isfinite(cash_runway) and 9.0 <= cash_runway < 12.0 and not has_business_anchor:
         reasons.append("cash_runway_9_to_12m_clinical")
-    going_status = str(sec_liq.get("going_concern_status") or "").strip().lower()
+    going_status = str(sec_liq.get("going_concern_status") or survival.get("going_concern_status") or "").strip().lower()
     if going_status in GOING_CONCERN_SOFT_STATUSES:
         reasons.append("going_concern_warning")
-    if to_float(sec_events.get("dilution_event_count"), 0.0) == 1.0:
+    dilution_events = count_value(sec_events.get("dilution_event_count"))
+    if 0 < dilution_events < 2:
         reasons.append("single_dilution_event")
     financial_quality = str(survival.get("data_quality") or "").strip().lower()
     if financial_quality in {"low", "poor", "stale"}:
         reasons.append("low_financial_data_quality")
-    commercial_fragility = to_float(governance.get("commercial_fragility_risk_score"), 0.0)
-    if commercial_fragility >= float(settings.get("commercial_fragility_threshold") or 70.0):
+    commercial_fragility = to_float(governance.get("commercial_fragility_risk_score"), math.nan)
+    if math.isfinite(commercial_fragility) and commercial_fragility >= float(settings.get("commercial_fragility_threshold") or 70.0):
         reasons.append("high_commercial_fragility")
     if risk >= float(settings.get("high_risk_threshold") or 75.0):
         reasons.append("high_tier1_risk_score")
@@ -466,6 +553,16 @@ def apply_production_selection_policy(
     soft_reasons: list[str],
     settings: dict[str, Any],
 ) -> tuple[float, float, float]:
+    known_policies = {
+        "raw_legacy_score",
+        "hard_weakness_veto",
+        "hard_veto_soft_drag",
+        "investable_core_risk_cap",
+        "core_veto_event_drag",
+        "core_veto_event_soft_drag",
+    }
+    if selection_policy not in known_policies:
+        raise ValueError(f"Unknown biotech_scoring.production_baseline.selection_policy: {selection_policy!r}")
     event_penalty = 0.0
     soft_penalty = 0.0
     if selection_policy in {"core_veto_event_drag", "core_veto_event_soft_drag"} and event_reasons:
@@ -582,31 +679,44 @@ def score_bucket(
     runway = to_float(survival.get("cash_runway_months"), math.nan)
     severe_runway = as_bool(survival.get("severe_runway_flag"), False)
     survival_quality = str(survival.get("data_quality") or "").lower()
-    going_status = str(sec_liq.get("going_concern_status") or "").lower()
+    going_status = str(sec_liq.get("going_concern_status") or survival.get("going_concern_status") or "").lower()
     recent_nt = int(to_float(sec_liq.get("recent_nt_filing_count_2y", 0)))
     has_advanced_catalyst = lead_phase2_3 > 0 or program_phase2_3 > 0 or pivotal > 0
     commercial_stage = bool(to_float(commercial.get("commercial_stage_flag"), 0.0))
     profitable = bool(to_float(commercial.get("profitable_flag"), 0.0))
-    has_business_anchor = commercial_stage or profitable
+    ttm_revenue = to_float(commercial.get("ttm_revenue"), 0.0)
+    has_business_anchor = commercial_stage or profitable or ttm_revenue >= params.commercial_stage_revenue_min
+    score_cmp = score + 1e-9
 
     if force_core_veto_avoid and core_veto_reasons:
         return "avoid"
-    if risk >= params.avoid_risk_min or severe_runway or going_status in GOING_CONCERN_HARD_STATUSES:
+    if (
+        risk >= params.avoid_risk_min
+        or severe_runway
+        or (math.isfinite(runway) and runway <= params.terminal_runway)
+        or going_status in GOING_CONCERN_HARD_STATUSES
+    ):
         return "avoid"
     if verified_active <= 0 and not has_business_anchor:
         return "avoid"
     if (
-        score >= params.high_min
+        score_cmp >= params.high_min
         and risk <= params.max_high_risk
         and recent_nt == 0
-        and (not math.isfinite(runway) or runway >= params.min_high_runway)
+        and math.isfinite(runway)
+        and runway >= params.min_high_runway
         and survival_quality != "low"
         and (has_advanced_catalyst or has_business_anchor or not params.require_advanced)
     ):
         return "high_conviction"
-    if score >= params.watch_min and risk <= params.max_watch_risk and (verified_active > 0 or has_business_anchor or not params.require_active_watch):
+    if (
+        score_cmp >= params.watch_min
+        and risk <= params.max_watch_risk
+        and (not math.isfinite(runway) or runway > params.terminal_runway)
+        and (verified_active > 0 or has_business_anchor or not params.require_active_watch)
+    ):
         return "watchlist"
-    if score >= params.spec_min and risk <= params.max_spec_risk and (verified_active > 0 or has_business_anchor):
+    if score_cmp >= params.spec_min and risk <= params.max_spec_risk and (verified_active > 0 or has_business_anchor):
         return "speculative"
     return "avoid"
 
@@ -620,6 +730,13 @@ def investment_weight_profile(config: dict[str, Any], commercial: dict[str, Any]
     profiles = cfg_get(config, "biotech_scoring.investment_weight_profiles", {}) or {}
     fallback = cfg_get(config, "biotech_scoring.investment_weights", {}) or {}
     raw_profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
+    if raw_profile is None:
+        LOGGER.warning(
+            "Missing biotech_scoring.investment_weight_profiles.%s; using biotech_scoring.investment_weights fallback.",
+            profile_name,
+        )
+    elif isinstance(raw_profile, dict) and not raw_profile:
+        LOGGER.warning("biotech_scoring.investment_weight_profiles.%s is empty; using field defaults.", profile_name)
     raw_weights = dict(raw_profile if raw_profile is not None else fallback)
     if "commercial_value" not in raw_weights and "commercial_quality" in raw_weights:
         LOGGER.warning(
@@ -651,6 +768,24 @@ def investment_weight_profile(config: dict[str, Any], commercial: dict[str, Any]
     )
 
 
+def validate_clinical_weights(weights: dict[str, Any]) -> None:
+    values = {
+        "catalyst": float(weights.get("catalyst", 0.55)),
+        "credibility": float(weights.get("credibility", 0.25)),
+        "financial_quality": float(weights.get("financial_quality", 0.15)),
+        "momentum": float(weights.get("momentum", 0.05)),
+    }
+    negative = [name for name, value in values.items() if value < 0.0]
+    if negative:
+        raise ValueError(f"biotech_scoring.weights has negative positive-component weight(s): {', '.join(negative)}")
+    total = sum(values.values())
+    if abs(total - 1.0) > 1e-3:
+        raise ValueError(f"biotech_scoring.weights positive components sum to {total:.4f}; expected 1.0 +/- 0.001")
+    risk_penalty = float(weights.get("risk_penalty", 0.25))
+    if not 0.0 < risk_penalty <= 1.0:
+        raise ValueError(f"biotech_scoring.weights.risk_penalty must be in (0, 1], got {risk_penalty}")
+
+
 def score_rows(
     rows: list[dict[str, Any]],
     config: dict[str, Any],
@@ -660,16 +795,18 @@ def score_rows(
 ) -> list[dict[str, Any]]:
     governance_by_company = governance_by_company or {}
     weights = cfg_get(config, "biotech_scoring.weights", {}) or {}
-    catalyst_w = float(weights.get("catalyst", 0.45))
-    credibility_w = float(weights.get("credibility", 0.30))
+    validate_clinical_weights(weights)
+    catalyst_w = float(weights.get("catalyst", 0.55))
+    credibility_w = float(weights.get("credibility", 0.25))
     financial_w = float(weights.get("financial_quality", 0.15))
-    momentum_w = float(weights.get("momentum", 0.10))
-    risk_w = float(weights.get("risk_penalty", 0.30))
+    momentum_w = float(weights.get("momentum", 0.05))
+    risk_w = float(weights.get("risk_penalty", 0.25))
 
     investment_enabled = as_bool(cfg_get(config, "biotech_scoring.use_investment_score", True), True)
     core_veto_settings = core_structural_veto_settings(config)
     production_baseline = tier1_production_baseline(config)
     policy_settings = production_policy_settings(config)
+    commercial_risk_settings = commercial_risk_overlay_settings(config)
     bucket_settings = bucket_params(config)
     selection_policy = str(production_baseline["selection_policy"])
     apply_core_veto_to_rank = bool(core_veto_settings["enabled"] and core_veto_settings["apply_to_rank"])
@@ -682,25 +819,37 @@ def score_rows(
     missing_momentum_raw: list[str] = []
     for row in rows:
         company_id = int(row["company_id"])
-        payload = parse_json(row.get("feature_json"))
+        payload = parse_json(
+            row.get("feature_json"),
+            context=f"company_id={company_id} ticker={row.get('ticker') or ''} source=daily_features",
+        )
         raw_scores = payload.get("raw_scores", {}) if isinstance(payload, dict) else {}
         commercial = commercial_by_company.get(company_id, {})
         forward_guidance = forward_by_company.get(company_id, {})
         governance = governance_by_company.get(company_id, {})
-        forward_payload = parse_json(forward_guidance.get("payload_json"))
-        if "catalyst_score_raw" not in raw_scores and row.get("catalyst_score_raw") in (None, ""):
+        commercial_risk = commercial_risk_overlay_fields(commercial, governance, commercial_risk_settings)
+        forward_payload = parse_json(
+            forward_guidance.get("payload_json"),
+            context=f"company_id={company_id} ticker={row.get('ticker') or ''} source=forward_guidance",
+        )
+        catalyst_raw = optional_score(raw_scores, row, "catalyst_score_raw")
+        credibility_raw = optional_score(raw_scores, row, "credibility_score_raw")
+        financial_raw = optional_score(raw_scores, row, "financial_quality_score_raw")
+        risk_raw = optional_score(raw_scores, row, "risk_score_raw")
+        momentum_raw = optional_score(raw_scores, row, "momentum_score_raw")
+        if catalyst_raw is None:
             missing_catalyst_raw.append(str(row.get("ticker") or company_id))
-        if "credibility_score_raw" not in raw_scores and row.get("credibility_score_raw") in (None, ""):
+        if credibility_raw is None:
             missing_credibility_raw.append(str(row.get("ticker") or company_id))
-        if "financial_quality_score_raw" not in raw_scores and row.get("financial_quality_score_raw") in (None, ""):
+        if financial_raw is None:
             missing_financial_raw.append(str(row.get("ticker") or company_id))
-        if "momentum_score_raw" not in raw_scores and row.get("momentum_score_raw") in (None, ""):
+        if momentum_raw is None:
             missing_momentum_raw.append(str(row.get("ticker") or company_id))
-        catalyst = clamp(to_float(raw_scores.get("catalyst_score_raw", row.get("catalyst_score_raw", 0.0))))
-        credibility = clamp(to_float(raw_scores.get("credibility_score_raw", row.get("credibility_score_raw", 0.0))))
-        financial_quality = clamp(to_float(raw_scores.get("financial_quality_score_raw", row.get("financial_quality_score_raw", 0.0))))
-        risk = clamp(to_float(raw_scores.get("risk_score_raw", row.get("risk_score_raw", 0.0))))
-        momentum = clamp(to_float(raw_scores.get("momentum_score_raw", row.get("momentum_score_raw", 0.0))))
+        catalyst = clamp(catalyst_raw if catalyst_raw is not None else 0.0)
+        credibility = clamp(credibility_raw if credibility_raw is not None else 0.0)
+        financial_quality = clamp(financial_raw if financial_raw is not None else 0.0)
+        risk = clamp(risk_raw if risk_raw is not None else 100.0)
+        momentum = clamp(momentum_raw if momentum_raw is not None else 0.0)
         clinical_positive = (
             catalyst_w * catalyst
             + credibility_w * credibility
@@ -710,25 +859,38 @@ def score_rows(
         clinical_risk_drag = convex_risk_drag(risk, risk_w, config, "biotech_scoring")
         clinical_opportunity = clamp(clinical_positive - clinical_risk_drag)
 
-        commercial_quality = clamp(to_float(commercial.get("commercial_quality_score"), float(cfg_get(config, "biotech_scoring.missing_score_defaults.commercial_quality_score", 35.0))))
-        commercial_value = clamp(to_float(commercial.get("commercial_value_score"), float(cfg_get(config, "biotech_scoring.missing_score_defaults.commercial_value_score", 35.0))))
+        commercial_value_default = float(cfg_get(config, "biotech_scoring.missing_score_defaults.commercial_value_score", 35.0))
+        commercial_quality = clamp(to_float(commercial.get("commercial_quality_score"), commercial_value_default))
+        commercial_value = clamp(to_float(commercial.get("commercial_value_score"), commercial_value_default))
         forward_guidance_score = clamp(to_float(forward_guidance.get("guidance_score"), float(cfg_get(config, "biotech_scoring.missing_score_defaults.forward_guidance_score", 45.0))))
         valuation_score = clamp(to_float(commercial.get("valuation_score"), float(cfg_get(config, "biotech_scoring.missing_score_defaults.valuation_score", 50.0))))
         upside_capacity_score = clamp(to_float(commercial.get("upside_capacity_score"), float(cfg_get(config, "biotech_scoring.missing_score_defaults.upside_capacity_score", 50.0))))
         profile_name, profile_weights = investment_weight_profile(config, commercial)
+        embedded_financial_quality_weight = profile_weights["clinical_opportunity"] * financial_w
+        embedded_momentum_weight = profile_weights["clinical_opportunity"] * momentum_w
+        # The investment layer uses the raw clinical-positive composite, then
+        # adds only residual weights for financial quality and momentum so their
+        # total effective allocation equals the profile-level target.
+        residual_financial_quality_weight = max(
+            0.0,
+            profile_weights["financial_quality"] - embedded_financial_quality_weight,
+        )
+        residual_momentum_weight = max(0.0, profile_weights["momentum"] - embedded_momentum_weight)
         investment_positive = (
-            profile_weights["clinical_opportunity"] * clinical_opportunity
+            profile_weights["clinical_opportunity"] * clinical_positive
             + profile_weights["commercial_value"] * commercial_value
             + profile_weights["forward_guidance"] * forward_guidance_score
             + profile_weights["valuation"] * valuation_score
             + profile_weights["upside_capacity"] * upside_capacity_score
-            + profile_weights["financial_quality"] * financial_quality
-            + profile_weights["momentum"] * momentum
+            + residual_financial_quality_weight * financial_quality
+            + residual_momentum_weight * momentum
         )
         investment_risk_drag = convex_risk_drag(risk, profile_weights["risk_penalty"], config, "biotech_scoring")
-        effective_pre_confidence_risk_drag = profile_weights["clinical_opportunity"] * clinical_risk_drag + investment_risk_drag
+        effective_pre_confidence_risk_drag = investment_risk_drag
         confidence_multiplier = score_confidence_multiplier(config, payload, commercial, forward_guidance, profile_name)
-        investment_score = clamp((investment_positive - investment_risk_drag) * confidence_multiplier)
+        pre_confidence_investment_score = clamp(investment_positive - investment_risk_drag)
+        confidence_adjusted_score_reduction = pre_confidence_investment_score * (1.0 - confidence_multiplier)
+        investment_score = clamp(pre_confidence_investment_score * confidence_multiplier)
         raw_opportunity = investment_score if investment_enabled else clinical_opportunity
         core_veto_reasons = core_structural_veto_reasons(payload, commercial, core_veto_settings)
         event_reasons = event_hard_weakness_reasons(payload, policy_settings)
@@ -746,6 +908,8 @@ def score_rows(
             soft_reasons=soft_reasons,
             settings=policy_settings,
         )
+        commercial_overlay_penalty = commercial_risk_policy_penalty(commercial_risk, commercial_risk_settings)
+        opportunity = clamp(opportunity - commercial_overlay_penalty)
         selection_gate = tier1_selection_gate_score(opportunity, risk)
         core_veto_flag = 1.0 if core_veto_reasons else 0.0
         rank_demoted_by_core_veto = bool(apply_core_veto_to_rank and core_veto_reasons)
@@ -833,16 +997,28 @@ def score_rows(
                 "policy_adjusted_opportunity_score": round(opportunity, 4),
                 "production_policy_event_hard_penalty": round(event_penalty, 4),
                 "production_policy_soft_weakness_penalty": round(soft_penalty, 4),
-                "production_policy_total_penalty": round(event_penalty + soft_penalty, 4),
+                "commercial_risk_overlay_penalty": round(commercial_overlay_penalty, 4),
+                "production_policy_total_penalty": round(event_penalty + soft_penalty + commercial_overlay_penalty, 4),
                 "production_policy_event_hard_reasons": event_reasons,
                 "production_policy_soft_weakness_reasons": soft_reasons,
+                "commercial_risk_overlay_score": commercial_risk["commercial_risk_overlay_score"],
+                "commercial_risk_overlay_reasons": commercial_risk["commercial_risk_overlay_reasons"],
+                "commercial_deterioration_score": commercial_risk["commercial_deterioration_score"],
+                "valuation_growth_mismatch_score": commercial_risk["valuation_growth_mismatch_score"],
+                "transient_revenue_anchor_score": commercial_risk["transient_revenue_anchor_score"],
+                "commercial_business_shock_score": commercial_risk["commercial_business_shock_score"],
                 "tier1_selection_gate_score": round(selection_gate, 4),
                 "investment_profile": profile_name,
                 "investment_weights": profile_weights,
                 "clinical_risk_drag": round(clinical_risk_drag, 4),
                 "investment_risk_drag": round(investment_risk_drag, 4),
                 "effective_pre_confidence_risk_drag": round(effective_pre_confidence_risk_drag, 4),
-                "effective_total_risk_drag": round(effective_pre_confidence_risk_drag * confidence_multiplier, 4),
+                "effective_total_risk_drag": round(effective_pre_confidence_risk_drag, 4),
+                "confidence_adjusted_score_reduction": round(confidence_adjusted_score_reduction, 4),
+                "embedded_financial_quality_weight": round(embedded_financial_quality_weight, 6),
+                "residual_financial_quality_weight": round(residual_financial_quality_weight, 6),
+                "embedded_momentum_weight": round(embedded_momentum_weight, 6),
+                "residual_momentum_weight": round(residual_momentum_weight, 6),
                 "data_quality_confidence_multiplier": round(confidence_multiplier, 4),
                 "commercial_quality_score": round(commercial_quality, 4),
                 "commercial_value_score": round(commercial_value, 4),
@@ -867,6 +1043,10 @@ def score_rows(
                 "configured_event_hard_reasons": sorted(policy_settings["event_hard_reasons"]),
                 "configured_soft_weakness_reasons": sorted(policy_settings["soft_weakness_reasons"]),
             },
+            "commercial_risk_overlay": commercial_risk | {
+                "enabled": as_bool(commercial_risk_settings.get("enabled", True), True),
+                "penalty": round(commercial_overlay_penalty, 4),
+            },
             "core_structural_veto": {
                 "enabled": bool(core_veto_settings["enabled"]),
                 "flag": bool(core_veto_reasons),
@@ -879,7 +1059,7 @@ def score_rows(
             },
             "sec_events": sec_events,
             "risk_flags": {
-                "going_concern_status": sec_liq.get("going_concern_status", ""),
+                "going_concern_status": sec_liq.get("going_concern_status") or survival.get("going_concern_status", ""),
                 "reverse_split_hits_2y": sec_liq.get("reverse_split_hits_2y", 0),
                 "median_addv20": sec_liq.get("median_addv20", 0),
                 "cash_runway_months": finite_value_or_none(survival.get("cash_runway_months")),
@@ -891,6 +1071,7 @@ def score_rows(
                 "core_structural_veto_reasons": "|".join(core_veto_reasons),
                 "event_hard_weakness_reasons": "|".join(event_reasons),
                 "soft_weakness_reasons": "|".join(soft_reasons),
+                "commercial_risk_overlay_reasons": commercial_risk["commercial_risk_overlay_reasons"],
             },
             "manual": payload.get("manual", {}),
         }
@@ -923,7 +1104,24 @@ def score_rows(
                 "data_quality_confidence_multiplier": round(confidence_multiplier, 4),
                 "clinical_risk_drag": round(clinical_risk_drag, 4),
                 "investment_risk_drag": round(investment_risk_drag, 4),
-                "effective_total_risk_drag": round(effective_pre_confidence_risk_drag * confidence_multiplier, 4),
+                "effective_total_risk_drag": round(effective_pre_confidence_risk_drag, 4),
+                "confidence_adjusted_score_reduction": round(confidence_adjusted_score_reduction, 4),
+                "commercial_risk_overlay_score": commercial_risk["commercial_risk_overlay_score"],
+                "commercial_risk_overlay_flag": commercial_risk["commercial_risk_overlay_flag"],
+                "commercial_risk_overlay_reasons": commercial_risk["commercial_risk_overlay_reasons"],
+                "commercial_risk_overlay_penalty": round(commercial_overlay_penalty, 4),
+                "commercial_deterioration_score": commercial_risk["commercial_deterioration_score"],
+                "commercial_deterioration_flag": commercial_risk["commercial_deterioration_flag"],
+                "commercial_deterioration_reasons": commercial_risk["commercial_deterioration_reasons"],
+                "valuation_growth_mismatch_score": commercial_risk["valuation_growth_mismatch_score"],
+                "valuation_growth_mismatch_flag": commercial_risk["valuation_growth_mismatch_flag"],
+                "valuation_growth_mismatch_reasons": commercial_risk["valuation_growth_mismatch_reasons"],
+                "transient_revenue_anchor_score": commercial_risk["transient_revenue_anchor_score"],
+                "transient_revenue_anchor_flag": commercial_risk["transient_revenue_anchor_flag"],
+                "transient_revenue_anchor_reasons": commercial_risk["transient_revenue_anchor_reasons"],
+                "commercial_business_shock_score": commercial_risk["commercial_business_shock_score"],
+                "commercial_business_shock_flag": commercial_risk["commercial_business_shock_flag"],
+                "commercial_business_shock_reasons": commercial_risk["commercial_business_shock_reasons"],
                 "bucket": score_bucket(
                     opportunity,
                     risk,
@@ -946,10 +1144,10 @@ def score_rows(
                 "collaborator_heavy_flag": ctgov.get("collaborator_heavy_flag", False),
                 "active_pivotal_trials": ctgov.get("active_pivotal_trials", 0),
                 "median_addv20": sec_liq.get("median_addv20", 0),
-                "cash_runway_months": finite_value_or_blank(survival.get("cash_runway_months")),
-                "financial_survival_score": finite_value_or_blank(survival.get("financial_survival_score")),
+                "cash_runway_months": finite_value_or_none(survival.get("cash_runway_months")),
+                "financial_survival_score": finite_value_or_none(survival.get("financial_survival_score")),
                 "financial_data_quality": survival.get("data_quality", ""),
-                "going_concern_status": sec_liq.get("going_concern_status", ""),
+                "going_concern_status": sec_liq.get("going_concern_status") or survival.get("going_concern_status", ""),
                 "reverse_split_hits_2y": sec_liq.get("reverse_split_hits_2y", 0),
                 "sec_regulatory_catalyst_count": sec_events.get("regulatory_catalyst_count", 0) if isinstance(sec_events, dict) else 0,
                 "sec_dilution_event_count": sec_events.get("dilution_event_count", 0) if isinstance(sec_events, dict) else 0,
@@ -994,46 +1192,121 @@ def score_rows(
     return scored
 
 def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_date: str) -> None:
+    bad_dates = sorted({str(row.get("asof_date") or "") for row in rows if str(row.get("asof_date") or "") != asof_date})
+    if bad_dates:
+        raise ValueError(f"upsert_scores received rows outside asof_date={asof_date}: {', '.join(bad_dates[:5])}")
+    ensure_table_optional_columns(conn, "daily_scores", DAILY_SCORES_OPTIONAL_COLUMNS)
     now = utc_now()
-    params = [
-        (
-            row["asof_date"],
-            row["company_id"],
-            row["catalyst_score"],
-            row["credibility_score"],
-            row["financial_quality_score"],
-            row["risk_score"],
-            row["momentum_score"],
-            row["clinical_opportunity_score"],
-            row["commercial_value_score"],
-            row["forward_guidance_score"],
-            row["valuation_score"],
-            row["upside_capacity_score"],
-            row["investment_score"],
-            row["opportunity_score"],
-            row["tier1_selection_gate_score"],
-            row["data_quality_confidence_multiplier"],
-            row["clinical_risk_drag"],
-            row["investment_risk_drag"],
-            row["rank"],
-            row["bucket"],
-            row["top_evidence_json"],
-            now,
-            now,
-        )
-        for row in rows
+    fields = [
+        "asof_date",
+        "company_id",
+        "ticker",
+        "company_name",
+        "catalyst_score",
+        "credibility_score",
+        "financial_quality_score",
+        "risk_score",
+        "momentum_score",
+        "clinical_opportunity_score",
+        "commercial_value_score",
+        "forward_guidance_score",
+        "valuation_score",
+        "upside_capacity_score",
+        "investment_score",
+        "opportunity_score",
+        "tier1_selection_gate_score",
+        "tier1_primary_horizon_trading_days",
+        "tier1_production_score_model",
+        "tier1_selection_policy",
+        "alpha_multibagger_role",
+        "core_structural_veto_flag",
+        "core_structural_veto_reasons",
+        "rank_demoted_by_core_veto",
+        "data_quality_confidence_multiplier",
+        "clinical_risk_drag",
+        "investment_risk_drag",
+        "effective_total_risk_drag",
+        "confidence_adjusted_score_reduction",
+        "commercial_risk_overlay_score",
+        "commercial_risk_overlay_flag",
+        "commercial_risk_overlay_reasons",
+        "commercial_risk_overlay_penalty",
+        "commercial_deterioration_score",
+        "commercial_deterioration_flag",
+        "commercial_deterioration_reasons",
+        "valuation_growth_mismatch_score",
+        "valuation_growth_mismatch_flag",
+        "valuation_growth_mismatch_reasons",
+        "transient_revenue_anchor_score",
+        "transient_revenue_anchor_flag",
+        "transient_revenue_anchor_reasons",
+        "commercial_business_shock_score",
+        "commercial_business_shock_flag",
+        "commercial_business_shock_reasons",
+        "rank",
+        "bucket",
+        "primary_nct",
+        "primary_trial_title",
+        "verified_qualifying_active_trial_count",
+        "phase2_3_active_trials",
+        "lead_phase2_3_active_trials",
+        "program_phase2_3_active_trials",
+        "collaborator_phase2_3_active_trials",
+        "effective_phase2_3_trials",
+        "core_pipeline_quality_score",
+        "collaborator_dependency_ratio",
+        "collaborator_heavy_flag",
+        "active_pivotal_trials",
+        "median_addv20",
+        "cash_runway_months",
+        "financial_survival_score",
+        "financial_data_quality",
+        "going_concern_status",
+        "reverse_split_hits_2y",
+        "sec_regulatory_catalyst_count",
+        "sec_dilution_event_count",
+        "sec_negative_clinical_event_count",
+        "top_evidence_json",
     ]
+    text_fields = {
+        "asof_date",
+        "ticker",
+        "company_name",
+        "tier1_production_score_model",
+        "tier1_selection_policy",
+        "alpha_multibagger_role",
+        "core_structural_veto_reasons",
+        "bucket",
+        "primary_nct",
+        "primary_trial_title",
+        "commercial_risk_overlay_reasons",
+        "commercial_deterioration_reasons",
+        "valuation_growth_mismatch_reasons",
+        "transient_revenue_anchor_reasons",
+        "commercial_business_shock_reasons",
+        "financial_data_quality",
+        "going_concern_status",
+        "top_evidence_json",
+    }
+
+    def db_value(row: dict[str, Any], field: str) -> Any:
+        if field in row:
+            return row[field]
+        return "" if field in text_fields else None
+
+    params = [tuple(db_value(row, field) for field in fields) + (now, now) for row in rows]
+    placeholders = ", ".join("?" for _ in [*fields, "created_at", "updated_at"])
+    update_fields = [field for field in fields if field not in {"asof_date", "company_id"}]
+    update_clause = ", ".join(f"{field} = excluded.{field}" for field in [*update_fields, "updated_at"])
     with conn:
         conn.executemany(
-            """
-            INSERT OR REPLACE INTO daily_scores(
-                asof_date, company_id, catalyst_score, credibility_score,
-                financial_quality_score, risk_score, momentum_score, clinical_opportunity_score,
-                commercial_value_score, forward_guidance_score, valuation_score, upside_capacity_score, investment_score, opportunity_score,
-                tier1_selection_gate_score, data_quality_confidence_multiplier, clinical_risk_drag, investment_risk_drag,
-                rank, bucket, top_evidence_json, created_at, updated_at
+            f"""
+            INSERT INTO daily_scores(
+                {", ".join(fields)}, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ({placeholders})
+            ON CONFLICT(asof_date, company_id) DO UPDATE SET
+                {update_clause}
             """,
             params,
         )
@@ -1044,6 +1317,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fieldnames = [
         "asof_date",
         "rank",
+        "company_id",
         "ticker",
         "company_name",
         "bucket",
@@ -1062,6 +1336,23 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "clinical_risk_drag",
         "investment_risk_drag",
         "effective_total_risk_drag",
+        "confidence_adjusted_score_reduction",
+        "commercial_risk_overlay_score",
+        "commercial_risk_overlay_flag",
+        "commercial_risk_overlay_reasons",
+        "commercial_risk_overlay_penalty",
+        "commercial_deterioration_score",
+        "commercial_deterioration_flag",
+        "commercial_deterioration_reasons",
+        "valuation_growth_mismatch_score",
+        "valuation_growth_mismatch_flag",
+        "valuation_growth_mismatch_reasons",
+        "transient_revenue_anchor_score",
+        "transient_revenue_anchor_flag",
+        "transient_revenue_anchor_reasons",
+        "commercial_business_shock_score",
+        "commercial_business_shock_flag",
+        "commercial_business_shock_reasons",
         "commercial_value_score",
         "forward_guidance_score",
         "valuation_score",
@@ -1162,11 +1453,14 @@ def main() -> None:
                 )
             missing_governance = [str(row["ticker"]) for row in features if int(row["company_id"]) not in governance_by_company]
             if missing_governance:
-                raise RuntimeError(
+                message = (
                     "biotech scoring missing governance_event_features_daily row(s): "
                     + ",".join(sorted(missing_governance)[:25])
                     + (f"...(+{len(missing_governance) - 25})" if len(missing_governance) > 25 else "")
                 )
+                if as_bool(cfg_get(config, "biotech_scoring.require_governance_features", False), False):
+                    raise RuntimeError(message)
+                LOGGER.warning("%s; continuing with empty governance diagnostics for missing companies.", message)
             max_upstream_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0))
             validate_layer_freshness(
                 base_rows=features,

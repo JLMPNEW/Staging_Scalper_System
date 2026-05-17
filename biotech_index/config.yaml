@@ -172,7 +172,7 @@ inactive_removed_audit:
   output_dir: "../output/biotech_index_reports"
   screen_results_csv: "../output/preload_biotech_screen/biotech_screen_results_all.csv"
   reactivation_scan_csv: "../output/biotech_index_reports/ctgov_reactivation_scan.csv"
-  rescreen_results_csv:
+  rescreen_results_csv: "../output/biotech_index_reports/inactive_removed_rescreen/inactive_removed_rescreen_results.csv"
   conditional_exclusions_csv: "data/inactive_removed_conditional_exclusions.csv"
   policy_inclusions_csv: "data/inactive_removed_policy_inclusions.csv"
   screen_config_yaml: "screen_biotech_universe_config.yaml"
@@ -404,28 +404,32 @@ biotech_scoring:
   output_dir: "../output/biotech_index_reports"
   output_csv: "biotech_daily_scores.csv"
   use_investment_score: true
+  require_governance_features: false
   production_baseline:
     enabled: true
     score_model: "biotech_opportunity_score"
-    candidate_id: "tier1_1f24e704aacf"
-    candidate_name: "current_clinical_mix_risk030_clinical_risk_strict"
+    candidate_id: "tier1_96cc042b6c9e"
+    candidate_name: "catalyst_heavy_risk025_commercial_defensive"
     top_n: 20
-    selection_policy: "core_veto_event_soft_drag"
+    selection_policy: "core_veto_event_drag"
     primary_horizon_trading_days: 120
     alpha_multibagger_role: "context_only"
     calibration_output_dir: "../output/biotech_index_reports/calibration_tier1_120d_confirm"
     calibration_test_metrics:
-      test_lcb_return_pct: 5.486824
-      test_sortino_like: 0.501776
-      test_profit_factor: 1.914178
-      test_large_loss_20pct_rate_pct: 17.222222
-      bootstrap_lcb_return_pct_ci05: 3.151838
-    runner_up_candidate_name: "catalyst_heavy_risk030_clinical_risk_strict"
-    runner_up_candidate_id: "tier1_1bfd24bdf1f4"
+      test_lcb_return_pct: 6.417134
+      test_sortino_like: 0.544727
+      test_profit_factor: 2.006218
+      test_large_loss_20pct_rate_pct: 20.0
+      test_core_hard_weakness_exposure_pct: 0.0
+      test_event_hard_weakness_exposure_pct: 78.888889
+      test_soft_weakness_exposure_pct: 25.555556
+    runner_up_candidate_name: "current_config"
+    runner_up_candidate_id: "tier1_1f24e704aacf"
     notes:
       - "Tier-1 production ranking is calibrated for a 120-trading-day primary horizon."
-      - "Production candidate selected from 2026-05-15 calibration as all-sample Top-20 rank 1 by bootstrap-positive report."
-      - "Core structural weakness is vetoed for rank; event hard and soft weakness reduce the score but do not automatically remove the name."
+      - "Production candidate promoted to the 2026-05-15 all-sample Top-20 120-day challenger after bug-fixed calibration review."
+      - "Core structural weakness is vetoed for rank; event hard weakness reduces the score but does not automatically remove the name."
+      - "Known follow-up: add and calibrate commercial deterioration, valuation/growth mismatch, and false commercial-anchor overlays before treating the raw Top-20 as final position sizing."
       - "Alpha and multibagger scores remain secondary context until Phase 2 calibration proves orthogonal value."
   convex_risk_penalty_enabled: true
   risk_penalty_convexity: 0.35
@@ -437,7 +441,6 @@ biotech_scoring:
     missing_field_penalty: 0.006
     max_missing_penalty: 0.08
   missing_score_defaults:
-    commercial_quality_score: 35.0
     commercial_value_score: 35.0
     forward_guidance_score: 45.0
     valuation_score: 50.0
@@ -471,12 +474,44 @@ biotech_scoring:
       - early_stage_or_unadvanced_trial_anchor
     commercial_fragility_threshold: 70.0
     high_risk_threshold: 75.0
+  commercial_risk_overlay:
+    enabled: true
+    # Diagnostic thresholds used by scoring and calibration. Production penalty
+    # values remain zero until a calibrated overlay policy is selected.
+    commercial_deterioration_penalty: 0.0
+    valuation_growth_mismatch_penalty: 0.0
+    transient_revenue_anchor_penalty: 0.0
+    commercial_business_shock_penalty: 0.0
+    commercial_risk_overlay_penalty: 0.0
+    max_total_penalty: 25.0
+    commercial_fragility_threshold: 70.0
+    moderate_revenue_decline_yoy_pct: -0.05
+    severe_revenue_decline_yoy_pct: -0.20
+    moderate_revenue_decline_qoq_pct: -0.10
+    severe_revenue_decline_qoq_pct: -0.35
+    weak_growth_yoy_pct: 0.15
+    low_growth_yoy_pct: 0.05
+    high_pe_ratio: 35.0
+    severe_pe_ratio: 70.0
+    high_ev_to_sales: 6.0
+    severe_ev_to_sales: 12.0
+    high_price_to_sales: 6.0
+    severe_price_to_sales: 12.0
+    transient_anchor_yoy_decline_pct: -0.50
+    transient_anchor_qoq_decline_pct: -0.45
+    transient_anchor_high_fcf_yield: 0.25
+    transient_anchor_low_pe_ratio: 5.0
+    business_shock_base_score: 20.0
+    business_shock_reason_weight: 15.0
+    low_revenue_growth_score: 25.0
+    high_valuation_score: 85.0
+    high_upside_capacity_score: 85.0
   weights:
-    catalyst: 0.45
-    credibility: 0.30
+    catalyst: 0.55
+    credibility: 0.25
     financial_quality: 0.15
-    momentum: 0.10
-    risk_penalty: 0.30
+    momentum: 0.05
+    risk_penalty: 0.25
   investment_weights:
     clinical_opportunity: 0.25
     commercial_value: 0.25
@@ -488,14 +523,14 @@ biotech_scoring:
     risk_penalty: 0.15
   investment_weight_profiles:
     commercial_stage:
-      clinical_opportunity: 0.10
-      commercial_value: 0.30
-      forward_guidance: 0.20
-      valuation: 0.10
-      upside_capacity: 0.10
-      financial_quality: 0.15
+      clinical_opportunity: 0.08
+      commercial_value: 0.35
+      forward_guidance: 0.15
+      valuation: 0.12
+      upside_capacity: 0.08
+      financial_quality: 0.17
       momentum: 0.05
-      risk_penalty: 0.15
+      risk_penalty: 0.20
     clinical_stage:
       clinical_opportunity: 0.45
       commercial_value: 0.05
@@ -733,6 +768,8 @@ calibration:
       min_net_lcb_return_pct: 0.0
       min_sortino: 0.0
       min_profit_factor: 1.15
+      legacy_binary_constraint_enabled: false
+      aggregate_hard_constraint_enabled: false
       max_core_hard_exposure_pct: 0.0
       max_event_hard_exposure_pct: 0.0
       max_soft_exposure_pct: 35.0
