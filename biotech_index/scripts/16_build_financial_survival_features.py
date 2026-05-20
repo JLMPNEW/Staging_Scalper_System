@@ -65,6 +65,7 @@ SURVIVAL_FIELDS = [
     "cash_yoy_change_pct",
     "rd_qoq_change_pct",
     "rd_yoy_change_pct",
+    "negative_cash_flag",
     "burn_acceleration_flag",
     "short_runway_flag",
     "severe_runway_flag",
@@ -462,16 +463,25 @@ def compute_survival_row(
             proxies.append("cash_and_equivalents_for_cash_and_investments")
     if cash is None:
         missing.append("cash_and_investments")
+    negative_cash_flag = int(cash is not None and cash < 0.0)
     latest_period_end = str((cash_row or rows[0] if rows else {}).get("period_end") or "")
 
     quarterly_burn, ttm_burn, ocf_ttm = burn_metrics(rows, proxies, missing)
+    revenue_ttm = ttm_amount(rows, "revenue", proxies)
     if cash is not None and cash <= 0:
         runway = 0.0
     elif ttm_burn is not None and ttm_burn > 0 and cash is not None:
         runway = cash / (ttm_burn / 12.0)
     elif ocf_ttm is not None and ocf_ttm > 0 and cash is not None:
-        runway = 999.0
-        proxies.append("positive_operating_cash_flow_runway_cap")
+        revenue_buffer_pct = float(cfg_get(config, "financial_survival.profitable_runway_revenue_buffer_pct", 0.10))
+        runway_cap = float(cfg_get(config, "financial_survival.profitable_company_runway_cap_months", 120.0))
+        if revenue_ttm is not None and revenue_ttm > 0.0 and revenue_buffer_pct > 0.0:
+            monthly_proxy_burn = max((revenue_ttm * revenue_buffer_pct) / 12.0, 1.0)
+            runway = min(runway_cap, cash / monthly_proxy_burn)
+            proxies.append("positive_operating_cash_flow_revenue_buffer_runway_proxy")
+        else:
+            runway = runway_cap
+            proxies.append("positive_operating_cash_flow_runway_cap")
     else:
         runway = None
         missing.append("cash_runway_months")
@@ -533,7 +543,26 @@ def compute_survival_row(
     elif runway is not None and runway >= float(cfg_get(config, "financial_survival.min_acceptable_runway_months", 12)):
         dilution_score *= 0.70
 
-    going_status = str(going_concern_status or screen_row.get("going_concern_status") or "").strip().lower()
+    source_priority = [
+        str(item).strip().lower()
+        for item in (cfg_get(config, "financial_survival.going_concern_source_priority", ["db", "csv"]) or [])
+    ]
+    db_going_status = str(going_concern_status or "").strip().lower()
+    csv_going_status = str(screen_row.get("going_concern_status") or "").strip().lower()
+    going_status = ""
+    for source in source_priority or ["db", "csv"]:
+        if source == "db" and db_going_status:
+            going_status = db_going_status
+            break
+        if source == "csv" and csv_going_status:
+            going_status = csv_going_status
+            if not db_going_status:
+                LOGGER.warning("Using CSV going_concern_status for %s because DB value is absent", ticker)
+            break
+    if not going_status:
+        going_status = db_going_status or csv_going_status
+    if "recent_nt_filing_count_2y" not in screen_row:
+        missing.append("late_filing_count")
     late_filing_count = to_int(screen_row.get("recent_nt_filing_count_2y"), 0)
 
     data_quality = "high"
@@ -606,6 +635,7 @@ def compute_survival_row(
         "cash_yoy_change_pct": cash_yoy,
         "rd_qoq_change_pct": rd_qoq,
         "rd_yoy_change_pct": rd_yoy,
+        "negative_cash_flag": negative_cash_flag,
         "burn_acceleration_flag": burn_acceleration,
         "short_runway_flag": short_runway_flag,
         "severe_runway_flag": severe_runway_flag,
@@ -765,6 +795,8 @@ def main() -> None:
             )
             with conn:
                 for row in rows:
+                    if to_int(row.get("negative_cash_flag"), 0) > 0:
+                        log_missing_issue(conn, row=row, field="cash_and_investments", severity="high", proxy="negative_cash_position")
                     if row["data_quality"] == "low":
                         for field in str(row.get("missing_fields") or "").split(";"):
                             if field:

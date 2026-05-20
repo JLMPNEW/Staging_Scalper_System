@@ -20,6 +20,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from biotech_index.core.constants import (  # noqa: E402
+    CORE_HARD_WEAKNESS_REASONS,
+    EVENT_HARD_WEAKNESS_REASONS,
+    GOING_CONCERN_HARD_STATUSES,
+    GOING_CONCERN_SOFT_STATUSES,
+    SOFT_WEAKNESS_REASONS,
+)
 from biotech_index.core.commercial_risk import commercial_risk_overlay_fields  # noqa: E402
 from biotech_index.core.db import (  # noqa: E402
     DAILY_SCORES_OPTIONAL_COLUMNS,
@@ -40,32 +47,29 @@ from biotech_index.core.pipeline_guards import (  # noqa: E402
 
 LOGGER = logging.getLogger("score_biotech_index")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-CORE_STRUCTURAL_VETO_DEFAULT_REASONS = [
-    "cash_runway_lt_9m",
-    "severe_runway_flag",
-    "going_concern_confirmed",
-    "reverse_split_history",
-    "no_active_trial_no_business_anchor",
-    "illiquid",
-]
-EVENT_HARD_WEAKNESS_DEFAULT_REASONS = [
-    "negative_clinical_event",
-    "repeated_dilution",
-]
-SOFT_WEAKNESS_DEFAULT_REASONS = [
-    "cash_runway_9_to_12m_clinical",
-    "going_concern_warning",
-    "single_dilution_event",
-    "low_financial_data_quality",
-    "high_commercial_fragility",
-    "high_tier1_risk_score",
-    "recent_nt_filing",
-    "early_stage_or_unadvanced_trial_anchor",
-]
-GOING_CONCERN_HARD_STATUSES = frozenset({"confirmed"})
-GOING_CONCERN_SOFT_STATUSES = frozenset({"possible", "substantial_doubt", "going_concern", "going_concern_warning"})
-
-
+CORE_STRUCTURAL_VETO_DEFAULT_REASONS = sorted(CORE_HARD_WEAKNESS_REASONS)
+EVENT_HARD_WEAKNESS_DEFAULT_REASONS = sorted(EVENT_HARD_WEAKNESS_REASONS)
+SOFT_WEAKNESS_DEFAULT_REASONS = sorted(SOFT_WEAKNESS_REASONS)
+EXPECTED_COMMERCIAL_RISK_FIELDS = frozenset(
+    {
+        "commercial_deterioration_score",
+        "commercial_deterioration_flag",
+        "commercial_deterioration_reasons",
+        "valuation_growth_mismatch_score",
+        "valuation_growth_mismatch_flag",
+        "valuation_growth_mismatch_reasons",
+        "transient_revenue_anchor_score",
+        "transient_revenue_anchor_flag",
+        "transient_revenue_anchor_reasons",
+        "commercial_business_shock_score",
+        "commercial_business_shock_flag",
+        "commercial_business_shock_reasons",
+        "commercial_risk_overlay_score",
+        "commercial_risk_overlay_flag",
+        "commercial_risk_overlay_reasons",
+        "commercial_risk_sub_scores",
+    }
+)
 @dataclass(frozen=True)
 class BucketParams:
     high_min: float
@@ -76,6 +80,7 @@ class BucketParams:
     max_spec_risk: float
     avoid_risk_min: float
     min_high_runway: float
+    min_watch_runway: float
     terminal_runway: float
     commercial_stage_revenue_min: float
     require_advanced: bool
@@ -324,6 +329,7 @@ def bucket_params(config: dict[str, Any]) -> BucketParams:
         max_spec_risk=float(cfg_get(config, "biotech_scoring.buckets.max_speculative_risk", 75)),
         avoid_risk_min=float(cfg_get(config, "biotech_scoring.buckets.avoid_risk_min", 80)),
         min_high_runway=float(cfg_get(config, "biotech_scoring.buckets.high_conviction_min_runway_months", 12)),
+        min_watch_runway=float(cfg_get(config, "biotech_scoring.buckets.watchlist_min_runway_months", 6)),
         terminal_runway=float(cfg_get(config, "biotech_scoring.buckets.terminal_runway_months", 3)),
         commercial_stage_revenue_min=float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000)),
         require_advanced=as_bool(
@@ -395,14 +401,25 @@ def production_policy_settings(config: dict[str, Any]) -> dict[str, Any]:
 
 def commercial_risk_overlay_settings(config: dict[str, Any]) -> dict[str, Any]:
     settings = dict(cfg_get(config, "biotech_scoring.commercial_risk_overlay", {}) or {})
+    production_fragility_threshold = float(
+        cfg_get(config, "biotech_scoring.production_policy.commercial_fragility_threshold", 70.0)
+    )
     settings.setdefault(
         "commercial_stage_revenue_min",
         float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000.0)),
     )
-    settings.setdefault(
-        "commercial_fragility_threshold",
-        float(cfg_get(config, "biotech_scoring.production_policy.commercial_fragility_threshold", 70.0)),
+    settings.setdefault("commercial_fragility_threshold", production_fragility_threshold)
+    overlay_fragility_threshold = to_float(
+        settings.get("commercial_fragility_threshold"),
+        production_fragility_threshold,
     )
+    if abs(overlay_fragility_threshold - production_fragility_threshold) > 1e-9:
+        LOGGER.warning(
+            "commercial_risk_overlay.commercial_fragility_threshold %.4f differs from "
+            "production_policy.commercial_fragility_threshold %.4f",
+            overlay_fragility_threshold,
+            production_fragility_threshold,
+        )
     return settings
 
 
@@ -434,6 +451,117 @@ def commercial_risk_policy_penalty(fields: dict[str, Any], settings: dict[str, A
         penalty += max(0.0, max_penalty) * max(0.0, min(100.0, score)) / 100.0
     max_total = to_float(settings.get("max_total_penalty"), 25.0)
     return min(penalty, max_total) if max_total is not None and max_total > 0.0 else penalty
+
+
+def rank_quality_cap_settings(config: dict[str, Any]) -> dict[str, Any]:
+    raw = cfg_get(config, "biotech_scoring.rank_quality_caps", {}) or {}
+    return {
+        "enabled": as_bool(raw.get("enabled", True), True),
+        "business_shock_min_score": float(raw.get("business_shock_min_score", 70.0)),
+        "business_shock_cap": float(raw.get("business_shock_cap", 48.0)),
+        "severe_deterioration_min_score": float(raw.get("severe_deterioration_min_score", 70.0)),
+        "severe_deterioration_revenue_yoy_max": float(raw.get("severe_deterioration_revenue_yoy_max", -0.20)),
+        "severe_deterioration_cap": float(raw.get("severe_deterioration_cap", 50.0)),
+        "no_guidance_negative_growth_cap": float(raw.get("no_guidance_negative_growth_cap", 52.0)),
+        "valuation_mismatch_min_score": float(raw.get("valuation_mismatch_min_score", 70.0)),
+        "unprofitable_value_mismatch_cap": float(raw.get("unprofitable_value_mismatch_cap", 50.0)),
+        "cheap_low_growth_valuation_min_score": float(raw.get("cheap_low_growth_valuation_min_score", 90.0)),
+        "cheap_low_growth_revenue_yoy_max": float(raw.get("cheap_low_growth_revenue_yoy_max", 0.10)),
+        "cheap_low_growth_guidance_max_score": float(raw.get("cheap_low_growth_guidance_max_score", 60.0)),
+        "cheap_low_growth_cap": float(raw.get("cheap_low_growth_cap", 60.0)),
+        "use_quality_adjusted_valuation_component": as_bool(
+            cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True),
+            True,
+        ),
+    }
+
+
+def guidance_quality_flags(commercial: dict[str, Any], forward_guidance: dict[str, Any]) -> dict[str, float]:
+    latest_guidance = str(forward_guidance.get("latest_guidance_filing_date") or "").strip()
+    recency_days = to_float(forward_guidance.get("guidance_recency_days"), math.nan)
+    revenue_yoy = to_float(commercial.get("revenue_yoy_growth_pct"), math.nan)
+    commercial_stage = bool(to_float(commercial.get("commercial_stage_flag"), 0.0))
+    no_guidance = 1.0 if not latest_guidance else 0.0
+    stale_guidance = 1.0 if math.isfinite(recency_days) and recency_days > 365.0 else 0.0
+    no_guidance_negative_growth = (
+        1.0
+        if no_guidance > 0.0
+        and commercial_stage
+        and math.isfinite(revenue_yoy)
+        and revenue_yoy <= 0.0
+        else 0.0
+    )
+    return {
+        "no_forward_guidance_flag": no_guidance,
+        "guidance_stale_flag": stale_guidance,
+        "no_guidance_negative_growth_flag": no_guidance_negative_growth,
+    }
+
+
+def apply_rank_quality_caps(
+    opportunity: float,
+    *,
+    commercial: dict[str, Any],
+    forward_guidance: dict[str, Any],
+    commercial_risk: dict[str, Any],
+    settings: dict[str, Any],
+) -> tuple[float, float | None, list[str], dict[str, float]]:
+    flags = guidance_quality_flags(commercial, forward_guidance)
+    if not as_bool(settings.get("enabled", True), True):
+        return opportunity, None, [], flags
+
+    capped = opportunity
+    cap_value: float | None = None
+    reasons: list[str] = []
+    revenue_yoy = to_float(commercial.get("revenue_yoy_growth_pct"), math.nan)
+    commercial_stage = bool(to_float(commercial.get("commercial_stage_flag"), 0.0))
+    profitable = bool(to_float(commercial.get("profitable_flag"), 0.0))
+    valuation_score = (
+        to_float(commercial.get("quality_adjusted_valuation_score"), math.nan)
+        if as_bool(settings.get("use_quality_adjusted_valuation_component", True), True)
+        and commercial.get("quality_adjusted_valuation_score") not in (None, "")
+        else to_float(commercial.get("valuation_score"), math.nan)
+    )
+    guidance_score = (
+        to_float(forward_guidance.get("quality_adjusted_guidance_score"), math.nan)
+        if forward_guidance.get("quality_adjusted_guidance_score") not in (None, "")
+        else to_float(forward_guidance.get("guidance_score"), math.nan)
+    )
+    business_shock = to_float(commercial_risk.get("commercial_business_shock_score"), 0.0) or 0.0
+    deterioration = to_float(commercial_risk.get("commercial_deterioration_score"), 0.0) or 0.0
+    valuation_mismatch = to_float(commercial_risk.get("valuation_growth_mismatch_score"), 0.0) or 0.0
+
+    def apply_cap(reason: str, raw_cap: object) -> None:
+        nonlocal capped, cap_value
+        cap = float(raw_cap)
+        if capped > cap:
+            capped = cap
+            cap_value = cap if cap_value is None else min(cap_value, cap)
+            reasons.append(reason)
+
+    if business_shock >= float(settings.get("business_shock_min_score") or 70.0):
+        apply_cap("commercial_business_shock_cap", settings.get("business_shock_cap", 48.0))
+    if (
+        deterioration >= float(settings.get("severe_deterioration_min_score") or 70.0)
+        and math.isfinite(revenue_yoy)
+        and revenue_yoy <= float(settings.get("severe_deterioration_revenue_yoy_max") or -0.20)
+    ):
+        apply_cap("severe_commercial_deterioration_cap", settings.get("severe_deterioration_cap", 50.0))
+    if flags["no_guidance_negative_growth_flag"] > 0.0:
+        apply_cap("no_guidance_negative_growth_cap", settings.get("no_guidance_negative_growth_cap", 52.0))
+    if valuation_mismatch >= float(settings.get("valuation_mismatch_min_score") or 70.0) and not profitable:
+        apply_cap("unprofitable_value_mismatch_cap", settings.get("unprofitable_value_mismatch_cap", 50.0))
+    if (
+        commercial_stage
+        and math.isfinite(valuation_score)
+        and valuation_score >= float(settings.get("cheap_low_growth_valuation_min_score") or 90.0)
+        and math.isfinite(revenue_yoy)
+        and revenue_yoy <= float(settings.get("cheap_low_growth_revenue_yoy_max") or 0.10)
+        and math.isfinite(guidance_score)
+        and guidance_score <= float(settings.get("cheap_low_growth_guidance_max_score") or 60.0)
+    ):
+        apply_cap("cheap_low_growth_valuation_cap", settings.get("cheap_low_growth_cap", 60.0))
+    return clamp(capped), cap_value, reasons, flags
 
 
 def core_structural_veto_reasons(
@@ -532,6 +660,8 @@ def soft_weakness_reasons(
     financial_quality = str(survival.get("data_quality") or "").strip().lower()
     if financial_quality in {"low", "poor", "stale"}:
         reasons.append("low_financial_data_quality")
+    if as_bool(survival.get("burn_acceleration_flag"), False):
+        reasons.append("burn_acceleration")
     commercial_fragility = to_float(governance.get("commercial_fragility_risk_score"), math.nan)
     if math.isfinite(commercial_fragility) and commercial_fragility >= float(settings.get("commercial_fragility_threshold") or 70.0):
         reasons.append("high_commercial_fragility")
@@ -712,7 +842,7 @@ def score_bucket(
     if (
         score_cmp >= params.watch_min
         and risk <= params.max_watch_risk
-        and (not math.isfinite(runway) or runway > params.terminal_runway)
+        and (has_business_anchor or (math.isfinite(runway) and runway >= params.min_watch_runway))
         and (verified_active > 0 or has_business_anchor or not params.require_active_watch)
     ):
         return "watchlist"
@@ -750,6 +880,7 @@ def investment_weight_profile(config: dict[str, Any], commercial: dict[str, Any]
         "forward_guidance": float(raw_weights.get("forward_guidance", 0.0)),
         "valuation": float(raw_weights.get("valuation", 0.20)),
         "upside_capacity": float(raw_weights.get("upside_capacity", 0.10)),
+        "institutional_upside": float(raw_weights.get("institutional_upside", 0.0)),
         "financial_quality": float(raw_weights.get("financial_quality", 0.15)),
         "momentum": float(raw_weights.get("momentum", 0.05)),
         "risk_penalty": float(raw_weights.get("risk_penalty", 0.15)),
@@ -807,6 +938,7 @@ def score_rows(
     production_baseline = tier1_production_baseline(config)
     policy_settings = production_policy_settings(config)
     commercial_risk_settings = commercial_risk_overlay_settings(config)
+    rank_cap_settings = rank_quality_cap_settings(config)
     bucket_settings = bucket_params(config)
     selection_policy = str(production_baseline["selection_policy"])
     apply_core_veto_to_rank = bool(core_veto_settings["enabled"] and core_veto_settings["apply_to_rank"])
@@ -828,6 +960,12 @@ def score_rows(
         forward_guidance = forward_by_company.get(company_id, {})
         governance = governance_by_company.get(company_id, {})
         commercial_risk = commercial_risk_overlay_fields(commercial, governance, commercial_risk_settings)
+        missing_commercial_risk_fields = EXPECTED_COMMERCIAL_RISK_FIELDS - set(commercial_risk)
+        if missing_commercial_risk_fields:
+            raise RuntimeError(
+                "commercial_risk_overlay_fields() missing expected field(s): "
+                + ", ".join(sorted(missing_commercial_risk_fields))
+            )
         forward_payload = parse_json(
             forward_guidance.get("payload_json"),
             context=f"company_id={company_id} ticker={row.get('ticker') or ''} source=forward_guidance",
@@ -862,9 +1000,37 @@ def score_rows(
         commercial_value_default = float(cfg_get(config, "biotech_scoring.missing_score_defaults.commercial_value_score", 35.0))
         commercial_quality = clamp(to_float(commercial.get("commercial_quality_score"), commercial_value_default))
         commercial_value = clamp(to_float(commercial.get("commercial_value_score"), commercial_value_default))
-        forward_guidance_score = clamp(to_float(forward_guidance.get("guidance_score"), float(cfg_get(config, "biotech_scoring.missing_score_defaults.forward_guidance_score", 45.0))))
+        forward_guidance_score = clamp(to_float(forward_guidance.get("guidance_score"), float(cfg_get(config, "biotech_scoring.missing_score_defaults.forward_guidance_score", 35.0))))
         valuation_score = clamp(to_float(commercial.get("valuation_score"), float(cfg_get(config, "biotech_scoring.missing_score_defaults.valuation_score", 50.0))))
         upside_capacity_score = clamp(to_float(commercial.get("upside_capacity_score"), float(cfg_get(config, "biotech_scoring.missing_score_defaults.upside_capacity_score", 50.0))))
+        institutional_upside_capacity_score = clamp(
+            to_float(
+                commercial.get("institutional_upside_capacity_score"),
+                float(cfg_get(config, "biotech_scoring.missing_score_defaults.institutional_upside_capacity_score", 50.0)),
+            )
+        )
+        leverage_score = clamp(to_float(commercial.get("leverage_score"), 50.0))
+        value_trap_score = clamp(to_float(commercial.get("value_trap_score"), 0.0))
+        quality_adjusted_valuation_score = clamp(to_float(commercial.get("quality_adjusted_valuation_score"), valuation_score))
+        quality_forward_valuation_score = clamp(
+            to_float(forward_guidance.get("quality_forward_valuation_score"), forward_guidance.get("forward_valuation_score"))
+        )
+        quality_adjusted_guidance_score = clamp(to_float(forward_guidance.get("quality_adjusted_guidance_score"), forward_guidance_score))
+        guidance_recency_penalty = clamp(to_float(forward_guidance.get("guidance_recency_penalty"), 0.0), 0.0, 100.0)
+        valuation_component_score = (
+            quality_adjusted_valuation_score
+            if as_bool(cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True), True)
+            else valuation_score
+        )
+        forward_guidance_component_score = (
+            quality_adjusted_guidance_score
+            if as_bool(cfg_get(config, "biotech_scoring.use_quality_adjusted_guidance_component", True), True)
+            else forward_guidance_score
+        )
+        used_quality_adjusted_valuation = 1.0 if valuation_component_score == quality_adjusted_valuation_score else 0.0
+        used_quality_adjusted_guidance = 1.0 if forward_guidance_component_score == quality_adjusted_guidance_score else 0.0
+        valuation_quality_adjustment_delta = valuation_score - quality_adjusted_valuation_score
+        guidance_quality_adjustment_delta = forward_guidance_score - quality_adjusted_guidance_score
         profile_name, profile_weights = investment_weight_profile(config, commercial)
         embedded_financial_quality_weight = profile_weights["clinical_opportunity"] * financial_w
         embedded_momentum_weight = profile_weights["clinical_opportunity"] * momentum_w
@@ -879,9 +1045,10 @@ def score_rows(
         investment_positive = (
             profile_weights["clinical_opportunity"] * clinical_positive
             + profile_weights["commercial_value"] * commercial_value
-            + profile_weights["forward_guidance"] * forward_guidance_score
-            + profile_weights["valuation"] * valuation_score
+            + profile_weights["forward_guidance"] * forward_guidance_component_score
+            + profile_weights["valuation"] * valuation_component_score
             + profile_weights["upside_capacity"] * upside_capacity_score
+            + profile_weights["institutional_upside"] * institutional_upside_capacity_score
             + residual_financial_quality_weight * financial_quality
             + residual_momentum_weight * momentum
         )
@@ -889,7 +1056,9 @@ def score_rows(
         effective_pre_confidence_risk_drag = investment_risk_drag
         confidence_multiplier = score_confidence_multiplier(config, payload, commercial, forward_guidance, profile_name)
         pre_confidence_investment_score = clamp(investment_positive - investment_risk_drag)
+        effective_post_confidence_risk_drag = effective_pre_confidence_risk_drag * confidence_multiplier
         confidence_adjusted_score_reduction = pre_confidence_investment_score * (1.0 - confidence_multiplier)
+        effective_total_risk_drag = effective_post_confidence_risk_drag + confidence_adjusted_score_reduction
         investment_score = clamp(pre_confidence_investment_score * confidence_multiplier)
         raw_opportunity = investment_score if investment_enabled else clinical_opportunity
         core_veto_reasons = core_structural_veto_reasons(payload, commercial, core_veto_settings)
@@ -910,6 +1079,14 @@ def score_rows(
         )
         commercial_overlay_penalty = commercial_risk_policy_penalty(commercial_risk, commercial_risk_settings)
         opportunity = clamp(opportunity - commercial_overlay_penalty)
+        pre_rank_cap_opportunity = opportunity
+        opportunity, rank_quality_cap, rank_quality_cap_reasons, guidance_flags = apply_rank_quality_caps(
+            opportunity,
+            commercial=commercial,
+            forward_guidance=forward_guidance,
+            commercial_risk=commercial_risk,
+            settings=rank_cap_settings,
+        )
         selection_gate = tier1_selection_gate_score(opportunity, risk)
         core_veto_flag = 1.0 if core_veto_reasons else 0.0
         rank_demoted_by_core_veto = bool(apply_core_veto_to_rank and core_veto_reasons)
@@ -940,7 +1117,11 @@ def score_rows(
             "commercial_quality_score": commercial_quality,
             "commercial_value_score": commercial_value,
             "valuation_score": valuation_score,
+            "quality_adjusted_valuation_score": quality_adjusted_valuation_score,
             "upside_capacity_score": upside_capacity_score,
+            "institutional_upside_capacity_score": institutional_upside_capacity_score,
+            "leverage_score": leverage_score,
+            "value_trap_score": value_trap_score,
             "data_quality": commercial.get("data_quality", ""),
             "missing_fields": commercial.get("missing_fields", ""),
             "proxy_fields_used": commercial.get("proxy_fields_used", ""),
@@ -981,6 +1162,9 @@ def score_rows(
                 "forward_growth_score": forward_guidance.get("forward_growth_score", ""),
                 "forward_profitability_score": forward_guidance.get("forward_profitability_score", ""),
                 "forward_valuation_score": forward_guidance.get("forward_valuation_score", ""),
+                "quality_forward_valuation_score": quality_forward_valuation_score,
+                "quality_adjusted_guidance_score": quality_adjusted_guidance_score,
+                "guidance_recency_penalty": guidance_recency_penalty,
                 "data_quality": forward_guidance.get("data_quality", ""),
                 "missing_fields": forward_guidance.get("missing_fields", ""),
                 "guidance_records": forward_payload.get("guidance_records", []) if isinstance(forward_payload, dict) else [],
@@ -998,6 +1182,9 @@ def score_rows(
                 "production_policy_event_hard_penalty": round(event_penalty, 4),
                 "production_policy_soft_weakness_penalty": round(soft_penalty, 4),
                 "commercial_risk_overlay_penalty": round(commercial_overlay_penalty, 4),
+                "pre_rank_cap_opportunity_score": round(pre_rank_cap_opportunity, 4),
+                "rank_quality_cap": rank_quality_cap if rank_quality_cap is not None else "",
+                "rank_quality_cap_reasons": rank_quality_cap_reasons,
                 "production_policy_total_penalty": round(event_penalty + soft_penalty + commercial_overlay_penalty, 4),
                 "production_policy_event_hard_reasons": event_reasons,
                 "production_policy_soft_weakness_reasons": soft_reasons,
@@ -1013,7 +1200,8 @@ def score_rows(
                 "clinical_risk_drag": round(clinical_risk_drag, 4),
                 "investment_risk_drag": round(investment_risk_drag, 4),
                 "effective_pre_confidence_risk_drag": round(effective_pre_confidence_risk_drag, 4),
-                "effective_total_risk_drag": round(effective_pre_confidence_risk_drag, 4),
+                "effective_post_confidence_risk_drag": round(effective_post_confidence_risk_drag, 4),
+                "effective_total_risk_drag": round(effective_total_risk_drag, 4),
                 "confidence_adjusted_score_reduction": round(confidence_adjusted_score_reduction, 4),
                 "embedded_financial_quality_weight": round(embedded_financial_quality_weight, 6),
                 "residual_financial_quality_weight": round(residual_financial_quality_weight, 6),
@@ -1024,7 +1212,23 @@ def score_rows(
                 "commercial_value_score": round(commercial_value, 4),
                 "forward_guidance_score": round(forward_guidance_score, 4),
                 "valuation_score": round(valuation_score, 4),
+                "valuation_component_score": round(valuation_component_score, 4),
+                "quality_adjusted_valuation_score": round(quality_adjusted_valuation_score, 4),
+                "used_quality_adjusted_valuation": bool(used_quality_adjusted_valuation),
+                "valuation_quality_adjustment_delta": round(valuation_quality_adjustment_delta, 4),
                 "upside_capacity_score": round(upside_capacity_score, 4),
+                "institutional_upside_capacity_score": round(institutional_upside_capacity_score, 4),
+                "leverage_score": round(leverage_score, 4),
+                "value_trap_score": round(value_trap_score, 4),
+                "quality_forward_valuation_score": round(quality_forward_valuation_score, 4),
+                "quality_adjusted_guidance_score": round(quality_adjusted_guidance_score, 4),
+                "forward_guidance_component_score": round(forward_guidance_component_score, 4),
+                "used_quality_adjusted_guidance": bool(used_quality_adjusted_guidance),
+                "guidance_quality_adjustment_delta": round(guidance_quality_adjustment_delta, 4),
+                "guidance_recency_penalty": round(guidance_recency_penalty, 4),
+                "no_forward_guidance_flag": guidance_flags["no_forward_guidance_flag"],
+                "guidance_stale_flag": guidance_flags["guidance_stale_flag"],
+                "no_guidance_negative_growth_flag": guidance_flags["no_guidance_negative_growth_flag"],
             },
             "downstream_interaction": {
                 "recommended_use": "gate_or_cap_multibagger_candidates_do_not_add_as_duplicate_alpha",
@@ -1072,6 +1276,7 @@ def score_rows(
                 "event_hard_weakness_reasons": "|".join(event_reasons),
                 "soft_weakness_reasons": "|".join(soft_reasons),
                 "commercial_risk_overlay_reasons": commercial_risk["commercial_risk_overlay_reasons"],
+                "rank_quality_cap_reasons": "|".join(rank_quality_cap_reasons),
             },
             "manual": payload.get("manual", {}),
         }
@@ -1091,6 +1296,17 @@ def score_rows(
                 "forward_guidance_score": round(forward_guidance_score, 4),
                 "valuation_score": round(valuation_score, 4),
                 "upside_capacity_score": round(upside_capacity_score, 4),
+                "institutional_upside_capacity_score": round(institutional_upside_capacity_score, 4),
+                "leverage_score": round(leverage_score, 4),
+                "value_trap_score": round(value_trap_score, 4),
+                "quality_adjusted_valuation_score": round(quality_adjusted_valuation_score, 4),
+                "used_quality_adjusted_valuation": used_quality_adjusted_valuation,
+                "valuation_quality_adjustment_delta": round(valuation_quality_adjustment_delta, 4),
+                "quality_forward_valuation_score": round(quality_forward_valuation_score, 4),
+                "quality_adjusted_guidance_score": round(quality_adjusted_guidance_score, 4),
+                "used_quality_adjusted_guidance": used_quality_adjusted_guidance,
+                "guidance_quality_adjustment_delta": round(guidance_quality_adjustment_delta, 4),
+                "guidance_recency_penalty": round(guidance_recency_penalty, 4),
                 "investment_score": round(investment_score, 4),
                 "opportunity_score": round(opportunity, 4),
                 "tier1_selection_gate_score": round(selection_gate, 4),
@@ -1104,12 +1320,17 @@ def score_rows(
                 "data_quality_confidence_multiplier": round(confidence_multiplier, 4),
                 "clinical_risk_drag": round(clinical_risk_drag, 4),
                 "investment_risk_drag": round(investment_risk_drag, 4),
-                "effective_total_risk_drag": round(effective_pre_confidence_risk_drag, 4),
+                "effective_pre_confidence_risk_drag": round(effective_pre_confidence_risk_drag, 4),
+                "effective_post_confidence_risk_drag": round(effective_post_confidence_risk_drag, 4),
+                "effective_total_risk_drag": round(effective_total_risk_drag, 4),
                 "confidence_adjusted_score_reduction": round(confidence_adjusted_score_reduction, 4),
                 "commercial_risk_overlay_score": commercial_risk["commercial_risk_overlay_score"],
                 "commercial_risk_overlay_flag": commercial_risk["commercial_risk_overlay_flag"],
                 "commercial_risk_overlay_reasons": commercial_risk["commercial_risk_overlay_reasons"],
                 "commercial_risk_overlay_penalty": round(commercial_overlay_penalty, 4),
+                "pre_rank_cap_opportunity_score": round(pre_rank_cap_opportunity, 4),
+                "rank_quality_cap": rank_quality_cap if rank_quality_cap is not None else None,
+                "rank_quality_cap_reasons": "|".join(rank_quality_cap_reasons),
                 "commercial_deterioration_score": commercial_risk["commercial_deterioration_score"],
                 "commercial_deterioration_flag": commercial_risk["commercial_deterioration_flag"],
                 "commercial_deterioration_reasons": commercial_risk["commercial_deterioration_reasons"],
@@ -1122,6 +1343,9 @@ def score_rows(
                 "commercial_business_shock_score": commercial_risk["commercial_business_shock_score"],
                 "commercial_business_shock_flag": commercial_risk["commercial_business_shock_flag"],
                 "commercial_business_shock_reasons": commercial_risk["commercial_business_shock_reasons"],
+                "no_forward_guidance_flag": guidance_flags["no_forward_guidance_flag"],
+                "guidance_stale_flag": guidance_flags["guidance_stale_flag"],
+                "no_guidance_negative_growth_flag": guidance_flags["no_guidance_negative_growth_flag"],
                 "bucket": score_bucket(
                     opportunity,
                     risk,
@@ -1212,6 +1436,17 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "forward_guidance_score",
         "valuation_score",
         "upside_capacity_score",
+        "institutional_upside_capacity_score",
+        "leverage_score",
+        "value_trap_score",
+        "quality_adjusted_valuation_score",
+        "used_quality_adjusted_valuation",
+        "valuation_quality_adjustment_delta",
+        "quality_forward_valuation_score",
+        "quality_adjusted_guidance_score",
+        "used_quality_adjusted_guidance",
+        "guidance_quality_adjustment_delta",
+        "guidance_recency_penalty",
         "investment_score",
         "opportunity_score",
         "tier1_selection_gate_score",
@@ -1225,12 +1460,17 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "data_quality_confidence_multiplier",
         "clinical_risk_drag",
         "investment_risk_drag",
+        "effective_pre_confidence_risk_drag",
+        "effective_post_confidence_risk_drag",
         "effective_total_risk_drag",
         "confidence_adjusted_score_reduction",
         "commercial_risk_overlay_score",
         "commercial_risk_overlay_flag",
         "commercial_risk_overlay_reasons",
         "commercial_risk_overlay_penalty",
+        "pre_rank_cap_opportunity_score",
+        "rank_quality_cap",
+        "rank_quality_cap_reasons",
         "commercial_deterioration_score",
         "commercial_deterioration_flag",
         "commercial_deterioration_reasons",
@@ -1243,6 +1483,9 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "commercial_business_shock_score",
         "commercial_business_shock_flag",
         "commercial_business_shock_reasons",
+        "no_forward_guidance_flag",
+        "guidance_stale_flag",
+        "no_guidance_negative_growth_flag",
         "rank",
         "bucket",
         "primary_nct",
@@ -1280,6 +1523,7 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "primary_nct",
         "primary_trial_title",
         "commercial_risk_overlay_reasons",
+        "rank_quality_cap_reasons",
         "commercial_deterioration_reasons",
         "valuation_growth_mismatch_reasons",
         "transient_revenue_anchor_reasons",
@@ -1335,12 +1579,17 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "data_quality_confidence_multiplier",
         "clinical_risk_drag",
         "investment_risk_drag",
+        "effective_pre_confidence_risk_drag",
+        "effective_post_confidence_risk_drag",
         "effective_total_risk_drag",
         "confidence_adjusted_score_reduction",
         "commercial_risk_overlay_score",
         "commercial_risk_overlay_flag",
         "commercial_risk_overlay_reasons",
         "commercial_risk_overlay_penalty",
+        "pre_rank_cap_opportunity_score",
+        "rank_quality_cap",
+        "rank_quality_cap_reasons",
         "commercial_deterioration_score",
         "commercial_deterioration_flag",
         "commercial_deterioration_reasons",
@@ -1353,10 +1602,24 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "commercial_business_shock_score",
         "commercial_business_shock_flag",
         "commercial_business_shock_reasons",
+        "no_forward_guidance_flag",
+        "guidance_stale_flag",
+        "no_guidance_negative_growth_flag",
         "commercial_value_score",
         "forward_guidance_score",
         "valuation_score",
         "upside_capacity_score",
+        "institutional_upside_capacity_score",
+        "leverage_score",
+        "value_trap_score",
+        "quality_adjusted_valuation_score",
+        "used_quality_adjusted_valuation",
+        "valuation_quality_adjustment_delta",
+        "quality_forward_valuation_score",
+        "quality_adjusted_guidance_score",
+        "used_quality_adjusted_guidance",
+        "guidance_quality_adjustment_delta",
+        "guidance_recency_penalty",
         "catalyst_score",
         "credibility_score",
         "financial_quality_score",

@@ -20,6 +20,30 @@ HOLDOUT_FILE = "tier1_weight_calibration_holdout.csv"
 BOOTSTRAP_FILE = "tier1_weight_calibration_bootstrap_ci.csv"
 TICKER_DIAGNOSTICS_FILE = "tier1_selected_ticker_diagnostics.csv"
 CURRENT_CONFIG_CANDIDATE_NAME = "current_config"
+HOLDOUT_LEGACY_ALIASES = {
+    "test_selected_lcb_return_pct": ("test_lcb_return_pct",),
+    "test_selected_sortino_like": ("test_sortino_like",),
+    "test_selected_profit_factor": ("test_profit_factor",),
+    "test_selected_omega_configured": ("test_omega_configured",),
+    "test_selected_omega_0": ("test_omega_0",),
+    "test_selected_mean_return_pct": ("test_mean_return_pct",),
+    "test_selected_large_loss_20pct_rate_pct": ("test_large_loss_20pct_rate_pct",),
+    "test_selected_large_loss_40pct_rate_pct": ("test_large_loss_40pct_rate_pct",),
+    "test_selected_top3_gain_contribution_pct": ("test_top3_gain_contribution_pct",),
+    "test_selected_core_hard_weakness_exposure_pct": ("test_core_hard_weakness_exposure_pct",),
+    "test_selected_event_hard_weakness_exposure_pct": ("test_event_hard_weakness_exposure_pct",),
+    "test_selected_soft_weakness_exposure_pct": ("test_soft_weakness_exposure_pct",),
+    "test_selected_toxic_soft_weakness_exposure_pct": ("test_toxic_soft_weakness_exposure_pct",),
+    "test_selected_mild_soft_weakness_exposure_pct": ("test_mild_soft_weakness_exposure_pct",),
+    "test_selected_illiquid_weakness_exposure_pct": ("test_illiquid_weakness_exposure_pct",),
+    "test_selected_value_trap_exposure_pct": ("test_value_trap_exposure_pct",),
+    "test_selected_leverage_fragility_exposure_pct": ("test_leverage_fragility_exposure_pct",),
+    "test_selected_guidance_staleness_exposure_pct": ("test_guidance_staleness_exposure_pct",),
+    "test_selected_no_forward_guidance_exposure_pct": ("test_no_forward_guidance_exposure_pct",),
+    "test_selected_stale_guidance_exposure_pct": ("test_stale_guidance_exposure_pct",),
+    "test_selected_no_guidance_negative_growth_exposure_pct": ("test_no_guidance_negative_growth_exposure_pct",),
+    "test_selected_rank_quality_cap_exposure_pct": ("test_rank_quality_cap_exposure_pct",),
+}
 
 WEIGHT_COLUMNS = [
     "clinical_catalyst_weight",
@@ -32,6 +56,7 @@ WEIGHT_COLUMNS = [
     "clinical_stage_forward_guidance_weight",
     "clinical_stage_valuation_weight",
     "clinical_stage_upside_capacity_weight",
+    "clinical_stage_institutional_upside_weight",
     "clinical_stage_financial_quality_weight",
     "clinical_stage_momentum_weight",
     "clinical_stage_risk_penalty_weight",
@@ -40,9 +65,21 @@ WEIGHT_COLUMNS = [
     "commercial_stage_forward_guidance_weight",
     "commercial_stage_valuation_weight",
     "commercial_stage_upside_capacity_weight",
+    "commercial_stage_institutional_upside_weight",
     "commercial_stage_financial_quality_weight",
     "commercial_stage_momentum_weight",
     "commercial_stage_risk_penalty_weight",
+]
+
+SOFT_REASON_REPORT_COLUMNS = [
+    "cash_runway_9_to_12m_clinical",
+    "going_concern_warning",
+    "single_dilution_event",
+    "low_financial_data_quality",
+    "high_commercial_fragility",
+    "high_tier1_risk_score",
+    "recent_nt_filing",
+    "early_stage_or_unadvanced_trial_anchor",
 ]
 
 
@@ -82,7 +119,7 @@ def configure_logging() -> None:
 
 def read_csv(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
-        raise FileNotFoundError(path)
+        raise FileNotFoundError(f"Script 28 calibration output not found at {path}. Run 28_calibrate_biotech_opportunity.py first.")
     with path.open("r", encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
 
@@ -94,6 +131,30 @@ def validate_required_columns(rows: list[dict[str, Any]], *, file_label: str, re
     missing = sorted(required - available)
     if missing:
         raise ValueError(f"{file_label} is missing required columns: {', '.join(missing)}")
+
+
+def apply_legacy_column_aliases(
+    rows: list[dict[str, Any]],
+    aliases: dict[str, tuple[str, ...]],
+    *,
+    file_label: str,
+) -> None:
+    alias_hits: set[str] = set()
+    for row in rows:
+        for canonical, legacy_names in aliases.items():
+            if row.get(canonical) not in {None, ""}:
+                continue
+            for legacy in legacy_names:
+                if legacy in row:
+                    row[canonical] = row.get(legacy, "")
+                    alias_hits.add(f"{legacy}->{canonical}")
+                    break
+    if alias_hits:
+        LOGGER.warning(
+            "%s used legacy script 28 column aliases: %s",
+            file_label,
+            ", ".join(sorted(alias_hits)),
+        )
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str] | None = None) -> None:
@@ -185,6 +246,7 @@ def candidate_key(row: dict[str, Any], *, split: str | None = None) -> tuple[str
 
 def holdout_report_sort_key(row: dict[str, Any]) -> tuple[float, float, float, float, float, float, float]:
     ci05 = numeric_or_default(row.get("bootstrap_lcb_return_pct_ci05"), -1e9)
+    # Fallback names without test_selected_ are for older script 28 outputs; new runs emit test_selected_*.
     lcb = numeric_or_default(first_value(row, "test_selected_lcb_return_pct", "test_lcb_return_pct"), -1e9)
     sortino = numeric_or_default(first_value(row, "test_selected_sortino_like", "test_sortino_like"), -1e9)
     profit = numeric_or_default(first_value(row, "test_selected_profit_factor", "test_profit_factor"), -1e9)
@@ -263,9 +325,30 @@ def build_candidate_report(
                 row.get("test_selected_event_hard_weakness_exposure_pct")
             ),
             "test_soft_weakness_exposure_pct": rounded(row.get("test_selected_soft_weakness_exposure_pct")),
+            "test_toxic_soft_weakness_exposure_pct": rounded(
+                row.get("test_selected_toxic_soft_weakness_exposure_pct")
+            ),
+            "test_mild_soft_weakness_exposure_pct": rounded(
+                row.get("test_selected_mild_soft_weakness_exposure_pct")
+            ),
             "test_illiquid_weakness_exposure_pct": rounded(
                 row.get("test_selected_illiquid_weakness_exposure_pct")
             ),
+            "test_value_trap_exposure_pct": rounded(row.get("test_selected_value_trap_exposure_pct")),
+            "test_leverage_fragility_exposure_pct": rounded(
+                row.get("test_selected_leverage_fragility_exposure_pct")
+            ),
+            "test_guidance_staleness_exposure_pct": rounded(
+                row.get("test_selected_guidance_staleness_exposure_pct")
+            ),
+            "test_no_forward_guidance_exposure_pct": rounded(
+                row.get("test_selected_no_forward_guidance_exposure_pct")
+            ),
+            "test_stale_guidance_exposure_pct": rounded(row.get("test_selected_stale_guidance_exposure_pct")),
+            "test_no_guidance_negative_growth_exposure_pct": rounded(
+                row.get("test_selected_no_guidance_negative_growth_exposure_pct")
+            ),
+            "test_rank_quality_cap_exposure_pct": rounded(row.get("test_selected_rank_quality_cap_exposure_pct")),
             "bootstrap_iterations": boot.get("bootstrap_iterations", ""),
             "bootstrap_lcb_return_pct_ci05": rounded(boot.get("selected_lcb_return_pct_ci05")),
             "bootstrap_lcb_return_pct_ci95": rounded(boot.get("selected_lcb_return_pct_ci95")),
@@ -316,7 +399,17 @@ def build_candidate_report(
                 "selection_policy_hard_weakness_penalty_reasons", ""
             ),
             "selection_policy_soft_weakness_penalty": row.get("selection_policy_soft_weakness_penalty", ""),
+            "selection_policy_targeted_soft_weakness_penalty": row.get(
+                "selection_policy_targeted_soft_weakness_penalty", ""
+            ),
+            "selection_policy_targeted_soft_weakness_penalty_reasons": row.get(
+                "selection_policy_targeted_soft_weakness_penalty_reasons", ""
+            ),
         }
+        for reason in SOFT_REASON_REPORT_COLUMNS:
+            payload[f"test_soft_reason_{reason}_exposure_pct"] = rounded(
+                row.get(f"test_selected_soft_reason_{reason}_exposure_pct")
+            )
         for column in WEIGHT_COLUMNS:
             payload[column] = row.get(column, "")
         payload["recommendation_bucket"] = recommendation_bucket(payload)
@@ -478,16 +571,56 @@ def main() -> None:
     holdout_rows = read_csv(input_dir / HOLDOUT_FILE)
     bootstrap_rows = read_csv(input_dir / BOOTSTRAP_FILE)
     ticker_rows = read_csv(input_dir / TICKER_DIAGNOSTICS_FILE)
+    apply_legacy_column_aliases(holdout_rows, HOLDOUT_LEGACY_ALIASES, file_label=HOLDOUT_FILE)
+    validate_required_columns(
+        holdout_rows,
+        file_label=HOLDOUT_FILE,
+        required={
+            "sample",
+            "horizon_days",
+            "top_n",
+            "train_rank",
+            "candidate_id",
+            "candidate_name",
+            "selection_policy_name",
+            "train_calibration_pass",
+            "test_calibration_pass",
+            "test_selected_lcb_return_pct",
+            "test_selected_sortino_like",
+            "test_selected_profit_factor",
+        },
+    )
     validate_required_columns(
         bootstrap_rows,
         file_label=BOOTSTRAP_FILE,
         required={
+            "sample",
+            "horizon_days",
+            "top_n",
+            "train_rank",
+            "candidate_id",
             "selected_lcb_return_pct_ci05",
             "selected_lcb_return_pct_ci95",
             "selected_sortino_like_ci05",
             "selected_sortino_like_ci95",
             "selected_profit_factor_ci05",
             "selected_profit_factor_ci95",
+        },
+    )
+    validate_required_columns(
+        ticker_rows,
+        file_label=TICKER_DIAGNOSTICS_FILE,
+        required={
+            "sample",
+            "evaluation_split",
+            "horizon_days",
+            "top_n",
+            "train_rank",
+            "candidate_id",
+            "asof_date",
+            "selected_rank_within_date",
+            "ticker",
+            "candidate_selection_score",
         },
     )
 

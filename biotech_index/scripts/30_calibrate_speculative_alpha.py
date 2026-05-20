@@ -28,6 +28,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_path  # noqa: E402
+from biotech_index.core.constants import (  # noqa: E402
+    GOING_CONCERN_HARD_STATUSES,
+    MILD_SOFT_WEAKNESS_REASONS,
+    TOXIC_SOFT_WEAKNESS_REASONS,
+)
 from biotech_index.core.db import connect  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
@@ -79,6 +84,10 @@ SPREAD_KEYS = [
     "core_hard_exposure_pct",
     "event_hard_exposure_pct",
     "soft_exposure_pct",
+    "toxic_soft_exposure_pct",
+    "commercial_risk_overlay_exposure_pct",
+    "commercial_business_shock_exposure_pct",
+    "evidence_json_missing_exposure_pct",
     "illiquid_exposure_pct",
     "top3_gain_contribution_pct",
 ]
@@ -91,6 +100,9 @@ BOOTSTRAP_METRIC_KEYS = [
     "core_hard_exposure_pct",
     "event_hard_exposure_pct",
     "soft_exposure_pct",
+    "toxic_soft_exposure_pct",
+    "commercial_business_shock_exposure_pct",
+    "evidence_json_missing_exposure_pct",
 ]
 
 
@@ -102,6 +114,9 @@ class Bar:
 
 @dataclass(frozen=True)
 class CalibrationParams:
+    # Speculative-alpha calibration uses LCB/Sortino/profit-factor constraints only.
+    # Omega is intentionally omitted here until the speculative stack has its own
+    # hurdle policy; Tier-1 omega settings should not silently govern this grid.
     round_trip_cost_bps: float = DEFAULT_ROUND_TRIP_COST_BPS
     lcb_z: float = DEFAULT_LCB_Z
     cvar_q: float = DEFAULT_CVAR_Q
@@ -465,14 +480,29 @@ def first_float(*values: object) -> float | None:
     return None
 
 
+def parse_reason_list(raw: object) -> list[str]:
+    if isinstance(raw, list):
+        return [str(value).strip() for value in raw if str(value).strip()]
+    return [part.strip() for part in str(raw or "").replace(";", "|").split("|") if part.strip()]
+
+
 def add_diagnostics(rows: list[dict[str, Any]], *, min_addv20: float) -> None:
     for row in rows:
         tier1 = parse_json(row.get("tier1_top_evidence_json"))
         multi = parse_json(row.get("multibagger_top_evidence_json"))
+        expected_tier1_keys = {
+            "risk_flags",
+            "ctgov_quality",
+            "commercial_value",
+            "core_structural_veto",
+            "commercial_risk_overlay",
+        }
+        evidence_quality = 1.0 if expected_tier1_keys.issubset(set(tier1)) else 0.0
         risk_flags = nested_dict(tier1, "risk_flags")
         ctgov = nested_dict(tier1, "ctgov_quality")
         commercial = nested_dict(tier1, "commercial_value")
         core_veto = nested_dict(tier1, "core_structural_veto")
+        commercial_risk = nested_dict(tier1, "commercial_risk_overlay")
         sec_events = nested_dict(tier1, "sec_events")
         multi_components = nested_dict(multi, "component_scores")
         multi_market = nested_dict(multi, "market")
@@ -501,23 +531,43 @@ def add_diagnostics(rows: list[dict[str, Any]], *, min_addv20: float) -> None:
         risk_score = first_float(row.get("tier1_risk_score"), 0.0) or 0.0
 
         core_reasons: list[str] = []
-        if as_bool(core_veto.get("flag"), False):
-            raw_reasons = core_veto.get("reasons")
-            if isinstance(raw_reasons, list):
-                core_reasons = [str(reason) for reason in raw_reasons]
+        core_reasons = parse_reason_list(core_veto.get("reasons"))
+        derived_core_reasons: list[str] = []
         if not core_reasons:
             if cash_runway is not None and cash_runway < 9.0:
-                core_reasons.append("cash_runway_lt_9m")
+                derived_core_reasons.append("cash_runway_lt_9m")
             if severe_runway:
-                core_reasons.append("severe_runway_flag")
-            if going_concern == "confirmed":
-                core_reasons.append("going_concern_confirmed")
+                derived_core_reasons.append("severe_runway_flag")
+            if going_concern in GOING_CONCERN_HARD_STATUSES:
+                derived_core_reasons.append("going_concern_confirmed")
             if reverse_splits > 0.0:
-                core_reasons.append("reverse_split_history")
+                derived_core_reasons.append("reverse_split_history")
             if verified_active <= 0.0 and not has_business_anchor:
-                core_reasons.append("no_active_trial_no_business_anchor")
+                derived_core_reasons.append("no_active_trial_no_business_anchor")
             if addv is not None and addv < min_addv20:
-                core_reasons.append("illiquid")
+                derived_core_reasons.append("illiquid")
+            core_reasons = derived_core_reasons
+        else:
+            if cash_runway is not None and cash_runway < 9.0:
+                derived_core_reasons.append("cash_runway_lt_9m")
+            if severe_runway:
+                derived_core_reasons.append("severe_runway_flag")
+            if going_concern in GOING_CONCERN_HARD_STATUSES:
+                derived_core_reasons.append("going_concern_confirmed")
+            if reverse_splits > 0.0:
+                derived_core_reasons.append("reverse_split_history")
+            if verified_active <= 0.0 and not has_business_anchor:
+                derived_core_reasons.append("no_active_trial_no_business_anchor")
+            if addv is not None and addv < min_addv20:
+                derived_core_reasons.append("illiquid")
+            if set(derived_core_reasons) and set(derived_core_reasons) != set(core_reasons):
+                LOGGER.warning(
+                    "Spec alpha core weakness divergence for %s %s: evidence=%s derived=%s",
+                    row.get("asof_date", ""),
+                    row.get("ticker", ""),
+                    "|".join(sorted(core_reasons)),
+                    "|".join(sorted(derived_core_reasons)),
+                )
 
         event_reasons: list[str] = []
         if dilution_events >= 2.0:
@@ -527,28 +577,48 @@ def add_diagnostics(rows: list[dict[str, Any]], *, min_addv20: float) -> None:
 
         soft_reasons: list[str] = []
         if cash_runway is not None and 9.0 <= cash_runway < 12.0 and not has_business_anchor:
-            soft_reasons.append("cash_runway_9_to_12m")
+            soft_reasons.append("cash_runway_9_to_12m_clinical")
         if financial_quality in {"low", "poor", "stale"}:
             soft_reasons.append("low_financial_data_quality")
         if commercial_fragility >= 70.0:
             soft_reasons.append("high_commercial_fragility")
         if risk_score >= 75.0:
             soft_reasons.append("high_tier1_risk_score")
+        toxic_soft_reasons = [reason for reason in soft_reasons if reason in TOXIC_SOFT_WEAKNESS_REASONS]
+        mild_soft_reasons = [reason for reason in soft_reasons if reason in MILD_SOFT_WEAKNESS_REASONS]
 
+        commercial_overlay_score = first_float(commercial_risk.get("commercial_risk_overlay_score"), 0.0) or 0.0
+        commercial_business_shock_score = first_float(commercial_risk.get("commercial_business_shock_score"), 0.0) or 0.0
         row["diag_avg_dollar_volume_20d"] = addv if addv is not None else ""
         row["diag_liquidity_ok"] = 1.0 if addv is not None and addv >= min_addv20 else 0.0 if addv is not None else ""
         row["diag_cash_runway_months"] = cash_runway if cash_runway is not None else ""
         row["diag_verified_active_trial_count"] = verified_active
         row["diag_has_business_anchor"] = 1.0 if has_business_anchor else 0.0
-        row["diag_core_hard_flag"] = 1.0 if core_reasons else 0.0
-        row["diag_core_hard_reasons"] = "|".join(core_reasons)
-        row["diag_event_hard_flag"] = 1.0 if event_reasons else 0.0
-        row["diag_event_hard_reasons"] = "|".join(event_reasons)
-        row["diag_soft_flag"] = 1.0 if soft_reasons else 0.0
-        row["diag_soft_reasons"] = "|".join(soft_reasons)
+        row["diag_core_hard_weakness_flag"] = 1.0 if core_reasons else 0.0
+        row["diag_core_hard_weakness_reasons"] = "|".join(core_reasons)
+        row["diag_event_hard_weakness_flag"] = 1.0 if event_reasons else 0.0
+        row["diag_event_hard_weakness_reasons"] = "|".join(event_reasons)
+        row["diag_soft_weakness_flag"] = 1.0 if soft_reasons else 0.0
+        row["diag_soft_weakness_reasons"] = "|".join(soft_reasons)
+        row["diag_toxic_soft_weakness_flag"] = 1.0 if toxic_soft_reasons else 0.0
+        row["diag_toxic_soft_weakness_reasons"] = "|".join(toxic_soft_reasons)
+        row["diag_mild_soft_weakness_flag"] = 1.0 if mild_soft_reasons else 0.0
+        row["diag_mild_soft_weakness_reasons"] = "|".join(mild_soft_reasons)
+        row["diag_core_hard_flag"] = row["diag_core_hard_weakness_flag"]
+        row["diag_core_hard_reasons"] = row["diag_core_hard_weakness_reasons"]
+        row["diag_event_hard_flag"] = row["diag_event_hard_weakness_flag"]
+        row["diag_event_hard_reasons"] = row["diag_event_hard_weakness_reasons"]
+        row["diag_soft_flag"] = row["diag_soft_weakness_flag"]
+        row["diag_soft_reasons"] = row["diag_soft_weakness_reasons"]
         row["diag_illiquid_flag"] = 1.0 if "illiquid" in core_reasons else 0.0
         row["diag_multibagger_risk_penalty"] = first_float(multi_components.get("multibagger_risk_penalty"))
         row["diag_commercial_fragility_risk_score"] = commercial_fragility
+        row["diag_commercial_risk_overlay_score"] = commercial_overlay_score
+        row["diag_commercial_risk_overlay_flag"] = 1.0 if commercial_overlay_score > 0.0 else 0.0
+        row["diag_commercial_business_shock_score"] = commercial_business_shock_score
+        row["diag_commercial_business_shock_flag"] = 1.0 if commercial_business_shock_score > 0.0 else 0.0
+        row["diag_evidence_json_quality"] = evidence_quality
+        row["diag_evidence_json_missing_flag"] = 1.0 if evidence_quality <= 0.0 else 0.0
 
     for score_key in SCORE_COLUMNS:
         add_percentile_by_date(rows, score_key, f"pct_{score_key}")
@@ -851,9 +921,15 @@ def selection_quality_summary(
     summary = summarize_return_risk(returns, params=params)
     summary.update(
         {
-            "core_hard_exposure_pct": pct_flag(rows, "diag_core_hard_flag"),
-            "event_hard_exposure_pct": pct_flag(rows, "diag_event_hard_flag"),
-            "soft_exposure_pct": pct_flag(rows, "diag_soft_flag"),
+            "core_hard_exposure_pct": pct_flag(rows, "diag_core_hard_weakness_flag"),
+            "event_hard_exposure_pct": pct_flag(rows, "diag_event_hard_weakness_flag"),
+            "soft_exposure_pct": pct_flag(rows, "diag_soft_weakness_flag"),
+            "toxic_soft_exposure_pct": pct_flag(rows, "diag_toxic_soft_weakness_flag"),
+            "mild_soft_exposure_pct": pct_flag(rows, "diag_mild_soft_weakness_flag"),
+            "commercial_risk_overlay_exposure_pct": pct_flag(rows, "diag_commercial_risk_overlay_flag"),
+            "commercial_business_shock_exposure_pct": pct_flag(rows, "diag_commercial_business_shock_flag"),
+            "evidence_json_missing_exposure_pct": pct_flag(rows, "diag_evidence_json_missing_flag"),
+            "mean_evidence_json_quality": mean_numeric(rows, "diag_evidence_json_quality"),
             "illiquid_exposure_pct": pct_flag(rows, "diag_illiquid_flag"),
             "liquidity_ok_pct": pct_flag(rows, "diag_liquidity_ok"),
             "mean_tier1_rank": mean_numeric(rows, "tier1_rank"),
@@ -896,6 +972,7 @@ def calibration_constraint_fields(
     core = to_float(selected_summary.get("core_hard_exposure_pct"))
     event = to_float(selected_summary.get("event_hard_exposure_pct"))
     soft = to_float(selected_summary.get("soft_exposure_pct"))
+    evidence_missing = to_float(selected_summary.get("evidence_json_missing_exposure_pct"))
     illiquid = to_float(selected_summary.get("illiquid_exposure_pct"))
     top3 = to_float(selected_summary.get("top3_gain_contribution_pct"))
     loss20 = to_float(selected_summary.get("large_loss_20pct_rate_pct"))
@@ -916,6 +993,8 @@ def calibration_constraint_fields(
         reasons.append(f"event_hard>{params.max_event_hard_exposure_pct}")
     if soft is not None and soft > params.max_soft_exposure_pct:
         reasons.append(f"soft>{params.max_soft_exposure_pct}")
+    if evidence_missing is not None and evidence_missing > 0.0:
+        reasons.append("evidence_json_missing>0")
     if illiquid is not None and illiquid > params.max_illiquid_exposure_pct:
         reasons.append(f"illiquid>{params.max_illiquid_exposure_pct}")
     if top3 is not None and top3 > params.max_top3_gain_contribution_pct:
@@ -942,6 +1021,13 @@ def robust_objective(selected: dict[str, Any], baseline: dict[str, Any]) -> floa
     core_spread = to_float(summary_metric_spread(selected, baseline, "core_hard_exposure_pct"), 0.0) or 0.0
     event_spread = to_float(summary_metric_spread(selected, baseline, "event_hard_exposure_pct"), 0.0) or 0.0
     soft_spread = to_float(summary_metric_spread(selected, baseline, "soft_exposure_pct"), 0.0) or 0.0
+    toxic_soft_spread = to_float(summary_metric_spread(selected, baseline, "toxic_soft_exposure_pct"), 0.0) or 0.0
+    commercial_shock_spread = (
+        to_float(summary_metric_spread(selected, baseline, "commercial_business_shock_exposure_pct"), 0.0) or 0.0
+    )
+    evidence_missing_spread = (
+        to_float(summary_metric_spread(selected, baseline, "evidence_json_missing_exposure_pct"), 0.0) or 0.0
+    )
     illiquid_spread = to_float(summary_metric_spread(selected, baseline, "illiquid_exposure_pct"), 0.0) or 0.0
     top3_spread = to_float(summary_metric_spread(selected, baseline, "top3_gain_contribution_pct"), 0.0) or 0.0
     return (
@@ -956,6 +1042,9 @@ def robust_objective(selected: dict[str, Any], baseline: dict[str, Any]) -> floa
         - 0.10 * max(0.0, core_spread)
         - 0.03 * max(0.0, event_spread)
         - 0.015 * max(0.0, soft_spread)
+        - 0.04 * max(0.0, toxic_soft_spread)
+        - 0.04 * max(0.0, commercial_shock_spread)
+        - 0.10 * max(0.0, evidence_missing_spread)
         - 0.03 * max(0.0, illiquid_spread)
         - 0.01 * max(0.0, top3_spread)
     )
@@ -1010,7 +1099,12 @@ def tier1_ranked_pool(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def apply_pool(rows: list[dict[str, Any]], pool: PoolSpec, ret_key: str) -> list[dict[str, Any]]:
     eligible = [row for row in rows if to_float(row.get(ret_key)) is not None]
     if pool.exclude_core_hard:
-        eligible = [row for row in eligible if (to_float(row.get("diag_core_hard_flag"), 0.0) or 0.0) <= 0.0]
+        eligible = [
+            row
+            for row in eligible
+            if (to_float(row.get("diag_core_hard_weakness_flag"), to_float(row.get("diag_core_hard_flag"), 0.0)) or 0.0)
+            <= 0.0
+        ]
     if pool.require_liquidity:
         eligible = [row for row in eligible if (to_float(row.get("diag_liquidity_ok"), 0.0) or 0.0) >= 1.0]
     if pool.max_tier1_risk_score is not None:
@@ -1153,6 +1247,10 @@ def split_rows_by_completed_return_date(
         }
     )
     if len(eligible_dates) < 2:
+        LOGGER.warning(
+            "Horizon %sd: fewer than two eligible dates with completed forward returns; test set will be empty.",
+            horizon,
+        )
         eligible = set(eligible_dates)
         return [row for row in rows if str(row.get("asof_date") or "") in eligible], [], eligible_dates, []
     bounded = max(0.10, min(0.90, float(train_fraction)))
@@ -1486,11 +1584,19 @@ def build_selected_ticker_rows(
                         "orthogonal_alpha_score": row.get("orthogonal_alpha_score", ""),
                         "distinctive_acceleration_score": row.get("distinctive_acceleration_score", ""),
                         "net_forward_return_pct": pct(to_float(row.get(ret_key))),
-                        "core_hard_flag": row.get("diag_core_hard_flag", ""),
-                        "core_hard_reasons": row.get("diag_core_hard_reasons", ""),
-                        "event_hard_flag": row.get("diag_event_hard_flag", ""),
-                        "event_hard_reasons": row.get("diag_event_hard_reasons", ""),
-                        "soft_reasons": row.get("diag_soft_reasons", ""),
+                        "core_hard_weakness_flag": row.get("diag_core_hard_weakness_flag", ""),
+                        "core_hard_weakness_reasons": row.get("diag_core_hard_weakness_reasons", ""),
+                        "event_hard_weakness_flag": row.get("diag_event_hard_weakness_flag", ""),
+                        "event_hard_weakness_reasons": row.get("diag_event_hard_weakness_reasons", ""),
+                        "soft_weakness_flag": row.get("diag_soft_weakness_flag", ""),
+                        "soft_weakness_reasons": row.get("diag_soft_weakness_reasons", ""),
+                        "toxic_soft_weakness_flag": row.get("diag_toxic_soft_weakness_flag", ""),
+                        "toxic_soft_weakness_reasons": row.get("diag_toxic_soft_weakness_reasons", ""),
+                        "mild_soft_weakness_flag": row.get("diag_mild_soft_weakness_flag", ""),
+                        "mild_soft_weakness_reasons": row.get("diag_mild_soft_weakness_reasons", ""),
+                        "commercial_business_shock_score": row.get("diag_commercial_business_shock_score", ""),
+                        "commercial_business_shock_flag": row.get("diag_commercial_business_shock_flag", ""),
+                        "evidence_json_quality": row.get("diag_evidence_json_quality", ""),
                         "liquidity_ok": row.get("diag_liquidity_ok", ""),
                         "avg_dollar_volume_20d": row.get("diag_avg_dollar_volume_20d", ""),
                     }
@@ -1523,9 +1629,11 @@ def build_phase2_weakness_component_rows(selected_rows: list[dict[str, Any]]) ->
         key = tuple(str(row.get(group_key) or "") for group_key in group_keys)
         grouped[key]["selected_n"] += 1
         for severity, reason_key in [
-            ("core_hard", "core_hard_reasons"),
-            ("event_hard", "event_hard_reasons"),
-            ("soft", "soft_reasons"),
+            ("core_hard", "core_hard_weakness_reasons"),
+            ("event_hard", "event_hard_weakness_reasons"),
+            ("soft", "soft_weakness_reasons"),
+            ("toxic_soft", "toxic_soft_weakness_reasons"),
+            ("mild_soft", "mild_soft_weakness_reasons"),
         ]:
             for reason in split_reason_tokens(row.get(reason_key)):
                 grouped[key]["reason_counts"][(severity, reason)] += 1

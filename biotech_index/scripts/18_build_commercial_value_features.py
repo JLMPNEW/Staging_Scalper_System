@@ -32,6 +32,7 @@ from biotech_index.core.pipeline_guards import (
     validate_output_coverage,
     validate_requested_tickers,
 )
+from biotech_index.core.scoring_math import score_growth
 
 
 LOGGER = logging.getLogger("build_commercial_value_features")
@@ -54,7 +55,9 @@ COMMERCIAL_FIELDS = [
     "shares_outstanding", "shares_yoy_growth_pct", "close_price", "market_cap", "enterprise_value",
     "price_to_sales", "ev_to_sales", "pe_ratio", "fcf_yield", "commercial_stage_flag", "profitable_flag",
     "revenue_scale_score", "revenue_growth_score", "margin_score", "profitability_score",
-    "balance_sheet_score", "dilution_score", "valuation_score", "upside_capacity_score",
+    "balance_sheet_score", "leverage_score", "dilution_score", "valuation_score",
+    "quality_adjusted_valuation_score", "upside_capacity_score", "institutional_upside_capacity_score",
+    "value_trap_score",
     "commercial_quality_score", "commercial_value_score", "data_quality", "missing_fields",
     "proxy_fields_used", "payload_json",
 ]
@@ -102,7 +105,7 @@ def pct_change(current: float | None, previous: float | None) -> float | None:
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
-    return max(low, min(high, value))
+    return low if not math.isfinite(value) else max(low, min(high, value))
 
 
 def safe_div(num: float | None, den: float | None) -> float | None:
@@ -300,22 +303,6 @@ def score_revenue_scale(ttm_revenue: float | None) -> float:
     return clamp(25.0 + (math.log10(max(ttm_revenue, 1.0)) - 7.0) * 25.0)
 
 
-def score_growth(growth: float | None, *, default: float = 45.0) -> float:
-    if growth is None:
-        return default
-    if growth < -0.20:
-        return 20.0
-    if growth < 0.0:
-        return 35.0 + growth * 75.0
-    if growth < 0.10:
-        return 50.0 + growth * 150.0
-    if growth < 0.30:
-        return 65.0 + (growth - 0.10) * 100.0
-    if growth < 0.75:
-        return 85.0 + (growth - 0.30) * 25.0
-    return 100.0
-
-
 def score_margin(gross_margin: float | None) -> float:
     if gross_margin is None:
         return 50.0
@@ -351,6 +338,52 @@ def score_balance(cash: float | None, debt: float | None, net_cash: float | None
     return clamp(score)
 
 
+def score_leverage(
+    cash: float | None,
+    debt: float | None,
+    operating_income_ttm: float | None,
+    free_cash_flow_ttm: float | None,
+    ttm_revenue: float | None,
+) -> float:
+    """Higher is better: debt is rewarded only when supported by cash flow."""
+    cash = cash or 0.0
+    debt = debt or 0.0
+    if debt <= 0.0:
+        return 92.0 if cash > 0.0 else 78.0
+
+    net_debt = max(0.0, debt - cash)
+    score = 72.0
+    if ttm_revenue and ttm_revenue > 0.0:
+        debt_to_sales = debt / max(ttm_revenue, 1.0)
+        if debt_to_sales > 4.0:
+            score -= 34.0
+        elif debt_to_sales > 2.5:
+            score -= 24.0
+        elif debt_to_sales > 1.25:
+            score -= 12.0
+
+    if free_cash_flow_ttm and free_cash_flow_ttm > 0.0:
+        net_debt_to_fcf = net_debt / max(free_cash_flow_ttm, 1.0)
+        if net_debt_to_fcf < 2.0:
+            score += 16.0
+        elif net_debt_to_fcf < 4.0:
+            score += 6.0
+        elif net_debt_to_fcf > 8.0:
+            score -= 24.0
+    elif operating_income_ttm and operating_income_ttm > 0.0:
+        net_debt_to_operating_income = net_debt / max(operating_income_ttm, 1.0)
+        if net_debt_to_operating_income < 3.0:
+            score += 8.0
+        elif net_debt_to_operating_income > 7.0:
+            score -= 18.0
+    else:
+        score -= 24.0
+
+    if cash / max(debt, 1.0) > 0.50:
+        score += 8.0
+    return clamp(score)
+
+
 def score_dilution(shares_yoy_growth: float | None) -> float:
     if shares_yoy_growth is None:
         return 55.0
@@ -365,29 +398,58 @@ def score_dilution(shares_yoy_growth: float | None) -> float:
     return 10.0
 
 
-def score_valuation(ev_to_sales: float | None, price_to_sales: float | None, pe_ratio: float | None, fcf_yield: float | None) -> float:
-    multiple = ev_to_sales if ev_to_sales is not None and ev_to_sales > 0 else price_to_sales
-    if multiple is None or multiple <= 0:
-        return 50.0
-    if multiple < 1.0:
-        score = 95.0
-    elif multiple < 2.0:
-        score = 85.0
-    elif multiple < 4.0:
-        score = 70.0
-    elif multiple < 8.0:
-        score = 55.0
-    elif multiple < 15.0:
-        score = 35.0
-    else:
-        score = 20.0
+def score_valuation(
+    enterprise_value: float | None,
+    operating_income_ttm: float | None,
+    ev_to_sales: float | None,
+    price_to_sales: float | None,
+    pe_ratio: float | None,
+    fcf_yield: float | None,
+) -> float:
+    scores: list[float] = []
+    if (
+        enterprise_value is not None
+        and enterprise_value > 0.0
+        and operating_income_ttm is not None
+        and operating_income_ttm > 0.0
+    ):
+        ev_to_operating_income = enterprise_value / operating_income_ttm
+        if ev_to_operating_income < 8.0:
+            scores.append(95.0)
+        elif ev_to_operating_income < 12.0:
+            scores.append(82.0)
+        elif ev_to_operating_income < 18.0:
+            scores.append(68.0)
+        elif ev_to_operating_income < 28.0:
+            scores.append(48.0)
+        else:
+            scores.append(28.0)
     if pe_ratio is not None and pe_ratio > 0:
-        if pe_ratio < 15:
-            score += 12.0
-        elif pe_ratio < 25:
-            score += 5.0
-        elif pe_ratio > 45:
-            score -= 12.0
+        if pe_ratio < 10:
+            scores.append(92.0)
+        elif pe_ratio < 16:
+            scores.append(82.0)
+        elif pe_ratio < 24:
+            scores.append(64.0)
+        elif pe_ratio < 35:
+            scores.append(45.0)
+        else:
+            scores.append(25.0)
+    multiple = ev_to_sales if ev_to_sales is not None and ev_to_sales > 0 else price_to_sales
+    if multiple is not None and multiple > 0:
+        if multiple < 1.0:
+            scores.append(88.0)
+        elif multiple < 2.0:
+            scores.append(78.0)
+        elif multiple < 4.0:
+            scores.append(64.0)
+        elif multiple < 7.0:
+            scores.append(48.0)
+        elif multiple < 12.0:
+            scores.append(34.0)
+        else:
+            scores.append(18.0)
+    score = sum(scores) / len(scores) if scores else 50.0
     if fcf_yield is not None:
         if fcf_yield > 0.08:
             score += 10.0
@@ -396,24 +458,117 @@ def score_valuation(ev_to_sales: float | None, price_to_sales: float | None, pe_
     return clamp(score)
 
 
+def score_value_trap(
+    revenue_yoy_growth: float | None,
+    gross_margin: float | None,
+    operating_margin: float | None,
+    net_margin: float | None,
+    fcf_yield: float | None,
+    cash: float | None,
+    debt: float | None,
+    pe_ratio: float | None,
+    ev_to_sales: float | None,
+) -> float:
+    """Higher means low valuation is more likely tied to deteriorating fundamentals."""
+    score = 0.0
+    if revenue_yoy_growth is not None:
+        if revenue_yoy_growth <= -0.30:
+            score += 45.0
+        elif revenue_yoy_growth <= -0.10:
+            score += 28.0
+        elif revenue_yoy_growth < 0.0:
+            score += 16.0
+    if gross_margin is not None and gross_margin < 0.35:
+        score += 10.0
+    if operating_margin is not None:
+        if operating_margin < 0.0:
+            score += 18.0
+        elif operating_margin < 0.05:
+            score += 8.0
+    if net_margin is not None and net_margin < 0.0:
+        score += 12.0
+    if fcf_yield is not None and fcf_yield < -0.05:
+        score += 14.0
+    if (debt or 0.0) > max(cash or 0.0, 1.0) * 3.0 and (fcf_yield is None or fcf_yield <= 0.0):
+        score += 16.0
+    if pe_ratio is not None and 0.0 < pe_ratio < 9.0 and revenue_yoy_growth is not None and revenue_yoy_growth < 0.0:
+        score += 12.0
+    if ev_to_sales is not None and 0.0 < ev_to_sales < 2.0 and revenue_yoy_growth is not None and revenue_yoy_growth < 0.0:
+        score += 8.0
+    return clamp(score)
+
+
 def score_upside_capacity(market_cap: float | None) -> float:
     if market_cap is None or market_cap <= 0:
         return 50.0
+    # Tier-1 investability sweet spot: enough upside to rerate, but
+    # not so small that liquidity/survival lottery effects dominate.
     if market_cap < 300_000_000:
-        return 95.0
+        return 35.0
     if market_cap < 1_000_000_000:
-        return 90.0
+        return 55.0
     if market_cap < 3_000_000_000:
         return 80.0
     if market_cap < 10_000_000_000:
-        return 70.0
+        return 84.0
     if market_cap < 25_000_000_000:
-        return 55.0
+        return 74.0
     if market_cap < 50_000_000_000:
-        return 40.0
+        return 58.0
     if market_cap < 100_000_000_000:
-        return 25.0
-    return 10.0
+        return 40.0
+    if market_cap < 250_000_000_000:
+        return 28.0
+    return 16.0
+
+
+def score_institutional_upside_capacity(market_cap: float | None) -> float:
+    """Upside score with less lottery-ticket bias than raw market-cap size."""
+    if market_cap is None or market_cap <= 0:
+        return 50.0
+    if market_cap < 300_000_000:
+        return 40.0
+    if market_cap < 1_000_000_000:
+        return 60.0
+    if market_cap < 3_000_000_000:
+        return 74.0
+    if market_cap < 10_000_000_000:
+        return 82.0
+    if market_cap < 25_000_000_000:
+        return 78.0
+    if market_cap < 50_000_000_000:
+        return 64.0
+    if market_cap < 100_000_000_000:
+        return 52.0
+    if market_cap < 250_000_000_000:
+        return 38.0
+    return 26.0
+
+
+def validate_weight_sum(section: str, weights: dict[str, Any], keys: list[str], *, expected: float = 1.0) -> None:
+    total = sum(float(weights.get(key, 0.0)) for key in keys)
+    if abs(total - expected) > 1e-6:
+        LOGGER.warning(
+            "%s additive weights sum to %.6f, expected %.6f; check config before relying on calibration output.",
+            section,
+            total,
+            expected,
+        )
+
+
+def validate_commercial_value_config(config: dict[str, Any]) -> None:
+    quality_weights = cfg_get(config, "commercial_value.quality_weights", {}) or {}
+    value_weights = cfg_get(config, "commercial_value.value_weights", {}) or {}
+    validate_weight_sum(
+        "commercial_value.quality_weights",
+        quality_weights,
+        ["revenue_scale", "revenue_growth", "margin", "profitability", "balance_sheet", "leverage", "dilution"],
+    )
+    validate_weight_sum(
+        "commercial_value.value_weights",
+        value_weights,
+        ["commercial_quality", "valuation", "upside_capacity", "commercial_stage"],
+    )
 
 
 def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: dict[str, Any] | None, asof_date: date, config: dict[str, Any]) -> dict[str, Any]:
@@ -463,7 +618,7 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
     net_margin = safe_div(net_income_ttm, ttm_revenue)
     price_to_sales = safe_div(market_cap, ttm_revenue)
     ev_to_sales = safe_div(enterprise_value, ttm_revenue)
-    pe_ratio = safe_div(market_cap, net_income_ttm) if net_income_ttm not in {None, 0.0} else None
+    pe_ratio = safe_div(market_cap, net_income_ttm)
     fcf_yield = safe_div(free_cash_flow_ttm, market_cap)
 
     commercial_stage_flag = bool(ttm_revenue is not None and ttm_revenue >= float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000)))
@@ -497,26 +652,45 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
     margin_score = score_margin(gross_margin)
     profitability_score = score_profitability(ttm_revenue, operating_margin, net_margin, free_cash_flow_ttm)
     balance_sheet_score = score_balance(cash, debt, net_cash, ttm_revenue)
+    leverage_score = score_leverage(cash, debt, operating_income_ttm, free_cash_flow_ttm, ttm_revenue)
     dilution_score = score_dilution(shares_yoy_growth)
-    valuation_score = score_valuation(ev_to_sales, price_to_sales, pe_ratio, fcf_yield)
+    valuation_score = score_valuation(enterprise_value, operating_income_ttm, ev_to_sales, price_to_sales, pe_ratio, fcf_yield)
+    value_trap_score = score_value_trap(
+        revenue_yoy_growth,
+        gross_margin,
+        operating_margin,
+        net_margin,
+        fcf_yield,
+        cash,
+        debt,
+        pe_ratio,
+        ev_to_sales,
+    )
+    quality_adjusted_valuation_score = clamp(valuation_score * max(0.0, 1.0 - 0.45 * value_trap_score / 100.0))
     upside_capacity_score = score_upside_capacity(market_cap)
+    institutional_upside_capacity_score = score_institutional_upside_capacity(market_cap)
     commercial_stage_score = 80.0 if commercial_stage_flag else 45.0 if ttm_revenue and ttm_revenue > 0 else 15.0
 
     quality_weights = cfg_get(config, "commercial_value.quality_weights", {}) or {}
     commercial_quality_score = clamp(
-        float(quality_weights.get("revenue_scale", 0.15)) * revenue_scale_score
-        + float(quality_weights.get("revenue_growth", 0.20)) * revenue_growth_score
+        float(quality_weights.get("revenue_scale", 0.08)) * revenue_scale_score
+        + float(quality_weights.get("revenue_growth", 0.22)) * revenue_growth_score
         + float(quality_weights.get("margin", 0.15)) * margin_score
-        + float(quality_weights.get("profitability", 0.20)) * profitability_score
-        + float(quality_weights.get("balance_sheet", 0.15)) * balance_sheet_score
-        + float(quality_weights.get("dilution", 0.15)) * dilution_score
+        + float(quality_weights.get("profitability", 0.22)) * profitability_score
+        + float(quality_weights.get("balance_sheet", 0.10)) * balance_sheet_score
+        + float(quality_weights.get("leverage", 0.10)) * leverage_score
+        + float(quality_weights.get("dilution", 0.13)) * dilution_score
     )
     value_weights = cfg_get(config, "commercial_value.value_weights", {}) or {}
+    penalty_weights = cfg_get(config, "commercial_value.penalty_weights", {}) or {}
+    # Leverage is additive quality because supported debt can be durable; value-trap risk is a post-score drag
+    # because cheapness paired with deteriorating fundamentals should not raise the commercial value score.
     commercial_value_score = clamp(
-        float(value_weights.get("commercial_quality", 0.45)) * commercial_quality_score
-        + float(value_weights.get("valuation", 0.30)) * valuation_score
-        + float(value_weights.get("upside_capacity", 0.15)) * upside_capacity_score
-        + float(value_weights.get("commercial_stage", 0.10)) * commercial_stage_score
+        float(value_weights.get("commercial_quality", 0.58)) * commercial_quality_score
+        + float(value_weights.get("valuation", 0.18)) * quality_adjusted_valuation_score
+        + float(value_weights.get("upside_capacity", 0.04)) * upside_capacity_score
+        + float(value_weights.get("commercial_stage", 0.20)) * commercial_stage_score
+        - float(penalty_weights.get("value_trap_drag", value_weights.get("value_trap_drag", 0.22))) * value_trap_score
     )
 
     if len(missing) <= 1:
@@ -536,9 +710,13 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
             "margin_score": round(margin_score, 4),
             "profitability_score": round(profitability_score, 4),
             "balance_sheet_score": round(balance_sheet_score, 4),
+            "leverage_score": round(leverage_score, 4),
             "dilution_score": round(dilution_score, 4),
             "valuation_score": round(valuation_score, 4),
+            "quality_adjusted_valuation_score": round(quality_adjusted_valuation_score, 4),
             "upside_capacity_score": round(upside_capacity_score, 4),
+            "institutional_upside_capacity_score": round(institutional_upside_capacity_score, 4),
+            "value_trap_score": round(value_trap_score, 4),
         },
     }
     return {
@@ -580,9 +758,13 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
         "margin_score": round(margin_score, 4),
         "profitability_score": round(profitability_score, 4),
         "balance_sheet_score": round(balance_sheet_score, 4),
+        "leverage_score": round(leverage_score, 4),
         "dilution_score": round(dilution_score, 4),
         "valuation_score": round(valuation_score, 4),
+        "quality_adjusted_valuation_score": round(quality_adjusted_valuation_score, 4),
         "upside_capacity_score": round(upside_capacity_score, 4),
+        "institutional_upside_capacity_score": round(institutional_upside_capacity_score, 4),
+        "value_trap_score": round(value_trap_score, 4),
         "commercial_quality_score": round(commercial_quality_score, 4),
         "commercial_value_score": round(commercial_value_score, 4),
         "data_quality": data_quality,
@@ -634,6 +816,7 @@ def main() -> None:
     args = parse_args()
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
+    validate_commercial_value_config(config)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_csv = resolve_path(cfg_get(config, "commercial_value.output_csv"), base_dir=base_dir)

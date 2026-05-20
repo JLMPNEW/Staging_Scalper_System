@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +39,7 @@ from biotech_index.core.pipeline_guards import (
     validate_output_coverage,
     validate_requested_tickers,
 )
+from biotech_index.core.scoring_math import score_growth
 
 
 LOGGER = logging.getLogger("parse_forward_guidance")
@@ -85,6 +86,9 @@ FEATURE_FIELDS = [
     "forward_growth_score",
     "forward_profitability_score",
     "forward_valuation_score",
+    "quality_forward_valuation_score",
+    "quality_adjusted_guidance_score",
+    "guidance_recency_penalty",
     "data_quality",
     "missing_fields",
     "payload_json",
@@ -145,23 +149,61 @@ METRIC_PATTERNS: dict[str, tuple[str, ...]] = {
         r"net revenue",
         r"total revenue",
         r"product revenue",
+        r"product net revenue",
+        r"commercial revenue",
+        r"full[- ]year revenue",
+        r"full[- ]year net revenue",
+        r"total net revenue",
         r"revenues?",
         r"net sales",
         r"sales",
     ),
     "adjusted_ebitda": (
         r"adjusted ebitda",
+        r"non[- ]GAAP adjusted ebitda",
         r"adjusted earnings before interest, taxes, depreciation and amortization",
     ),
     "ebitda": (r"\bebitda\b",),
-    "adjusted_eps": (r"adjusted (?:diluted )?eps", r"adjusted earnings per share"),
-    "eps": (r"(?:diluted )?eps", r"earnings per share"),
+    "adjusted_eps": (
+        r"adjusted (?:diluted )?eps",
+        r"adjusted earnings per share",
+        r"non[- ]GAAP (?:diluted )?eps",
+    ),
+    "eps": (
+        r"(?:diluted )?eps",
+        r"earnings per share",
+        r"GAAP (?:diluted )?eps",
+    ),
 }
 
-GUIDANCE_TERMS = re.compile(
-    r"\b(guidance|outlook|expects?|anticipates?|projects?|forecasts?|guides?|reiterates?|reaffirms?|raises?|lowers?|full year|fiscal year|fy\s*20\d{2})\b",
-    re.IGNORECASE,
+DEFAULT_GUIDANCE_CUE_PATTERNS = (
+    r"guidance",
+    r"outlook",
+    r"expects?",
+    r"anticipates?",
+    r"projects?",
+    r"forecasts?",
+    r"guides?",
+    r"reiterates?",
+    r"reaffirms?",
+    r"raises?",
+    r"lowers?",
+    r"full year",
+    r"fiscal year",
+    r"fy\s*20\d{2}",
 )
+
+
+def compile_guidance_terms(extra_patterns: Sequence[str] | None = None) -> re.Pattern[str]:
+    patterns = [*DEFAULT_GUIDANCE_CUE_PATTERNS]
+    for pattern in extra_patterns or []:
+        cleaned = str(pattern or "").strip()
+        if cleaned:
+            patterns.append(cleaned)
+    return re.compile(r"\b(" + "|".join(patterns) + r")\b", re.IGNORECASE)
+
+
+GUIDANCE_TERMS = compile_guidance_terms()
 FORWARD_LOOKING_ONLY = re.compile(
     r"\b(forward-looking statements?|safe harbor|actual results may differ|risk factors|there can be no assurance)\b",
     re.IGNORECASE,
@@ -304,7 +346,7 @@ def safe_json_loads(raw: object) -> dict[str, Any]:
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
-    return max(low, min(high, value))
+    return low if not math.isfinite(value) else max(low, min(high, value))
 
 
 def clean_text(raw: str) -> str:
@@ -433,7 +475,15 @@ def parse_metric_values(metric: str, window: str) -> tuple[float | None, float |
     return None
 
 
-def confidence_for(*, form: str, window: str, has_range: bool, filing_date: date | None, asof_date: date) -> float:
+def confidence_for(
+    *,
+    form: str,
+    window: str,
+    has_range: bool,
+    metric_count: int,
+    filing_date: date | None,
+    asof_date: date,
+) -> float:
     lower = window.lower()
     score = 0.62
     if form.upper() in {"8-K", "6-K"}:
@@ -444,6 +494,8 @@ def confidence_for(*, form: str, window: str, has_range: bool, filing_date: date
         score += 0.10
     if has_range:
         score += 0.06
+    if metric_count > 1:
+        score += min(0.08, 0.03 * (metric_count - 1))
     if filing_date is not None:
         age = max(0, (asof_date - filing_date).days)
         if age <= 120:
@@ -455,11 +507,13 @@ def confidence_for(*, form: str, window: str, has_range: bool, filing_date: date
     return round(clamp(score, 0.0, 0.98), 4)
 
 
-def guidance_windows(text: str, *, max_windows: int) -> list[str]:
+def guidance_windows(text: str, *, max_windows: int, before_chars: int = 450, after_chars: int = 900) -> list[str]:
     windows: list[str] = []
     for match in GUIDANCE_TERMS.finditer(text):
-        start = max(0, match.start() - 280)
-        end = min(len(text), match.end() + 520)
+        # Many releases introduce the fiscal-year outlook before the actual
+        # metric table, so use a wider window than the immediate cue sentence.
+        start = max(0, match.start() - max(0, int(before_chars)))
+        end = min(len(text), match.end() + max(0, int(after_chars)))
         window = text[start:end].strip()
         if window and window not in windows:
             windows.append(window)
@@ -468,14 +522,27 @@ def guidance_windows(text: str, *, max_windows: int) -> list[str]:
     return windows
 
 
-def detect_guidance(filing: FilingText, *, asof_date: date, min_confidence: float, max_windows: int) -> list[GuidanceRecord]:
+def detect_guidance(
+    filing: FilingText,
+    *,
+    asof_date: date,
+    min_confidence: float,
+    max_windows: int,
+    window_before_chars: int = 450,
+    window_after_chars: int = 900,
+) -> list[GuidanceRecord]:
     text = clean_text(filing.text_content)
     if not text:
         return []
     filing_dt = parse_date(filing.filing_date)
     records: list[GuidanceRecord] = []
     seen: set[tuple[str, int | None, str, str]] = set()
-    for window in guidance_windows(text, max_windows=max_windows):
+    for window in guidance_windows(
+        text,
+        max_windows=max_windows,
+        before_chars=window_before_chars,
+        after_chars=window_after_chars,
+    ):
         lower_window = window.lower()
         if (
             ("preliminary " in lower_window or "preliminary unaudited" in lower_window or "results of operations" in lower_window or "fiscal year ended" in lower_window)
@@ -489,6 +556,9 @@ def detect_guidance(filing: FilingText, *, asof_date: date, min_confidence: floa
         if guidance_year is not None and guidance_year < asof_date.year:
             continue
         period_label = extract_period_label(window, guidance_year)
+        window_metric_count = sum(
+            1 for metric_name in METRIC_PATTERNS if re.search(metric_regex(metric_name), window, re.IGNORECASE)
+        )
         for metric in METRIC_PATTERNS:
             if not re.search(metric_regex(metric), window, re.IGNORECASE):
                 continue
@@ -499,7 +569,14 @@ def detect_guidance(filing: FilingText, *, asof_date: date, min_confidence: floa
             if midpoint_value is None:
                 continue
             has_range = low_value is not None and high_value is not None and abs(high_value - low_value) > 1e-9
-            confidence = confidence_for(form=filing.form, window=window, has_range=has_range, filing_date=filing_dt, asof_date=asof_date)
+            confidence = confidence_for(
+                form=filing.form,
+                window=window,
+                has_range=has_range,
+                metric_count=window_metric_count,
+                filing_date=filing_dt,
+                asof_date=asof_date,
+            )
             if confidence < min_confidence:
                 continue
             key = (
@@ -1019,6 +1096,9 @@ def build_parser_signature(
     lookback_days: int,
     max_filings_per_company: int,
     max_windows_per_filing: int,
+    guidance_window_before_chars: int,
+    guidance_window_after_chars: int,
+    guidance_cue_patterns: Sequence[str],
     min_confidence: float,
     fetch_complete: bool,
     fetch_forms: set[str],
@@ -1029,6 +1109,9 @@ def build_parser_signature(
         "lookback_days": int(lookback_days),
         "max_filings_per_company": int(max_filings_per_company),
         "max_windows_per_filing": int(max_windows_per_filing),
+        "guidance_window_before_chars": int(guidance_window_before_chars),
+        "guidance_window_after_chars": int(guidance_window_after_chars),
+        "guidance_cue_patterns": [str(pattern) for pattern in guidance_cue_patterns],
         "min_confidence": round(float(min_confidence), 6),
         "fetch_complete": bool(fetch_complete),
         "fetch_forms": sorted(fetch_forms),
@@ -1408,6 +1491,8 @@ def parse_guidance_records(
     asof_date: date,
     min_confidence: float,
     max_windows_per_filing: int,
+    guidance_window_before_chars: int,
+    guidance_window_after_chars: int,
     max_workers: int,
 ) -> tuple[list[GuidanceRecord], dict[str, int]]:
     if not filings:
@@ -1421,6 +1506,8 @@ def parse_guidance_records(
                 asof_date=asof_date,
                 min_confidence=min_confidence,
                 max_windows=max_windows_per_filing,
+                window_before_chars=guidance_window_before_chars,
+                window_after_chars=guidance_window_after_chars,
             )
             records.extend(filing_records)
             counts[filing.accession_nodash] = len(filing_records)
@@ -1434,6 +1521,8 @@ def parse_guidance_records(
                 asof_date=asof_date,
                 min_confidence=min_confidence,
                 max_windows=max_windows_per_filing,
+                window_before_chars=guidance_window_before_chars,
+                window_after_chars=guidance_window_after_chars,
             ): filing
             for filing in filings
         }
@@ -1492,22 +1581,6 @@ def latest_guidance_by_metric(records: list[GuidanceRecord], asof_date: date) ->
     return out
 
 
-def score_growth(growth: float | None) -> float:
-    if growth is None:
-        return 45.0
-    if growth < -0.20:
-        return 15.0
-    if growth < 0.0:
-        return 35.0 + growth * 75.0
-    if growth < 0.10:
-        return 55.0 + growth * 150.0
-    if growth < 0.30:
-        return 70.0 + (growth - 0.10) * 75.0
-    if growth < 0.75:
-        return 85.0 + (growth - 0.30) * 25.0
-    return 100.0
-
-
 def score_profitability(ebitda_margin: float | None, eps: float | None) -> float:
     if ebitda_margin is not None:
         if ebitda_margin >= 0.30:
@@ -1522,21 +1595,67 @@ def score_profitability(ebitda_margin: float | None, eps: float | None) -> float
     return 45.0
 
 
-def score_forward_valuation(market_cap: float | None, revenue_midpoint: float | None) -> float:
-    if market_cap is None or market_cap <= 0 or revenue_midpoint is None or revenue_midpoint <= 0:
-        return 50.0
-    multiple = market_cap / revenue_midpoint
-    if multiple < 1.0:
-        return 95.0
-    if multiple < 2.0:
-        return 88.0
-    if multiple < 4.0:
-        return 75.0
-    if multiple < 7.0:
-        return 60.0
-    if multiple < 12.0:
-        return 42.0
-    return 20.0
+def score_forward_valuation(
+    *,
+    market_cap: float | None,
+    enterprise_value: float | None,
+    revenue_midpoint: float | None,
+    ebitda_midpoint: float | None,
+    eps_midpoint: float | None,
+    shares_outstanding: float | None,
+) -> float:
+    """Forward valuation using the best available guided metric.
+
+    Profitability guidance separates quality commercial names from cheap
+    revenue stories, so EV/EBITDA and forward P/E are included before relying
+    on EV/sales or market-cap/sales fallback.
+    """
+    scores: list[float] = []
+    enterprise = enterprise_value if enterprise_value is not None and enterprise_value > 0.0 else market_cap
+
+    if enterprise and enterprise > 0.0 and ebitda_midpoint and ebitda_midpoint > 0.0:
+        ev_to_ebitda = enterprise / ebitda_midpoint
+        if ev_to_ebitda < 6.0:
+            scores.append(95.0)
+        elif ev_to_ebitda < 9.0:
+            scores.append(84.0)
+        elif ev_to_ebitda < 13.0:
+            scores.append(70.0)
+        elif ev_to_ebitda < 18.0:
+            scores.append(52.0)
+        else:
+            scores.append(28.0)
+
+    # EPS metrics are parsed only from EPS / earnings-per-share guidance patterns; midpoint is per-share.
+    if market_cap and market_cap > 0.0 and eps_midpoint and eps_midpoint > 0.0 and shares_outstanding and shares_outstanding > 0.0:
+        forward_pe = market_cap / max(eps_midpoint * shares_outstanding, 1.0)
+        if forward_pe < 8.0:
+            scores.append(92.0)
+        elif forward_pe < 14.0:
+            scores.append(82.0)
+        elif forward_pe < 22.0:
+            scores.append(68.0)
+        elif forward_pe < 35.0:
+            scores.append(50.0)
+        else:
+            scores.append(25.0)
+
+    if enterprise and enterprise > 0.0 and revenue_midpoint and revenue_midpoint > 0.0:
+        ev_to_sales = enterprise / revenue_midpoint
+        if ev_to_sales < 1.0:
+            scores.append(88.0)
+        elif ev_to_sales < 2.0:
+            scores.append(78.0)
+        elif ev_to_sales < 4.0:
+            scores.append(64.0)
+        elif ev_to_sales < 7.0:
+            scores.append(48.0)
+        elif ev_to_sales < 12.0:
+            scores.append(34.0)
+        else:
+            scores.append(18.0)
+
+    return clamp(sum(scores) / len(scores)) if scores else 35.0
 
 
 def build_feature_row(
@@ -1545,6 +1664,7 @@ def build_feature_row(
     asof_date: date,
     records: list[GuidanceRecord],
     commercial: dict[str, Any] | None,
+    config: dict[str, Any],
 ) -> dict[str, Any]:
     by_metric = latest_guidance_by_metric(records, asof_date)
     revenue = by_metric.get("revenue")
@@ -1552,6 +1672,8 @@ def build_feature_row(
     eps = by_metric.get("adjusted_eps") or by_metric.get("eps")
     ttm_revenue = to_float((commercial or {}).get("ttm_revenue"))
     market_cap = to_float((commercial or {}).get("market_cap"))
+    enterprise_value = to_float((commercial or {}).get("enterprise_value"))
+    shares_outstanding = to_float((commercial or {}).get("shares_outstanding"))
     revenue_mid = revenue.midpoint_value if revenue else None
     revenue_growth = pct_change(revenue_mid, ttm_revenue)
     ebitda_mid = ebitda.midpoint_value if ebitda else None
@@ -1561,13 +1683,31 @@ def build_feature_row(
     confidence = max(confidence_values) if confidence_values else 0.0
     filing_dates = [parse_date(record.filing_date) for record in by_metric.values()]
     valid_dates = [item for item in filing_dates if item is not None]
-    latest_filing = max(valid_dates).isoformat() if valid_dates else ""
-    recency_days = min((asof_date - item).days for item in valid_dates) if valid_dates else None
+    latest_record_date = max(valid_dates) if valid_dates else None
+    latest_filing = latest_record_date.isoformat() if latest_record_date else ""
+    recency_days = (asof_date - latest_record_date).days if latest_record_date else None
     growth_score = score_growth(revenue_growth)
     profitability_score = score_profitability(ebitda_margin, eps_mid)
-    valuation_score = score_forward_valuation(market_cap, revenue_mid)
+    valuation_score = score_forward_valuation(
+        market_cap=market_cap,
+        enterprise_value=enterprise_value,
+        revenue_midpoint=revenue_mid,
+        ebitda_midpoint=ebitda_mid,
+        eps_midpoint=eps_mid,
+        shares_outstanding=shares_outstanding,
+    )
+    quality_forward_valuation_score = valuation_score
     confidence_score = confidence * 100.0
-    forward_profitability_flag = int((ebitda_mid is not None and ebitda_mid > 0) or (eps_mid is not None and eps_mid > 0))
+    require_both_profitability_metrics = as_bool(
+        cfg_get(config, "forward_guidance.forward_profitability_require_both_metrics", False),
+        False,
+    )
+    if require_both_profitability_metrics and ebitda_mid is not None and eps_mid is not None:
+        forward_profitability_flag = int(ebitda_mid > 0 and eps_mid > 0)
+    else:
+        forward_profitability_flag = int(
+            (ebitda_mid is not None and ebitda_mid > 0) or (eps_mid is not None and eps_mid > 0)
+        )
     missing: list[str] = []
     if revenue_mid is None:
         missing.append("forward_revenue_guidance")
@@ -1580,9 +1720,38 @@ def build_feature_row(
     else:
         data_quality = "medium"
     if not records:
-        guidance_score = 50.0
+        trailing_growth = to_float((commercial or {}).get("revenue_yoy_growth_pct"))
+        commercial_stage = bool(to_float((commercial or {}).get("commercial_stage_flag")) or 0.0)
+        if commercial_stage and trailing_growth is not None and trailing_growth <= 0.0:
+            guidance_score = float(cfg_get(config, "forward_guidance.no_guidance_negative_growth_score", 28.0))
+        elif commercial_stage:
+            guidance_score = float(cfg_get(config, "forward_guidance.no_guidance_commercial_score", 35.0))
+        else:
+            guidance_score = float(cfg_get(config, "forward_guidance.no_guidance_clinical_score", 42.0))
+        quality_adjusted_guidance_score = guidance_score
+        guidance_recency_penalty = 0.0
     else:
-        guidance_score = clamp(0.35 * growth_score + 0.25 * profitability_score + 0.20 * valuation_score + 0.20 * confidence_score)
+        guidance_score = clamp(
+            0.32 * growth_score
+            + 0.30 * profitability_score
+            + 0.23 * valuation_score
+            + 0.15 * confidence_score
+        )
+        stale_120_penalty = float(cfg_get(config, "forward_guidance.guidance_staleness_penalty_120d", 5.0))
+        stale_240_penalty = float(cfg_get(config, "forward_guidance.guidance_staleness_penalty_240d", 10.0))
+        if recency_days is not None and recency_days > 240:
+            guidance_recency_penalty = stale_240_penalty
+        elif recency_days is not None and recency_days > 120:
+            guidance_recency_penalty = stale_120_penalty
+        else:
+            guidance_recency_penalty = 0.0
+        quality_adjusted_guidance_score = clamp(
+            0.32 * growth_score
+            + 0.30 * profitability_score
+            + 0.23 * quality_forward_valuation_score
+            + 0.15 * confidence_score
+            - guidance_recency_penalty
+        )
     payload = {
         "guidance_records": [
             {
@@ -1596,12 +1765,20 @@ def build_feature_row(
                 "source_name": safe_json_loads(record.source_payload).get("source_name", ""),
                 "source_url": safe_json_loads(record.source_payload).get("source_url", ""),
                 "override_reason": safe_json_loads(record.source_payload).get("override_reason", ""),
-                "excerpt": record.source_excerpt[:420],
+                "excerpt": record.source_excerpt,
             }
             for record in by_metric.values()
         ],
         "ttm_revenue": ttm_revenue,
         "market_cap": market_cap,
+        "component_scores": {
+            "forward_growth_score": round(growth_score, 4),
+            "forward_profitability_score": round(profitability_score, 4),
+            "forward_valuation_score": round(valuation_score, 4),
+            "quality_forward_valuation_score": round(quality_forward_valuation_score, 4),
+            "quality_adjusted_guidance_score": round(quality_adjusted_guidance_score, 4),
+            "guidance_recency_penalty": round(guidance_recency_penalty, 4),
+        },
     }
     return {
         "asof_date": asof_date.isoformat(),
@@ -1624,6 +1801,9 @@ def build_feature_row(
         "forward_growth_score": round(growth_score, 4),
         "forward_profitability_score": round(profitability_score, 4),
         "forward_valuation_score": round(valuation_score, 4),
+        "quality_forward_valuation_score": round(quality_forward_valuation_score, 4),
+        "quality_adjusted_guidance_score": round(quality_adjusted_guidance_score, 4),
+        "guidance_recency_penalty": round(guidance_recency_penalty, 4),
         "data_quality": data_quality,
         "missing_fields": ";".join(missing),
         "payload_json": json.dumps(payload, ensure_ascii=True, sort_keys=True),
@@ -1895,6 +2075,9 @@ def replace_guidance(
                 row["forward_growth_score"],
                 row["forward_profitability_score"],
                 row["forward_valuation_score"],
+                row["quality_forward_valuation_score"],
+                row["quality_adjusted_guidance_score"],
+                row["guidance_recency_penalty"],
                 row["data_quality"],
                 row["missing_fields"],
                 row["payload_json"],
@@ -1913,9 +2096,11 @@ def replace_guidance(
                     forward_ebitda_margin_pct, forward_eps_midpoint, guidance_confidence,
                     guidance_recency_days, forward_profitability_flag, guidance_score,
                     forward_growth_score, forward_profitability_score, forward_valuation_score,
-                    data_quality, missing_fields, payload_json, created_at, updated_at
+                    quality_forward_valuation_score, quality_adjusted_guidance_score,
+                    guidance_recency_penalty, data_quality, missing_fields, payload_json,
+                    created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(asof_date, company_id) DO UPDATE SET
                     latest_guidance_filing_date = excluded.latest_guidance_filing_date,
                     forward_revenue_midpoint = excluded.forward_revenue_midpoint,
@@ -1933,6 +2118,9 @@ def replace_guidance(
                     forward_growth_score = excluded.forward_growth_score,
                     forward_profitability_score = excluded.forward_profitability_score,
                     forward_valuation_score = excluded.forward_valuation_score,
+                    quality_forward_valuation_score = excluded.quality_forward_valuation_score,
+                    quality_adjusted_guidance_score = excluded.quality_adjusted_guidance_score,
+                    guidance_recency_penalty = excluded.guidance_recency_penalty,
                     data_quality = excluded.data_quality,
                     missing_fields = excluded.missing_fields,
                     payload_json = excluded.payload_json,
@@ -1969,6 +2157,15 @@ def main() -> None:
     lookback_days = int(cfg_get(config, "forward_guidance.lookback_days", 540))
     max_filings_per_company = int(cfg_get(config, "forward_guidance.max_filings_per_company", 14))
     max_windows_per_filing = int(cfg_get(config, "forward_guidance.max_windows_per_filing", 40))
+    guidance_window_before_chars = int(cfg_get(config, "forward_guidance.guidance_window_before_chars", 450))
+    guidance_window_after_chars = int(cfg_get(config, "forward_guidance.guidance_window_after_chars", 900))
+    guidance_cue_patterns = [
+        str(pattern)
+        for pattern in (cfg_get(config, "forward_guidance.guidance_cue_patterns", []) or [])
+        if str(pattern or "").strip()
+    ]
+    global GUIDANCE_TERMS
+    GUIDANCE_TERMS = compile_guidance_terms(guidance_cue_patterns)
     min_confidence = float(cfg_get(config, "forward_guidance.min_confidence", 0.68))
     fetch_complete = as_bool(cfg_get(config, "forward_guidance.fetch_complete_submission_text", True), True)
     fetch_forms = {str(item).upper() for item in (cfg_get(config, "forward_guidance.fetch_complete_submission_forms", ["8-K", "8-K/A", "6-K", "6-K/A"]) or [])}
@@ -1987,6 +2184,9 @@ def main() -> None:
         lookback_days=lookback_days,
         max_filings_per_company=max_filings_per_company,
         max_windows_per_filing=max_windows_per_filing,
+        guidance_window_before_chars=guidance_window_before_chars,
+        guidance_window_after_chars=guidance_window_after_chars,
+        guidance_cue_patterns=guidance_cue_patterns,
         min_confidence=min_confidence,
         fetch_complete=fetch_complete,
         fetch_forms=fetch_forms,
@@ -2111,6 +2311,8 @@ def main() -> None:
                 asof_date=asof_date,
                 min_confidence=min_confidence,
                 max_windows_per_filing=max_windows_per_filing,
+                guidance_window_before_chars=guidance_window_before_chars,
+                guidance_window_after_chars=guidance_window_after_chars,
                 max_workers=max_workers,
             )
             LOGGER.info("Forward guidance parsing complete: filings=%d records=%d elapsed=%.3fs", len(prepared_filings), len(parsed_records), time.perf_counter() - phase_start)
@@ -2144,6 +2346,7 @@ def main() -> None:
                     asof_date=asof_date,
                     records=records_by_company.get(int(company["company_id"]), []),
                     commercial=commercial_by_company.get(int(company["company_id"])),
+                    config=config,
                 )
                 for company in companies
             ]

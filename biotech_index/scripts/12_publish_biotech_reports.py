@@ -177,6 +177,9 @@ def to_float(raw: object, default: float = 0.0) -> float:
 
 
 def latest_score_date(conn: sqlite3.Connection) -> str:
+    null_count = int(conn.execute("SELECT COUNT(*) AS n FROM daily_scores WHERE asof_date IS NULL").fetchone()["n"] or 0)
+    if null_count:
+        raise ValueError(f"daily_scores contains {null_count} row(s) with NULL asof_date")
     row = conn.execute("SELECT MAX(asof_date) AS asof_date FROM daily_scores").fetchone()
     asof = str(row["asof_date"] or "") if row else ""
     if not asof:
@@ -304,14 +307,37 @@ def assert_output_paths_writable(paths: list[Path]) -> None:
         raise PermissionError("Report output file is not writable. Close the file and rerun: " + "; ".join(locked))
 
 
-def build_index_summary(scores: list[dict[str, Any]], asof_date: str, top_n: int) -> dict[str, Any]:
+def build_index_summary(
+    scores: list[dict[str, Any]],
+    asof_date: str,
+    top_n: int,
+    *,
+    weights: dict[str, float] | None = None,
+) -> dict[str, Any]:
     values = [to_float(row.get("opportunity_score")) for row in scores]
     top_values = values[:top_n]
     top_n_avg_score = round(sum(top_values) / len(top_values), 4) if top_values else 0.0
     median_score = round(median(values), 4) if values else 0.0
     full_universe_avg_score = round(sum(values) / len(values), 4) if values else 0.0
+    raw_weights = weights or {}
+    top_weight = float(raw_weights.get("top_n_avg_score", 0.70))
+    universe_weight = float(raw_weights.get("full_universe_avg_score", 0.20))
+    median_weight = float(raw_weights.get("median_score", 0.10))
+    total_weight = top_weight + universe_weight + median_weight
+    if total_weight <= 0.0:
+        raise ValueError("biotech_reports.index_weights must sum to a positive value")
+    top_weight, universe_weight, median_weight = (
+        top_weight / total_weight,
+        universe_weight / total_weight,
+        median_weight / total_weight,
+    )
     # Blend leader strength with universe breadth so the index is not just an alias for top-N average.
-    index_level = round((0.70 * top_n_avg_score) + (0.20 * full_universe_avg_score) + (0.10 * median_score), 4)
+    index_level = round(
+        (top_weight * top_n_avg_score)
+        + (universe_weight * full_universe_avg_score)
+        + (median_weight * median_score),
+        4,
+    )
     bucket_counts: dict[str, int] = {}
     for row in scores:
         bucket = str(row.get("bucket") or "unknown")
@@ -329,7 +355,11 @@ def build_index_summary(scores: list[dict[str, Any]], asof_date: str, top_n: int
         "watchlist_count": bucket_counts.get("watchlist", 0),
         "speculative_count": bucket_counts.get("speculative", 0),
         "avoid_count": bucket_counts.get("avoid", 0),
-        "index_method": "0.70*top_n_avg_score+0.20*full_universe_avg_score+0.10*median_score",
+        "index_method": (
+            f"{top_weight:.2f}*top_n_avg_score+"
+            f"{universe_weight:.2f}*full_universe_avg_score+"
+            f"{median_weight:.2f}*median_score"
+        ),
     }
 
 
@@ -438,6 +468,15 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def validate_top_score_fields(sample_row: dict[str, Any]) -> None:
+    missing = [field for field in TOP_SCORE_FIELDS if field not in sample_row]
+    if missing:
+        raise RuntimeError(
+            "TOP_SCORE_FIELDS contains field(s) not emitted by flatten_score_row(): "
+            + ",".join(missing)
+        )
+
+
 def load_previous_scores(conn: sqlite3.Connection, prev_asof: str) -> dict[int, dict[str, Any]]:
     if not prev_asof:
         return {}
@@ -458,6 +497,8 @@ def build_alerts(
     previous_scores: dict[int, dict[str, Any]],
     prev_asof: str,
     score_change_min: float,
+    rank_move_min: int,
+    bucket_transition_enabled: bool,
     top_n: int,
 ) -> list[dict[str, Any]]:
     alerts: list[dict[str, Any]] = []
@@ -502,8 +543,13 @@ def build_alerts(
             prev_bucket_value = str(prev.get("bucket") or "")
             if delta >= score_change_min:
                 alert_type = "score_jump"
-            elif current_bucket in strong_buckets and current_bucket != prev_bucket_value:
+            elif bucket_transition_enabled and current_bucket in strong_buckets and current_bucket != prev_bucket_value:
                 alert_type = "bucket_upgrade"
+            elif (
+                int(prev.get("rank") or 999999) - int(row.get("rank") or 999999) >= rank_move_min
+                and int(row.get("rank") or 999999) <= top_n
+            ):
+                alert_type = "rank_improvement"
             elif int(row.get("rank") or 999999) <= top_n and int(prev.get("rank") or 999999) > top_n:
                 alert_type = "entered_top_n"
             else:
@@ -538,10 +584,19 @@ def build_trial_validation_rows(
     top_n: int,
     extra_tickers: list[str],
     max_trials_per_ticker: int,
+    asof_date: str,
 ) -> list[dict[str, Any]]:
     score_by_ticker = {str(row.get("ticker") or "").upper(): row for row in scores}
     selected = {str(row.get("ticker") or "").upper() for row in scores[:top_n]}
-    selected.update(str(ticker or "").strip().upper() for ticker in extra_tickers if str(ticker or "").strip())
+    extra_selected = {str(ticker or "").strip().upper() for ticker in extra_tickers if str(ticker or "").strip()}
+    missing_extra = sorted(ticker for ticker in extra_selected if ticker not in score_by_ticker)
+    if missing_extra:
+        LOGGER.warning(
+            "Trial-validation extra ticker(s) not present in current scores for asof=%s: %s",
+            asof_date,
+            ",".join(missing_extra[:25]) + (f"...(+{len(missing_extra) - 25})" if len(missing_extra) > 25 else ""),
+        )
+    selected.update(extra_selected)
     grouped: dict[str, list[dict[str, str]]] = {}
     for row in evidence_rows:
         ticker = str(row.get("ticker") or "").upper()
@@ -566,7 +621,7 @@ def build_trial_validation_rows(
         for row in rows[:max(1, max_trials_per_ticker)]:
             out.append(
                 {
-                    "asof_date": score_row.get("asof_date", ""),
+                    "asof_date": score_row.get("asof_date") or row.get("asof_date") or asof_date,
                     "rank": score_row.get("rank", ""),
                     "ticker": ticker,
                     "company_name": score_row.get("company_name", row.get("company_name", "")),
@@ -618,7 +673,12 @@ def is_terminal_status(row: dict[str, Any]) -> bool:
     return str(row.get("overall_status") or "").strip().upper() in {"COMPLETED", "TERMINATED", "WITHDRAWN", "SUSPENDED"}
 
 
-def build_trial_validation_summary_rows(trial_rows: list[dict[str, Any]], validation_cap: int) -> list[dict[str, Any]]:
+def build_trial_validation_summary_rows(
+    trial_rows: list[dict[str, Any]],
+    validation_cap: int,
+    *,
+    stale_days: int,
+) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in trial_rows:
         ticker = str(row.get("ticker") or "").strip().upper()
@@ -631,8 +691,8 @@ def build_trial_validation_summary_rows(trial_rows: list[dict[str, Any]], valida
         active = [row for row in rows if bool_text(row.get("is_active_status"))]
         active_qualifying = [row for row in active if bool_text(row.get("qualifying_trial"))]
         active_phase2_3 = [row for row in active_qualifying if int(to_float(row.get("phase_rank"))) in {2, 3}]
-        fresh_active_phase2_3 = [row for row in active_phase2_3 if days_since_update(row) <= 365]
-        stale_active_phase2_3 = [row for row in active_phase2_3 if days_since_update(row) > 365]
+        fresh_active_phase2_3 = [row for row in active_phase2_3 if days_since_update(row) <= stale_days]
+        stale_active_phase2_3 = [row for row in active_phase2_3 if days_since_update(row) > stale_days]
         lead_active_qualifying = [row for row in active_qualifying if "lead" in split_roles(row.get("match_roles"))]
         lead_active_phase2_3 = [row for row in active_phase2_3 if "lead" in split_roles(row.get("match_roles"))]
         program_active_qualifying = [row for row in active_qualifying if "program" in split_roles(row.get("match_roles"))]
@@ -658,7 +718,7 @@ def build_trial_validation_summary_rows(trial_rows: list[dict[str, Any]], valida
             if {"lead", "program"} & split_roles(row.get("match_roles"))
         ]
         weak_link_rows = [row for row in rows if not bool_text(row.get("strong_company_link"))]
-        stale_active = [row for row in active if days_since_update(row) > 365]
+        stale_active = [row for row in active if days_since_update(row) > stale_days]
         non_qualifying = [row for row in rows if not bool_text(row.get("qualifying_trial"))]
         terminal = [row for row in rows if is_terminal_status(row)]
         outcome_overridden = [row for row in rows if bool_text(row.get("outcome_override_applied"))]
@@ -766,11 +826,23 @@ def main() -> None:
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     base_output_dir = resolve_path(cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
     top_n = int(cfg_get(config, "biotech_reports.top_n", 20))
-    score_change_min = float(cfg_get(config, "biotech_reports.alerts_score_change_min", 12))
+    score_change_min = float(
+        cfg_get(
+            config,
+            "biotech_reports.alert_config.score_change_min",
+            cfg_get(config, "biotech_reports.alerts_score_change_min", 12),
+        )
+    )
+    rank_move_min = int(cfg_get(config, "biotech_reports.alert_config.rank_move_min", 5))
+    bucket_transition_enabled = str(
+        cfg_get(config, "biotech_reports.alert_config.bucket_transition_enabled", True)
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    index_weights = cfg_get(config, "biotech_reports.index_weights", {}) or {}
     configured_ctgov_evidence_csv = resolve_path(cfg_get(config, "biotech_features.ctgov_evidence_csv", "../output/biotech_index_reports/ctgov_trial_evidence.csv"), base_dir=base_dir)
     trial_status_overrides_csv = resolve_optional_path(cfg_get(config, "ctgov_audit.trial_status_overrides_csv"), base_dir=base_dir)
     validation_extra_tickers = [str(x).upper() for x in (cfg_get(config, "biotech_reports.trial_validation_extra_tickers", []) or [])]
     validation_max_trials = int(cfg_get(config, "biotech_reports.trial_validation_max_trials_per_ticker", 25))
+    trial_stale_days = int(cfg_get(config, "ctgov_audit.stale_days", 365))
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
@@ -801,13 +873,17 @@ def main() -> None:
             prev_asof = previous_score_date(conn, asof_date)
             previous = load_previous_scores(conn, prev_asof)
 
-            summary = build_index_summary(scores, asof_date, top_n)
+            summary = build_index_summary(scores, asof_date, top_n, weights=index_weights)
             top_rows = [flatten_score_row(row) for row in scores[:top_n]]
+            if top_rows:
+                validate_top_score_fields(top_rows[0])
             alerts = build_alerts(
                 current_scores=scores,
                 previous_scores=previous,
                 prev_asof=prev_asof,
                 score_change_min=score_change_min,
+                rank_move_min=rank_move_min,
+                bucket_transition_enabled=bucket_transition_enabled,
                 top_n=top_n,
             )
             cards = build_evidence_cards(scores, features, top_n)
@@ -820,8 +896,13 @@ def main() -> None:
                 top_n=top_n,
                 extra_tickers=validation_extra_tickers,
                 max_trials_per_ticker=validation_max_trials,
+                asof_date=asof_date,
             )
-            trial_validation_summary_rows = build_trial_validation_summary_rows(trial_validation_rows, validation_max_trials)
+            trial_validation_summary_rows = build_trial_validation_summary_rows(
+                trial_validation_rows,
+                validation_max_trials,
+                stale_days=trial_stale_days,
+            )
 
             write_csv(index_csv, [summary], list(summary.keys()))
             write_csv(top_csv, top_rows, TOP_SCORE_FIELDS)

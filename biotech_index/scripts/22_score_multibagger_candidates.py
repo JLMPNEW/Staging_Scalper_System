@@ -187,6 +187,19 @@ def parse_json(raw: object) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def row_liquidity_ok(row: dict[str, Any], payload: dict[str, Any], config: dict[str, Any]) -> bool:
+    raw = row.get("liquidity_ok")
+    if raw not in {None, ""}:
+        return as_bool(raw, False)
+    market_payload = payload.get("market", {}) if isinstance(payload, dict) else {}
+    addv = to_float(
+        market_payload.get("avg_dollar_volume_20d", row.get("avg_dollar_volume_20d")),
+        0.0,
+    )
+    min_addv = float(cfg_get(config, "multibagger.min_addv20", 1_000_000))
+    return addv >= min_addv
+
+
 def latest_feature_date(conn: sqlite3.Connection) -> str:
     row = conn.execute("SELECT MAX(asof_date) AS asof_date FROM multibagger_features_daily").fetchone()
     asof = str(row["asof_date"] or "") if row else ""
@@ -318,6 +331,7 @@ def bucket_for(
     max_watch_risk = float(cfg_get(config, "multibagger.max_watchlist_risk", 55))
     max_spec_risk = float(cfg_get(config, "multibagger.max_speculative_risk", 75))
     avoid_risk_min = float(cfg_get(config, "multibagger.avoid_risk_min", 75))
+    large_cap_quality_max_risk = float(cfg_get(config, "multibagger.large_cap_quality_max_risk", max_watch_risk))
     avoid_fragility_min = float(cfg_get(config, "multibagger.avoid_fragility_min", 70))
     require_evidence = as_bool(cfg_get(config, "multibagger.require_event_or_catalyst", True), True)
     commercial = payload.get("commercial", {}) if isinstance(payload, dict) else {}
@@ -347,7 +361,7 @@ def bucket_for(
         return "avoid_commercial_fragility"
     if require_evidence and not evidence:
         return "avoid_no_event_or_catalyst"
-    if market_cap >= hard_cap and score >= watch_min:
+    if market_cap >= hard_cap and score >= watch_min and risk <= large_cap_quality_max_risk:
         return "large_cap_quality"
     if score >= high_min and risk <= max_high_risk:
         return "high_conviction_multibagger"
@@ -411,11 +425,8 @@ def score_one(row: dict[str, Any], config: dict[str, Any], tier1: dict[str, Any]
     )
     risk_drag = convex_risk_drag(risk, risk_w, config, "multibagger")
     score = round(clamp(positive - risk_drag), 4)
-    market_payload = payload.get("market", {}) if isinstance(payload, dict) else {}
-    avg_dollar_volume = to_float(market_payload.get("avg_dollar_volume_20d"), 0.0)
-    min_addv = float(cfg_get(config, "multibagger.min_addv20", 1_000_000))
     evidence = bool(to_int(row.get("evidence_or_catalyst_flag")))
-    liquidity_ok = avg_dollar_volume >= min_addv
+    liquidity_ok = row_liquidity_ok(row, payload, config)
     gate_score, gate_multiplier = tier1_gate_values(tier1, config)
     tier1_context = {
         "tier1_available": bool(tier1),
@@ -662,7 +673,7 @@ def apply_tier1_interaction(rows: list[dict[str, Any]], config: dict[str, Any]) 
             final_score,
             to_float(row.get("multibagger_risk_penalty")),
             bool(to_int(row.get("evidence_or_catalyst_flag"))),
-            bool(row.get("liquidity_ok")),
+            row_liquidity_ok(row, payload, config),
             payload,
             config,
             row,

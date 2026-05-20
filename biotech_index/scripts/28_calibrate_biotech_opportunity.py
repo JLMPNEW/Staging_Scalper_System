@@ -31,6 +31,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.commercial_risk import commercial_risk_overlay_fields  # noqa: E402
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_path  # noqa: E402
+from biotech_index.core.constants import (  # noqa: E402
+    CORE_HARD_WEAKNESS_REASONS,
+    EVENT_HARD_WEAKNESS_REASONS,
+    GOING_CONCERN_HARD_STATUSES,
+    GOING_CONCERN_SOFT_STATUSES,
+    MILD_SOFT_WEAKNESS_REASONS,
+    SOFT_WEAKNESS_REASONS,
+    TOXIC_SOFT_WEAKNESS_REASONS,
+)
 from biotech_index.core.db import connect  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 from biotech_index.core.pipeline_guards import normalize_ticker  # noqa: E402
@@ -70,6 +79,7 @@ DEFAULT_BOOTSTRAP_ITERATIONS = 200
 DEFAULT_BOOTSTRAP_TOP_K = 10
 DEFAULT_BOOTSTRAP_SEED = 1729
 DEFAULT_HOLDOUT_TOP_K = 25
+DEFAULT_BEST_ROWS_LIMIT = 25
 DEFAULT_SELECTED_TICKER_DIAGNOSTIC_TOP_RANKS = 3
 CURRENT_CONFIG_CANDIDATE_NAME = "current_config"
 RAW_SCORE_KEYS = [
@@ -80,24 +90,13 @@ RAW_SCORE_KEYS = [
     "momentum_score_raw",
 ]
 
-CORE_HARD_WEAKNESS_REASONS = frozenset(
-    {
-        "cash_runway_lt_9m",
-        "severe_runway_flag",
-        "going_concern_confirmed",
-        "reverse_split_history",
-        "no_active_trial_no_business_anchor",
-        "illiquid",
-    }
-)
-EVENT_HARD_WEAKNESS_REASONS = frozenset({"repeated_dilution", "negative_clinical_event"})
-
 PROFILE_COMPONENTS = [
     "clinical_opportunity",
     "commercial_value",
     "forward_guidance",
     "valuation",
     "upside_capacity",
+    "institutional_upside",
     "financial_quality",
     "momentum",
     "risk_penalty",
@@ -120,6 +119,8 @@ SPREAD_KEYS = [
     "core_hard_weakness_exposure_pct",
     "event_hard_weakness_exposure_pct",
     "soft_weakness_exposure_pct",
+    "toxic_soft_weakness_exposure_pct",
+    "mild_soft_weakness_exposure_pct",
     "normal_binary_exposure_pct",
     "illiquid_weakness_exposure_pct",
     "commercial_risk_overlay_exposure_pct",
@@ -127,8 +128,16 @@ SPREAD_KEYS = [
     "valuation_growth_mismatch_exposure_pct",
     "transient_revenue_anchor_exposure_pct",
     "commercial_business_shock_exposure_pct",
+    "value_trap_exposure_pct",
+    "leverage_fragility_exposure_pct",
+    "guidance_staleness_exposure_pct",
+    "no_forward_guidance_exposure_pct",
+    "stale_guidance_exposure_pct",
+    "no_guidance_negative_growth_exposure_pct",
+    "rank_quality_cap_exposure_pct",
     "top3_gain_contribution_pct",
 ]
+SPREAD_KEYS.extend(f"soft_reason_{reason}_exposure_pct" for reason in SOFT_WEAKNESS_REASONS)
 BOOTSTRAP_METRIC_KEYS = [
     "mean_return_pct",
     "lcb_return_pct",
@@ -141,6 +150,11 @@ BOOTSTRAP_METRIC_KEYS = [
     "event_hard_weakness_exposure_pct",
     "soft_weakness_exposure_pct",
     "commercial_risk_overlay_exposure_pct",
+    "value_trap_exposure_pct",
+    "leverage_fragility_exposure_pct",
+    "guidance_staleness_exposure_pct",
+    "no_guidance_negative_growth_exposure_pct",
+    "rank_quality_cap_exposure_pct",
     "illiquid_weakness_exposure_pct",
 ]
 
@@ -175,6 +189,21 @@ class CalibrationParams:
     convex_risk_penalty_enabled: bool = True
     risk_penalty_convexity: float = 0.35
     risk_penalty_inflection: float = 50.0
+    use_quality_adjusted_valuation_component: bool = True
+    use_quality_adjusted_guidance_component: bool = True
+    rank_quality_caps_enabled: bool = True
+    rank_quality_business_shock_min_score: float = 70.0
+    rank_quality_business_shock_cap: float = 48.0
+    rank_quality_severe_deterioration_min_score: float = 70.0
+    rank_quality_severe_deterioration_revenue_yoy_max: float = -0.20
+    rank_quality_severe_deterioration_cap: float = 50.0
+    rank_quality_no_guidance_negative_growth_cap: float = 52.0
+    rank_quality_valuation_mismatch_min_score: float = 70.0
+    rank_quality_unprofitable_value_mismatch_cap: float = 50.0
+    rank_quality_cheap_low_growth_valuation_min_score: float = 90.0
+    rank_quality_cheap_low_growth_revenue_yoy_max: float = 0.10
+    rank_quality_cheap_low_growth_guidance_max_score: float = 60.0
+    rank_quality_cheap_low_growth_cap: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -218,8 +247,13 @@ class SelectionPolicy:
     transient_revenue_anchor_penalty: float = 0.0
     commercial_business_shock_penalty: float = 0.0
     commercial_risk_overlay_penalty: float = 0.0
+    value_trap_penalty: float = 0.0
+    leverage_fragility_penalty: float = 0.0
+    guidance_staleness_penalty: float = 0.0
+    targeted_soft_weakness_penalty: float = 0.0
     hard_veto_reasons: tuple[str, ...] = ()
     hard_weakness_penalty_reasons: tuple[str, ...] = ()
+    targeted_soft_weakness_penalty_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -306,6 +340,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--best-rows-limit",
+        type=int,
+        default=None,
+        help=(
+            "Rows per sample/horizon/top-N group to include in tier1_weight_calibration_best.csv. "
+            f"Defaults to calibration.tier1.best_rows_limit or {DEFAULT_BEST_ROWS_LIMIT}."
+        ),
+    )
+    parser.add_argument(
         "--selected-ticker-diagnostic-top-ranks",
         type=int,
         default=None,
@@ -346,12 +389,27 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--include-non-fridays", action="store_true", help="Include non-Friday feature snapshots.")
     parser.add_argument(
+        "--candidate-name-filter",
+        type=str,
+        default="",
+        help=(
+            "Comma/semicolon/pipe-separated substrings of candidate names to keep for scoped runs. "
+            "current_config is always retained when a filter is supplied."
+        ),
+    )
+    parser.add_argument(
+        "--policy-name-filter",
+        type=str,
+        default="",
+        help="Comma/semicolon/pipe-separated substrings of selection policy names to keep for scoped runs.",
+    )
+    parser.add_argument(
         "--exclude-current-removals",
         action=argparse.BooleanOptionalAction,
         default=None,
         help=(
-            "Exclude current inactive/remove/manual-exclude companies. Default comes from "
-            "calibration.tier1.exclude_current_removals, otherwise false to reduce survivorship bias."
+            "Temporally exclude inactive/remove companies. Not implemented until removal_date history exists; "
+            "default comes from calibration.tier1.exclude_current_removals, otherwise false."
         ),
     )
     parser.add_argument("--exclude-tickers", type=str, default="")
@@ -398,6 +456,25 @@ def parse_string_set(raw: object) -> set[str]:
     else:
         parts = [str(raw)]
     return {ticker for part in parts if (ticker := normalize_ticker(part))}
+
+
+def parse_name_filters(raw: object) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        parts = raw.replace(";", ",").replace("|", ",").split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        parts = [str(item) for item in raw]
+    else:
+        parts = [str(raw)]
+    return [text for part in parts if (text := str(part or "").strip().lower())]
+
+
+def name_matches_filters(value: object, filters: list[str]) -> bool:
+    if not filters:
+        return True
+    text = str(value or "").strip().lower()
+    return any(token in text for token in filters)
 
 
 def to_float(raw: object, default: float | None = None) -> float | None:
@@ -492,6 +569,7 @@ def table_exists(conn: sqlite3.Connection, table: str) -> bool:
 def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
     stack = cfg_get(config, "calibration.tier1.recommended_stack", {}) or {}
     costs = cfg_get(config, "calibration.tier1.costs", {}) or {}
+    rank_caps = cfg_get(config, "biotech_scoring.rank_quality_caps", {}) or {}
     return CalibrationParams(
         round_trip_cost_bps=float(costs.get("long_round_trip_bps", DEFAULT_ROUND_TRIP_COST_BPS)),
         lcb_z=float(stack.get("lcb_z", DEFAULT_LCB_Z)),
@@ -554,6 +632,39 @@ def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
                 cfg_get(config, "biotech_scoring.risk_penalty_inflection", 50.0),
             )
         ),
+        use_quality_adjusted_valuation_component=as_bool(
+            cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True),
+            True,
+        ),
+        use_quality_adjusted_guidance_component=as_bool(
+            cfg_get(config, "biotech_scoring.use_quality_adjusted_guidance_component", True),
+            True,
+        ),
+        rank_quality_caps_enabled=as_bool(rank_caps.get("enabled", True), True),
+        rank_quality_business_shock_min_score=float(rank_caps.get("business_shock_min_score", 70.0)),
+        rank_quality_business_shock_cap=float(rank_caps.get("business_shock_cap", 48.0)),
+        rank_quality_severe_deterioration_min_score=float(rank_caps.get("severe_deterioration_min_score", 70.0)),
+        rank_quality_severe_deterioration_revenue_yoy_max=float(
+            rank_caps.get("severe_deterioration_revenue_yoy_max", -0.20)
+        ),
+        rank_quality_severe_deterioration_cap=float(rank_caps.get("severe_deterioration_cap", 50.0)),
+        rank_quality_no_guidance_negative_growth_cap=float(
+            rank_caps.get("no_guidance_negative_growth_cap", 52.0)
+        ),
+        rank_quality_valuation_mismatch_min_score=float(rank_caps.get("valuation_mismatch_min_score", 70.0)),
+        rank_quality_unprofitable_value_mismatch_cap=float(
+            rank_caps.get("unprofitable_value_mismatch_cap", 50.0)
+        ),
+        rank_quality_cheap_low_growth_valuation_min_score=float(
+            rank_caps.get("cheap_low_growth_valuation_min_score", 90.0)
+        ),
+        rank_quality_cheap_low_growth_revenue_yoy_max=float(
+            rank_caps.get("cheap_low_growth_revenue_yoy_max", 0.10)
+        ),
+        rank_quality_cheap_low_growth_guidance_max_score=float(
+            rank_caps.get("cheap_low_growth_guidance_max_score", 60.0)
+        ),
+        rank_quality_cheap_low_growth_cap=float(rank_caps.get("cheap_low_growth_cap", 60.0)),
     )
 
 
@@ -612,13 +723,31 @@ def load_confidence_params(config: dict[str, Any]) -> ConfidenceParams:
 
 def commercial_risk_overlay_settings(config: dict[str, Any]) -> dict[str, Any]:
     settings = dict(cfg_get(config, "biotech_scoring.commercial_risk_overlay", {}) or {})
+    production_fragility_threshold = float(
+        cfg_get(config, "biotech_scoring.production_policy.commercial_fragility_threshold", 70.0)
+    )
     settings.setdefault(
         "commercial_stage_revenue_min",
         float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000.0)),
     )
+    settings.setdefault("commercial_fragility_threshold", production_fragility_threshold)
+    overlay_fragility_threshold = to_float(
+        settings.get("commercial_fragility_threshold"),
+        production_fragility_threshold,
+    )
+    overlay_fragility_threshold = (
+        production_fragility_threshold if overlay_fragility_threshold is None else overlay_fragility_threshold
+    )
+    if abs(overlay_fragility_threshold - production_fragility_threshold) > 1e-9:
+        LOGGER.warning(
+            "commercial_risk_overlay.commercial_fragility_threshold %.4f differs from "
+            "production_policy.commercial_fragility_threshold %.4f",
+            overlay_fragility_threshold,
+            production_fragility_threshold,
+        )
     settings.setdefault(
-        "commercial_fragility_threshold",
-        float(cfg_get(config, "biotech_scoring.production_policy.commercial_fragility_threshold", 70.0)),
+        "high_risk_threshold",
+        float(cfg_get(config, "biotech_scoring.production_policy.high_risk_threshold", 75.0)),
     )
     return settings
 
@@ -667,13 +796,14 @@ def tier1_selection_gate_score(opportunity: float, risk: float) -> float:
     return clamp(0.70 * opportunity + 0.30 * (100.0 - risk))
 
 
-def normalize_profile(raw: Mapping[str, Any]) -> dict[str, float]:
+def normalize_profile(raw: Mapping[str, Any], *, profile_name: str = "profile") -> dict[str, float]:
     profile = {
         "clinical_opportunity": float(raw.get("clinical_opportunity", 0.25)),
         "commercial_value": float(raw.get("commercial_value", raw.get("commercial_quality", 0.25))),
         "forward_guidance": float(raw.get("forward_guidance", 0.0)),
         "valuation": float(raw.get("valuation", 0.20)),
         "upside_capacity": float(raw.get("upside_capacity", 0.10)),
+        "institutional_upside": float(raw.get("institutional_upside", 0.0)),
         "financial_quality": float(raw.get("financial_quality", 0.15)),
         "momentum": float(raw.get("momentum", 0.05)),
         "risk_penalty": float(raw.get("risk_penalty", 0.15)),
@@ -683,6 +813,11 @@ def normalize_profile(raw: Mapping[str, Any]) -> dict[str, float]:
             raise ValueError(f"Profile weight '{key}' must be non-negative, got {value}")
     positive_total = sum(value for key, value in profile.items() if key != "risk_penalty")
     if positive_total > 1e-12 and abs(positive_total - 1.0) > 1e-6:
+        LOGGER.warning(
+            "Investment profile %s positive weights sum to %.6f, not 1.0; rescaling proportionally.",
+            profile_name,
+            positive_total,
+        )
         scale = 1.0 / positive_total
         for key in PROFILE_COMPONENTS:
             if key != "risk_penalty":
@@ -693,8 +828,8 @@ def normalize_profile(raw: Mapping[str, Any]) -> dict[str, float]:
 def base_profiles_from_config(config: dict[str, Any]) -> tuple[dict[str, float], dict[str, float]]:
     profiles = cfg_get(config, "biotech_scoring.investment_weight_profiles", {}) or {}
     fallback = cfg_get(config, "biotech_scoring.investment_weights", {}) or {}
-    clinical = normalize_profile(dict(profiles.get("clinical_stage") or fallback))
-    commercial = normalize_profile(dict(profiles.get("commercial_stage") or fallback))
+    clinical = normalize_profile(dict(profiles.get("clinical_stage") or fallback), profile_name="clinical_stage")
+    commercial = normalize_profile(dict(profiles.get("commercial_stage") or fallback), profile_name="commercial_stage")
     return clinical, commercial
 
 
@@ -827,6 +962,57 @@ def generate_weight_specs(config: dict[str, Any], *, candidate_limit: int = 0) -
                 }
             ),
         ),
+        (
+            "commercial_quality_value_guarded",
+            base_clinical_profile,
+            normalize_profile(
+                {
+                    "clinical_opportunity": 0.06,
+                    "commercial_value": 0.30,
+                    "forward_guidance": 0.18,
+                    "valuation": 0.10,
+                    "upside_capacity": 0.04,
+                    "institutional_upside": 0.08,
+                    "financial_quality": 0.18,
+                    "momentum": 0.06,
+                    "risk_penalty": max(base_commercial_profile["risk_penalty"], 0.24),
+                }
+            ),
+        ),
+        (
+            "commercial_profitability_guidance",
+            base_clinical_profile,
+            normalize_profile(
+                {
+                    "clinical_opportunity": 0.04,
+                    "commercial_value": 0.26,
+                    "forward_guidance": 0.28,
+                    "valuation": 0.08,
+                    "upside_capacity": 0.02,
+                    "institutional_upside": 0.04,
+                    "financial_quality": 0.22,
+                    "momentum": 0.06,
+                    "risk_penalty": max(base_commercial_profile["risk_penalty"], 0.26),
+                }
+            ),
+        ),
+        (
+            "clinical_selective_guarded",
+            normalize_profile(
+                {
+                    "clinical_opportunity": 0.48,
+                    "commercial_value": 0.03,
+                    "forward_guidance": 0.04,
+                    "valuation": 0.05,
+                    "upside_capacity": 0.08,
+                    "institutional_upside": 0.05,
+                    "financial_quality": 0.22,
+                    "momentum": 0.05,
+                    "risk_penalty": max(base_clinical_profile["risk_penalty"], 0.45),
+                }
+            ),
+            base_commercial_profile,
+        ),
     ]
 
     seen = {spec_signature(specs[0])}
@@ -872,8 +1058,13 @@ def policy_signature(policy: SelectionPolicy) -> tuple[Any, ...]:
         round(float(policy.transient_revenue_anchor_penalty), 6),
         round(float(policy.commercial_business_shock_penalty), 6),
         round(float(policy.commercial_risk_overlay_penalty), 6),
+        round(float(policy.value_trap_penalty), 6),
+        round(float(policy.leverage_fragility_penalty), 6),
+        round(float(policy.guidance_staleness_penalty), 6),
+        round(float(policy.targeted_soft_weakness_penalty), 6),
         tuple(policy.hard_veto_reasons),
         tuple(policy.hard_weakness_penalty_reasons),
+        tuple(policy.targeted_soft_weakness_penalty_reasons),
     )
 
 
@@ -914,8 +1105,13 @@ def policy_from_dict(raw: dict[str, Any], *, fallback_name: str) -> SelectionPol
         transient_revenue_anchor_penalty=float(raw.get("transient_revenue_anchor_penalty", 0.0)),
         commercial_business_shock_penalty=float(raw.get("commercial_business_shock_penalty", 0.0)),
         commercial_risk_overlay_penalty=float(raw.get("commercial_risk_overlay_penalty", 0.0)),
+        value_trap_penalty=float(raw.get("value_trap_penalty", 0.0)),
+        leverage_fragility_penalty=float(raw.get("leverage_fragility_penalty", 0.0)),
+        guidance_staleness_penalty=float(raw.get("guidance_staleness_penalty", 0.0)),
+        targeted_soft_weakness_penalty=float(raw.get("targeted_soft_weakness_penalty", 0.0)),
         hard_veto_reasons=reason_tuple(raw.get("hard_veto_reasons")),
         hard_weakness_penalty_reasons=reason_tuple(raw.get("hard_weakness_penalty_reasons")),
+        targeted_soft_weakness_penalty_reasons=reason_tuple(raw.get("targeted_soft_weakness_penalty_reasons")),
     )
     validate_commercial_penalty_policy(policy)
     return policy
@@ -926,6 +1122,11 @@ def validate_commercial_penalty_policy(policy: SelectionPolicy) -> None:
         raise ValueError(
             f"Selection policy '{policy.policy_name}' sets hard_weakness_penalty without "
             "hard_weakness_penalty_reasons; specify the targeted reasons explicitly."
+        )
+    if policy.targeted_soft_weakness_penalty > 0.0 and not policy.targeted_soft_weakness_penalty_reasons:
+        raise ValueError(
+            f"Selection policy '{policy.policy_name}' sets targeted_soft_weakness_penalty without "
+            "targeted_soft_weakness_penalty_reasons; specify the targeted soft reasons explicitly."
         )
     component_penalty = any(
         value > 0.0
@@ -1015,11 +1216,92 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
             hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
         ),
         SelectionPolicy(
+            policy_name="core_veto_event_drag_top10_quality_guard",
+            description=(
+                "Exclude core weakness, penalize event/dilution risk, and apply a stricter commercial-quality "
+                "guardrail for top-10 false-positive suppression."
+            ),
+            hard_veto=True,
+            hard_weakness_penalty=10.0,
+            commercial_deterioration_penalty=12.0,
+            valuation_growth_mismatch_penalty=10.0,
+            transient_revenue_anchor_penalty=12.0,
+            commercial_business_shock_penalty=18.0,
+            value_trap_penalty=12.0,
+            leverage_fragility_penalty=8.0,
+            guidance_staleness_penalty=4.0,
+            hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+            hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
+        ),
+        SelectionPolicy(
+            policy_name="core_veto_event_drag_business_shock_strict",
+            description=(
+                "Exclude core weakness, penalize event/dilution risk, and strongly penalize commercial "
+                "business-shock/value-trap conditions before rank caps are applied."
+            ),
+            hard_veto=True,
+            hard_weakness_penalty=10.0,
+            commercial_deterioration_penalty=10.0,
+            valuation_growth_mismatch_penalty=8.0,
+            transient_revenue_anchor_penalty=10.0,
+            commercial_business_shock_penalty=18.0,
+            value_trap_penalty=10.0,
+            guidance_staleness_penalty=4.0,
+            hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+            hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
+        ),
+        SelectionPolicy(
+            policy_name="core_veto_event_drag_value_trap_guardrail",
+            description="Exclude core weakness, penalize event/dilution risk, and penalize value-trap/leverage fragility diagnostics.",
+            hard_veto=True,
+            hard_weakness_penalty=10.0,
+            value_trap_penalty=8.0,
+            leverage_fragility_penalty=5.0,
+            hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+            hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
+        ),
+        SelectionPolicy(
+            policy_name="core_veto_event_drag_quality_guardrail",
+            description="Exclude core weakness, penalize event/dilution risk, and penalize value-trap, leverage, and stale-guidance diagnostics.",
+            hard_veto=True,
+            hard_weakness_penalty=10.0,
+            value_trap_penalty=10.0,
+            leverage_fragility_penalty=6.0,
+            guidance_staleness_penalty=4.0,
+            hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+            hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
+        ),
+        SelectionPolicy(
+            policy_name="core_veto_event_drag_toxic_soft_filter",
+            description=(
+                "Exclude core weakness, penalize event/dilution risk, and penalize only toxic soft weakness "
+                "reasons instead of every soft weakness reason equally."
+            ),
+            hard_veto=True,
+            hard_weakness_penalty=10.0,
+            targeted_soft_weakness_penalty=8.0,
+            hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+            hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
+            targeted_soft_weakness_penalty_reasons=tuple(sorted(TOXIC_SOFT_WEAKNESS_REASONS)),
+        ),
+        SelectionPolicy(
             policy_name="core_veto_event_soft_drag",
             description="Exclude core structural hard weakness, penalize event/dilution reasons, and apply a soft weakness drag.",
             hard_veto=True,
             hard_weakness_penalty=10.0,
             soft_weakness_penalty=8.0,
+            hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+            hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
+        ),
+        SelectionPolicy(
+            policy_name="core_veto_event_soft_drag_quality_guardrail",
+            description="Exclude core weakness, penalize event/dilution and soft weakness, plus value-trap/leverage/stale-guidance diagnostics.",
+            hard_veto=True,
+            hard_weakness_penalty=10.0,
+            soft_weakness_penalty=8.0,
+            value_trap_penalty=10.0,
+            leverage_fragility_penalty=6.0,
+            guidance_staleness_penalty=4.0,
             hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
             hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
         ),
@@ -1044,8 +1326,15 @@ def policy_fields(policy: SelectionPolicy) -> dict[str, Any]:
         "selection_policy_transient_revenue_anchor_penalty": policy.transient_revenue_anchor_penalty,
         "selection_policy_commercial_business_shock_penalty": policy.commercial_business_shock_penalty,
         "selection_policy_commercial_risk_overlay_penalty": policy.commercial_risk_overlay_penalty,
+        "selection_policy_value_trap_penalty": policy.value_trap_penalty,
+        "selection_policy_leverage_fragility_penalty": policy.leverage_fragility_penalty,
+        "selection_policy_guidance_staleness_penalty": policy.guidance_staleness_penalty,
+        "selection_policy_targeted_soft_weakness_penalty": policy.targeted_soft_weakness_penalty,
         "selection_policy_hard_veto_reasons": "|".join(policy.hard_veto_reasons),
         "selection_policy_hard_weakness_penalty_reasons": "|".join(policy.hard_weakness_penalty_reasons),
+        "selection_policy_targeted_soft_weakness_penalty_reasons": "|".join(
+            policy.targeted_soft_weakness_penalty_reasons
+        ),
     }
 
 
@@ -1064,8 +1353,13 @@ def policy_output_keys() -> list[str]:
         "selection_policy_transient_revenue_anchor_penalty",
         "selection_policy_commercial_business_shock_penalty",
         "selection_policy_commercial_risk_overlay_penalty",
+        "selection_policy_value_trap_penalty",
+        "selection_policy_leverage_fragility_penalty",
+        "selection_policy_guidance_staleness_penalty",
+        "selection_policy_targeted_soft_weakness_penalty",
         "selection_policy_hard_veto_reasons",
         "selection_policy_hard_weakness_penalty_reasons",
+        "selection_policy_targeted_soft_weakness_penalty_reasons",
     ]
 
 
@@ -1105,10 +1399,10 @@ def load_snapshot_dates(
 def load_excluded_tickers(conn: sqlite3.Connection, *, exclude_current_removals: bool, extra: set[str]) -> set[str]:
     out = set(extra)
     if exclude_current_removals:
-        raise ValueError(
-            "calibration.tier1.exclude_current_removals is disabled because current removal status "
-            "retroactively excludes historical snapshots. Use calibration.exclude_tickers for explicit "
-            "non-temporal exclusions until removal_date history is available."
+        raise NotImplementedError(
+            "exclude_current_removals requires a temporal removal_date history column that is not yet available "
+            "in the schema. Current inactive/remove status would retroactively exclude historical snapshots and "
+            "bias calibration. Use calibration.exclude_tickers for explicit non-temporal exclusions."
         )
     return {ticker for ticker in out if ticker}
 
@@ -1189,6 +1483,8 @@ def build_binary_weakness_fields(
     min_addv20: float,
     revenue_min: float,
     risk_score: float,
+    commercial_fragility_threshold: float = 70.0,
+    high_risk_threshold: float = 75.0,
 ) -> dict[str, Any]:
     """Split biotech binary risk into hard weakness, soft weakness, and normal clinical binary exposure."""
     ctgov = payload.get("ctgov", {}) if isinstance(payload, dict) else {}
@@ -1213,6 +1509,7 @@ def build_binary_weakness_fields(
     financial_quality = str(survival.get("data_quality") or "").strip().lower()
     going_concern = str(sec_liq.get("going_concern_status") or survival.get("going_concern_status") or "").strip().lower()
     severe_runway = as_bool(survival.get("severe_runway_flag"), False)
+    burn_acceleration = as_bool(survival.get("burn_acceleration_flag"), False)
     has_business_anchor = commercial_stage > 0.0 or profitable > 0.0 or ttm_revenue >= revenue_min
     has_advanced_trial = lead_phase2_3 > 0.0 or program_phase2_3 > 0.0 or active_pivotal > 0.0
     liquidity_ok = addv is not None and addv >= min_addv20
@@ -1225,9 +1522,9 @@ def build_binary_weakness_fields(
         soft_reasons.append("cash_runway_9_to_12m_clinical")
     if severe_runway:
         hard_reasons.append("severe_runway_flag")
-    if going_concern == "confirmed":
+    if going_concern in GOING_CONCERN_HARD_STATUSES:
         hard_reasons.append("going_concern_confirmed")
-    elif going_concern in {"possible", "substantial_doubt", "going_concern", "going_concern_warning"}:
+    elif going_concern in GOING_CONCERN_SOFT_STATUSES:
         soft_reasons.append("going_concern_warning")
     if reverse_splits > 0:
         hard_reasons.append("reverse_split_history")
@@ -1243,9 +1540,11 @@ def build_binary_weakness_fields(
         hard_reasons.append("illiquid")
     if financial_quality in {"low", "poor", "stale"}:
         soft_reasons.append("low_financial_data_quality")
-    if commercial_fragility >= 70.0:
+    if burn_acceleration:
+        soft_reasons.append("burn_acceleration")
+    if commercial_fragility >= commercial_fragility_threshold:
         soft_reasons.append("high_commercial_fragility")
-    if risk_score >= 75.0:
+    if risk_score >= high_risk_threshold:
         soft_reasons.append("high_tier1_risk_score")
     if recent_nt > 0:
         soft_reasons.append("recent_nt_filing")
@@ -1259,11 +1558,13 @@ def build_binary_weakness_fields(
         for reason in hard_reasons
         if reason not in CORE_HARD_WEAKNESS_REASONS and reason not in EVENT_HARD_WEAKNESS_REASONS
     ]
+    toxic_soft_reasons = [reason for reason in soft_reasons if reason in TOXIC_SOFT_WEAKNESS_REASONS]
+    mild_soft_reasons = [reason for reason in soft_reasons if reason in MILD_SOFT_WEAKNESS_REASONS]
     legacy_reasons = [*hard_reasons, *soft_reasons]
     normal_binary = bool(verified_active > 0 and not has_business_anchor and not hard_reasons)
     if core_hard_reasons and event_hard_reasons:
         severity = "core_event_hard"
-    elif normal_binary and not soft_reasons:
+    elif normal_binary:
         severity = "normal_clinical_binary"
     elif core_hard_reasons:
         severity = "core_hard"
@@ -1300,6 +1601,12 @@ def build_binary_weakness_fields(
         "diag_soft_weakness_count": float(len(soft_reasons)),
         "diag_soft_weakness_flag": 1.0 if soft_reasons else 0.0,
         "diag_soft_weakness_reasons": "|".join(soft_reasons),
+        "diag_toxic_soft_weakness_count": float(len(toxic_soft_reasons)),
+        "diag_toxic_soft_weakness_flag": 1.0 if toxic_soft_reasons else 0.0,
+        "diag_toxic_soft_weakness_reasons": "|".join(toxic_soft_reasons),
+        "diag_mild_soft_weakness_count": float(len(mild_soft_reasons)),
+        "diag_mild_soft_weakness_flag": 1.0 if mild_soft_reasons else 0.0,
+        "diag_mild_soft_weakness_reasons": "|".join(mild_soft_reasons),
         "diag_normal_clinical_binary_flag": 1.0 if normal_binary else 0.0,
         "diag_illiquid_weakness_flag": 1.0 if "illiquid" in hard_reasons else 0.0,
     }
@@ -1318,11 +1625,22 @@ def load_observations(
     revenue_min = float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000.0))
     confidence_params = load_confidence_params(config)
     commercial_risk_settings = commercial_risk_overlay_settings(config)
+    use_quality_adjusted_valuation = as_bool(
+        cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True),
+        True,
+    )
+    use_quality_adjusted_guidance = as_bool(
+        cfg_get(config, "biotech_scoring.use_quality_adjusted_guidance_component", True),
+        True,
+    )
     missing_score_defaults = {
         "commercial_value_score": float(cfg_get(config, "biotech_scoring.missing_score_defaults.commercial_value_score", 35.0)),
-        "forward_guidance_score": float(cfg_get(config, "biotech_scoring.missing_score_defaults.forward_guidance_score", 45.0)),
+        "forward_guidance_score": float(cfg_get(config, "biotech_scoring.missing_score_defaults.forward_guidance_score", 35.0)),
         "valuation_score": float(cfg_get(config, "biotech_scoring.missing_score_defaults.valuation_score", 50.0)),
         "upside_capacity_score": float(cfg_get(config, "biotech_scoring.missing_score_defaults.upside_capacity_score", 50.0)),
+        "institutional_upside_capacity_score": float(
+            cfg_get(config, "biotech_scoring.missing_score_defaults.institutional_upside_capacity_score", 50.0)
+        ),
     }
     for asof_date in dates:
         features = load_feature_rows(conn, asof_date, excluded_tickers)
@@ -1378,10 +1696,63 @@ def load_observations(
                     to_float(forward.get("guidance_score"), missing_score_defaults["forward_guidance_score"])
                 ),
                 "valuation_score": clamp(to_float(commercial.get("valuation_score"), missing_score_defaults["valuation_score"])),
+                "quality_adjusted_valuation_score": clamp(
+                    to_float(commercial.get("quality_adjusted_valuation_score"), commercial.get("valuation_score"))
+                    if use_quality_adjusted_valuation
+                    else to_float(commercial.get("valuation_score"), missing_score_defaults["valuation_score"])
+                ),
                 "upside_capacity_score": clamp(
                     to_float(commercial.get("upside_capacity_score"), missing_score_defaults["upside_capacity_score"])
                 ),
+                "institutional_upside_capacity_score": clamp(
+                    to_float(
+                        commercial.get("institutional_upside_capacity_score"),
+                        missing_score_defaults["institutional_upside_capacity_score"],
+                    )
+                ),
+                "leverage_score": clamp(to_float(commercial.get("leverage_score"), 50.0)),
+                "value_trap_score": clamp(to_float(commercial.get("value_trap_score"), 0.0)),
+                "revenue_yoy_growth_pct": to_float(commercial.get("revenue_yoy_growth_pct")),
+                "commercial_stage_flag": to_float(commercial.get("commercial_stage_flag"), 0.0) or 0.0,
+                "profitable_flag": to_float(commercial.get("profitable_flag"), 0.0) or 0.0,
+                "quality_forward_valuation_score": clamp(
+                    to_float(forward.get("quality_forward_valuation_score"), forward.get("forward_valuation_score"))
+                ),
+                "quality_adjusted_guidance_score": clamp(
+                    to_float(forward.get("quality_adjusted_guidance_score"), forward.get("guidance_score"))
+                    if use_quality_adjusted_guidance
+                    else to_float(forward.get("guidance_score"), missing_score_defaults["forward_guidance_score"])
+                ),
+                "guidance_recency_penalty": clamp(to_float(forward.get("guidance_recency_penalty"), 0.0), 0.0, 100.0),
             }
+            leverage_fragility_score = clamp(100.0 - float(observation["leverage_score"]))
+            guidance_recency_days = to_float(forward.get("guidance_recency_days"))
+            no_forward_guidance = not str(forward.get("latest_guidance_filing_date") or "").strip()
+            revenue_yoy = to_float(observation.get("revenue_yoy_growth_pct"))
+            commercial_stage_flag = float(observation["commercial_stage_flag"])
+            guidance_stale = no_forward_guidance or float(observation["guidance_recency_penalty"]) > 0.0 or (
+                guidance_recency_days is not None and guidance_recency_days > 240
+            )
+            stale_guidance = guidance_recency_days is not None and guidance_recency_days > 365.0
+            no_guidance_negative_growth = (
+                no_forward_guidance
+                and commercial_stage_flag > 0.0
+                and revenue_yoy is not None
+                and revenue_yoy <= 0.0
+            )
+            observation.update(
+                {
+                    "diag_value_trap_score": float(observation["value_trap_score"]),
+                    "diag_value_trap_flag": 1.0 if float(observation["value_trap_score"]) >= 50.0 else 0.0,
+                    "diag_leverage_fragility_score": leverage_fragility_score,
+                    "diag_leverage_fragility_flag": 1.0 if float(observation["leverage_score"]) < 50.0 else 0.0,
+                    "diag_guidance_staleness_flag": 1.0 if guidance_stale else 0.0,
+                    "diag_no_forward_guidance_flag": 1.0 if no_forward_guidance else 0.0,
+                    "diag_stale_guidance_flag": 1.0 if stale_guidance else 0.0,
+                    "diag_no_guidance_negative_growth_flag": 1.0 if no_guidance_negative_growth else 0.0,
+                    "diag_forward_guidance_recency_days": guidance_recency_days if guidance_recency_days is not None else "",
+                }
+            )
             observation.update(
                 build_binary_weakness_fields(
                     payload,
@@ -1390,6 +1761,10 @@ def load_observations(
                     min_addv20=min_addv20,
                     revenue_min=revenue_min,
                     risk_score=float(observation["risk_score_raw"]),
+                    commercial_fragility_threshold=float(
+                        commercial_risk_settings.get("commercial_fragility_threshold", 70.0)
+                    ),
+                    high_risk_threshold=float(commercial_risk_settings.get("high_risk_threshold", 75.0)),
                 )
             )
             observation.update(
@@ -1512,7 +1887,7 @@ def add_forward_returns(
             row[f"{prefix}_target_date"] = target_date
 
 
-def score_observation(row: dict[str, Any], spec: WeightSpec, params: CalibrationParams) -> dict[str, float]:
+def score_observation(row: dict[str, Any], spec: WeightSpec, params: CalibrationParams) -> dict[str, Any]:
     catalyst = clamp(to_float(row.get("catalyst_score_raw")))
     credibility = clamp(to_float(row.get("credibility_score_raw")))
     financial_quality = clamp(to_float(row.get("financial_quality_score_raw")))
@@ -1532,12 +1907,23 @@ def score_observation(row: dict[str, Any], spec: WeightSpec, params: Calibration
     embedded_momentum_weight = profile["clinical_opportunity"] * spec.clinical_momentum
     residual_financial_quality_weight = max(0.0, profile["financial_quality"] - embedded_financial_quality_weight)
     residual_momentum_weight = max(0.0, profile["momentum"] - embedded_momentum_weight)
+    valuation_component = (
+        clamp(to_float(row.get("quality_adjusted_valuation_score"), row.get("valuation_score")))
+        if params.use_quality_adjusted_valuation_component
+        else clamp(to_float(row.get("valuation_score")))
+    )
+    forward_guidance_component = (
+        clamp(to_float(row.get("quality_adjusted_guidance_score"), row.get("forward_guidance_score")))
+        if params.use_quality_adjusted_guidance_component
+        else clamp(to_float(row.get("forward_guidance_score")))
+    )
     investment_positive = (
         profile["clinical_opportunity"] * clinical_positive
         + profile["commercial_value"] * clamp(to_float(row.get("commercial_value_score")))
-        + profile["forward_guidance"] * clamp(to_float(row.get("forward_guidance_score")))
-        + profile["valuation"] * clamp(to_float(row.get("valuation_score")))
+        + profile["forward_guidance"] * forward_guidance_component
+        + profile["valuation"] * valuation_component
         + profile["upside_capacity"] * clamp(to_float(row.get("upside_capacity_score")))
+        + profile["institutional_upside"] * clamp(to_float(row.get("institutional_upside_capacity_score")))
         + residual_financial_quality_weight * financial_quality
         + residual_momentum_weight * momentum
     )
@@ -1551,11 +1937,79 @@ def score_observation(row: dict[str, Any], spec: WeightSpec, params: Calibration
         "pre_confidence_opportunity_score": pre_confidence_opportunity_score,
         "investment_score": investment_score,
         "tier1_selection_gate_score": gate_score,
+        "valuation_component_score": valuation_component,
+        "forward_guidance_component_score": forward_guidance_component,
     }
+
+
+def apply_rank_quality_caps_to_score(
+    score: float,
+    row: dict[str, Any],
+    params: CalibrationParams,
+) -> tuple[float, float | None, str]:
+    if not params.rank_quality_caps_enabled:
+        return score, None, ""
+
+    capped = score
+    cap_value: float | None = None
+    reasons: list[str] = []
+    revenue_yoy = to_float(row.get("revenue_yoy_growth_pct"))
+    commercial_stage = (to_float(row.get("commercial_stage_flag"), 0.0) or 0.0) > 0.0
+    profitable = (to_float(row.get("profitable_flag"), 0.0) or 0.0) > 0.0
+    valuation_score = to_float(row.get("valuation_score"), 0.0) or 0.0
+    guidance_score = to_float(row.get("quality_adjusted_guidance_score"))
+    if guidance_score is None:
+        guidance_score = to_float(row.get("forward_guidance_score"))
+    business_shock = to_float(row.get("diag_commercial_business_shock_score"), 0.0) or 0.0
+    deterioration = to_float(row.get("diag_commercial_deterioration_score"), 0.0) or 0.0
+    valuation_mismatch = to_float(row.get("diag_valuation_growth_mismatch_score"), 0.0) or 0.0
+    no_guidance_negative_growth = (to_float(row.get("diag_no_guidance_negative_growth_flag"), 0.0) or 0.0) > 0.0
+
+    def apply_cap(reason: str, cap: float) -> None:
+        nonlocal capped, cap_value
+        if capped > cap:
+            capped = cap
+            cap_value = cap if cap_value is None else min(cap_value, cap)
+            reasons.append(reason)
+
+    if business_shock >= params.rank_quality_business_shock_min_score:
+        apply_cap("commercial_business_shock_cap", params.rank_quality_business_shock_cap)
+    if (
+        deterioration >= params.rank_quality_severe_deterioration_min_score
+        and revenue_yoy is not None
+        and revenue_yoy <= params.rank_quality_severe_deterioration_revenue_yoy_max
+    ):
+        apply_cap("severe_commercial_deterioration_cap", params.rank_quality_severe_deterioration_cap)
+    if no_guidance_negative_growth:
+        apply_cap("no_guidance_negative_growth_cap", params.rank_quality_no_guidance_negative_growth_cap)
+    if valuation_mismatch >= params.rank_quality_valuation_mismatch_min_score and not profitable:
+        apply_cap("unprofitable_value_mismatch_cap", params.rank_quality_unprofitable_value_mismatch_cap)
+    if (
+        commercial_stage
+        and valuation_score >= params.rank_quality_cheap_low_growth_valuation_min_score
+        and revenue_yoy is not None
+        and revenue_yoy <= params.rank_quality_cheap_low_growth_revenue_yoy_max
+        and guidance_score is not None
+        and guidance_score <= params.rank_quality_cheap_low_growth_guidance_max_score
+    ):
+        apply_cap("cheap_low_growth_valuation_cap", params.rank_quality_cheap_low_growth_cap)
+    return clamp(capped), cap_value, "|".join(reasons)
 
 
 def mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
+
+
+def mean_jaccard_turnover(selected_sets: list[set[str]]) -> float | None:
+    if len(selected_sets) < 2:
+        return None
+    distances: list[float] = []
+    for previous, current in zip(selected_sets, selected_sets[1:]):
+        union = previous | current
+        if not union:
+            continue
+        distances.append(1.0 - (len(previous & current) / len(union)))
+    return mean(distances)
 
 
 def stdev(values: list[float]) -> float | None:
@@ -1683,6 +2137,18 @@ def pct_flag(rows: Iterable[dict[str, Any]], key: str) -> float | str:
     return round(100.0 * sum(values) / len(values), 6) if values else ""
 
 
+def pct_any_reason(rows: Iterable[dict[str, Any]], key: str, reasons: set[str] | frozenset[str]) -> float | str:
+    values: list[float] = []
+    for row in rows:
+        row_reasons = set(reason_tuple(row.get(key)))
+        values.append(1.0 if row_reasons.intersection(reasons) else 0.0)
+    return round(100.0 * sum(values) / len(values), 6) if values else ""
+
+
+def pct_reason(rows: Iterable[dict[str, Any]], key: str, reason: str) -> float | str:
+    return pct_any_reason(rows, key, {reason})
+
+
 def summarize_return_risk(values: list[float], *, params: CalibrationParams) -> dict[str, Any]:
     if not values:
         return {
@@ -1762,6 +2228,16 @@ def selection_quality_summary(
             "core_hard_weakness_exposure_pct": pct_flag(rows, "diag_core_hard_weakness_flag"),
             "event_hard_weakness_exposure_pct": pct_flag(rows, "diag_event_hard_weakness_flag"),
             "soft_weakness_exposure_pct": pct_flag(rows, "diag_soft_weakness_flag"),
+            "toxic_soft_weakness_exposure_pct": pct_any_reason(
+                rows,
+                "diag_soft_weakness_reasons",
+                TOXIC_SOFT_WEAKNESS_REASONS,
+            ),
+            "mild_soft_weakness_exposure_pct": pct_any_reason(
+                rows,
+                "diag_soft_weakness_reasons",
+                MILD_SOFT_WEAKNESS_REASONS,
+            ),
             "normal_binary_exposure_pct": pct_flag(rows, "diag_normal_clinical_binary_flag"),
             "illiquid_weakness_exposure_pct": pct_flag(rows, "diag_illiquid_weakness_flag"),
             "commercial_risk_overlay_exposure_pct": pct_flag(rows, "diag_commercial_risk_overlay_flag"),
@@ -1769,6 +2245,13 @@ def selection_quality_summary(
             "valuation_growth_mismatch_exposure_pct": pct_flag(rows, "diag_valuation_growth_mismatch_flag"),
             "transient_revenue_anchor_exposure_pct": pct_flag(rows, "diag_transient_revenue_anchor_flag"),
             "commercial_business_shock_exposure_pct": pct_flag(rows, "diag_commercial_business_shock_flag"),
+            "value_trap_exposure_pct": pct_flag(rows, "diag_value_trap_flag"),
+            "leverage_fragility_exposure_pct": pct_flag(rows, "diag_leverage_fragility_flag"),
+            "guidance_staleness_exposure_pct": pct_flag(rows, "diag_guidance_staleness_flag"),
+            "no_forward_guidance_exposure_pct": pct_flag(rows, "diag_no_forward_guidance_flag"),
+            "stale_guidance_exposure_pct": pct_flag(rows, "diag_stale_guidance_flag"),
+            "no_guidance_negative_growth_exposure_pct": pct_flag(rows, "diag_no_guidance_negative_growth_flag"),
+            "rank_quality_cap_exposure_pct": pct_flag(rows, "rank_quality_cap_flag"),
             "avg_binary_weakness_count": mean_numeric(rows, "diag_binary_weakness_count"),
             "avg_hard_weakness_count": mean_numeric(rows, "diag_hard_weakness_count"),
             "avg_core_hard_weakness_count": mean_numeric(rows, "diag_core_hard_weakness_count"),
@@ -1779,6 +2262,12 @@ def selection_quality_summary(
             "avg_valuation_growth_mismatch_score": mean_numeric(rows, "diag_valuation_growth_mismatch_score"),
             "avg_transient_revenue_anchor_score": mean_numeric(rows, "diag_transient_revenue_anchor_score"),
             "avg_commercial_business_shock_score": mean_numeric(rows, "diag_commercial_business_shock_score"),
+            "avg_value_trap_score": mean_numeric(rows, "diag_value_trap_score"),
+            "avg_leverage_fragility_score": mean_numeric(rows, "diag_leverage_fragility_score"),
+            "mean_institutional_upside_capacity_score": mean_numeric(rows, "institutional_upside_capacity_score"),
+            "mean_quality_adjusted_valuation_score": mean_numeric(rows, "quality_adjusted_valuation_score"),
+            "mean_quality_adjusted_guidance_score": mean_numeric(rows, "quality_adjusted_guidance_score"),
+            "mean_rank_quality_cap": mean_numeric(rows, "rank_quality_cap"),
             "liquidity_ok_pct": pct_flag(rows, "diag_liquidity_ok"),
             "raw_score_missing_exposure_pct": pct_flag(rows, "diag_raw_score_missing_flag"),
             "avg_raw_score_missing_count": mean_numeric(rows, "diag_raw_score_missing_count"),
@@ -1787,6 +2276,8 @@ def selection_quality_summary(
             "mean_commercial_fragility_risk_score": mean_numeric(rows, "diag_commercial_fragility_risk_score"),
         }
     )
+    for reason in SOFT_WEAKNESS_REASONS:
+        summary[f"soft_reason_{reason}_exposure_pct"] = pct_reason(rows, "diag_soft_weakness_reasons", reason)
     return summary
 
 
@@ -1877,12 +2368,28 @@ def robust_objective(selected: dict[str, Any], baseline: dict[str, Any], *, para
         to_float(summary_metric_spread(selected, baseline, "event_hard_weakness_exposure_pct"), 0.0) or 0.0
     )
     soft_spread = to_float(summary_metric_spread(selected, baseline, "soft_weakness_exposure_pct"), 0.0) or 0.0
+    toxic_soft_spread = (
+        to_float(summary_metric_spread(selected, baseline, "toxic_soft_weakness_exposure_pct"), 0.0) or 0.0
+    )
     illiquid_spread = to_float(summary_metric_spread(selected, baseline, "illiquid_weakness_exposure_pct"), 0.0) or 0.0
     commercial_risk_spread = (
         to_float(summary_metric_spread(selected, baseline, "commercial_risk_overlay_exposure_pct"), 0.0) or 0.0
     )
     commercial_shock_spread = (
         to_float(summary_metric_spread(selected, baseline, "commercial_business_shock_exposure_pct"), 0.0) or 0.0
+    )
+    value_trap_spread = to_float(summary_metric_spread(selected, baseline, "value_trap_exposure_pct"), 0.0) or 0.0
+    leverage_fragility_spread = (
+        to_float(summary_metric_spread(selected, baseline, "leverage_fragility_exposure_pct"), 0.0) or 0.0
+    )
+    guidance_staleness_spread = (
+        to_float(summary_metric_spread(selected, baseline, "guidance_staleness_exposure_pct"), 0.0) or 0.0
+    )
+    no_guidance_negative_growth_spread = (
+        to_float(summary_metric_spread(selected, baseline, "no_guidance_negative_growth_exposure_pct"), 0.0) or 0.0
+    )
+    rank_cap_spread = (
+        to_float(summary_metric_spread(selected, baseline, "rank_quality_cap_exposure_pct"), 0.0) or 0.0
     )
     top3_spread = to_float(summary_metric_spread(selected, baseline, "top3_gain_contribution_pct"), 0.0) or 0.0
     omega_weight = 0.15 if omega_is_distinct else 0.0
@@ -1905,8 +2412,14 @@ def robust_objective(selected: dict[str, Any], baseline: dict[str, Any], *, para
         - 0.025 * max(0.0, event_hard_spread)
         - 0.03 * max(0.0, illiquid_spread)
         - 0.015 * max(0.0, soft_spread)
+        - 0.02 * max(0.0, toxic_soft_spread)
         - 0.015 * max(0.0, commercial_risk_spread)
         - 0.02 * max(0.0, commercial_shock_spread)
+        - 0.02 * max(0.0, value_trap_spread)
+        - 0.015 * max(0.0, leverage_fragility_spread)
+        - 0.01 * max(0.0, guidance_staleness_spread)
+        - 0.035 * max(0.0, no_guidance_negative_growth_spread)
+        - 0.02 * max(0.0, rank_cap_spread)
         - 0.01 * max(0.0, top3_spread)
     )
 
@@ -1921,7 +2434,12 @@ def calibration_sort_tuple(row: dict[str, Any]) -> tuple[float, ...]:
     objective = numeric_or_default(row.get("calibration_objective_vs_current_config"), -1e9)
     lcb = numeric_or_default(row.get("selected_lcb_return_pct"), -1e9)
     sortino = numeric_or_default(row.get("selected_sortino_like"), -1e9)
-    profit = numeric_or_default(row.get("selected_profit_factor"), -1e9)
+    # selected_profit_factor_configured matches the omega hurdle when non-zero;
+    # at the default zero hurdle it is intentionally equal to selected_profit_factor.
+    profit = numeric_or_default(
+        row.get("selected_profit_factor_configured"),
+        numeric_or_default(row.get("selected_profit_factor"), -1e9),
+    )
     core_hard = numeric_or_default(row.get("selected_core_hard_weakness_exposure_pct"), 100.0)
     loss20 = numeric_or_default(row.get("selected_large_loss_20pct_rate_pct"), 100.0)
     commercial_risk = numeric_or_default(row.get("selected_commercial_risk_overlay_exposure_pct"), 100.0)
@@ -1984,7 +2502,7 @@ def policy_adjusted_score(
     spec: WeightSpec,
     policy: SelectionPolicy,
     params: CalibrationParams,
-) -> tuple[float | None, dict[str, float]]:
+) -> tuple[float | None, dict[str, Any]]:
     scores = score_observation(row, spec, params)
     risk_raw = to_float(row.get("risk_score_raw"))
     risk = clamp(risk_raw if risk_raw is not None else 100.0)
@@ -2005,7 +2523,13 @@ def policy_adjusted_score(
     else:
         hard_veto_match = False
         hard_penalty_match = False
-    soft = 1.0 if (to_float(row.get("diag_soft_weakness_flag"), 0.0) or 0.0) > 0.0 else 0.0
+    soft_reasons = set(reason_tuple(row.get("diag_soft_weakness_reasons")))
+    soft = 1.0 if soft_reasons or (to_float(row.get("diag_soft_weakness_flag"), 0.0) or 0.0) > 0.0 else 0.0
+    targeted_soft = (
+        1.0
+        if soft_reasons.intersection(policy.targeted_soft_weakness_penalty_reasons)
+        else 0.0
+    )
     illiquid = 1.0 if (to_float(row.get("diag_illiquid_weakness_flag"), 0.0) or 0.0) > 0.0 else 0.0
     liquidity_ok = to_float(row.get("diag_liquidity_ok"))
     if policy.hard_veto and hard_veto_match:
@@ -2016,6 +2540,7 @@ def policy_adjusted_score(
         scores["investment_score"]
         - policy.hard_weakness_penalty * (1.0 if hard_penalty_match else 0.0)
         - policy.soft_weakness_penalty * soft
+        - policy.targeted_soft_weakness_penalty * targeted_soft
         - policy.illiquid_penalty * illiquid
         - policy.commercial_deterioration_penalty
         * max(0.0, min(100.0, to_float(row.get("diag_commercial_deterioration_score"), 0.0) or 0.0))
@@ -2032,7 +2557,18 @@ def policy_adjusted_score(
         - policy.commercial_risk_overlay_penalty
         * max(0.0, min(100.0, to_float(row.get("diag_commercial_risk_overlay_score"), 0.0) or 0.0))
         / 100.0
+        - policy.value_trap_penalty * max(0.0, min(100.0, to_float(row.get("diag_value_trap_score"), 0.0) or 0.0)) / 100.0
+        - policy.leverage_fragility_penalty
+        * max(0.0, min(100.0, to_float(row.get("diag_leverage_fragility_score"), 0.0) or 0.0))
+        / 100.0
+        - policy.guidance_staleness_penalty
+        * (1.0 if (to_float(row.get("diag_guidance_staleness_flag"), 0.0) or 0.0) > 0.0 else 0.0)
     )
+    scores["pre_rank_cap_selection_score"] = clamp(adjusted)
+    adjusted, rank_cap, rank_cap_reasons = apply_rank_quality_caps_to_score(adjusted, row, params)
+    scores["rank_quality_cap"] = rank_cap if rank_cap is not None else 0.0
+    scores["rank_quality_cap_flag"] = 1.0 if rank_cap_reasons else 0.0
+    scores["rank_quality_cap_reasons"] = rank_cap_reasons
     return clamp(adjusted), scores
 
 
@@ -2040,7 +2576,7 @@ def annotate_selected_row(
     row: dict[str, Any],
     *,
     candidate_score: float,
-    scores: dict[str, float],
+    scores: dict[str, Any],
     policy: SelectionPolicy,
 ) -> dict[str, Any]:
     out = dict(row)
@@ -2048,6 +2584,10 @@ def annotate_selected_row(
     out["candidate_pre_confidence_opportunity_score"] = round(scores.get("pre_confidence_opportunity_score", 0.0), 6)
     out["candidate_investment_score"] = round(scores.get("investment_score", 0.0), 6)
     out["candidate_clinical_opportunity_score"] = round(scores.get("clinical_opportunity_score", 0.0), 6)
+    out["candidate_pre_rank_cap_selection_score"] = round(scores.get("pre_rank_cap_selection_score", candidate_score), 6)
+    out["rank_quality_cap"] = scores.get("rank_quality_cap", "")
+    out["rank_quality_cap_flag"] = scores.get("rank_quality_cap_flag", 0.0)
+    out["rank_quality_cap_reasons"] = str(scores.get("rank_quality_cap_reasons", "") or "")
     out["selection_policy_name"] = policy.policy_name
     return out
 
@@ -2075,7 +2615,7 @@ def select_top_rows(
                 annotate_selected_row(row, candidate_score=candidate_score, scores=scores, policy=policy),
             )
         )
-    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    candidates.sort(key=lambda item: (-item[0], item[1]))
     return [row for _, _, row in candidates[:top_n]]
 
 
@@ -2121,6 +2661,9 @@ def build_candidate_grid_row(
     baseline_rows: list[dict[str, Any]] = []
     raw_baseline_rows: list[dict[str, Any]] = []
     selected_counts: list[int] = []
+    selection_rates: list[float] = []
+    policy_selection_rates: list[float] = []
+    selected_ticker_sets: list[set[str]] = []
     date_count = 0
     for asof_date in sorted(rows_by_date):
         date_rows = rows_by_date[asof_date]
@@ -2144,6 +2687,10 @@ def build_candidate_grid_row(
         ]
         date_count += 1
         selected_counts.append(len(selected))
+        selection_rates.append(len(selected) / len(eligible))
+        if policy_eligible:
+            policy_selection_rates.append(len(selected) / len(policy_eligible))
+        selected_ticker_sets.append({str(row.get("ticker") or "") for row in selected if str(row.get("ticker") or "")})
         selected_rows.extend(selected)
         baseline_rows.extend(policy_eligible)
         raw_baseline_rows.extend(eligible)
@@ -2171,6 +2718,10 @@ def build_candidate_grid_row(
         "universe_baseline_type": "policy_eligible",
         "asof_dates": date_count,
         "avg_selected_names_per_date": rounded(mean([float(v) for v in selected_counts])),
+        "avg_selection_rate_pct": pct(mean(selection_rates)),
+        "min_selection_rate_pct": pct(min(selection_rates) if selection_rates else None),
+        "avg_policy_selection_rate_pct": pct(mean(policy_selection_rates)),
+        "avg_candidate_turnover_pct": pct(mean_jaccard_turnover(selected_ticker_sets)),
         **constraint_fields,
         **spec_fields(job.spec, job.policy),
         **prefixed("selected_", selected_summary),
@@ -2282,8 +2833,14 @@ def medium_term_scope_name(medium_term_horizons: list[int]) -> str:
     return f"medium_term_{'_'.join(str(horizon) for horizon in medium_term_horizons)}"
 
 
-def build_best_rows(grid_rows: list[dict[str, Any]], *, medium_term_horizons: list[int]) -> list[dict[str, Any]]:
+def build_best_rows(
+    grid_rows: list[dict[str, Any]],
+    *,
+    medium_term_horizons: list[int],
+    limit: int = DEFAULT_BEST_ROWS_LIMIT,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    limit = max(1, int(limit))
     group_keys = ["sample", "evaluation_split", "horizon_days", "top_n"]
     medium_horizon_labels = {str(horizon) for horizon in medium_term_horizons}
     medium_scope = medium_term_scope_name(medium_term_horizons)
@@ -2292,7 +2849,7 @@ def build_best_rows(grid_rows: list[dict[str, Any]], *, medium_term_horizons: li
         grouped[tuple(str(row.get(key) or "") for key in group_keys)].append(row)
     for key, rows_for_group in sorted(grouped.items()):
         ranked = sorted(rows_for_group, key=calibration_sort_tuple, reverse=True)
-        for rank, row in enumerate(ranked[:25], start=1):
+        for rank, row in enumerate(ranked[:limit], start=1):
             out.append({"scope": "horizon", "rank": rank, **{group_keys[i]: key[i] for i in range(len(group_keys))}, **row})
 
     medium_term_groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -2370,6 +2927,14 @@ def build_best_rows(grid_rows: list[dict[str, Any]], *, medium_term_horizons: li
                     rows_for_candidate,
                     "selected_commercial_business_shock_exposure_pct",
                 ),
+                "mean_selected_no_guidance_negative_growth_exposure_pct": mean_numeric(
+                    rows_for_candidate,
+                    "selected_no_guidance_negative_growth_exposure_pct",
+                ),
+                "mean_selected_rank_quality_cap_exposure_pct": mean_numeric(
+                    rows_for_candidate,
+                    "selected_rank_quality_cap_exposure_pct",
+                ),
                 "mean_selected_large_loss_20pct_rate_pct": mean_numeric(
                     rows_for_candidate,
                     "selected_large_loss_20pct_rate_pct",
@@ -2402,7 +2967,7 @@ def build_best_rows(grid_rows: list[dict[str, Any]], *, medium_term_horizons: li
             ),
             reverse=True,
         )
-        for rank, row in enumerate(ranked[:25], start=1):
+        for rank, row in enumerate(ranked[:limit], start=1):
             out.append({"rank": rank, **row})
     return out
 
@@ -2442,6 +3007,8 @@ def build_holdout_rows(grid_rows: list[dict[str, Any]], *, limit: int = 25) -> l
         "selected_core_hard_weakness_exposure_pct",
         "selected_event_hard_weakness_exposure_pct",
         "selected_soft_weakness_exposure_pct",
+        "selected_toxic_soft_weakness_exposure_pct",
+        "selected_mild_soft_weakness_exposure_pct",
         "selected_normal_binary_exposure_pct",
         "selected_illiquid_weakness_exposure_pct",
         "selected_commercial_risk_overlay_exposure_pct",
@@ -2449,14 +3016,31 @@ def build_holdout_rows(grid_rows: list[dict[str, Any]], *, limit: int = 25) -> l
         "selected_valuation_growth_mismatch_exposure_pct",
         "selected_transient_revenue_anchor_exposure_pct",
         "selected_commercial_business_shock_exposure_pct",
+        "selected_value_trap_exposure_pct",
+        "selected_leverage_fragility_exposure_pct",
+        "selected_guidance_staleness_exposure_pct",
+        "selected_no_forward_guidance_exposure_pct",
+        "selected_stale_guidance_exposure_pct",
+        "selected_no_guidance_negative_growth_exposure_pct",
+        "selected_rank_quality_cap_exposure_pct",
         "selected_large_loss_20pct_rate_pct",
         "selected_large_loss_40pct_rate_pct",
         "selected_top3_gain_contribution_pct",
     ]
+    metric_keys.extend(f"selected_soft_reason_{reason}_exposure_pct" for reason in SOFT_WEAKNESS_REASONS)
     for (sample, horizon, top_n), rows_for_group in sorted(train_groups.items()):
         ranked = sorted(rows_for_group, key=calibration_sort_tuple, reverse=True)
-        for train_rank, train_row in enumerate(ranked[: max(1, limit)], start=1):
+        rows_to_emit: list[tuple[int, dict[str, Any]]] = [
+            (train_rank, train_row)
+            for train_rank, train_row in enumerate(ranked, start=1)
+            if train_rank <= max(1, limit) or str(train_row.get("candidate_name") or "") == CURRENT_CONFIG_CANDIDATE_NAME
+        ]
+        seen_candidate_ids: set[str] = set()
+        for train_rank, train_row in rows_to_emit:
             candidate_id = str(train_row.get("candidate_id") or train_row.get("candidate_name") or "")
+            if candidate_id in seen_candidate_ids:
+                continue
+            seen_candidate_ids.add(candidate_id)
             test_row = test_by_key.get((sample, horizon, top_n, candidate_id), {})
             payload: dict[str, Any] = {
                 "sample": sample,
@@ -2739,6 +3323,10 @@ def selected_ticker_diagnostic_record(
         "company_name": row.get("company_name", ""),
         "profile_name": row.get("profile_name", ""),
         "candidate_selection_score": row.get("candidate_selection_score", ""),
+        "candidate_pre_rank_cap_selection_score": row.get("candidate_pre_rank_cap_selection_score", ""),
+        "rank_quality_cap": row.get("rank_quality_cap", ""),
+        "rank_quality_cap_flag": row.get("rank_quality_cap_flag", ""),
+        "rank_quality_cap_reasons": row.get("rank_quality_cap_reasons", ""),
         "candidate_pre_confidence_opportunity_score": row.get("candidate_pre_confidence_opportunity_score", ""),
         "candidate_investment_score": row.get("candidate_investment_score", ""),
         "risk_score_raw": row.get("risk_score_raw", ""),
@@ -2758,6 +3346,10 @@ def selected_ticker_diagnostic_record(
         "event_hard_weakness_reasons": row.get("diag_event_hard_weakness_reasons", ""),
         "soft_weakness_flag": row.get("diag_soft_weakness_flag", ""),
         "soft_weakness_reasons": row.get("diag_soft_weakness_reasons", ""),
+        "toxic_soft_weakness_flag": row.get("diag_toxic_soft_weakness_flag", ""),
+        "toxic_soft_weakness_reasons": row.get("diag_toxic_soft_weakness_reasons", ""),
+        "mild_soft_weakness_flag": row.get("diag_mild_soft_weakness_flag", ""),
+        "mild_soft_weakness_reasons": row.get("diag_mild_soft_weakness_reasons", ""),
         "normal_clinical_binary_flag": row.get("diag_normal_clinical_binary_flag", ""),
         "illiquid_weakness_flag": row.get("diag_illiquid_weakness_flag", ""),
         "commercial_risk_overlay_score": row.get("diag_commercial_risk_overlay_score", ""),
@@ -2770,6 +3362,19 @@ def selected_ticker_diagnostic_record(
         "transient_revenue_anchor_reasons": row.get("diag_transient_revenue_anchor_reasons", ""),
         "commercial_business_shock_score": row.get("diag_commercial_business_shock_score", ""),
         "commercial_business_shock_reasons": row.get("diag_commercial_business_shock_reasons", ""),
+        "value_trap_score": row.get("diag_value_trap_score", ""),
+        "value_trap_flag": row.get("diag_value_trap_flag", ""),
+        "leverage_score": row.get("leverage_score", ""),
+        "leverage_fragility_score": row.get("diag_leverage_fragility_score", ""),
+        "leverage_fragility_flag": row.get("diag_leverage_fragility_flag", ""),
+        "guidance_staleness_flag": row.get("diag_guidance_staleness_flag", ""),
+        "no_forward_guidance_flag": row.get("diag_no_forward_guidance_flag", ""),
+        "stale_guidance_flag": row.get("diag_stale_guidance_flag", ""),
+        "no_guidance_negative_growth_flag": row.get("diag_no_guidance_negative_growth_flag", ""),
+        "forward_guidance_recency_days": row.get("diag_forward_guidance_recency_days", ""),
+        "institutional_upside_capacity_score": row.get("institutional_upside_capacity_score", ""),
+        "quality_adjusted_valuation_score": row.get("quality_adjusted_valuation_score", ""),
+        "quality_adjusted_guidance_score": row.get("quality_adjusted_guidance_score", ""),
         "avg_dollar_volume_20d": row.get("diag_avg_dollar_volume_20d", ""),
         "liquidity_ok": row.get("diag_liquidity_ok", ""),
         "cash_runway_months": row.get("diag_cash_runway_months", ""),
@@ -2795,7 +3400,11 @@ def build_selected_ticker_diagnostic_rows(
     seen: set[tuple[str, str, int, int, int, str]] = set()
     for holdout in holdout_rows:
         train_rank = int(to_float(holdout.get("train_rank"), 0.0) or 0)
-        if train_rank <= 0 or train_rank > max(1, int(top_train_ranks)):
+        candidate_name = str(holdout.get("candidate_name") or "")
+        is_current_config = candidate_name == CURRENT_CONFIG_CANDIDATE_NAME
+        if train_rank <= 0:
+            continue
+        if train_rank > max(1, int(top_train_ranks)) and not is_current_config:
             continue
         sample = str(holdout.get("sample") or "")
         horizon = int(to_float(holdout.get("horizon_days"), 0.0) or 0)
@@ -2842,9 +3451,13 @@ def split_reason_tokens(raw: object) -> list[str]:
     return [part.strip() for part in text.split("|") if part.strip()]
 
 
-def build_binary_weakness_component_rows(selected_diagnostics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_binary_weakness_component_rows(
+    selected_diagnostics: list[dict[str, Any]],
+    *,
+    params: CalibrationParams,
+) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, ...], dict[str, Any]] = defaultdict(
-        lambda: {"selected_n": 0, "reason_counts": defaultdict(int)}
+        lambda: {"selected_n": 0, "reason_counts": defaultdict(int), "reason_returns": defaultdict(list)}
     )
     group_keys = [
         "sample",
@@ -2859,6 +3472,7 @@ def build_binary_weakness_component_rows(selected_diagnostics: list[dict[str, An
     for row in selected_diagnostics:
         key = tuple(str(row.get(k) or "") for k in group_keys)
         grouped[key]["selected_n"] += 1
+        net_return = to_float(row.get("net_forward_return"))
         for severity, reason_key in [
             ("core_hard", "core_hard_weakness_reasons"),
             ("event_hard", "event_hard_weakness_reasons"),
@@ -2867,12 +3481,16 @@ def build_binary_weakness_component_rows(selected_diagnostics: list[dict[str, An
         ]:
             for reason in split_reason_tokens(row.get(reason_key)):
                 grouped[key]["reason_counts"][(severity, reason)] += 1
+                if net_return is not None:
+                    grouped[key]["reason_returns"][(severity, reason)].append(net_return)
         core_or_event_reasons = [
             *split_reason_tokens(row.get("core_hard_weakness_reasons")),
             *split_reason_tokens(row.get("event_hard_weakness_reasons")),
         ]
         if to_float(row.get("normal_clinical_binary_flag"), 0.0) and not core_or_event_reasons:
             grouped[key]["reason_counts"][("normal", "normal_clinical_binary_without_hard_weakness")] += 1
+            if net_return is not None:
+                grouped[key]["reason_returns"][("normal", "normal_clinical_binary_without_hard_weakness")].append(net_return)
 
     out: list[dict[str, Any]] = []
     for key, payload in sorted(grouped.items()):
@@ -2880,7 +3498,11 @@ def build_binary_weakness_component_rows(selected_diagnostics: list[dict[str, An
         reason_counts = payload["reason_counts"]
         if not isinstance(reason_counts, defaultdict):
             raise TypeError("Expected reason_counts to be a defaultdict")
+        reason_returns = payload["reason_returns"]
+        if not isinstance(reason_returns, defaultdict):
+            raise TypeError("Expected reason_returns to be a defaultdict")
         for (severity, reason), count in sorted(reason_counts.items(), key=lambda item: (-item[1], item[0])):
+            return_summary = summarize_return_risk(list(reason_returns.get((severity, reason), [])), params=params)
             row: dict[str, Any] = {group_keys[i]: key[i] for i in range(len(group_keys))}
             row.update(
                 {
@@ -2889,6 +3511,11 @@ def build_binary_weakness_component_rows(selected_diagnostics: list[dict[str, An
                     "reason_count": count,
                     "selected_n": selected_n,
                     "reason_exposure_pct": round(100.0 * count / selected_n, 6) if selected_n else "",
+                    "reason_mean_return_pct": return_summary.get("mean_return_pct", ""),
+                    "reason_lcb_return_pct": return_summary.get("lcb_return_pct", ""),
+                    "reason_sortino_like": return_summary.get("sortino_like", ""),
+                    "reason_profit_factor": return_summary.get("profit_factor", ""),
+                    "reason_large_loss_20pct_rate_pct": return_summary.get("large_loss_20pct_rate_pct", ""),
                 }
             )
             out.append(row)
@@ -2993,6 +3620,12 @@ def main() -> None:
         if args.exclude_current_removals is not None
         else as_bool(cfg_get(config, "calibration.tier1.exclude_current_removals", False), False)
     )
+    if exclude_current_removals:
+        raise ValueError(
+            "exclude_current_removals=True is not yet implemented because the schema does not have temporal "
+            "removal_date history. Set calibration.tier1.exclude_current_removals to false or use "
+            "calibration.exclude_tickers for explicit non-temporal exclusions."
+        )
     strict_feature_lag = (
         args.strict_feature_lag
         if args.strict_feature_lag is not None
@@ -3038,6 +3671,12 @@ def main() -> None:
         else int(cfg_get(config, "calibration.tier1.holdout_top_k", DEFAULT_HOLDOUT_TOP_K))
     )
     holdout_top_k = max(1, holdout_top_k)
+    best_rows_limit = (
+        int(args.best_rows_limit)
+        if args.best_rows_limit is not None
+        else int(cfg_get(config, "calibration.tier1.best_rows_limit", DEFAULT_BEST_ROWS_LIMIT))
+    )
+    best_rows_limit = max(1, best_rows_limit)
     bootstrap_seed = (
         int(args.bootstrap_seed)
         if args.bootstrap_seed is not None
@@ -3062,6 +3701,35 @@ def main() -> None:
     params = load_calibration_params(config)
     specs = generate_weight_specs(config, candidate_limit=max(0, int(args.candidate_limit)))
     policies = generate_selection_policies(config)
+    candidate_name_filters = parse_name_filters(args.candidate_name_filter)
+    if candidate_name_filters:
+        before_count = len(specs)
+        specs = [
+            spec
+            for spec in specs
+            if spec.candidate_name == CURRENT_CONFIG_CANDIDATE_NAME
+            or name_matches_filters(spec.candidate_name, candidate_name_filters)
+        ]
+        if not specs:
+            raise ValueError(f"--candidate-name-filter matched no candidates: {args.candidate_name_filter}")
+        LOGGER.info(
+            "Filtered candidate specs by name: before=%d after=%d filters=%s",
+            before_count,
+            len(specs),
+            ",".join(candidate_name_filters),
+        )
+    policy_name_filters = parse_name_filters(args.policy_name_filter)
+    if policy_name_filters:
+        before_count = len(policies)
+        policies = [policy for policy in policies if name_matches_filters(policy.policy_name, policy_name_filters)]
+        if not policies:
+            raise ValueError(f"--policy-name-filter matched no policies: {args.policy_name_filter}")
+        LOGGER.info(
+            "Filtered selection policies by name: before=%d after=%d filters=%s",
+            before_count,
+            len(policies),
+            ",".join(policy_name_filters),
+        )
     candidates_by_id = {stable_candidate_id(spec, policy): (spec, policy) for spec in specs for policy in policies}
     selected_diagnostic_top_ranks = max(
         1,
@@ -3198,7 +3866,11 @@ def main() -> None:
                 max_workers=max_workers,
             )
     )
-    best_rows = build_best_rows(candidate_rows, medium_term_horizons=medium_term_horizons)
+    best_rows = build_best_rows(
+        candidate_rows,
+        medium_term_horizons=medium_term_horizons,
+        limit=best_rows_limit,
+    )
     holdout_rows = build_holdout_rows(candidate_rows, limit=holdout_top_k)
     bootstrap_ci_rows = build_bootstrap_ci_rows(
         split_rows_by_key,
@@ -3221,7 +3893,10 @@ def main() -> None:
         top_train_ranks=selected_diagnostic_top_ranks,
         params=params,
     )
-    binary_weakness_component_rows = build_binary_weakness_component_rows(selected_ticker_diagnostic_rows)
+    binary_weakness_component_rows = build_binary_weakness_component_rows(
+        selected_ticker_diagnostic_rows,
+        params=params,
+    )
     binary_weakness_severity_rows = build_binary_weakness_severity_rows(
         selected_ticker_diagnostic_rows,
         params=params,
@@ -3272,6 +3947,7 @@ def main() -> None:
         "bootstrap_iterations": bootstrap_iterations,
         "bootstrap_top_k": bootstrap_top_k,
         "holdout_top_k": holdout_top_k,
+        "best_rows_limit": best_rows_limit,
         "bootstrap_seed": bootstrap_seed,
         "bootstrap_ci_row_count": len(bootstrap_ci_rows),
         "forward_return_observation_counts": horizon_counts,

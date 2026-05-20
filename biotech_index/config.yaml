@@ -336,17 +336,20 @@ commercial_value:
   preferred_market_source: "interactive_brokers"
   commercial_stage_revenue_min: 50000000
   quality_weights:
-    revenue_scale: 0.15
-    revenue_growth: 0.20
+    revenue_scale: 0.08
+    revenue_growth: 0.22
     margin: 0.15
-    profitability: 0.20
-    balance_sheet: 0.15
-    dilution: 0.15
+    profitability: 0.22
+    balance_sheet: 0.10
+    leverage: 0.10
+    dilution: 0.13
   value_weights:
-    commercial_quality: 0.45
-    valuation: 0.30
-    upside_capacity: 0.15
-    commercial_stage: 0.10
+    commercial_quality: 0.58
+    valuation: 0.18
+    upside_capacity: 0.04
+    commercial_stage: 0.20
+  penalty_weights:
+    value_trap_drag: 0.22
 
 forward_guidance:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
@@ -368,6 +371,16 @@ forward_guidance:
   reuse_unchanged_parse_state: true
   max_workers: 4
   min_confidence: 0.68
+  guidance_window_before_chars: 450
+  guidance_window_after_chars: 900
+  guidance_cue_patterns: []
+  guidance_staleness_penalty_120d: 5.0
+  guidance_staleness_penalty_240d: 10.0
+  forward_profitability_require_both_metrics: false
+  no_guidance_quality_score: 35.0
+  no_guidance_negative_growth_score: 28.0
+  no_guidance_commercial_score: 35.0
+  no_guidance_clinical_score: 42.0
   text_ttl_hours: 168.0
   sleep_sec: 0.15
   timeout_sec: 45.0
@@ -396,6 +409,11 @@ financial_survival:
   cash_decline_threshold: -0.30
   low_data_quality_penalty: 12
   missing_burn_proxy_penalty: 10
+  profitable_company_runway_cap_months: 120
+  profitable_runway_revenue_buffer_pct: 0.10
+  going_concern_source_priority:
+    - "db"
+    - "csv"
   active_atm_penalty: 15
   recent_offering_penalty: 10
   shelf_registration_penalty: 8
@@ -404,6 +422,8 @@ biotech_scoring:
   output_dir: "../output/biotech_index_reports"
   output_csv: "biotech_daily_scores.csv"
   use_investment_score: true
+  use_quality_adjusted_valuation_component: true
+  use_quality_adjusted_guidance_component: true
   require_governance_features: false
   production_baseline:
     enabled: true
@@ -442,9 +462,24 @@ biotech_scoring:
     max_missing_penalty: 0.08
   missing_score_defaults:
     commercial_value_score: 35.0
-    forward_guidance_score: 45.0
+    forward_guidance_score: 35.0
     valuation_score: 50.0
     upside_capacity_score: 50.0
+    institutional_upside_capacity_score: 50.0
+  rank_quality_caps:
+    enabled: true
+    business_shock_min_score: 70.0
+    business_shock_cap: 48.0
+    severe_deterioration_min_score: 70.0
+    severe_deterioration_revenue_yoy_max: -0.20
+    severe_deterioration_cap: 50.0
+    no_guidance_negative_growth_cap: 52.0
+    valuation_mismatch_min_score: 70.0
+    unprofitable_value_mismatch_cap: 50.0
+    cheap_low_growth_valuation_min_score: 90.0
+    cheap_low_growth_revenue_yoy_max: 0.10
+    cheap_low_growth_guidance_max_score: 60.0
+    cheap_low_growth_cap: 60.0
   core_structural_veto:
     enabled: true
     apply_to_rank: true
@@ -472,6 +507,7 @@ biotech_scoring:
       - high_tier1_risk_score
       - recent_nt_filing
       - early_stage_or_unadvanced_trial_anchor
+      - burn_acceleration
     commercial_fragility_threshold: 70.0
     high_risk_threshold: 75.0
   commercial_risk_overlay:
@@ -518,6 +554,7 @@ biotech_scoring:
     forward_guidance: 0.05
     valuation: 0.15
     upside_capacity: 0.10
+    institutional_upside: 0.00
     financial_quality: 0.15
     momentum: 0.05
     risk_penalty: 0.15
@@ -528,6 +565,7 @@ biotech_scoring:
       forward_guidance: 0.15
       valuation: 0.12
       upside_capacity: 0.08
+      institutional_upside: 0.00
       financial_quality: 0.17
       momentum: 0.05
       risk_penalty: 0.20
@@ -537,6 +575,7 @@ biotech_scoring:
       forward_guidance: 0.05
       valuation: 0.05
       upside_capacity: 0.15
+      institutional_upside: 0.00
       financial_quality: 0.15
       momentum: 0.10
       risk_penalty: 0.40
@@ -549,6 +588,7 @@ biotech_scoring:
     max_speculative_risk: 75
     avoid_risk_min: 80
     high_conviction_min_runway_months: 12
+    watchlist_min_runway_months: 6
     terminal_runway_months: 3
     require_advanced_catalyst_for_high_conviction: true
     require_active_trial_for_watchlist: true
@@ -557,6 +597,14 @@ biotech_reports:
   output_dir: "../output/biotech_index_reports"
   top_n: 20
   alerts_score_change_min: 12
+  index_weights:
+    top_n_avg_score: 0.70
+    full_universe_avg_score: 0.20
+    median_score: 0.10
+  alert_config:
+    score_change_min: 12
+    rank_move_min: 5
+    bucket_transition_enabled: true
   index_latest_csv: "biotech_index_latest.csv"
   top_candidates_csv: "biotech_top_candidates.csv"
   alerts_csv: "biotech_alerts.csv"
@@ -581,7 +629,9 @@ biotech_refresh:
     enabled: true
     required: true
     warn_only: false
+    warning_is_fatal: true
     max_staleness_days: 2
+  max_snapshot_history: 30
   snapshot_outputs:
     enabled: true
     source_dir: "../output/biotech_index_reports"
@@ -639,6 +689,7 @@ multibagger:
   max_high_conviction_risk: 35
   max_watchlist_risk: 55
   max_speculative_risk: 75
+  large_cap_quality_max_risk: 55
   avoid_risk_min: 80
   avoid_fragility_min: 70
   missing_score_prior: 50.0
@@ -705,7 +756,12 @@ calibration:
   phase1:
     output_dir: "../output/biotech_index_reports/calibration_phase1"
     exclude_current_removals: false
+    horizons:
+      - 60
+      - 120
     next_bar_entry: true
+    conflict_high_pct: 80.0
+    conflict_low_pct: 20.0
     costs:
       long_round_trip_bps: 40
   tier1:
@@ -719,6 +775,7 @@ calibration:
     risk_penalty_convexity: 0.35
     risk_penalty_inflection: 50.0
     holdout_top_k: 25
+    best_rows_limit: 25
     bootstrap_iterations: 200
     bootstrap_top_k: 10
     bootstrap_seed: 1729
@@ -758,6 +815,8 @@ calibration:
     holdout_top_k: 25
     bootstrap_seed: 3001
     selected_ticker_top_ranks: 5
+    signal_specs: []
+    pool_specs: []
     costs:
       long_round_trip_bps: 40
     recommended_stack:

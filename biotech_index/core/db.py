@@ -5,7 +5,6 @@ import logging
 import math
 import re
 import sqlite3
-from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
@@ -399,6 +398,7 @@ CREATE TABLE IF NOT EXISTS financial_survival_features (
     cash_yoy_change_pct REAL,
     rd_qoq_change_pct REAL,
     rd_yoy_change_pct REAL,
+    negative_cash_flag INTEGER,
     burn_acceleration_flag INTEGER,
     short_runway_flag INTEGER,
     severe_runway_flag INTEGER,
@@ -449,6 +449,8 @@ CREATE TABLE IF NOT EXISTS daily_features (
     FOREIGN KEY (company_id) REFERENCES companies(company_id) ON DELETE CASCADE
 );
 
+-- daily_scores starts with stable core columns; extended scoring/reporting fields are migrated
+-- idempotently from DAILY_SCORES_OPTIONAL_COLUMNS in init_db().
 CREATE TABLE IF NOT EXISTS daily_scores (
     asof_date TEXT NOT NULL,
     company_id INTEGER NOT NULL,
@@ -599,9 +601,13 @@ CREATE TABLE IF NOT EXISTS commercial_value_features_daily (
     margin_score REAL,
     profitability_score REAL,
     balance_sheet_score REAL,
+    leverage_score REAL,
     dilution_score REAL,
     valuation_score REAL,
+    quality_adjusted_valuation_score REAL,
     upside_capacity_score REAL,
+    institutional_upside_capacity_score REAL,
+    value_trap_score REAL,
     commercial_quality_score REAL,
     commercial_value_score REAL,
     data_quality TEXT,
@@ -692,6 +698,9 @@ CREATE TABLE IF NOT EXISTS forward_guidance_features_daily (
     forward_growth_score REAL,
     forward_profitability_score REAL,
     forward_valuation_score REAL,
+    quality_forward_valuation_score REAL,
+    quality_adjusted_guidance_score REAL,
+    guidance_recency_penalty REAL,
     data_quality TEXT,
     missing_fields TEXT,
     payload_json TEXT,
@@ -821,6 +830,7 @@ CREATE INDEX IF NOT EXISTS idx_governance_features_asof_company ON governance_ev
 CREATE INDEX IF NOT EXISTS idx_governance_features_company_asof ON governance_event_features_daily(company_id, asof_date DESC);
 CREATE INDEX IF NOT EXISTS idx_daily_features_company_asof ON daily_features(company_id, asof_date DESC);
 CREATE INDEX IF NOT EXISTS idx_daily_scores_company_asof ON daily_scores(company_id, asof_date DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_scores_asof_bucket ON daily_scores(asof_date, bucket);
 CREATE INDEX IF NOT EXISTS idx_multibagger_features_asof_company ON multibagger_features_daily(asof_date, company_id);
 CREATE INDEX IF NOT EXISTS idx_multibagger_features_company_asof ON multibagger_features_daily(company_id, asof_date DESC);
 CREATE INDEX IF NOT EXISTS idx_multibagger_scores_company_asof ON multibagger_scores_daily(company_id, asof_date DESC);
@@ -872,6 +882,10 @@ FORWARD_GUIDANCE_PARSE_STATE_OPTIONAL_COLUMNS = {
     "parser_signature": "TEXT",
 }
 
+FINANCIAL_SURVIVAL_OPTIONAL_COLUMNS = {
+    "negative_cash_flag": "INTEGER",
+}
+
 
 COMPANY_FACTS_QUARTERLY_OPTIONAL_COLUMNS = {
     "cost_of_revenue": "REAL",
@@ -897,6 +911,17 @@ DAILY_SCORES_OPTIONAL_COLUMNS = {
     "forward_guidance_score": "REAL",
     "valuation_score": "REAL",
     "upside_capacity_score": "REAL",
+    "institutional_upside_capacity_score": "REAL",
+    "leverage_score": "REAL",
+    "value_trap_score": "REAL",
+    "quality_adjusted_valuation_score": "REAL",
+    "used_quality_adjusted_valuation": "REAL",
+    "valuation_quality_adjustment_delta": "REAL",
+    "quality_forward_valuation_score": "REAL",
+    "quality_adjusted_guidance_score": "REAL",
+    "used_quality_adjusted_guidance": "REAL",
+    "guidance_quality_adjustment_delta": "REAL",
+    "guidance_recency_penalty": "REAL",
     "investment_score": "REAL",
     "tier1_selection_gate_score": "REAL",
     "tier1_primary_horizon_trading_days": "INTEGER",
@@ -909,12 +934,17 @@ DAILY_SCORES_OPTIONAL_COLUMNS = {
     "data_quality_confidence_multiplier": "REAL",
     "clinical_risk_drag": "REAL",
     "investment_risk_drag": "REAL",
+    "effective_pre_confidence_risk_drag": "REAL",
+    "effective_post_confidence_risk_drag": "REAL",
     "effective_total_risk_drag": "REAL",
     "confidence_adjusted_score_reduction": "REAL",
     "commercial_risk_overlay_score": "REAL",
     "commercial_risk_overlay_flag": "REAL",
     "commercial_risk_overlay_reasons": "TEXT",
     "commercial_risk_overlay_penalty": "REAL",
+    "pre_rank_cap_opportunity_score": "REAL",
+    "rank_quality_cap": "REAL",
+    "rank_quality_cap_reasons": "TEXT",
     "commercial_deterioration_score": "REAL",
     "commercial_deterioration_flag": "REAL",
     "commercial_deterioration_reasons": "TEXT",
@@ -927,6 +957,9 @@ DAILY_SCORES_OPTIONAL_COLUMNS = {
     "commercial_business_shock_score": "REAL",
     "commercial_business_shock_flag": "REAL",
     "commercial_business_shock_reasons": "TEXT",
+    "no_forward_guidance_flag": "REAL",
+    "guidance_stale_flag": "REAL",
+    "no_guidance_negative_growth_flag": "REAL",
     "primary_nct": "TEXT",
     "primary_trial_title": "TEXT",
     "verified_qualifying_active_trial_count": "REAL",
@@ -948,6 +981,19 @@ DAILY_SCORES_OPTIONAL_COLUMNS = {
     "sec_regulatory_catalyst_count": "REAL",
     "sec_dilution_event_count": "REAL",
     "sec_negative_clinical_event_count": "REAL",
+}
+
+COMMERCIAL_VALUE_OPTIONAL_COLUMNS = {
+    "leverage_score": "REAL",
+    "quality_adjusted_valuation_score": "REAL",
+    "institutional_upside_capacity_score": "REAL",
+    "value_trap_score": "REAL",
+}
+
+FORWARD_GUIDANCE_FEATURE_OPTIONAL_COLUMNS = {
+    "quality_forward_valuation_score": "REAL",
+    "quality_adjusted_guidance_score": "REAL",
+    "guidance_recency_penalty": "REAL",
 }
 
 MARKET_BARS_OPTIONAL_COLUMNS = {
@@ -1031,6 +1077,10 @@ class ManagedConnection:
             suppress = self._conn.__exit__(exc_type, exc_value, traceback)
         except Exception:
             try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            try:
                 self._conn.close()
             except Exception:
                 pass
@@ -1076,11 +1126,18 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_table_optional_columns(conn, "sec_events", SEC_EVENT_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "company_facts_quarterly", COMPANY_FACTS_QUARTERLY_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "daily_features", DAILY_FEATURES_OPTIONAL_COLUMNS)
+    ensure_table_optional_columns(conn, "financial_survival_features", FINANCIAL_SURVIVAL_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "daily_scores", DAILY_SCORES_OPTIONAL_COLUMNS)
+    ensure_table_optional_columns(conn, "commercial_value_features_daily", COMMERCIAL_VALUE_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "market_bars_daily", MARKET_BARS_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "market_snapshots_daily", MARKET_DAILY_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "market_features_daily", MARKET_DAILY_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "company_forward_guidance", FORWARD_GUIDANCE_OPTIONAL_COLUMNS)
+    ensure_table_optional_columns(
+        conn,
+        "forward_guidance_features_daily",
+        FORWARD_GUIDANCE_FEATURE_OPTIONAL_COLUMNS,
+    )
     ensure_forward_guidance_unique_keys(conn)
     ensure_table_optional_columns(conn, "company_forward_guidance_overrides", FORWARD_GUIDANCE_OVERRIDES_OPTIONAL_COLUMNS)
     conn.execute(
@@ -1158,11 +1215,12 @@ def _run_schema_migration(conn: sqlite3.Connection, name: str, callback) -> None
     conn.execute(f"RELEASE {savepoint_sql}")
 
 
-def _coalesce_existing_expr(columns: set[str], candidates: list[str], fallback: str) -> str:
+def _coalesce_existing_expr(columns: set[str], candidates: list[str], fallback: str) -> tuple[str, int]:
     present = [column for column in candidates if column in columns]
+    fallback_params = 1 if fallback == "?" else 0
     if not present:
-        return fallback
-    return f"COALESCE({', '.join([*(quote_identifier(column) for column in present), fallback])})"
+        return fallback, fallback_params
+    return f"COALESCE({', '.join([*(quote_identifier(column) for column in present), fallback])})", fallback_params
 
 
 def _normalize_guidance_key_number(raw: object, *, null_token: str = "<NULL>") -> str:
@@ -1345,9 +1403,11 @@ def refresh_sec_latest_documents(conn: sqlite3.Connection, accessions: Iterable[
     """Refresh latest SEC document metadata without reading large text_content blobs."""
     now = utc_now()
     refreshed = 0
-    transaction = nullcontext() if conn.in_transaction else conn
-    with transaction:
-        for accession in sorted({str(value or "").strip() for value in accessions if str(value or "").strip()}):
+    target_accessions = sorted({str(value or "").strip() for value in accessions if str(value or "").strip()})
+
+    def refresh_rows() -> None:
+        nonlocal refreshed
+        for accession in target_accessions:
             row = conn.execute(
                 """
                 SELECT
@@ -1401,6 +1461,20 @@ def refresh_sec_latest_documents(conn: sqlite3.Connection, accessions: Iterable[
                 ),
             )
             refreshed += 1
+
+    if conn.in_transaction:
+        savepoint = quote_identifier("refresh_sec_latest_documents")
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            refresh_rows()
+        except Exception:
+            conn.execute(f"ROLLBACK TO {savepoint}")
+            conn.execute(f"RELEASE {savepoint}")
+            raise
+        conn.execute(f"RELEASE {savepoint}")
+    else:
+        with conn:
+            refresh_rows()
     return refreshed
 
 
@@ -1429,10 +1503,10 @@ def _copy_sec_event_parse_state_legacy(conn: sqlite3.Connection) -> None:
     accession_expr = quote_identifier("accession_nodash")
     text_hash_expr = quote_identifier("text_hash") if "text_hash" in columns else "''"
     parser_signature_expr = quote_identifier("parser_signature") if "parser_signature" in columns else "''"
-    parsed_at_expr = _coalesce_existing_expr(columns, ["parsed_at", "updated_at", "created_at"], "?")
+    parsed_at_expr, parsed_at_params = _coalesce_existing_expr(columns, ["parsed_at", "updated_at", "created_at"], "?")
     event_count_expr = f"COALESCE({quote_identifier('event_count')}, 0)" if "event_count" in columns else "0"
-    created_at_expr = _coalesce_existing_expr(columns, ["created_at", "updated_at", "parsed_at"], "?")
-    updated_at_expr = _coalesce_existing_expr(columns, ["updated_at", "parsed_at", "created_at"], "?")
+    created_at_expr, created_at_params = _coalesce_existing_expr(columns, ["created_at", "updated_at", "parsed_at"], "?")
+    updated_at_expr, updated_at_params = _coalesce_existing_expr(columns, ["updated_at", "parsed_at", "created_at"], "?")
     sql = f"""
         INSERT OR IGNORE INTO sec_event_parse_state(
             accession_nodash, text_hash, parser_signature, parsed_at, event_count, created_at, updated_at
@@ -1442,7 +1516,8 @@ def _copy_sec_event_parse_state_legacy(conn: sqlite3.Connection) -> None:
         FROM {quote_identifier("sec_event_parse_state_legacy")}
         WHERE COALESCE({accession_expr}, '') <> ''
         """
-    conn.execute(sql, tuple(now for _ in range(sql.count("?"))))
+    params = tuple(now for _ in range(parsed_at_params + created_at_params + updated_at_params))
+    conn.execute(sql, params)
 
 
 def _create_company_facts_sync_state(conn: sqlite3.Connection) -> None:
@@ -1470,10 +1545,10 @@ def _copy_company_facts_sync_state_legacy(conn: sqlite3.Connection) -> None:
     company_id_expr = quote_identifier("company_id")
     latest_source_expr = quote_identifier("latest_source_filing_date") if "latest_source_filing_date" in columns else "''"
     payload_hash_expr = quote_identifier("payload_hash") if "payload_hash" in columns else "''"
-    last_synced_expr = _coalesce_existing_expr(columns, ["last_synced_at", "updated_at", "created_at"], "?")
-    sync_status_expr = _coalesce_existing_expr(columns, ["sync_status"], "'unknown'")
-    created_at_expr = _coalesce_existing_expr(columns, ["created_at", "updated_at", "last_synced_at"], "?")
-    updated_at_expr = _coalesce_existing_expr(columns, ["updated_at", "last_synced_at", "created_at"], "?")
+    last_synced_expr, last_synced_params = _coalesce_existing_expr(columns, ["last_synced_at", "updated_at", "created_at"], "?")
+    sync_status_expr, sync_status_params = _coalesce_existing_expr(columns, ["sync_status"], "'unknown'")
+    created_at_expr, created_at_params = _coalesce_existing_expr(columns, ["created_at", "updated_at", "last_synced_at"], "?")
+    updated_at_expr, updated_at_params = _coalesce_existing_expr(columns, ["updated_at", "last_synced_at", "created_at"], "?")
     sql = f"""
         INSERT OR IGNORE INTO company_facts_sync_state(
             company_id, latest_source_filing_date, payload_hash, last_synced_at, sync_status, created_at, updated_at
@@ -1483,7 +1558,8 @@ def _copy_company_facts_sync_state_legacy(conn: sqlite3.Connection) -> None:
         FROM {quote_identifier("company_facts_sync_state_legacy")}
         WHERE {company_id_expr} IS NOT NULL
         """
-    conn.execute(sql, tuple(now for _ in range(sql.count("?"))))
+    param_count = last_synced_params + sync_status_params + created_at_params + updated_at_params
+    conn.execute(sql, tuple(now for _ in range(param_count)))
 
 
 def ensure_state_tables_created_at(conn: sqlite3.Connection) -> None:

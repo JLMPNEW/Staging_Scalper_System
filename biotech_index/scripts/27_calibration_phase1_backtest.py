@@ -7,6 +7,7 @@ import csv
 import json
 import logging
 import math
+import random
 import sqlite3
 import sys
 import time
@@ -79,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--start-asof", type=str, default="")
     parser.add_argument("--end-asof", type=str, default="")
-    parser.add_argument("--horizons", type=str, default="20,60,120", help="Comma-separated trading-day horizons.")
+    parser.add_argument("--horizons", type=str, default="", help="Comma-separated trading-day horizons. Defaults to calibration.phase1.horizons or calibration.tier1.medium_term_horizons.")
     parser.add_argument("--top-n", type=str, default="10,20,30", help="Comma-separated top-N cutoffs.")
     parser.add_argument("--market-sources", type=str, default="yahoo_adjusted,interactive_brokers")
     parser.add_argument("--max-snapshots", type=int, default=0, help="Optional limit for smoke tests; keeps latest dates.")
@@ -104,6 +105,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Round-trip trading cost in basis points used for net-return Top-N diagnostics.",
+    )
+    parser.add_argument(
+        "--train-fraction",
+        type=float,
+        default=None,
+        help="Chronological train fraction for Phase 1 train/test diagnostic splits. Defaults to calibration.tier1.train_fraction or 0.70.",
+    )
+    parser.add_argument(
+        "--bootstrap-iterations",
+        type=int,
+        default=None,
+        help="Bootstrap iterations for Phase 1 Top-N risk-adjusted CI diagnostics. Defaults to calibration.tier1.bootstrap_iterations.",
     )
     parser.add_argument("--exclude-tickers", type=str, default="")
     return parser.parse_args()
@@ -276,6 +289,13 @@ def load_score_rows(conn: sqlite3.Connection, dates: list[str], excluded_tickers
         optional_select(multi_cols, "tier1_available", "multibagger_tier1_available", table_alias="m"),
     ]
     rows_out: list[dict[str, Any]] = []
+    excluded = sorted(ticker for ticker in excluded_tickers if ticker)
+    exclusion_clause = ""
+    exclusion_params: tuple[str, ...] = ()
+    if excluded:
+        exclusion_placeholders = ",".join("?" for _ in excluded)
+        exclusion_clause = f" AND UPPER(c.ticker) NOT IN ({exclusion_placeholders})"
+        exclusion_params = tuple(excluded)
     for chunk in chunked(dates):
         placeholders = ",".join("?" for _ in chunk)
         rows = conn.execute(
@@ -287,15 +307,16 @@ def load_score_rows(conn: sqlite3.Connection, dates: list[str], excluded_tickers
                AND m.company_id = d.company_id
             INNER JOIN companies c ON c.company_id = d.company_id
             WHERE d.asof_date IN ({placeholders})
+              {exclusion_clause}
             ORDER BY d.asof_date, d.rank, c.ticker
             """,
-            tuple(chunk),
+            tuple(chunk) + exclusion_params,
         ).fetchall()
         for row in rows:
-            ticker = normalize_ticker(row["ticker"])
-            if ticker in excluded_tickers:
-                continue
-            rows_out.append(dict(row))
+            record = dict(row)
+            record["ticker"] = normalize_ticker(record.get("ticker"))
+            if record["ticker"]:
+                rows_out.append(record)
     return rows_out
 
 
@@ -590,6 +611,14 @@ def safe_ratio(numerator: float | None, denominator: float | None) -> float | No
     return numerator / denominator
 
 
+def profit_factor(values: list[float]) -> float | None:
+    gains = sum(value for value in values if value > 0.0)
+    losses = -sum(value for value in values if value < 0.0)
+    if losses <= 0.0:
+        return None
+    return gains / losses
+
+
 def winsorized_mean(values: list[float], lower_q: float = 0.05, upper_q: float = 0.95) -> float | None:
     if not values:
         return None
@@ -669,8 +698,40 @@ def prefixed(prefix: str, values: dict[str, Any]) -> dict[str, Any]:
     return {f"{prefix}{key}": value for key, value in values.items()}
 
 
-def risk_adjusted_summary(values: list[float]) -> dict[str, Any]:
-    return {**summarize_returns(values), **summarize_return_risk(values)}
+def bootstrap_metric_cis(values: list[float], *, iterations: int, seed: int) -> dict[str, Any]:
+    if not values or iterations <= 0:
+        return {}
+    rng = random.Random(seed)
+    n = len(values)
+    mean_samples: list[float] = []
+    sortino_samples: list[float] = []
+    profit_samples: list[float] = []
+    for _ in range(iterations):
+        sample = [values[rng.randrange(n)] for _ in range(n)]
+        avg = mean(sample)
+        downside = math.sqrt(sum(min(0.0, value) ** 2 for value in sample) / len(sample))
+        mean_samples.append(avg)
+        sortino_value = safe_ratio(avg, downside)
+        if sortino_value is not None:
+            sortino_samples.append(sortino_value)
+        pf = profit_factor(sample)
+        if pf is not None:
+            profit_samples.append(pf)
+    return {
+        "mean_return_pct_ci05": pct(quantile(mean_samples, 0.05)),
+        "mean_return_pct_ci95": pct(quantile(mean_samples, 0.95)),
+        "sortino_like_ci05": rounded(quantile(sortino_samples, 0.05)),
+        "sortino_like_ci95": rounded(quantile(sortino_samples, 0.95)),
+        "profit_factor_ci05": rounded(quantile(profit_samples, 0.05)),
+        "profit_factor_ci95": rounded(quantile(profit_samples, 0.95)),
+    }
+
+
+def risk_adjusted_summary(values: list[float], *, bootstrap_iterations: int = 0, seed: int = 0) -> dict[str, Any]:
+    summary = {**summarize_returns(values), **summarize_return_risk(values)}
+    summary["profit_factor"] = rounded(profit_factor(values))
+    summary.update(bootstrap_metric_cis(values, iterations=bootstrap_iterations, seed=seed))
+    return summary
 
 
 def numeric_values(rows: Iterable[dict[str, Any]], key: str) -> list[float]:
@@ -956,6 +1017,7 @@ def build_topn_risk_adjusted_rows(
     top_ns: list[int],
     *,
     sample: str,
+    bootstrap_iterations: int = 0,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     rows_by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -990,14 +1052,25 @@ def build_topn_risk_adjusted_rows(
                     selected_returns.extend(selected_rets)
                     baseline_returns.extend(base_rets)
 
-                selected_summary = risk_adjusted_summary(selected_returns)
-                baseline_summary = risk_adjusted_summary(baseline_returns)
+                seed_text = f"{sample}|{horizon}|{model_name}|{top_n}"
+                seed_base = sum((idx + 1) * ord(ch) for idx, ch in enumerate(seed_text)) % 2_000_000_000
+                selected_summary = risk_adjusted_summary(
+                    selected_returns,
+                    bootstrap_iterations=bootstrap_iterations,
+                    seed=seed_base,
+                )
+                baseline_summary = risk_adjusted_summary(
+                    baseline_returns,
+                    bootstrap_iterations=bootstrap_iterations,
+                    seed=seed_base + 1,
+                )
                 spread_keys = [
                     "mean_return_pct",
                     "winsorized_mean_return_pct",
                     "median_return_pct",
                     "sharpe_like",
                     "sortino_like",
+                    "profit_factor",
                     "gain_loss_ratio",
                     "p05_return_pct",
                     "p10_return_pct",
@@ -1534,12 +1607,103 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def chronological_train_test_rows(
+    rows: list[dict[str, Any]],
+    snapshot_dates: list[str],
+    *,
+    train_fraction: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
+    if len(snapshot_dates) < 2:
+        return rows, [], list(snapshot_dates), []
+    split_idx = int(math.floor(len(snapshot_dates) * train_fraction))
+    split_idx = max(1, min(len(snapshot_dates) - 1, split_idx))
+    train_dates = snapshot_dates[:split_idx]
+    test_dates = snapshot_dates[split_idx:]
+    train_set = set(train_dates)
+    test_set = set(test_dates)
+    return (
+        [row for row in rows if str(row.get("asof_date") or "") in train_set],
+        [row for row in rows if str(row.get("asof_date") or "") in test_set],
+        train_dates,
+        test_dates,
+    )
+
+
+def build_return_data_completeness_rows(
+    rows: list[dict[str, Any]],
+    horizons: list[int],
+    *,
+    sample: str,
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    row_count = len(rows)
+    for horizon in horizons:
+        gross_key = f"fwd_{horizon}d_return"
+        net_key = f"fwd_{horizon}d_net_return"
+        gross_count = sum(1 for row in rows if to_float(row.get(gross_key)) is not None)
+        net_count = sum(1 for row in rows if to_float(row.get(net_key)) is not None)
+        output.append(
+            {
+                "sample": sample,
+                "horizon_days": horizon,
+                "score_row_count": row_count,
+                "gross_return_observation_count": gross_count,
+                "net_return_observation_count": net_count,
+                "missing_net_return_count": max(0, row_count - net_count),
+                "net_return_completeness_pct": pct(net_count / row_count if row_count else None),
+            }
+        )
+    return output
+
+
+def write_phase1_sample_outputs(
+    output_dir: Path,
+    *,
+    sample_name: str,
+    rows: list[dict[str, Any]],
+    horizons: list[int],
+    top_ns: list[int],
+    observation_fields: list[str],
+    bootstrap_iterations: int,
+) -> None:
+    liquid_rows = liquidity_ok_rows(rows)
+    write_csv(output_dir / f"phase1_{sample_name}_observations.csv", rows, observation_fields)
+    write_csv(output_dir / f"phase1_{sample_name}_score_correlations.csv", build_correlation_rows(rows, horizons))
+    write_csv(output_dir / f"phase1_{sample_name}_deciles.csv", build_decile_rows(rows, horizons))
+    write_csv(output_dir / f"phase1_{sample_name}_buckets.csv", build_bucket_rows(rows, horizons))
+    write_csv(
+        output_dir / f"phase1_{sample_name}_return_data_completeness.csv",
+        build_return_data_completeness_rows(rows, horizons, sample=sample_name),
+    )
+    risk_rows = build_topn_risk_adjusted_rows(
+        rows,
+        horizons,
+        top_ns,
+        sample=sample_name,
+        bootstrap_iterations=bootstrap_iterations,
+    )
+    risk_rows.extend(
+        build_topn_risk_adjusted_rows(
+            liquid_rows,
+            horizons,
+            top_ns,
+            sample=f"{sample_name}_liquidity_ok",
+            bootstrap_iterations=bootstrap_iterations,
+        )
+    )
+    write_csv(output_dir / f"phase1_{sample_name}_topn_risk_adjusted.csv", risk_rows)
+    write_csv(output_dir / f"phase1_{sample_name}_topn.csv", build_topn_rows(rows, horizons, top_ns))
+
+
 def main() -> None:
+    global CONFLICT_HIGH_PERCENTILE, CONFLICT_LOW_PERCENTILE
     configure_logging()
     args = parse_args()
     start_time = time.perf_counter()
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
+    CONFLICT_HIGH_PERCENTILE = float(cfg_get(config, "calibration.phase1.conflict_high_pct", CONFLICT_HIGH_PERCENTILE))
+    CONFLICT_LOW_PERCENTILE = float(cfg_get(config, "calibration.phase1.conflict_low_pct", CONFLICT_LOW_PERCENTILE))
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_dir = (
@@ -1560,7 +1724,16 @@ def main() -> None:
         raise ValueError(f"Invalid --start-asof date: {args.start_asof}")
     if args.end_asof and end_asof is None:
         raise ValueError(f"Invalid --end-asof date: {args.end_asof}")
-    horizons = parse_int_list(args.horizons, default=[20, 60, 120])
+    default_horizons_raw = cfg_get(
+        config,
+        "calibration.phase1.horizons",
+        cfg_get(config, "calibration.tier1.medium_term_horizons", [60, 120]),
+    )
+    default_horizons = parse_int_list(
+        ",".join(str(value) for value in normalize_string_list(default_horizons_raw, ["60", "120"])),
+        default=[60, 120],
+    )
+    horizons = parse_int_list(args.horizons, default=default_horizons)
     top_ns = parse_int_list(args.top_n, default=[10, 20, 30])
     market_sources = [
         token.strip()
@@ -1574,6 +1747,18 @@ def main() -> None:
         if args.round_trip_cost_bps is not None
         else float(phase1_costs.get("long_round_trip_bps", DEFAULT_ROUND_TRIP_COST_BPS))
     )
+    train_fraction = (
+        float(args.train_fraction)
+        if args.train_fraction is not None
+        else float(cfg_get(config, "calibration.tier1.train_fraction", 0.70))
+    )
+    train_fraction = max(0.10, min(0.90, train_fraction))
+    bootstrap_iterations = (
+        int(args.bootstrap_iterations)
+        if args.bootstrap_iterations is not None
+        else int(cfg_get(config, "calibration.tier1.bootstrap_iterations", 200))
+    )
+    bootstrap_iterations = max(0, bootstrap_iterations)
     next_bar_entry = (
         args.next_bar_entry
         if args.next_bar_entry is not None
@@ -1683,9 +1868,21 @@ def main() -> None:
         build_topn_rows(liquid_score_rows, horizons, top_ns),
         "liquidity_ok",
     )
-    topn_risk_adjusted_rows = build_topn_risk_adjusted_rows(score_rows, horizons, top_ns, sample="all")
+    topn_risk_adjusted_rows = build_topn_risk_adjusted_rows(
+        score_rows,
+        horizons,
+        top_ns,
+        sample="all",
+        bootstrap_iterations=bootstrap_iterations,
+    )
     topn_risk_adjusted_rows.extend(
-        build_topn_risk_adjusted_rows(liquid_score_rows, horizons, top_ns, sample="liquidity_ok")
+        build_topn_risk_adjusted_rows(
+            liquid_score_rows,
+            horizons,
+            top_ns,
+            sample="liquidity_ok",
+            bootstrap_iterations=bootstrap_iterations,
+        )
     )
     tier1_gate_ranked_additive_rows = build_tier1_gate_ranked_additive_rows(
         score_rows,
@@ -1707,6 +1904,11 @@ def main() -> None:
     monotonicity_rows.extend(build_monotonicity_rows(liquid_score_rows, horizons, sample="liquidity_ok"))
     topn_rows = build_topn_rows(score_rows, horizons, top_ns)
     orthogonality_rows = build_orthogonality_rows(score_rows)
+    train_rows, test_rows, train_dates, test_dates = chronological_train_test_rows(
+        score_rows,
+        snapshot_dates,
+        train_fraction=train_fraction,
+    )
 
     write_csv(output_dir / "phase1_observations.csv", score_rows, observation_fields)
     write_csv(output_dir / "phase1_score_correlations.csv", correlation_rows)
@@ -1716,12 +1918,32 @@ def main() -> None:
     write_csv(output_dir / "phase1_liquidity_filtered_buckets.csv", liquidity_filtered_bucket_rows)
     write_csv(output_dir / "phase1_liquidity_filtered_topn.csv", liquidity_filtered_topn_rows)
     write_csv(output_dir / "phase1_topn_risk_adjusted.csv", topn_risk_adjusted_rows)
+    return_data_completeness_rows = build_return_data_completeness_rows(score_rows, horizons, sample="all")
+    write_csv(output_dir / "phase1_return_data_completeness.csv", return_data_completeness_rows)
     write_csv(output_dir / "phase1_tier1_gate_ranked_additive.csv", tier1_gate_ranked_additive_rows)
     write_csv(output_dir / "phase1_score_conflict_diagnostics.csv", score_conflict_rows)
     write_csv(output_dir / "phase1_bucket_ticker_drivers.csv", bucket_ticker_driver_rows)
     write_csv(output_dir / "phase1_monotonicity.csv", monotonicity_rows)
     write_csv(output_dir / "phase1_topn.csv", topn_rows)
     write_csv(output_dir / "phase1_orthogonality.csv", orthogonality_rows)
+    write_phase1_sample_outputs(
+        output_dir,
+        sample_name="train",
+        rows=train_rows,
+        horizons=horizons,
+        top_ns=top_ns,
+        observation_fields=observation_fields,
+        bootstrap_iterations=bootstrap_iterations,
+    )
+    write_phase1_sample_outputs(
+        output_dir,
+        sample_name="test",
+        rows=test_rows,
+        horizons=horizons,
+        top_ns=top_ns,
+        observation_fields=observation_fields,
+        bootstrap_iterations=bootstrap_iterations,
+    )
 
     horizon_counts = {
         str(horizon): sum(1 for row in score_rows if to_float(row.get(f"fwd_{horizon}d_return")) is not None)
@@ -1737,6 +1959,11 @@ def main() -> None:
         "output_dir": str(output_dir),
         "snapshot_dates": snapshot_dates,
         "snapshot_date_count": len(snapshot_dates),
+        "train_fraction": train_fraction,
+        "train_snapshot_dates": train_dates,
+        "test_snapshot_dates": test_dates,
+        "train_score_row_count": len(train_rows),
+        "test_score_row_count": len(test_rows),
         "score_row_count_after_exclusions": len(score_rows),
         "liquidity_ok_score_row_count": len(liquid_score_rows),
         "ticker_count_after_exclusions": len(tickers),
@@ -1747,7 +1974,11 @@ def main() -> None:
         "top_n": top_ns,
         "forward_return_observation_counts": horizon_counts,
         "net_forward_return_observation_counts": net_horizon_counts,
+        "return_data_completeness": {
+            str(row["horizon_days"]): row for row in return_data_completeness_rows
+        },
         "round_trip_cost_bps": round_trip_cost_bps,
+        "bootstrap_iterations": bootstrap_iterations,
         "next_bar_entry": next_bar_entry,
         "exclude_current_removals": exclude_current_removals,
         "elapsed_sec": round(time.perf_counter() - start_time, 3),
@@ -1760,6 +1991,7 @@ def main() -> None:
             "phase1_bucket_diagnostics.csv separates bucket return behavior from risk, liquidity, and score-rank behavior.",
             "phase1_bucket_ticker_drivers.csv shows the best and worst tickers driving each bucket.",
             "phase1_liquidity_filtered_*.csv retests buckets and Top-N selections after the liquidity gate.",
+            "phase1_return_data_completeness.csv reports per-horizon completed-return coverage to surface bar-data gaps.",
             "phase1_monotonicity.csv defines decile 1 as lowest score and decile 10 as highest score.",
             "Sharpe-like and Sortino-like ratios use zero risk-free rate on overlapping forward-return cohorts; they are relative diagnostics, not formal portfolio Sharpe/Sortino ratios.",
             "phase1_tier1_gate_ranked_additive.csv treats orthogonal alpha and multibagger as second-stage rankers inside Tier 1 gates.",

@@ -6,11 +6,13 @@ import csv
 import hashlib
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import subprocess
 import sys
 import time
+import signal
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta, timezone
@@ -279,11 +281,37 @@ def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bo
 
 def write_timing_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["run_started_at", "mode", "step", "status", "elapsed_sec", "returncode", "command"]
+    fieldnames = ["run_started_at", "mode", "step", "status", "elapsed_sec", "returncode", "command", "stdout_tail", "stderr_tail"]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows([{field: row.get(field, "") for field in fieldnames} for row in rows])
+
+
+def text_tail(raw: str, limit: int = 4000) -> str:
+    text = str(raw or "").strip()
+    return text[-limit:] if len(text) > limit else text
+
+
+def terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        else:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+    except Exception as exc:
+        LOGGER.warning("Failed to terminate process tree for pid=%s: %s", process.pid, exc)
+    try:
+        process.kill()
+    except Exception:
+        pass
 
 
 def file_sha256(path: Path) -> str:
@@ -394,6 +422,20 @@ def snapshot_direct_output_files(
             "last_write_time_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0).isoformat(),
         }
     )
+    max_history = int(cfg_get(config, "biotech_refresh.max_snapshot_history", 30) or 0)
+    if max_history > 0:
+        dated_dirs = sorted(
+            [
+                path
+                for path in snapshot_root.iterdir()
+                if path.is_dir() and path.name.isdigit() and len(path.name) == 8
+            ],
+            key=lambda path: path.name,
+            reverse=True,
+        )
+        for old_dir in dated_dirs[max_history:]:
+            LOGGER.info("Pruning old biotech snapshot directory: %s", old_dir)
+            shutil.rmtree(old_dir)
     elapsed = round(time.monotonic() - start, 3)
     LOGGER.info(
         "Snapshot outputs written: asof=%s files=%d snapshot_dir=%s elapsed=%.3fs",
@@ -438,8 +480,26 @@ def run_step(
     start = time.monotonic()
     LOGGER.info("Starting %s", step.name)
     LOGGER.info("Command for %s: %s", step.name, " ".join(command))
+    stdout_text = ""
+    stderr_text = ""
     try:
-        completed = subprocess.run(command, cwd=str(PROJECT_ROOT), timeout=timeout_sec)
+        process = subprocess.Popen(
+            command,
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            start_new_session=sys.platform != "win32",
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+        )
+        try:
+            stdout_text, stderr_text = process.communicate(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            terminate_process_tree(process)
+            stdout_text, stderr_text = process.communicate(timeout=30)
+            raise
     except subprocess.TimeoutExpired:
         elapsed = round(time.monotonic() - start, 3)
         LOGGER.error("Step %s timed out after %.3fs", step.name, elapsed)
@@ -451,9 +511,15 @@ def run_step(
             "elapsed_sec": elapsed,
             "returncode": -1,
             "command": " ".join(command),
+            "stdout_tail": text_tail(stdout_text),
+            "stderr_tail": text_tail(stderr_text),
         }
     elapsed = round(time.monotonic() - start, 3)
-    status = "success" if completed.returncode == 0 else "failed"
+    returncode = int(process.returncode or 0)
+    status = "success" if returncode == 0 else "failed"
+    if stderr_text.strip():
+        log_func = LOGGER.warning if status == "success" else LOGGER.error
+        log_func("Step %s stderr tail: %s", step.name, text_tail(stderr_text, 1200))
     LOGGER.info("Finished %s status=%s elapsed=%.3fs", step.name, status, elapsed)
     return {
         "run_started_at": run_started_at,
@@ -461,8 +527,10 @@ def run_step(
         "step": step.name,
         "status": status,
         "elapsed_sec": elapsed,
-        "returncode": completed.returncode,
+        "returncode": returncode,
         "command": " ".join(command),
+        "stdout_tail": text_tail(stdout_text),
+        "stderr_tail": text_tail(stderr_text),
     }
 
 
@@ -736,6 +804,8 @@ def validate_score_csv(
         reader = csv.DictReader(handle)
         rows = list(reader)
         fieldnames = [str(field or "") for field in (reader.fieldnames or [])]
+    if not rows:
+        raise RuntimeError(f"{path} validation failed: score CSV has no data rows")
     observed_tickers = [str(row.get("ticker") or "") for row in rows]
     coverage = universe_coverage(expected_tickers, observed_tickers)
     asof_values = {str(row.get("asof_date") or "") for row in rows}
@@ -781,6 +851,8 @@ def validate_required_csv_columns_with_presence(
         fieldnames = [str(field or "") for field in (reader.fieldnames or [])]
 
     failures: list[str] = []
+    if not rows:
+        failures.append("CSV has no data rows")
     presence_columns = list(present_columns or [])
     missing_columns = [column for column in [*required_columns, *presence_columns] if column not in fieldnames]
     if missing_columns:
@@ -954,6 +1026,7 @@ def main() -> None:
     final_validation_enabled = as_bool(cfg_get(config, "biotech_refresh.validate_final_outputs", True))
     snapshot_outputs_enabled = as_bool(cfg_get(config, "biotech_refresh.snapshot_outputs.enabled", True))
     form4_preflight_enabled = as_bool(cfg_get(config, "biotech_refresh.form4_preflight.enabled", True), True)
+    form4_warning_is_fatal = as_bool(cfg_get(config, "biotech_refresh.form4_preflight.warning_is_fatal", True), True)
     form4_preflight_needed = any(step.name == "governance_events" for step in steps)
 
     run_started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -993,6 +1066,15 @@ def main() -> None:
                 }
                 write_timing_csv(timing_csv, timing_rows)
                 raise
+            if timing_rows[-1]["status"] == "warning" and form4_warning_is_fatal:
+                timing_rows[-1] = {
+                    **timing_rows[-1],
+                    "status": "failed",
+                    "returncode": 1,
+                    "command": str(timing_rows[-1].get("command") or "") + " warning_is_fatal=true",
+                }
+                write_timing_csv(timing_csv, timing_rows)
+                raise SystemExit(1)
             write_timing_csv(timing_csv, timing_rows)
         elif form4_preflight_needed and args.skip_form4_preflight:
             LOGGER.warning("Form 4 preflight skipped via --skip-form4-preflight.")
@@ -1063,7 +1145,7 @@ def main() -> None:
         elif selected_steps:
             LOGGER.warning("Final output validation skipped because --steps was used.")
         elif args.skip_final_validation:
-            LOGGER.warning("Final output validation skipped via --skip-final-validation.")
+            LOGGER.warning("Final output validation SKIPPED via --skip-final-validation; output may be unvalidated.")
         elif not final_validation_enabled:
             LOGGER.warning("Final output validation skipped because biotech_refresh.validate_final_outputs=false.")
         if snapshot_outputs_enabled and not selected_steps:
