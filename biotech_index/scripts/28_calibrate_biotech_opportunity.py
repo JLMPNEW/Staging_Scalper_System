@@ -135,6 +135,8 @@ SPREAD_KEYS = [
     "stale_guidance_exposure_pct",
     "no_guidance_negative_growth_exposure_pct",
     "rank_quality_cap_exposure_pct",
+    "mature_defensive_exposure_pct",
+    "expected_return_quality_exposure_pct",
     "top3_gain_contribution_pct",
 ]
 SPREAD_KEYS.extend(f"soft_reason_{reason}_exposure_pct" for reason in SOFT_WEAKNESS_REASONS)
@@ -155,6 +157,8 @@ BOOTSTRAP_METRIC_KEYS = [
     "guidance_staleness_exposure_pct",
     "no_guidance_negative_growth_exposure_pct",
     "rank_quality_cap_exposure_pct",
+    "mature_defensive_exposure_pct",
+    "expected_return_quality_exposure_pct",
     "illiquid_weakness_exposure_pct",
 ]
 
@@ -204,6 +208,14 @@ class CalibrationParams:
     rank_quality_cheap_low_growth_revenue_yoy_max: float = 0.10
     rank_quality_cheap_low_growth_guidance_max_score: float = 60.0
     rank_quality_cheap_low_growth_cap: float = 60.0
+    rank_quality_cap_veto_enabled: bool = True
+    rank_quality_cap_veto_threshold: float = 49.0
+    rank_quality_cap_veto_reasons: tuple[str, ...] = (
+        "commercial_business_shock_cap",
+        "severe_commercial_deterioration_cap",
+        "no_guidance_negative_growth_cap",
+        "unprofitable_value_mismatch_cap",
+    )
 
 
 @dataclass(frozen=True)
@@ -250,6 +262,8 @@ class SelectionPolicy:
     value_trap_penalty: float = 0.0
     leverage_fragility_penalty: float = 0.0
     guidance_staleness_penalty: float = 0.0
+    mature_defensive_penalty: float = 0.0
+    expected_return_quality_bonus: float = 0.0
     targeted_soft_weakness_penalty: float = 0.0
     hard_veto_reasons: tuple[str, ...] = ()
     hard_weakness_penalty_reasons: tuple[str, ...] = ()
@@ -665,6 +679,21 @@ def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
             rank_caps.get("cheap_low_growth_guidance_max_score", 60.0)
         ),
         rank_quality_cheap_low_growth_cap=float(rank_caps.get("cheap_low_growth_cap", 60.0)),
+        rank_quality_cap_veto_enabled=as_bool(rank_caps.get("rank_cap_veto_enabled", True), True),
+        rank_quality_cap_veto_threshold=float(rank_caps.get("rank_cap_veto_threshold", 49.0)),
+        rank_quality_cap_veto_reasons=tuple(
+            normalize_string_list(
+                rank_caps.get(
+                    "rank_cap_veto_reasons",
+                    [
+                        "commercial_business_shock_cap",
+                        "severe_commercial_deterioration_cap",
+                        "no_guidance_negative_growth_cap",
+                        "unprofitable_value_mismatch_cap",
+                    ],
+                )
+            )
+        ),
     )
 
 
@@ -871,6 +900,21 @@ def generate_weight_specs(config: dict[str, Any], *, candidate_limit: int = 0) -
             commercial_stage_profile=base_commercial_profile,
         )
     ]
+    production_candidate_name = str(cfg_get(config, "biotech_scoring.production_baseline.candidate_name", "") or "").strip()
+    if production_candidate_name and production_candidate_name != CURRENT_CONFIG_CANDIDATE_NAME:
+        specs.append(
+            WeightSpec(
+                candidate_name=production_candidate_name,
+                description="Production baseline alias for the current biotech_scoring weights from config.yaml.",
+                clinical_catalyst=base_catalyst,
+                clinical_credibility=base_credibility,
+                clinical_financial_quality=base_financial,
+                clinical_momentum=base_momentum,
+                clinical_risk_penalty=base_risk,
+                clinical_stage_profile=base_clinical_profile,
+                commercial_stage_profile=base_commercial_profile,
+            )
+        )
 
     clinical_positive_variants = [
         ("current_clinical_mix", base_catalyst, base_credibility, base_financial, base_momentum),
@@ -980,6 +1024,40 @@ def generate_weight_specs(config: dict[str, Any], *, candidate_limit: int = 0) -
             ),
         ),
         (
+            "commercial_expected_return_quality",
+            base_clinical_profile,
+            normalize_profile(
+                {
+                    "clinical_opportunity": 0.04,
+                    "commercial_value": 0.27,
+                    "forward_guidance": 0.24,
+                    "valuation": 0.07,
+                    "upside_capacity": 0.04,
+                    "institutional_upside": 0.12,
+                    "financial_quality": 0.14,
+                    "momentum": 0.08,
+                    "risk_penalty": max(base_commercial_profile["risk_penalty"], 0.24),
+                }
+            ),
+        ),
+        (
+            "commercial_growth_compounder",
+            base_clinical_profile,
+            normalize_profile(
+                {
+                    "clinical_opportunity": 0.04,
+                    "commercial_value": 0.24,
+                    "forward_guidance": 0.28,
+                    "valuation": 0.06,
+                    "upside_capacity": 0.04,
+                    "institutional_upside": 0.10,
+                    "financial_quality": 0.16,
+                    "momentum": 0.08,
+                    "risk_penalty": max(base_commercial_profile["risk_penalty"], 0.24),
+                }
+            ),
+        ),
+        (
             "commercial_profitability_guidance",
             base_clinical_profile,
             normalize_profile(
@@ -1015,7 +1093,7 @@ def generate_weight_specs(config: dict[str, Any], *, candidate_limit: int = 0) -
         ),
     ]
 
-    seen = {spec_signature(specs[0])}
+    seen = {spec_signature(spec) for spec in specs}
     for clinical_name, catalyst, credibility, financial, momentum in clinical_positive_variants:
         for risk_penalty in clinical_risk_values:
             for profile_name, clinical_profile, commercial_profile in clinical_stage_variants:
@@ -1061,6 +1139,8 @@ def policy_signature(policy: SelectionPolicy) -> tuple[Any, ...]:
         round(float(policy.value_trap_penalty), 6),
         round(float(policy.leverage_fragility_penalty), 6),
         round(float(policy.guidance_staleness_penalty), 6),
+        round(float(policy.mature_defensive_penalty), 6),
+        round(float(policy.expected_return_quality_bonus), 6),
         round(float(policy.targeted_soft_weakness_penalty), 6),
         tuple(policy.hard_veto_reasons),
         tuple(policy.hard_weakness_penalty_reasons),
@@ -1108,6 +1188,8 @@ def policy_from_dict(raw: dict[str, Any], *, fallback_name: str) -> SelectionPol
         value_trap_penalty=float(raw.get("value_trap_penalty", 0.0)),
         leverage_fragility_penalty=float(raw.get("leverage_fragility_penalty", 0.0)),
         guidance_staleness_penalty=float(raw.get("guidance_staleness_penalty", 0.0)),
+        mature_defensive_penalty=float(raw.get("mature_defensive_penalty", 0.0)),
+        expected_return_quality_bonus=float(raw.get("expected_return_quality_bonus", 0.0)),
         targeted_soft_weakness_penalty=float(raw.get("targeted_soft_weakness_penalty", 0.0)),
         hard_veto_reasons=reason_tuple(raw.get("hard_veto_reasons")),
         hard_weakness_penalty_reasons=reason_tuple(raw.get("hard_weakness_penalty_reasons")),
@@ -1272,6 +1354,42 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
             hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
         ),
         SelectionPolicy(
+            policy_name="core_veto_event_drag_expected_return_tilt",
+            description=(
+                "Exclude core weakness, penalize event/dilution risk, lightly penalize mature defensive "
+                "profiles, and reward expected-return quality diagnostics."
+            ),
+            hard_veto=True,
+            hard_weakness_penalty=10.0,
+            value_trap_penalty=8.0,
+            leverage_fragility_penalty=4.0,
+            guidance_staleness_penalty=3.0,
+            mature_defensive_penalty=6.0,
+            expected_return_quality_bonus=4.0,
+            hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+            hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
+        ),
+        SelectionPolicy(
+            policy_name="core_veto_event_drag_mature_defensive_guard",
+            description=(
+                "Exclude core weakness, penalize event/dilution risk, and demote large low-growth "
+                "commercial names that look defensive rather than high-return."
+            ),
+            hard_veto=True,
+            hard_weakness_penalty=10.0,
+            commercial_deterioration_penalty=8.0,
+            valuation_growth_mismatch_penalty=6.0,
+            transient_revenue_anchor_penalty=8.0,
+            commercial_business_shock_penalty=10.0,
+            value_trap_penalty=8.0,
+            leverage_fragility_penalty=4.0,
+            guidance_staleness_penalty=3.0,
+            mature_defensive_penalty=10.0,
+            expected_return_quality_bonus=3.0,
+            hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+            hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
+        ),
+        SelectionPolicy(
             policy_name="core_veto_event_drag_toxic_soft_filter",
             description=(
                 "Exclude core weakness, penalize event/dilution risk, and penalize only toxic soft weakness "
@@ -1329,6 +1447,8 @@ def policy_fields(policy: SelectionPolicy) -> dict[str, Any]:
         "selection_policy_value_trap_penalty": policy.value_trap_penalty,
         "selection_policy_leverage_fragility_penalty": policy.leverage_fragility_penalty,
         "selection_policy_guidance_staleness_penalty": policy.guidance_staleness_penalty,
+        "selection_policy_mature_defensive_penalty": policy.mature_defensive_penalty,
+        "selection_policy_expected_return_quality_bonus": policy.expected_return_quality_bonus,
         "selection_policy_targeted_soft_weakness_penalty": policy.targeted_soft_weakness_penalty,
         "selection_policy_hard_veto_reasons": "|".join(policy.hard_veto_reasons),
         "selection_policy_hard_weakness_penalty_reasons": "|".join(policy.hard_weakness_penalty_reasons),
@@ -1356,6 +1476,8 @@ def policy_output_keys() -> list[str]:
         "selection_policy_value_trap_penalty",
         "selection_policy_leverage_fragility_penalty",
         "selection_policy_guidance_staleness_penalty",
+        "selection_policy_mature_defensive_penalty",
+        "selection_policy_expected_return_quality_bonus",
         "selection_policy_targeted_soft_weakness_penalty",
         "selection_policy_hard_veto_reasons",
         "selection_policy_hard_weakness_penalty_reasons",
@@ -1468,6 +1590,74 @@ def first_float(*values: object) -> float | None:
         if parsed is not None:
             return parsed
     return None
+
+
+def finite_float(raw: object) -> float | None:
+    value = to_float(raw)
+    return value if value is not None and math.isfinite(value) else None
+
+
+def growth_drag_score(*growth_values: object) -> float:
+    parsed = [value for value in (finite_float(raw) for raw in growth_values) if value is not None]
+    if not parsed:
+        return 50.0
+    best_growth = max(parsed)
+    if best_growth >= 0.20:
+        return 0.0
+    if best_growth >= 0.10:
+        return 25.0
+    if best_growth >= 0.0:
+        return 50.0
+    if best_growth >= -0.10:
+        return 75.0
+    return 100.0
+
+
+def market_cap_maturity_score(market_cap: object) -> float:
+    cap = finite_float(market_cap)
+    if cap is None or cap <= 0.0:
+        return 0.0
+    if cap >= 100_000_000_000:
+        return 100.0
+    if cap >= 50_000_000_000:
+        return 75.0
+    if cap >= 25_000_000_000:
+        return 55.0
+    if cap >= 10_000_000_000:
+        return 30.0
+    return 0.0
+
+
+def mature_defensive_score(observation: Mapping[str, Any]) -> float:
+    if (to_float(observation.get("commercial_stage_flag"), 0.0) or 0.0) <= 0.0:
+        return 0.0
+    size_score = market_cap_maturity_score(observation.get("market_cap"))
+    growth_drag = growth_drag_score(
+        observation.get("forward_revenue_growth_pct"),
+        observation.get("revenue_yoy_growth_pct"),
+    )
+    upside_drag = 100.0 - clamp(to_float(observation.get("institutional_upside_capacity_score"), 50.0))
+    score = clamp(0.40 * size_score + 0.35 * growth_drag + 0.25 * upside_drag)
+    if growth_drag <= 25.0:
+        score *= 0.45
+    return clamp(score)
+
+
+def expected_return_quality_score(observation: Mapping[str, Any]) -> float:
+    risk = clamp(to_float(observation.get("risk_score_raw"), 100.0))
+    value_trap = clamp(to_float(observation.get("diag_value_trap_score"), 0.0))
+    mature_drag = clamp(to_float(observation.get("diag_mature_defensive_score"), 0.0))
+    score = (
+        0.24 * clamp(to_float(observation.get("quality_adjusted_guidance_score"), observation.get("forward_guidance_score")))
+        + 0.20 * clamp(to_float(observation.get("institutional_upside_capacity_score"), 50.0))
+        + 0.16 * clamp(to_float(observation.get("commercial_value_score"), 35.0))
+        + 0.14 * clamp(to_float(observation.get("momentum_score_raw"), 50.0))
+        + 0.12 * clamp(to_float(observation.get("quality_adjusted_valuation_score"), observation.get("valuation_score")))
+        + 0.14 * (100.0 - risk)
+        - 0.08 * value_trap
+        - 0.05 * mature_drag
+    )
+    return clamp(score)
 
 
 def raw_score_value(raw_scores: dict[str, Any], row: dict[str, Any], key: str) -> tuple[float, bool]:
@@ -1712,9 +1902,12 @@ def load_observations(
                 ),
                 "leverage_score": clamp(to_float(commercial.get("leverage_score"), 50.0)),
                 "value_trap_score": clamp(to_float(commercial.get("value_trap_score"), 0.0)),
+                "market_cap": to_float(commercial.get("market_cap")),
+                "ttm_revenue": to_float(commercial.get("ttm_revenue")),
                 "revenue_yoy_growth_pct": to_float(commercial.get("revenue_yoy_growth_pct")),
                 "commercial_stage_flag": to_float(commercial.get("commercial_stage_flag"), 0.0) or 0.0,
                 "profitable_flag": to_float(commercial.get("profitable_flag"), 0.0) or 0.0,
+                "forward_revenue_growth_pct": to_float(forward.get("forward_revenue_growth_pct")),
                 "quality_forward_valuation_score": clamp(
                     to_float(forward.get("quality_forward_valuation_score"), forward.get("forward_valuation_score"))
                 ),
@@ -1753,6 +1946,12 @@ def load_observations(
                     "diag_forward_guidance_recency_days": guidance_recency_days if guidance_recency_days is not None else "",
                 }
             )
+            mature_score = mature_defensive_score(observation)
+            observation["diag_mature_defensive_score"] = mature_score
+            observation["diag_mature_defensive_flag"] = 1.0 if mature_score >= 60.0 else 0.0
+            expected_score = expected_return_quality_score(observation)
+            observation["diag_expected_return_quality_score"] = expected_score
+            observation["diag_expected_return_quality_flag"] = 1.0 if expected_score >= 60.0 else 0.0
             observation.update(
                 build_binary_weakness_fields(
                     payload,
@@ -1956,7 +2155,13 @@ def apply_rank_quality_caps_to_score(
     revenue_yoy = to_float(row.get("revenue_yoy_growth_pct"))
     commercial_stage = (to_float(row.get("commercial_stage_flag"), 0.0) or 0.0) > 0.0
     profitable = (to_float(row.get("profitable_flag"), 0.0) or 0.0) > 0.0
-    valuation_score = to_float(row.get("valuation_score"), 0.0) or 0.0
+    valuation_score = (
+        to_float(row.get("quality_adjusted_valuation_score"))
+        if params.use_quality_adjusted_valuation_component
+        else None
+    )
+    if valuation_score is None:
+        valuation_score = to_float(row.get("valuation_score"), 0.0) or 0.0
     guidance_score = to_float(row.get("quality_adjusted_guidance_score"))
     if guidance_score is None:
         guidance_score = to_float(row.get("forward_guidance_score"))
@@ -2252,6 +2457,8 @@ def selection_quality_summary(
             "stale_guidance_exposure_pct": pct_flag(rows, "diag_stale_guidance_flag"),
             "no_guidance_negative_growth_exposure_pct": pct_flag(rows, "diag_no_guidance_negative_growth_flag"),
             "rank_quality_cap_exposure_pct": pct_flag(rows, "rank_quality_cap_flag"),
+            "mature_defensive_exposure_pct": pct_flag(rows, "diag_mature_defensive_flag"),
+            "expected_return_quality_exposure_pct": pct_flag(rows, "diag_expected_return_quality_flag"),
             "avg_binary_weakness_count": mean_numeric(rows, "diag_binary_weakness_count"),
             "avg_hard_weakness_count": mean_numeric(rows, "diag_hard_weakness_count"),
             "avg_core_hard_weakness_count": mean_numeric(rows, "diag_core_hard_weakness_count"),
@@ -2264,9 +2471,12 @@ def selection_quality_summary(
             "avg_commercial_business_shock_score": mean_numeric(rows, "diag_commercial_business_shock_score"),
             "avg_value_trap_score": mean_numeric(rows, "diag_value_trap_score"),
             "avg_leverage_fragility_score": mean_numeric(rows, "diag_leverage_fragility_score"),
+            "avg_mature_defensive_score": mean_numeric(rows, "diag_mature_defensive_score"),
+            "avg_expected_return_quality_score": mean_numeric(rows, "diag_expected_return_quality_score"),
             "mean_institutional_upside_capacity_score": mean_numeric(rows, "institutional_upside_capacity_score"),
             "mean_quality_adjusted_valuation_score": mean_numeric(rows, "quality_adjusted_valuation_score"),
             "mean_quality_adjusted_guidance_score": mean_numeric(rows, "quality_adjusted_guidance_score"),
+            "mean_forward_revenue_growth_pct": mean_numeric(rows, "forward_revenue_growth_pct"),
             "mean_rank_quality_cap": mean_numeric(rows, "rank_quality_cap"),
             "liquidity_ok_pct": pct_flag(rows, "diag_liquidity_ok"),
             "raw_score_missing_exposure_pct": pct_flag(rows, "diag_raw_score_missing_flag"),
@@ -2391,23 +2601,30 @@ def robust_objective(selected: dict[str, Any], baseline: dict[str, Any], *, para
     rank_cap_spread = (
         to_float(summary_metric_spread(selected, baseline, "rank_quality_cap_exposure_pct"), 0.0) or 0.0
     )
+    mature_defensive_spread = (
+        to_float(summary_metric_spread(selected, baseline, "mature_defensive_exposure_pct"), 0.0) or 0.0
+    )
+    expected_return_quality_spread = (
+        to_float(summary_metric_spread(selected, baseline, "expected_return_quality_exposure_pct"), 0.0) or 0.0
+    )
     top3_spread = to_float(summary_metric_spread(selected, baseline, "top3_gain_contribution_pct"), 0.0) or 0.0
     omega_weight = 0.15 if omega_is_distinct else 0.0
-    positive_weight_sum = 0.12 + 0.50 + 0.20 + omega_weight + 0.05 + 0.01 + 0.01
-    positive_scale = 0.89 / positive_weight_sum
+    positive_weight_sum = 0.16 + 0.44 + 0.20 + omega_weight + 0.06 + 0.02 + 0.02 + 0.02
+    positive_scale = 0.86 / positive_weight_sum
     return (
         positive_scale
         * (
-            0.12 * lcb_spread
-            + 0.50 * sortino_spread
+            0.16 * lcb_spread
+            + 0.44 * sortino_spread
             + 0.20 * profit_spread
             + omega_weight * omega_spread
-            + 0.05 * mean_spread
-            + 0.01 * p10_spread
-            + 0.01 * cvar_spread
+            + 0.06 * mean_spread
+            + 0.02 * p10_spread
+            + 0.02 * cvar_spread
+            + 0.02 * expected_return_quality_spread
         )
-        - 0.03 * max(0.0, loss20_spread)
-        - 0.05 * max(0.0, loss40_spread)
+        - 0.06 * max(0.0, loss20_spread)
+        - 0.08 * max(0.0, loss40_spread)
         - 0.10 * max(0.0, core_hard_spread)
         - 0.025 * max(0.0, event_hard_spread)
         - 0.03 * max(0.0, illiquid_spread)
@@ -2419,7 +2636,8 @@ def robust_objective(selected: dict[str, Any], baseline: dict[str, Any], *, para
         - 0.015 * max(0.0, leverage_fragility_spread)
         - 0.01 * max(0.0, guidance_staleness_spread)
         - 0.035 * max(0.0, no_guidance_negative_growth_spread)
-        - 0.02 * max(0.0, rank_cap_spread)
+        - 0.04 * max(0.0, rank_cap_spread)
+        - 0.015 * max(0.0, mature_defensive_spread)
         - 0.01 * max(0.0, top3_spread)
     )
 
@@ -2563,12 +2781,30 @@ def policy_adjusted_score(
         / 100.0
         - policy.guidance_staleness_penalty
         * (1.0 if (to_float(row.get("diag_guidance_staleness_flag"), 0.0) or 0.0) > 0.0 else 0.0)
+        - policy.mature_defensive_penalty
+        * max(0.0, min(100.0, to_float(row.get("diag_mature_defensive_score"), 0.0) or 0.0))
+        / 100.0
+        + policy.expected_return_quality_bonus
+        * max(0.0, min(100.0, to_float(row.get("diag_expected_return_quality_score"), 0.0) or 0.0))
+        / 100.0
     )
     scores["pre_rank_cap_selection_score"] = clamp(adjusted)
     adjusted, rank_cap, rank_cap_reasons = apply_rank_quality_caps_to_score(adjusted, row, params)
+    if (
+        params.rank_quality_cap_veto_enabled
+        and rank_cap is not None
+        and rank_cap <= params.rank_quality_cap_veto_threshold
+        and set(reason_tuple(rank_cap_reasons)).intersection(params.rank_quality_cap_veto_reasons)
+    ):
+        scores["rank_quality_cap"] = rank_cap
+        scores["rank_quality_cap_flag"] = 1.0
+        scores["rank_quality_cap_reasons"] = rank_cap_reasons
+        scores["rank_quality_cap_vetoed"] = 1.0
+        return None, scores
     scores["rank_quality_cap"] = rank_cap if rank_cap is not None else 0.0
     scores["rank_quality_cap_flag"] = 1.0 if rank_cap_reasons else 0.0
     scores["rank_quality_cap_reasons"] = rank_cap_reasons
+    scores["rank_quality_cap_vetoed"] = 0.0
     return clamp(adjusted), scores
 
 
@@ -3367,11 +3603,18 @@ def selected_ticker_diagnostic_record(
         "leverage_score": row.get("leverage_score", ""),
         "leverage_fragility_score": row.get("diag_leverage_fragility_score", ""),
         "leverage_fragility_flag": row.get("diag_leverage_fragility_flag", ""),
+        "mature_defensive_score": row.get("diag_mature_defensive_score", ""),
+        "mature_defensive_flag": row.get("diag_mature_defensive_flag", ""),
+        "expected_return_quality_score": row.get("diag_expected_return_quality_score", ""),
+        "expected_return_quality_flag": row.get("diag_expected_return_quality_flag", ""),
         "guidance_staleness_flag": row.get("diag_guidance_staleness_flag", ""),
         "no_forward_guidance_flag": row.get("diag_no_forward_guidance_flag", ""),
         "stale_guidance_flag": row.get("diag_stale_guidance_flag", ""),
         "no_guidance_negative_growth_flag": row.get("diag_no_guidance_negative_growth_flag", ""),
         "forward_guidance_recency_days": row.get("diag_forward_guidance_recency_days", ""),
+        "market_cap": row.get("market_cap", ""),
+        "forward_revenue_growth_pct": row.get("forward_revenue_growth_pct", ""),
+        "revenue_yoy_growth_pct": row.get("revenue_yoy_growth_pct", ""),
         "institutional_upside_capacity_score": row.get("institutional_upside_capacity_score", ""),
         "quality_adjusted_valuation_score": row.get("quality_adjusted_valuation_score", ""),
         "quality_adjusted_guidance_score": row.get("quality_adjusted_guidance_score", ""),

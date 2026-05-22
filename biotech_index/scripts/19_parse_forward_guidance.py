@@ -1999,13 +1999,19 @@ def replace_guidance(
         override_params: list[tuple[Any, ...]] = []
         for record in override_records:
             payload = safe_json_loads(record.source_payload)
+            unique_key = guidance_unique_key(record)
+            if not unique_key:
+                raise ValueError(
+                    f"Could not compute override unique_key for company_id={record.company_id} "
+                    f"accession={record.accession_nodash} metric={record.metric}"
+                )
             override_params.append(
                 (
                     record.asof_date,
                     record.company_id,
                     record.ticker,
                     record.company_name,
-                    record.accession_nodash,
+                    unique_key,
                     record.metric,
                     record.guidance_year,
                     record.period_label,

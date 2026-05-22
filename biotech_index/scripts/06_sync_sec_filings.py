@@ -178,6 +178,10 @@ def matches_form(form: str, allowed_forms: set[str]) -> bool:
     return False
 
 
+def escape_sql_like(raw: str) -> str:
+    return str(raw).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def read_scoring_tickers(path: Path) -> set[str]:
     return read_final_scoring_tickers(path)
 
@@ -407,8 +411,15 @@ def load_existing_documents(
     form_clause = ""
     form_params: list[Any] = []
     if allowed_forms:
-        form_clause = f"AND ({' OR '.join('f.form = ?' if not form.endswith('*') else 'f.form LIKE ?' for form in sorted(allowed_forms))})"
-        form_params = [form[:-1] + "%" if form.endswith("*") else form for form in sorted(allowed_forms)]
+        form_conditions: list[str] = []
+        for form in sorted(allowed_forms):
+            if form.endswith("*"):
+                form_conditions.append("f.form LIKE ? ESCAPE '\\'")
+                form_params.append(escape_sql_like(form[:-1]) + "%")
+            else:
+                form_conditions.append("f.form = ?")
+                form_params.append(form)
+        form_clause = f"AND ({' OR '.join(form_conditions)})"
     target_accessions: list[str] = []
     seen_accessions: set[str] = set()
     for company_chunk in chunked([int(company_id) for company_id in company_ids]):

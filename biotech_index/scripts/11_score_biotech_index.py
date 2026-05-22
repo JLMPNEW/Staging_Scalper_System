@@ -379,6 +379,19 @@ def production_policy_settings(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "event_hard_penalty": float(event_hard_penalty),
         "soft_weakness_penalty": float(soft_weakness_penalty),
+        "value_trap_penalty": float(cfg_get(config, "biotech_scoring.production_policy.value_trap_penalty", 0.0)),
+        "leverage_fragility_penalty": float(
+            cfg_get(config, "biotech_scoring.production_policy.leverage_fragility_penalty", 0.0)
+        ),
+        "guidance_staleness_penalty": float(
+            cfg_get(config, "biotech_scoring.production_policy.guidance_staleness_penalty", 0.0)
+        ),
+        "mature_defensive_penalty": float(
+            cfg_get(config, "biotech_scoring.production_policy.mature_defensive_penalty", 0.0)
+        ),
+        "expected_return_quality_bonus": float(
+            cfg_get(config, "biotech_scoring.production_policy.expected_return_quality_bonus", 0.0)
+        ),
         "event_hard_reasons": set(
             parse_string_list(
                 cfg_get(config, "biotech_scoring.production_policy.event_hard_reasons", EVENT_HARD_WEAKNESS_DEFAULT_REASONS),
@@ -397,6 +410,91 @@ def production_policy_settings(config: dict[str, Any]) -> dict[str, Any]:
         "high_risk_threshold": float(cfg_get(config, "biotech_scoring.production_policy.high_risk_threshold", 75.0)),
         "commercial_stage_revenue_min": float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000)),
     }
+
+
+def finite_float(raw: object) -> float | None:
+    value = to_float(raw, math.nan)
+    return value if math.isfinite(value) else None
+
+
+def growth_drag_score(*growth_values: object) -> float:
+    parsed = [value for value in (finite_float(raw) for raw in growth_values) if value is not None]
+    if not parsed:
+        return 50.0
+    best_growth = max(parsed)
+    if best_growth >= 0.20:
+        return 0.0
+    if best_growth >= 0.10:
+        return 25.0
+    if best_growth >= 0.0:
+        return 50.0
+    if best_growth >= -0.10:
+        return 75.0
+    return 100.0
+
+
+def market_cap_maturity_score(market_cap: object) -> float:
+    cap = finite_float(market_cap)
+    if cap is None or cap <= 0.0:
+        return 0.0
+    if cap >= 100_000_000_000:
+        return 100.0
+    if cap >= 50_000_000_000:
+        return 75.0
+    if cap >= 25_000_000_000:
+        return 55.0
+    if cap >= 10_000_000_000:
+        return 30.0
+    return 0.0
+
+
+def mature_defensive_score(commercial: dict[str, Any], forward_guidance: dict[str, Any]) -> float:
+    if to_float(commercial.get("commercial_stage_flag"), 0.0) <= 0.0:
+        return 0.0
+    size_score = market_cap_maturity_score(commercial.get("market_cap"))
+    growth_drag = growth_drag_score(
+        forward_guidance.get("forward_revenue_growth_pct"),
+        commercial.get("revenue_yoy_growth_pct"),
+    )
+    upside_drag = 100.0 - clamp(to_float(commercial.get("institutional_upside_capacity_score"), 50.0))
+    score = clamp(0.40 * size_score + 0.35 * growth_drag + 0.25 * upside_drag)
+    if growth_drag <= 25.0:
+        score *= 0.45
+    return clamp(score)
+
+
+def expected_return_quality_score(
+    *,
+    commercial: dict[str, Any],
+    forward_guidance: dict[str, Any],
+    momentum: float,
+    risk: float,
+    mature_defensive: float,
+) -> float:
+    value_trap = clamp(to_float(commercial.get("value_trap_score"), 0.0))
+    score = (
+        0.24
+        * clamp(
+            to_float(
+                forward_guidance.get("quality_adjusted_guidance_score"),
+                to_float(forward_guidance.get("guidance_score"), 35.0),
+            )
+        )
+        + 0.20 * clamp(to_float(commercial.get("institutional_upside_capacity_score"), 50.0))
+        + 0.16 * clamp(to_float(commercial.get("commercial_value_score"), 35.0))
+        + 0.14 * clamp(momentum)
+        + 0.12
+        * clamp(
+            to_float(
+                commercial.get("quality_adjusted_valuation_score"),
+                to_float(commercial.get("valuation_score"), 50.0),
+            )
+        )
+        + 0.14 * (100.0 - clamp(risk))
+        - 0.08 * value_trap
+        - 0.05 * mature_defensive
+    )
+    return clamp(score)
 
 
 def commercial_risk_overlay_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -469,6 +567,21 @@ def rank_quality_cap_settings(config: dict[str, Any]) -> dict[str, Any]:
         "cheap_low_growth_revenue_yoy_max": float(raw.get("cheap_low_growth_revenue_yoy_max", 0.10)),
         "cheap_low_growth_guidance_max_score": float(raw.get("cheap_low_growth_guidance_max_score", 60.0)),
         "cheap_low_growth_cap": float(raw.get("cheap_low_growth_cap", 60.0)),
+        "rank_cap_veto_enabled": as_bool(raw.get("rank_cap_veto_enabled", True), True),
+        "rank_cap_veto_threshold": float(raw.get("rank_cap_veto_threshold", 49.0)),
+        "rank_cap_veto_reasons": set(
+            parse_string_list(
+                raw.get(
+                    "rank_cap_veto_reasons",
+                    [
+                        "commercial_business_shock_cap",
+                        "severe_commercial_deterioration_cap",
+                        "no_guidance_negative_growth_cap",
+                        "unprofitable_value_mismatch_cap",
+                    ],
+                )
+            )
+        ),
         "use_quality_adjusted_valuation_component": as_bool(
             cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True),
             True,
@@ -479,9 +592,17 @@ def rank_quality_cap_settings(config: dict[str, Any]) -> dict[str, Any]:
 def guidance_quality_flags(commercial: dict[str, Any], forward_guidance: dict[str, Any]) -> dict[str, float]:
     latest_guidance = str(forward_guidance.get("latest_guidance_filing_date") or "").strip()
     recency_days = to_float(forward_guidance.get("guidance_recency_days"), math.nan)
+    recency_penalty = to_float(forward_guidance.get("guidance_recency_penalty"), 0.0) or 0.0
     revenue_yoy = to_float(commercial.get("revenue_yoy_growth_pct"), math.nan)
     commercial_stage = bool(to_float(commercial.get("commercial_stage_flag"), 0.0))
     no_guidance = 1.0 if not latest_guidance else 0.0
+    guidance_staleness = (
+        1.0
+        if no_guidance > 0.0
+        or recency_penalty > 0.0
+        or (math.isfinite(recency_days) and recency_days > 240.0)
+        else 0.0
+    )
     stale_guidance = 1.0 if math.isfinite(recency_days) and recency_days > 365.0 else 0.0
     no_guidance_negative_growth = (
         1.0
@@ -493,6 +614,7 @@ def guidance_quality_flags(commercial: dict[str, Any], forward_guidance: dict[st
     )
     return {
         "no_forward_guidance_flag": no_guidance,
+        "guidance_staleness_flag": guidance_staleness,
         "guidance_stale_flag": stale_guidance,
         "no_guidance_negative_growth_flag": no_guidance_negative_growth,
     }
@@ -682,7 +804,8 @@ def apply_production_selection_policy(
     event_reasons: list[str],
     soft_reasons: list[str],
     settings: dict[str, Any],
-) -> tuple[float, float, float]:
+    diagnostics: dict[str, float] | None = None,
+) -> tuple[float, float, float, float, float]:
     known_policies = {
         "raw_legacy_score",
         "hard_weakness_veto",
@@ -690,16 +813,60 @@ def apply_production_selection_policy(
         "investable_core_risk_cap",
         "core_veto_event_drag",
         "core_veto_event_soft_drag",
+        "core_veto_event_drag_quality_guardrail",
+        "core_veto_event_soft_drag_quality_guardrail",
+        "core_veto_event_drag_business_shock_strict",
+        "core_veto_event_drag_expected_return_tilt",
+        "core_veto_event_drag_mature_defensive_guard",
     }
     if selection_policy not in known_policies:
         raise ValueError(f"Unknown biotech_scoring.production_baseline.selection_policy: {selection_policy!r}")
     event_penalty = 0.0
     soft_penalty = 0.0
-    if selection_policy in {"core_veto_event_drag", "core_veto_event_soft_drag"} and event_reasons:
+    if selection_policy.startswith("core_veto_event") and event_reasons:
         event_penalty = float(settings.get("event_hard_penalty") or 0.0)
-    if selection_policy == "core_veto_event_soft_drag" and soft_reasons:
+    if selection_policy in {"core_veto_event_soft_drag", "core_veto_event_soft_drag_quality_guardrail"} and soft_reasons:
         soft_penalty = float(settings.get("soft_weakness_penalty") or 0.0)
-    return clamp(raw_opportunity - event_penalty - soft_penalty), event_penalty, soft_penalty
+    diagnostics = diagnostics or {}
+    quality_penalty = 0.0
+    quality_bonus = 0.0
+    if selection_policy in {
+        "core_veto_event_drag_quality_guardrail",
+        "core_veto_event_soft_drag_quality_guardrail",
+        "core_veto_event_drag_business_shock_strict",
+        "core_veto_event_drag_expected_return_tilt",
+        "core_veto_event_drag_mature_defensive_guard",
+    }:
+        quality_penalty += (
+            float(settings.get("value_trap_penalty") or 0.0)
+            * clamp(diagnostics.get("value_trap_score", 0.0))
+            / 100.0
+        )
+        quality_penalty += (
+            float(settings.get("leverage_fragility_penalty") or 0.0)
+            * clamp(diagnostics.get("leverage_fragility_score", 0.0))
+            / 100.0
+        )
+        quality_penalty += float(settings.get("guidance_staleness_penalty") or 0.0) * (
+            1.0 if diagnostics.get("guidance_staleness_flag", 0.0) > 0.0 else 0.0
+        )
+        quality_penalty += (
+            float(settings.get("mature_defensive_penalty") or 0.0)
+            * clamp(diagnostics.get("mature_defensive_score", 0.0))
+            / 100.0
+        )
+        quality_bonus += (
+            float(settings.get("expected_return_quality_bonus") or 0.0)
+            * clamp(diagnostics.get("expected_return_quality_score", 0.0))
+            / 100.0
+        )
+    return (
+        clamp(raw_opportunity - event_penalty - soft_penalty - quality_penalty + quality_bonus),
+        event_penalty,
+        soft_penalty,
+        quality_penalty,
+        quality_bonus,
+    )
 
 
 def latest_feature_date(conn: sqlite3.Connection) -> str:
@@ -1011,12 +1178,28 @@ def score_rows(
         )
         leverage_score = clamp(to_float(commercial.get("leverage_score"), 50.0))
         value_trap_score = clamp(to_float(commercial.get("value_trap_score"), 0.0))
+        mature_defensive = mature_defensive_score(commercial, forward_guidance)
         quality_adjusted_valuation_score = clamp(to_float(commercial.get("quality_adjusted_valuation_score"), valuation_score))
         quality_forward_valuation_score = clamp(
             to_float(forward_guidance.get("quality_forward_valuation_score"), forward_guidance.get("forward_valuation_score"))
         )
         quality_adjusted_guidance_score = clamp(to_float(forward_guidance.get("quality_adjusted_guidance_score"), forward_guidance_score))
         guidance_recency_penalty = clamp(to_float(forward_guidance.get("guidance_recency_penalty"), 0.0), 0.0, 100.0)
+        guidance_flags_preview = guidance_quality_flags(commercial, forward_guidance)
+        expected_return_quality = expected_return_quality_score(
+            commercial=commercial,
+            forward_guidance=forward_guidance,
+            momentum=momentum,
+            risk=risk,
+            mature_defensive=mature_defensive,
+        )
+        policy_diagnostics = {
+            "value_trap_score": value_trap_score,
+            "leverage_fragility_score": clamp(100.0 - leverage_score),
+            "guidance_staleness_flag": guidance_flags_preview["guidance_staleness_flag"],
+            "mature_defensive_score": mature_defensive,
+            "expected_return_quality_score": expected_return_quality,
+        }
         valuation_component_score = (
             quality_adjusted_valuation_score
             if as_bool(cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True), True)
@@ -1070,12 +1253,13 @@ def score_rows(
             risk=risk,
             settings=policy_settings,
         )
-        opportunity, event_penalty, soft_penalty = apply_production_selection_policy(
+        opportunity, event_penalty, soft_penalty, quality_penalty, quality_bonus = apply_production_selection_policy(
             raw_opportunity,
             selection_policy=selection_policy,
             event_reasons=event_reasons,
             soft_reasons=soft_reasons,
             settings=policy_settings,
+            diagnostics=policy_diagnostics,
         )
         commercial_overlay_penalty = commercial_risk_policy_penalty(commercial_risk, commercial_risk_settings)
         opportunity = clamp(opportunity - commercial_overlay_penalty)
@@ -1087,6 +1271,18 @@ def score_rows(
             commercial_risk=commercial_risk,
             settings=rank_cap_settings,
         )
+        rank_cap_reason_set = set(rank_quality_cap_reasons)
+        rank_cap_vetoed = (
+            as_bool(rank_cap_settings.get("rank_cap_veto_enabled", True), True)
+            and rank_quality_cap is not None
+            and rank_quality_cap <= float(rank_cap_settings.get("rank_cap_veto_threshold", 49.0))
+            and bool(rank_cap_reason_set.intersection(rank_cap_settings.get("rank_cap_veto_reasons") or set()))
+        )
+        rank_quality_cap_veto_reasons = sorted(
+            rank_cap_reason_set.intersection(rank_cap_settings.get("rank_cap_veto_reasons") or set())
+        )
+        if rank_cap_vetoed:
+            opportunity = 0.0
         selection_gate = tier1_selection_gate_score(opportunity, risk)
         core_veto_flag = 1.0 if core_veto_reasons else 0.0
         rank_demoted_by_core_veto = bool(apply_core_veto_to_rank and core_veto_reasons)
@@ -1181,11 +1377,18 @@ def score_rows(
                 "policy_adjusted_opportunity_score": round(opportunity, 4),
                 "production_policy_event_hard_penalty": round(event_penalty, 4),
                 "production_policy_soft_weakness_penalty": round(soft_penalty, 4),
+                "production_policy_quality_penalty": round(quality_penalty, 4),
+                "production_policy_quality_bonus": round(quality_bonus, 4),
                 "commercial_risk_overlay_penalty": round(commercial_overlay_penalty, 4),
                 "pre_rank_cap_opportunity_score": round(pre_rank_cap_opportunity, 4),
                 "rank_quality_cap": rank_quality_cap if rank_quality_cap is not None else "",
                 "rank_quality_cap_reasons": rank_quality_cap_reasons,
-                "production_policy_total_penalty": round(event_penalty + soft_penalty + commercial_overlay_penalty, 4),
+                "rank_quality_cap_vetoed": 1.0 if rank_cap_vetoed else 0.0,
+                "rank_quality_cap_veto_reasons": rank_quality_cap_veto_reasons,
+                "production_policy_total_penalty": round(
+                    event_penalty + soft_penalty + quality_penalty + commercial_overlay_penalty - quality_bonus,
+                    4,
+                ),
                 "production_policy_event_hard_reasons": event_reasons,
                 "production_policy_soft_weakness_reasons": soft_reasons,
                 "commercial_risk_overlay_score": commercial_risk["commercial_risk_overlay_score"],
@@ -1220,6 +1423,9 @@ def score_rows(
                 "institutional_upside_capacity_score": round(institutional_upside_capacity_score, 4),
                 "leverage_score": round(leverage_score, 4),
                 "value_trap_score": round(value_trap_score, 4),
+                "leverage_fragility_score": round(policy_diagnostics["leverage_fragility_score"], 4),
+                "mature_defensive_score": round(mature_defensive, 4),
+                "expected_return_quality_score": round(expected_return_quality, 4),
                 "quality_forward_valuation_score": round(quality_forward_valuation_score, 4),
                 "quality_adjusted_guidance_score": round(quality_adjusted_guidance_score, 4),
                 "forward_guidance_component_score": round(forward_guidance_component_score, 4),
@@ -1227,6 +1433,7 @@ def score_rows(
                 "guidance_quality_adjustment_delta": round(guidance_quality_adjustment_delta, 4),
                 "guidance_recency_penalty": round(guidance_recency_penalty, 4),
                 "no_forward_guidance_flag": guidance_flags["no_forward_guidance_flag"],
+                "guidance_staleness_flag": guidance_flags["guidance_staleness_flag"],
                 "guidance_stale_flag": guidance_flags["guidance_stale_flag"],
                 "no_guidance_negative_growth_flag": guidance_flags["no_guidance_negative_growth_flag"],
             },
@@ -1242,6 +1449,13 @@ def score_rows(
                 "selection_policy": selection_policy,
                 "event_hard_penalty": policy_settings["event_hard_penalty"],
                 "soft_weakness_penalty": policy_settings["soft_weakness_penalty"],
+                "value_trap_penalty": policy_settings["value_trap_penalty"],
+                "leverage_fragility_penalty": policy_settings["leverage_fragility_penalty"],
+                "guidance_staleness_penalty": policy_settings["guidance_staleness_penalty"],
+                "mature_defensive_penalty": policy_settings["mature_defensive_penalty"],
+                "expected_return_quality_bonus": policy_settings["expected_return_quality_bonus"],
+                "quality_penalty": round(quality_penalty, 4),
+                "quality_bonus": round(quality_bonus, 4),
                 "event_hard_reasons": event_reasons,
                 "soft_weakness_reasons": soft_reasons,
                 "configured_event_hard_reasons": sorted(policy_settings["event_hard_reasons"]),
@@ -1277,6 +1491,8 @@ def score_rows(
                 "soft_weakness_reasons": "|".join(soft_reasons),
                 "commercial_risk_overlay_reasons": commercial_risk["commercial_risk_overlay_reasons"],
                 "rank_quality_cap_reasons": "|".join(rank_quality_cap_reasons),
+                "rank_quality_cap_vetoed": 1.0 if rank_cap_vetoed else 0.0,
+                "rank_quality_cap_veto_reasons": "|".join(rank_quality_cap_veto_reasons),
             },
             "manual": payload.get("manual", {}),
         }
@@ -1299,6 +1515,9 @@ def score_rows(
                 "institutional_upside_capacity_score": round(institutional_upside_capacity_score, 4),
                 "leverage_score": round(leverage_score, 4),
                 "value_trap_score": round(value_trap_score, 4),
+                "leverage_fragility_score": round(policy_diagnostics["leverage_fragility_score"], 4),
+                "mature_defensive_score": round(mature_defensive, 4),
+                "expected_return_quality_score": round(expected_return_quality, 4),
                 "quality_adjusted_valuation_score": round(quality_adjusted_valuation_score, 4),
                 "used_quality_adjusted_valuation": used_quality_adjusted_valuation,
                 "valuation_quality_adjustment_delta": round(valuation_quality_adjustment_delta, 4),
@@ -1328,9 +1547,13 @@ def score_rows(
                 "commercial_risk_overlay_flag": commercial_risk["commercial_risk_overlay_flag"],
                 "commercial_risk_overlay_reasons": commercial_risk["commercial_risk_overlay_reasons"],
                 "commercial_risk_overlay_penalty": round(commercial_overlay_penalty, 4),
+                "production_policy_quality_penalty": round(quality_penalty, 4),
+                "production_policy_quality_bonus": round(quality_bonus, 4),
                 "pre_rank_cap_opportunity_score": round(pre_rank_cap_opportunity, 4),
                 "rank_quality_cap": rank_quality_cap if rank_quality_cap is not None else None,
                 "rank_quality_cap_reasons": "|".join(rank_quality_cap_reasons),
+                "rank_quality_cap_vetoed": 1.0 if rank_cap_vetoed else 0.0,
+                "rank_quality_cap_veto_reasons": "|".join(rank_quality_cap_veto_reasons),
                 "commercial_deterioration_score": commercial_risk["commercial_deterioration_score"],
                 "commercial_deterioration_flag": commercial_risk["commercial_deterioration_flag"],
                 "commercial_deterioration_reasons": commercial_risk["commercial_deterioration_reasons"],
@@ -1344,6 +1567,7 @@ def score_rows(
                 "commercial_business_shock_flag": commercial_risk["commercial_business_shock_flag"],
                 "commercial_business_shock_reasons": commercial_risk["commercial_business_shock_reasons"],
                 "no_forward_guidance_flag": guidance_flags["no_forward_guidance_flag"],
+                "guidance_staleness_flag": guidance_flags["guidance_staleness_flag"],
                 "guidance_stale_flag": guidance_flags["guidance_stale_flag"],
                 "no_guidance_negative_growth_flag": guidance_flags["no_guidance_negative_growth_flag"],
                 "bucket": score_bucket(
@@ -1439,6 +1663,9 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "institutional_upside_capacity_score",
         "leverage_score",
         "value_trap_score",
+        "leverage_fragility_score",
+        "mature_defensive_score",
+        "expected_return_quality_score",
         "quality_adjusted_valuation_score",
         "used_quality_adjusted_valuation",
         "valuation_quality_adjustment_delta",
@@ -1468,9 +1695,13 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "commercial_risk_overlay_flag",
         "commercial_risk_overlay_reasons",
         "commercial_risk_overlay_penalty",
+        "production_policy_quality_penalty",
+        "production_policy_quality_bonus",
         "pre_rank_cap_opportunity_score",
         "rank_quality_cap",
         "rank_quality_cap_reasons",
+        "rank_quality_cap_vetoed",
+        "rank_quality_cap_veto_reasons",
         "commercial_deterioration_score",
         "commercial_deterioration_flag",
         "commercial_deterioration_reasons",
@@ -1484,6 +1715,7 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "commercial_business_shock_flag",
         "commercial_business_shock_reasons",
         "no_forward_guidance_flag",
+        "guidance_staleness_flag",
         "guidance_stale_flag",
         "no_guidance_negative_growth_flag",
         "rank",
@@ -1524,6 +1756,7 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "primary_trial_title",
         "commercial_risk_overlay_reasons",
         "rank_quality_cap_reasons",
+        "rank_quality_cap_veto_reasons",
         "commercial_deterioration_reasons",
         "valuation_growth_mismatch_reasons",
         "transient_revenue_anchor_reasons",
@@ -1587,9 +1820,13 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "commercial_risk_overlay_flag",
         "commercial_risk_overlay_reasons",
         "commercial_risk_overlay_penalty",
+        "production_policy_quality_penalty",
+        "production_policy_quality_bonus",
         "pre_rank_cap_opportunity_score",
         "rank_quality_cap",
         "rank_quality_cap_reasons",
+        "rank_quality_cap_vetoed",
+        "rank_quality_cap_veto_reasons",
         "commercial_deterioration_score",
         "commercial_deterioration_flag",
         "commercial_deterioration_reasons",
@@ -1603,6 +1840,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "commercial_business_shock_flag",
         "commercial_business_shock_reasons",
         "no_forward_guidance_flag",
+        "guidance_staleness_flag",
         "guidance_stale_flag",
         "no_guidance_negative_growth_flag",
         "commercial_value_score",
@@ -1612,6 +1850,9 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "institutional_upside_capacity_score",
         "leverage_score",
         "value_trap_score",
+        "leverage_fragility_score",
+        "mature_defensive_score",
+        "expected_return_quality_score",
         "quality_adjusted_valuation_score",
         "used_quality_adjusted_valuation",
         "valuation_quality_adjustment_delta",

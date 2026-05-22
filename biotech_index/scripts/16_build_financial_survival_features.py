@@ -562,7 +562,7 @@ def compute_survival_row(
     if not going_status:
         going_status = db_going_status or csv_going_status
     if "recent_nt_filing_count_2y" not in screen_row:
-        missing.append("late_filing_count")
+        missing.append("late_filing_count_12m")
     late_filing_count = to_int(screen_row.get("recent_nt_filing_count_2y"), 0)
 
     data_quality = "high"

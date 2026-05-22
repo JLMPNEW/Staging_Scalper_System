@@ -18,6 +18,14 @@ XERS,Xeris Biopharma,manual_sponsor_alias,0.95,Shortened issuer/sponsor alias
 MRNA,ModernaTX Inc,manual_sponsor_alias,0.95,CTGov sponsor alias for Moderna trials
 MRNA,ModernaTX,manual_sponsor_alias,0.95,CTGov sponsor alias for Moderna trials
 PCRX,Pacira Pharmaceuticals Inc,manual_sponsor_alias,0.95,Historical/operating CTGov sponsor alias
+BBIO,BridgeBio Pharma,manual_sponsor_alias,0.95,Canonical sponsor/company alias for user-requested activation
+BBIO,BridgeBio Pharmaceuticals,manual_sponsor_alias,0.95,CTGov sponsor alias for BridgeBio trials
+ARWR,Arrowhead Pharmaceuticals,manual_sponsor_alias,0.95,Canonical sponsor/company alias for final-universe inclusion
+ARWR,Arrowhead Pharmaceuticals Inc,manual_sponsor_alias,0.95,CTGov sponsor alias for Arrowhead trials
+NBIX,Neurocrine Biosciences,manual_sponsor_alias,0.95,Canonical sponsor/company alias for user-requested addition
+NBIX,Neurocrine Biosciences Inc,manual_sponsor_alias,0.95,CTGov sponsor alias for Neurocrine trials
+ASND,Ascendis Pharma,manual_sponsor_alias,0.95,Canonical sponsor/company alias for user-requested addition
+ASND,Ascendis Pharma A/S,manual_sponsor_alias,0.95,CTGov sponsor alias for Ascendis trials
 PCRX,Pacira BioSciences Inc,manual_sponsor_alias,0.95,CTGov sponsor alias
 BCYC,BicycleTx Limited,manual_sponsor_alias,0.95,CTGov sponsor alias for Bicycle Therapeutics trials
 BCYC,Bicycle Therapeutics Ltd,manual_sponsor_alias,0.95,CTGov sponsor alias

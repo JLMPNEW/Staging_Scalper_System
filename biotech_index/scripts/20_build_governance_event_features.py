@@ -230,10 +230,8 @@ def normalize_cik(raw: object) -> str:
     text = re.sub(r"\D", "", str(raw or ""))
     if not text:
         return ""
-    try:
-        return str(int(text))
-    except ValueError:
-        return text.lstrip("0")
+    normalized = text.lstrip("0") or "0"
+    return normalized.zfill(10) if len(normalized) <= 10 else normalized
 
 
 def read_scoring_tickers(path: Path) -> set[str]:

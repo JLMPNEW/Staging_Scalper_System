@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import json
 import logging
 import math
@@ -34,6 +35,10 @@ TOP_SCORE_FIELDS = [
     "company_name",
     "bucket",
     "opportunity_score",
+    "action_tier",
+    "action_tier_reason",
+    "allocation_candidate_flag",
+    "research_watchlist_flag",
     "investment_score",
     "investment_profile",
     "clinical_opportunity_score",
@@ -49,10 +54,26 @@ TOP_SCORE_FIELDS = [
     "clinical_risk_drag",
     "investment_risk_drag",
     "effective_total_risk_drag",
+    "production_policy_quality_penalty",
+    "production_policy_quality_bonus",
+    "rank_quality_cap",
+    "rank_quality_cap_reasons",
+    "rank_quality_cap_vetoed",
+    "rank_quality_cap_veto_reasons",
     "commercial_value_score",
     "forward_guidance_score",
     "valuation_score",
     "upside_capacity_score",
+    "institutional_upside_capacity_score",
+    "leverage_score",
+    "leverage_fragility_score",
+    "value_trap_score",
+    "mature_defensive_score",
+    "expected_return_quality_score",
+    "no_forward_guidance_flag",
+    "guidance_staleness_flag",
+    "guidance_stale_flag",
+    "no_guidance_negative_growth_flag",
     "catalyst_score",
     "credibility_score",
     "financial_quality_score",
@@ -98,6 +119,78 @@ TOP_SCORE_FIELDS = [
     "sec_negative_clinical_event_count",
     "industry",
     "industry_aggregate",
+]
+
+SHADOW_SCORE_FIELDS = [
+    "asof_date",
+    "rank",
+    "ticker",
+    "company_name",
+    "shadow_candidate_name",
+    "shadow_selection_policy",
+    "shadow_top_n",
+    "shadow_score",
+    "action_tier",
+    "action_tier_reason",
+    "allocation_candidate_flag",
+    "research_watchlist_flag",
+    "candidate_investment_score",
+    "candidate_pre_rank_cap_selection_score",
+    "candidate_clinical_opportunity_score",
+    "profile_name",
+    "commercial_value_score",
+    "forward_guidance_score",
+    "valuation_score",
+    "quality_adjusted_valuation_score",
+    "quality_adjusted_guidance_score",
+    "institutional_upside_capacity_score",
+    "value_trap_score",
+    "leverage_score",
+    "leverage_fragility_score",
+    "mature_defensive_score",
+    "expected_return_quality_score",
+    "rank_quality_cap",
+    "rank_quality_cap_flag",
+    "rank_quality_cap_reasons",
+    "rank_quality_cap_vetoed",
+    "risk_score_raw",
+    "momentum_score_raw",
+    "core_hard_weakness_reasons",
+    "event_hard_weakness_reasons",
+    "soft_weakness_reasons",
+    "commercial_business_shock_score",
+    "commercial_business_shock_reasons",
+    "no_forward_guidance_flag",
+    "guidance_staleness_flag",
+    "no_guidance_negative_growth_flag",
+]
+
+RANKING_DIAGNOSTIC_FIELDS = [
+    "asof_date",
+    "diagnostic_group",
+    "ticker",
+    "company_name",
+    "prod_rank",
+    "prod_score",
+    "prod_action_tier",
+    "shadow_rank",
+    "shadow_score",
+    "shadow_action_tier",
+    "score_gap_prod_minus_shadow",
+    "commercial_value_score",
+    "forward_guidance_score",
+    "quality_adjusted_guidance_score",
+    "quality_adjusted_valuation_score",
+    "institutional_upside_capacity_score",
+    "mature_defensive_score",
+    "expected_return_quality_score",
+    "risk_score",
+    "event_hard_reasons",
+    "rank_quality_cap",
+    "rank_quality_cap_reasons",
+    "rank_quality_cap_vetoed",
+    "production_policy_quality_penalty",
+    "production_policy_quality_bonus",
 ]
 
 
@@ -174,6 +267,68 @@ def to_float(raw: object, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default
+
+
+def normalized_ticker_list(raw: object, default: list[str] | None = None) -> list[str]:
+    if raw is None:
+        return list(default or [])
+    if isinstance(raw, str):
+        values = [part.strip() for part in raw.replace(";", ",").split(",")]
+    elif isinstance(raw, (list, tuple, set)):
+        values = [str(part).strip() for part in raw]
+    else:
+        values = [str(raw).strip()]
+    return [value.upper() for value in values if value.strip()]
+
+
+def action_tier_settings(config: dict[str, Any]) -> dict[str, float]:
+    settings = cfg_get(config, "biotech_reports.action_tiers", {}) or {}
+    if not isinstance(settings, dict):
+        settings = {}
+    return {
+        "allocation_rank_max": float(settings.get("allocation_rank_max", 10)),
+        "allocation_score_min": float(settings.get("allocation_score_min", 50.0)),
+        "research_rank_max": float(settings.get("research_rank_max", 20)),
+        "research_score_min": float(settings.get("research_score_min", 45.0)),
+    }
+
+
+def apply_action_tier(
+    row: dict[str, Any],
+    settings: dict[str, float],
+    *,
+    score_field: str,
+    rank_field: str = "rank",
+) -> dict[str, Any]:
+    out = dict(row)
+    rank = int(to_float(out.get(rank_field), 0.0))
+    score = to_float(out.get(score_field), 0.0)
+    allocation_rank_max = int(settings["allocation_rank_max"])
+    allocation_score_min = float(settings["allocation_score_min"])
+    research_rank_max = int(settings["research_rank_max"])
+    research_score_min = float(settings["research_score_min"])
+
+    if rank > 0 and rank <= allocation_rank_max and score >= allocation_score_min:
+        tier = "allocation_candidate"
+        reason = f"rank<={allocation_rank_max} and score>={allocation_score_min:g}"
+        allocation_flag = 1
+        research_flag = 0
+    elif score >= research_score_min and (rank <= 0 or rank <= research_rank_max):
+        tier = "research_watchlist"
+        reason = f"rank<={research_rank_max} and score>={research_score_min:g}"
+        allocation_flag = 0
+        research_flag = 1
+    else:
+        tier = "low_priority"
+        reason = f"score<{research_score_min:g} or rank>{research_rank_max}"
+        allocation_flag = 0
+        research_flag = 0
+
+    out["action_tier"] = tier
+    out["action_tier_reason"] = reason
+    out["allocation_candidate_flag"] = allocation_flag
+    out["research_watchlist_flag"] = research_flag
+    return out
 
 
 def latest_score_date(conn: sqlite3.Connection) -> str:
@@ -416,10 +571,29 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "clinical_risk_drag": row.get("clinical_risk_drag", score_components.get("clinical_risk_drag", "") if isinstance(score_components, dict) else ""),
         "investment_risk_drag": row.get("investment_risk_drag", score_components.get("investment_risk_drag", "") if isinstance(score_components, dict) else ""),
         "effective_total_risk_drag": score_components.get("effective_total_risk_drag", "") if isinstance(score_components, dict) else "",
+        "production_policy_quality_penalty": row.get("production_policy_quality_penalty", score_components.get("production_policy_quality_penalty", "") if isinstance(score_components, dict) else ""),
+        "production_policy_quality_bonus": row.get("production_policy_quality_bonus", score_components.get("production_policy_quality_bonus", "") if isinstance(score_components, dict) else ""),
+        "rank_quality_cap": row.get("rank_quality_cap", score_components.get("rank_quality_cap", "") if isinstance(score_components, dict) else ""),
+        "rank_quality_cap_reasons": row.get("rank_quality_cap_reasons", "|".join(str(reason) for reason in score_components.get("rank_quality_cap_reasons", [])) if isinstance(score_components, dict) and isinstance(score_components.get("rank_quality_cap_reasons"), list) else score_components.get("rank_quality_cap_reasons", "") if isinstance(score_components, dict) else ""),
+        "rank_quality_cap_vetoed": row.get("rank_quality_cap_vetoed", score_components.get("rank_quality_cap_vetoed", "") if isinstance(score_components, dict) else ""),
+        "rank_quality_cap_veto_reasons": row.get("rank_quality_cap_veto_reasons", "|".join(str(reason) for reason in score_components.get("rank_quality_cap_veto_reasons", [])) if isinstance(score_components, dict) and isinstance(score_components.get("rank_quality_cap_veto_reasons"), list) else score_components.get("rank_quality_cap_veto_reasons", "") if isinstance(score_components, dict) else ""),
+        "event_hard_reasons": row.get("event_hard_weakness_reasons", "|".join(str(reason) for reason in score_components.get("production_policy_event_hard_reasons", [])) if isinstance(score_components, dict) and isinstance(score_components.get("production_policy_event_hard_reasons"), list) else risk_flags.get("event_hard_weakness_reasons", "") if isinstance(risk_flags, dict) else ""),
         "commercial_value_score": row.get("commercial_value_score", commercial_value.get("commercial_value_score", "") if isinstance(commercial_value, dict) else ""),
         "forward_guidance_score": row.get("forward_guidance_score", score_components.get("forward_guidance_score", "") if isinstance(score_components, dict) else ""),
         "valuation_score": row.get("valuation_score", commercial_value.get("valuation_score", "") if isinstance(commercial_value, dict) else ""),
+        "quality_adjusted_valuation_score": row.get("quality_adjusted_valuation_score", commercial_value.get("quality_adjusted_valuation_score", "") if isinstance(commercial_value, dict) else ""),
+        "quality_adjusted_guidance_score": row.get("quality_adjusted_guidance_score", forward_guidance.get("quality_adjusted_guidance_score", score_components.get("quality_adjusted_guidance_score", "") if isinstance(score_components, dict) else "") if isinstance(forward_guidance, dict) else ""),
         "upside_capacity_score": row.get("upside_capacity_score", commercial_value.get("upside_capacity_score", "") if isinstance(commercial_value, dict) else ""),
+        "institutional_upside_capacity_score": row.get("institutional_upside_capacity_score", commercial_value.get("institutional_upside_capacity_score", "") if isinstance(commercial_value, dict) else ""),
+        "leverage_score": row.get("leverage_score", commercial_value.get("leverage_score", "") if isinstance(commercial_value, dict) else ""),
+        "leverage_fragility_score": row.get("leverage_fragility_score", score_components.get("leverage_fragility_score", "") if isinstance(score_components, dict) else ""),
+        "value_trap_score": row.get("value_trap_score", commercial_value.get("value_trap_score", "") if isinstance(commercial_value, dict) else ""),
+        "mature_defensive_score": row.get("mature_defensive_score", score_components.get("mature_defensive_score", "") if isinstance(score_components, dict) else ""),
+        "expected_return_quality_score": row.get("expected_return_quality_score", score_components.get("expected_return_quality_score", "") if isinstance(score_components, dict) else ""),
+        "no_forward_guidance_flag": row.get("no_forward_guidance_flag", score_components.get("no_forward_guidance_flag", "") if isinstance(score_components, dict) else ""),
+        "guidance_staleness_flag": row.get("guidance_staleness_flag", score_components.get("guidance_staleness_flag", "") if isinstance(score_components, dict) else ""),
+        "guidance_stale_flag": row.get("guidance_stale_flag", score_components.get("guidance_stale_flag", "") if isinstance(score_components, dict) else ""),
+        "no_guidance_negative_growth_flag": row.get("no_guidance_negative_growth_flag", score_components.get("no_guidance_negative_growth_flag", "") if isinstance(score_components, dict) else ""),
         "catalyst_score": row.get("catalyst_score", ""),
         "credibility_score": row.get("credibility_score", ""),
         "financial_quality_score": row.get("financial_quality_score", ""),
@@ -466,6 +640,171 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "industry": row.get("industry", ""),
         "industry_aggregate": row.get("industry_aggregate", ""),
     }
+
+
+def load_calibration_module() -> Any:
+    module_path = PACKAGE_ROOT / "scripts" / "28_calibrate_biotech_opportunity.py"
+    spec = importlib.util.spec_from_file_location("biotech_tier1_calibration_shadow", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load calibration module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def build_shadow_top_rows(
+    conn: sqlite3.Connection,
+    config: dict[str, Any],
+    asof_date: str,
+) -> list[dict[str, Any]]:
+    shadow = cfg_get(config, "biotech_scoring.production_baseline.shadow_research_pool", {}) or {}
+    if not isinstance(shadow, dict) or not shadow:
+        return []
+    candidate_name = str(shadow.get("candidate_name") or "").strip()
+    policy_name = str(shadow.get("selection_policy") or "").strip()
+    if not candidate_name or not policy_name:
+        LOGGER.warning("Shadow research pool configured without candidate_name or selection_policy; skipping shadow report.")
+        return []
+    top_n = int(float(shadow.get("top_n", 20)))
+    strict_feature_lag = str(shadow.get("strict_feature_lag", "false")).strip().lower() in {"1", "true", "yes", "on"}
+
+    calibration = load_calibration_module()
+    params = calibration.load_calibration_params(config)
+    specs = {spec.candidate_name: spec for spec in calibration.generate_weight_specs(config)}
+    policies = {policy.policy_name: policy for policy in calibration.generate_selection_policies(config)}
+    if candidate_name not in specs:
+        raise ValueError(f"Shadow research pool candidate not found in calibration specs: {candidate_name}")
+    if policy_name not in policies:
+        raise ValueError(f"Shadow research pool policy not found in calibration policies: {policy_name}")
+
+    observations = calibration.load_observations(
+        conn,
+        [asof_date],
+        set(),
+        config,
+        min_addv20=0.0,
+        strict_feature_lag=strict_feature_lag,
+    )
+    ret_key = "_shadow_report_return"
+    for row in observations:
+        row[ret_key] = 0.0
+    selected = calibration.select_top_rows(
+        observations,
+        specs[candidate_name],
+        policies[policy_name],
+        ret_key=ret_key,
+        top_n=top_n,
+        params=params,
+    )
+    out: list[dict[str, Any]] = []
+    tier_settings = action_tier_settings(config)
+    for rank, row in enumerate(selected, start=1):
+        shadow_row = {
+            "asof_date": asof_date,
+            "rank": rank,
+            "ticker": row.get("ticker", ""),
+            "company_name": row.get("company_name", ""),
+            "shadow_candidate_name": candidate_name,
+            "shadow_selection_policy": policy_name,
+            "shadow_top_n": top_n,
+            "shadow_score": round(to_float(row.get("candidate_selection_score")), 4),
+            "candidate_investment_score": row.get("candidate_investment_score", ""),
+            "candidate_pre_rank_cap_selection_score": row.get("candidate_pre_rank_cap_selection_score", ""),
+            "candidate_clinical_opportunity_score": row.get("candidate_clinical_opportunity_score", ""),
+            "profile_name": row.get("profile_name", ""),
+            "commercial_value_score": row.get("commercial_value_score", ""),
+            "forward_guidance_score": row.get("forward_guidance_score", ""),
+            "valuation_score": row.get("valuation_score", ""),
+            "quality_adjusted_valuation_score": row.get("quality_adjusted_valuation_score", ""),
+            "quality_adjusted_guidance_score": row.get("quality_adjusted_guidance_score", ""),
+            "institutional_upside_capacity_score": row.get("institutional_upside_capacity_score", ""),
+            "value_trap_score": row.get("diag_value_trap_score", row.get("value_trap_score", "")),
+            "leverage_score": row.get("leverage_score", ""),
+            "leverage_fragility_score": row.get("diag_leverage_fragility_score", ""),
+            "mature_defensive_score": row.get("diag_mature_defensive_score", ""),
+            "expected_return_quality_score": row.get("diag_expected_return_quality_score", ""),
+            "rank_quality_cap": row.get("rank_quality_cap", ""),
+            "rank_quality_cap_flag": row.get("rank_quality_cap_flag", ""),
+            "rank_quality_cap_reasons": row.get("rank_quality_cap_reasons", ""),
+            "rank_quality_cap_vetoed": row.get("rank_quality_cap_vetoed", ""),
+            "risk_score_raw": row.get("risk_score_raw", ""),
+            "momentum_score_raw": row.get("momentum_score_raw", ""),
+            "core_hard_weakness_reasons": row.get("diag_core_hard_weakness_reasons", ""),
+            "event_hard_weakness_reasons": row.get("diag_event_hard_weakness_reasons", ""),
+            "soft_weakness_reasons": row.get("diag_soft_weakness_reasons", ""),
+            "commercial_business_shock_score": row.get("diag_commercial_business_shock_score", ""),
+            "commercial_business_shock_reasons": row.get("diag_commercial_business_shock_reasons", ""),
+            "no_forward_guidance_flag": row.get("diag_no_forward_guidance_flag", ""),
+            "guidance_staleness_flag": row.get("diag_guidance_staleness_flag", ""),
+            "no_guidance_negative_growth_flag": row.get("diag_no_guidance_negative_growth_flag", ""),
+        }
+        out.append(apply_action_tier(shadow_row, tier_settings, score_field="shadow_score"))
+    return out
+
+
+def build_ranking_order_diagnostics(
+    *,
+    config: dict[str, Any],
+    asof_date: str,
+    production_rows_by_ticker: dict[str, dict[str, Any]],
+    shadow_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    diagnostic_config = cfg_get(config, "biotech_reports.ranking_diagnostics", {}) or {}
+    if not isinstance(diagnostic_config, dict):
+        diagnostic_config = {}
+    over_ranked = normalized_ticker_list(
+        diagnostic_config.get("over_ranked_tickers"),
+        default=["BMRN", "BIIB", "TECH", "EW", "MDT"],
+    )
+    under_ranked = normalized_ticker_list(
+        diagnostic_config.get("under_ranked_tickers"),
+        default=["EXEL", "PODD", "TARS", "UTHR", "TMDX", "COLL"],
+    )
+    shadow_by_ticker = {str(row.get("ticker") or "").upper(): row for row in shadow_rows}
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for group_name, tickers in [("potentially_over_ranked", over_ranked), ("potentially_under_ranked", under_ranked)]:
+        for ticker in tickers:
+            key = (group_name, ticker)
+            if key in seen:
+                continue
+            seen.add(key)
+            prod = production_rows_by_ticker.get(ticker, {})
+            shadow = shadow_by_ticker.get(ticker, {})
+            prod_score = to_float(prod.get("opportunity_score"), math.nan)
+            shadow_score = to_float(shadow.get("shadow_score"), math.nan)
+            score_gap = round(prod_score - shadow_score, 4) if math.isfinite(prod_score) and math.isfinite(shadow_score) else ""
+            rows.append(
+                {
+                    "asof_date": asof_date,
+                    "diagnostic_group": group_name,
+                    "ticker": ticker,
+                    "company_name": prod.get("company_name", shadow.get("company_name", "")),
+                    "prod_rank": prod.get("rank", ""),
+                    "prod_score": prod.get("opportunity_score", ""),
+                    "prod_action_tier": prod.get("action_tier", ""),
+                    "shadow_rank": shadow.get("rank", ""),
+                    "shadow_score": shadow.get("shadow_score", ""),
+                    "shadow_action_tier": shadow.get("action_tier", ""),
+                    "score_gap_prod_minus_shadow": score_gap,
+                    "commercial_value_score": prod.get("commercial_value_score", shadow.get("commercial_value_score", "")),
+                    "forward_guidance_score": prod.get("forward_guidance_score", shadow.get("forward_guidance_score", "")),
+                    "quality_adjusted_guidance_score": prod.get("quality_adjusted_guidance_score", shadow.get("quality_adjusted_guidance_score", "")),
+                    "quality_adjusted_valuation_score": prod.get("quality_adjusted_valuation_score", shadow.get("quality_adjusted_valuation_score", "")),
+                    "institutional_upside_capacity_score": prod.get("institutional_upside_capacity_score", shadow.get("institutional_upside_capacity_score", "")),
+                    "mature_defensive_score": prod.get("mature_defensive_score", shadow.get("mature_defensive_score", "")),
+                    "expected_return_quality_score": prod.get("expected_return_quality_score", shadow.get("expected_return_quality_score", "")),
+                    "risk_score": prod.get("risk_score", shadow.get("risk_score_raw", "")),
+                    "event_hard_reasons": prod.get("event_hard_reasons", shadow.get("event_hard_weakness_reasons", "")),
+                    "rank_quality_cap": prod.get("rank_quality_cap", shadow.get("rank_quality_cap", "")),
+                    "rank_quality_cap_reasons": prod.get("rank_quality_cap_reasons", shadow.get("rank_quality_cap_reasons", "")),
+                    "rank_quality_cap_vetoed": prod.get("rank_quality_cap_vetoed", shadow.get("rank_quality_cap_vetoed", "")),
+                    "production_policy_quality_penalty": prod.get("production_policy_quality_penalty", ""),
+                    "production_policy_quality_bonus": prod.get("production_policy_quality_bonus", ""),
+                }
+            )
+    return rows
 
 
 def validate_top_score_fields(sample_row: dict[str, Any]) -> None:
@@ -837,6 +1176,7 @@ def main() -> None:
     bucket_transition_enabled = str(
         cfg_get(config, "biotech_reports.alert_config.bucket_transition_enabled", True)
     ).strip().lower() not in {"0", "false", "no", "off"}
+    tier_settings = action_tier_settings(config)
     index_weights = cfg_get(config, "biotech_reports.index_weights", {}) or {}
     configured_ctgov_evidence_csv = resolve_path(cfg_get(config, "biotech_features.ctgov_evidence_csv", "../output/biotech_index_reports/ctgov_trial_evidence.csv"), base_dir=base_dir)
     trial_status_overrides_csv = resolve_optional_path(cfg_get(config, "ctgov_audit.trial_status_overrides_csv"), base_dir=base_dir)
@@ -854,6 +1194,12 @@ def main() -> None:
             output_dir = dated_output_dir(base_output_dir, asof_date)
             index_csv = output_dir / str(cfg_get(config, "biotech_reports.index_latest_csv", "biotech_index_latest.csv"))
             top_csv = output_dir / str(cfg_get(config, "biotech_reports.top_candidates_csv", "biotech_top_candidates.csv"))
+            shadow_top_csv = output_dir / str(
+                cfg_get(config, "biotech_reports.shadow_top_candidates_csv", "biotech_shadow_top20_candidates.csv")
+            )
+            ranking_diag_csv = output_dir / str(
+                cfg_get(config, "biotech_reports.ranking_diagnostics_csv", "biotech_ranking_order_diagnostics.csv")
+            )
             alerts_csv = output_dir / str(cfg_get(config, "biotech_reports.alerts_csv", "biotech_alerts.csv"))
             evidence_json = output_dir / str(cfg_get(config, "biotech_reports.evidence_cards_json", "biotech_evidence_cards.json"))
             trial_validation_csv = output_dir / str(cfg_get(config, "biotech_reports.trial_validation_csv", "biotech_top_trial_validation.csv"))
@@ -865,7 +1211,18 @@ def main() -> None:
                 base_output_dir=base_output_dir,
                 asof_date=asof_date,
             )
-            assert_output_paths_writable([index_csv, top_csv, alerts_csv, evidence_json, trial_validation_csv, trial_validation_summary_csv])
+            assert_output_paths_writable(
+                [
+                    index_csv,
+                    top_csv,
+                    shadow_top_csv,
+                    ranking_diag_csv,
+                    alerts_csv,
+                    evidence_json,
+                    trial_validation_csv,
+                    trial_validation_summary_csv,
+                ]
+            )
             scores = load_scores(conn, asof_date)
             if not scores:
                 raise ValueError(f"No daily_scores rows found for asof_date={asof_date}")
@@ -874,9 +1231,23 @@ def main() -> None:
             previous = load_previous_scores(conn, prev_asof)
 
             summary = build_index_summary(scores, asof_date, top_n, weights=index_weights)
-            top_rows = [flatten_score_row(row) for row in scores[:top_n]]
+            flattened_rows = [
+                apply_action_tier(flatten_score_row(row), tier_settings, score_field="opportunity_score")
+                for row in scores
+            ]
+            top_rows = flattened_rows[:top_n]
             if top_rows:
                 validate_top_score_fields(top_rows[0])
+            shadow_top_rows = build_shadow_top_rows(conn, config, asof_date)
+            production_rows_by_ticker = {
+                str(row.get("ticker") or "").upper(): row for row in flattened_rows if str(row.get("ticker") or "").strip()
+            }
+            ranking_diagnostic_rows = build_ranking_order_diagnostics(
+                config=config,
+                asof_date=asof_date,
+                production_rows_by_ticker=production_rows_by_ticker,
+                shadow_rows=shadow_top_rows,
+            )
             alerts = build_alerts(
                 current_scores=scores,
                 previous_scores=previous,
@@ -906,6 +1277,8 @@ def main() -> None:
 
             write_csv(index_csv, [summary], list(summary.keys()))
             write_csv(top_csv, top_rows, TOP_SCORE_FIELDS)
+            write_csv(shadow_top_csv, shadow_top_rows, SHADOW_SCORE_FIELDS)
+            write_csv(ranking_diag_csv, ranking_diagnostic_rows, RANKING_DIAGNOSTIC_FIELDS)
             write_csv(
                 alerts_csv,
                 alerts,
@@ -956,13 +1329,23 @@ def main() -> None:
                     "outcome_override_excluded_rows", "outcome_override_review_rows", "review_flags",
                 ],
             )
-            LOGGER.info("Published biotech reports: rows=%d output_dir=%s", len(scores), output_dir)
+            LOGGER.info(
+                "Published biotech reports: rows=%d top_rows=%d shadow_rows=%d ranking_diag_rows=%d output_dir=%s",
+                len(scores),
+                len(top_rows),
+                len(shadow_top_rows),
+                len(ranking_diagnostic_rows),
+                output_dir,
+            )
             finish_run(
                 conn,
                 run_id=run_id,
                 status="success",
                 row_count=len(scores),
-                message=f"asof={asof_date} top_n={top_n} alerts={len(alerts)} output_dir={output_dir}",
+                message=(
+                    f"asof={asof_date} top_n={top_n} shadow_top_n={len(shadow_top_rows)} "
+                    f"ranking_diag={len(ranking_diagnostic_rows)} alerts={len(alerts)} output_dir={output_dir}"
+                ),
             )
         except BaseException as exc:
             if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):

@@ -242,7 +242,7 @@ def quote_ident(identifier: str) -> str:
 
 
 def connect_readonly(db_path: Path, *, timeout_sec: float) -> sqlite3.Connection:
-    uri = f"file:{db_path.as_posix()}?mode=ro"
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=timeout_sec)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
@@ -288,7 +288,7 @@ def purge_candidate_on_connection(conn: sqlite3.Connection, *, ticker: str, comp
         ticker_col = columns.get("ticker") or columns.get("symbol")
         if ticker_col:
             conn.execute(
-                f"DELETE FROM {quote_ident(table)} WHERE UPPER({quote_ident(ticker_col)}) = ?",
+                f"DELETE FROM {quote_ident(table)} WHERE UPPER(REPLACE({quote_ident(ticker_col)}, '.', '-')) = ?",
                 (normalized,),
             )
     if company_id is not None:
@@ -311,8 +311,8 @@ def count_candidate_rows_in_table(
 
     ticker_col = "ticker" if "ticker" in columns else "symbol" if "symbol" in columns else ""
     if ticker_col:
-        conditions.append(f"{quote_ident(ticker_col)} = ? COLLATE NOCASE")
-        params.append(ticker)
+        conditions.append(f"UPPER(REPLACE({quote_ident(ticker_col)}, '.', '-')) = ?")
+        params.append(normalize_ticker(ticker))
 
     if company_id is not None and "accession_nodash" in columns and "company_id" not in columns:
         conditions.append(

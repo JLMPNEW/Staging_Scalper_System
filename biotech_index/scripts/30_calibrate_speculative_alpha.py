@@ -28,6 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_path  # noqa: E402
+from biotech_index.core.commercial_risk import commercial_risk_overlay_fields  # noqa: E402
 from biotech_index.core.constants import (  # noqa: E402
     GOING_CONCERN_HARD_STATUSES,
     MILD_SOFT_WEAKNESS_REASONS,
@@ -486,7 +487,13 @@ def parse_reason_list(raw: object) -> list[str]:
     return [part.strip() for part in str(raw or "").replace(";", "|").split("|") if part.strip()]
 
 
-def add_diagnostics(rows: list[dict[str, Any]], *, min_addv20: float) -> None:
+def add_diagnostics(
+    rows: list[dict[str, Any]],
+    *,
+    min_addv20: float,
+    commercial_risk_settings: dict[str, Any] | None = None,
+) -> None:
+    commercial_risk_settings = commercial_risk_settings or {}
     for row in rows:
         tier1 = parse_json(row.get("tier1_top_evidence_json"))
         multi = parse_json(row.get("multibagger_top_evidence_json"))
@@ -502,7 +509,7 @@ def add_diagnostics(rows: list[dict[str, Any]], *, min_addv20: float) -> None:
         ctgov = nested_dict(tier1, "ctgov_quality")
         commercial = nested_dict(tier1, "commercial_value")
         core_veto = nested_dict(tier1, "core_structural_veto")
-        commercial_risk = nested_dict(tier1, "commercial_risk_overlay")
+        embedded_commercial_risk = nested_dict(tier1, "commercial_risk_overlay")
         sec_events = nested_dict(tier1, "sec_events")
         multi_components = nested_dict(multi, "component_scores")
         multi_market = nested_dict(multi, "market")
@@ -525,10 +532,27 @@ def add_diagnostics(rows: list[dict[str, Any]], *, min_addv20: float) -> None:
         )
         financial_quality = str(risk_flags.get("financial_data_quality") or "").strip().lower()
         commercial_fragility = (
-            first_float(row.get("commercial_fragility_risk_score"), multi_components.get("commercial_fragility_risk_score"), 0.0)
+            first_float(
+                row.get("commercial_fragility_risk_score"),
+                risk_flags.get("commercial_fragility_risk_score"),
+                commercial.get("commercial_fragility_risk_score"),
+                multi_components.get("commercial_fragility_risk_score"),
+                0.0,
+            )
             or 0.0
         )
         risk_score = first_float(row.get("tier1_risk_score"), 0.0) or 0.0
+        computed_commercial_risk = commercial_risk_overlay_fields(
+            commercial,
+            {"commercial_fragility_risk_score": commercial_fragility},
+            commercial_risk_settings,
+        )
+        commercial_risk_source = "evidence_json"
+        if first_float(embedded_commercial_risk.get("commercial_risk_overlay_score")) is None:
+            commercial_risk = computed_commercial_risk
+            commercial_risk_source = "computed"
+        else:
+            commercial_risk = {**computed_commercial_risk, **embedded_commercial_risk}
 
         core_reasons: list[str] = []
         core_reasons = parse_reason_list(core_veto.get("reasons"))
@@ -613,10 +637,25 @@ def add_diagnostics(rows: list[dict[str, Any]], *, min_addv20: float) -> None:
         row["diag_illiquid_flag"] = 1.0 if "illiquid" in core_reasons else 0.0
         row["diag_multibagger_risk_penalty"] = first_float(multi_components.get("multibagger_risk_penalty"))
         row["diag_commercial_fragility_risk_score"] = commercial_fragility
+        row["diag_commercial_risk_source"] = commercial_risk_source
         row["diag_commercial_risk_overlay_score"] = commercial_overlay_score
         row["diag_commercial_risk_overlay_flag"] = 1.0 if commercial_overlay_score > 0.0 else 0.0
+        row["diag_commercial_risk_overlay_reasons"] = commercial_risk.get("commercial_risk_overlay_reasons", "")
+        row["diag_commercial_deterioration_score"] = first_float(
+            commercial_risk.get("commercial_deterioration_score"), 0.0
+        ) or 0.0
+        row["diag_commercial_deterioration_reasons"] = commercial_risk.get("commercial_deterioration_reasons", "")
+        row["diag_valuation_growth_mismatch_score"] = first_float(
+            commercial_risk.get("valuation_growth_mismatch_score"), 0.0
+        ) or 0.0
+        row["diag_valuation_growth_mismatch_reasons"] = commercial_risk.get("valuation_growth_mismatch_reasons", "")
+        row["diag_transient_revenue_anchor_score"] = first_float(
+            commercial_risk.get("transient_revenue_anchor_score"), 0.0
+        ) or 0.0
+        row["diag_transient_revenue_anchor_reasons"] = commercial_risk.get("transient_revenue_anchor_reasons", "")
         row["diag_commercial_business_shock_score"] = commercial_business_shock_score
         row["diag_commercial_business_shock_flag"] = 1.0 if commercial_business_shock_score > 0.0 else 0.0
+        row["diag_commercial_business_shock_reasons"] = commercial_risk.get("commercial_business_shock_reasons", "")
         row["diag_evidence_json_quality"] = evidence_quality
         row["diag_evidence_json_missing_flag"] = 1.0 if evidence_quality <= 0.0 else 0.0
 
@@ -686,9 +725,10 @@ def load_bars(
             close = to_float(row["close"])
             if parsed is None or close is None or close <= 0.0:
                 continue
-            grouped[(str(row["ticker"] or "").upper().replace(".", "-"), str(row["source"] or ""))].append(
-                Bar(day=parsed, close=close)
-            )
+            ticker_key = normalize_ticker(row["ticker"])
+            if not ticker_key:
+                continue
+            grouped[(ticker_key, str(row["source"] or ""))].append(Bar(day=parsed, close=close))
     by_ticker: dict[str, list[tuple[int, list[Bar]]]] = defaultdict(list)
     for (ticker, source), bars in grouped.items():
         if bars:
@@ -728,7 +768,7 @@ def add_forward_returns(
 ) -> None:
     cost = round_trip_cost_bps / 10000.0
     for row in rows:
-        ticker = str(row.get("ticker") or "").upper().replace(".", "-")
+        ticker = normalize_ticker(row.get("ticker"))
         asof = parse_date(row.get("asof_date"))
         bars = bars_by_ticker.get(ticker, [])
         for horizon in horizons:
@@ -1594,8 +1634,19 @@ def build_selected_ticker_rows(
                         "toxic_soft_weakness_reasons": row.get("diag_toxic_soft_weakness_reasons", ""),
                         "mild_soft_weakness_flag": row.get("diag_mild_soft_weakness_flag", ""),
                         "mild_soft_weakness_reasons": row.get("diag_mild_soft_weakness_reasons", ""),
+                        "commercial_risk_source": row.get("diag_commercial_risk_source", ""),
+                        "commercial_risk_overlay_score": row.get("diag_commercial_risk_overlay_score", ""),
+                        "commercial_risk_overlay_flag": row.get("diag_commercial_risk_overlay_flag", ""),
+                        "commercial_risk_overlay_reasons": row.get("diag_commercial_risk_overlay_reasons", ""),
+                        "commercial_deterioration_score": row.get("diag_commercial_deterioration_score", ""),
+                        "commercial_deterioration_reasons": row.get("diag_commercial_deterioration_reasons", ""),
+                        "valuation_growth_mismatch_score": row.get("diag_valuation_growth_mismatch_score", ""),
+                        "valuation_growth_mismatch_reasons": row.get("diag_valuation_growth_mismatch_reasons", ""),
+                        "transient_revenue_anchor_score": row.get("diag_transient_revenue_anchor_score", ""),
+                        "transient_revenue_anchor_reasons": row.get("diag_transient_revenue_anchor_reasons", ""),
                         "commercial_business_shock_score": row.get("diag_commercial_business_shock_score", ""),
                         "commercial_business_shock_flag": row.get("diag_commercial_business_shock_flag", ""),
+                        "commercial_business_shock_reasons": row.get("diag_commercial_business_shock_reasons", ""),
                         "evidence_json_quality": row.get("diag_evidence_json_quality", ""),
                         "liquidity_ok": row.get("diag_liquidity_ok", ""),
                         "avg_dollar_volume_20d": row.get("diag_avg_dollar_volume_20d", ""),
@@ -1993,6 +2044,15 @@ def main() -> None:
     )
     extra_exclusions = parse_string_set(args.exclude_tickers) | parse_string_set(cfg_get(config, "calibration.exclude_tickers", []))
     min_addv20 = float(cfg_get(config, "multibagger.min_addv20", 1_000_000.0))
+    commercial_risk_settings = dict(cfg_get(config, "biotech_scoring.commercial_risk_overlay", {}) or {})
+    commercial_risk_settings.setdefault(
+        "commercial_fragility_threshold",
+        float(cfg_get(config, "biotech_scoring.production_policy.commercial_fragility_threshold", 70.0)),
+    )
+    commercial_risk_settings.setdefault(
+        "commercial_stage_revenue_min",
+        float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000.0)),
+    )
     signals = build_signal_specs(config)
     pools = build_pool_specs(config)
 
@@ -2020,7 +2080,7 @@ def main() -> None:
         tickers = {str(row.get("ticker") or "").upper().replace(".", "-") for row in rows}
         bars_by_ticker = load_bars(conn, tickers=tickers, min_date=min(asof_dates), market_sources=market_sources)
 
-    add_diagnostics(rows, min_addv20=min_addv20)
+    add_diagnostics(rows, min_addv20=min_addv20, commercial_risk_settings=commercial_risk_settings)
     add_forward_returns(
         rows,
         bars_by_ticker,

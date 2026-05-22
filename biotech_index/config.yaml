@@ -428,28 +428,41 @@ biotech_scoring:
   production_baseline:
     enabled: true
     score_model: "biotech_opportunity_score"
-    candidate_id: "tier1_96cc042b6c9e"
-    candidate_name: "catalyst_heavy_risk025_commercial_defensive"
-    top_n: 20
-    selection_policy: "core_veto_event_drag"
+    candidate_id: "tier1_8820143dc910"
+    candidate_name: "current_clinical_mix_risk015_commercial_expected_return_quality"
+    top_n: 10
+    selection_policy: "core_veto_event_soft_drag_quality_guardrail"
     primary_horizon_trading_days: 120
     alpha_multibagger_role: "context_only"
-    calibration_output_dir: "../output/biotech_index_reports/calibration_tier1_120d_confirm"
+    calibration_output_dir: "../output/biotech_index_reports/calibration_tier1_20260515_final_v2_prod_parity"
     calibration_test_metrics:
-      test_lcb_return_pct: 6.417134
-      test_sortino_like: 0.544727
-      test_profit_factor: 2.006218
-      test_large_loss_20pct_rate_pct: 20.0
+      test_lcb_return_pct: 6.835734
+      test_sortino_like: 1.021875
+      test_profit_factor: 2.893888
+      test_mean_return_pct: 10.56434
+      test_large_loss_20pct_rate_pct: 6.666667
       test_core_hard_weakness_exposure_pct: 0.0
-      test_event_hard_weakness_exposure_pct: 78.888889
-      test_soft_weakness_exposure_pct: 25.555556
-    runner_up_candidate_name: "current_config"
-    runner_up_candidate_id: "tier1_1f24e704aacf"
+      test_event_hard_weakness_exposure_pct: 70.0
+      test_soft_weakness_exposure_pct: 8.888889
+      test_toxic_soft_weakness_exposure_pct: 8.888889
+      test_no_forward_guidance_exposure_pct: 0.0
+    shadow_research_pool:
+      candidate_id: "tier1_b011ee62a2ea"
+      candidate_name: "catalyst_credibility_risk015_commercial_quality_value_guarded"
+      top_n: 20
+      selection_policy: "core_veto_event_drag"
+      test_lcb_return_pct: 4.355781
+      test_sortino_like: 0.440351
+      test_profit_factor: 1.846492
+      test_large_loss_20pct_rate_pct: 13.333333
+    runner_up_candidate_name: "catalyst_credibility_risk015_commercial_quality_value_guarded"
+    runner_up_candidate_id: "tier1_b011ee62a2ea"
     notes:
       - "Tier-1 production ranking is calibrated for a 120-trading-day primary horizon."
-      - "Production candidate promoted to the 2026-05-15 all-sample Top-20 120-day challenger after bug-fixed calibration review."
-      - "Core structural weakness is vetoed for rank; event hard weakness reduces the score but does not automatically remove the name."
-      - "Known follow-up: add and calibrate commercial deterioration, valuation/growth mismatch, and false commercial-anchor overlays before treating the raw Top-20 as final position sizing."
+      - "Top-10 production selector uses the V2 expected-return quality guardrail for concentrated allocation risk control."
+      - "Shadow Top-20 research pool uses the challenger model for broader idea discovery; it is not the concentrated allocation selector."
+      - "Core structural weakness is vetoed for rank; event and configured soft weakness reduce the score under the selected guardrail policy."
+      - "Rank-quality cap veto keeps business-shock and severe-deterioration caps out of investable ranked lists when the cap is at or below the configured threshold."
       - "Alpha and multibagger scores remain secondary context until Phase 2 calibration proves orthogonal value."
   convex_risk_penalty_enabled: true
   risk_penalty_convexity: 0.35
@@ -480,6 +493,13 @@ biotech_scoring:
     cheap_low_growth_revenue_yoy_max: 0.10
     cheap_low_growth_guidance_max_score: 60.0
     cheap_low_growth_cap: 60.0
+    rank_cap_veto_enabled: true
+    rank_cap_veto_threshold: 49.0
+    rank_cap_veto_reasons:
+      - commercial_business_shock_cap
+      - severe_commercial_deterioration_cap
+      - no_guidance_negative_growth_cap
+      - unprofitable_value_mismatch_cap
   core_structural_veto:
     enabled: true
     apply_to_rank: true
@@ -495,6 +515,11 @@ biotech_scoring:
   production_policy:
     event_hard_penalty: 10.0
     soft_weakness_penalty: 8.0
+    value_trap_penalty: 10.0
+    leverage_fragility_penalty: 6.0
+    guidance_staleness_penalty: 4.0
+    mature_defensive_penalty: 0.0
+    expected_return_quality_bonus: 0.0
     event_hard_reasons:
       - negative_clinical_event
       - repeated_dilution
@@ -520,7 +545,6 @@ biotech_scoring:
     commercial_business_shock_penalty: 0.0
     commercial_risk_overlay_penalty: 0.0
     max_total_penalty: 25.0
-    commercial_fragility_threshold: 70.0
     moderate_revenue_decline_yoy_pct: -0.05
     severe_revenue_decline_yoy_pct: -0.20
     moderate_revenue_decline_qoq_pct: -0.10
@@ -547,7 +571,7 @@ biotech_scoring:
     credibility: 0.25
     financial_quality: 0.15
     momentum: 0.05
-    risk_penalty: 0.25
+    risk_penalty: 0.15
   investment_weights:
     clinical_opportunity: 0.25
     commercial_value: 0.25
@@ -560,15 +584,15 @@ biotech_scoring:
     risk_penalty: 0.15
   investment_weight_profiles:
     commercial_stage:
-      clinical_opportunity: 0.08
-      commercial_value: 0.35
-      forward_guidance: 0.15
-      valuation: 0.12
-      upside_capacity: 0.08
-      institutional_upside: 0.00
-      financial_quality: 0.17
-      momentum: 0.05
-      risk_penalty: 0.20
+      clinical_opportunity: 0.04
+      commercial_value: 0.27
+      forward_guidance: 0.24
+      valuation: 0.07
+      upside_capacity: 0.04
+      institutional_upside: 0.12
+      financial_quality: 0.14
+      momentum: 0.08
+      risk_penalty: 0.24
     clinical_stage:
       clinical_opportunity: 0.45
       commercial_value: 0.05
@@ -595,7 +619,7 @@ biotech_scoring:
 
 biotech_reports:
   output_dir: "../output/biotech_index_reports"
-  top_n: 20
+  top_n: 10
   alerts_score_change_min: 12
   index_weights:
     top_n_avg_score: 0.70
@@ -607,6 +631,27 @@ biotech_reports:
     bucket_transition_enabled: true
   index_latest_csv: "biotech_index_latest.csv"
   top_candidates_csv: "biotech_top_candidates.csv"
+  shadow_top_candidates_csv: "biotech_shadow_top20_candidates.csv"
+  ranking_diagnostics_csv: "biotech_ranking_order_diagnostics.csv"
+  action_tiers:
+    allocation_rank_max: 10
+    allocation_score_min: 50.0
+    research_rank_max: 20
+    research_score_min: 45.0
+  ranking_diagnostics:
+    over_ranked_tickers:
+      - BMRN
+      - BIIB
+      - TECH
+      - EW
+      - MDT
+    under_ranked_tickers:
+      - EXEL
+      - PODD
+      - TARS
+      - UTHR
+      - TMDX
+      - COLL
   alerts_csv: "biotech_alerts.csv"
   evidence_cards_json: "biotech_evidence_cards.json"
   trial_validation_csv: "biotech_top_trial_validation.csv"

@@ -283,6 +283,20 @@ def build_candidate_report(
     horizon: str,
 ) -> list[dict[str, Any]]:
     bootstrap_by_key = {candidate_key(row): row for row in bootstrap_rows if str(row.get("evaluation_split") or "") == "test"}
+    sparse_test_rows = [
+        row
+        for row in holdout_rows
+        if str(row.get("horizon_days") or "") == horizon
+        and as_bool(row.get("train_calibration_pass"))
+        and not str(row.get("test_calibration_pass") or "").strip()
+    ]
+    if sparse_test_rows:
+        LOGGER.warning(
+            "Skipping %d train-passing candidate row(s) for horizon=%s because test_calibration_pass is blank. "
+            "This usually means the test split had sparse or unavailable completed returns.",
+            len(sparse_test_rows),
+            horizon,
+        )
     confirmed = [
         row
         for row in holdout_rows
@@ -571,6 +585,12 @@ def main() -> None:
     holdout_rows = read_csv(input_dir / HOLDOUT_FILE)
     bootstrap_rows = read_csv(input_dir / BOOTSTRAP_FILE)
     ticker_rows = read_csv(input_dir / TICKER_DIAGNOSTICS_FILE)
+    if not bootstrap_rows:
+        LOGGER.warning(
+            "%s contains no bootstrap rows. Run script 28 with --bootstrap-iterations > 0 "
+            "if bootstrap confidence intervals are required.",
+            BOOTSTRAP_FILE,
+        )
     apply_legacy_column_aliases(holdout_rows, HOLDOUT_LEGACY_ALIASES, file_label=HOLDOUT_FILE)
     validate_required_columns(
         holdout_rows,

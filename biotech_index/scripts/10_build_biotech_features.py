@@ -216,6 +216,77 @@ def load_latest_survival_features(conn: sqlite3.Connection, asof_date: date) -> 
     return {int(row["company_id"]): dict(row) for row in rows}
 
 
+def load_latest_market_features(conn: sqlite3.Connection, asof_date: date) -> dict[int, dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT f.*
+        FROM market_features_daily f
+        JOIN (
+            SELECT company_id, MAX(asof_date) AS max_asof
+            FROM market_features_daily
+            WHERE asof_date <= ?
+            GROUP BY company_id
+        ) latest
+          ON latest.company_id = f.company_id AND latest.max_asof = f.asof_date
+        """,
+        (asof_date.isoformat(),),
+    ).fetchall()
+    return {int(row["company_id"]): dict(row) for row in rows}
+
+
+def load_recent_sec_filing_summary(conn: sqlite3.Connection, asof_date: date, *, lookback_days: int = 730) -> dict[int, dict[str, int]]:
+    cutoff = (asof_date - timedelta(days=max(1, lookback_days))).isoformat()
+    rows = conn.execute(
+        """
+        SELECT company_id, form, COUNT(*) AS n
+        FROM sec_filings
+        WHERE filing_date >= ?
+          AND filing_date <= ?
+        GROUP BY company_id, form
+        """,
+        (cutoff, asof_date.isoformat()),
+    ).fetchall()
+    out: dict[int, dict[str, int]] = {}
+    for row in rows:
+        company_id = int(row["company_id"])
+        form = str(row["form"] or "").upper()
+        bucket = out.setdefault(company_id, {"recent_sec_filing_count_2y": 0, "recent_current_report_count_2y": 0, "recent_nt_filing_count_2y": 0})
+        count = int(row["n"] or 0)
+        bucket["recent_sec_filing_count_2y"] += count
+        if form in {"8-K", "8-K/A", "6-K", "6-K/A"}:
+            bucket["recent_current_report_count_2y"] += count
+        if form.startswith("NT "):
+            bucket["recent_nt_filing_count_2y"] += count
+    return out
+
+
+def screen_row_with_fallbacks(
+    screen_row: pd.Series | None,
+    *,
+    market: dict[str, Any] | None,
+    sec_filings: dict[str, int] | None,
+) -> pd.Series | None:
+    if screen_row is not None:
+        out = screen_row.copy()
+    else:
+        out = pd.Series(dtype=str)
+    market = market or {}
+    sec_filings = sec_filings or {}
+
+    if to_float(out.get("median_addv20"), 0.0) <= 0.0:
+        addv = to_float(market.get("avg_dollar_volume_20d"), 0.0)
+        if addv > 0.0:
+            out["median_addv20"] = addv
+            out["liquidity_status"] = out.get("liquidity_status") or "market_feature_fallback"
+
+    if not str(out.get("has_recent_sec_filing_2y") or "").strip() and sec_filings.get("recent_sec_filing_count_2y", 0) > 0:
+        out["has_recent_sec_filing_2y"] = "True"
+        out["recent_sec_filing_count_2y"] = sec_filings.get("recent_sec_filing_count_2y", 0)
+        out["recent_current_report_count_2y"] = sec_filings.get("recent_current_report_count_2y", 0)
+        out["recent_nt_filing_count_2y"] = sec_filings.get("recent_nt_filing_count_2y", 0)
+    return out
+
+
 def is_actionable_sec_event(event_type: str, excerpt: str) -> bool:
     text = " ".join(str(excerpt or "").lower().split())
     if not text:
@@ -932,6 +1003,12 @@ def main() -> None:
         try:
             company_ids = load_company_ids(conn)
             survival_features = load_latest_survival_features(conn, asof_date)
+            market_features = load_latest_market_features(conn, asof_date)
+            sec_filing_summary = load_recent_sec_filing_summary(
+                conn,
+                asof_date,
+                lookback_days=int(cfg_get(config, "sec_event_parser.lookback_days", 730)),
+            )
             sec_event_summary = load_recent_sec_event_summary(
                 conn,
                 asof_date,
@@ -949,7 +1026,11 @@ def main() -> None:
                 rows.append(
                     compute_feature_row(
                         universe_row=universe_row,
-                        screen_row=screen_by_ticker.get(ticker),
+                        screen_row=screen_row_with_fallbacks(
+                            screen_by_ticker.get(ticker),
+                            market=market_features.get(company_id),
+                            sec_filings=sec_filing_summary.get(company_id),
+                        ),
                         evidence=evidence_by_ticker.get(ticker, empty_evidence_summary()),
                         company_id=company_id,
                         asof_date=asof_date,

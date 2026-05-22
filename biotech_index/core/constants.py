@@ -33,16 +33,18 @@ CORE_HARD_WEAKNESS_REASONS = frozenset(
     }
 )
 EVENT_HARD_WEAKNESS_REASONS = frozenset({"repeated_dilution", "negative_clinical_event"})
-SOFT_WEAKNESS_REASONS = (
-    "cash_runway_9_to_12m_clinical",
-    "going_concern_warning",
-    "single_dilution_event",
-    "low_financial_data_quality",
-    "high_commercial_fragility",
-    "high_tier1_risk_score",
-    "recent_nt_filing",
-    "early_stage_or_unadvanced_trial_anchor",
-    "burn_acceleration",
+SOFT_WEAKNESS_REASONS = frozenset(
+    {
+        "cash_runway_9_to_12m_clinical",
+        "going_concern_warning",
+        "single_dilution_event",
+        "low_financial_data_quality",
+        "high_commercial_fragility",
+        "high_tier1_risk_score",
+        "recent_nt_filing",
+        "early_stage_or_unadvanced_trial_anchor",
+        "burn_acceleration",
+    }
 )
 TOXIC_SOFT_WEAKNESS_REASONS = frozenset(
     {

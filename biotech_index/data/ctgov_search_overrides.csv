@@ -11,6 +11,14 @@ FBIO,Journey Medical,query.spons,manual_parent_subsidiary,0.85,true,Fortress Bio
 FBIO,NG-350A,query.intr,manual_program,0.75,true,Program-level search supplied for Fortress ecosystem review
 GPCR,GSBR-1290,query.intr,manual_program,0.90,true,Structure Therapeutics program/intervention search
 GPCR,Structure Therapeutics,query.spons,manual_sponsor_search,0.90,true,Sponsor operating-name search
+BBIO,BridgeBio Pharma,query.spons,manual_sponsor_search,0.95,true,User-requested activation sponsor search
+BBIO,BridgeBio Pharmaceuticals,query.spons,manual_sponsor_search,0.95,true,BridgeBio CTGov sponsor search
+ARWR,Arrowhead Pharmaceuticals,query.spons,manual_sponsor_search,0.95,true,User-requested activation sponsor search
+ARWR,Arrowhead Pharmaceuticals Inc,query.spons,manual_sponsor_search,0.95,true,Arrowhead CTGov sponsor search
+NBIX,Neurocrine Biosciences,query.spons,manual_sponsor_search,0.95,true,User-requested addition sponsor search
+NBIX,Neurocrine Biosciences Inc,query.spons,manual_sponsor_search,0.95,true,Neurocrine CTGov sponsor search
+ASND,Ascendis Pharma,query.spons,manual_sponsor_search,0.95,true,User-requested addition sponsor search
+ASND,Ascendis Pharma A/S,query.spons,manual_sponsor_search,0.95,true,Ascendis CTGov sponsor search
 HELP,CYB003,query.intr,manual_program,0.90,true,Cybin program/intervention search
 HELP,Cybin US Ltd,query.spons,manual_sponsor_search,0.90,true,Cybin sponsor alias search
 HELP,Cybin IRL Limited,query.spons,manual_sponsor_search,0.90,true,Cybin sponsor alias search
