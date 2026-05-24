@@ -1686,7 +1686,15 @@ def build_feature_row(
     latest_record_date = max(valid_dates) if valid_dates else None
     latest_filing = latest_record_date.isoformat() if latest_record_date else ""
     recency_days = (asof_date - latest_record_date).days if latest_record_date else None
-    growth_score = score_growth(revenue_growth)
+    growth_curve = str(
+        cfg_get(
+            config,
+            "forward_guidance.growth_curve",
+            cfg_get(config, "commercial_value.growth_curve", "legacy"),
+        )
+        or "legacy"
+    )
+    growth_score = score_growth(revenue_growth, curve=growth_curve)
     profitability_score = score_profitability(ebitda_margin, eps_mid)
     valuation_score = score_forward_valuation(
         market_cap=market_cap,
@@ -1771,6 +1779,7 @@ def build_feature_row(
         ],
         "ttm_revenue": ttm_revenue,
         "market_cap": market_cap,
+        "growth_curve": growth_curve,
         "component_scores": {
             "forward_growth_score": round(growth_score, 4),
             "forward_profitability_score": round(profitability_score, 4),

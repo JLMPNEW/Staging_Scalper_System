@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 import re
+import logging
 from pathlib import Path
 from typing import Any, Optional
 
 ENV_DEFAULT_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
+LOGGER = logging.getLogger(__name__)
 
 
 def expand_env_vars(raw: Any) -> str:
@@ -42,8 +44,18 @@ def load_yaml(path: Path) -> dict[str, Any]:
 
 def cfg_get(config: dict[str, Any], dotted_key: str, default: Any = None) -> Any:
     cur: Any = config
-    for part in dotted_key.split("."):
-        if not isinstance(cur, dict) or part not in cur:
+    parts = dotted_key.split(".")
+    for idx, part in enumerate(parts):
+        if not isinstance(cur, dict):
+            parent_key = ".".join(parts[:idx]) or "<root>"
+            LOGGER.warning(
+                "Config key %s expected mapping at %s but found %s; using default",
+                dotted_key,
+                parent_key,
+                type(cur).__name__,
+            )
+            return default
+        if part not in cur:
             return default
         cur = cur[part]
     return cur

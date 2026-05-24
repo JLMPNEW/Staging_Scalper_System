@@ -335,6 +335,8 @@ commercial_value:
   output_csv: "../output/biotech_index_reports/commercial_value_features.csv"
   preferred_market_source: "interactive_brokers"
   commercial_stage_revenue_min: 50000000
+  # smooth_zero removes artificial ranking jumps around flat growth.
+  growth_curve: "smooth_zero"
   quality_weights:
     revenue_scale: 0.08
     revenue_growth: 0.22
@@ -356,6 +358,8 @@ forward_guidance:
   guidance_output_csv: "../output/biotech_index_reports/forward_guidance_records.csv"
   features_output_csv: "../output/biotech_index_reports/forward_guidance_features.csv"
   overrides_csv: "data/forward_guidance_overrides.csv"
+  # Defaults to commercial_value.growth_curve if omitted.
+  growth_curve: "smooth_zero"
   cache_dir: "../output/biotech_index_cache"
   user_agent: "JL, Independent Research, jm.357@hotmail.com"
   fetch_complete_submission_text: true
@@ -747,6 +751,12 @@ multibagger:
     forward_growth_score: 50.0
     market_confirmation_score: 50.0
     liquidity_score: 50.0
+  scoring_thresholds:
+    deep_price_200d_pct_cutoff: -0.15
+    deep_distance_52w_high_pct_cutoff: -0.35
+    deep_technical_score_cap: 55.0
+    risk_price_200d_pct_cutoff: -0.20
+    risk_distance_52w_high_pct_cutoff: -0.45
   convex_risk_penalty_enabled: true
   risk_penalty_convexity: 0.35
   risk_penalty_inflection: 50.0
@@ -765,6 +775,8 @@ multibagger:
     leave_one_out_residualization: true
     tier1_avoid_score_cap: 49.0
     tier1_risk_score_cap: 55.0
+    tier1_research_watchlist_score_cap: 55.0
+    tier1_low_priority_score_cap: 45.0
   weights:
     commercial_acceleration: 0.25
     upside_capacity: 0.20

@@ -71,6 +71,14 @@ def format_ticker_sample(tickers: Sequence[str], *, limit: int = 25) -> str:
     return ",".join(sample) + suffix
 
 
+def format_ticker_date_sample(items: Sequence[tuple[str, date]], *, limit: int = 25) -> str:
+    if not items:
+        return "(none)"
+    sample = [f"{ticker}:{item_date.isoformat()}" for ticker, item_date in items[:limit]]
+    suffix = "" if len(items) <= limit else f"...(+{len(items) - limit})"
+    return ",".join(sample) + suffix
+
+
 def parse_asof_date(raw: object) -> date | None:
     text = str(raw or "").strip()
     if not text:
@@ -98,8 +106,8 @@ def validate_layer_freshness(
     if target_date is None:
         raise ValueError(f"Invalid asof_date for {context}: {asof_date}")
     missing: list[str] = []
-    stale: list[str] = []
-    future: list[str] = []
+    stale: list[tuple[str, date]] = []
+    future: list[tuple[str, date]] = []
     invalid_date: list[str] = []
     for base_row in base_rows:
         company_id = int(base_row["company_id"])
@@ -114,19 +122,21 @@ def validate_layer_freshness(
             continue
         age_days = (target_date - layer_date).days
         if age_days < 0:
-            future.append(f"{ticker}:{layer_date.isoformat()}")
+            future.append((ticker, layer_date))
         elif age_days > max_staleness_days:
-            stale.append(f"{ticker}:{layer_date.isoformat()}")
+            stale.append((ticker, layer_date))
     failures: list[str] = []
     if missing:
         failures.append(f"missing {len(missing)} ticker(s): {format_ticker_sample(sorted(missing))}")
     if stale:
+        stale_sorted = sorted(stale, key=lambda item: (item[0], item[1]))
         failures.append(
             f"stale {len(stale)} ticker(s) older than {max_staleness_days} day(s): "
-            f"{format_ticker_sample(sorted(stale))}"
+            f"{format_ticker_date_sample(stale_sorted)}"
         )
     if future:
-        failures.append(f"future-dated {len(future)} ticker(s): {format_ticker_sample(sorted(future))}")
+        future_sorted = sorted(future, key=lambda item: (item[0], item[1]))
+        failures.append(f"future-dated {len(future)} ticker(s): {format_ticker_date_sample(future_sorted)}")
     if invalid_date:
         failures.append(f"invalid asof_date {len(invalid_date)} ticker(s): {format_ticker_sample(sorted(invalid_date))}")
     if failures:

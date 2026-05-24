@@ -909,6 +909,7 @@ DAILY_SCORES_OPTIONAL_COLUMNS = {
     "ticker": "TEXT",
     "company_name": "TEXT",
     "clinical_opportunity_score": "REAL",
+    "commercial_quality_score": "REAL",
     "commercial_value_score": "REAL",
     "forward_guidance_score": "REAL",
     "valuation_score": "REAL",
@@ -1051,6 +1052,7 @@ GOVERNANCE_EVENT_OPTIONAL_COLUMNS = {
     "generic_competition_risk_count_365d": "INTEGER",
     "product_concentration_risk_count_365d": "INTEGER",
     "commercial_fragility_risk_score": "REAL",
+    "proxy_fields_used": "TEXT",
 }
 
 MULTIBAGGER_FEATURE_OPTIONAL_COLUMNS = {
@@ -1066,8 +1068,27 @@ MULTIBAGGER_SCORES_OPTIONAL_COLUMNS = {
     "tier1_bucket": "TEXT",
     "tier1_gate_score": "REAL",
     "tier1_gate_multiplier": "REAL",
-    "tier1_available": "INTEGER NOT NULL DEFAULT 0",
+    "tier1_available": "INTEGER",
     "tier1_interaction_reason": "TEXT",
+    "tier1_score_tier": "TEXT",
+    "tier1_allocation_eligible": "INTEGER",
+    "tier1_research_watchlist": "INTEGER",
+    "tier1_score_spread_to_allocation": "REAL",
+    "tier1_score_spread_to_high_confidence": "REAL",
+    "tier1_rank_quality_cap": "REAL",
+    "tier1_rank_quality_cap_reasons": "TEXT",
+    "tier1_rank_quality_cap_vetoed": "INTEGER",
+    "tier1_rank_quality_cap_veto_reasons": "TEXT",
+    "tier1_mature_defensive_score": "REAL",
+    "tier1_expected_return_quality_score": "REAL",
+    "tier1_value_trap_score": "REAL",
+    "tier1_leverage_score": "REAL",
+    "tier1_leverage_fragility_score": "REAL",
+    "tier1_no_forward_guidance_flag": "REAL",
+    "tier1_guidance_stale_flag": "REAL",
+    "tier1_no_guidance_negative_growth_flag": "REAL",
+    "tier1_production_policy_quality_penalty": "REAL",
+    "tier1_production_policy_quality_bonus": "REAL",
 }
 
 
@@ -1225,9 +1246,15 @@ def _run_schema_migration(conn: sqlite3.Connection, name: str, callback) -> None
     conn.execute(f"RELEASE {savepoint_sql}")
 
 
-def _coalesce_existing_expr(columns: set[str], candidates: list[str], fallback: str) -> tuple[str, int]:
+def _coalesce_existing_expr(
+    columns: set[str],
+    candidates: list[str],
+    fallback: str,
+    *,
+    fallback_param: object | None = None,
+) -> tuple[str, tuple[object, ...]]:
     present = [column for column in candidates if column in columns]
-    fallback_params = 1 if fallback == "?" else 0
+    fallback_params = (fallback_param,) if fallback == "?" else ()
     if not present:
         return fallback, fallback_params
     return f"COALESCE({', '.join([*(quote_identifier(column) for column in present), fallback])})", fallback_params
@@ -1296,10 +1323,18 @@ def ensure_company_universe_history_unique_index(conn: sqlite3.Connection) -> No
         conn.execute(
             """
             DELETE FROM company_universe_history
-            WHERE history_id NOT IN (
-                SELECT MIN(history_id)
-                FROM company_universe_history
-                GROUP BY asof_date, company_id, COALESCE(run_id, -1)
+            WHERE history_id IN (
+                SELECT history_id
+                FROM (
+                    SELECT
+                        history_id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY asof_date, company_id, COALESCE(run_id, -1)
+                            ORDER BY history_id
+                        ) AS duplicate_rank
+                    FROM company_universe_history
+                )
+                WHERE duplicate_rank > 1
             )
             """
         )
@@ -1473,7 +1508,7 @@ def refresh_sec_latest_documents(conn: sqlite3.Connection, accessions: Iterable[
             refreshed += 1
 
     if conn.in_transaction:
-        savepoint = quote_identifier("refresh_sec_latest_documents")
+        savepoint = quote_identifier(f"refresh_sec_latest_documents_{id(target_accessions)}")
         conn.execute(f"SAVEPOINT {savepoint}")
         try:
             refresh_rows()
@@ -1513,10 +1548,16 @@ def _copy_sec_event_parse_state_legacy(conn: sqlite3.Connection) -> None:
     accession_expr = quote_identifier("accession_nodash")
     text_hash_expr = quote_identifier("text_hash") if "text_hash" in columns else "''"
     parser_signature_expr = quote_identifier("parser_signature") if "parser_signature" in columns else "''"
-    parsed_at_expr, parsed_at_params = _coalesce_existing_expr(columns, ["parsed_at", "updated_at", "created_at"], "?")
+    parsed_at_expr, parsed_at_params = _coalesce_existing_expr(
+        columns, ["parsed_at", "updated_at", "created_at"], "?", fallback_param=now
+    )
     event_count_expr = f"COALESCE({quote_identifier('event_count')}, 0)" if "event_count" in columns else "0"
-    created_at_expr, created_at_params = _coalesce_existing_expr(columns, ["created_at", "updated_at", "parsed_at"], "?")
-    updated_at_expr, updated_at_params = _coalesce_existing_expr(columns, ["updated_at", "parsed_at", "created_at"], "?")
+    created_at_expr, created_at_params = _coalesce_existing_expr(
+        columns, ["created_at", "updated_at", "parsed_at"], "?", fallback_param=now
+    )
+    updated_at_expr, updated_at_params = _coalesce_existing_expr(
+        columns, ["updated_at", "parsed_at", "created_at"], "?", fallback_param=now
+    )
     sql = f"""
         INSERT OR IGNORE INTO sec_event_parse_state(
             accession_nodash, text_hash, parser_signature, parsed_at, event_count, created_at, updated_at
@@ -1526,8 +1567,7 @@ def _copy_sec_event_parse_state_legacy(conn: sqlite3.Connection) -> None:
         FROM {quote_identifier("sec_event_parse_state_legacy")}
         WHERE COALESCE({accession_expr}, '') <> ''
         """
-    params = tuple(now for _ in range(parsed_at_params + created_at_params + updated_at_params))
-    conn.execute(sql, params)
+    conn.execute(sql, parsed_at_params + created_at_params + updated_at_params)
 
 
 def _create_company_facts_sync_state(conn: sqlite3.Connection) -> None:
@@ -1555,10 +1595,16 @@ def _copy_company_facts_sync_state_legacy(conn: sqlite3.Connection) -> None:
     company_id_expr = quote_identifier("company_id")
     latest_source_expr = quote_identifier("latest_source_filing_date") if "latest_source_filing_date" in columns else "''"
     payload_hash_expr = quote_identifier("payload_hash") if "payload_hash" in columns else "''"
-    last_synced_expr, last_synced_params = _coalesce_existing_expr(columns, ["last_synced_at", "updated_at", "created_at"], "?")
+    last_synced_expr, last_synced_params = _coalesce_existing_expr(
+        columns, ["last_synced_at", "updated_at", "created_at"], "?", fallback_param=now
+    )
     sync_status_expr, sync_status_params = _coalesce_existing_expr(columns, ["sync_status"], "'unknown'")
-    created_at_expr, created_at_params = _coalesce_existing_expr(columns, ["created_at", "updated_at", "last_synced_at"], "?")
-    updated_at_expr, updated_at_params = _coalesce_existing_expr(columns, ["updated_at", "last_synced_at", "created_at"], "?")
+    created_at_expr, created_at_params = _coalesce_existing_expr(
+        columns, ["created_at", "updated_at", "last_synced_at"], "?", fallback_param=now
+    )
+    updated_at_expr, updated_at_params = _coalesce_existing_expr(
+        columns, ["updated_at", "last_synced_at", "created_at"], "?", fallback_param=now
+    )
     sql = f"""
         INSERT OR IGNORE INTO company_facts_sync_state(
             company_id, latest_source_filing_date, payload_hash, last_synced_at, sync_status, created_at, updated_at
@@ -1568,8 +1614,7 @@ def _copy_company_facts_sync_state_legacy(conn: sqlite3.Connection) -> None:
         FROM {quote_identifier("company_facts_sync_state_legacy")}
         WHERE {company_id_expr} IS NOT NULL
         """
-    param_count = last_synced_params + sync_status_params + created_at_params + updated_at_params
-    conn.execute(sql, tuple(now for _ in range(param_count)))
+    conn.execute(sql, last_synced_params + sync_status_params + created_at_params + updated_at_params)
 
 
 def ensure_state_tables_created_at(conn: sqlite3.Connection) -> None:

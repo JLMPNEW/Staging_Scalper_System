@@ -304,6 +304,10 @@ def score_market_confirmation(market: dict[str, Any], config: dict[str, Any]) ->
     prior = missing_score_prior(config, "market_confirmation_score")
     if not market:
         return prior
+    thresholds = cfg_get(config, "multibagger.scoring_thresholds", {}) or {}
+    deep_price_200_cutoff = float(thresholds.get("deep_price_200d_pct_cutoff", -0.15))
+    deep_52w_cutoff = float(thresholds.get("deep_distance_52w_high_pct_cutoff", -0.35))
+    deep_technical_score_cap = float(thresholds.get("deep_technical_score_cap", 55.0))
     score = prior
     rs = to_optional_float(market.get("relative_strength_3m_vs_xbi"))
     price_200 = to_optional_float(market.get("price_vs_200d_pct"))
@@ -345,8 +349,8 @@ def score_market_confirmation(market: dict[str, Any], config: dict[str, Any]) ->
             score -= 18.0
         elif dist_52w <= -0.30:
             score -= 10.0
-    if price_200 is not None and dist_52w is not None and price_200 < -0.15 and dist_52w < -0.35:
-        score = min(score, 55.0)
+    if price_200 is not None and dist_52w is not None and price_200 < deep_price_200_cutoff and dist_52w < deep_52w_cutoff:
+        score = min(score, deep_technical_score_cap)
     score += (liquidity - 50.0) * 0.12
     return round(clamp(score), 4)
 
@@ -398,9 +402,12 @@ def risk_penalty(
         penalty += 12.0
     price_200 = to_optional_float(market.get("price_vs_200d_pct"))
     dist_52w = to_optional_float(market.get("distance_from_52w_high_pct"))
-    if price_200 is not None and price_200 < -0.20:
+    thresholds = cfg_get(config, "multibagger.scoring_thresholds", {}) or {}
+    risk_price_200_cutoff = float(thresholds.get("risk_price_200d_pct_cutoff", -0.20))
+    risk_52w_cutoff = float(thresholds.get("risk_distance_52w_high_pct_cutoff", -0.45))
+    if price_200 is not None and price_200 < risk_price_200_cutoff:
         penalty += 8.0
-    if dist_52w is not None and dist_52w < -0.45:
+    if dist_52w is not None and dist_52w < risk_52w_cutoff:
         penalty += 10.0
     return round(clamp(penalty), 4)
 
@@ -504,6 +511,13 @@ def build_row(
             "pe_ratio": commercial.get("pe_ratio"),
             "commercial_stage_flag": commercial.get("commercial_stage_flag"),
             "profitable_flag": commercial.get("profitable_flag"),
+            "commercial_value_score": commercial.get("commercial_value_score"),
+            "valuation_score": commercial.get("valuation_score"),
+            "quality_adjusted_valuation_score": commercial.get("quality_adjusted_valuation_score"),
+            "upside_capacity_score": commercial.get("upside_capacity_score"),
+            "institutional_upside_capacity_score": commercial.get("institutional_upside_capacity_score"),
+            "value_trap_score": commercial.get("value_trap_score"),
+            "leverage_score": commercial.get("leverage_score"),
         },
         "survival": {
             "cash_runway_months": survival.get("cash_runway_months"),
@@ -535,10 +549,18 @@ def build_row(
             "commercial_fragility_risk_score": governance.get("commercial_fragility_risk_score"),
         },
         "forward_guidance": {
+            "latest_guidance_filing_date": forward.get("latest_guidance_filing_date"),
             "forward_revenue_midpoint": forward.get("forward_revenue_midpoint"),
             "forward_revenue_growth_pct": forward.get("forward_revenue_growth_pct"),
             "forward_ebitda_midpoint": forward.get("forward_ebitda_midpoint"),
+            "forward_eps_midpoint": forward.get("forward_eps_midpoint"),
             "guidance_score": forward.get("guidance_score"),
+            "forward_valuation_score": forward.get("forward_valuation_score"),
+            "quality_forward_valuation_score": forward.get("quality_forward_valuation_score"),
+            "quality_adjusted_guidance_score": forward.get("quality_adjusted_guidance_score"),
+            "guidance_recency_days": forward.get("guidance_recency_days"),
+            "guidance_recency_penalty": forward.get("guidance_recency_penalty"),
+            "data_quality": forward.get("data_quality"),
         },
         "clinical": payload.get("ctgov", {}) if isinstance(payload, dict) else {},
         "risk": payload.get("sec_and_liquidity", {}) if isinstance(payload, dict) else {},

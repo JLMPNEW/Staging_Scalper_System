@@ -76,6 +76,7 @@ GOVERNANCE_FIELDS = [
     "governance_risk_score",
     "data_quality",
     "missing_fields",
+    "proxy_fields_used",
     "payload_json",
 ]
 
@@ -202,7 +203,13 @@ def to_int(raw: object, default: int = 0) -> int:
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
-    return max(low, min(high, value))
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return low
+    if not math.isfinite(parsed):
+        return low
+    return max(low, min(high, parsed))
 
 
 def as_bool(raw: object, default: bool = False) -> bool:

@@ -648,7 +648,8 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
         missing.append("market_cap")
 
     revenue_scale_score = score_revenue_scale(ttm_revenue)
-    revenue_growth_score = score_growth(revenue_yoy_growth)
+    growth_curve = str(cfg_get(config, "commercial_value.growth_curve", "legacy") or "legacy")
+    revenue_growth_score = score_growth(revenue_yoy_growth, curve=growth_curve)
     margin_score = score_margin(gross_margin)
     profitability_score = score_profitability(ttm_revenue, operating_margin, net_margin, free_cash_flow_ttm)
     balance_sheet_score = score_balance(cash, debt, net_cash, ttm_revenue)
@@ -703,6 +704,7 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
     payload = {
         "source": "sec_companyfacts_primary_market_optional",
         "market_source": str(market.get("source") if market else ""),
+        "growth_curve": growth_curve,
         "latest_shares_period_end": str(shares_row.get("period_end") if shares_row else ""),
         "component_scores": {
             "revenue_scale_score": round(revenue_scale_score, 4),

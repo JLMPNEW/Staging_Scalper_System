@@ -13,10 +13,19 @@ GPCR,GSBR-1290,query.intr,manual_program,0.90,true,Structure Therapeutics progra
 GPCR,Structure Therapeutics,query.spons,manual_sponsor_search,0.90,true,Sponsor operating-name search
 BBIO,BridgeBio Pharma,query.spons,manual_sponsor_search,0.95,true,User-requested activation sponsor search
 BBIO,BridgeBio Pharmaceuticals,query.spons,manual_sponsor_search,0.95,true,BridgeBio CTGov sponsor search
+BBIO,Acoramidis,query.intr,manual_program,0.95,true,BridgeBio acoramidis program/intervention search
+BBIO,Infigratinib,query.intr,manual_program,0.95,true,BridgeBio infigratinib program/intervention search
+BBIO,BBP-418,query.intr,manual_program,0.95,true,BridgeBio BBP-418 program/intervention search
+BBIO,Eidos Therapeutics,query.spons,manual_parent_subsidiary,0.95,true,BridgeBio subsidiary sponsor search
+BBIO,QED Therapeutics,query.spons,manual_parent_subsidiary,0.95,true,BridgeBio subsidiary sponsor search
+BBIO,ML Bio Solutions,query.spons,manual_parent_subsidiary,0.95,true,BridgeBio subsidiary sponsor search
 ARWR,Arrowhead Pharmaceuticals,query.spons,manual_sponsor_search,0.95,true,User-requested activation sponsor search
 ARWR,Arrowhead Pharmaceuticals Inc,query.spons,manual_sponsor_search,0.95,true,Arrowhead CTGov sponsor search
 NBIX,Neurocrine Biosciences,query.spons,manual_sponsor_search,0.95,true,User-requested addition sponsor search
 NBIX,Neurocrine Biosciences Inc,query.spons,manual_sponsor_search,0.95,true,Neurocrine CTGov sponsor search
+NBIX,NBI-1070770-MDD2029,query.term,manual_protocol_code,0.95,true,Neurocrine NBI-1070770 MDD Phase 2 protocol code search
+NBIX,NBI-1070770,query.intr,manual_program,0.95,true,Neurocrine NBI-1070770 program/intervention search
+NBIX,NCT06267846,query.term,manual_nct,0.95,true,Neurocrine NBI-1070770 MDD Phase 2 exact NCT seed
 ASND,Ascendis Pharma,query.spons,manual_sponsor_search,0.95,true,User-requested addition sponsor search
 ASND,Ascendis Pharma A/S,query.spons,manual_sponsor_search,0.95,true,Ascendis CTGov sponsor search
 HELP,CYB003,query.intr,manual_program,0.90,true,Cybin program/intervention search

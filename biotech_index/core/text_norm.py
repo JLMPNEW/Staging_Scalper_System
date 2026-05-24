@@ -169,16 +169,18 @@ def build_company_aliases(company_name: str) -> list[AliasCandidate]:
         if candidate:
             raw_aliases.append((source, candidate, confidence))
 
-    out: list[AliasCandidate] = []
-    seen: set[tuple[str, str]] = set()
+    by_key: dict[tuple[str, str], AliasCandidate] = {}
     for source, alias_raw, confidence in raw_aliases:
         for alias_text in (alias_raw, strip_corporate_suffixes(normalize_org_name(alias_raw)).title()):
             alias_norm = normalize_org_name(alias_text)
-            if not alias_norm or (source, alias_norm) in seen:
+            if not alias_norm:
                 continue
-            seen.add((source, alias_norm))
-            out.append(AliasCandidate(alias_raw=alias_text, alias_norm=alias_norm, source=source, confidence=confidence))
-    return out
+            key = (source, alias_norm)
+            candidate = AliasCandidate(alias_raw=alias_text, alias_norm=alias_norm, source=source, confidence=confidence)
+            existing = by_key.get(key)
+            if existing is None or candidate.confidence > existing.confidence:
+                by_key[key] = candidate
+    return list(by_key.values())
 
 
 def alias_token_sets(norm_aliases: set[str]) -> list[set[str]]:

@@ -45,6 +45,25 @@ SCORE_FIELDS = [
     "tier1_gate_multiplier",
     "tier1_available",
     "tier1_interaction_reason",
+    "tier1_score_tier",
+    "tier1_allocation_eligible",
+    "tier1_research_watchlist",
+    "tier1_score_spread_to_allocation",
+    "tier1_score_spread_to_high_confidence",
+    "tier1_rank_quality_cap",
+    "tier1_rank_quality_cap_reasons",
+    "tier1_rank_quality_cap_vetoed",
+    "tier1_rank_quality_cap_veto_reasons",
+    "tier1_mature_defensive_score",
+    "tier1_expected_return_quality_score",
+    "tier1_value_trap_score",
+    "tier1_leverage_score",
+    "tier1_leverage_fragility_score",
+    "tier1_no_forward_guidance_flag",
+    "tier1_guidance_stale_flag",
+    "tier1_no_guidance_negative_growth_flag",
+    "tier1_production_policy_quality_penalty",
+    "tier1_production_policy_quality_bonus",
     "rank",
     "bucket",
     "top_evidence_json",
@@ -68,6 +87,25 @@ CSV_FIELDS = [
     "tier1_gate_multiplier",
     "tier1_available",
     "tier1_interaction_reason",
+    "tier1_score_tier",
+    "tier1_allocation_eligible",
+    "tier1_research_watchlist",
+    "tier1_score_spread_to_allocation",
+    "tier1_score_spread_to_high_confidence",
+    "tier1_rank_quality_cap",
+    "tier1_rank_quality_cap_reasons",
+    "tier1_rank_quality_cap_vetoed",
+    "tier1_rank_quality_cap_veto_reasons",
+    "tier1_mature_defensive_score",
+    "tier1_expected_return_quality_score",
+    "tier1_value_trap_score",
+    "tier1_leverage_score",
+    "tier1_leverage_fragility_score",
+    "tier1_no_forward_guidance_flag",
+    "tier1_guidance_stale_flag",
+    "tier1_no_guidance_negative_growth_flag",
+    "tier1_production_policy_quality_penalty",
+    "tier1_production_policy_quality_bonus",
     "commercial_acceleration_score",
     "upside_capacity_score",
     "cash_flow_acceleration_score",
@@ -83,9 +121,23 @@ CSV_FIELDS = [
     "fcf_yield",
     "market_cap",
     "ev_to_sales",
+    "pe_ratio",
+    "commercial_value_score",
+    "valuation_score",
+    "quality_adjusted_valuation_score",
+    "institutional_upside_capacity_score",
+    "value_trap_score",
+    "leverage_score",
     "cash_runway_months",
     "forward_revenue_midpoint",
     "forward_revenue_growth_pct",
+    "forward_ebitda_midpoint",
+    "forward_eps_midpoint",
+    "guidance_score",
+    "quality_forward_valuation_score",
+    "quality_adjusted_guidance_score",
+    "guidance_recency_days",
+    "guidance_recency_penalty",
     "insider_buy_count_90d",
     "insider_buy_value_90d",
     "buyback_event_count_365d",
@@ -166,6 +218,12 @@ def as_bool(raw: object, default: bool = False) -> bool:
         return True
     if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
         return False
+    try:
+        value = float(text)
+    except ValueError:
+        return default
+    if math.isfinite(value):
+        return value != 0.0
     return default
 
 
@@ -221,13 +279,43 @@ def load_feature_rows(conn: sqlite3.Connection, asof_date: str) -> list[dict[str
     return [dict(row) for row in rows]
 
 
+def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def optional_column_expr(existing_columns: set[str], column_name: str) -> str:
+    if column_name in existing_columns:
+        return f"s.{column_name}"
+    return f"NULL AS {column_name}"
+
+
 def load_tier1_score_rows(conn: sqlite3.Connection, asof_date: str) -> dict[int, dict[str, Any]]:
+    daily_score_columns = table_columns(conn, "daily_scores")
+    optional_columns = [
+        "rank_quality_cap",
+        "rank_quality_cap_reasons",
+        "rank_quality_cap_vetoed",
+        "rank_quality_cap_veto_reasons",
+        "mature_defensive_score",
+        "expected_return_quality_score",
+        "value_trap_score",
+        "leverage_score",
+        "leverage_fragility_score",
+        "no_forward_guidance_flag",
+        "guidance_stale_flag",
+        "guidance_staleness_flag",
+        "no_guidance_negative_growth_flag",
+        "production_policy_quality_penalty",
+        "production_policy_quality_bonus",
+    ]
+    optional_select = ",\n            ".join(optional_column_expr(daily_score_columns, column) for column in optional_columns)
     rows = conn.execute(
-        """
+        f"""
         SELECT
             s.asof_date, s.company_id, s.opportunity_score, s.investment_score,
             s.clinical_opportunity_score, s.commercial_value_score, s.upside_capacity_score,
-            s.risk_score, s.bucket, s.tier1_selection_gate_score, s.top_evidence_json
+            s.risk_score, s.bucket, s.tier1_selection_gate_score, s.top_evidence_json,
+            {optional_select}
         FROM daily_scores s
         JOIN (
             SELECT company_id, MAX(asof_date) AS max_asof
@@ -250,6 +338,117 @@ def normalized_config_list(raw: object, default: list[str]) -> set[str]:
     if isinstance(raw, (list, tuple, set)):
         return {str(item).strip().lower() for item in raw if str(item).strip()}
     return {item.lower() for item in default}
+
+
+def tier1_score_tier(tier1_score: float | None, *, rank_cap_vetoed: bool = False) -> str:
+    if rank_cap_vetoed:
+        return "rank_vetoed"
+    if tier1_score is None or not math.isfinite(tier1_score):
+        return "missing"
+    if tier1_score >= 55.0:
+        return "high_confidence_allocation"
+    if tier1_score >= 50.0:
+        return "allocation_candidate"
+    if tier1_score >= 45.0:
+        return "research_watchlist"
+    return "low_priority"
+
+
+def tier1_score_tier_flags(tier1: dict[str, Any] | None) -> dict[str, Any]:
+    if not tier1:
+        return {
+            "tier1_score_tier": "missing",
+            "tier1_allocation_eligible": 0,
+            "tier1_research_watchlist": 0,
+            "tier1_score_spread_to_allocation": "",
+            "tier1_score_spread_to_high_confidence": "",
+        }
+    score = to_float(tier1.get("opportunity_score"), math.nan)
+    rank_cap_vetoed = as_bool(tier1.get("rank_quality_cap_vetoed"), False)
+    tier = tier1_score_tier(score if math.isfinite(score) else None, rank_cap_vetoed=rank_cap_vetoed)
+    return {
+        "tier1_score_tier": tier,
+        "tier1_allocation_eligible": 1 if tier in {"high_confidence_allocation", "allocation_candidate"} else 0,
+        "tier1_research_watchlist": 1 if tier == "research_watchlist" else 0,
+        "tier1_score_spread_to_allocation": round(score - 50.0, 4) if math.isfinite(score) else "",
+        "tier1_score_spread_to_high_confidence": round(score - 55.0, 4) if math.isfinite(score) else "",
+    }
+
+
+def tier1_context_values(tier1: dict[str, Any] | None, gate_score: float | None, gate_multiplier: float | None) -> dict[str, Any]:
+    tier_flags = tier1_score_tier_flags(tier1)
+    if not tier1:
+        return {
+            "tier1_available": False,
+            "tier1_opportunity_score": "",
+            "tier1_risk_score": "",
+            "tier1_bucket": "",
+            "tier1_gate_score": "",
+            "tier1_gate_multiplier": "",
+            **tier_flags,
+            "tier1_rank_quality_cap": "",
+            "tier1_rank_quality_cap_reasons": "",
+            "tier1_rank_quality_cap_vetoed": 0,
+            "tier1_rank_quality_cap_veto_reasons": "",
+            "tier1_mature_defensive_score": "",
+            "tier1_expected_return_quality_score": "",
+            "tier1_value_trap_score": "",
+            "tier1_leverage_score": "",
+            "tier1_leverage_fragility_score": "",
+            "tier1_no_forward_guidance_flag": "",
+            "tier1_guidance_stale_flag": "",
+            "tier1_no_guidance_negative_growth_flag": "",
+            "tier1_production_policy_quality_penalty": "",
+            "tier1_production_policy_quality_bonus": "",
+        }
+    guidance_stale = tier1.get("guidance_stale_flag")
+    if guidance_stale in (None, ""):
+        guidance_stale = tier1.get("guidance_staleness_flag")
+    return {
+        "tier1_available": True,
+        "tier1_opportunity_score": round(to_float(tier1.get("opportunity_score"), 0.0), 4),
+        "tier1_risk_score": round(to_float(tier1.get("risk_score"), 0.0), 4),
+        "tier1_bucket": str(tier1.get("bucket") or ""),
+        "tier1_gate_score": round(gate_score, 4) if gate_score is not None else "",
+        "tier1_gate_multiplier": round(gate_multiplier, 4) if gate_multiplier is not None else "",
+        **tier_flags,
+        "tier1_rank_quality_cap": round(to_float(tier1.get("rank_quality_cap"), 0.0), 4)
+        if tier1.get("rank_quality_cap") not in (None, "")
+        else "",
+        "tier1_rank_quality_cap_reasons": str(tier1.get("rank_quality_cap_reasons") or ""),
+        "tier1_rank_quality_cap_vetoed": 1 if as_bool(tier1.get("rank_quality_cap_vetoed"), False) else 0,
+        "tier1_rank_quality_cap_veto_reasons": str(tier1.get("rank_quality_cap_veto_reasons") or ""),
+        "tier1_mature_defensive_score": round(to_float(tier1.get("mature_defensive_score"), 0.0), 4)
+        if tier1.get("mature_defensive_score") not in (None, "")
+        else "",
+        "tier1_expected_return_quality_score": round(to_float(tier1.get("expected_return_quality_score"), 0.0), 4)
+        if tier1.get("expected_return_quality_score") not in (None, "")
+        else "",
+        "tier1_value_trap_score": round(to_float(tier1.get("value_trap_score"), 0.0), 4)
+        if tier1.get("value_trap_score") not in (None, "")
+        else "",
+        "tier1_leverage_score": round(to_float(tier1.get("leverage_score"), 0.0), 4)
+        if tier1.get("leverage_score") not in (None, "")
+        else "",
+        "tier1_leverage_fragility_score": round(to_float(tier1.get("leverage_fragility_score"), 0.0), 4)
+        if tier1.get("leverage_fragility_score") not in (None, "")
+        else "",
+        "tier1_no_forward_guidance_flag": round(to_float(tier1.get("no_forward_guidance_flag"), 0.0), 4)
+        if tier1.get("no_forward_guidance_flag") not in (None, "")
+        else "",
+        "tier1_guidance_stale_flag": round(to_float(guidance_stale, 0.0), 4)
+        if guidance_stale not in (None, "")
+        else "",
+        "tier1_no_guidance_negative_growth_flag": round(to_float(tier1.get("no_guidance_negative_growth_flag"), 0.0), 4)
+        if tier1.get("no_guidance_negative_growth_flag") not in (None, "")
+        else "",
+        "tier1_production_policy_quality_penalty": round(to_float(tier1.get("production_policy_quality_penalty"), 0.0), 4)
+        if tier1.get("production_policy_quality_penalty") not in (None, "")
+        else "",
+        "tier1_production_policy_quality_bonus": round(to_float(tier1.get("production_policy_quality_bonus"), 0.0), 4)
+        if tier1.get("production_policy_quality_bonus") not in (None, "")
+        else "",
+    }
 
 
 def tier1_gate_values(tier1: dict[str, Any] | None, config: dict[str, Any]) -> tuple[float | None, float | None]:
@@ -291,6 +490,8 @@ def build_tier1_interaction_reason(
     reasons: list[str] = []
     tier1_bucket = str(row.get("tier1_bucket") or "").lower()
     tier1_risk = to_float(row.get("tier1_risk_score"), 0.0)
+    tier1_tier = str(row.get("tier1_score_tier") or "").lower()
+    tier1_rank_vetoed = as_bool(row.get("tier1_rank_quality_cap_vetoed"), False)
     gate_multiplier = to_float(row.get("tier1_gate_multiplier"), 1.0)
     veto_buckets = normalized_config_list(
         cfg_get(config, "multibagger.tier1_interaction.veto_buckets", ["avoid"]),
@@ -299,11 +500,21 @@ def build_tier1_interaction_reason(
     tier1_risk_veto = float(cfg_get(config, "multibagger.tier1_interaction.tier1_risk_veto", 80.0))
     tier1_avoid_cap = float(cfg_get(config, "multibagger.tier1_interaction.tier1_avoid_score_cap", 49.0))
     tier1_risk_cap = float(cfg_get(config, "multibagger.tier1_interaction.tier1_risk_score_cap", 55.0))
+    tier1_research_cap = float(cfg_get(config, "multibagger.tier1_interaction.tier1_research_watchlist_score_cap", 55.0))
+    tier1_low_priority_cap = float(cfg_get(config, "multibagger.tier1_interaction.tier1_low_priority_score_cap", 45.0))
 
     if residualization_status:
         reasons.append(f"orthogonal_alpha={residualization_status}")
     if gate_multiplier < 0.9999:
         reasons.append(f"tier1_gate_multiplier={gate_multiplier:.4f}")
+    if tier1_tier:
+        reasons.append(f"tier1_score_tier={tier1_tier}")
+    if tier1_rank_vetoed:
+        reasons.append(f"tier1_rank_quality_cap_veto;cap<={tier1_avoid_cap:.1f}")
+    if tier1_tier == "research_watchlist":
+        reasons.append(f"tier1_research_watchlist_cap<={tier1_research_cap:.1f}")
+    if tier1_tier == "low_priority":
+        reasons.append(f"tier1_low_priority_cap<={tier1_low_priority_cap:.1f}")
     if tier1_bucket in veto_buckets:
         reasons.append(f"tier1_bucket_veto={tier1_bucket};cap<={tier1_avoid_cap:.1f}")
     if tier1_risk >= tier1_risk_veto:
@@ -346,11 +557,16 @@ def bucket_for(
     if tier1_enabled and tier1 and as_bool(tier1.get("tier1_available", True), True):
         tier1_bucket = str(tier1.get("tier1_bucket") or tier1.get("bucket") or "").lower()
         tier1_risk = to_float(tier1.get("tier1_risk_score", tier1.get("risk_score")), 0.0)
+        tier1_tier = str(tier1.get("tier1_score_tier") or "").lower()
         veto_buckets = normalized_config_list(
             cfg_get(config, "multibagger.tier1_interaction.veto_buckets", ["avoid"]),
             ["avoid"],
         )
         tier1_risk_veto = float(cfg_get(config, "multibagger.tier1_interaction.tier1_risk_veto", 80.0))
+        if as_bool(tier1.get("tier1_rank_quality_cap_vetoed"), False):
+            return "avoid_tier1_rank_veto"
+        if tier1_tier == "low_priority":
+            return "avoid_tier1_low_priority"
         if tier1_bucket in veto_buckets:
             return "avoid_tier1_conflict"
         if tier1_risk >= tier1_risk_veto:
@@ -428,14 +644,7 @@ def score_one(row: dict[str, Any], config: dict[str, Any], tier1: dict[str, Any]
     evidence = bool(to_int(row.get("evidence_or_catalyst_flag")))
     liquidity_ok = row_liquidity_ok(row, payload, config)
     gate_score, gate_multiplier = tier1_gate_values(tier1, config)
-    tier1_context = {
-        "tier1_available": bool(tier1),
-        "tier1_opportunity_score": round(to_float(tier1.get("opportunity_score"), 0.0), 4) if tier1 else "",
-        "tier1_risk_score": round(to_float(tier1.get("risk_score"), 0.0), 4) if tier1 else "",
-        "tier1_bucket": str(tier1.get("bucket") or "") if tier1 else "",
-        "tier1_gate_score": round(gate_score, 4) if gate_score is not None else "",
-        "tier1_gate_multiplier": round(gate_multiplier, 4) if gate_multiplier is not None else "",
-    }
+    tier1_context = tier1_context_values(tier1, gate_score, gate_multiplier)
     bucket = bucket_for(score, risk, evidence, liquidity_ok, payload, config, tier1_context)
     distinct_score = distinctive_acceleration_score(
         {
@@ -494,6 +703,25 @@ def score_one(row: dict[str, Any], config: dict[str, Any], tier1: dict[str, Any]
         "tier1_gate_multiplier": tier1_context["tier1_gate_multiplier"],
         "tier1_available": 1 if tier1_context["tier1_available"] else 0,
         "tier1_interaction_reason": tier1_reason_disabled(config, tier1),
+        "tier1_score_tier": tier1_context["tier1_score_tier"],
+        "tier1_allocation_eligible": tier1_context["tier1_allocation_eligible"],
+        "tier1_research_watchlist": tier1_context["tier1_research_watchlist"],
+        "tier1_score_spread_to_allocation": tier1_context["tier1_score_spread_to_allocation"],
+        "tier1_score_spread_to_high_confidence": tier1_context["tier1_score_spread_to_high_confidence"],
+        "tier1_rank_quality_cap": tier1_context["tier1_rank_quality_cap"],
+        "tier1_rank_quality_cap_reasons": tier1_context["tier1_rank_quality_cap_reasons"],
+        "tier1_rank_quality_cap_vetoed": tier1_context["tier1_rank_quality_cap_vetoed"],
+        "tier1_rank_quality_cap_veto_reasons": tier1_context["tier1_rank_quality_cap_veto_reasons"],
+        "tier1_mature_defensive_score": tier1_context["tier1_mature_defensive_score"],
+        "tier1_expected_return_quality_score": tier1_context["tier1_expected_return_quality_score"],
+        "tier1_value_trap_score": tier1_context["tier1_value_trap_score"],
+        "tier1_leverage_score": tier1_context["tier1_leverage_score"],
+        "tier1_leverage_fragility_score": tier1_context["tier1_leverage_fragility_score"],
+        "tier1_no_forward_guidance_flag": tier1_context["tier1_no_forward_guidance_flag"],
+        "tier1_guidance_stale_flag": tier1_context["tier1_guidance_stale_flag"],
+        "tier1_no_guidance_negative_growth_flag": tier1_context["tier1_no_guidance_negative_growth_flag"],
+        "tier1_production_policy_quality_penalty": tier1_context["tier1_production_policy_quality_penalty"],
+        "tier1_production_policy_quality_bonus": tier1_context["tier1_production_policy_quality_bonus"],
         "commercial_acceleration_score": commercial,
         "cash_flow_acceleration_score": cash_flow,
         "governance_event_score": governance,
@@ -637,6 +865,8 @@ def apply_tier1_interaction(rows: list[dict[str, Any]], config: dict[str, Any]) 
     tier1_avoid_cap = float(cfg_get(config, "multibagger.tier1_interaction.tier1_avoid_score_cap", 49.0))
     tier1_risk_cap = float(cfg_get(config, "multibagger.tier1_interaction.tier1_risk_score_cap", 55.0))
     tier1_risk_veto = float(cfg_get(config, "multibagger.tier1_interaction.tier1_risk_veto", 80.0))
+    tier1_research_cap = float(cfg_get(config, "multibagger.tier1_interaction.tier1_research_watchlist_score_cap", 55.0))
+    tier1_low_priority_cap = float(cfg_get(config, "multibagger.tier1_interaction.tier1_low_priority_score_cap", 45.0))
 
     for idx, row in enumerate(rows):
         alpha_score = clamp(alpha_scores[idx]) if alpha_available and idx in alpha_scores else None
@@ -653,6 +883,13 @@ def apply_tier1_interaction(rows: list[dict[str, Any]], config: dict[str, Any]) 
         pre_cap_score = final_score
         tier1_bucket = str(row.get("tier1_bucket") or "").lower()
         tier1_risk = to_float(row.get("tier1_risk_score"), 0.0)
+        tier1_tier = str(row.get("tier1_score_tier") or "").lower()
+        if as_bool(row.get("tier1_available")) and as_bool(row.get("tier1_rank_quality_cap_vetoed"), False):
+            final_score = min(final_score, tier1_avoid_cap)
+        if as_bool(row.get("tier1_available")) and tier1_tier == "research_watchlist":
+            final_score = min(final_score, tier1_research_cap)
+        if as_bool(row.get("tier1_available")) and tier1_tier == "low_priority":
+            final_score = min(final_score, tier1_low_priority_cap)
         if as_bool(row.get("tier1_available")) and tier1_bucket in veto_buckets:
             final_score = min(final_score, tier1_avoid_cap)
         if as_bool(row.get("tier1_available")) and tier1_risk >= tier1_risk_veto:
@@ -691,6 +928,25 @@ def apply_tier1_interaction(rows: list[dict[str, Any]], config: dict[str, Any]) 
             "distinctive_acceleration_score": row.get("distinctive_acceleration_score"),
             "tier1_gate_score": row.get("tier1_gate_score"),
             "tier1_gate_multiplier": row.get("tier1_gate_multiplier"),
+            "tier1_score_tier": row.get("tier1_score_tier"),
+            "tier1_allocation_eligible": row.get("tier1_allocation_eligible"),
+            "tier1_research_watchlist": row.get("tier1_research_watchlist"),
+            "tier1_score_spread_to_allocation": row.get("tier1_score_spread_to_allocation"),
+            "tier1_score_spread_to_high_confidence": row.get("tier1_score_spread_to_high_confidence"),
+            "tier1_rank_quality_cap": row.get("tier1_rank_quality_cap"),
+            "tier1_rank_quality_cap_reasons": row.get("tier1_rank_quality_cap_reasons"),
+            "tier1_rank_quality_cap_vetoed": row.get("tier1_rank_quality_cap_vetoed"),
+            "tier1_rank_quality_cap_veto_reasons": row.get("tier1_rank_quality_cap_veto_reasons"),
+            "tier1_mature_defensive_score": row.get("tier1_mature_defensive_score"),
+            "tier1_expected_return_quality_score": row.get("tier1_expected_return_quality_score"),
+            "tier1_value_trap_score": row.get("tier1_value_trap_score"),
+            "tier1_leverage_score": row.get("tier1_leverage_score"),
+            "tier1_leverage_fragility_score": row.get("tier1_leverage_fragility_score"),
+            "tier1_no_forward_guidance_flag": row.get("tier1_no_forward_guidance_flag"),
+            "tier1_guidance_stale_flag": row.get("tier1_guidance_stale_flag"),
+            "tier1_no_guidance_negative_growth_flag": row.get("tier1_no_guidance_negative_growth_flag"),
+            "tier1_production_policy_quality_penalty": row.get("tier1_production_policy_quality_penalty"),
+            "tier1_production_policy_quality_bonus": row.get("tier1_production_policy_quality_bonus"),
             "tier1_interaction_reason": row.get("tier1_interaction_reason"),
             "final_multibagger_score": row.get("multibagger_score"),
             "method": "residualize_base_score_vs_tier1_opportunity_and_risk_then_gate_by_tier1_quality",
@@ -723,9 +979,23 @@ def flatten_for_csv(score_row: dict[str, Any], feature_row: dict[str, Any]) -> d
         "fcf_yield": commercial.get("fcf_yield"),
         "market_cap": commercial.get("market_cap"),
         "ev_to_sales": commercial.get("ev_to_sales"),
+        "pe_ratio": commercial.get("pe_ratio"),
+        "commercial_value_score": commercial.get("commercial_value_score"),
+        "valuation_score": commercial.get("valuation_score"),
+        "quality_adjusted_valuation_score": commercial.get("quality_adjusted_valuation_score"),
+        "institutional_upside_capacity_score": commercial.get("institutional_upside_capacity_score"),
+        "value_trap_score": commercial.get("value_trap_score"),
+        "leverage_score": commercial.get("leverage_score"),
         "cash_runway_months": survival.get("cash_runway_months"),
         "forward_revenue_midpoint": forward.get("forward_revenue_midpoint"),
         "forward_revenue_growth_pct": forward.get("forward_revenue_growth_pct"),
+        "forward_ebitda_midpoint": forward.get("forward_ebitda_midpoint"),
+        "forward_eps_midpoint": forward.get("forward_eps_midpoint"),
+        "guidance_score": forward.get("guidance_score"),
+        "quality_forward_valuation_score": forward.get("quality_forward_valuation_score"),
+        "quality_adjusted_guidance_score": forward.get("quality_adjusted_guidance_score"),
+        "guidance_recency_days": forward.get("guidance_recency_days"),
+        "guidance_recency_penalty": forward.get("guidance_recency_penalty"),
         "insider_buy_count_90d": governance.get("insider_buy_count_90d"),
         "insider_buy_value_90d": governance.get("insider_buy_value_90d"),
         "buyback_event_count_365d": governance.get("buyback_event_count_365d"),

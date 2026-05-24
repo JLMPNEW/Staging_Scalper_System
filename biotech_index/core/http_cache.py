@@ -73,11 +73,18 @@ class CachedHttpClient:
 
     @staticmethod
     def cache_is_fresh(path: Path, ttl_hours: float) -> bool:
+        """Return true when cached content is usable.
+
+        A negative TTL disables expiry and treats an existing cache file as fresh.
+        """
         if not path.exists():
             return False
         if ttl_hours < 0:
             return True
-        age_seconds = time.time() - path.stat().st_mtime
+        try:
+            age_seconds = time.time() - path.stat().st_mtime
+        except FileNotFoundError:
+            return False
         return age_seconds <= ttl_hours * 3600.0
 
     def _get_text(self, *, url: str, params: Optional[dict[str, Any]], headers: dict[str, str]) -> str:
@@ -97,7 +104,7 @@ class CachedHttpClient:
                     time.sleep(min(8.0, 2.0**attempt))
         if last_exc is not None:
             raise last_exc
-        raise RuntimeError(f"Request failed without exception: {url}")
+        raise RuntimeError(f"Request failed without a captured exception: {url}")
 
     def fetch_json(
         self,
@@ -110,17 +117,22 @@ class CachedHttpClient:
     ) -> Any:
         path = self.cache_path(namespace, url, params)
         if self.cache_is_fresh(path, ttl_hours):
-            cached_text = path.read_text(encoding="utf-8")
             try:
-                return json.loads(cached_text)
-            except json.JSONDecodeError:
-                LOGGER.warning("Ignoring invalid JSON cache file: %s", path)
-                with _CACHE_WRITE_LOCK:
-                    try:
-                        path.unlink()
-                    except FileNotFoundError:
-                        pass
-
+                cached_text = path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                cached_text = ""
+            if cached_text:
+                try:
+                    return json.loads(cached_text)
+                except json.JSONDecodeError:
+                    LOGGER.warning("Ignoring invalid JSON cache file: %s", path)
+                    with _CACHE_WRITE_LOCK:
+                        try:
+                            path.unlink()
+                        except FileNotFoundError:
+                            pass
+            elif path.exists():
+                LOGGER.warning("Ignoring empty JSON cache file: %s", path)
         text = self._get_text(url=url, params=params, headers=headers or {})
         parsed = json.loads(text)
         with _CACHE_WRITE_LOCK:
@@ -139,7 +151,10 @@ class CachedHttpClient:
     ) -> str:
         path = self.cache_path(namespace, url, params)
         if self.cache_is_fresh(path, ttl_hours):
-            return path.read_text(encoding="utf-8", errors="replace")
+            try:
+                return path.read_text(encoding="utf-8", errors="replace")
+            except FileNotFoundError:
+                pass
 
         text = self._get_text(url=url, params=params, headers=headers or {})
         with _CACHE_WRITE_LOCK:

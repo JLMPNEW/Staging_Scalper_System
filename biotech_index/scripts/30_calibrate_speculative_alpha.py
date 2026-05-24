@@ -2077,7 +2077,7 @@ def main() -> None:
         asof_dates = [parsed for row in rows if (parsed := parse_date(row.get("asof_date"))) is not None]
         if not asof_dates:
             raise ValueError("Score rows do not contain valid as-of dates.")
-        tickers = {str(row.get("ticker") or "").upper().replace(".", "-") for row in rows}
+        tickers = {ticker for row in rows if (ticker := normalize_ticker(row.get("ticker")))}
         bars_by_ticker = load_bars(conn, tickers=tickers, min_date=min(asof_dates), market_sources=market_sources)
 
     add_diagnostics(rows, min_addv20=min_addv20, commercial_risk_settings=commercial_risk_settings)

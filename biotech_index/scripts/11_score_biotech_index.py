@@ -655,7 +655,9 @@ def apply_rank_quality_caps(
 
     def apply_cap(reason: str, raw_cap: object) -> None:
         nonlocal capped, cap_value
-        cap = float(raw_cap)
+        cap = to_float(raw_cap, math.nan)
+        if not math.isfinite(cap):
+            return
         if capped > cap:
             capped = cap
             cap_value = cap if cap_value is None else min(cap_value, cap)
@@ -724,7 +726,7 @@ def core_structural_veto_reasons(
 
     addv = to_float(sec_liq.get("median_addv20", sec_liq.get("avg_dollar_volume_20d")), math.nan)
     min_addv20 = float(settings.get("min_addv20") or 0.0)
-    if math.isfinite(addv) and addv < min_addv20:
+    if min_addv20 > 0.0 and (not math.isfinite(addv) or addv < min_addv20):
         reasons.append("illiquid")
 
     return [reason for reason in reasons if reason in configured_reasons]
@@ -1180,8 +1182,9 @@ def score_rows(
         value_trap_score = clamp(to_float(commercial.get("value_trap_score"), 0.0))
         mature_defensive = mature_defensive_score(commercial, forward_guidance)
         quality_adjusted_valuation_score = clamp(to_float(commercial.get("quality_adjusted_valuation_score"), valuation_score))
+        forward_valuation_score = to_float(forward_guidance.get("forward_valuation_score"), 50.0)
         quality_forward_valuation_score = clamp(
-            to_float(forward_guidance.get("quality_forward_valuation_score"), forward_guidance.get("forward_valuation_score"))
+            to_float(forward_guidance.get("quality_forward_valuation_score"), forward_valuation_score)
         )
         quality_adjusted_guidance_score = clamp(to_float(forward_guidance.get("quality_adjusted_guidance_score"), forward_guidance_score))
         guidance_recency_penalty = clamp(to_float(forward_guidance.get("guidance_recency_penalty"), 0.0), 0.0, 100.0)
@@ -1508,6 +1511,7 @@ def score_rows(
                 "risk_score": round(risk, 4),
                 "momentum_score": round(momentum, 4),
                 "clinical_opportunity_score": round(clinical_opportunity, 4),
+                "commercial_quality_score": round(commercial_quality, 4),
                 "commercial_value_score": round(commercial_value, 4),
                 "forward_guidance_score": round(forward_guidance_score, 4),
                 "valuation_score": round(valuation_score, 4),
@@ -1656,6 +1660,7 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "risk_score",
         "momentum_score",
         "clinical_opportunity_score",
+        "commercial_quality_score",
         "commercial_value_score",
         "forward_guidance_score",
         "valuation_score",
@@ -1844,6 +1849,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "guidance_stale_flag",
         "no_guidance_negative_growth_flag",
         "commercial_value_score",
+        "commercial_quality_score",
         "forward_guidance_score",
         "valuation_score",
         "upside_capacity_score",

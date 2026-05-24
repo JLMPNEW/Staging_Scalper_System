@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
+from biotech_index.core.scoring_math import clamp as _clamp
+
 
 def _to_float(raw: object, default: float | None = None) -> float | None:
     if raw is None:
@@ -14,12 +16,6 @@ def _to_float(raw: object, default: float | None = None) -> float | None:
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default
-
-
-def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
-    if not math.isfinite(value):
-        return low
-    return max(low, min(high, value))
 
 
 def _setting(settings: Mapping[str, Any], key: str, default: float) -> float:
@@ -188,12 +184,9 @@ def commercial_risk_overlay_fields(
         "commercial_business_shock": business_shock_score,
     }
     ranked_sub_scores = sorted(sub_scores.values(), reverse=True)
-    overlay_score = _clamp(
-        ranked_sub_scores[0]
-        + 0.40 * ranked_sub_scores[1]
-        + 0.25 * ranked_sub_scores[2]
-        + 0.15 * ranked_sub_scores[3]
-    )
+    overlay_weights = (1.00, 0.40, 0.25, 0.15)
+    # The weights intentionally sum above 1.0 to amplify co-occurring commercial risks.
+    overlay_score = _clamp(sum(weight * score for weight, score in zip(overlay_weights, ranked_sub_scores)))
 
     return {
         "commercial_deterioration_score": round(deterioration_score, 6),
