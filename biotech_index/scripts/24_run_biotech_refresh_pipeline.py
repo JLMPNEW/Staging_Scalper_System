@@ -535,7 +535,7 @@ def run_step(
 
 
 def connect_form4_readonly(path: Path) -> sqlite3.Connection:
-    uri = f"file:{path.as_posix()}?mode=ro"
+    uri = path.resolve().as_uri() + "?mode=ro&immutable=1"
     conn = sqlite3.connect(uri, uri=True, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=ON")
