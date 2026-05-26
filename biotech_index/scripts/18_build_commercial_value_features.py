@@ -18,10 +18,11 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from biotech_index.core.config import cfg_get, load_yaml, resolve_path
-from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
-from biotech_index.core.logging_utils import configure_utc_logging
-from biotech_index.core.pipeline_guards import (
+from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.market_policy import scoring_market_sources, select_latest_rows_by_source_priority  # noqa: E402
+from biotech_index.core.pipeline_guards import (  # noqa: E402
     normalize_ticker,
     read_final_scoring_tickers,
     subset_mode_enabled,
@@ -32,7 +33,7 @@ from biotech_index.core.pipeline_guards import (
     validate_output_coverage,
     validate_requested_tickers,
 )
-from biotech_index.core.scoring_math import score_growth
+from biotech_index.core.scoring_math import score_growth  # noqa: E402
 
 
 LOGGER = logging.getLogger("build_commercial_value_features")
@@ -204,7 +205,8 @@ def load_latest_market_bulk(
     company_ids: list[int],
     asof_date: date,
     *,
-    preferred_source: str,
+    source_priority: list[str],
+    max_staleness_days: int,
 ) -> dict[int, dict[str, Any]]:
     if not company_ids:
         return {}
@@ -216,30 +218,39 @@ def load_latest_market_bulk(
                     conn,
                     [int(value) for value in company_chunk],
                     asof_date,
-                    preferred_source=preferred_source,
+                    source_priority=source_priority,
+                    max_staleness_days=max_staleness_days,
                 )
             )
         return out
     placeholders = ",".join("?" for _ in company_ids)
+    source_clause = ""
+    params: list[Any] = [*company_ids, asof_date.isoformat()]
+    if source_priority:
+        source_clause = " AND source IN (" + ",".join("?" for _ in source_priority) + ")"
+        params.extend(source_priority)
     rows = conn.execute(
         f"""
-        SELECT *
-        FROM market_features_daily
-        WHERE company_id IN ({placeholders}) AND asof_date <= ?
-        ORDER BY
-            company_id,
-            asof_date DESC,
-            CASE WHEN source = ? THEN 0 ELSE 1 END,
-            source
+        SELECT f.*
+        FROM market_features_daily f
+        JOIN (
+            SELECT company_id, source, MAX(asof_date) AS max_asof
+            FROM market_features_daily
+            WHERE company_id IN ({placeholders}) AND asof_date <= ?{source_clause}
+            GROUP BY company_id, source
+        ) latest
+          ON latest.company_id = f.company_id
+         AND latest.source = f.source
+         AND latest.max_asof = f.asof_date
         """,
-        tuple(company_ids) + (asof_date.isoformat(), preferred_source),
+        tuple(params),
     ).fetchall()
-    out: dict[int, dict[str, Any]] = {}
-    for row in rows:
-        company_id = int(row["company_id"])
-        if company_id not in out:
-            out[company_id] = dict(row)
-    return out
+    return select_latest_rows_by_source_priority(
+        rows,
+        asof_date=asof_date,
+        source_priority=source_priority,
+        max_staleness_days=max_staleness_days,
+    )
 
 
 def latest_nonnull(rows: list[dict[str, Any]], field: str) -> tuple[float | None, dict[str, Any] | None]:
@@ -704,6 +715,12 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
     payload = {
         "source": "sec_companyfacts_primary_market_optional",
         "market_source": str(market.get("source") if market else ""),
+        "market_price_adjustment": str(market.get("price_adjustment") if market else ""),
+        "market_is_adjusted": int(to_float(market.get("is_adjusted") if market else None) or 0),
+        "market_asof_date": str(market.get("asof_date") if market else ""),
+        "market_last_bar_date": str(market.get("last_bar_date") if market else ""),
+        "market_bar_count": int(to_float(market.get("bar_count") if market else None) or 0),
+        "market_data_quality": str(market.get("market_data_quality") if market else ""),
         "growth_curve": growth_curve,
         "latest_shares_period_end": str(shares_row.get("period_end") if shares_row else ""),
         "component_scores": {
@@ -848,8 +865,16 @@ def main() -> None:
             )
             company_ids = [int(company["company_id"]) for company in companies]
             fact_rows_by_company = load_fact_rows_bulk(conn, company_ids, asof_date)
-            preferred_source = str(cfg_get(config, "commercial_value.preferred_market_source", "interactive_brokers") or "interactive_brokers")
-            market_by_company = load_latest_market_bulk(conn, company_ids, asof_date, preferred_source=preferred_source)
+            market_source_priority = scoring_market_sources(config)
+            max_market_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0))
+            market_by_company = load_latest_market_bulk(
+                conn,
+                company_ids,
+                asof_date,
+                source_priority=market_source_priority,
+                max_staleness_days=max_market_staleness_days,
+            )
+            LOGGER.info("Commercial value market source priority: %s", ",".join(market_source_priority))
             freshness_base_rows = companies
             if args.allow_missing_market:
                 market_company_ids = set(market_by_company)
@@ -872,7 +897,7 @@ def main() -> None:
                 layer_rows_by_company=market_by_company,
                 asof_date=asof_date,
                 context="commercial value feature build market_features_daily",
-                max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0)),
+                max_staleness_days=max_market_staleness_days,
             )
             rows: list[dict[str, Any]] = []
             for idx, company in enumerate(companies, start=1):

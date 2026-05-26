@@ -33,6 +33,8 @@ def normalize_growth_curve(raw: object) -> str:
 def _score_growth_legacy(growth: float | None, *, default: float) -> float:
     if growth is None:
         return default
+    if not math.isfinite(growth):
+        return default
     if growth < GROWTH_SEVERE_DECLINE:
         return 20.0
     if growth < GROWTH_ZERO:
@@ -71,10 +73,9 @@ def score_growth(
 ) -> float:
     """Shared trailing/forward growth score on a 0-100 scale.
 
-    The current production calibration intentionally separates negative growth
-    from positive growth with a discontinuity at zero. Do not smooth these
-    thresholds in production without recalibrating scoring and ranking outputs.
-    Use curve="smooth_zero" only as a challenger curve.
+    The legacy curve is kept for backward-compatible historical comparisons.
+    Production scripts should pass the configured curve explicitly; current
+    biotech config uses ``smooth_zero`` for both commercial and forward growth.
     """
     if normalize_growth_curve(curve) == GROWTH_CURVE_SMOOTH_ZERO:
         return _score_growth_smooth_zero(growth, default=default)

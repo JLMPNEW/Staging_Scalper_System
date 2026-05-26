@@ -281,10 +281,19 @@ def strip_company_suffixes(norm_name: str) -> str:
 def load_tickers(csv_path: Path, ticker_column: Optional[str] = None) -> List[InputTicker]:
     if not csv_path.exists():
         raise FileNotFoundError(f"Input CSV not found: {csv_path}")
-    try:
-        df = pd.read_csv(csv_path, dtype=str)
-    except pd.errors.EmptyDataError:
-        raise ValueError(f"Input CSV is empty: {csv_path}")
+    last_error: Exception | None = None
+    df: pd.DataFrame | None = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            df = pd.read_csv(csv_path, dtype=str, encoding=encoding)
+            break
+        except UnicodeDecodeError as e:
+            last_error = e
+            continue
+        except pd.errors.EmptyDataError:
+            raise ValueError(f"Input CSV is empty: {csv_path}")
+    if df is None:
+        raise ValueError(f"Could not decode CSV {csv_path}: {last_error}")
     if df.empty:
         raise ValueError(f"Input CSV is empty: {csv_path}")
 

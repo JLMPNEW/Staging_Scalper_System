@@ -28,6 +28,14 @@ from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 LOGGER = logging.getLogger("publish_biotech_reports")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 
+
+def first_nonblank(*values: object) -> object:
+    for value in values:
+        if str(value if value is not None else "").strip():
+            return value
+    return ""
+
+
 TOP_SCORE_FIELDS = [
     "asof_date",
     "rank",
@@ -731,16 +739,40 @@ def build_shadow_top_rows(
             "rank_quality_cap_flag": row.get("rank_quality_cap_flag", ""),
             "rank_quality_cap_reasons": row.get("rank_quality_cap_reasons", ""),
             "rank_quality_cap_vetoed": row.get("rank_quality_cap_vetoed", ""),
-            "risk_score_raw": row.get("risk_score_raw", row.get("risk_score", "")),
-            "momentum_score_raw": row.get("momentum_score_raw", row.get("momentum_score", "")),
-            "core_hard_weakness_reasons": row.get("diag_core_hard_weakness_reasons", ""),
-            "event_hard_weakness_reasons": row.get("diag_event_hard_weakness_reasons", ""),
-            "soft_weakness_reasons": row.get("diag_soft_weakness_reasons", ""),
-            "commercial_business_shock_score": row.get("diag_commercial_business_shock_score", ""),
-            "commercial_business_shock_reasons": row.get("diag_commercial_business_shock_reasons", ""),
-            "no_forward_guidance_flag": row.get("diag_no_forward_guidance_flag", ""),
-            "guidance_staleness_flag": row.get("diag_guidance_staleness_flag", ""),
-            "no_guidance_negative_growth_flag": row.get("diag_no_guidance_negative_growth_flag", ""),
+            "risk_score_raw": row.get("risk_score_raw", ""),
+            "momentum_score_raw": row.get("momentum_score_raw", ""),
+            "core_hard_weakness_reasons": first_nonblank(
+                row.get("diag_core_hard_weakness_reasons"),
+                row.get("core_hard_weakness_reasons"),
+            ),
+            "event_hard_weakness_reasons": first_nonblank(
+                row.get("diag_event_hard_weakness_reasons"),
+                row.get("event_hard_weakness_reasons"),
+            ),
+            "soft_weakness_reasons": first_nonblank(
+                row.get("diag_soft_weakness_reasons"),
+                row.get("soft_weakness_reasons"),
+            ),
+            "commercial_business_shock_score": first_nonblank(
+                row.get("diag_commercial_business_shock_score"),
+                row.get("commercial_business_shock_score"),
+            ),
+            "commercial_business_shock_reasons": first_nonblank(
+                row.get("diag_commercial_business_shock_reasons"),
+                row.get("commercial_business_shock_reasons"),
+            ),
+            "no_forward_guidance_flag": first_nonblank(
+                row.get("diag_no_forward_guidance_flag"),
+                row.get("no_forward_guidance_flag"),
+            ),
+            "guidance_staleness_flag": first_nonblank(
+                row.get("diag_guidance_staleness_flag"),
+                row.get("guidance_staleness_flag"),
+            ),
+            "no_guidance_negative_growth_flag": first_nonblank(
+                row.get("diag_no_guidance_negative_growth_flag"),
+                row.get("no_guidance_negative_growth_flag"),
+            ),
         }
         out.append(apply_action_tier(shadow_row, tier_settings, score_field="shadow_score"))
     return out

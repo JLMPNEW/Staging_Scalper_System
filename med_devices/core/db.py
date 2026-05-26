@@ -1,0 +1,882 @@
+from __future__ import annotations
+
+import re
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+
+SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+SCHEMA_SQL = """
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS runs (
+    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_type TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    status TEXT NOT NULL,
+    input_path TEXT,
+    row_count INTEGER,
+    message TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS source_registry (
+    source_id TEXT PRIMARY KEY,
+    stage TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    source_owner TEXT,
+    source_type TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    documentation_url TEXT,
+    authentication_required INTEGER NOT NULL DEFAULT 0,
+    free_key_required INTEGER NOT NULL DEFAULT 0,
+    api_key_env TEXT,
+    rate_limit_notes TEXT,
+    refresh_frequency TEXT,
+    terms_url TEXT,
+    data_owner TEXT,
+    raw_schema TEXT,
+    staging_tables TEXT,
+    canonical_tables TEXT,
+    feature_stages TEXT,
+    priority INTEGER NOT NULL DEFAULT 100,
+    status TEXT NOT NULL DEFAULT 'planned',
+    notes TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ingestion_runs (
+    ingestion_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    status TEXT NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    row_count INTEGER NOT NULL DEFAULT 0,
+    message TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS raw_api_responses (
+    raw_response_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    query_params_json TEXT,
+    request_time_utc TEXT NOT NULL,
+    response_status INTEGER,
+    response_hash TEXT NOT NULL,
+    asof_date TEXT,
+    payload_text TEXT,
+    ingestion_run_id INTEGER,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT,
+    FOREIGN KEY (ingestion_run_id) REFERENCES ingestion_runs(ingestion_run_id) ON DELETE SET NULL,
+    UNIQUE(source_id, endpoint, response_hash)
+);
+
+CREATE TABLE IF NOT EXISTS dim_company (
+    company_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL UNIQUE,
+    cik TEXT,
+    company_name TEXT NOT NULL,
+    exchange TEXT,
+    sector TEXT,
+    industry TEXT,
+    subsector TEXT,
+    country TEXT,
+    currency TEXT,
+    universe_status TEXT NOT NULL DEFAULT 'candidate',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    medtech_pure_play_flag INTEGER NOT NULL DEFAULT 0,
+    data_quality_status TEXT,
+    first_seen_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dim_security (
+    security_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    exchange TEXT,
+    security_type TEXT,
+    listing_status TEXT,
+    is_primary_listing INTEGER NOT NULL DEFAULT 1,
+    currency TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE,
+    UNIQUE(ticker, exchange)
+);
+
+CREATE TABLE IF NOT EXISTS dim_identifier (
+    identifier_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    identifier_type TEXT NOT NULL,
+    identifier_value TEXT NOT NULL,
+    source_id TEXT,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL,
+    UNIQUE(identifier_type, identifier_value)
+);
+
+CREATE TABLE IF NOT EXISTS dim_company_alias (
+    alias_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    alias_raw TEXT NOT NULL,
+    alias_norm TEXT NOT NULL,
+    source_id TEXT,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    is_manual INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS dim_fda_manufacturer (
+    fda_manufacturer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    manufacturer_name TEXT NOT NULL,
+    manufacturer_name_norm TEXT NOT NULL,
+    fei_number TEXT,
+    parent_company_id INTEGER,
+    mapping_confidence REAL NOT NULL DEFAULT 0.0,
+    mapping_method TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (parent_company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS dim_fda_product_code (
+    product_code TEXT PRIMARY KEY,
+    device_name TEXT,
+    medical_specialty TEXT,
+    device_class TEXT,
+    regulation_number TEXT,
+    source_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS dim_device (
+    device_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER,
+    fda_manufacturer_id INTEGER,
+    product_code TEXT,
+    device_name TEXT NOT NULL,
+    brand_name TEXT,
+    udi_di TEXT,
+    model_number TEXT,
+    catalog_number TEXT,
+    device_class TEXT,
+    mapping_confidence REAL NOT NULL DEFAULT 0.0,
+    source_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (fda_manufacturer_id) REFERENCES dim_fda_manufacturer(fda_manufacturer_id) ON DELETE SET NULL,
+    FOREIGN KEY (product_code) REFERENCES dim_fda_product_code(product_code) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS dim_reimbursement_code (
+    reimbursement_code_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code_type TEXT NOT NULL,
+    code TEXT NOT NULL,
+    short_description TEXT,
+    long_description TEXT,
+    effective_date TEXT,
+    termination_date TEXT,
+    source_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS fact_price_ohlcv (
+    ticker TEXT NOT NULL,
+    bar_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    open REAL,
+    high REAL,
+    low REAL,
+    close REAL,
+    adj_close REAL,
+    volume REAL,
+    dividend_amount REAL,
+    split_factor REAL,
+    price_adjustment TEXT,
+    is_adjusted INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, bar_date, source_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_sec_filing (
+    accession_nodash TEXT PRIMARY KEY,
+    company_id INTEGER NOT NULL,
+    form TEXT NOT NULL,
+    filing_date TEXT NOT NULL,
+    report_date TEXT,
+    primary_document TEXT,
+    archive_url TEXT,
+    source_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS fact_financial_statement (
+    financial_statement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    period_end TEXT NOT NULL,
+    fiscal_year INTEGER,
+    fiscal_period TEXT,
+    form TEXT,
+    filed_date TEXT,
+    accession_nodash TEXT,
+    revenue REAL,
+    gross_profit REAL,
+    operating_income REAL,
+    net_income REAL,
+    operating_cash_flow REAL,
+    capital_expenditures REAL,
+    free_cash_flow REAL,
+    research_and_development REAL,
+    interest_expense REAL,
+    cash_and_investments REAL,
+    total_debt REAL,
+    total_assets REAL,
+    stockholders_equity REAL,
+    shares_outstanding REAL,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE,
+    FOREIGN KEY (accession_nodash) REFERENCES fact_sec_filing(accession_nodash) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL,
+    UNIQUE(company_id, period_end, fiscal_period, form)
+);
+
+CREATE TABLE IF NOT EXISTS fact_fda_approval (
+    fda_approval_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER,
+    fda_manufacturer_id INTEGER,
+    product_code TEXT,
+    submission_number TEXT NOT NULL,
+    submission_type TEXT NOT NULL,
+    decision_date TEXT,
+    receipt_date TEXT,
+    device_name TEXT,
+    decision TEXT,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (fda_manufacturer_id) REFERENCES dim_fda_manufacturer(fda_manufacturer_id) ON DELETE SET NULL,
+    FOREIGN KEY (product_code) REFERENCES dim_fda_product_code(product_code) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL,
+    UNIQUE(submission_number, submission_type)
+);
+
+CREATE TABLE IF NOT EXISTS fact_fda_recall (
+    fda_recall_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recall_key TEXT,
+    company_id INTEGER,
+    fda_manufacturer_id INTEGER,
+    product_code TEXT,
+    recall_number TEXT,
+    event_id TEXT,
+    classification TEXT,
+    severity_weight REAL,
+    status TEXT,
+    recalling_firm TEXT,
+    reason_for_recall TEXT,
+    recall_initiation_date TEXT,
+    center_classification_date TEXT,
+    termination_date TEXT,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (fda_manufacturer_id) REFERENCES dim_fda_manufacturer(fda_manufacturer_id) ON DELETE SET NULL,
+    FOREIGN KEY (product_code) REFERENCES dim_fda_product_code(product_code) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS fact_fda_adverse_event (
+    adverse_event_id TEXT PRIMARY KEY,
+    company_id INTEGER,
+    fda_manufacturer_id INTEGER,
+    product_code TEXT,
+    event_date TEXT,
+    report_date TEXT,
+    report_type TEXT,
+    death_count INTEGER NOT NULL DEFAULT 0,
+    injury_count INTEGER NOT NULL DEFAULT 0,
+    malfunction_count INTEGER NOT NULL DEFAULT 0,
+    event_type TEXT,
+    device_problem_codes TEXT,
+    patient_problem_codes TEXT,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (fda_manufacturer_id) REFERENCES dim_fda_manufacturer(fda_manufacturer_id) ON DELETE SET NULL,
+    FOREIGN KEY (product_code) REFERENCES dim_fda_product_code(product_code) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS fact_fda_inspection (
+    fda_inspection_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER,
+    fda_manufacturer_id INTEGER,
+    fei_number TEXT,
+    legal_name TEXT,
+    inspection_end_date TEXT,
+    classification_code TEXT,
+    classification TEXT,
+    product_type TEXT,
+    project_area TEXT,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (fda_manufacturer_id) REFERENCES dim_fda_manufacturer(fda_manufacturer_id) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS fact_fda_compliance_action (
+    fda_compliance_action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER,
+    fda_manufacturer_id INTEGER,
+    fei_number TEXT,
+    legal_name TEXT,
+    action_type TEXT,
+    action_date TEXT,
+    subject TEXT,
+    status TEXT,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (fda_manufacturer_id) REFERENCES dim_fda_manufacturer(fda_manufacturer_id) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS fact_reimbursement_policy (
+    reimbursement_policy_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_id TEXT,
+    policy_type TEXT NOT NULL,
+    title TEXT,
+    contractor_name TEXT,
+    jurisdiction TEXT,
+    effective_date TEXT,
+    retirement_date TEXT,
+    status TEXT,
+    related_codes TEXT,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS fact_reimbursement_rate (
+    reimbursement_rate_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reimbursement_code_id INTEGER,
+    payment_system TEXT NOT NULL,
+    effective_date TEXT,
+    locality TEXT,
+    apc TEXT,
+    drg TEXT,
+    payment_rate REAL,
+    status_indicator TEXT,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (reimbursement_code_id) REFERENCES dim_reimbursement_code(reimbursement_code_id) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS fact_clinical_trial_status (
+    clinical_trial_status_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nct_id TEXT NOT NULL,
+    company_id INTEGER,
+    brief_title TEXT,
+    overall_status TEXT,
+    study_type TEXT,
+    enrollment_count INTEGER,
+    start_date TEXT,
+    primary_completion_date TEXT,
+    completion_date TEXT,
+    last_update_post_date TEXT,
+    interventions_json TEXT,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS fact_patent (
+    patent_id TEXT PRIMARY KEY,
+    company_id INTEGER,
+    assignee_name TEXT,
+    filing_date TEXT,
+    grant_date TEXT,
+    title TEXT,
+    cpc_codes TEXT,
+    citation_count INTEGER,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS fact_short_interest (
+    ticker TEXT NOT NULL,
+    settlement_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    short_interest REAL,
+    avg_daily_volume REAL,
+    days_to_cover REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, settlement_date, source_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_macro (
+    series_id TEXT NOT NULL,
+    observation_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    value REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(series_id, observation_date, source_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_policy_event (
+    policy_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_date TEXT,
+    agency TEXT,
+    document_type TEXT,
+    title TEXT,
+    docket_id TEXT,
+    document_id TEXT,
+    url TEXT,
+    comment_due_date TEXT,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS fact_news_event (
+    news_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_time_utc TEXT,
+    company_id INTEGER,
+    ticker TEXT,
+    source_name TEXT,
+    title TEXT,
+    url TEXT,
+    tone REAL,
+    event_tags TEXT,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS feature_fundamental_quality (
+    asof_date TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    score REAL,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, company_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS feature_durable_growth (
+    asof_date TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    score REAL,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, company_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS feature_fda_product_risk (
+    asof_date TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    regulatory_innovation_score REAL,
+    regulatory_risk_score REAL,
+    fda_product_score REAL,
+    hard_red_flag INTEGER NOT NULL DEFAULT 0,
+    hard_red_flag_reasons TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, company_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS feature_reimbursement (
+    asof_date TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    score REAL,
+    coverage_clarity_score REAL,
+    payment_adequacy_score REAL,
+    hard_red_flag INTEGER NOT NULL DEFAULT 0,
+    hard_red_flag_reasons TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, company_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS feature_valuation (
+    asof_date TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    score REAL,
+    value_trap_score REAL,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, company_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS feature_financial_valuation (
+    asof_date TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    company_name TEXT,
+    subsector TEXT,
+    market_source_id TEXT,
+    latest_price_date TEXT,
+    latest_close REAL,
+    price_staleness_days INTEGER,
+    revenue_ttm REAL,
+    gross_profit_ttm REAL,
+    operating_income_ttm REAL,
+    net_income_ttm REAL,
+    operating_cash_flow_ttm REAL,
+    capital_expenditures_ttm REAL,
+    free_cash_flow_ttm REAL,
+    research_and_development_ttm REAL,
+    interest_expense_ttm REAL,
+    revenue_yoy_growth REAL,
+    rd_growth_yoy REAL,
+    gross_margin_ttm REAL,
+    operating_margin_ttm REAL,
+    net_margin_ttm REAL,
+    fcf_margin_ttm REAL,
+    rd_to_revenue_ttm REAL,
+    rule_of_40 REAL,
+    cash_and_investments REAL,
+    total_debt REAL,
+    total_assets REAL,
+    stockholders_equity REAL,
+    net_debt REAL,
+    shares_outstanding REAL,
+    shares_yoy_growth REAL,
+    market_cap REAL,
+    enterprise_value REAL,
+    price_to_sales REAL,
+    ev_to_sales REAL,
+    growth_to_ev_sales REAL,
+    fcf_yield REAL,
+    net_debt_to_revenue REAL,
+    return_on_assets REAL,
+    return_on_equity REAL,
+    interest_coverage REAL,
+    gross_margin_trend_3y REAL,
+    financial_history_years REAL,
+    min_core_group_years REAL,
+    data_confidence_score REAL,
+    calibration_bucket TEXT,
+    ttm_method TEXT,
+    data_quality_status TEXT,
+    missing_fields TEXT,
+    fundamental_quality_score_v1 REAL,
+    valuation_score_v1 REAL,
+    value_trap_score REAL,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, company_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS feature_technical_entry (
+    asof_date TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    score REAL,
+    trend_quality_score REAL,
+    relative_strength_score REAL,
+    liquidity_score REAL,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, company_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS feature_sentiment_catalyst (
+    asof_date TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    score REAL,
+    estimate_revision_proxy_score REAL,
+    event_risk_score REAL,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, company_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS med_device_daily_scores (
+    asof_date TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    composite_score REAL,
+    fundamental_quality_score REAL,
+    durable_growth_score REAL,
+    fda_product_score REAL,
+    reimbursement_score REAL,
+    valuation_score REAL,
+    technical_entry_score REAL,
+    sentiment_catalyst_score REAL,
+    rank INTEGER,
+    classification TEXT,
+    hard_red_flag INTEGER NOT NULL DEFAULT 0,
+    hard_red_flag_reasons TEXT,
+    top_positive_drivers_json TEXT,
+    top_negative_drivers_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, company_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS data_quality_issues (
+    issue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asof_date TEXT NOT NULL,
+    company_id INTEGER,
+    source_id TEXT,
+    table_name TEXT NOT NULL,
+    field_name TEXT,
+    issue_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    message TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_registry_stage ON source_registry(stage, priority);
+CREATE INDEX IF NOT EXISTS idx_raw_api_responses_source ON raw_api_responses(source_id, request_time_utc);
+CREATE INDEX IF NOT EXISTS idx_dim_company_cik ON dim_company(cik);
+CREATE INDEX IF NOT EXISTS idx_dim_company_subsector ON dim_company(subsector);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dim_company_alias_unique
+ON dim_company_alias(company_id, alias_norm, COALESCE(source_id, 'manual'));
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dim_fda_manufacturer_unique
+ON dim_fda_manufacturer(manufacturer_name_norm, COALESCE(fei_number, ''));
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dim_reimbursement_code_unique
+ON dim_reimbursement_code(code_type, code, COALESCE(effective_date, ''));
+CREATE INDEX IF NOT EXISTS idx_fact_price_ohlcv_ticker_date ON fact_price_ohlcv(ticker, bar_date);
+CREATE INDEX IF NOT EXISTS idx_fact_price_ohlcv_ticker_source_date ON fact_price_ohlcv(ticker, source_id, bar_date DESC);
+CREATE INDEX IF NOT EXISTS idx_fact_price_ohlcv_source_date ON fact_price_ohlcv(source_id, bar_date DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_fda_recall_unique
+ON fact_fda_recall(COALESCE(recall_number, ''), COALESCE(event_id, ''), source_id);
+CREATE INDEX IF NOT EXISTS idx_fact_fda_approval_company_date ON fact_fda_approval(company_id, decision_date);
+CREATE INDEX IF NOT EXISTS idx_fact_fda_recall_company_date ON fact_fda_recall(company_id, recall_initiation_date);
+CREATE INDEX IF NOT EXISTS idx_fact_fda_adverse_company_date ON fact_fda_adverse_event(company_id, report_date);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_reimbursement_policy_unique
+ON fact_reimbursement_policy(policy_type, COALESCE(policy_id, ''), COALESCE(effective_date, ''));
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_clinical_trial_status_unique
+ON fact_clinical_trial_status(nct_id, COALESCE(company_id, -1));
+CREATE INDEX IF NOT EXISTS idx_feature_financial_valuation_asof
+ON feature_financial_valuation(asof_date, ticker);
+CREATE INDEX IF NOT EXISTS idx_scores_asof_rank ON med_device_daily_scores(asof_date, rank);
+"""
+
+
+class ManagedConnection:
+    def __init__(self, db_path: Path, *, timeout_sec: float = 30.0) -> None:
+        self.db_path = db_path
+        self.timeout_sec = timeout_sec
+        self._conn: Optional[sqlite3.Connection] = None
+
+    def __enter__(self) -> sqlite3.Connection:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.db_path, timeout=self.timeout_sec)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        self._conn = conn
+        return conn
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._conn is None:
+            return
+        if exc_type is None:
+            self._conn.commit()
+        else:
+            self._conn.rollback()
+        self._conn.close()
+        self._conn = None
+
+
+def quote_identifier(identifier: str) -> str:
+    if not SAFE_IDENTIFIER_RE.fullmatch(str(identifier or "")):
+        raise ValueError(f"Unsafe SQLite identifier: {identifier!r}")
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def connect(db_path: Path, *, timeout_sec: float = 30.0) -> ManagedConnection:
+    return ManagedConnection(db_path.expanduser().resolve(), timeout_sec=timeout_sec)
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    conn.executescript(SCHEMA_SQL)
+    _ensure_table_optional_columns(conn, "fact_price_ohlcv", {"price_adjustment": "TEXT"})
+    _ensure_table_optional_columns(
+        conn,
+        "fact_financial_statement",
+        {
+            "research_and_development": "REAL",
+            "interest_expense": "REAL",
+            "total_assets": "REAL",
+            "stockholders_equity": "REAL",
+        },
+    )
+    _ensure_table_optional_columns(
+        conn,
+        "feature_financial_valuation",
+        {
+            "company_name": "TEXT",
+            "subsector": "TEXT",
+            "research_and_development_ttm": "REAL",
+            "interest_expense_ttm": "REAL",
+            "rd_growth_yoy": "REAL",
+            "rd_to_revenue_ttm": "REAL",
+            "rule_of_40": "REAL",
+            "total_assets": "REAL",
+            "stockholders_equity": "REAL",
+            "shares_yoy_growth": "REAL",
+            "growth_to_ev_sales": "REAL",
+            "return_on_assets": "REAL",
+            "return_on_equity": "REAL",
+            "interest_coverage": "REAL",
+            "gross_margin_trend_3y": "REAL",
+            "data_confidence_score": "REAL",
+        },
+    )
+    _ensure_table_optional_columns(
+        conn,
+        "fact_fda_recall",
+        {
+            "recall_key": "TEXT",
+            "severity_weight": "REAL",
+        },
+    )
+    _ensure_table_optional_columns(
+        conn,
+        "feature_reimbursement",
+        {
+            "hard_red_flag_reasons": "TEXT",
+        },
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_fda_recall_key
+        ON fact_fda_recall(recall_key, source_id)
+        WHERE recall_key IS NOT NULL AND recall_key != ''
+        """
+    )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+
+
+def _table_column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    if not SAFE_IDENTIFIER_RE.fullmatch(str(table_name or "")):
+        raise ValueError(f"Unsafe SQLite table name: {table_name!r}")
+    rows = conn.execute(f"PRAGMA table_info({quote_identifier(table_name)})").fetchall()
+    return {str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) for row in rows}
+
+
+def _ensure_table_optional_columns(conn: sqlite3.Connection, table_name: str, columns: dict[str, str]) -> None:
+    existing = _table_column_names(conn, table_name)
+    for column, column_type in columns.items():
+        if column in existing:
+            continue
+        if not SAFE_IDENTIFIER_RE.fullmatch(str(column or "")):
+            raise ValueError(f"Unsafe SQLite column name: {column!r}")
+        normalized_type = str(column_type or "").strip().upper()
+        if normalized_type not in {"TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC", "DATE", "BOOLEAN"}:
+            raise ValueError(f"Unsafe SQLite column type for {table_name}.{column}: {column_type!r}")
+        conn.execute(f"ALTER TABLE {quote_identifier(table_name)} ADD COLUMN {quote_identifier(column)} {normalized_type}")
+
+
+def start_run(conn: sqlite3.Connection, *, run_type: str, input_path: Optional[Path]) -> int:
+    now = utc_now()
+    cur = conn.execute(
+        """
+        INSERT INTO runs(run_type, started_at, status, input_path, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (run_type, now, "running", str(input_path) if input_path else None, now),
+    )
+    conn.commit()
+    if cur.lastrowid is None:
+        raise RuntimeError("Could not create run row; sqlite cursor returned no lastrowid.")
+    return int(cur.lastrowid)
+
+
+def finish_run(conn: sqlite3.Connection, *, run_id: int, status: str, row_count: int, message: str = "") -> None:
+    conn.execute(
+        """
+        UPDATE runs
+        SET completed_at = ?, status = ?, row_count = ?, message = ?
+        WHERE run_id = ?
+        """,
+        (utc_now(), status, row_count, message, run_id),
+    )
+    conn.commit()

@@ -36,6 +36,7 @@ from biotech_index.core.constants import (  # noqa: E402
 )
 from biotech_index.core.db import connect  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.market_policy import calibration_market_sources  # noqa: E402
 from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
 
 
@@ -194,7 +195,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-asof", type=str, default="")
     parser.add_argument("--horizons", type=str, default="20,60,120", help="Comma-separated trading-bar horizons.")
     parser.add_argument("--top-n", type=str, default="10,20,30", help="Comma-separated Top-N cutoffs.")
-    parser.add_argument("--market-sources", type=str, default="yahoo_adjusted,interactive_brokers")
+    parser.add_argument("--market-sources", type=str, default="")
     parser.add_argument("--max-snapshots", type=int, default=0, help="Optional smoke-test limit; keeps latest dates.")
     parser.add_argument("--train-fraction", type=float, default=None)
     parser.add_argument("--max-workers", type=int, default=None)
@@ -1092,7 +1093,7 @@ def robust_objective(selected: dict[str, Any], baseline: dict[str, Any]) -> floa
 
 def signal_id(signal: SignalSpec, pool: PoolSpec) -> str:
     payload = json.dumps({"signal": signal.weights, "pool": pool.__dict__}, sort_keys=True)
-    return hashlib.sha1(payload.encode("ascii")).hexdigest()[:12]
+    return hashlib.sha1(payload.encode("ascii")).hexdigest()[:16]
 
 
 def signal_score(row: dict[str, Any], signal: SignalSpec) -> tuple[float | None, int, int, float]:
@@ -1991,7 +1992,7 @@ def main() -> None:
     top_ns = parse_int_list(args.top_n, default=[10, 20, 30])
     market_sources = [
         token.strip()
-        for raw in normalize_string_list(args.market_sources, ["yahoo_adjusted", "interactive_brokers"])
+        for raw in normalize_string_list(args.market_sources, calibration_market_sources(config))
         for token in str(raw).split(",")
         if token.strip()
     ]

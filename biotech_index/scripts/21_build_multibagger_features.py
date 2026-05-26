@@ -18,10 +18,11 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from biotech_index.core.config import cfg_get, load_yaml, resolve_path
-from biotech_index.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now
-from biotech_index.core.logging_utils import configure_utc_logging
-from biotech_index.core.pipeline_guards import (
+from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from biotech_index.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
+from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.market_policy import scoring_market_sources, select_latest_rows_by_source_priority  # noqa: E402
+from biotech_index.core.pipeline_guards import (  # noqa: E402
     normalize_ticker,
     read_final_scoring_tickers,
     subset_mode_enabled,
@@ -186,10 +187,40 @@ def load_latest_table(
     asof_date: str,
     *,
     preferred_source: str = "",
+    source_priority: list[str] | None = None,
+    max_staleness_days: int = 0,
 ) -> dict[int, dict[str, Any]]:
     if table not in LATEST_SOURCE_TABLES:
         raise ValueError(f"Unsupported source table for latest-row load: {table}")
     table_sql = quote_identifier(table)
+    effective_priority = source_priority or ([preferred_source] if preferred_source else [])
+    if table == "market_features_daily" and effective_priority:
+        source_clause = " AND source IN (" + ",".join("?" for _ in effective_priority) + ")"
+        rows = conn.execute(
+            f"""
+            SELECT t.*
+            FROM {table_sql} t
+            JOIN (
+                SELECT company_id, source, MAX(asof_date) AS max_asof
+                FROM {table_sql}
+                WHERE asof_date <= ?{source_clause}
+                GROUP BY company_id, source
+            ) latest
+              ON latest.company_id = t.company_id
+             AND latest.source = t.source
+             AND latest.max_asof = t.asof_date
+            """,
+            (asof_date, *effective_priority),
+        ).fetchall()
+        parsed_asof = parse_date(asof_date)
+        if parsed_asof is None:
+            raise ValueError(f"Invalid asof_date for market source selection: {asof_date}")
+        return select_latest_rows_by_source_priority(
+            rows,
+            asof_date=parsed_asof,
+            source_priority=effective_priority,
+            max_staleness_days=max_staleness_days,
+        )
     rows = conn.execute(
         f"""
         SELECT t.*
@@ -527,6 +558,13 @@ def build_row(
             "financial_survival_score": survival.get("financial_survival_score"),
         },
         "market": {
+            "source": market.get("source"),
+            "asof_date": market.get("asof_date"),
+            "price_adjustment": market.get("price_adjustment"),
+            "is_adjusted": market.get("is_adjusted"),
+            "last_bar_date": market.get("last_bar_date"),
+            "bar_count": market.get("bar_count"),
+            "market_data_quality": market.get("market_data_quality"),
             "return_3m_pct": market.get("return_3m_pct"),
             "relative_strength_3m_vs_xbi": market.get("relative_strength_3m_vs_xbi"),
             "price_vs_200d_pct": market.get("price_vs_200d_pct"),
@@ -680,12 +718,16 @@ def main() -> None:
             )
             commercial = load_latest_table(conn, "commercial_value_features_daily", asof_date)
             survival = load_latest_table(conn, "financial_survival_features", asof_date)
+            market_source_priority = scoring_market_sources(config)
+            max_upstream_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2))
             market = load_latest_table(
                 conn,
                 "market_features_daily",
                 asof_date,
-                preferred_source=str(cfg_get(config, "multibagger.preferred_market_source", "interactive_brokers") or ""),
+                source_priority=market_source_priority,
+                max_staleness_days=max_upstream_staleness_days,
             )
+            LOGGER.info("Multibagger feature market source priority: %s", ",".join(market_source_priority))
             governance = load_latest_table(conn, "governance_event_features_daily", asof_date)
             forward = load_latest_table(conn, "forward_guidance_features_daily", asof_date)
             missing_market_tickers = missing_layer_tickers(base_rows, market)
@@ -710,7 +752,6 @@ def main() -> None:
             ]
             if failures:
                 raise RuntimeError("Multibagger feature build missing upstream layer rows: " + " | ".join(failures))
-            max_upstream_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2))
             for layer_name, layer_rows in (
                 ("commercial_value_features_daily", commercial),
                 ("financial_survival_features", survival),

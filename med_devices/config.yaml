@@ -1,0 +1,501 @@
+paths:
+  database_path: "${MED_DEVICES_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/med_devices.sqlite"
+  output_dir: "../output/med_devices_reports"
+  cache_dir: "../output/med_devices_cache"
+
+runtime:
+  sqlite_timeout_sec: 30.0
+
+source_registry:
+  path: "data/free_source_registry.yaml"
+
+med_devices_universe:
+  seed_csv: "../ticker_mapping/med_dev_tickers_clean_keep.csv"
+  market_cap_min: 250000000
+  avg_dollar_volume_60d_min: 1000000
+  include_us_listed_only: true
+  benchmark_tickers:
+    - IHI
+    - XHE
+  subsectors:
+    - cardiovascular_devices
+    - diabetes_technology
+    - diagnostics_equipment
+    - hospital_equipment
+    - imaging
+    - monitoring
+    - neuro_devices
+    - ophthalmology_devices
+    - orthopedics
+    - robotic_surgery
+    - surgical_tools
+    - wound_care
+
+universe_validation:
+  input_csv: "../ticker_mapping/med_dev_tickers.csv"
+  output_csv: "../output/med_devices_reports/med_device_universe_validation.csv"
+  keep_csv: "../output/med_devices_reports/med_device_tickers_keep.csv"
+  clean_tickers_csv: "../output/med_devices_reports/med_dev_tickers_clean_keep.csv"
+  calibration_core_csv: "../output/med_devices_reports/med_dev_tickers_calibration_core.csv"
+  sec_submissions_url_template: "https://data.sec.gov/submissions/CIK{cik}.json"
+  sec_companyfacts_url_template: "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+  yahoo_chart_url_template: "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+  yahoo_market_range: "90d"
+  yahoo_market_interval: "1d"
+  yahoo_market_events: "history"
+  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  cache_ttl_hours: 24.0
+  http_timeout_sec: 20.0
+  request_sleep_sec: 0.1
+  active_listing_statuses:
+    - active
+  investable_security_types:
+    - common stock
+    - ordinary shares
+    - adr/ads
+  us_exchanges:
+    - nasdaq
+    - nasd
+    - nyse
+    - new york stock exchange
+    - nyse american
+    - nyse mkt
+    - amex
+  recent_forms:
+    - "10-K"
+    - "10-Q"
+    - "20-F"
+    - "40-F"
+  annual_forms:
+    - "10-K"
+    - "20-F"
+    - "40-F"
+  quarterly_forms:
+    - "10-Q"
+  core_fact_groups:
+    revenue:
+      - RevenueFromContractWithCustomerExcludingAssessedTax
+      - RevenueFromContractWithCustomerIncludingAssessedTax
+      - Revenues
+      - SalesRevenueNet
+    assets:
+      - Assets
+    liabilities:
+      - Liabilities
+    cash:
+      - CashAndCashEquivalentsAtCarryingValue
+      - CashAndCashEquivalentsAtFairValue
+    net_income:
+      - NetIncomeLoss
+    operating_cash_flow:
+      - NetCashProvidedByUsedInOperatingActivities
+      - NetCashProvidedByUsedInOperatingActivitiesContinuingOperations
+  companyfacts_currency_units:
+    - USD
+  min_recent_financial_filings: 4
+  min_annual_filings: 2
+  min_quarterly_filings: 3
+  max_sec_filing_staleness_days: 550
+  min_core_fact_groups: 5
+  min_companyfacts_observations: 20
+  max_companyfacts_staleness_days: 550
+  max_market_staleness_days: 7
+  min_avg_dollar_volume_60d: 1000000
+  min_trading_bars: 20
+  calibration_core_min_fact_years: 7.0
+  calibration_core_min_core_group_years: 5.0
+  calibration_short_history_min_fact_years: 3.0
+  score_penalties:
+    missing_cik: 30
+    non_common_security_type: 25
+    inactive_or_unknown_listing: 35
+    non_us_primary_exchange: 20
+    non_us_country: 15
+    non_usd_currency: 15
+    too_few_recent_financial_filings: 20
+    too_few_annual_filings: 15
+    too_few_quarterly_filings: 15
+    no_recent_financial_filing: 35
+    stale_sec_financial_filing: 30
+    insufficient_core_fact_coverage: 25
+    too_few_companyfacts_observations: 20
+    no_companyfacts_periods: 35
+    stale_companyfacts: 25
+    non_usd_companyfacts_units: 20
+    too_few_recent_market_bars: 20
+    no_recent_market_bar: 35
+    stale_market_bar: 30
+    missing_latest_close: 25
+    low_avg_dollar_volume_60d: 25
+  default_unknown_reason_penalty: 10
+  hard_exclusion_reasons:
+    - missing_cik
+    - non_common_security_type
+    - inactive_or_unknown_listing
+    - non_us_primary_exchange
+    - no_recent_financial_filing
+    - stale_sec_financial_filing
+    - insufficient_core_fact_coverage
+    - no_companyfacts_periods
+    - stale_companyfacts
+    - no_recent_market_bar
+    - stale_market_bar
+    - missing_latest_close
+    - low_avg_dollar_volume_60d
+
+market_data_policy:
+  # Historical scoring and calibration should use split/dividend-adjusted prices first.
+  scoring_primary_source: "yahoo_finance_backup"
+  scoring_fallback_sources:
+    - "ib_market_data"
+  calibration_sources:
+    - "yahoo_finance_backup"
+    - "ib_market_data"
+  live_validation_primary_source: "ib_market_data"
+  require_adjusted_for_scoring: true
+  max_staleness_days: 7
+  audit_input_csv: "../ticker_mapping/med_dev_tickers_clean_keep.csv"
+  audit_output_csv: "../output/med_devices_reports/market_data_source_audit.csv"
+
+yahoo_price_ingestion:
+  input_csv: "../ticker_mapping/med_dev_tickers_clean_keep.csv"
+  output_csv: "../output/med_devices_reports/med_device_yahoo_adjusted_price_coverage.csv"
+  source_id: "yahoo_finance_backup"
+  chart_url_template: "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+  start_date: "2000-01-01"
+  interval: "1d"
+  events: "div,splits"
+  include_adjusted_close: true
+  include_benchmark_tickers: true
+  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  request_sleep_sec: 0.15
+  timeout_sec: 30.0
+  max_retries: 3
+  commit_every_tickers: 25
+  retry_status_codes:
+    - 429
+    - 500
+    - 502
+    - 503
+    - 504
+
+sec_ingestion:
+  output_csv: "../output/med_devices_reports/med_device_sec_ingestion_coverage.csv"
+  submissions_source_id: "sec_submissions"
+  companyfacts_source_id: "sec_companyfacts"
+  sec_archives_base: "https://www.sec.gov/Archives/edgar/data"
+  cache_dir: "../output/med_devices_cache/sec_ingestion"
+  validation_cache_dir: "../output/med_devices_cache/universe_validation"
+  submissions_url_template: "https://data.sec.gov/submissions/CIK{cik}.json"
+  companyfacts_url_template: "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+  submissions_file_url_template: "https://data.sec.gov/submissions/{file_name}"
+  fetch_paginated_submissions: true
+  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  cache_ttl_hours: 24.0
+  request_sleep_sec: 0.15
+  timeout_sec: 30.0
+  max_retries: 3
+  commit_every_companies: 25
+  forms:
+    - "10-K"
+    - "10-K/A"
+    - "10-Q"
+    - "10-Q/A"
+    - "20-F"
+    - "20-F/A"
+    - "40-F"
+    - "40-F/A"
+    - "8-K"
+    - "8-K/A"
+    - "6-K"
+    - "6-K/A"
+  financial_forms:
+    - "10-K"
+    - "10-K/A"
+    - "10-Q"
+    - "10-Q/A"
+    - "20-F"
+    - "20-F/A"
+    - "40-F"
+    - "40-F/A"
+  preferred_units:
+    default:
+      - USD
+    shares_outstanding:
+      - shares
+  metric_concepts:
+    revenue:
+      - RevenueFromContractWithCustomerExcludingAssessedTax
+      - RevenueFromContractWithCustomerIncludingAssessedTax
+      - Revenues
+      - SalesRevenueNet
+      - SalesRevenueGoodsNet
+      - SalesRevenueServicesNet
+    gross_profit:
+      - GrossProfit
+    operating_income:
+      - OperatingIncomeLoss
+    net_income:
+      - NetIncomeLoss
+      - ProfitLoss
+    operating_cash_flow:
+      - NetCashProvidedByUsedInOperatingActivities
+      - NetCashProvidedByUsedInOperatingActivitiesContinuingOperations
+    capital_expenditures:
+      - PaymentsToAcquirePropertyPlantAndEquipment
+      - PaymentsToAcquireProductiveAssets
+    research_and_development:
+      - ResearchAndDevelopmentExpense
+      - ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost
+    interest_expense:
+      - InterestExpense
+      - InterestAndDebtExpense
+    cash_and_investments:
+      - CashAndCashEquivalentsAtCarryingValue
+      - CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents
+      - CashAndCashEquivalentsAtFairValue
+    total_assets:
+      - Assets
+    stockholders_equity:
+      - StockholdersEquity
+      - StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest
+    shares_outstanding:
+      - EntityCommonStockSharesOutstanding
+      - WeightedAverageNumberOfDilutedSharesOutstanding
+      - WeightedAverageNumberOfSharesOutstandingDiluted
+      - WeightedAverageNumberOfBasicSharesOutstanding
+  debt_concepts:
+    direct:
+      - DebtAndFinanceLeaseObligations
+      - LongTermDebtAndFinanceLeaseObligations
+      - LongTermDebt
+      - Debt
+    current:
+      - LongTermDebtCurrent
+      - LongTermDebtAndFinanceLeaseObligationsCurrent
+      - ShortTermBorrowings
+      - ShortTermDebt
+    noncurrent:
+      - LongTermDebtNoncurrent
+      - LongTermDebtAndFinanceLeaseObligationsNoncurrent
+  composite_debt_concept_rank: 1000
+
+financial_features:
+  output_csv: "../output/med_devices_reports/med_device_financial_valuation_features.csv"
+  market_max_staleness_days: 7
+  require_adjusted_prices: true
+  core_calibration_min_fact_years: 7.0
+  core_calibration_min_core_group_years: 5.0
+  short_history_min_fact_years: 3.0
+  neutral_component_score: 25.0
+  subsector_percentile_blend_weight: 0.60
+  winsor_low_pct: 0.05
+  winsor_high_pct: 0.95
+  ttm_sanity_min_annual_ratio: 0.20
+  ttm_sanity_max_annual_ratio: 3.00
+  fundamental_component_weights:
+    gross_margin: 0.18
+    operating_margin: 0.18
+    fcf_margin: 0.17
+    revenue_growth: 0.15
+    balance_sheet: 0.12
+    rd_intensity: 0.10
+    history_confidence: 0.10
+  valuation_component_weights:
+    ev_to_sales: 0.35
+    price_to_sales: 0.20
+    fcf_yield: 0.25
+    growth_to_ev_sales: 0.10
+    history_confidence: 0.10
+
+financial_baseline_qa:
+  summary_csv: "../output/med_devices_reports/med_device_financial_baseline_qa_summary.csv"
+  ranked_csv: "../output/med_devices_reports/med_device_financial_baseline_qa_ranked.csv"
+  top_bottom_n: 20
+  baseline_score_weights:
+    fundamental_quality: 0.55
+    valuation: 0.45
+  key_metrics:
+    - revenue_ttm
+    - gross_margin_ttm
+    - operating_margin_ttm
+    - fcf_margin_ttm
+    - rd_to_revenue_ttm
+    - total_debt
+    - cash_and_investments
+    - shares_outstanding
+    - market_cap
+    - enterprise_value
+    - ev_to_sales
+    - price_to_sales
+    - fcf_yield
+    - fundamental_quality_score_v1
+    - valuation_score_v1
+    - value_trap_score
+
+fda_core_ingestion:
+  output_csv: "../output/med_devices_reports/med_device_fda_core_ingestion_coverage.csv"
+  source_id: "openfda_device"
+  base_url: "https://api.fda.gov/device"
+  api_key_env: "OPENFDA_API_KEY"
+  api_key_file: "secrets.local.yaml"
+  api_key_file_field: "openfda_api_key"
+  timeout_sec: 30.0
+  max_retries: 3
+  request_sleep_sec: 0.15
+  page_limit: 1000
+  commit_every_pages: 10
+  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  endpoints:
+    classification:
+      enabled: true
+      path: "classification.json"
+      max_records: 5000
+      search: ""
+      sort: ""
+    approvals_510k:
+      enabled: true
+      path: "510k.json"
+      max_records: 25000
+      search: ""
+      sort: "decision_date:desc"
+    approvals_pma:
+      enabled: true
+      path: "pma.json"
+      max_records: 25000
+      search: ""
+      sort: "decision_date:desc"
+    recall:
+      enabled: true
+      path: "recall.json"
+      max_records: 25000
+      search: ""
+      sort: "event_date_initiated:desc"
+    enforcement:
+      enabled: true
+      path: "enforcement.json"
+      max_records: 25000
+      search: 'product_type:"Devices"'
+      sort: "recall_initiation_date:desc"
+    adverse_event:
+      enabled: true
+      path: "event.json"
+      max_records: 25000
+      search: ""
+      sort: "date_received:desc"
+
+fda_entity_linking:
+  output_csv: "../output/med_devices_reports/med_device_fda_entity_mapping.csv"
+  source_id: "openfda_device"
+  min_auto_confidence: 75.0
+  high_confidence_threshold: 90.0
+  token_score_weight: 100.0
+  update_fact_company_ids: true
+
+fda_features:
+  output_csv: "../output/med_devices_reports/med_device_fda_product_risk_features.csv"
+  source_id: "openfda_device"
+  normalization:
+    revenue_floor: 100000000.0
+  windows_months:
+    short: 12
+    medium: 24
+    long: 36
+  no_data_innovation_score: 20.0
+  no_data_risk_score: 65.0
+  min_mapping_confidence_for_high_confidence: 75.0
+  recall_severity_weights:
+    class_i: 5.0
+    class_ii: 2.0
+    class_iii: 0.5
+    unknown: 1.0
+  hard_red_flags:
+    class_i_recall_lookback_months: 36
+    death_event_lookback_months: 24
+    death_event_min_count: 1
+  score_weights:
+    regulatory_risk: 0.60
+    regulatory_innovation: 0.40
+
+reimbursement_features:
+  output_csv: "../output/med_devices_reports/med_device_reimbursement_features.csv"
+  source_ids:
+    - "cms_coverage_api"
+    - "cms_payment_files"
+  no_data_score: 25.0
+  no_data_coverage_clarity_score: 25.0
+  no_data_payment_adequacy_score: 25.0
+  company_mention_score: 45.0
+  policy_evidence_score: 60.0
+  rate_evidence_score: 65.0
+  low_confidence_hard_flag: false
+
+ib_price_validation:
+  input_csv: "../ticker_mapping/med_dev_tickers_clean_keep.csv"
+  output_csv: "../output/med_devices_reports/med_device_ib_price_coverage.csv"
+  source_id: "ib_market_data"
+  host: "127.0.0.1"
+  port: 7497
+  client_id: 7727
+  duration: "8 Y"
+  required_history_years: 7.0
+  minimum_history_years: 5.0
+  max_bar_staleness_days: 7
+  min_trading_bars: 1000
+  min_avg_dollar_volume_60d: 1000000
+  what_to_show: "ADJUSTED_LAST"
+  fallback_what_to_show: "TRADES"
+  adjusted_what_to_show_values:
+    - "ADJUSTED_LAST"
+  default_exchange: "SMART"
+  default_currency: "USD"
+  bar_size: "1 day"
+  format_date: 1
+  keep_up_to_date: false
+  use_rth: true
+  sleep_sec: 0.15
+  connect_timeout_sec: 15.0
+  market_timezone: "America/New_York"
+  market_close_time: "16:15"
+  market_close_guard: true
+  hard_fail_reasons:
+    - missing_ticker
+    - contract_not_qualified
+    - contract_qualification_failed
+    - non_usd_ib_contract
+    - historical_data_failed
+    - no_usable_bars
+    - stale_ib_bar
+    - insufficient_ib_history
+    - low_ib_avg_dollar_volume
+
+scoring:
+  composite_weights:
+    fundamental_quality: 0.25
+    durable_growth: 0.15
+    fda_product: 0.15
+    reimbursement: 0.10
+    valuation: 0.20
+    technical_entry: 0.10
+    sentiment_catalyst: 0.05
+  gates:
+    composite_min: 75
+    fundamental_quality_min: 65
+    fda_product_min: 55
+    reimbursement_min: 50
+    valuation_min: 60
+    technical_entry_min: 55
+
+stage_plan:
+  stage_1:
+    name: "data_engineering_api_ingestion_database_build"
+    owns_database_build: true
+    description: "Build source registry, raw ingestion tables, canonical tables, data-quality tables, and refresh metadata."
+  stage_2:
+    name: "entity_resolution"
+    owns_database_build: false
+    description: "Map SEC companies, FDA sponsors/manufacturers, devices, UDI records, reimbursement codes, and clinical-trial sponsors."
+  stage_3:
+    name: "data_quality_point_in_time_controls"
+    owns_database_build: false
+    description: "Enforce as-of dates, late-arriving data policy, duplicates, mapping confidence, and leakage checks."

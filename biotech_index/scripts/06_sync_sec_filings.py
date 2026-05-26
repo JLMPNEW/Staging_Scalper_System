@@ -24,7 +24,6 @@ from biotech_index.core.db import connect, finish_run, init_db, refresh_sec_late
 from biotech_index.core.http_cache import CachedHttpClient, HostThrottle
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
-    normalize_ticker,
     read_final_scoring_tickers,
     subset_mode_enabled,
     subset_output_path,
@@ -32,6 +31,7 @@ from biotech_index.core.pipeline_guards import (
     validate_nonempty_selection,
     validate_requested_tickers,
 )
+from biotech_index.core.text_norm import normalize_ticker
 
 
 LOGGER = logging.getLogger("sync_sec_filings")

@@ -27,7 +27,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_path  # noqa: E402
 from biotech_index.core.db import connect  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
-from biotech_index.core.pipeline_guards import normalize_ticker  # noqa: E402
+from biotech_index.core.market_policy import calibration_market_sources  # noqa: E402
+from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("calibration_phase1_backtest")
@@ -82,7 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-asof", type=str, default="")
     parser.add_argument("--horizons", type=str, default="", help="Comma-separated trading-day horizons. Defaults to calibration.phase1.horizons or calibration.tier1.medium_term_horizons.")
     parser.add_argument("--top-n", type=str, default="10,20,30", help="Comma-separated top-N cutoffs.")
-    parser.add_argument("--market-sources", type=str, default="yahoo_adjusted,interactive_brokers")
+    parser.add_argument("--market-sources", type=str, default="")
     parser.add_argument("--max-snapshots", type=int, default=0, help="Optional limit for smoke tests; keeps latest dates.")
     parser.add_argument("--include-non-fridays", action="store_true", help="Include non-Friday snapshots.")
     parser.add_argument(
@@ -450,7 +451,7 @@ def add_percentile_by_date(rows: list[dict[str, Any]], source_key: str, output_k
         scored.sort(key=lambda item: (item[0], item[1]))
         n = len(scored)
         if n == 1:
-            scored[0][2][output_key] = 50.0
+            scored[0][2][output_key] = ""
             continue
         i = 0
         while i < n:
@@ -709,6 +710,8 @@ def bootstrap_metric_cis(values: list[float], *, iterations: int, seed: int) -> 
     for _ in range(iterations):
         sample = [values[rng.randrange(n)] for _ in range(n)]
         avg = mean(sample)
+        if avg is None:
+            continue
         downside = math.sqrt(sum(min(0.0, value) ** 2 for value in sample) / len(sample))
         mean_samples.append(avg)
         sortino_value = safe_ratio(avg, downside)
@@ -1737,7 +1740,7 @@ def main() -> None:
     top_ns = parse_int_list(args.top_n, default=[10, 20, 30])
     market_sources = [
         token.strip()
-        for raw_source in normalize_string_list(args.market_sources, ["yahoo_adjusted", "interactive_brokers"])
+        for raw_source in normalize_string_list(args.market_sources, calibration_market_sources(config))
         for token in str(raw_source).split(",")
         if token.strip()
     ]

@@ -1,0 +1,471 @@
+sources:
+  - source_id: sec_company_tickers
+    stage: stage_1
+    source_name: "SEC company tickers"
+    source_owner: "U.S. Securities and Exchange Commission"
+    source_type: json
+    base_url: "https://www.sec.gov/files/company_tickers.json"
+    documentation_url: "https://www.sec.gov/search-filings/edgar-application-programming-interfaces"
+    authentication_required: false
+    free_key_required: false
+    rate_limit_notes: "SEC fair-access policy applies; keep below current SEC automated access limits."
+    refresh_frequency: daily
+    terms_url: "https://www.sec.gov/os/accessing-edgar-data"
+    data_owner: SEC
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_sec_company_tickers
+    canonical_tables:
+      - dim_company
+      - dim_security
+      - dim_identifier
+    feature_stages:
+      - universe
+    priority: 10
+    status: planned
+    notes: "Primary free ticker-to-CIK source."
+
+  - source_id: sec_submissions
+    stage: stage_1
+    source_name: "SEC submissions API"
+    source_owner: "U.S. Securities and Exchange Commission"
+    source_type: api
+    base_url: "https://data.sec.gov/submissions/CIK##########.json"
+    documentation_url: "https://www.sec.gov/search-filings/edgar-application-programming-interfaces"
+    authentication_required: false
+    free_key_required: false
+    rate_limit_notes: "Use an identifying User-Agent and obey SEC fair-access limits."
+    refresh_frequency: daily
+    terms_url: "https://www.sec.gov/os/accessing-edgar-data"
+    data_owner: SEC
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_sec_submissions
+      - stg_sec_filings
+    canonical_tables:
+      - fact_sec_filing
+    feature_stages:
+      - fundamentals
+      - event_risk
+    priority: 20
+    status: planned
+
+  - source_id: sec_companyfacts
+    stage: stage_1
+    source_name: "SEC XBRL company facts"
+    source_owner: "U.S. Securities and Exchange Commission"
+    source_type: api
+    base_url: "https://data.sec.gov/api/xbrl/companyfacts/CIK##########.json"
+    documentation_url: "https://www.sec.gov/search-filings/edgar-application-programming-interfaces"
+    authentication_required: false
+    free_key_required: false
+    rate_limit_notes: "Use an identifying User-Agent and cache responses."
+    refresh_frequency: daily
+    terms_url: "https://www.sec.gov/os/accessing-edgar-data"
+    data_owner: SEC
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_sec_companyfacts
+    canonical_tables:
+      - fact_financial_statement
+    feature_stages:
+      - fundamental_quality
+      - durable_growth
+      - valuation
+    priority: 30
+    status: planned
+
+  - source_id: nasdaq_trader_symbols
+    stage: stage_1
+    source_name: "Nasdaq Trader symbol directory"
+    source_owner: "Nasdaq Trader"
+    source_type: txt
+    base_url: "https://www.nasdaqtrader.com/dynamic/SymDir/"
+    documentation_url: "https://www.nasdaqtrader.com/trader.aspx?id=symboldirdefs"
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    terms_url: "https://www.nasdaqtrader.com/Trader.aspx?id=TraderTerms"
+    data_owner: Nasdaq
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_nasdaq_listed
+      - stg_other_listed
+    canonical_tables:
+      - dim_security
+    feature_stages:
+      - universe
+    priority: 40
+    status: planned
+    notes: "Use nasdaqlisted.txt and otherlisted.txt."
+
+  - source_id: ib_market_data
+    stage: stage_1
+    source_name: "Interactive Brokers market data"
+    source_owner: "Interactive Brokers"
+    source_type: broker_api
+    base_url: "127.0.0.1:7497"
+    documentation_url: "https://interactivebrokers.github.io/tws-api/"
+    authentication_required: true
+    free_key_required: false
+    rate_limit_notes: "Requires TWS or IB Gateway session plus market-data permissions. Use pacing-aware batching and cache bars."
+    refresh_frequency: daily
+    terms_url: "https://www.interactivebrokers.com/en/general/terms-and-conditions.php"
+    data_owner: Interactive Brokers
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_ib_ohlcv_daily
+    canonical_tables:
+      - fact_price_ohlcv
+    feature_stages:
+      - technical_entry
+      - valuation
+      - universe
+    priority: 60
+    status: planned
+    notes: "Live validation and fallback market-data source. Use adjusted daily bars where available; record fallback_what_to_show when raw bars are used."
+
+  - source_id: yahoo_finance_backup
+    stage: stage_1
+    source_name: "Yahoo Finance adjusted market data"
+    source_owner: "Yahoo Finance"
+    source_type: python_library
+    base_url: "https://query1.finance.yahoo.com/"
+    documentation_url: "https://github.com/ranaroussi/yfinance"
+    authentication_required: false
+    free_key_required: false
+    rate_limit_notes: "Cache results, respect upstream throttling, and reconcile against IB bars."
+    refresh_frequency: daily
+    terms_url: "https://legal.yahoo.com/us/en/yahoo/terms/otos/index.html"
+    data_owner: Yahoo Finance
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_yahoo_ohlcv_daily
+    canonical_tables:
+      - fact_price_ohlcv
+    feature_stages:
+      - technical_entry
+      - valuation
+      - universe
+    priority: 50
+    status: planned
+    notes: "Primary adjusted historical source for scoring, calibration, and backtesting. IB remains the live validation and fallback source."
+
+  - source_id: openfda_device
+    stage: stage_1
+    source_name: "openFDA medical device APIs"
+    source_owner: "U.S. Food and Drug Administration"
+    source_type: api
+    base_url: "https://api.fda.gov/device/"
+    documentation_url: "https://open.fda.gov/apis/device/"
+    authentication_required: false
+    free_key_required: false
+    rate_limit_notes: "Free API key optional but recommended for higher limits; bulk downloads should be used for backfills."
+    refresh_frequency: daily
+    terms_url: "https://open.fda.gov/terms/"
+    data_owner: FDA
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_fda_510k
+      - stg_fda_pma
+      - stg_fda_classification
+      - stg_fda_recall
+      - stg_fda_enforcement
+      - stg_fda_maude_event
+      - stg_fda_registration_listing
+      - stg_fda_udi
+    canonical_tables:
+      - dim_fda_manufacturer
+      - dim_fda_product_code
+      - dim_device
+      - fact_fda_approval
+      - fact_fda_recall
+      - fact_fda_adverse_event
+    feature_stages:
+      - fda_product_risk
+      - durable_growth
+    priority: 70
+    status: planned
+    notes: "Endpoints include 510k.json, pma.json, classification.json, recall.json, enforcement.json, event.json, registrationlisting.json, and udi.json."
+
+  - source_id: accessgudid
+    stage: stage_1
+    source_name: "AccessGUDID API and downloads"
+    source_owner: "National Library of Medicine / FDA"
+    source_type: api
+    base_url: "https://accessgudid.nlm.nih.gov/api/v2/"
+    documentation_url: "https://accessgudid.nlm.nih.gov/resources/developers"
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: weekly
+    terms_url: "https://accessgudid.nlm.nih.gov/resources/terms"
+    data_owner: FDA
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_accessgudid_device
+    canonical_tables:
+      - dim_device
+    feature_stages:
+      - entity_resolution
+      - fda_product_risk
+    priority: 80
+    status: planned
+
+  - source_id: fda_data_dashboard
+    stage: stage_1
+    source_name: "FDA Data Dashboard"
+    source_owner: "U.S. Food and Drug Administration"
+    source_type: api
+    base_url: "https://api-datadashboard.fda.gov/v1/"
+    documentation_url: "https://api-datadashboard.fda.gov/"
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: weekly
+    terms_url: "https://www.fda.gov/about-fda/about-website/fdagov-archive-terms-and-policies"
+    data_owner: FDA
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_fda_inspection
+      - stg_fda_compliance_action
+    canonical_tables:
+      - fact_fda_inspection
+      - fact_fda_compliance_action
+    feature_stages:
+      - fda_product_risk
+    priority: 90
+    status: planned
+    notes: "Use inspections_classifications and compliance_actions."
+
+  - source_id: cms_coverage_api
+    stage: stage_1
+    source_name: "CMS Medicare Coverage API"
+    source_owner: "Centers for Medicare and Medicaid Services"
+    source_type: api
+    base_url: "https://api.coverage.cms.gov/"
+    documentation_url: "https://api.coverage.cms.gov/docs/swagger/index.html"
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: weekly
+    terms_url: "https://www.cms.gov/about-cms/website-policies-important-links"
+    data_owner: CMS
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_cms_ncd
+      - stg_cms_lcd
+      - stg_cms_article
+    canonical_tables:
+      - fact_reimbursement_policy
+    feature_stages:
+      - reimbursement
+    priority: 100
+    status: planned
+
+  - source_id: cms_payment_files
+    stage: stage_1
+    source_name: "CMS HCPCS, DMEPOS, OPPS, and IPPS public files"
+    source_owner: "Centers for Medicare and Medicaid Services"
+    source_type: bulk_download
+    base_url: "https://www.cms.gov/"
+    documentation_url: "https://www.cms.gov/medicare/coding-billing/healthcare-common-procedure-system"
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: quarterly
+    terms_url: "https://www.cms.gov/about-cms/website-policies-important-links"
+    data_owner: CMS
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_hcpcs_code
+      - stg_dmepos_fee_schedule
+      - stg_opps_payment
+      - stg_ipps_payment
+    canonical_tables:
+      - dim_reimbursement_code
+      - fact_reimbursement_rate
+    feature_stages:
+      - reimbursement
+    priority: 110
+    status: planned
+
+  - source_id: clinicaltrials_v2
+    stage: stage_1
+    source_name: "ClinicalTrials.gov API v2"
+    source_owner: "National Library of Medicine"
+    source_type: api
+    base_url: "https://clinicaltrials.gov/api/v2/studies"
+    documentation_url: "https://clinicaltrials.gov/data-api/api"
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: weekly
+    terms_url: "https://clinicaltrials.gov/about-site/terms-conditions"
+    data_owner: NLM
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_clinical_trial
+      - stg_clinical_trial_sponsor
+      - stg_clinical_trial_intervention
+    canonical_tables:
+      - fact_clinical_trial_status
+    feature_stages:
+      - durable_growth
+      - sentiment_catalyst
+    priority: 120
+    status: planned
+
+  - source_id: patentsview
+    stage: stage_1
+    source_name: "PatentsView API"
+    source_owner: "U.S. Patent and Trademark Office"
+    source_type: api
+    base_url: "https://search.patentsview.org/api/v1/"
+    documentation_url: "https://patentsview.org/apis/api-endpoints"
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: monthly
+    terms_url: "https://patentsview.org/about"
+    data_owner: USPTO
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_patent
+      - stg_patent_assignee
+    canonical_tables:
+      - fact_patent
+    feature_stages:
+      - durable_growth
+      - fundamental_quality
+    priority: 130
+    status: planned
+
+  - source_id: federal_register
+    stage: stage_1
+    source_name: "Federal Register API"
+    source_owner: "Office of the Federal Register"
+    source_type: api
+    base_url: "https://www.federalregister.gov/api/v1/documents.json"
+    documentation_url: "https://www.federalregister.gov/developers/documentation/api/v1"
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    terms_url: "https://www.federalregister.gov/policy/legal-status"
+    data_owner: "Office of the Federal Register"
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_regulatory_document
+    canonical_tables:
+      - fact_policy_event
+    feature_stages:
+      - sentiment_catalyst
+      - reimbursement
+    priority: 140
+    status: planned
+
+  - source_id: regulations_gov
+    stage: stage_1
+    source_name: "Regulations.gov API"
+    source_owner: "General Services Administration"
+    source_type: api
+    base_url: "https://api.regulations.gov/v4/"
+    documentation_url: "https://open.gsa.gov/api/regulationsgov/"
+    authentication_required: true
+    free_key_required: true
+    api_key_env: REGULATIONS_GOV_API_KEY
+    rate_limit_notes: "Uses api.data.gov key infrastructure."
+    refresh_frequency: daily
+    terms_url: "https://www.regulations.gov/reader-aids"
+    data_owner: GSA
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_docket
+      - stg_comment
+    canonical_tables:
+      - fact_policy_event
+    feature_stages:
+      - sentiment_catalyst
+    priority: 150
+    status: planned
+
+  - source_id: finra_short_interest
+    stage: stage_1
+    source_name: "FINRA short interest files"
+    source_owner: "FINRA"
+    source_type: bulk_download
+    base_url: "https://www.finra.org/finra-data/browse-catalog/equity-short-interest/data"
+    documentation_url: "https://www.finra.org/finra-data/browse-catalog/equity-short-interest"
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: twice_monthly
+    terms_url: "https://www.finra.org/terms-of-use"
+    data_owner: FINRA
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_short_interest
+    canonical_tables:
+      - fact_short_interest
+    feature_stages:
+      - sentiment_catalyst
+    priority: 160
+    status: planned
+
+  - source_id: fred
+    stage: stage_1
+    source_name: "FRED API"
+    source_owner: "Federal Reserve Bank of St. Louis"
+    source_type: api
+    base_url: "https://api.stlouisfed.org/fred/"
+    documentation_url: "https://fred.stlouisfed.org/docs/api/fred/"
+    authentication_required: true
+    free_key_required: true
+    api_key_env: FRED_API_KEY
+    refresh_frequency: daily
+    terms_url: "https://fred.stlouisfed.org/legal/"
+    data_owner: "Federal Reserve Bank of St. Louis"
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_macro_series
+    canonical_tables:
+      - fact_macro
+    feature_stages:
+      - valuation
+      - sentiment_catalyst
+    priority: 170
+    status: planned
+
+  - source_id: gdelt
+    stage: stage_1
+    source_name: "GDELT APIs"
+    source_owner: "GDELT Project"
+    source_type: api
+    base_url: "https://api.gdeltproject.org/api/v2/"
+    documentation_url: "https://www.gdeltproject.org/data.html"
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    terms_url: "https://www.gdeltproject.org/about.html"
+    data_owner: GDELT
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_news_article
+      - stg_news_event
+    canonical_tables:
+      - fact_news_event
+    feature_stages:
+      - sentiment_catalyst
+    priority: 180
+    status: planned

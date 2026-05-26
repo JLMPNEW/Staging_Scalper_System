@@ -197,11 +197,28 @@ def as_bool(raw: object, default: bool = False) -> bool:
     if raw is None:
         return default
     text = str(raw).strip().lower()
-    if text in {"1", "true", "t", "yes", "y", "enabled", "on"}:
+    if text in {"1", "true", "t", "yes", "y", "enabled", "on", "pass", "passed"}:
         return True
     if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
         return False
     return default
+
+
+def is_sparse_test_pass(row: dict[str, Any]) -> bool:
+    value = str(row.get("test_calibration_pass") or "").strip().lower()
+    state = str(row.get("test_calibration_pass_state") or "").strip().lower()
+    return value in {"", "sparse_data"} or state == "sparse_data"
+
+
+def bootstrap_ci_status(boot: dict[str, Any]) -> str:
+    if not boot:
+        return "missing"
+    iterations = to_float(boot.get("bootstrap_iterations"))
+    if iterations is None or iterations <= 0:
+        return "not_computed"
+    if to_float(boot.get("selected_lcb_return_pct_ci05")) is None:
+        return "missing_ci"
+    return "computed"
 
 
 def rounded(raw: object, digits: int = 6) -> float | str:
@@ -288,11 +305,11 @@ def build_candidate_report(
         for row in holdout_rows
         if str(row.get("horizon_days") or "") == horizon
         and as_bool(row.get("train_calibration_pass"))
-        and not str(row.get("test_calibration_pass") or "").strip()
+        and is_sparse_test_pass(row)
     ]
     if sparse_test_rows:
         LOGGER.warning(
-            "Skipping %d train-passing candidate row(s) for horizon=%s because test_calibration_pass is blank. "
+            "Skipping %d train-passing candidate row(s) for horizon=%s because test_calibration_pass is sparse. "
             "This usually means the test split had sparse or unavailable completed returns.",
             len(sparse_test_rows),
             horizon,
@@ -318,6 +335,8 @@ def build_candidate_report(
             "candidate_description": row.get("candidate_description", ""),
             "selection_policy_name": row.get("selection_policy_name", ""),
             "selection_policy_description": row.get("selection_policy_description", ""),
+            "train_calibration_pass_state": row.get("train_calibration_pass_state", ""),
+            "test_calibration_pass_state": row.get("test_calibration_pass_state", ""),
             "recommendation_bucket": "",
             "test_calibration_objective_vs_current_config": rounded(
                 row.get("test_calibration_objective_vs_current_config")
@@ -364,6 +383,7 @@ def build_candidate_report(
             ),
             "test_rank_quality_cap_exposure_pct": rounded(row.get("test_selected_rank_quality_cap_exposure_pct")),
             "bootstrap_iterations": boot.get("bootstrap_iterations", ""),
+            "bootstrap_ci_status": bootstrap_ci_status(boot),
             "bootstrap_lcb_return_pct_ci05": rounded(boot.get("selected_lcb_return_pct_ci05")),
             "bootstrap_lcb_return_pct_ci95": rounded(boot.get("selected_lcb_return_pct_ci95")),
             "bootstrap_sortino_like_ci05": rounded(boot.get("selected_sortino_like_ci05")),

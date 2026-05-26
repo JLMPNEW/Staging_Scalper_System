@@ -251,6 +251,8 @@ def convex_risk_drag(risk: float, weight: float, config: dict[str, Any], section
         return base_drag
     convexity = float(cfg_get(config, f"{section}.risk_penalty_convexity", 0.35))
     inflection = float(cfg_get(config, f"{section}.risk_penalty_inflection", 50.0))
+    if not math.isfinite(inflection) or inflection >= 100.0:
+        raise ValueError(f"{section}.risk_penalty_inflection must be finite and < 100.0, got {inflection}")
     excess = max(0.0, min(1.0, (risk - inflection) / max(1e-9, 100.0 - inflection)))
     return base_drag * (1.0 + convexity * excess)
 
@@ -987,7 +989,7 @@ def score_bucket(
     has_business_anchor = commercial_stage or profitable or ttm_revenue >= params.commercial_stage_revenue_min
     score_cmp = score + 1e-9
 
-    if force_core_veto_avoid and core_veto_reasons:
+    if force_core_veto_avoid:
         return "avoid"
     if (
         risk >= params.avoid_risk_min

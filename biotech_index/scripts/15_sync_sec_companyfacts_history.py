@@ -180,6 +180,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-companies", type=int, default=0, help="Smoke-test limit. 0 means all.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
     parser.add_argument("--full-refresh", action="store_true", help="Force refresh for all eligible companies regardless of sync state.")
+    parser.add_argument("--audit-only", action="store_true", help="Write the sign-convention audit from existing DB rows without fetching SEC data.")
     parser.add_argument("--allow-partial", action="store_true", help="Return success even if one or more companyfacts fetches fail.")
     return parser.parse_args()
 
@@ -494,6 +495,34 @@ QUARTERLY_FIELDS = [
     "payload_json",
 ]
 
+SIGN_CONVENTION_AUDIT_FIELDS = [
+    "audit_type",
+    "ticker",
+    "company_name",
+    "period_end",
+    "form",
+    "filed_date",
+    "metric",
+    "source_status",
+    "reported_value",
+    "current_abs_formula",
+    "proposed_raw_formula",
+    "current_abs_error",
+    "proposed_raw_error",
+    "winner",
+    "error_delta_abs",
+    "error_delta_pct",
+    "revenue",
+    "cost_of_revenue",
+    "rd_expense",
+    "sgna_expense",
+    "operating_cash_flow",
+    "capital_expenditures",
+    "proxy_fields_used",
+    "source_concept",
+    "notes",
+]
+
 
 def sql_field_list(fields: list[str]) -> str:
     allowed = set(QUARTERLY_FIELDS)
@@ -789,6 +818,275 @@ def write_quarterly_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def write_sign_convention_audit_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SIGN_CONVENTION_AUDIT_FIELDS, lineterminator="\n", extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def payload_source_concept(row: dict[str, Any], field: str) -> str:
+    direct = str(row.get(f"{field}_source_concept") or "").strip()
+    if direct:
+        return direct
+    try:
+        payload = json.loads(str(row.get("payload_json") or "{}"))
+    except json.JSONDecodeError:
+        return ""
+    source_concepts = payload.get("source_concepts")
+    if not isinstance(source_concepts, dict):
+        return ""
+    return str(source_concepts.get(field) or "").strip()
+
+
+def formula_diff_is_material(
+    current_abs_formula: float,
+    proposed_raw_formula: float,
+    *,
+    materiality_abs: float,
+    materiality_pct: float,
+) -> bool:
+    delta = abs(current_abs_formula - proposed_raw_formula)
+    denominator = max(abs(current_abs_formula), abs(proposed_raw_formula), 1.0)
+    return delta >= materiality_abs or (delta / denominator) >= materiality_pct
+
+
+def formula_comparison_fields(
+    *,
+    reported_value: float | None,
+    current_abs_formula: float,
+    proposed_raw_formula: float,
+) -> dict[str, Any]:
+    if reported_value is None:
+        return {
+            "reported_value": "",
+            "current_abs_error": "",
+            "proposed_raw_error": "",
+            "winner": "",
+            "error_delta_abs": "",
+            "error_delta_pct": "",
+        }
+    current_abs_error = abs(current_abs_formula - reported_value)
+    proposed_raw_error = abs(proposed_raw_formula - reported_value)
+    tolerance = max(abs(reported_value), 1.0) * 1e-6
+    if current_abs_error + tolerance < proposed_raw_error:
+        winner = "current_abs_formula"
+    elif proposed_raw_error + tolerance < current_abs_error:
+        winner = "proposed_raw_formula"
+    else:
+        winner = "tie"
+    denominator = max(abs(reported_value), 1.0)
+    return {
+        "reported_value": reported_value,
+        "current_abs_error": current_abs_error,
+        "proposed_raw_error": proposed_raw_error,
+        "winner": winner,
+        "error_delta_abs": current_abs_error - proposed_raw_error,
+        "error_delta_pct": (current_abs_error - proposed_raw_error) / denominator,
+    }
+
+
+def build_sign_audit_row(
+    row: dict[str, Any],
+    *,
+    metric: str,
+    source_status: str,
+    source_concept: str,
+    reported_value: float | None,
+    current_abs_formula: float,
+    proposed_raw_formula: float,
+    notes: list[str],
+) -> dict[str, Any]:
+    comparison = formula_comparison_fields(
+        reported_value=reported_value,
+        current_abs_formula=current_abs_formula,
+        proposed_raw_formula=proposed_raw_formula,
+    )
+    return {
+        "audit_type": "reported_formula_compare" if reported_value is not None else "derived_formula_compare",
+        "ticker": row.get("ticker", ""),
+        "company_name": row.get("company_name", ""),
+        "period_end": row.get("period_end", ""),
+        "form": row.get("form", ""),
+        "filed_date": row.get("filed_date", ""),
+        "metric": metric,
+        "source_status": source_status,
+        "current_abs_formula": current_abs_formula,
+        "proposed_raw_formula": proposed_raw_formula,
+        "revenue": row.get("revenue", ""),
+        "cost_of_revenue": row.get("cost_of_revenue", ""),
+        "rd_expense": row.get("rd_expense", ""),
+        "sgna_expense": row.get("sgna_expense", ""),
+        "operating_cash_flow": row.get("operating_cash_flow", ""),
+        "capital_expenditures": row.get("capital_expenditures", ""),
+        "proxy_fields_used": row.get("proxy_fields_used", ""),
+        "source_concept": source_concept,
+        "notes": ";".join(notes),
+        **comparison,
+    }
+
+
+def build_sign_convention_audit_rows(
+    rows: list[dict[str, Any]],
+    *,
+    materiality_abs: float,
+    materiality_pct: float,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    audit_rows: list[dict[str, Any]] = []
+    summary = {
+        "gross_comparable": 0,
+        "operating_comparable": 0,
+        "current_abs_wins": 0,
+        "proposed_raw_wins": 0,
+        "negative_component_rows": 0,
+    }
+
+    for row in rows:
+        proxy_fields = set(str(row.get("proxy_fields_used") or "").split(";"))
+        revenue = to_float(row.get("revenue"))
+        cost = to_float(row.get("cost_of_revenue"))
+        rd_expense = to_float(row.get("rd_expense"))
+        sgna_expense = to_float(row.get("sgna_expense"))
+        operating_cash_flow = to_float(row.get("operating_cash_flow"))
+        capital_expenditures = to_float(row.get("capital_expenditures"))
+        negative_components = [
+            field
+            for field, value in (
+                ("cost_of_revenue", cost),
+                ("rd_expense", rd_expense),
+                ("sgna_expense", sgna_expense),
+                ("capital_expenditures", capital_expenditures),
+            )
+            if value is not None and value < 0.0
+        ]
+        if negative_components:
+            summary["negative_component_rows"] += 1
+
+        if revenue is not None and cost is not None:
+            gross_current = revenue - abs(cost)
+            gross_proposed = revenue - cost
+            gross_source = payload_source_concept(row, "gross_profit")
+            gross_reported = to_float(row.get("gross_profit")) if gross_source else None
+            source_status = "reported" if gross_source else "proxied" if "gross_profit_revenue_minus_cost_of_revenue" in proxy_fields else "derived"
+            if gross_reported is not None:
+                summary["gross_comparable"] += 1
+            notes = [f"negative_components={','.join(negative_components)}"] if negative_components else []
+            include = bool(negative_components) or formula_diff_is_material(
+                gross_current,
+                gross_proposed,
+                materiality_abs=materiality_abs,
+                materiality_pct=materiality_pct,
+            )
+            audit_row = build_sign_audit_row(
+                row,
+                metric="gross_profit",
+                source_status=source_status,
+                source_concept=gross_source,
+                reported_value=gross_reported,
+                current_abs_formula=gross_current,
+                proposed_raw_formula=gross_proposed,
+                notes=notes,
+            )
+            if gross_reported is not None and str(audit_row.get("winner")) == "current_abs_formula":
+                summary["current_abs_wins"] += 1
+            elif gross_reported is not None and str(audit_row.get("winner")) == "proposed_raw_formula":
+                summary["proposed_raw_wins"] += 1
+                include = True
+            if include:
+                audit_rows.append(audit_row)
+
+        if revenue is not None and cost is not None and rd_expense is not None and sgna_expense is not None:
+            op_current = revenue - sum(abs(value) for value in (cost, rd_expense, sgna_expense))
+            op_proposed = revenue - sum((cost, rd_expense, sgna_expense))
+            op_source = payload_source_concept(row, "operating_income")
+            op_reported = to_float(row.get("operating_income")) if op_source else None
+            source_status = "reported" if op_source else "proxied" if "operating_income_revenue_minus_cost_rd_sgna" in proxy_fields else "derived"
+            if op_reported is not None:
+                summary["operating_comparable"] += 1
+            notes = [f"negative_components={','.join(negative_components)}"] if negative_components else []
+            include = bool(negative_components) or formula_diff_is_material(
+                op_current,
+                op_proposed,
+                materiality_abs=materiality_abs,
+                materiality_pct=materiality_pct,
+            )
+            audit_row = build_sign_audit_row(
+                row,
+                metric="operating_income",
+                source_status=source_status,
+                source_concept=op_source,
+                reported_value=op_reported,
+                current_abs_formula=op_current,
+                proposed_raw_formula=op_proposed,
+                notes=notes,
+            )
+            if op_reported is not None and str(audit_row.get("winner")) == "current_abs_formula":
+                summary["current_abs_wins"] += 1
+            elif op_reported is not None and str(audit_row.get("winner")) == "proposed_raw_formula":
+                summary["proposed_raw_wins"] += 1
+                include = True
+            if include:
+                audit_rows.append(audit_row)
+
+        if operating_cash_flow is not None and capital_expenditures is not None:
+            fcf_current = operating_cash_flow - abs(capital_expenditures)
+            fcf_proposed = operating_cash_flow - capital_expenditures
+            notes = [f"negative_components={','.join(negative_components)}"] if negative_components else []
+            include = bool(capital_expenditures < 0.0) or formula_diff_is_material(
+                fcf_current,
+                fcf_proposed,
+                materiality_abs=materiality_abs,
+                materiality_pct=materiality_pct,
+            )
+            if include:
+                audit_rows.append(
+                    build_sign_audit_row(
+                        row,
+                        metric="free_cash_flow",
+                        source_status="derived",
+                        source_concept=payload_source_concept(row, "capital_expenditures"),
+                        reported_value=None,
+                        current_abs_formula=fcf_current,
+                        proposed_raw_formula=fcf_proposed,
+                        notes=notes,
+                    )
+                )
+
+    audit_rows.sort(
+        key=lambda item: (
+            str(item.get("metric") or ""),
+            str(item.get("ticker") or ""),
+            str(item.get("period_end") or ""),
+            str(item.get("form") or ""),
+        )
+    )
+    return audit_rows, summary
+
+
+def log_sign_convention_audit_summary(
+    *,
+    audit_rows: list[dict[str, Any]],
+    summary: dict[str, int],
+    output_path: Path,
+    raw_win_warning_pct: float,
+) -> None:
+    comparable = int(summary.get("gross_comparable", 0)) + int(summary.get("operating_comparable", 0))
+    raw_wins = int(summary.get("proposed_raw_wins", 0))
+    raw_win_rate = (100.0 * raw_wins / comparable) if comparable else 0.0
+    log_func = LOGGER.warning if raw_wins and raw_win_rate >= raw_win_warning_pct else LOGGER.info
+    log_func(
+        "SEC companyfacts sign audit rows=%d comparable=%d current_abs_wins=%d proposed_raw_wins=%d raw_win_rate=%.2f%% negative_component_rows=%d output=%s",
+        len(audit_rows),
+        comparable,
+        int(summary.get("current_abs_wins", 0)),
+        raw_wins,
+        raw_win_rate,
+        int(summary.get("negative_component_rows", 0)),
+        output_path,
+    )
+
+
 def export_quarterly_rows(conn: sqlite3.Connection, company_ids: list[int]) -> list[dict[str, Any]]:
     if not company_ids:
         return []
@@ -860,6 +1158,14 @@ def main() -> None:
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     universe_csv = resolve_path(cfg_get(config, "sec_companyfacts_history.final_scoring_universe_csv"), base_dir=base_dir)
     output_csv = resolve_path(cfg_get(config, "sec_companyfacts_history.output_csv"), base_dir=base_dir)
+    sign_audit_csv = resolve_path(
+        cfg_get(
+            config,
+            "sec_companyfacts_history.sign_convention_audit_csv",
+            "../output/biotech_index_reports/company_facts_sign_convention_audit.csv",
+        ),
+        base_dir=base_dir,
+    )
     cache_dir = resolve_path(cfg_get(config, "sec_companyfacts_history.cache_dir", "../output/biotech_index_cache"), base_dir=base_dir)
     url_template = str(cfg_get(config, "sec_companyfacts_history.companyfacts_url_template", "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"))
     user_agent = str(cfg_get(config, "sec_companyfacts_history.user_agent", "") or "").strip()
@@ -878,6 +1184,9 @@ def main() -> None:
     timeout_sec = float(cfg_get(config, "sec_companyfacts_history.timeout_sec", 45.0))
     max_retries = int(cfg_get(config, "sec_companyfacts_history.max_retries", 3))
     max_workers = max(1, int(cfg_get(config, "sec_companyfacts_history.max_workers", 4)))
+    sign_materiality_abs = float(cfg_get(config, "sec_companyfacts_history.sign_convention_materiality_abs", 5_000_000.0))
+    sign_materiality_pct = float(cfg_get(config, "sec_companyfacts_history.sign_convention_materiality_pct", 0.05))
+    sign_raw_win_warning_pct = float(cfg_get(config, "sec_companyfacts_history.sign_convention_raw_win_warning_pct", 5.0))
     all_csv_rows: list[dict[str, Any]] = []
     run_id: int | None = None
 
@@ -892,6 +1201,7 @@ def main() -> None:
         )
         subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_companies))
         output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
+        sign_audit_csv = subset_output_path(sign_audit_csv, subset_mode=subset_mode)
         validate_nonempty_selection(count=len(companies), context="SEC companyfacts sync", subset_mode=subset_mode)
         loaded_tickers = [company.ticker for company in companies]
         validate_requested_tickers(requested_tickers=ticker_filter, loaded_tickers=loaded_tickers, context="SEC companyfacts sync")
@@ -901,10 +1211,26 @@ def main() -> None:
             context="SEC companyfacts sync",
             subset_mode=subset_mode,
         )
+        company_ids = [company.company_id for company in companies]
+        if args.audit_only:
+            all_csv_rows = export_quarterly_rows(conn, company_ids)
+            audit_rows, audit_summary = build_sign_convention_audit_rows(
+                all_csv_rows,
+                materiality_abs=sign_materiality_abs,
+                materiality_pct=sign_materiality_pct,
+            )
+            write_sign_convention_audit_csv(sign_audit_csv, audit_rows)
+            log_sign_convention_audit_summary(
+                audit_rows=audit_rows,
+                summary=audit_summary,
+                output_path=sign_audit_csv,
+                raw_win_warning_pct=sign_raw_win_warning_pct,
+            )
+            LOGGER.info("Wrote SEC companyfacts sign-convention audit from existing DB rows: rows=%d output=%s", len(audit_rows), sign_audit_csv)
+            return
         run_id = start_run(conn, run_type="sync_sec_companyfacts_history", input_path=universe_csv)
         try:
             error_count = 0
-            company_ids = [company.company_id for company in companies]
             sync_state_by_company = load_companyfacts_sync_state(conn, company_ids)
             fact_summary_by_company = load_companyfacts_fact_summary(conn, company_ids)
             latest_source_dates = load_latest_source_filing_dates(conn, company_ids)
@@ -1089,12 +1415,24 @@ def main() -> None:
                 )
             all_csv_rows = export_quarterly_rows(conn, company_ids)
             write_quarterly_csv(output_csv, all_csv_rows)
+            audit_rows, audit_summary = build_sign_convention_audit_rows(
+                all_csv_rows,
+                materiality_abs=sign_materiality_abs,
+                materiality_pct=sign_materiality_pct,
+            )
+            write_sign_convention_audit_csv(sign_audit_csv, audit_rows)
+            log_sign_convention_audit_summary(
+                audit_rows=audit_rows,
+                summary=audit_summary,
+                output_path=sign_audit_csv,
+                raw_win_warning_pct=sign_raw_win_warning_pct,
+            )
             finish_run(
                 conn,
                 run_id=run_id,
                 status="success" if error_count == 0 else "partial",
                 row_count=len(all_csv_rows),
-                message=f"companies={len(companies)} refreshed={len(refresh_targets)} errors={error_count} output={output_csv}",
+                message=f"companies={len(companies)} refreshed={len(refresh_targets)} errors={error_count} output={output_csv} sign_audit={sign_audit_csv}",
             )
             if error_count > 0 and not args.allow_partial:
                 raise SystemExit(2)
@@ -1102,7 +1440,7 @@ def main() -> None:
             if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
-    LOGGER.info("Synced SEC companyfacts history: companies=%d rows=%d output=%s", len(companies), len(all_csv_rows), output_csv)
+    LOGGER.info("Synced SEC companyfacts history: companies=%d rows=%d output=%s sign_audit=%s", len(companies), len(all_csv_rows), output_csv, sign_audit_csv)
 
 
 if __name__ == "__main__":

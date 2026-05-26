@@ -10,7 +10,7 @@ import sqlite3
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
@@ -20,10 +20,11 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from biotech_index.core.config import cfg_get, load_yaml, resolve_optional_path, resolve_path
-from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
-from biotech_index.core.logging_utils import configure_utc_logging
-from biotech_index.core.pipeline_guards import (
+from biotech_index.core.config import cfg_get, load_yaml, resolve_optional_path, resolve_path  # noqa: E402
+from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.market_policy import scoring_market_sources, select_latest_rows_by_source_priority  # noqa: E402
+from biotech_index.core.pipeline_guards import (  # noqa: E402
     normalize_ticker,
     validate_full_universe_coverage,
     validate_layer_freshness,
@@ -216,22 +217,40 @@ def load_latest_survival_features(conn: sqlite3.Connection, asof_date: date) -> 
     return {int(row["company_id"]): dict(row) for row in rows}
 
 
-def load_latest_market_features(conn: sqlite3.Connection, asof_date: date) -> dict[int, dict[str, Any]]:
+def load_latest_market_features(
+    conn: sqlite3.Connection,
+    asof_date: date,
+    *,
+    source_priority: list[str],
+    max_staleness_days: int,
+) -> dict[int, dict[str, Any]]:
+    source_clause = ""
+    params: list[Any] = [asof_date.isoformat()]
+    if source_priority:
+        source_clause = " AND source IN (" + ",".join("?" for _ in source_priority) + ")"
+        params.extend(source_priority)
     rows = conn.execute(
-        """
+        f"""
         SELECT f.*
         FROM market_features_daily f
         JOIN (
-            SELECT company_id, MAX(asof_date) AS max_asof
+            SELECT company_id, source, MAX(asof_date) AS max_asof
             FROM market_features_daily
-            WHERE asof_date <= ?
-            GROUP BY company_id
+            WHERE asof_date <= ?{source_clause}
+            GROUP BY company_id, source
         ) latest
-          ON latest.company_id = f.company_id AND latest.max_asof = f.asof_date
+          ON latest.company_id = f.company_id
+         AND latest.source = f.source
+         AND latest.max_asof = f.asof_date
         """,
-        (asof_date.isoformat(),),
+        tuple(params),
     ).fetchall()
-    return {int(row["company_id"]): dict(row) for row in rows}
+    return select_latest_rows_by_source_priority(
+        rows,
+        asof_date=asof_date,
+        source_priority=source_priority,
+        max_staleness_days=max_staleness_days,
+    )
 
 
 def load_recent_sec_filing_summary(conn: sqlite3.Connection, asof_date: date, *, lookback_days: int = 730) -> dict[int, dict[str, int]]:
@@ -261,11 +280,11 @@ def load_recent_sec_filing_summary(conn: sqlite3.Connection, asof_date: date, *,
 
 
 def screen_row_with_fallbacks(
-    screen_row: pd.Series | None,
+    screen_row: Any | None,
     *,
     market: dict[str, Any] | None,
     sec_filings: dict[str, int] | None,
-) -> pd.Series | None:
+) -> Any | None:
     if screen_row is not None:
         out = screen_row.copy()
     else:
@@ -416,7 +435,7 @@ def empty_evidence_summary() -> dict[str, Any]:
 def evidence_summary(evidence_df: pd.DataFrame, ticker: str) -> dict[str, Any]:
     if evidence_df.empty:
         return empty_evidence_summary()
-    ev = evidence_df[evidence_df["ticker"].str.upper() == ticker.upper()].copy()
+    ev = cast(Any, evidence_df[evidence_df["ticker"].str.upper() == ticker.upper()].copy())
     if ev.empty:
         return empty_evidence_summary()
     override_mask = ev["outcome_override_applied"].astype(str).map(as_bool).astype(bool) if "outcome_override_applied" in ev else pd.Series(False, index=ev.index)
@@ -437,10 +456,10 @@ def evidence_summary(evidence_df: pd.DataFrame, ticker: str) -> dict[str, Any]:
     # Only strong company links should drive scoring. Weak links remain visible in audit outputs,
     # but should not inflate catalyst quality for broad sponsors or collaborator-heavy tickers.
     strong_mask = ev["strong_company_link"].astype(str).map(as_bool).astype(bool) if "strong_company_link" in ev else pd.Series(True, index=ev.index)
-    strong = ev[strong_mask]
+    strong = cast(Any, ev[strong_mask])
     active_status_mask = strong["is_active_status"].astype(str).map(as_bool).astype(bool)
     qualifying_mask = strong["qualifying_trial"].astype(str).map(as_bool).astype(bool)
-    active = strong[active_status_mask & qualifying_mask].copy()
+    active = cast(Any, strong[active_status_mask & qualifying_mask].copy())
     if active.empty:
         empty = empty_evidence_summary()
         empty.update(override_counts)
@@ -476,7 +495,7 @@ def evidence_summary(evidence_df: pd.DataFrame, ticker: str) -> dict[str, Any]:
     core_quality = clamp(core_quality)
     collaborator_heavy = collab_ratio >= 0.60 and collab_only_active > (lead_active + program_active)
 
-    top = active.copy()
+    top = cast(Any, active.copy())
     top["_score"] = top["trial_score"].map(to_float) if "trial_score" in top.columns else 0.0
     top["_lead_or_program"] = lead_mask.astype(int) + program_mask.astype(int)
     if "last_update_post_date" not in top.columns:
@@ -525,14 +544,15 @@ def build_evidence_summary_index(evidence_df: pd.DataFrame) -> dict[str, dict[st
 
 def compute_feature_row(
     *,
-    universe_row: pd.Series,
-    screen_row: pd.Series | None,
+    universe_row: Any,
+    screen_row: Any | None,
     evidence: dict[str, Any],
     company_id: int,
     asof_date: date,
     min_liquidity_addv20: float,
     low_liquidity_addv20: float,
     strong_liquidity_addv20: float,
+    market: dict[str, Any] | None,
     survival: dict[str, Any] | None,
     sec_events: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -830,6 +850,13 @@ def compute_feature_row(
             "has_pipeline_disclosure": pipeline_disclosure,
             "median_addv20": median_addv20,
             "liquidity_status": liquidity_status,
+            "market_source": str(market.get("source") if market else ""),
+            "market_asof_date": str(market.get("asof_date") if market else ""),
+            "market_price_adjustment": str(market.get("price_adjustment") if market else ""),
+            "market_is_adjusted": int(to_float(market.get("is_adjusted") if market else None, 0.0)),
+            "market_last_bar_date": str(market.get("last_bar_date") if market else ""),
+            "market_bar_count": to_int(market.get("bar_count") if market else None),
+            "market_data_quality": str(market.get("market_data_quality") if market else ""),
             "going_concern_status": going_status,
             "latest_periodic_going_concern_status": latest_gc_status,
             "reverse_split_hits_2y": reverse_2y,
@@ -983,14 +1010,17 @@ def main() -> None:
     evidence_df = apply_trial_status_overrides(evidence_df, read_optional_csv(trial_status_overrides_csv))
     screen = read_csv(screen_csv)
     universe = universe[universe["scoring_include"].map(as_bool)].copy()
-    universe_records = universe.to_dict("records")
+    universe_records = cast(list[dict[str, Any]], cast(Any, universe).to_dict("records"))
     normalized_universe = [(normalize_ticker(row.get("ticker")), row) for row in universe_records]
     expected_tickers = {ticker for ticker, _ in normalized_universe if ticker}
     if not expected_tickers:
         raise ValueError(f"No scoring_include tickers found in final scoring universe CSV: {universe_csv}")
     screen_by_ticker = {
         ticker: row
-        for ticker, row in ((normalize_ticker(row.get("ticker")), row) for row in screen.to_dict("records"))
+        for ticker, row in (
+            (normalize_ticker(row.get("ticker")), row)
+            for row in cast(list[dict[str, Any]], cast(Any, screen).to_dict("records"))
+        )
         if ticker
     }
     evidence_by_ticker = build_evidence_summary_index(evidence_df)
@@ -1003,7 +1033,14 @@ def main() -> None:
         try:
             company_ids = load_company_ids(conn)
             survival_features = load_latest_survival_features(conn, asof_date)
-            market_features = load_latest_market_features(conn, asof_date)
+            market_source_priority = scoring_market_sources(config)
+            market_features = load_latest_market_features(
+                conn,
+                asof_date,
+                source_priority=market_source_priority,
+                max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0)),
+            )
+            LOGGER.info("Biotech feature market source priority: %s", ",".join(market_source_priority))
             sec_filing_summary = load_recent_sec_filing_summary(
                 conn,
                 asof_date,
@@ -1023,12 +1060,13 @@ def main() -> None:
                 if company_id is None:
                     skipped.append(ticker)
                     continue
+                market = market_features.get(company_id)
                 rows.append(
                     compute_feature_row(
                         universe_row=universe_row,
                         screen_row=screen_row_with_fallbacks(
                             screen_by_ticker.get(ticker),
-                            market=market_features.get(company_id),
+                            market=market,
                             sec_filings=sec_filing_summary.get(company_id),
                         ),
                         evidence=evidence_by_ticker.get(ticker, empty_evidence_summary()),
@@ -1037,6 +1075,7 @@ def main() -> None:
                         min_liquidity_addv20=min_liquidity,
                         low_liquidity_addv20=low_liquidity,
                         strong_liquidity_addv20=strong_liquidity,
+                        market=market,
                         survival=survival_features.get(company_id),
                         sec_events=sec_event_summary.get(company_id),
                     )

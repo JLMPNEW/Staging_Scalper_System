@@ -297,6 +297,10 @@ sec_companyfacts_history:
   max_retries: 3
   max_workers: 6
   output_csv: "../output/biotech_index_reports/company_facts_quarterly.csv"
+  sign_convention_audit_csv: "../output/biotech_index_reports/company_facts_sign_convention_audit.csv"
+  sign_convention_materiality_abs: 5000000.0
+  sign_convention_materiality_pct: 0.05
+  sign_convention_raw_win_warning_pct: 5.0
 
 ib_market_data:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
@@ -330,10 +334,22 @@ yahoo_market_data:
   market_close_time: "16:15"
   continuity_max_missing_days: 2
 
+market_data_policy:
+  # Historical scoring and calibration should use split/dividend-adjusted prices first.
+  scoring_primary_source: "yahoo_adjusted"
+  scoring_fallback_sources:
+    - "interactive_brokers"
+  calibration_sources:
+    - "yahoo_adjusted"
+    - "interactive_brokers"
+  live_validation_primary_source: "interactive_brokers"
+  require_adjusted_for_scoring: true
+  audit_output_csv: "../output/biotech_index_reports/market_data_source_audit.csv"
+
 commercial_value:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
   output_csv: "../output/biotech_index_reports/commercial_value_features.csv"
-  preferred_market_source: "interactive_brokers"
+  preferred_market_source: "yahoo_adjusted"
   commercial_stage_revenue_min: 50000000
   # smooth_zero removes artificial ranking jumps around flat growth.
   growth_curve: "smooth_zero"
@@ -377,6 +393,7 @@ forward_guidance:
   min_confidence: 0.68
   guidance_window_before_chars: 450
   guidance_window_after_chars: 900
+  # Empty means use the built-in forward-guidance cue patterns in script 19.
   guidance_cue_patterns: []
   guidance_staleness_penalty_120d: 5.0
   guidance_staleness_penalty_240d: 10.0
@@ -438,6 +455,7 @@ biotech_scoring:
     selection_policy: "core_veto_event_soft_drag_quality_guardrail"
     primary_horizon_trading_days: 120
     alpha_multibagger_role: "context_only"
+    # Historical artifact used to document the promoted PROD baseline; not an active output target.
     calibration_output_dir: "../output/biotech_index_reports/calibration_tier1_20260515_final_v2_prod_parity"
     calibration_test_metrics:
       test_lcb_return_pct: 6.835734
@@ -726,7 +744,7 @@ multibagger:
   candidates_csv: "biotech_multibagger_candidates.csv"
   summary_csv: "biotech_multibagger_summary.csv"
   evidence_cards_json: "biotech_multibagger_evidence_cards.json"
-  preferred_market_source: "interactive_brokers"
+  preferred_market_source: "yahoo_adjusted"
   top_n: 50
   market_cap_soft_cap: 25000000000
   market_cap_hard_cap: 75000000000
@@ -872,6 +890,7 @@ calibration:
     holdout_top_k: 25
     bootstrap_seed: 3001
     selected_ticker_top_ranks: 5
+    # Empty lists intentionally use the built-in reproducible Phase 2 signal/pool defaults.
     signal_specs: []
     pool_specs: []
     costs:

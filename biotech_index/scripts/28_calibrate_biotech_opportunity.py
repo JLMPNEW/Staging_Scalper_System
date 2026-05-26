@@ -42,7 +42,8 @@ from biotech_index.core.constants import (  # noqa: E402
 )
 from biotech_index.core.db import connect  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
-from biotech_index.core.pipeline_guards import normalize_ticker  # noqa: E402
+from biotech_index.core.market_policy import calibration_market_sources  # noqa: E402
+from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("calibrate_biotech_opportunity")
@@ -306,7 +307,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-asof", type=str, default="")
     parser.add_argument("--horizons", type=str, default="20,60,120", help="Comma-separated trading-day horizons.")
     parser.add_argument("--top-n", type=str, default="10,20,30", help="Comma-separated Top-N cutoffs.")
-    parser.add_argument("--market-sources", type=str, default="yahoo_adjusted,interactive_brokers")
+    parser.add_argument("--market-sources", type=str, default="")
     parser.add_argument(
         "--max-snapshots",
         type=int,
@@ -3294,6 +3295,14 @@ def build_holdout_rows(grid_rows: list[dict[str, Any]], *, limit: int = 25) -> l
                 train_key = "selected_n" if key == "n" else key
                 payload[f"train_{key}"] = train_row.get(train_key, "")
                 payload[f"test_{key}"] = test_row.get(train_key, "")
+            payload["train_calibration_pass_state"] = "pass" if as_bool(train_row.get("calibration_pass")) else "fail"
+            if not test_row:
+                payload["test_calibration_pass"] = "sparse_data"
+                payload["test_calibration_pass_state"] = "sparse_data"
+            else:
+                payload["test_calibration_pass_state"] = (
+                    "pass" if as_bool(test_row.get("calibration_pass")) else "fail"
+                )
             out.append(payload)
     return out
 
@@ -3851,7 +3860,7 @@ def main() -> None:
     top_ns = parse_int_list(args.top_n, default=[10, 20, 30])
     market_sources = [
         token.strip()
-        for raw_source in normalize_string_list(args.market_sources, ["yahoo_adjusted", "interactive_brokers"])
+        for raw_source in normalize_string_list(args.market_sources, calibration_market_sources(config))
         for token in str(raw_source).split(",")
         if token.strip()
     ]

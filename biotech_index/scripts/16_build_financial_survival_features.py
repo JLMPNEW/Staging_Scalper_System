@@ -131,7 +131,13 @@ def pct_change(current: float | None, previous: float | None) -> float | None:
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
-    return max(low, min(high, value))
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return low
+    if not math.isfinite(parsed):
+        return low
+    return max(low, min(high, parsed))
 
 
 def as_bool(raw: object) -> bool:
@@ -561,6 +567,8 @@ def compute_survival_row(
             break
     if not going_status:
         going_status = db_going_status or csv_going_status
+    # Prefer the broader 2-year NT-filing screen when present; the output keeps
+    # the historical 12m field name for downstream schema compatibility.
     late_filing_raw = screen_row.get("recent_nt_filing_count_2y")
     if late_filing_raw is None:
         late_filing_raw = screen_row.get("late_filing_count_12m")

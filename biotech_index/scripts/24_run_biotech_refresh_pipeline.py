@@ -29,6 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from biotech_index.core.db import connect, quote_identifier  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.market_policy import scoring_market_sources  # noqa: E402
 from biotech_index.core.pipeline_guards import format_ticker_sample, read_final_scoring_tickers, universe_coverage  # noqa: E402
 
 
@@ -263,6 +264,7 @@ def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bo
         steps.append(Step("ib_market", "17_sync_market_data_ib.py", ib_args))
     if not skip_yahoo:
         steps.append(Step("yahoo_market_adjusted", "17_sync_market_data_yahoo_adjusted.py", yahoo_args))
+    steps.append(Step("market_policy_audit", "31_audit_market_data_policy.py"))
     steps.extend(
         [
             Step("commercial_value", "18_build_commercial_value_features.py", commercial_args),
@@ -621,7 +623,12 @@ def validate_form4_preflight(
             failures.append(f"Form 4 snapshot date is unavailable in {form4_db_path}")
         else:
             age_days = (target_date - snapshot_date).days
-            if isinstance(age_days, int) and age_days > max_staleness_days:
+            if isinstance(age_days, int) and age_days < 0:
+                failures.append(
+                    f"Form 4 snapshot is future-dated: snapshot_date={snapshot_date.isoformat()} "
+                    f"asof={target_date.isoformat()} age_days={age_days}"
+                )
+            elif isinstance(age_days, int) and age_days > max_staleness_days:
                 failures.append(
                     f"Form 4 snapshot is stale: snapshot_date={snapshot_date.isoformat()} "
                     f"asof={target_date.isoformat()} age_days={age_days} max_staleness_days={max_staleness_days}"
@@ -904,10 +911,8 @@ def validate_final_outputs(
     )
     multibagger_scores_csv = multibagger_output_dir / str(cfg_get(config, "multibagger.scores_csv", "biotech_multibagger_scores.csv"))
     multibagger_candidates_csv = multibagger_output_dir / str(cfg_get(config, "multibagger.candidates_csv", "biotech_multibagger_candidates.csv"))
-    preferred_market_sources = {
-        str(cfg_get(config, "commercial_value.preferred_market_source", "interactive_brokers") or "interactive_brokers"),
-        str(cfg_get(config, "multibagger.preferred_market_source", "interactive_brokers") or "interactive_brokers"),
-    }
+    scoring_sources = scoring_market_sources(config)
+    preferred_market_sources = {scoring_sources[0]} if scoring_sources else set()
     multibagger_required_columns = list(MULTIBAGGER_SCORE_BASE_REQUIRED_COLUMNS)
     if as_bool(cfg_get(config, "multibagger.tier1_interaction.enabled", False)):
         multibagger_required_columns.extend(MULTIBAGGER_SCORE_TIER1_REQUIRED_COLUMNS)

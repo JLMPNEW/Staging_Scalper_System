@@ -18,6 +18,10 @@ FileDepository/
 ticker_mapping/_sec_cache/
 ticker_mapping/_identity_enrichment_cache/
 
+# --- Local secrets ---
+med_devices/secrets.local.yaml
+med_devices/secrets*.local.yaml
+
 # --- Data file formats ---
 *.parquet
 *.pkl
