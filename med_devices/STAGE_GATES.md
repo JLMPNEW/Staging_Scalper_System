@@ -81,6 +81,7 @@ Build:
 - Yahoo Finance adjusted market-data sync for historical scoring and backtesting.
 - IB market-data validation for active trading status, contract resolution, and fallback bars.
 - `med_devices/scripts/04_sync_med_device_yahoo_adjusted_prices.py` for Yahoo adjusted scoring/calibration bars.
+- Yahoo fetches can run in parallel via `yahoo_price_ingestion.parallel_workers`; SQLite writes stay serialized.
 - `med_devices/scripts/03_audit_med_device_market_data_policy.py` for selected-source policy validation.
 - Price source priority policy: adjusted historical source first, IB fallback/live validation.
 - Corporate-action fields: raw close, adjusted close, dividend amount, split factor when available.
@@ -127,6 +128,7 @@ Build:
 
 - openFDA 510(k), PMA, classification, recall, enforcement, MAUDE, registration/listing, and UDI ingestion.
 - `med_devices/scripts/08_sync_med_device_fda_core.py` for the first openFDA core ingestion pass.
+- openFDA page fetches can run in parallel via `fda_core_ingestion.parallel_workers`; raw and canonical SQLite writes stay serialized.
 - Product-code dimension.
 - Manufacturer/sponsor staging tables.
 - Recall severity normalization.
@@ -194,6 +196,8 @@ Build:
 - HCPCS quarterly files.
 - DMEPOS fee schedule.
 - OPPS and IPPS payment files.
+- `med_devices/scripts/14_sync_med_device_cms_reimbursement.py` for CMS Coverage API policy rows, LCD/article HCPCS detail rows, and configured CMS payment CSV/ZIP rows such as DMEPOS.
+- `med_devices/scripts/15_link_med_device_reimbursement_to_companies.py` for confidence-scored company-policy and company-HCPCS mapping, including FDA device-descriptor matches and manual overrides.
 - `med_devices/scripts/11_build_med_device_reimbursement_features.py` for conservative reimbursement feature rows from loaded CMS/mapping evidence.
 - Product-to-code mapping.
 - Coverage clarity and payment adequacy features.
@@ -201,6 +205,8 @@ Build:
 Acceptance tests:
 
 - HCPCS/CPT-like codes are stored in `dim_reimbursement_code` where available.
+- DMEPOS payment-rate rows populate `fact_reimbursement_rate` from the configured CMS ZIP cache.
+- CLFS/ASC/other license-gated CMS payment files are not automatically enabled until the license workflow is handled.
 - NCD/LCD/article records retain effective dates and status.
 - Major product lines are mapped to reimbursement codes or explicitly marked `not_applicable` / `unknown`.
 - Restrictive or absent coverage generates negative reason codes.
@@ -286,6 +292,8 @@ Acceptance tests:
 
 - Composite score equals configured weighted subscores after documented penalties.
 - Minimum gates are enforced: composite, fundamental quality, FDA/product, reimbursement, valuation, and technical entry.
+- `med_devices/scripts/12_build_med_device_technical_features.py` builds the technical-entry sleeve.
+- `med_devices/scripts/13_build_med_device_daily_scores.py` builds the final multi-sleeve daily ranking table.
 - Hard red flags can force `avoid` or `event_driven_only`.
 - Top-ranked names have visible reason codes.
 - Ranking is stable and reproducible for the same as-of inputs.

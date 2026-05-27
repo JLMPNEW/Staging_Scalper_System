@@ -1,0 +1,38 @@
+ticker,alias_raw,source,note
+ABT,Abbott Diabetes Care,operating_unit,High-volume FDA labeler under Abbott
+ABT,Abbott Medical,operating_unit,Abbott cardiovascular/medical device operating unit
+ABT,Abbott Molecular,operating_unit,Abbott diagnostics operating unit
+ABT,St Jude Medical,acquired_subsidiary,Acquired by Abbott
+ABT,Thoratec,acquired_subsidiary,Acquired by St Jude Medical then Abbott
+BDX,C R Bard,acquired_subsidiary,Acquired by Becton Dickinson
+BDX,Bard Peripheral Vascular,operating_unit,Bard operating unit under Becton Dickinson
+BDX,CareFusion,acquired_subsidiary,Acquired by Becton Dickinson
+BSX,Guidant,acquired_subsidiary,Acquired by Boston Scientific
+DHR,Beckman Coulter,operating_company,Danaher diagnostics operating company
+DHR,Cepheid,operating_company,Danaher diagnostics operating company
+ENOV,DJO,legacy_operating_name,Enovis legacy orthopedic/bracing operating name
+FMS,Fresenius Medical Care Renal Therapies Group,operating_unit,Fresenius Medical Care public parent trades as FMS
+GEHC,GE Medical Systems,legacy_name,Legacy GE Healthcare medical systems entity
+MDT,Covidien,acquired_subsidiary,Acquired by Medtronic
+MDT,Medtronic MiniMed,operating_unit,Medtronic diabetes operating unit
+MDT,Scientia Vascular,acquired_subsidiary,Medtronic announced acquisition for neurovascular portfolio
+MDT,Sofamor Danek,legacy_operating_name,Medtronic spine legacy operating name
+MDLN,Medline Inc,public_parent,Medline public parent trades as MDLN
+MDLN,Medline Industries,operating_company,Medline public parent trades as MDLN
+MDLN,Medline Industries LP,operating_company,Medline public parent trades as MDLN
+PHG,Philips Healthcare,operating_unit,Royal Philips healthcare operating unit
+PHG,Philips Image Guided Therapy,operating_unit,Royal Philips healthcare operating unit
+PHG,Philips Medical Systems,operating_unit,Royal Philips healthcare operating unit
+PHG,Philips Medical Systems Nederland,operating_unit,Royal Philips healthcare operating unit
+PHG,Philips Medizin Systeme,operating_unit,Royal Philips healthcare operating unit
+PHG,Philips Medizin Systeme Boeblingen,operating_unit,Royal Philips healthcare operating unit
+PHG,Philips North America,operating_unit,Royal Philips healthcare operating unit
+PHG,Philips Respironics,operating_unit,Royal Philips healthcare operating unit
+PHG,Philips Ultrasound,operating_unit,Royal Philips healthcare operating unit
+PHG,Spectranetics,acquired_subsidiary,Acquired by Philips
+PHG,Volcano Corporation,acquired_subsidiary,Acquired by Philips
+SOLV,3M Health Care,pre_spin_operating_unit,Solventum predecessor health care business
+SYK,Mako Surgical,acquired_subsidiary,Acquired by Stryker
+SYK,Wright Medical,acquired_subsidiary,Acquired by Stryker
+TMO,Life Technologies,acquired_subsidiary,Acquired by Thermo Fisher Scientific
+ZBH,Biomet,merged_predecessor,Zimmer Biomet predecessor entity

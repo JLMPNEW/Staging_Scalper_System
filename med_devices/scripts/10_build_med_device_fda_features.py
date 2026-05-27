@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import csv
 import json
 import logging
 import math
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,9 @@ FIELDNAMES = [
     "revenue_ttm",
     "recall_severity_per_billion_revenue",
     "adverse_event_rate_per_billion_revenue",
+    "fda_data_available",
+    "latest_fda_event_date",
+    "fda_data_recency_score",
     "regulatory_innovation_score",
     "regulatory_risk_score",
     "fda_product_score",
@@ -85,6 +89,9 @@ class FdaFeatureRow:
     revenue_ttm: float | None = None
     recall_severity_per_billion_revenue: float | None = None
     adverse_event_rate_per_billion_revenue: float | None = None
+    fda_data_available: int = 0
+    latest_fda_event_date: str = ""
+    fda_data_recency_score: float | None = None
     mapped_manufacturer_count: int = 0
     avg_mapping_confidence: float | None = None
     regulatory_innovation_score: float = 0.0
@@ -105,6 +112,17 @@ class FdaFeaturePolicy:
     no_data_innovation_score: float
     no_data_risk_score: float
     revenue_floor: float
+    recall_decay_half_life_days: float
+    innovation_base_score: float
+    innovation_approval_log_weight: float
+    innovation_pma_log_weight: float
+    innovation_product_code_log_weight: float
+    risk_recall_severity_weight: float
+    risk_class_i_recall_weight: float
+    risk_death_per_billion_weight: float
+    risk_injury_per_billion_weight: float
+    risk_malfunction_per_billion_weight: float
+    risk_adverse_acceleration_per_billion_weight: float
     min_mapping_confidence: float
     class_i_lookback_months: int
     death_lookback_months: int
@@ -147,7 +165,11 @@ def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
 
 
 def months_before(asof: date, months: int) -> date:
-    return asof - timedelta(days=round(months * 30.4375))
+    month = asof.month - months
+    year = asof.year + (month - 1) // 12
+    month = (month - 1) % 12 + 1
+    day = min(asof.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
 
 
 def cfg_float(config: dict[str, Any], dotted_key: str, default: float) -> float:
@@ -170,6 +192,21 @@ def fda_feature_policy(config: dict[str, Any]) -> FdaFeaturePolicy:
         no_data_innovation_score=cfg_float(config, "fda_features.no_data_innovation_score", 20.0),
         no_data_risk_score=cfg_float(config, "fda_features.no_data_risk_score", 65.0),
         revenue_floor=cfg_float(config, "fda_features.normalization.revenue_floor", 100000000.0),
+        recall_decay_half_life_days=cfg_float(config, "fda_features.recall_decay_half_life_days", 730.0),
+        innovation_base_score=cfg_float(config, "fda_features.innovation_score.base_score", 25.0),
+        innovation_approval_log_weight=cfg_float(config, "fda_features.innovation_score.approval_log_weight", 18.0),
+        innovation_pma_log_weight=cfg_float(config, "fda_features.innovation_score.pma_log_weight", 16.0),
+        innovation_product_code_log_weight=cfg_float(config, "fda_features.innovation_score.product_code_log_weight", 12.0),
+        risk_recall_severity_weight=cfg_float(config, "fda_features.risk_penalties.recall_severity_per_billion_weight", 4.0),
+        risk_class_i_recall_weight=cfg_float(config, "fda_features.risk_penalties.class_i_recall_weight", 20.0),
+        risk_death_per_billion_weight=cfg_float(config, "fda_features.risk_penalties.death_per_billion_weight", 5.0),
+        risk_injury_per_billion_weight=cfg_float(config, "fda_features.risk_penalties.injury_per_billion_weight", 0.5),
+        risk_malfunction_per_billion_weight=cfg_float(config, "fda_features.risk_penalties.malfunction_per_billion_weight", 0.1),
+        risk_adverse_acceleration_per_billion_weight=cfg_float(
+            config,
+            "fda_features.risk_penalties.adverse_acceleration_per_billion_weight",
+            0.5,
+        ),
         min_mapping_confidence=cfg_float(config, "fda_features.min_mapping_confidence_for_high_confidence", 75.0),
         class_i_lookback_months=int(cfg_get(config, "fda_features.hard_red_flags.class_i_recall_lookback_months", 36)),
         death_lookback_months=int(cfg_get(config, "fda_features.hard_red_flags.death_event_lookback_months", 24)),
@@ -205,6 +242,13 @@ def load_companies(conn: Any, *, ticker_filter: set[str], max_tickers: int) -> l
     return out
 
 
+def update_latest_fda_event_date(row: FdaFeatureRow, event_date: str) -> None:
+    if not event_date:
+        return
+    if not row.latest_fda_event_date or event_date > row.latest_fda_event_date:
+        row.latest_fda_event_date = event_date
+
+
 def count_approvals(conn: Any, row: FdaFeatureRow, *, asof: date, policy: FdaFeaturePolicy) -> None:
     long_start = months_before(asof, policy.long_months).isoformat()
     medium_start = months_before(asof, policy.medium_months).isoformat()
@@ -233,6 +277,7 @@ def count_approvals(conn: Any, row: FdaFeatureRow, *, asof: date, policy: FdaFea
         product_code = str(item["product_code"] or "").strip()
         if product_code:
             product_codes.add(product_code)
+        update_latest_fda_event_date(row, day)
     row.product_code_count_36m = len(product_codes)
 
 
@@ -261,9 +306,13 @@ def count_recalls(conn: Any, row: FdaFeatureRow, *, asof: date, policy: FdaFeatu
         if event_date >= medium_start:
             row.recall_count_24m += 1
         row.recall_count_36m += 1
-        row.recall_severity_36m += float(item["severity_weight"] or 1.0)
+        event_day = parse_date(event_date)
+        days_since = (asof - event_day).days if event_day is not None else 0
+        decay = 0.5 ** (max(0, days_since) / max(1.0, policy.recall_decay_half_life_days))
+        row.recall_severity_36m += float(item["severity_weight"] or 1.0) * decay
         if is_class_i(item["classification"]):
             row.class_i_recall_count_36m += 1
+        update_latest_fda_event_date(row, event_date)
 
 
 def count_adverse_events(conn: Any, row: FdaFeatureRow, *, asof: date, policy: FdaFeaturePolicy) -> None:
@@ -292,6 +341,7 @@ def count_adverse_events(conn: Any, row: FdaFeatureRow, *, asof: date, policy: F
             row.malfunction_count_24m += int(item["malfunction_count"] or 0)
         else:
             row.prev_adverse_event_count_24m += event_count
+        update_latest_fda_event_date(row, event_day.isoformat())
 
 
 def manufacturer_mapping_summary(conn: Any, row: FdaFeatureRow) -> None:
@@ -337,6 +387,7 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
             row.prev_adverse_event_count_24m,
         ]
     )
+    row.fda_data_available = 1 if has_fda_records else 0
     if has_fda_records:
         revenue_base = revenue_normalizer(row, policy=policy)
         recall_severity_rate = round(row.recall_severity_36m / revenue_base, 4)
@@ -346,24 +397,31 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
         injury_rate = row.injury_count_24m / revenue_base
         malfunction_rate = row.malfunction_count_24m / revenue_base
         adverse_acceleration_rate = max(0, row.current_adverse_event_count_24m - row.prev_adverse_event_count_24m) / revenue_base
-        row.regulatory_innovation_score = round(
-            clamp(
-                25.0
-                + row.approval_count_24m * 5.0
-                + row.pma_count_36m * 8.0
-                + row.product_code_count_36m * 3.0
-            ),
-            2,
+        if row.latest_fda_event_date:
+            event_day = parse_date(row.latest_fda_event_date)
+            if event_day is not None:
+                days_since = max(0, (date.fromisoformat(row.asof_date) - event_day).days)
+                row.fda_data_recency_score = round(
+                    clamp(100.0 * (0.5 ** (days_since / max(1.0, policy.recall_decay_half_life_days)))),
+                    2,
+                )
+        raw_innovation = (
+            policy.innovation_base_score
+            + math.log1p(row.approval_count_24m) * policy.innovation_approval_log_weight
+            + math.log1p(row.pma_count_36m) * policy.innovation_pma_log_weight
+            + math.log1p(row.product_code_count_36m) * policy.innovation_product_code_log_weight
         )
+        recency_multiplier = 0.5 + 0.5 * ((row.fda_data_recency_score or 0.0) / 100.0)
+        row.regulatory_innovation_score = round(clamp(raw_innovation * recency_multiplier), 2)
         row.regulatory_risk_score = round(
             clamp(
                 100.0
-                - recall_severity_rate * 4.0
-                - row.class_i_recall_count_36m * 20.0
-                - death_rate * 5.0
-                - injury_rate * 0.5
-                - malfunction_rate * 0.1
-                - adverse_acceleration_rate * 0.02
+                - recall_severity_rate * policy.risk_recall_severity_weight
+                - row.class_i_recall_count_36m * policy.risk_class_i_recall_weight
+                - death_rate * policy.risk_death_per_billion_weight
+                - injury_rate * policy.risk_injury_per_billion_weight
+                - malfunction_rate * policy.risk_malfunction_per_billion_weight
+                - adverse_acceleration_rate * policy.risk_adverse_acceleration_per_billion_weight
             ),
             2,
         )
@@ -412,6 +470,11 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
             "revenue_ttm": row.revenue_ttm,
             "revenue_floor": policy.revenue_floor,
             "normalizer": "per_1b_revenue_with_floor",
+            "recall_decay_half_life_days": policy.recall_decay_half_life_days,
+        },
+        "recency": {
+            "latest_fda_event_date": row.latest_fda_event_date,
+            "fda_data_recency_score": row.fda_data_recency_score,
         },
         "mapping": {
             "mapped_manufacturer_count": row.mapped_manufacturer_count,
@@ -421,6 +484,14 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
         "score_weights": {
             "regulatory_risk": policy.regulatory_risk_weight,
             "regulatory_innovation": policy.regulatory_innovation_weight,
+        },
+        "risk_penalties": {
+            "recall_severity_per_billion": policy.risk_recall_severity_weight,
+            "class_i_recall": policy.risk_class_i_recall_weight,
+            "death_per_billion": policy.risk_death_per_billion_weight,
+            "injury_per_billion": policy.risk_injury_per_billion_weight,
+            "malfunction_per_billion": policy.risk_malfunction_per_billion_weight,
+            "adverse_acceleration_per_billion": policy.risk_adverse_acceleration_per_billion_weight,
         },
     }
 
@@ -452,16 +523,22 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
         """
         INSERT INTO feature_fda_product_risk(
             asof_date, company_id, regulatory_innovation_score, regulatory_risk_score,
-            fda_product_score, hard_red_flag, hard_red_flag_reasons, payload_json,
-            created_at, updated_at
+            fda_product_score, fda_data_available, latest_fda_event_date,
+            mapped_manufacturer_count, avg_mapping_confidence, hard_red_flag,
+            hard_red_flag_reasons, review_reason, payload_json, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(asof_date, company_id) DO UPDATE SET
             regulatory_innovation_score = excluded.regulatory_innovation_score,
             regulatory_risk_score = excluded.regulatory_risk_score,
             fda_product_score = excluded.fda_product_score,
+            fda_data_available = excluded.fda_data_available,
+            latest_fda_event_date = excluded.latest_fda_event_date,
+            mapped_manufacturer_count = excluded.mapped_manufacturer_count,
+            avg_mapping_confidence = excluded.avg_mapping_confidence,
             hard_red_flag = excluded.hard_red_flag,
             hard_red_flag_reasons = excluded.hard_red_flag_reasons,
+            review_reason = excluded.review_reason,
             payload_json = excluded.payload_json,
             updated_at = excluded.updated_at
         """,
@@ -472,8 +549,13 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
                 row.regulatory_innovation_score,
                 row.regulatory_risk_score,
                 row.fda_product_score,
+                row.fda_data_available,
+                row.latest_fda_event_date,
+                row.mapped_manufacturer_count,
+                row.avg_mapping_confidence,
                 row.hard_red_flag,
                 ";".join(row.hard_red_flag_reasons or []),
+                row.review_reason,
                 json.dumps(row.payload or {}, ensure_ascii=True, sort_keys=True),
                 now,
                 now,

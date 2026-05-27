@@ -418,6 +418,40 @@ CREATE TABLE IF NOT EXISTS fact_reimbursement_rate (
     FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS map_company_reimbursement_policy (
+    company_id INTEGER NOT NULL,
+    reimbursement_policy_id INTEGER NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.0,
+    mapping_method TEXT,
+    matched_term TEXT,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(company_id, reimbursement_policy_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE,
+    FOREIGN KEY (reimbursement_policy_id) REFERENCES fact_reimbursement_policy(reimbursement_policy_id) ON DELETE CASCADE,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS map_company_reimbursement_code (
+    company_reimbursement_code_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    reimbursement_code_id INTEGER NOT NULL,
+    reimbursement_policy_id INTEGER,
+    confidence REAL NOT NULL DEFAULT 0.0,
+    mapping_method TEXT,
+    matched_term TEXT,
+    source_id TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE,
+    FOREIGN KEY (reimbursement_code_id) REFERENCES dim_reimbursement_code(reimbursement_code_id) ON DELETE CASCADE,
+    FOREIGN KEY (reimbursement_policy_id) REFERENCES fact_reimbursement_policy(reimbursement_policy_id) ON DELETE CASCADE,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS fact_clinical_trial_status (
     clinical_trial_status_id INTEGER PRIMARY KEY AUTOINCREMENT,
     nct_id TEXT NOT NULL,
@@ -644,10 +678,39 @@ CREATE TABLE IF NOT EXISTS feature_financial_valuation (
 CREATE TABLE IF NOT EXISTS feature_technical_entry (
     asof_date TEXT NOT NULL,
     company_id INTEGER NOT NULL,
+    ticker TEXT,
+    company_name TEXT,
+    subsector TEXT,
+    market_source_id TEXT,
+    latest_price_date TEXT,
+    latest_close REAL,
+    avg_dollar_volume_60d REAL,
+    return_21d REAL,
+    return_63d REAL,
+    return_126d REAL,
+    return_252d REAL,
+    momentum_12_1 REAL,
+    relative_strength_63d REAL,
+    relative_strength_126d REAL,
+    sma_50 REAL,
+    sma_200 REAL,
+    price_vs_sma_50 REAL,
+    price_vs_sma_200 REAL,
+    sma_50_vs_200 REAL,
+    sma_200_slope_63d REAL,
+    rsi_14 REAL,
+    atr_14_pct REAL,
+    realized_vol_60d REAL,
+    max_drawdown_252d REAL,
+    pct_from_52w_high REAL,
     score REAL,
     trend_quality_score REAL,
     relative_strength_score REAL,
     liquidity_score REAL,
+    volatility_risk_score REAL,
+    entry_signal TEXT,
+    data_quality_status TEXT,
+    missing_fields TEXT,
     payload_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -679,8 +742,16 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     valuation_score REAL,
     technical_entry_score REAL,
     sentiment_catalyst_score REAL,
+    value_trap_score REAL,
+    data_completeness_score REAL,
+    live_component_count INTEGER,
+    composite_score_delta REAL,
+    rank_delta INTEGER,
+    classification_change TEXT,
     rank INTEGER,
     classification TEXT,
+    gate_status TEXT,
+    review_reason TEXT,
     hard_red_flag INTEGER NOT NULL DEFAULT 0,
     hard_red_flag_reasons TEXT,
     top_positive_drivers_json TEXT,
@@ -726,6 +797,18 @@ CREATE INDEX IF NOT EXISTS idx_fact_fda_recall_company_date ON fact_fda_recall(c
 CREATE INDEX IF NOT EXISTS idx_fact_fda_adverse_company_date ON fact_fda_adverse_event(company_id, report_date);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_reimbursement_policy_unique
 ON fact_reimbursement_policy(policy_type, COALESCE(policy_id, ''), COALESCE(effective_date, ''));
+CREATE INDEX IF NOT EXISTS idx_fact_reimbursement_policy_source
+ON fact_reimbursement_policy(source_id, policy_type);
+CREATE INDEX IF NOT EXISTS idx_dim_reimbursement_code_code
+ON dim_reimbursement_code(code_type, code);
+CREATE INDEX IF NOT EXISTS idx_fact_reimbursement_rate_code_source
+ON fact_reimbursement_rate(reimbursement_code_id, source_id, effective_date);
+CREATE INDEX IF NOT EXISTS idx_map_reimb_policy_company
+ON map_company_reimbursement_policy(company_id, confidence);
+CREATE INDEX IF NOT EXISTS idx_map_reimb_code_company
+ON map_company_reimbursement_code(company_id, confidence);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_map_reimb_code_unique
+ON map_company_reimbursement_code(company_id, reimbursement_code_id, COALESCE(reimbursement_policy_id, -1));
 CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_clinical_trial_status_unique
 ON fact_clinical_trial_status(nct_id, COALESCE(company_id, -1));
 CREATE INDEX IF NOT EXISTS idx_feature_financial_valuation_asof
@@ -821,7 +904,75 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn,
         "feature_reimbursement",
         {
+            "ticker": "TEXT",
+            "company_name": "TEXT",
+            "policy_evidence_count": "INTEGER",
+            "company_mention_count": "INTEGER",
+            "mapped_product_code_count": "INTEGER",
+            "reimbursement_code_count": "INTEGER",
+            "rate_row_count": "INTEGER",
             "hard_red_flag_reasons": "TEXT",
+            "review_reason": "TEXT",
+        },
+    )
+    _ensure_table_optional_columns(
+        conn,
+        "feature_fda_product_risk",
+        {
+            "fda_data_available": "INTEGER",
+            "latest_fda_event_date": "TEXT",
+            "mapped_manufacturer_count": "INTEGER",
+            "avg_mapping_confidence": "REAL",
+            "review_reason": "TEXT",
+        },
+    )
+    _ensure_table_optional_columns(
+        conn,
+        "feature_technical_entry",
+        {
+            "ticker": "TEXT",
+            "company_name": "TEXT",
+            "subsector": "TEXT",
+            "market_source_id": "TEXT",
+            "latest_price_date": "TEXT",
+            "latest_close": "REAL",
+            "avg_dollar_volume_60d": "REAL",
+            "return_21d": "REAL",
+            "return_63d": "REAL",
+            "return_126d": "REAL",
+            "return_252d": "REAL",
+            "momentum_12_1": "REAL",
+            "relative_strength_63d": "REAL",
+            "relative_strength_126d": "REAL",
+            "sma_50": "REAL",
+            "sma_200": "REAL",
+            "price_vs_sma_50": "REAL",
+            "price_vs_sma_200": "REAL",
+            "sma_50_vs_200": "REAL",
+            "sma_200_slope_63d": "REAL",
+            "rsi_14": "REAL",
+            "atr_14_pct": "REAL",
+            "realized_vol_60d": "REAL",
+            "max_drawdown_252d": "REAL",
+            "pct_from_52w_high": "REAL",
+            "volatility_risk_score": "REAL",
+            "entry_signal": "TEXT",
+            "data_quality_status": "TEXT",
+            "missing_fields": "TEXT",
+        },
+    )
+    _ensure_table_optional_columns(
+        conn,
+        "med_device_daily_scores",
+        {
+            "value_trap_score": "REAL",
+            "data_completeness_score": "REAL",
+            "live_component_count": "INTEGER",
+            "composite_score_delta": "REAL",
+            "rank_delta": "INTEGER",
+            "classification_change": "TEXT",
+            "gate_status": "TEXT",
+            "review_reason": "TEXT",
         },
     )
     conn.execute(

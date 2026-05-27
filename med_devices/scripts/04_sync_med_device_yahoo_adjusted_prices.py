@@ -9,6 +9,7 @@ import logging
 import math
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -84,9 +85,23 @@ class YahooPolicy:
     include_adjusted_close: bool
     timeout_sec: float
     max_retries: int
+    parallel_workers: int
     sleep_sec: float
     user_agent: str
     retry_status_codes: set[int]
+
+
+@dataclass(frozen=True)
+class PriceFetchResult:
+    idx: int
+    job: PriceJob
+    endpoint: str
+    query_params: dict[str, Any]
+    status_code: int
+    payload_text: str
+    payload: dict[str, Any]
+    bars: list[YahooBar]
+    error: str = ""
 
 
 def parse_args() -> argparse.Namespace:
@@ -223,6 +238,7 @@ def yahoo_policy(config: dict[str, Any]) -> YahooPolicy:
         ),
         timeout_sec=float(cfg_get(config, "yahoo_price_ingestion.timeout_sec", 30.0)),
         max_retries=int(cfg_get(config, "yahoo_price_ingestion.max_retries", 3)),
+        parallel_workers=max(1, int(cfg_get(config, "yahoo_price_ingestion.parallel_workers", 1))),
         sleep_sec=float(cfg_get(config, "yahoo_price_ingestion.request_sleep_sec", 0.15)),
         user_agent=str(cfg_get(config, "yahoo_price_ingestion.user_agent", DEFAULT_USER_AGENT) or DEFAULT_USER_AGENT),
         retry_status_codes=int_set(
@@ -270,6 +286,58 @@ def fetch_chart_payload(
             continue
         return last_status, last_text, last_payload
     return last_status, last_text, last_payload
+
+
+def yahoo_query_params(start_date: date, asof_date: date, policy: YahooPolicy) -> dict[str, Any]:
+    return {
+        "period1": unix_timestamp(start_date),
+        "period2": unix_timestamp(asof_date + timedelta(days=1)),
+        "interval": policy.interval,
+        "events": policy.events,
+        "includeAdjustedClose": str(policy.include_adjusted_close).lower(),
+    }
+
+
+def fetch_price_job(
+    idx: int,
+    job: PriceJob,
+    *,
+    start_date: date,
+    asof_date: date,
+    policy: YahooPolicy,
+) -> PriceFetchResult:
+    endpoint = policy.chart_url_template.format(ticker=job.ticker)
+    query_params = yahoo_query_params(start_date, asof_date, policy)
+    try:
+        status_code, payload_text, payload = fetch_chart_payload(
+            job.ticker,
+            start_date=start_date,
+            asof_date=asof_date,
+            policy=policy,
+        )
+        bars = parse_bars(job.ticker, payload, source_id=policy.source_id) if status_code == 200 else []
+        return PriceFetchResult(
+            idx=idx,
+            job=job,
+            endpoint=endpoint,
+            query_params=query_params,
+            status_code=status_code,
+            payload_text=payload_text,
+            payload=payload,
+            bars=bars,
+        )
+    except Exception as exc:
+        return PriceFetchResult(
+            idx=idx,
+            job=job,
+            endpoint=endpoint,
+            query_params=query_params,
+            status_code=0,
+            payload_text="",
+            payload={},
+            bars=[],
+            error=f"{type(exc).__name__}: {exc}",
+        )
 
 
 def event_date(raw_ts: object) -> str:
@@ -353,23 +421,39 @@ def parse_bars(ticker: str, payload: dict[str, Any], *, source_id: str) -> list[
             continue
         factor = final_close / raw_close if raw_close else 1.0
 
-        def adjusted_value(field: str) -> float | None:
+        def raw_value(field: str) -> float | None:
             values = list_field(quote, field)
-            raw_value = to_float(values[idx] if idx < len(values) else None)
-            return raw_value * factor if raw_value is not None else None
+            return to_float(values[idx] if idx < len(values) else None)
 
+        open_value = raw_value("open")
+        high_value = raw_value("high")
+        low_value = raw_value("low")
+        adjusted_high = high_value * factor if high_value is not None else None
+        adjusted_low = low_value * factor if low_value is not None else None
+        if high_value is not None and low_value is not None and high_value < low_value:
+            LOGGER.debug("Skipping invalid Yahoo OHLC bar: ticker=%s date=%s reason=high_lt_low", ticker, bar_day)
+            continue
+        if adjusted_high is not None and final_close > adjusted_high * 1.001:
+            LOGGER.debug("Skipping invalid Yahoo OHLC bar: ticker=%s date=%s reason=close_gt_high", ticker, bar_day)
+            continue
+        if adjusted_low is not None and final_close < adjusted_low * 0.999:
+            LOGGER.debug("Skipping invalid Yahoo OHLC bar: ticker=%s date=%s reason=close_lt_low", ticker, bar_day)
+            continue
         volume_values = list_field(quote, "volume")
+        volume_value = to_float(volume_values[idx] if idx < len(volume_values) else None)
+        if volume_value is not None and volume_value < 0:
+            volume_value = None
         out.append(
             YahooBar(
                 ticker=ticker,
                 bar_date=bar_day,
                 source_id=source_id,
-                open=adjusted_value("open"),
-                high=adjusted_value("high"),
-                low=adjusted_value("low"),
-                close=final_close,
+                open=open_value,
+                high=high_value,
+                low=low_value,
+                close=raw_close,
                 adj_close=final_close,
-                volume=to_float(volume_values[idx] if idx < len(volume_values) else None),
+                volume=volume_value,
                 dividend_amount=dividends.get(bar_day),
                 split_factor=splits.get(bar_day),
                 price_adjustment=price_adjustment,
@@ -540,6 +624,36 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows([{field: row.get(field, "") for field in FIELDNAMES} for row in rows])
 
 
+def process_price_result(
+    conn: Any,
+    result: PriceFetchResult,
+    *,
+    policy: YahooPolicy,
+    asof_date: date,
+    ingestion_run_id: int,
+) -> tuple[dict[str, Any], int, bool]:
+    if result.payload_text:
+        store_raw_response(
+            conn,
+            source_id=policy.source_id,
+            endpoint=result.endpoint,
+            ticker=result.job.ticker,
+            query_params=result.query_params,
+            response_status=result.status_code,
+            payload_text=result.payload_text,
+            asof_date=asof_date.isoformat(),
+            ingestion_run_id=ingestion_run_id,
+        )
+    if result.error:
+        return coverage_row(result.job, policy.source_id, "failed", [], result.error), 0, True
+    if result.status_code != 200:
+        return coverage_row(result.job, policy.source_id, "failed", [], f"http_status_{result.status_code}"), 0, True
+    if not result.bars:
+        return coverage_row(result.job, policy.source_id, "failed", [], "no_usable_bars"), 0, True
+    upserted = upsert_price_bars(conn, result.bars)
+    return coverage_row(result.job, policy.source_id, "success", result.bars), upserted, False
+
+
 def main() -> None:
     configure_utc_logging()
     args = parse_args()
@@ -603,78 +717,70 @@ def main() -> None:
         run_id = start_run(conn, run_type="sync_med_device_yahoo_adjusted_prices", input_path=input_csv)
         ingestion_run_id = start_ingestion_run(conn, policy.source_id)
         try:
-            for idx, job in enumerate(jobs, start=1):
-                query_params = {
-                    "period1": unix_timestamp(configured_start),
-                    "period2": unix_timestamp(asof_date + timedelta(days=1)),
-                    "interval": policy.interval,
-                    "events": policy.events,
-                    "includeAdjustedClose": str(policy.include_adjusted_close).lower(),
-                }
-                endpoint = policy.chart_url_template.format(ticker=job.ticker)
-                try:
-                    status_code, payload_text, payload = fetch_chart_payload(
-                        job.ticker,
+            if policy.parallel_workers > 1 and len(jobs) > 1:
+                LOGGER.info("Fetching Yahoo prices in parallel: jobs=%d workers=%d", len(jobs), policy.parallel_workers)
+                with ThreadPoolExecutor(max_workers=policy.parallel_workers) as executor:
+                    futures = [
+                        executor.submit(
+                            fetch_price_job,
+                            idx,
+                            job,
+                            start_date=configured_start,
+                            asof_date=asof_date,
+                            policy=policy,
+                        )
+                        for idx, job in enumerate(jobs, start=1)
+                    ]
+                    completed = 0
+                    for future in as_completed(futures):
+                        result = future.result()
+                        completed += 1
+                        request_count += 1
+                        row, upserted, failed = process_price_result(
+                            conn,
+                            result,
+                            policy=policy,
+                            asof_date=asof_date,
+                            ingestion_run_id=ingestion_run_id,
+                        )
+                        coverage_rows.append(row)
+                        total_bars += upserted
+                        if failed:
+                            failed_tickers.append(result.job.ticker)
+                            LOGGER.warning("[%d/%d] %s failed: %s", completed, len(jobs), result.job.ticker, row.get("review_reason", ""))
+                        else:
+                            LOGGER.info("[%d/%d] %s bars=%d", completed, len(jobs), result.job.ticker, upserted)
+                        if completed % commit_every == 0:
+                            conn.commit()
+                            LOGGER.info("Committed Yahoo price sync progress: %d/%d", completed, len(jobs))
+            else:
+                for idx, job in enumerate(jobs, start=1):
+                    result = fetch_price_job(
+                        idx,
+                        job,
                         start_date=configured_start,
                         asof_date=asof_date,
                         policy=policy,
                     )
                     request_count += 1
-                    store_raw_response(
+                    row, upserted, failed = process_price_result(
                         conn,
-                        source_id=policy.source_id,
-                        endpoint=endpoint,
-                        ticker=job.ticker,
-                        query_params=query_params,
-                        response_status=status_code,
-                        payload_text=payload_text,
-                        asof_date=asof_date.isoformat(),
+                        result,
+                        policy=policy,
+                        asof_date=asof_date,
                         ingestion_run_id=ingestion_run_id,
                     )
-                    if status_code != 200:
-                        failed_tickers.append(job.ticker)
-                        coverage_rows.append(
-                            coverage_row(job, policy.source_id, "failed", [], f"http_status_{status_code}")
-                        )
-                        LOGGER.warning("[%d/%d] %s failed: http_status=%s", idx, len(jobs), job.ticker, status_code)
-                        if idx % commit_every == 0:
-                            conn.commit()
-                            LOGGER.info("Committed Yahoo price sync progress: %d/%d", idx, len(jobs))
-                        time.sleep(max(0.0, policy.sleep_sec))
-                        continue
-                    bars = parse_bars(job.ticker, payload, source_id=policy.source_id)
-                    if not bars:
-                        failed_tickers.append(job.ticker)
-                        coverage_rows.append(coverage_row(job, policy.source_id, "failed", [], "no_usable_bars"))
-                        LOGGER.warning("[%d/%d] %s failed: no usable bars", idx, len(jobs), job.ticker)
-                        if idx % commit_every == 0:
-                            conn.commit()
-                            LOGGER.info("Committed Yahoo price sync progress: %d/%d", idx, len(jobs))
-                        time.sleep(max(0.0, policy.sleep_sec))
-                        continue
-                    upserted = upsert_price_bars(conn, bars)
+                    coverage_rows.append(row)
                     total_bars += upserted
-                    coverage_rows.append(coverage_row(job, policy.source_id, "success", bars))
-                    LOGGER.info(
-                        "[%d/%d] %s bars=%d first=%s last=%s",
-                        idx,
-                        len(jobs),
-                        job.ticker,
-                        upserted,
-                        bars[0].bar_date,
-                        bars[-1].bar_date,
-                    )
+                    if failed:
+                        failed_tickers.append(job.ticker)
+                        LOGGER.warning("[%d/%d] %s failed: %s", idx, len(jobs), job.ticker, row.get("review_reason", ""))
+                    else:
+                        LOGGER.info("[%d/%d] %s bars=%d", idx, len(jobs), job.ticker, upserted)
                     if idx % commit_every == 0:
                         conn.commit()
                         LOGGER.info("Committed Yahoo price sync progress: %d/%d", idx, len(jobs))
                     time.sleep(max(0.0, policy.sleep_sec))
-                except Exception as exc:
-                    failed_tickers.append(job.ticker)
-                    coverage_rows.append(coverage_row(job, policy.source_id, "failed", [], f"{type(exc).__name__}: {exc}"))
-                    LOGGER.warning("[%d/%d] %s failed: %s", idx, len(jobs), job.ticker, exc)
-                    if idx % commit_every == 0:
-                        conn.commit()
-                        LOGGER.info("Committed Yahoo price sync progress: %d/%d", idx, len(jobs))
             status = "partial" if failed_tickers else "success"
             message = f"jobs={len(jobs)} bars={total_bars} output={output_csv}"
             if failed_tickers:

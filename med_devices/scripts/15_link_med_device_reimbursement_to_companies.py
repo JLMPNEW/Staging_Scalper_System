@@ -1,0 +1,1111 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import logging
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = PACKAGE_ROOT.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
+from med_devices.core.text_norm import normalize_code, normalize_org_name, normalize_ticker  # noqa: E402
+
+
+LOGGER = logging.getLogger("link_med_device_reimbursement_to_companies")
+DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+CODE_TOKEN_RE = re.compile(r"\b(?:[A-Z]\d{4}|\d{5})\b")
+CORPORATE_SUFFIXES = {
+    "INC",
+    "INCORPORATED",
+    "CORP",
+    "CORPORATION",
+    "PLC",
+    "LTD",
+    "LIMITED",
+    "LLC",
+    "NV",
+    "SA",
+    "AG",
+    "CO",
+    "COMPANY",
+    "HOLDING",
+    "HOLDINGS",
+    "GROUP",
+}
+STOP_TERMS = {
+    "MEDICAL",
+    "DEVICE",
+    "DEVICES",
+    "TECHNOLOGY",
+    "TECHNOLOGIES",
+    "HEALTH",
+    "HEALTHCARE",
+    "SYSTEM",
+    "SYSTEMS",
+    "SURGICAL",
+    "DIAGNOSTIC",
+    "DIAGNOSTICS",
+}
+FIELDNAMES = [
+    "company_id",
+    "ticker",
+    "company_name",
+    "reimbursement_policy_id",
+    "policy_type",
+    "policy_id",
+    "reimbursement_code_id",
+    "reimbursement_code",
+    "confidence",
+    "mapping_method",
+    "matched_term",
+    "title",
+]
+
+
+@dataclass(frozen=True)
+class LinkPolicy:
+    source_ids: list[str]
+    min_auto_confidence: float
+    exact_alias_confidence: float
+    core_alias_confidence: float
+    ticker_confidence: float
+    min_term_length: int
+    max_policy_rows: int
+    code_source_ids: list[str] | None = None
+    override_csv: str = ""
+    unmapped_output_csv: str = ""
+    enable_descriptor_matching: bool = True
+    descriptor_confidence: float = 70.0
+    descriptor_min_term_length: int = 8
+    descriptor_min_token_count: int = 2
+    descriptor_max_code_matches_per_term: int = 50
+    descriptor_require_rate_rows: bool = True
+    replace_existing_mappings: bool = True
+
+
+@dataclass(frozen=True)
+class CompanyAlias:
+    company_id: int
+    ticker: str
+    company_name: str
+    term: str
+    method: str
+    confidence: float
+
+
+@dataclass(frozen=True)
+class PolicyRow:
+    reimbursement_policy_id: int
+    policy_type: str
+    policy_id: str
+    title: str
+    related_codes: str
+    source_id: str
+    search_text: str
+
+
+@dataclass(frozen=True)
+class ReimbursementCodeRow:
+    reimbursement_code_id: int
+    code: str
+    short_description: str
+    long_description: str
+    source_id: str
+    search_text: str
+    rate_row_count: int
+
+
+@dataclass(frozen=True)
+class MatchRow:
+    company_id: int
+    ticker: str
+    company_name: str
+    reimbursement_policy_id: int | None
+    policy_type: str
+    policy_id: str
+    reimbursement_code_id: int | None
+    reimbursement_code: str
+    confidence: float
+    mapping_method: str
+    matched_term: str
+    title: str
+    source_id: str
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Map CMS reimbursement policies and HCPCS codes to med-device companies.")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--output-csv", type=Path, default=None)
+    parser.add_argument("--unmapped-output-csv", type=Path, default=None)
+    parser.add_argument("--tickers", type=str, default="")
+    parser.add_argument("--max-policies", type=int, default=0)
+    parser.add_argument("--min-confidence", type=float, default=0.0)
+    return parser.parse_args()
+
+
+def to_float(raw: object) -> float | None:
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def as_bool(raw: object, *, default: bool) -> bool:
+    if raw is None:
+        return default
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def link_policy(config: dict[str, Any]) -> LinkPolicy:
+    raw_source_ids = cfg_get(config, "reimbursement_entity_linking.source_ids", ["cms_coverage_api"])
+    source_ids = [str(value).strip() for value in raw_source_ids] if isinstance(raw_source_ids, list) else ["cms_coverage_api"]
+    raw_code_source_ids = cfg_get(config, "reimbursement_entity_linking.code_source_ids", source_ids)
+    code_source_ids = (
+        [str(value).strip() for value in raw_code_source_ids]
+        if isinstance(raw_code_source_ids, list)
+        else list(source_ids)
+    )
+    return LinkPolicy(
+        source_ids=[source_id for source_id in source_ids if source_id],
+        min_auto_confidence=float(cfg_get(config, "reimbursement_entity_linking.min_auto_confidence", 65.0)),
+        exact_alias_confidence=float(cfg_get(config, "reimbursement_entity_linking.exact_alias_confidence", 92.0)),
+        core_alias_confidence=float(cfg_get(config, "reimbursement_entity_linking.core_alias_confidence", 82.0)),
+        ticker_confidence=float(cfg_get(config, "reimbursement_entity_linking.ticker_confidence", 60.0)),
+        min_term_length=max(3, int(cfg_get(config, "reimbursement_entity_linking.min_term_length", 5))),
+        max_policy_rows=max(0, int(cfg_get(config, "reimbursement_entity_linking.max_policy_rows", 0))),
+        code_source_ids=[source_id for source_id in code_source_ids if source_id],
+        override_csv=str(cfg_get(config, "reimbursement_entity_linking.override_csv", "") or "").strip(),
+        unmapped_output_csv=str(cfg_get(config, "reimbursement_entity_linking.unmapped_output_csv", "") or "").strip(),
+        enable_descriptor_matching=as_bool(
+            cfg_get(config, "reimbursement_entity_linking.enable_descriptor_matching", True),
+            default=True,
+        ),
+        descriptor_confidence=float(cfg_get(config, "reimbursement_entity_linking.descriptor_confidence", 70.0)),
+        descriptor_min_term_length=max(3, int(cfg_get(config, "reimbursement_entity_linking.descriptor_min_term_length", 8))),
+        descriptor_min_token_count=max(1, int(cfg_get(config, "reimbursement_entity_linking.descriptor_min_token_count", 2))),
+        descriptor_max_code_matches_per_term=max(1, int(cfg_get(config, "reimbursement_entity_linking.descriptor_max_code_matches_per_term", 50))),
+        descriptor_require_rate_rows=as_bool(
+            cfg_get(config, "reimbursement_entity_linking.descriptor_require_rate_rows", True),
+            default=True,
+        ),
+        replace_existing_mappings=as_bool(
+            cfg_get(config, "reimbursement_entity_linking.replace_existing_mappings", True),
+            default=True,
+        ),
+    )
+
+
+def strip_suffixes(norm_name: str) -> str:
+    tokens = [token for token in norm_name.split() if token and token not in CORPORATE_SUFFIXES]
+    return " ".join(tokens).strip()
+
+
+def term_is_usable(term: str, *, min_length: int) -> bool:
+    if len(term) < min_length:
+        return False
+    if term in STOP_TERMS:
+        return False
+    return True
+
+
+def add_alias(
+    aliases: dict[tuple[int, str], CompanyAlias],
+    *,
+    company_id: int,
+    ticker: str,
+    company_name: str,
+    term: str,
+    method: str,
+    confidence: float,
+    min_length: int,
+) -> None:
+    norm = normalize_org_name(term)
+    if not term_is_usable(norm, min_length=min_length):
+        return
+    key = (company_id, norm)
+    existing = aliases.get(key)
+    if existing is None or confidence > existing.confidence:
+        aliases[key] = CompanyAlias(company_id, ticker, company_name, norm, method, confidence)
+
+
+def build_aliases(conn: Any, *, ticker_filter: set[str], policy: LinkPolicy) -> list[CompanyAlias]:
+    rows = conn.execute(
+        """
+        SELECT company_id, ticker, company_name
+        FROM dim_company
+        WHERE is_active = 1
+        ORDER BY ticker
+        """
+    ).fetchall()
+    aliases: dict[tuple[int, str], CompanyAlias] = {}
+    company_ids: list[int] = []
+    meta: dict[int, tuple[str, str]] = {}
+    for row in rows:
+        ticker = normalize_ticker(row["ticker"])
+        if ticker_filter and ticker not in ticker_filter:
+            continue
+        company_id = int(row["company_id"])
+        company_name = str(row["company_name"] or "")
+        company_ids.append(company_id)
+        meta[company_id] = (ticker, company_name)
+        normalized = normalize_org_name(company_name)
+        core = strip_suffixes(normalized)
+        add_alias(
+            aliases,
+            company_id=company_id,
+            ticker=ticker,
+            company_name=company_name,
+            term=normalized,
+            method="company_name_exact",
+            confidence=policy.exact_alias_confidence,
+            min_length=policy.min_term_length,
+        )
+        add_alias(
+            aliases,
+            company_id=company_id,
+            ticker=ticker,
+            company_name=company_name,
+            term=core,
+            method="company_name_core",
+            confidence=policy.core_alias_confidence,
+            min_length=policy.min_term_length,
+        )
+        if len(ticker) >= max(4, policy.min_term_length):
+            add_alias(
+                aliases,
+                company_id=company_id,
+                ticker=ticker,
+                company_name=company_name,
+                term=ticker,
+                method="ticker",
+                confidence=policy.ticker_confidence,
+                min_length=policy.min_term_length,
+            )
+    if company_ids:
+        placeholders = ",".join("?" for _ in company_ids)
+        alias_rows = conn.execute(
+            f"""
+            SELECT company_id, alias_norm, alias_raw, confidence, is_manual
+            FROM dim_company_alias
+            WHERE company_id IN ({placeholders})
+            """,
+            company_ids,
+        ).fetchall()
+        for row in alias_rows:
+            company_id = int(row["company_id"])
+            ticker, company_name = meta[company_id]
+            raw_confidence = to_float(row["confidence"]) or 1.0
+            confidence = min(98.0, max(0.0, raw_confidence * 100.0))
+            method = "manual_alias" if int(row["is_manual"] or 0) else "company_alias"
+            add_alias(
+                aliases,
+                company_id=company_id,
+                ticker=ticker,
+                company_name=company_name,
+                term=str(row["alias_norm"] or row["alias_raw"] or ""),
+                method=method,
+                confidence=confidence,
+                min_length=policy.min_term_length,
+            )
+    return sorted(aliases.values(), key=lambda item: (-item.confidence, item.ticker, item.term))
+
+
+def load_policy_rows(conn: Any, *, policy: LinkPolicy, max_rows: int) -> list[PolicyRow]:
+    if not policy.source_ids:
+        return []
+    placeholders = ",".join("?" for _ in policy.source_ids)
+    limit = max_rows or policy.max_policy_rows
+    limit_sql = " LIMIT ?" if limit > 0 else ""
+    params: list[Any] = [*policy.source_ids]
+    if limit > 0:
+        params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT reimbursement_policy_id, policy_type, policy_id, title, related_codes, source_id, payload_json
+        FROM fact_reimbursement_policy
+        WHERE source_id IN ({placeholders})
+        ORDER BY reimbursement_policy_id
+        {limit_sql}
+        """,
+        params,
+    ).fetchall()
+    out: list[PolicyRow] = []
+    for row in rows:
+        payload_text = str(row["payload_json"] or "")
+        title = str(row["title"] or "")
+        search_text = extract_policy_search_text(title, payload_text)
+        out.append(
+            PolicyRow(
+                reimbursement_policy_id=int(row["reimbursement_policy_id"]),
+                policy_type=str(row["policy_type"] or ""),
+                policy_id=str(row["policy_id"] or ""),
+                title=title,
+                related_codes=str(row["related_codes"] or ""),
+                source_id=str(row["source_id"] or ""),
+                search_text=search_text,
+            )
+        )
+    return out
+
+
+def extract_policy_search_text(title: str, payload_text: str) -> str:
+    parts = [title]
+    try:
+        payload = json.loads(payload_text) if payload_text else {}
+    except json.JSONDecodeError:
+        payload = {}
+    wanted = (
+        "title",
+        "contractor",
+        "jurisdiction",
+        "description",
+        "narrative",
+        "summary",
+        "coverage",
+        "indication",
+        "billing",
+        "article",
+        "lcd",
+        "ncd",
+    )
+
+    def visit(value: Any, key_hint: str = "", depth: int = 0) -> None:
+        if depth > 8:
+            return
+        if isinstance(value, dict):
+            for key, child in value.items():
+                visit(child, str(key).lower(), depth + 1)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child, key_hint, depth + 1)
+        elif isinstance(value, str) and len(value.strip()) > 10 and any(token in key_hint for token in wanted):
+            parts.append(value)
+
+    visit(payload)
+    return normalize_org_name(" ".join(parts))
+
+
+def term_in_text(term: str, text: str) -> bool:
+    if not term or not text:
+        return False
+    return re.search(rf"(?<![A-Z0-9]){re.escape(term)}(?![A-Z0-9])", text) is not None
+
+
+def parse_related_codes(raw: object) -> set[str]:
+    text = str(raw or "").upper()
+    return {match.group(0) for match in CODE_TOKEN_RE.finditer(text)}
+
+
+def reimbursement_code_ids(conn: Any, codes: set[str], *, source_ids: list[str] | None = None) -> dict[str, list[int]]:
+    if not codes:
+        return {}
+    placeholders = ",".join("?" for _ in codes)
+    source_ids = [source_id for source_id in (source_ids or []) if source_id]
+    source_sql = ""
+    params: list[Any] = [*sorted(codes)]
+    if source_ids:
+        source_placeholders = ",".join("?" for _ in source_ids)
+        source_sql = f" AND source_id IN ({source_placeholders})"
+        params.extend(source_ids)
+    rows = conn.execute(
+        f"""
+        SELECT reimbursement_code_id, code
+        FROM dim_reimbursement_code
+        WHERE code IN ({placeholders})
+        {source_sql}
+        """,
+        params,
+    ).fetchall()
+    out: dict[str, list[int]] = {}
+    for row in rows:
+        out.setdefault(str(row["code"] or ""), []).append(int(row["reimbursement_code_id"]))
+    return out
+
+
+def build_matches(conn: Any, aliases: list[CompanyAlias], policies: list[PolicyRow], *, min_confidence: float) -> list[MatchRow]:
+    matches: list[MatchRow] = []
+    eligible_aliases = [alias for alias in aliases if alias.confidence >= min_confidence]
+    term_to_aliases: dict[str, list[CompanyAlias]] = {}
+    for alias in eligible_aliases:
+        term_to_aliases.setdefault(alias.term, []).append(alias)
+    alias_pattern = (
+        re.compile(
+            r"(?<![A-Z0-9])(" + "|".join(re.escape(term) for term in sorted(term_to_aliases, key=len, reverse=True)) + r")(?![A-Z0-9])"
+        )
+        if term_to_aliases
+        else None
+    )
+    all_codes: set[str] = set()
+    policy_codes: dict[int, set[str]] = {}
+    for policy_row in policies:
+        codes = parse_related_codes(policy_row.related_codes)
+        policy_codes[policy_row.reimbursement_policy_id] = codes
+        all_codes.update(codes)
+    all_code_ids = reimbursement_code_ids(conn, all_codes)
+    for policy_row in policies:
+        codes = policy_codes.get(policy_row.reimbursement_policy_id, set())
+        best_by_company: dict[int, CompanyAlias] = {}
+        if alias_pattern is not None:
+            for match in alias_pattern.finditer(policy_row.search_text):
+                for alias in term_to_aliases.get(match.group(1), []):
+                    existing = best_by_company.get(alias.company_id)
+                    if existing is None or alias.confidence > existing.confidence:
+                        best_by_company[alias.company_id] = alias
+        for alias in best_by_company.values():
+            if codes:
+                for code in sorted(codes):
+                    ids = all_code_ids.get(code, [])
+                    if not ids:
+                        matches.append(
+                            MatchRow(
+                                alias.company_id,
+                                alias.ticker,
+                                alias.company_name,
+                                policy_row.reimbursement_policy_id,
+                                policy_row.policy_type,
+                                policy_row.policy_id,
+                                None,
+                                code,
+                                alias.confidence,
+                                alias.method,
+                                alias.term,
+                                policy_row.title,
+                                policy_row.source_id,
+                            )
+                        )
+                    for code_id in ids:
+                        matches.append(
+                            MatchRow(
+                                alias.company_id,
+                                alias.ticker,
+                                alias.company_name,
+                                policy_row.reimbursement_policy_id,
+                                policy_row.policy_type,
+                                policy_row.policy_id,
+                                code_id,
+                                code,
+                                alias.confidence,
+                                alias.method,
+                                alias.term,
+                                policy_row.title,
+                                policy_row.source_id,
+                            )
+                        )
+            else:
+                matches.append(
+                    MatchRow(
+                        alias.company_id,
+                        alias.ticker,
+                        alias.company_name,
+                        policy_row.reimbursement_policy_id,
+                        policy_row.policy_type,
+                        policy_row.policy_id,
+                        None,
+                        "",
+                        alias.confidence,
+                        alias.method,
+                        alias.term,
+                        policy_row.title,
+                        policy_row.source_id,
+                    )
+                )
+    return matches
+
+
+def load_company_meta(conn: Any, *, ticker_filter: set[str]) -> dict[int, tuple[str, str]]:
+    rows = conn.execute(
+        """
+        SELECT company_id, ticker, company_name
+        FROM dim_company
+        WHERE is_active = 1
+        ORDER BY ticker
+        """
+    ).fetchall()
+    out: dict[int, tuple[str, str]] = {}
+    for row in rows:
+        ticker = normalize_ticker(row["ticker"])
+        if ticker_filter and ticker not in ticker_filter:
+            continue
+        out[int(row["company_id"])] = (ticker, str(row["company_name"] or ""))
+    return out
+
+
+def load_company_descriptor_terms(conn: Any, company_meta: dict[int, tuple[str, str]], *, policy: LinkPolicy) -> dict[int, set[str]]:
+    if not company_meta:
+        return {}
+    company_ids = sorted(company_meta)
+    placeholders = ",".join("?" for _ in company_ids)
+    rows = conn.execute(
+        f"""
+        SELECT company_id, device_name
+        FROM fact_fda_approval
+        WHERE company_id IN ({placeholders})
+          AND COALESCE(device_name, '') != ''
+        UNION ALL
+        SELECT company_id, device_name
+        FROM dim_device
+        WHERE company_id IN ({placeholders})
+          AND COALESCE(device_name, '') != ''
+        UNION ALL
+        SELECT f.company_id, p.device_name
+        FROM (
+            SELECT DISTINCT company_id, product_code
+            FROM fact_fda_approval
+            WHERE company_id IN ({placeholders}) AND COALESCE(product_code, '') != ''
+            UNION
+            SELECT DISTINCT company_id, product_code
+            FROM fact_fda_recall
+            WHERE company_id IN ({placeholders}) AND COALESCE(product_code, '') != ''
+            UNION
+            SELECT DISTINCT company_id, product_code
+            FROM fact_fda_adverse_event
+            WHERE company_id IN ({placeholders}) AND COALESCE(product_code, '') != ''
+        ) f
+        JOIN dim_fda_product_code p
+          ON p.product_code = f.product_code
+        WHERE COALESCE(p.device_name, '') != ''
+        """,
+        [*company_ids, *company_ids, *company_ids, *company_ids, *company_ids],
+    ).fetchall()
+    out: dict[int, set[str]] = {company_id: set() for company_id in company_ids}
+    for row in rows:
+        company_id = int(row["company_id"])
+        for term in descriptor_terms(row["device_name"], policy=policy):
+            out.setdefault(company_id, set()).add(term)
+    return out
+
+
+def descriptor_terms(raw: object, *, policy: LinkPolicy) -> set[str]:
+    norm = normalize_org_name(raw)
+    if not norm:
+        return set()
+    tokens = [
+        token
+        for token in norm.split()
+        if token
+        and token not in STOP_TERMS
+        and token not in CORPORATE_SUFFIXES
+        and not token.isdigit()
+    ]
+    out: set[str] = set()
+    min_tokens = policy.descriptor_min_token_count
+    min_length = policy.descriptor_min_term_length
+    if len(tokens) >= min_tokens:
+        full = " ".join(tokens)
+        if term_is_usable(full, min_length=min_length):
+            out.add(full)
+    max_window = min(5, len(tokens))
+    for size in range(max(min_tokens, 2), max_window + 1):
+        for idx in range(0, len(tokens) - size + 1):
+            term = " ".join(tokens[idx : idx + size])
+            if term_is_usable(term, min_length=min_length):
+                out.add(term)
+    return out
+
+
+def load_reimbursement_code_rows(conn: Any, *, policy: LinkPolicy) -> list[ReimbursementCodeRow]:
+    source_ids = [source_id for source_id in (policy.code_source_ids or policy.source_ids) if source_id]
+    source_sql = ""
+    params: list[Any] = []
+    if source_ids:
+        placeholders = ",".join("?" for _ in source_ids)
+        source_sql = f"WHERE c.source_id IN ({placeholders})"
+        params.extend(source_ids)
+    rows = conn.execute(
+        f"""
+        SELECT c.reimbursement_code_id, c.code, c.short_description, c.long_description, c.source_id,
+               COUNT(r.reimbursement_rate_id) AS rate_row_count
+        FROM dim_reimbursement_code c
+        LEFT JOIN fact_reimbursement_rate r
+          ON r.reimbursement_code_id = c.reimbursement_code_id
+        {source_sql}
+        GROUP BY c.reimbursement_code_id, c.code, c.short_description, c.long_description, c.source_id
+        """,
+        params,
+    ).fetchall()
+    out: list[ReimbursementCodeRow] = []
+    for row in rows:
+        short_description = str(row["short_description"] or "")
+        long_description = str(row["long_description"] or "")
+        search_text = normalize_org_name(" ".join([short_description, long_description]))
+        if not search_text:
+            continue
+        rate_row_count = int(row["rate_row_count"] or 0)
+        if policy.descriptor_require_rate_rows and rate_row_count <= 0:
+            continue
+        out.append(
+            ReimbursementCodeRow(
+                reimbursement_code_id=int(row["reimbursement_code_id"]),
+                code=str(row["code"] or ""),
+                short_description=short_description,
+                long_description=long_description,
+                source_id=str(row["source_id"] or ""),
+                search_text=search_text,
+                rate_row_count=rate_row_count,
+            )
+        )
+    return out
+
+
+def text_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in str(text or "").split()
+        if token and token not in STOP_TERMS and len(token) >= 3
+    }
+
+
+def build_descriptor_code_matches(
+    conn: Any,
+    company_meta: dict[int, tuple[str, str]],
+    *,
+    policy: LinkPolicy,
+    min_confidence: float,
+) -> list[MatchRow]:
+    if not policy.enable_descriptor_matching or policy.descriptor_confidence < min_confidence:
+        return []
+    company_terms = load_company_descriptor_terms(conn, company_meta, policy=policy)
+    code_rows = load_reimbursement_code_rows(conn, policy=policy)
+    token_index: dict[str, set[int]] = {}
+    for idx, code_row in enumerate(code_rows):
+        for token in text_tokens(code_row.search_text):
+            token_index.setdefault(token, set()).add(idx)
+    matches: list[MatchRow] = []
+    for company_id, terms in company_terms.items():
+        if not terms:
+            continue
+        ticker, company_name = company_meta[company_id]
+        per_term_count: dict[str, int] = {}
+        seen_codes: set[int] = set()
+        for term in sorted(terms, key=len, reverse=True):
+            term_tokens = text_tokens(term)
+            if not term_tokens:
+                continue
+            candidate_ids: set[int] | None = None
+            for token in term_tokens:
+                ids = token_index.get(token, set())
+                candidate_ids = set(ids) if candidate_ids is None else candidate_ids & ids
+                if not candidate_ids:
+                    break
+            if not candidate_ids:
+                continue
+            for code_idx in sorted(candidate_ids):
+                code_row = code_rows[code_idx]
+                if not term_in_text(term, code_row.search_text):
+                    continue
+                per_term_count[term] = per_term_count.get(term, 0) + 1
+                if per_term_count[term] > policy.descriptor_max_code_matches_per_term:
+                    break
+                if code_row.reimbursement_code_id in seen_codes:
+                    continue
+                seen_codes.add(code_row.reimbursement_code_id)
+                matches.append(
+                    MatchRow(
+                        company_id,
+                        ticker,
+                        company_name,
+                        None,
+                        "code_descriptor",
+                        "",
+                        code_row.reimbursement_code_id,
+                        code_row.code,
+                        policy.descriptor_confidence,
+                        "fda_device_descriptor",
+                        term,
+                        code_row.short_description or code_row.long_description,
+                        code_row.source_id,
+                    )
+                )
+    return matches
+
+
+def row_get(row: dict[str, str], *names: str) -> str:
+    lowered = {str(key).strip().lower(): str(value or "").strip() for key, value in row.items()}
+    for name in names:
+        value = lowered.get(name.lower())
+        if value:
+            return value
+    return ""
+
+
+def load_override_matches(
+    conn: Any,
+    path: Path,
+    company_meta: dict[int, tuple[str, str]],
+    *,
+    policy: LinkPolicy,
+    min_confidence: float,
+) -> list[MatchRow]:
+    if not path.exists():
+        return []
+    ticker_to_company = {ticker: (company_id, company_name) for company_id, (ticker, company_name) in company_meta.items()}
+    matches: list[MatchRow] = []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for raw_row in reader:
+            active = row_get(raw_row, "active", "enabled")
+            if active and active.lower() in {"0", "false", "no", "n"}:
+                continue
+            ticker = normalize_ticker(row_get(raw_row, "ticker", "symbol"))
+            company = ticker_to_company.get(ticker)
+            if company is None:
+                continue
+            code = normalize_code(row_get(raw_row, "reimbursement_code", "hcpcs", "hcpcs_code", "code"))
+            if not code:
+                continue
+            confidence = to_float(row_get(raw_row, "confidence")) or 99.0
+            if confidence < min_confidence:
+                continue
+            source_id = row_get(raw_row, "source_id") or ((policy.code_source_ids or policy.source_ids or ["cms_payment_files"])[0])
+            code_ids = reimbursement_code_ids(conn, {code}, source_ids=policy.code_source_ids or policy.source_ids)
+            company_id, company_name = company
+            if not code_ids.get(code):
+                matches.append(
+                    MatchRow(
+                        company_id,
+                        ticker,
+                        company_name,
+                        None,
+                        "manual_override",
+                        "",
+                        None,
+                        code,
+                        confidence,
+                        row_get(raw_row, "mapping_method") or "manual_override",
+                        row_get(raw_row, "matched_term", "product_name", "notes"),
+                        row_get(raw_row, "notes", "product_name"),
+                        source_id,
+                    )
+                )
+                continue
+            for code_id in code_ids[code]:
+                matches.append(
+                    MatchRow(
+                        company_id,
+                        ticker,
+                        company_name,
+                        None,
+                        "manual_override",
+                        "",
+                        code_id,
+                        code,
+                        confidence,
+                        row_get(raw_row, "mapping_method") or "manual_override",
+                        row_get(raw_row, "matched_term", "product_name", "notes"),
+                        row_get(raw_row, "notes", "product_name"),
+                        source_id,
+                    )
+                )
+    return matches
+
+
+def upsert_policy_mapping(conn: Any, match: MatchRow) -> None:
+    if match.reimbursement_policy_id is None:
+        return
+    now = utc_now()
+    payload = {
+        "ticker": match.ticker,
+        "policy_id": match.policy_id,
+        "policy_type": match.policy_type,
+        "title": match.title,
+    }
+    conn.execute(
+        """
+        INSERT INTO map_company_reimbursement_policy(
+            company_id, reimbursement_policy_id, confidence, mapping_method, matched_term,
+            source_id, payload_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, reimbursement_policy_id) DO UPDATE SET
+            confidence = excluded.confidence,
+            mapping_method = excluded.mapping_method,
+            matched_term = excluded.matched_term,
+            source_id = excluded.source_id,
+            payload_json = excluded.payload_json,
+            updated_at = excluded.updated_at
+        """,
+        (
+            match.company_id,
+            match.reimbursement_policy_id,
+            match.confidence,
+            match.mapping_method,
+            match.matched_term,
+            match.source_id,
+            json.dumps(payload, ensure_ascii=True, sort_keys=True),
+            now,
+            now,
+        ),
+    )
+
+
+def upsert_code_mapping(conn: Any, match: MatchRow) -> None:
+    if match.reimbursement_code_id is None:
+        return
+    now = utc_now()
+    payload = {
+        "ticker": match.ticker,
+        "policy_id": match.policy_id,
+        "policy_type": match.policy_type,
+        "code": match.reimbursement_code,
+        "title": match.title,
+    }
+    existing = conn.execute(
+        """
+        SELECT company_reimbursement_code_id
+        FROM map_company_reimbursement_code
+        WHERE company_id = ?
+          AND reimbursement_code_id = ?
+          AND COALESCE(reimbursement_policy_id, -1) = COALESCE(?, -1)
+        """,
+        (match.company_id, match.reimbursement_code_id, match.reimbursement_policy_id),
+    ).fetchone()
+    values = (
+        match.company_id,
+        match.reimbursement_code_id,
+        match.reimbursement_policy_id,
+        match.confidence,
+        match.mapping_method,
+        match.matched_term,
+        match.source_id,
+        json.dumps(payload, ensure_ascii=True, sort_keys=True),
+        now,
+    )
+    if existing is not None:
+        conn.execute(
+            """
+            UPDATE map_company_reimbursement_code
+            SET confidence = ?, mapping_method = ?, matched_term = ?, source_id = ?,
+                payload_json = ?, updated_at = ?
+            WHERE company_reimbursement_code_id = ?
+            """,
+            (
+                match.confidence,
+                match.mapping_method,
+                match.matched_term,
+                match.source_id,
+                json.dumps(payload, ensure_ascii=True, sort_keys=True),
+                now,
+                int(existing["company_reimbursement_code_id"]),
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO map_company_reimbursement_code(
+                company_id, reimbursement_code_id, reimbursement_policy_id, confidence,
+                mapping_method, matched_term, source_id, payload_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (*values, now),
+        )
+
+
+def upsert_matches(conn: Any, matches: list[MatchRow]) -> tuple[int, int]:
+    policy_seen: set[tuple[int, int]] = set()
+    code_count = 0
+    for match in matches:
+        if match.reimbursement_policy_id is not None:
+            policy_key = (match.company_id, match.reimbursement_policy_id)
+        else:
+            policy_key = None
+        if policy_key is not None and policy_key not in policy_seen:
+            upsert_policy_mapping(conn, match)
+            policy_seen.add(policy_key)
+        if match.reimbursement_code_id is not None:
+            upsert_code_mapping(conn, match)
+            code_count += 1
+    return len(policy_seen), code_count
+
+
+def row_to_dict(match: MatchRow) -> dict[str, Any]:
+    return {field: getattr(match, field) for field in FIELDNAMES if hasattr(match, field)}
+
+
+def dedupe_matches(matches: list[MatchRow]) -> list[MatchRow]:
+    best: dict[tuple[int, int | None, int | None, str], MatchRow] = {}
+    for match in matches:
+        key = (
+            match.company_id,
+            match.reimbursement_policy_id,
+            match.reimbursement_code_id,
+            match.reimbursement_code,
+        )
+        existing = best.get(key)
+        if existing is None or match.confidence > existing.confidence:
+            best[key] = match
+    return sorted(best.values(), key=lambda item: (item.ticker, item.policy_type, item.policy_id, item.reimbursement_code))
+
+
+def write_csv(path: Path, rows: list[MatchRow]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=FIELDNAMES, extrasaction="ignore", lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(row_to_dict(row) for row in rows)
+
+
+def clear_existing_mappings(conn: Any, company_ids: list[int], *, policy: LinkPolicy) -> None:
+    if not company_ids:
+        return
+    source_ids = sorted({*(policy.source_ids or []), *((policy.code_source_ids or []) or [])})
+    if not source_ids:
+        return
+    company_placeholders = ",".join("?" for _ in company_ids)
+    source_placeholders = ",".join("?" for _ in source_ids)
+    conn.execute(
+        f"""
+        DELETE FROM map_company_reimbursement_code
+        WHERE company_id IN ({company_placeholders})
+          AND source_id IN ({source_placeholders})
+        """,
+        [*company_ids, *source_ids],
+    )
+    conn.execute(
+        f"""
+        DELETE FROM map_company_reimbursement_policy
+        WHERE company_id IN ({company_placeholders})
+          AND source_id IN ({source_placeholders})
+        """,
+        [*company_ids, *source_ids],
+    )
+
+
+def load_mapped_company_ids(conn: Any, company_ids: list[int], *, policy: LinkPolicy) -> set[int]:
+    if not company_ids:
+        return set()
+    source_ids = sorted({*(policy.source_ids or []), *((policy.code_source_ids or []) or [])})
+    if not source_ids:
+        return set()
+    company_placeholders = ",".join("?" for _ in company_ids)
+    source_placeholders = ",".join("?" for _ in source_ids)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT company_id
+        FROM map_company_reimbursement_code
+        WHERE company_id IN ({company_placeholders})
+          AND source_id IN ({source_placeholders})
+        """,
+        [*company_ids, *source_ids],
+    ).fetchall()
+    return {int(row["company_id"]) for row in rows}
+
+
+def write_unmapped_csv(path: Path, company_meta: dict[int, tuple[str, str]], mapped_company_ids: set[int]) -> None:
+    fieldnames = ["company_id", "ticker", "company_name", "review_reason"]
+    rows = [
+        {
+            "company_id": company_id,
+            "ticker": ticker,
+            "company_name": company_name,
+            "review_reason": "no_reimbursement_code_mapping",
+        }
+        for company_id, (ticker, company_name) in sorted(company_meta.items(), key=lambda item: item[1][0])
+        if company_id not in mapped_company_ids
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def main() -> None:
+    configure_utc_logging()
+    args = parse_args()
+    config_path = args.config.expanduser().resolve()
+    config = load_yaml(config_path)
+    base_dir = config_path.parent
+    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    output_csv = (
+        args.output_csv.expanduser().resolve()
+        if args.output_csv
+        else resolve_path(
+            cfg_get(config, "reimbursement_entity_linking.output_csv", "../output/med_devices_reports/med_device_reimbursement_entity_mapping.csv"),
+            base_dir=base_dir,
+        )
+    )
+    unmapped_output_csv = (
+        args.unmapped_output_csv.expanduser().resolve()
+        if args.unmapped_output_csv
+        else resolve_path(
+            cfg_get(
+                config,
+                "reimbursement_entity_linking.unmapped_output_csv",
+                "../output/med_devices_reports/med_device_reimbursement_unmapped_companies.csv",
+            ),
+            base_dir=base_dir,
+        )
+    )
+    policy = link_policy(config)
+    min_confidence = float(args.min_confidence or policy.min_auto_confidence)
+    ticker_filter = {normalize_ticker(value) for value in str(args.tickers or "").split(",") if normalize_ticker(value)}
+    with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
+        init_db(conn)
+        run_id = start_run(conn, run_type="link_med_device_reimbursement_to_companies", input_path=config_path)
+        try:
+            company_meta = load_company_meta(conn, ticker_filter=ticker_filter)
+            aliases = build_aliases(conn, ticker_filter=ticker_filter, policy=policy)
+            policies = load_policy_rows(conn, policy=policy, max_rows=int(args.max_policies))
+            matches = build_matches(conn, aliases, policies, min_confidence=min_confidence)
+            matches.extend(
+                build_descriptor_code_matches(
+                    conn,
+                    company_meta,
+                    policy=policy,
+                    min_confidence=min_confidence,
+                )
+            )
+            if policy.override_csv:
+                matches.extend(
+                    load_override_matches(
+                        conn,
+                        resolve_path(policy.override_csv, base_dir=base_dir),
+                        company_meta,
+                        policy=policy,
+                        min_confidence=min_confidence,
+                    )
+            )
+            matches = dedupe_matches(matches)
+            if policy.replace_existing_mappings:
+                with conn:
+                    clear_existing_mappings(conn, sorted(company_meta), policy=policy)
+                    policy_count, code_count = upsert_matches(conn, matches)
+            else:
+                with conn:
+                    policy_count, code_count = upsert_matches(conn, matches)
+            write_csv(output_csv, matches)
+            mapped_company_ids = load_mapped_company_ids(conn, sorted(company_meta), policy=policy)
+            write_unmapped_csv(unmapped_output_csv, company_meta, mapped_company_ids)
+            message = (
+                f"policies_scanned={len(policies)} aliases={len(aliases)} matches={len(matches)} "
+                f"policy_maps={policy_count} code_maps={code_count} mapped_companies={len(mapped_company_ids)} output={output_csv} "
+                f"unmapped_output={unmapped_output_csv}"
+            )
+            finish_run(conn, run_id=run_id, status="success", row_count=len(matches), message=message)
+            LOGGER.info("Reimbursement linking complete: %s", message)
+        except BaseException as exc:
+            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            raise
+
+
+if __name__ == "__main__":
+    main()

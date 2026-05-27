@@ -8,8 +8,10 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,11 +66,24 @@ class FdaPolicy:
     api_key_file_field: str
     timeout_sec: float
     max_retries: int
+    parallel_workers: int
     sleep_sec: float
     page_limit: int
     commit_every_pages: int
     user_agent: str
     endpoints: list[EndpointConfig]
+
+
+@dataclass(frozen=True)
+class FetchedFdaPage:
+    endpoint_name: str
+    url: str
+    public_params: dict[str, Any]
+    skip: int
+    page_number_hint: int
+    response_status: int
+    payload_text: str
+    payload: dict[str, Any]
 
 
 def parse_args() -> argparse.Namespace:
@@ -177,6 +192,7 @@ def fda_policy(config: dict[str, Any]) -> FdaPolicy:
         ),
         timeout_sec=float(cfg_get(config, "fda_core_ingestion.timeout_sec", 30.0)),
         max_retries=int(cfg_get(config, "fda_core_ingestion.max_retries", 3)),
+        parallel_workers=max(1, int(cfg_get(config, "fda_core_ingestion.parallel_workers", 1))),
         sleep_sec=float(cfg_get(config, "fda_core_ingestion.request_sleep_sec", 0.15)),
         page_limit=max(1, min(1000, int(cfg_get(config, "fda_core_ingestion.page_limit", 1000)))),
         commit_every_pages=max(1, int(cfg_get(config, "fda_core_ingestion.commit_every_pages", 10))),
@@ -304,6 +320,69 @@ def fetch_openfda_page(
             continue
         return last_status, last_text, last_payload
     return last_status, last_text, last_payload
+
+
+def openfda_total(payload: dict[str, Any]) -> int | None:
+    meta = json_dict(payload.get("meta"))
+    results = json_dict(meta.get("results"))
+    raw_total = results.get("total")
+    try:
+        total = int(str(raw_total))
+    except (TypeError, ValueError):
+        return None
+    return max(0, total)
+
+
+def is_openfda_not_found(payload: dict[str, Any]) -> bool:
+    error = json_dict(payload.get("error"))
+    return str(error.get("code") or "").upper() == "NOT_FOUND"
+
+
+def endpoint_url(policy: FdaPolicy, endpoint: EndpointConfig) -> str:
+    return f"{policy.base_url}/{endpoint.path.lstrip('/')}"
+
+
+def page_params(
+    endpoint: EndpointConfig,
+    *,
+    skip: int,
+    limit: int,
+    api_key: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    public_params: dict[str, Any] = {"limit": limit, "skip": skip}
+    if endpoint.search:
+        public_params["search"] = endpoint.search
+    if endpoint.sort:
+        public_params["sort"] = endpoint.sort
+    params = dict(public_params)
+    if api_key:
+        params["api_key"] = api_key
+    return params, public_params
+
+
+def fetch_fda_page_job(
+    endpoint: EndpointConfig,
+    *,
+    policy: FdaPolicy,
+    api_key: str,
+    skip: int,
+    limit: int,
+    page_number_hint: int,
+) -> FetchedFdaPage:
+    url = endpoint_url(policy, endpoint)
+    params, public_params = page_params(endpoint, skip=skip, limit=limit, api_key=api_key)
+    with requests.Session() as session:
+        status_code, payload_text, payload = fetch_openfda_page(session, url, params, policy=policy)
+    return FetchedFdaPage(
+        endpoint_name=endpoint.name,
+        url=url,
+        public_params=public_params,
+        skip=skip,
+        page_number_hint=page_number_hint,
+        response_status=status_code,
+        payload_text=payload_text,
+        payload=payload,
+    )
 
 
 def upsert_product_code(
@@ -552,23 +631,93 @@ def upsert_recall(conn: Any, payload: dict[str, Any], *, endpoint_name: str, sou
     return 1
 
 
+def flattened_text(raw: Any) -> str:
+    parts: list[str] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+        elif value is not None:
+            text = str(value).strip()
+            if text:
+                parts.append(text)
+
+    visit(raw)
+    return " ".join(parts).lower()
+
+
+def representative_device(payload: dict[str, Any]) -> dict[str, Any]:
+    devices = [json_dict(device) for device in json_list(payload.get("device"))]
+    if not devices:
+        return {}
+
+    def rank(device: dict[str, Any]) -> tuple[int, int, int]:
+        has_product_code = 1 if field(device, "device_report_product_code", "product_code") else 0
+        has_maker = 1 if field(device, "manufacturer_d_name", "manufacturer_g1_name", "manufacturer_name") else 0
+        has_brand = 1 if field(device, "brand_name", "generic_name") else 0
+        return (has_product_code, has_maker, has_brand)
+
+    devices.sort(key=rank, reverse=True)
+    return devices[0]
+
+
 def first_device(payload: dict[str, Any]) -> dict[str, Any]:
-    devices = json_list(payload.get("device"))
-    return json_dict(devices[0]) if devices else {}
+    return representative_device(payload)
 
 
 def event_counts(payload: dict[str, Any]) -> tuple[int, int, int]:
-    event_type = field(payload, "event_type").lower()
-    patients = json_list(payload.get("patient"))
-    patient_text = compact_json(patients).lower() if patients else ""
-    death = 1 if "death" in event_type or "death" in patient_text else 0
-    injury = 1 if "injury" in event_type or "injury" in patient_text else 0
-    malfunction = 1 if "malfunction" in event_type else 0
+    event_type = field(payload, "event_type", "type_of_report").lower()
+    all_text = flattened_text(
+        {
+            "event_type": event_type,
+            "patient": payload.get("patient"),
+            "device": payload.get("device"),
+            "mdr_text": payload.get("mdr_text"),
+        }
+    )
+    death_terms = {"death", "fatal", "fatality", "deceased", "mortality", "died"}
+    injury_terms = {"injury", "serious injury", "hospitalization", "disability", "intervention", "life threatening"}
+    malfunction_terms = {"malfunction", "failure", "device malfunction", "failed", "broke", "breakage"}
+
+    def has_term(text: str, terms: set[str]) -> bool:
+        tokens = set(re.findall(r"[a-z]+", text))
+        return any(term in text or term in tokens for term in terms)
+
+    death = 1 if has_term(event_type, death_terms) or has_term(all_text, death_terms) else 0
+    injury = 1 if has_term(event_type, injury_terms) or has_term(all_text, injury_terms) else 0
+    malfunction = 1 if has_term(event_type, malfunction_terms) or has_term(all_text, malfunction_terms) else 0
+    if death:
+        injury = max(injury, 1)
     return death, injury, malfunction
 
 
+def extract_problem_codes(raw: Any) -> list[str]:
+    codes: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                key_text = str(key).lower()
+                if "code" in key_text and child is not None and not isinstance(child, (dict, list)):
+                    text = str(child).strip()
+                    if text:
+                        codes.add(text)
+                else:
+                    visit(child)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(raw)
+    return sorted(codes)
+
+
 def upsert_adverse_event(conn: Any, payload: dict[str, Any], *, source_id: str) -> int:
-    device = first_device(payload)
+    device = representative_device(payload)
     event_id = field(payload, "mdr_report_key", "report_number")
     if not event_id:
         event_id = hashlib.sha256(compact_json(payload).encode("utf-8")).hexdigest()
@@ -613,15 +762,15 @@ def upsert_adverse_event(conn: Any, payload: dict[str, Any], *, source_id: str) 
             manufacturer_id,
             manufacturer_id,
             product_code or None,
-            date_text(field(payload, "date_of_event")),
-            date_text(field(payload, "date_received")),
+            date_text(field(payload, "date_of_event")) or date_text(field(payload, "date_received", "date_report", "date_report_to_fda")),
+            date_text(field(payload, "date_received", "date_report", "date_report_to_fda")),
             field(payload, "report_source_code", "report_type"),
             death_count,
             injury_count,
             malfunction_count,
             field(payload, "event_type"),
-            compact_json(device.get("device_problem_codes", [])),
-            compact_json(json_list(payload.get("patient"))),
+            compact_json(extract_problem_codes(device.get("device_problem_codes", []))),
+            compact_json(extract_problem_codes(json_list(payload.get("patient")))),
             source_id,
             compact_json(payload),
             now,
@@ -654,6 +803,33 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=FIELDNAMES, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows([{field: row.get(field, "") for field in FIELDNAMES} for row in rows])
+
+
+def process_fda_page(
+    conn: Any,
+    page: FetchedFdaPage,
+    *,
+    source_id: str,
+    ingestion_run_id: int,
+) -> tuple[int, int, str, str]:
+    store_raw_response(
+        conn,
+        source_id=source_id,
+        endpoint=page.url,
+        query_params=page.public_params,
+        response_status=page.response_status,
+        payload_text=page.payload_text,
+        ingestion_run_id=ingestion_run_id,
+    )
+    if page.response_status != 200:
+        if page.response_status == 404 and is_openfda_not_found(page.payload):
+            return 0, 0, "empty", "not_found_no_records"
+        return 0, 0, "failed", f"http_status_{page.response_status}"
+    results = json_list(page.payload.get("results"))
+    if not results:
+        return 0, 0, "empty", "no_results"
+    upserted = upsert_endpoint_records(conn, page.endpoint_name, results, source_id=source_id)
+    return len(results), upserted, "success", ""
 
 
 def main() -> None:
@@ -693,7 +869,6 @@ def main() -> None:
         ensure_source_registry(conn, config, base_dir, policy.source_id)
         run_id = start_run(conn, run_type="sync_med_device_fda_core", input_path=config_path)
         ingestion_run_id = start_ingestion_run(conn, policy.source_id)
-        session = requests.Session()
         try:
             for endpoint in endpoints:
                 pages = 0
@@ -704,53 +879,135 @@ def main() -> None:
                 max_records = args.max_records if args.max_records > 0 else endpoint.max_records
                 max_records = max_records if max_records > 0 else policy.page_limit
                 try:
-                    for skip in range(0, max_records, policy.page_limit):
-                        params: dict[str, Any] = {"limit": min(policy.page_limit, max_records - skip), "skip": skip}
-                        if endpoint.search:
-                            params["search"] = endpoint.search
-                        if endpoint.sort:
-                            params["sort"] = endpoint.sort
-                        if api_key:
-                            params["api_key"] = api_key
-                        url = f"{policy.base_url}/{endpoint.path.lstrip('/')}"
-                        status_code, payload_text, payload = fetch_openfda_page(session, url, params, policy=policy)
-                        request_count += 1
-                        pages += 1
-                        store_raw_response(
-                            conn,
-                            source_id=policy.source_id,
-                            endpoint=url,
-                            query_params={key: value for key, value in params.items() if key != "api_key"},
-                            response_status=status_code,
-                            payload_text=payload_text,
-                            ingestion_run_id=ingestion_run_id,
-                        )
-                        if status_code != 200:
-                            status = "failed"
-                            reason = f"http_status_{status_code}"
-                            failed.append(endpoint.name)
-                            break
-                        results = json_list(payload.get("results"))
-                        if not results:
-                            break
-                        seen += len(results)
-                        page_upserted = upsert_endpoint_records(conn, endpoint.name, results, source_id=policy.source_id)
-                        upserted += page_upserted
-                        canonical_rows += page_upserted
-                        LOGGER.info(
-                            "%s page=%d skip=%d records=%d upserted_total=%d",
-                            endpoint.name,
-                            pages,
-                            skip,
-                            len(results),
-                            upserted,
-                        )
-                        if pages % policy.commit_every_pages == 0:
-                            conn.commit()
-                            LOGGER.info("Committed FDA sync progress: endpoint=%s pages=%d", endpoint.name, pages)
-                        if len(results) < policy.page_limit:
-                            break
-                        time.sleep(max(0.0, policy.sleep_sec))
+                    first_limit = min(policy.page_limit, max_records)
+                    first_page = fetch_fda_page_job(
+                        endpoint,
+                        policy=policy,
+                        api_key=api_key,
+                        skip=0,
+                        limit=first_limit,
+                        page_number_hint=1,
+                    )
+                    request_count += 1
+                    pages += 1
+                    page_seen, page_upserted, page_status, page_reason = process_fda_page(
+                        conn,
+                        first_page,
+                        source_id=policy.source_id,
+                        ingestion_run_id=ingestion_run_id,
+                    )
+                    seen += page_seen
+                    upserted += page_upserted
+                    canonical_rows += page_upserted
+                    if page_status == "failed":
+                        status = "failed"
+                        reason = page_reason
+                        failed.append(endpoint.name)
+                    elif page_status == "empty":
+                        reason = page_reason
+                    LOGGER.info(
+                        "%s page=%d skip=%d records=%d upserted_total=%d",
+                        endpoint.name,
+                        pages,
+                        first_page.skip,
+                        page_seen,
+                        upserted,
+                    )
+
+                    total = openfda_total(first_page.payload)
+                    effective_max = min(max_records, total) if total is not None else max_records
+                    if first_page.response_status == 200 and page_seen == policy.page_limit and effective_max > policy.page_limit:
+                        page_jobs: list[tuple[int, int, int]] = []
+                        for page_number, skip in enumerate(range(policy.page_limit, effective_max, policy.page_limit), start=2):
+                            page_jobs.append((page_number, skip, min(policy.page_limit, effective_max - skip)))
+                        if policy.parallel_workers > 1 and len(page_jobs) > 1:
+                            LOGGER.info(
+                                "Fetching FDA endpoint in parallel: endpoint=%s pages=%d workers=%d",
+                                endpoint.name,
+                                len(page_jobs) + 1,
+                                policy.parallel_workers,
+                            )
+                            with ThreadPoolExecutor(max_workers=policy.parallel_workers) as executor:
+                                futures = [
+                                    executor.submit(
+                                        fetch_fda_page_job,
+                                        endpoint,
+                                        policy=policy,
+                                        api_key=api_key,
+                                        skip=skip,
+                                        limit=limit,
+                                        page_number_hint=page_number,
+                                    )
+                                    for page_number, skip, limit in page_jobs
+                                ]
+                                for future in as_completed(futures):
+                                    page = future.result()
+                                    request_count += 1
+                                    pages += 1
+                                    page_seen, page_upserted, page_status, page_reason = process_fda_page(
+                                        conn,
+                                        page,
+                                        source_id=policy.source_id,
+                                        ingestion_run_id=ingestion_run_id,
+                                    )
+                                    seen += page_seen
+                                    upserted += page_upserted
+                                    canonical_rows += page_upserted
+                                    if page_status == "failed":
+                                        status = "failed"
+                                        reason = page_reason
+                                        if endpoint.name not in failed:
+                                            failed.append(endpoint.name)
+                                    LOGGER.info(
+                                        "%s page=%d skip=%d records=%d upserted_total=%d",
+                                        endpoint.name,
+                                        page.page_number_hint,
+                                        page.skip,
+                                        page_seen,
+                                        upserted,
+                                    )
+                                    if pages % policy.commit_every_pages == 0:
+                                        conn.commit()
+                                        LOGGER.info("Committed FDA sync progress: endpoint=%s pages=%d", endpoint.name, pages)
+                        else:
+                            for page_number, skip, limit in page_jobs:
+                                time.sleep(max(0.0, policy.sleep_sec))
+                                page = fetch_fda_page_job(
+                                    endpoint,
+                                    policy=policy,
+                                    api_key=api_key,
+                                    skip=skip,
+                                    limit=limit,
+                                    page_number_hint=page_number,
+                                )
+                                request_count += 1
+                                pages += 1
+                                page_seen, page_upserted, page_status, page_reason = process_fda_page(
+                                    conn,
+                                    page,
+                                    source_id=policy.source_id,
+                                    ingestion_run_id=ingestion_run_id,
+                                )
+                                seen += page_seen
+                                upserted += page_upserted
+                                canonical_rows += page_upserted
+                                if page_status == "failed":
+                                    status = "failed"
+                                    reason = page_reason
+                                    if endpoint.name not in failed:
+                                        failed.append(endpoint.name)
+                                    break
+                                LOGGER.info(
+                                    "%s page=%d skip=%d records=%d upserted_total=%d",
+                                    endpoint.name,
+                                    page.page_number_hint,
+                                    page.skip,
+                                    page_seen,
+                                    upserted,
+                                )
+                                if pages % policy.commit_every_pages == 0:
+                                    conn.commit()
+                                    LOGGER.info("Committed FDA sync progress: endpoint=%s pages=%d", endpoint.name, pages)
                 except Exception as exc:
                     status = "failed"
                     reason = f"{type(exc).__name__}: {exc}"

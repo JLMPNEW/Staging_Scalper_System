@@ -43,7 +43,7 @@ universe_validation:
   yahoo_market_range: "90d"
   yahoo_market_interval: "1d"
   yahoo_market_events: "history"
-  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  user_agent: "${MED_DEVICES_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
   cache_ttl_hours: 24.0
   http_timeout_sec: 20.0
   request_sleep_sec: 0.1
@@ -167,10 +167,11 @@ yahoo_price_ingestion:
   events: "div,splits"
   include_adjusted_close: true
   include_benchmark_tickers: true
-  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  user_agent: "${MED_DEVICES_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
   request_sleep_sec: 0.15
   timeout_sec: 30.0
   max_retries: 3
+  parallel_workers: 4
   commit_every_tickers: 25
   retry_status_codes:
     - 429
@@ -190,7 +191,7 @@ sec_ingestion:
   companyfacts_url_template: "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
   submissions_file_url_template: "https://data.sec.gov/submissions/{file_name}"
   fetch_paginated_submissions: true
-  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  user_agent: "${MED_DEVICES_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
   cache_ttl_hours: 24.0
   request_sleep_sec: 0.15
   timeout_sec: 30.0
@@ -221,6 +222,7 @@ sec_ingestion:
   preferred_units:
     default:
       - USD
+      - EUR
     shares_outstanding:
       - shares
   metric_concepts:
@@ -231,53 +233,71 @@ sec_ingestion:
       - SalesRevenueNet
       - SalesRevenueGoodsNet
       - SalesRevenueServicesNet
+      - Revenue
+      - RevenueFromContractsWithCustomers
     gross_profit:
       - GrossProfit
     operating_income:
       - OperatingIncomeLoss
+      - ProfitLossFromOperatingActivities
     net_income:
       - NetIncomeLoss
       - ProfitLoss
     operating_cash_flow:
       - NetCashProvidedByUsedInOperatingActivities
       - NetCashProvidedByUsedInOperatingActivitiesContinuingOperations
+      - CashFlowsFromUsedInOperatingActivitiesContinuingOperations
+      - CashFlowsFromUsedInOperations
     capital_expenditures:
       - PaymentsToAcquirePropertyPlantAndEquipment
       - PaymentsToAcquireProductiveAssets
+      - PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities
     research_and_development:
       - ResearchAndDevelopmentExpense
       - ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost
     interest_expense:
       - InterestExpense
       - InterestAndDebtExpense
+      - FinanceCosts
+      - InterestExpenseOnBorrowings
     cash_and_investments:
       - CashAndCashEquivalentsAtCarryingValue
       - CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents
       - CashAndCashEquivalentsAtFairValue
+      - CashAndCashEquivalents
     total_assets:
       - Assets
     stockholders_equity:
       - StockholdersEquity
       - StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest
+      - Equity
+      - EquityAttributableToOwnersOfParent
     shares_outstanding:
       - EntityCommonStockSharesOutstanding
       - WeightedAverageNumberOfDilutedSharesOutstanding
       - WeightedAverageNumberOfSharesOutstandingDiluted
       - WeightedAverageNumberOfBasicSharesOutstanding
+      - WeightedAverageShares
+      - NumberOfSharesIssued
   debt_concepts:
     direct:
       - DebtAndFinanceLeaseObligations
       - LongTermDebtAndFinanceLeaseObligations
       - LongTermDebt
       - Debt
+      - Borrowings
     current:
       - LongTermDebtCurrent
       - LongTermDebtAndFinanceLeaseObligationsCurrent
       - ShortTermBorrowings
       - ShortTermDebt
+      - CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings
+      - CurrentPortionOfLongtermBorrowings
+      - ShorttermBorrowings
     noncurrent:
       - LongTermDebtNoncurrent
       - LongTermDebtAndFinanceLeaseObligationsNoncurrent
+      - LongtermBorrowings
   composite_debt_concept_rank: 1000
 
 financial_features:
@@ -311,6 +331,7 @@ financial_features:
 financial_baseline_qa:
   summary_csv: "../output/med_devices_reports/med_device_financial_baseline_qa_summary.csv"
   ranked_csv: "../output/med_devices_reports/med_device_financial_baseline_qa_ranked.csv"
+  delta_csv: "../output/med_devices_reports/med_device_financial_baseline_qa_delta.csv"
   top_bottom_n: 20
   baseline_score_weights:
     fundamental_quality: 0.55
@@ -342,10 +363,11 @@ fda_core_ingestion:
   api_key_file_field: "openfda_api_key"
   timeout_sec: 30.0
   max_retries: 3
+  parallel_workers: 4
   request_sleep_sec: 0.15
   page_limit: 1000
   commit_every_pages: 10
-  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  user_agent: "${MED_DEVICES_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
   endpoints:
     classification:
       enabled: true
@@ -390,13 +412,44 @@ fda_entity_linking:
   min_auto_confidence: 75.0
   high_confidence_threshold: 90.0
   token_score_weight: 100.0
+  edit_distance_max_normalized: 0.20
+  edit_distance_score: 70.0
+  ambiguity_margin: 5.0
+  extra_alias_csv: "data/fda_company_aliases.csv"
+  manual_overrides_csv: "data/fda_manufacturer_overrides.csv"
+  max_candidate_summary: 5
+  high_volume_unmapped_record_threshold: 50
   update_fact_company_ids: true
+
+technical_features:
+  output_csv: "../output/med_devices_reports/med_device_technical_entry_features.csv"
+  benchmark_ticker: "IHI"
+  lookback_days: 460
+  min_trading_bars: 220
+  max_staleness_days: 7
+  entry_signal_thresholds:
+    strong_entry: 80.0
+    good_entry: 65.0
+    watchlist: 50.0
 
 fda_features:
   output_csv: "../output/med_devices_reports/med_device_fda_product_risk_features.csv"
   source_id: "openfda_device"
   normalization:
     revenue_floor: 100000000.0
+  recall_decay_half_life_days: 730.0
+  innovation_score:
+    base_score: 25.0
+    approval_log_weight: 18.0
+    pma_log_weight: 16.0
+    product_code_log_weight: 12.0
+  risk_penalties:
+    recall_severity_per_billion_weight: 4.0
+    class_i_recall_weight: 20.0
+    death_per_billion_weight: 5.0
+    injury_per_billion_weight: 0.5
+    malfunction_per_billion_weight: 0.1
+    adverse_acceleration_per_billion_weight: 0.5
   windows_months:
     short: 12
     medium: 24
@@ -405,10 +458,10 @@ fda_features:
   no_data_risk_score: 65.0
   min_mapping_confidence_for_high_confidence: 75.0
   recall_severity_weights:
-    class_i: 5.0
-    class_ii: 2.0
-    class_iii: 0.5
-    unknown: 1.0
+    class_i: 1.0
+    class_ii: 2.5
+    class_iii: 5.0
+    unknown: 1.5
   hard_red_flags:
     class_i_recall_lookback_months: 36
     death_event_lookback_months: 24
@@ -416,6 +469,99 @@ fda_features:
   score_weights:
     regulatory_risk: 0.60
     regulatory_innovation: 0.40
+
+cms_reimbursement_ingestion:
+  output_csv: "../output/med_devices_reports/med_device_cms_reimbursement_ingestion.csv"
+  coverage_source_id: "cms_coverage_api"
+  payment_source_id: "cms_payment_files"
+  coverage_base_url: "https://api.coverage.cms.gov"
+  timeout_sec: 30.0
+  max_retries: 3
+  request_sleep_sec: 0.15
+  user_agent: "${MED_DEVICES_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  coverage_endpoints:
+    local_coverage_final_lcds:
+      enabled: true
+      path: "v1/reports/local-coverage-final-lcds"
+      policy_type: "lcd"
+      record_path: ""
+      max_pages: 1
+    local_coverage_articles:
+      enabled: true
+      path: "v1/reports/local-coverage-articles"
+      policy_type: "article"
+      record_path: ""
+      max_pages: 1
+    national_coverage_ncd:
+      enabled: true
+      path: "v1/reports/national-coverage-ncd"
+      policy_type: "ncd"
+      record_path: ""
+      max_pages: 1
+  detail_parallel_workers: 6
+  detail_hcpcs_endpoints:
+    lcd_hcpcs_codes:
+      enabled: true
+      policy_type: "lcd"
+      path: "v1/data/lcd/hcpc-code"
+      id_param: "lcdid"
+      version_param: "ver"
+      record_path: "data"
+      max_documents: 0
+    article_hcpcs_codes:
+      enabled: true
+      policy_type: "article"
+      path: "v1/data/article/hcpc-code"
+      id_param: "articleid"
+      version_param: "ver"
+      record_path: "data"
+      max_documents: 0
+  # CMS payment files used to populate fact_reimbursement_rate.
+  payment_files:
+    - name: "dmepos_2026_q2"
+      enabled: true
+      url: "https://www.cms.gov/files/zip/dme26-b.zip"
+      path: "../output/med_devices_cache/cms_reimbursement/dme26-b.zip"
+      zip_members:
+        - "DMEPOS_APR.csv"
+      payment_system: "dmepos"
+      code_type: "HCPCS"
+      effective_date: "2026-04-01"
+      replace_existing: true
+      refresh_download: false
+      header_required_columns:
+        - "HCPCS"
+        - "Ceiling"
+        - "Floor"
+      excluded_rate_columns:
+        - "HCPCS"
+        - "Mod"
+        - "Mod2"
+        - "JURIS"
+        - "CATG"
+    # License-gated CMS/AMA files. Keep disabled until the license workflow is handled outside automation.
+    - name: "clfs_2026_q2"
+      enabled: false
+      url: "https://www.cms.gov/files/zip/26clabq2.zip"
+      path: "../output/med_devices_cache/cms_reimbursement/26clabq2.zip"
+      payment_system: "clfs"
+      code_type: "HCPCS"
+      effective_date: "2026-04-01"
+      replace_existing: true
+      refresh_download: false
+      header_required_columns:
+        - "HCPCS"
+    - name: "asc_2026_q2"
+      enabled: false
+      url: "https://www.cms.gov/files/zip/april-2026-asc-approved-hcpcs-code-payment-rates.zip"
+      path: "../output/med_devices_cache/cms_reimbursement/april-2026-asc-approved-hcpcs-code-payment-rates.zip"
+      payment_system: "asc"
+      code_type: "HCPCS"
+      effective_date: "2026-04-01"
+      replace_existing: true
+      refresh_download: false
+      header_required_columns:
+        - "HCPCS"
 
 reimbursement_features:
   output_csv: "../output/med_devices_reports/med_device_reimbursement_features.csv"
@@ -428,7 +574,35 @@ reimbursement_features:
   company_mention_score: 45.0
   policy_evidence_score: 60.0
   rate_evidence_score: 65.0
+  coverage_weight: 0.60
+  payment_weight: 0.40
+  mention_count_boost_per_hit: 0.5
+  mention_count_boost_cap: 8.0
   low_confidence_hard_flag: false
+  use_fallback_policy_scan_when_unmapped: true
+
+reimbursement_entity_linking:
+  output_csv: "../output/med_devices_reports/med_device_reimbursement_entity_mapping.csv"
+  unmapped_output_csv: "../output/med_devices_reports/med_device_reimbursement_unmapped_companies.csv"
+  override_csv: "data/reimbursement_mapping_overrides.csv"
+  source_ids:
+    - "cms_coverage_api"
+  code_source_ids:
+    - "cms_coverage_api"
+    - "cms_payment_files"
+  min_auto_confidence: 65.0
+  exact_alias_confidence: 92.0
+  core_alias_confidence: 82.0
+  ticker_confidence: 60.0
+  min_term_length: 5
+  max_policy_rows: 0
+  enable_descriptor_matching: true
+  descriptor_confidence: 70.0
+  descriptor_min_term_length: 8
+  descriptor_min_token_count: 2
+  descriptor_max_code_matches_per_term: 50
+  descriptor_require_rate_rows: true
+  replace_existing_mappings: true
 
 ib_price_validation:
   input_csv: "../ticker_mapping/med_dev_tickers_clean_keep.csv"
@@ -467,9 +641,24 @@ ib_price_validation:
     - no_usable_bars
     - stale_ib_bar
     - insufficient_ib_history
+    - too_few_ib_bars
     - low_ib_avg_dollar_volume
 
 scoring:
+  output_csv: "../output/med_devices_reports/med_device_daily_composite_scores.csv"
+  neutral_durable_growth_score: 50.0
+  neutral_fda_no_data_score: 55.0
+  neutral_reimbursement_score: 50.0
+  neutral_technical_entry_score: 50.0
+  neutral_sentiment_catalyst_score: 50.0
+  component_neutral_defaults:
+    fundamental_quality: 50.0
+    durable_growth: 50.0
+    fda_product: 55.0
+    reimbursement: 50.0
+    valuation: 50.0
+    technical_entry: 50.0
+    sentiment_catalyst: 50.0
   composite_weights:
     fundamental_quality: 0.25
     durable_growth: 0.15
@@ -485,6 +674,7 @@ scoring:
     reimbursement_min: 50
     valuation_min: 60
     technical_entry_min: 55
+    value_trap_max: 40
 
 stage_plan:
   stage_1:
@@ -499,3 +689,15 @@ stage_plan:
     name: "data_quality_point_in_time_controls"
     owns_database_build: false
     description: "Enforce as-of dates, late-arriving data policy, duplicates, mapping confidence, and leakage checks."
+  stage_4:
+    name: "financial_and_valuation_features"
+    owns_database_build: false
+    description: "Build SEC-derived financial quality, valuation, value-trap, calibration bucket, and QA outputs."
+  stage_5:
+    name: "fda_reimbursement_and_technical_features"
+    owns_database_build: false
+    description: "Build FDA product-risk, reimbursement, and technical-entry feature sleeves."
+  stage_6:
+    name: "composite_scoring_and_reporting"
+    owns_database_build: false
+    description: "Build final med-device daily scores, ranks, classifications, gates, and score-driver diagnostics."

@@ -21,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.market_policy import live_validation_primary_source  # noqa: E402
-from med_devices.core.text_norm import normalize_cik, normalize_ticker  # noqa: E402
+from med_devices.core.text_norm import as_bool, normalize_cik, normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("validate_med_device_ib_prices")
@@ -37,6 +37,7 @@ DEFAULT_HARD_FAIL_REASONS = {
     "no_usable_bars",
     "stale_ib_bar",
     "insufficient_ib_history",
+    "too_few_ib_bars",
     "low_ib_avg_dollar_volume",
 }
 
@@ -155,10 +156,6 @@ def parse_clock_time(raw: object, default: str = "16:15") -> dt_time:
     raise ValueError(f"Invalid market close time: {raw}")
 
 
-def as_bool(raw: object) -> bool:
-    return str(raw or "").strip().lower() in {"1", "true", "yes", "y"}
-
-
 def str_set(raw: object, default: set[str]) -> set[str]:
     values = raw if isinstance(raw, list) else list(default)
     out = {str(value or "").strip().upper() for value in values if str(value or "").strip()}
@@ -231,7 +228,7 @@ def read_csv_flexible(path: Path) -> list[dict[str, str]]:
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDNAMES, extrasaction="ignore")
+        writer = csv.DictWriter(handle, fieldnames=FIELDNAMES, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -306,8 +303,8 @@ def resolve_paths(config: dict[str, Any], config_path: Path, args: argparse.Name
     return input_csv, output_csv
 
 
-def ib_end_datetime(asof_date: date) -> str:
-    return f"{asof_date.strftime('%Y%m%d')} 23:59:59 US/Eastern"
+def ib_end_datetime(asof_date: date, policy: IbPolicy) -> str:
+    return f"{asof_date.strftime('%Y%m%d')} 23:59:59 {policy.market_timezone}"
 
 
 def request_bars(
@@ -322,7 +319,7 @@ def request_bars(
     return list(
         ib.reqHistoricalData(
             contract,
-            endDateTime=ib_end_datetime(asof_date),
+            endDateTime=ib_end_datetime(asof_date, policy),
             durationStr=duration,
             barSizeSetting=policy.bar_size,
             whatToShow=what_to_show,

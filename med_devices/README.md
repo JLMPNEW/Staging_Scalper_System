@@ -91,6 +91,7 @@ python med_devices\scripts\03_audit_med_device_market_data_policy.py
 ```
 
 The Yahoo sync writes `source_id = yahoo_finance_backup` into `fact_price_ohlcv`. IB remains the live-validation and fallback source under the configured market-data policy.
+Yahoo fetches are bounded by `yahoo_price_ingestion.parallel_workers`; database writes remain serialized.
 
 Load SEC submissions and companyfacts into canonical filing/financial tables:
 
@@ -113,7 +114,15 @@ Load and score the first FDA/reimbursement layers:
 python med_devices\scripts\08_sync_med_device_fda_core.py --allow-partial
 python med_devices\scripts\09_link_med_device_fda_to_companies.py
 python med_devices\scripts\10_build_med_device_fda_features.py
+python med_devices\scripts\14_sync_med_device_cms_reimbursement.py --allow-partial
+python med_devices\scripts\15_link_med_device_reimbursement_to_companies.py
 python med_devices\scripts\11_build_med_device_reimbursement_features.py
+python med_devices\scripts\12_build_med_device_technical_features.py
+python med_devices\scripts\13_build_med_device_daily_scores.py
 ```
 
-The FDA sync writes official openFDA approvals, product classifications, recalls, enforcement rows, and MAUDE adverse events into the med-devices namespace. The linker maps FDA manufacturers/sponsors to public companies only when the configured confidence threshold is met. The reimbursement builder is conservative until CMS policy/rate data and product-to-code mappings are loaded.
+The FDA sync writes official openFDA approvals, product classifications, recalls, enforcement rows, and MAUDE adverse events into the med-devices namespace. The FDA linker maps FDA manufacturers/sponsors to public companies only when the configured confidence threshold is met. The CMS reimbursement sync loads Coverage API policy rows, LCD/article HCPCS detail rows, and configured CMS payment CSV/ZIP files, including the current DMEPOS payment ZIP configured under `cms_reimbursement_ingestion.payment_files`. The reimbursement linker materializes company-policy and company-HCPCS mappings before the reimbursement feature builder scores coverage/payment evidence.
+openFDA page fetches are bounded by `fda_core_ingestion.parallel_workers`; raw and canonical SQLite writes remain serialized.
+CMS detail HCPCS fetches are bounded by `cms_reimbursement_ingestion.detail_parallel_workers`; payment-file ZIP downloads are cached at the configured `path`, and SQLite writes remain serialized.
+Reimbursement mapping uses policy-text alias matches, FDA device-name descriptor matches against HCPCS descriptions, and optional manual mappings in `med_devices/data/reimbursement_mapping_overrides.csv`. CLFS and ASC payment-file entries are present but disabled because the CMS downloads route through the CMS/AMA license workflow.
+The final daily scoring script writes the multi-sleeve composite into `med_device_daily_scores`.

@@ -1,0 +1,9 @@
+fda_manufacturer_id,manufacturer_name,ticker,company_id,confidence,mapping_method,note
+1108,ABBOTT DIABETES CARE INC,ABT,3,99,manual_override,High-volume FDA manufacturer under Abbott
+183,ABBOTT MEDICAL,ABT,3,99,manual_override,High-volume FDA manufacturer under Abbott
+935,Abbott Molecular,ABT,3,99,manual_override,Abbott diagnostics operating unit
+799,"Abbott Molecular, Inc.",ABT,3,99,manual_override,Abbott diagnostics operating unit
+16,"Fresenius Medical Care Renal Therapies Group, LLC",FMS,,99,manual_override,Fresenius Medical Care public parent trades as FMS
+456,"Medline Industries, LP",MDLN,,99,manual_override,Medline public parent trades as MDLN
+519,"PHILIPS MEDICAL SYSTEMS NEDERLAND B.V.",PHG,,99,manual_override,Royal Philips parent trades as PHG
+158,"Scientia Vascular, Inc.",MDT,6,99,manual_override,Medtronic acquisition for neurovascular portfolio

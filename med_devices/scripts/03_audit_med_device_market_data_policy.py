@@ -16,7 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from med_devices.core.db import connect  # noqa: E402
+from med_devices.core.db import connect, finish_run, init_db, start_run  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.market_policy import (  # noqa: E402
     is_adjusted_price_row,
@@ -185,74 +185,86 @@ def main() -> None:
         raise ValueError(f"No tickers selected from {input_csv}")
 
     LOGGER.info("Auditing market policy db=%s input=%s tickers=%d sources=%s", db_path, input_csv, len(tickers), ",".join(sources))
+    exit_code = 0
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
-        conn.execute("PRAGMA temp_store = MEMORY")
-        rows = load_price_rows(conn, tickers, asof, sources)
-    selected = select_latest_rows_by_source_priority(
-        rows,
-        asof_date=asof_obj,
-        source_priority=sources,
-        max_staleness_days=max_staleness_days,
-    )
+        init_db(conn)
+        run_id = start_run(conn, run_type="audit_med_device_market_data_policy", input_path=input_csv)
+        try:
+            conn.execute("PRAGMA temp_store = MEMORY")
+            rows = load_price_rows(conn, tickers, asof, sources)
+            selected = select_latest_rows_by_source_priority(
+                rows,
+                asof_date=asof_obj,
+                source_priority=sources,
+                max_staleness_days=max_staleness_days,
+            )
 
-    source_rank = {source: idx for idx, source in enumerate(sources)}
-    available_by_ticker: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        row_dict = dict(row)
-        available_by_ticker.setdefault(normalize_ticker(row_dict.get("ticker")), []).append(row_dict)
+            source_rank = {source: idx for idx, source in enumerate(sources)}
+            available_by_ticker: dict[str, list[dict[str, Any]]] = {}
+            for row in rows:
+                row_dict = dict(row)
+                available_by_ticker.setdefault(normalize_ticker(row_dict.get("ticker")), []).append(row_dict)
 
-    audit_rows: list[dict[str, Any]] = []
-    for ticker in tickers:
-        selected_row = selected.get(ticker, {})
-        available = available_by_ticker.get(ticker, [])
-        reasons: list[str] = []
-        selected_source = str(selected_row.get("source_id") or "").lower()
-        selected_bar_date = parse_date(selected_row.get("bar_date"))
-        adjusted_available = is_adjusted_price_row(selected_row) if selected_row else False
-        if not selected_row:
-            reasons.append("missing_market_row")
-        if selected_row and require_adjusted and not adjusted_available:
-            reasons.append("selected_row_has_no_adjusted_price")
-        if selected_row and selected_source != sources[0]:
-            reasons.append("fallback_source_used")
-        if selected_bar_date is not None and (asof_obj - selected_bar_date).days > max_staleness_days:
-            reasons.append("selected_row_stale")
+            audit_rows: list[dict[str, Any]] = []
+            for ticker in tickers:
+                selected_row = selected.get(ticker, {})
+                available = available_by_ticker.get(ticker, [])
+                reasons: list[str] = []
+                selected_source = str(selected_row.get("source_id") or "").lower()
+                selected_bar_date = parse_date(selected_row.get("bar_date"))
+                adjusted_available = is_adjusted_price_row(selected_row) if selected_row else False
+                if not selected_row:
+                    reasons.append("missing_market_row")
+                if selected_row and require_adjusted and not adjusted_available:
+                    reasons.append("selected_row_has_no_adjusted_price")
+                if selected_row and selected_source != sources[0]:
+                    reasons.append("fallback_source_used")
+                if selected_bar_date is not None and (asof_obj - selected_bar_date).days > max_staleness_days:
+                    reasons.append("selected_row_stale")
 
-        available_sources = sorted({str(row.get("source_id") or "").lower() for row in available if row.get("source_id")})
-        available_adjustments = sorted(
-            {
-                f"{str(row.get('source_id') or '').lower()}:{price_adjustment_label(row)}:{int(row.get('is_adjusted') or 0)}"
-                for row in available
-                if row.get("source_id")
-            }
-        )
-        audit_rows.append(
-            {
-                "asof_date": asof,
-                "ticker": ticker,
-                "selected_source": selected_source,
-                "selected_source_rank": source_rank.get(selected_source, ""),
-                "selected_bar_date": selected_row.get("bar_date", ""),
-                "selected_close": selected_row.get("close", ""),
-                "selected_adj_close": selected_row.get("adj_close", ""),
-                "selected_price_adjustment": price_adjustment_label(selected_row) if selected_row else "",
-                "selected_is_adjusted": int(adjusted_available) if selected_row else "",
-                "available_sources": ";".join(available_sources),
-                "available_adjustments": ";".join(available_adjustments),
-                "requires_adjusted_for_scoring": int(require_adjusted),
-                "policy_status": "pass" if not reasons else "fail",
-                "review_reason": ";".join(reasons),
-            }
-        )
+                available_sources = sorted({str(row.get("source_id") or "").lower() for row in available if row.get("source_id")})
+                available_adjustments = sorted(
+                    {
+                        f"{str(row.get('source_id') or '').lower()}:{price_adjustment_label(row)}:{int(row.get('is_adjusted') or 0)}"
+                        for row in available
+                        if row.get("source_id")
+                    }
+                )
+                audit_rows.append(
+                    {
+                        "asof_date": asof,
+                        "ticker": ticker,
+                        "selected_source": selected_source,
+                        "selected_source_rank": source_rank.get(selected_source, ""),
+                        "selected_bar_date": selected_row.get("bar_date", ""),
+                        "selected_close": selected_row.get("close", ""),
+                        "selected_adj_close": selected_row.get("adj_close", ""),
+                        "selected_price_adjustment": price_adjustment_label(selected_row) if selected_row else "",
+                        "selected_is_adjusted": int(adjusted_available) if selected_row else "",
+                        "available_sources": ";".join(available_sources),
+                        "available_adjustments": ";".join(available_adjustments),
+                        "requires_adjusted_for_scoring": int(require_adjusted),
+                        "policy_status": "pass" if not reasons else "fail",
+                        "review_reason": ";".join(reasons),
+                    }
+                )
 
-    write_csv(output_csv, audit_rows)
-    counts: dict[str, int] = {}
-    for row in audit_rows:
-        key = f"{row['policy_status']}:{row['selected_source'] or '<missing>'}"
-        counts[key] = counts.get(key, 0) + 1
-    LOGGER.info("Market policy audit written: %s rows=%d counts=%s", output_csv, len(audit_rows), counts)
-    if not args.allow_fail and any(row["policy_status"] != "pass" for row in audit_rows):
-        raise SystemExit(2)
+            write_csv(output_csv, audit_rows)
+            counts: dict[str, int] = {}
+            for row in audit_rows:
+                key = f"{row['policy_status']}:{row['selected_source'] or '<missing>'}"
+                counts[key] = counts.get(key, 0) + 1
+            failing = any(row["policy_status"] != "pass" for row in audit_rows)
+            status = "partial" if failing else "success"
+            message = f"asof={asof} rows={len(audit_rows)} output={output_csv} counts={counts}"
+            finish_run(conn, run_id=run_id, status=status, row_count=len(audit_rows), message=message)
+            LOGGER.info("Market policy audit written: %s rows=%d counts=%s", output_csv, len(audit_rows), counts)
+            exit_code = 2 if failing and not args.allow_fail else 0
+        except BaseException as exc:
+            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            raise
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

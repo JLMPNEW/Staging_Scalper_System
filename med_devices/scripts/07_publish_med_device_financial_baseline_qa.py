@@ -7,7 +7,7 @@ import logging
 import math
 import sys
 from pathlib import Path
-from statistics import median
+from statistics import median, pstdev
 from typing import Any
 
 
@@ -39,6 +39,15 @@ DEFAULT_KEY_METRICS = [
     "value_trap_score",
 ]
 SUMMARY_FIELDS = ["asof_date", "section", "metric", "value", "detail"]
+DELTA_FIELDS = [
+    "asof_date",
+    "ticker",
+    "company_name",
+    "previous_stage4_baseline_score",
+    "current_stage4_baseline_score",
+    "score_delta",
+    "alert_flag",
+]
 RANKED_FIELDS = [
     "asof_date",
     "rank",
@@ -70,6 +79,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--summary-csv", type=Path, default=None)
     parser.add_argument("--ranked-csv", type=Path, default=None)
+    parser.add_argument("--delta-csv", type=Path, default=None)
     parser.add_argument("--asof", type=str, default="", help="Feature as-of date. Defaults to latest available.")
     return parser.parse_args()
 
@@ -126,7 +136,53 @@ def metric_values(rows: list[dict[str, Any]], metric: str) -> list[float]:
     return out
 
 
-def summary_rows(rows: list[dict[str, Any]], *, asof: str, key_metrics: list[str], top_bottom_n: int) -> list[dict[str, Any]]:
+def percentile(sorted_values: list[float], pct: float) -> float | None:
+    if not sorted_values:
+        return None
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    position = (len(sorted_values) - 1) * pct
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return sorted_values[lower]
+    weight = position - lower
+    return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
+
+
+def add_distribution_rows(
+    out: list[dict[str, Any]],
+    *,
+    asof: str,
+    section: str,
+    metric: str,
+    values: list[float],
+) -> None:
+    if not values:
+        return
+    ordered = sorted(values)
+
+    def add(stat: str, value: float | None) -> None:
+        if value is not None:
+            out.append({"asof_date": asof, "section": section, "metric": f"{metric}_{stat}", "value": round(value, 6), "detail": ""})
+
+    add("min", ordered[0])
+    add("p25", percentile(ordered, 0.25))
+    add("median", median(ordered))
+    add("p75", percentile(ordered, 0.75))
+    add("max", ordered[-1])
+    add("stddev", pstdev(ordered) if len(ordered) > 1 else 0.0)
+
+
+def summary_rows(
+    rows: list[dict[str, Any]],
+    *,
+    asof: str,
+    key_metrics: list[str],
+    top_bottom_n: int,
+    fundamental_weight: float,
+    valuation_weight: float,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     total = len(rows)
 
@@ -135,6 +191,8 @@ def summary_rows(rows: list[dict[str, Any]], *, asof: str, key_metrics: list[str
 
     add("coverage", "feature_rows", total)
     add("coverage", "tickers", total)
+    add("score_config", "stage4_fundamental_weight", fundamental_weight)
+    add("score_config", "stage4_valuation_weight", valuation_weight)
     for field in ("data_quality_status", "calibration_bucket", "subsector"):
         counts: dict[str, int] = {}
         for row in rows:
@@ -147,11 +205,17 @@ def summary_rows(rows: list[dict[str, Any]], *, asof: str, key_metrics: list[str
         values = metric_values(rows, metric)
         missing = total - len(values)
         add("missingness", metric, missing, f"{missing / total:.1%}" if total else "")
-        if not values:
-            continue
-        add("distribution", f"{metric}_min", round(min(values), 6))
-        add("distribution", f"{metric}_median", round(median(values), 6))
-        add("distribution", f"{metric}_max", round(max(values), 6))
+        add_distribution_rows(out, asof=asof, section="distribution", metric=metric, values=values)
+        buckets = sorted({str(row.get("calibration_bucket") or "unknown") for row in rows})
+        for bucket in buckets:
+            bucket_rows = [row for row in rows if str(row.get("calibration_bucket") or "unknown") == bucket]
+            add_distribution_rows(
+                out,
+                asof=asof,
+                section=f"distribution_bucket_{bucket}",
+                metric=metric,
+                values=metric_values(bucket_rows, metric),
+            )
 
     ranked = sorted(rows, key=lambda row: parse_float(row.get("stage4_baseline_score")) or 0.0, reverse=True)
     for label, selected in (("top", ranked[:top_bottom_n]), ("bottom", list(reversed(ranked[-top_bottom_n:])))):
@@ -165,6 +229,43 @@ def summary_rows(rows: list[dict[str, Any]], *, asof: str, key_metrics: list[str
                     f"fund={row.get('fundamental_quality_score_v1')} val={row.get('valuation_score_v1')}"
                 ),
             )
+    return out
+
+
+def read_previous_ranked_scores(path: Path) -> dict[str, float]:
+    if not path.exists():
+        return {}
+    out: dict[str, float] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            ticker = str(row.get("ticker") or "").strip().upper()
+            score = parse_float(row.get("stage4_baseline_score"))
+            if ticker and score is not None:
+                out[ticker] = score
+    return out
+
+
+def delta_rows(rows: list[dict[str, Any]], previous_scores: dict[str, float], *, asof: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        ticker = str(row.get("ticker") or "").strip().upper()
+        current = parse_float(row.get("stage4_baseline_score"))
+        previous = previous_scores.get(ticker)
+        if not ticker or current is None or previous is None:
+            continue
+        delta = round(current - previous, 2)
+        out.append(
+            {
+                "asof_date": asof,
+                "ticker": ticker,
+                "company_name": row.get("company_name", ""),
+                "previous_stage4_baseline_score": previous,
+                "current_stage4_baseline_score": current,
+                "score_delta": delta,
+                "alert_flag": 1 if abs(delta) >= 15.0 else 0,
+            }
+        )
     return out
 
 
@@ -199,6 +300,14 @@ def main() -> None:
             base_dir=base_dir,
         )
     )
+    delta_csv = (
+        args.delta_csv.expanduser().resolve()
+        if args.delta_csv
+        else resolve_path(
+            cfg_get(config, "financial_baseline_qa.delta_csv", "../output/med_devices_reports/med_device_financial_baseline_qa_delta.csv"),
+            base_dir=base_dir,
+        )
+    )
     key_metrics_raw = cfg_get(config, "financial_baseline_qa.key_metrics", DEFAULT_KEY_METRICS)
     key_metrics = [str(value).strip() for value in key_metrics_raw] if isinstance(key_metrics_raw, list) else list(DEFAULT_KEY_METRICS)
     top_bottom_n = max(1, int(cfg_get(config, "financial_baseline_qa.top_bottom_n", 20)))
@@ -219,13 +328,24 @@ def main() -> None:
                     fundamental_weight=fundamental_weight,
                     valuation_weight=valuation_weight,
                 )
+            previous_scores = read_previous_ranked_scores(ranked_csv)
             ranked = sorted(rows, key=lambda row: parse_float(row.get("stage4_baseline_score")) or 0.0, reverse=True)
             for idx, row in enumerate(ranked, start=1):
                 row["rank"] = idx
-            summary = summary_rows(ranked, asof=asof, key_metrics=key_metrics, top_bottom_n=top_bottom_n)
+            summary = summary_rows(
+                ranked,
+                asof=asof,
+                key_metrics=key_metrics,
+                top_bottom_n=top_bottom_n,
+                fundamental_weight=fundamental_weight,
+                valuation_weight=valuation_weight,
+            )
+            deltas = delta_rows(ranked, previous_scores, asof=asof)
             write_csv(summary_csv, summary, SUMMARY_FIELDS)
             write_csv(ranked_csv, ranked, RANKED_FIELDS)
-            message = f"asof={asof} rows={len(rows)} summary={summary_csv} ranked={ranked_csv}"
+            write_csv(delta_csv, deltas, DELTA_FIELDS)
+            alerts = sum(1 for row in deltas if int(row.get("alert_flag") or 0) == 1)
+            message = f"asof={asof} rows={len(rows)} delta_alerts={alerts} summary={summary_csv} ranked={ranked_csv} delta={delta_csv}"
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=message)
             LOGGER.info("Financial baseline QA complete: %s", message)
         except BaseException as exc:

@@ -36,6 +36,9 @@ def normalize_subsector(raw: object) -> str:
     return text.strip("_")
 
 
+def normalize_code(raw: object) -> str:
+    return "".join(ch for ch in str(raw or "").upper().strip() if ch.isalnum())[:12]
+
+
 def as_bool(raw: object) -> bool:
     return str(raw or "").strip().lower() in {"1", "true", "t", "yes", "y"}
-

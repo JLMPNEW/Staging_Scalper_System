@@ -60,6 +60,13 @@ DEFAULT_FILING_FORMS = {
     "6-K",
     "6-K/A",
 }
+PRIMARY_FINANCIAL_OBSERVATION_ORDER = (
+    "revenue",
+    "gross_profit",
+    "operating_income",
+    "net_income",
+    "operating_cash_flow",
+)
 
 DEFAULT_METRIC_CONCEPTS: dict[str, list[str]] = {
     "revenue": [
@@ -69,17 +76,22 @@ DEFAULT_METRIC_CONCEPTS: dict[str, list[str]] = {
         "SalesRevenueNet",
         "SalesRevenueGoodsNet",
         "SalesRevenueServicesNet",
+        "Revenue",
+        "RevenueFromContractsWithCustomers",
     ],
     "gross_profit": ["GrossProfit"],
-    "operating_income": ["OperatingIncomeLoss"],
+    "operating_income": ["OperatingIncomeLoss", "ProfitLossFromOperatingActivities"],
     "net_income": ["NetIncomeLoss", "ProfitLoss"],
     "operating_cash_flow": [
         "NetCashProvidedByUsedInOperatingActivities",
         "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+        "CashFlowsFromUsedInOperatingActivitiesContinuingOperations",
+        "CashFlowsFromUsedInOperations",
     ],
     "capital_expenditures": [
         "PaymentsToAcquirePropertyPlantAndEquipment",
         "PaymentsToAcquireProductiveAssets",
+        "PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities",
     ],
     "research_and_development": [
         "ResearchAndDevelopmentExpense",
@@ -88,22 +100,29 @@ DEFAULT_METRIC_CONCEPTS: dict[str, list[str]] = {
     "interest_expense": [
         "InterestExpense",
         "InterestAndDebtExpense",
+        "FinanceCosts",
+        "InterestExpenseOnBorrowings",
     ],
     "cash_and_investments": [
         "CashAndCashEquivalentsAtCarryingValue",
         "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
         "CashAndCashEquivalentsAtFairValue",
+        "CashAndCashEquivalents",
     ],
     "total_assets": ["Assets"],
     "stockholders_equity": [
         "StockholdersEquity",
         "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+        "Equity",
+        "EquityAttributableToOwnersOfParent",
     ],
     "shares_outstanding": [
         "EntityCommonStockSharesOutstanding",
         "WeightedAverageNumberOfDilutedSharesOutstanding",
         "WeightedAverageNumberOfSharesOutstandingDiluted",
         "WeightedAverageNumberOfBasicSharesOutstanding",
+        "WeightedAverageShares",
+        "NumberOfSharesIssued",
     ],
 }
 DEFAULT_DEBT_DIRECT_CONCEPTS = [
@@ -111,16 +130,21 @@ DEFAULT_DEBT_DIRECT_CONCEPTS = [
     "LongTermDebtAndFinanceLeaseObligations",
     "LongTermDebt",
     "Debt",
+    "Borrowings",
 ]
 DEFAULT_DEBT_CURRENT_CONCEPTS = [
     "LongTermDebtCurrent",
     "LongTermDebtAndFinanceLeaseObligationsCurrent",
     "ShortTermBorrowings",
     "ShortTermDebt",
+    "CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings",
+    "CurrentPortionOfLongtermBorrowings",
+    "ShorttermBorrowings",
 ]
 DEFAULT_DEBT_NONCURRENT_CONCEPTS = [
     "LongTermDebtNoncurrent",
     "LongTermDebtAndFinanceLeaseObligationsNoncurrent",
+    "LongtermBorrowings",
 ]
 
 
@@ -478,6 +502,7 @@ def parse_recent_filings(
         value = source_payload.get(name)
         arrays[name] = value if isinstance(value, list) else []
     max_len = max((len(value) for value in arrays.values()), default=0)
+    # SEC archive paths use the unpadded numeric CIK, unlike data.sec.gov JSON paths.
     cik_int = str(int(company.cik))
     out: list[dict[str, Any]] = []
     for idx in range(max_len):
@@ -528,6 +553,17 @@ def submission_file_names(submissions: dict[str, Any]) -> list[str]:
 def upsert_filings(conn: Any, rows: list[dict[str, Any]]) -> int:
     if not rows:
         return 0
+    deduped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        accession = str(row.get("accession_nodash") or "")
+        if not accession:
+            continue
+        existing = deduped.get(accession)
+        if existing is None or str(row.get("filing_date") or "") >= str(existing.get("filing_date") or ""):
+            deduped[accession] = row
+    rows = list(deduped.values())
+    if not rows:
+        return 0
     now = utc_now()
     fields = [
         "accession_nodash",
@@ -575,54 +611,58 @@ def flatten_metric_observations(
     policy: SecIngestionPolicy | None = None,
 ) -> list[FactObservation]:
     policy = policy or sec_ingestion_policy({})
-    facts = companyfacts.get("facts", {}).get("us-gaap", {})
-    if not isinstance(facts, dict):
+    facts_root = companyfacts.get("facts", {})
+    if not isinstance(facts_root, dict):
         return []
     out: list[FactObservation] = []
     for concept_rank, concept in enumerate(concepts):
-        payload = facts.get(concept)
-        if not isinstance(payload, dict):
-            continue
-        units = payload.get("units", {})
-        if not isinstance(units, dict):
-            continue
-        for unit, observations in units.items():
-            if not preferred_unit(metric, str(unit), policy):
+        for taxonomy in ("us-gaap", "ifrs-full", "dei"):
+            facts = facts_root.get(taxonomy, {})
+            if not isinstance(facts, dict):
                 continue
-            if not isinstance(observations, list):
+            payload = facts.get(concept)
+            if not isinstance(payload, dict):
                 continue
-            for obs in observations:
-                if not isinstance(obs, dict):
+            units = payload.get("units", {})
+            if not isinstance(units, dict):
+                continue
+            for unit, observations in units.items():
+                if not preferred_unit(metric, str(unit), policy):
                     continue
-                value = parse_float(obs.get("val"))
-                period_end = str(obs.get("end") or "").strip()
-                if value is None or not period_end:
+                if not isinstance(observations, list):
                     continue
-                if metric == "capital_expenditures" and value < 0:
-                    value = abs(value)
-                form = normalize_form(obs.get("form"))
-                if form not in policy.financial_forms:
-                    continue
-                accession = accession_nodash(obs.get("accn"))
-                filed = str(obs.get("filed") or "").strip()
-                fp = str(obs.get("fp") or "").strip().upper()
-                out.append(
-                    FactObservation(
-                        metric=metric,
-                        concept=concept,
-                        unit=str(unit),
-                        value=value,
-                        period_start=str(obs.get("start") or "").strip(),
-                        period_end=period_end,
-                        fiscal_year=int(obs["fy"]) if str(obs.get("fy") or "").isdigit() else None,
-                        fiscal_period=fp,
-                        form=form,
-                        filed_date=filed,
-                        accession_nodash=accession,
-                        frame=str(obs.get("frame") or ""),
-                        concept_rank=concept_rank,
+                for obs in observations:
+                    if not isinstance(obs, dict):
+                        continue
+                    value = parse_float(obs.get("val"))
+                    period_end = str(obs.get("end") or "").strip()
+                    if value is None or not period_end:
+                        continue
+                    if metric == "capital_expenditures" and value < 0:
+                        value = abs(value)
+                    form = normalize_form(obs.get("form"))
+                    if form not in policy.financial_forms:
+                        continue
+                    accession = accession_nodash(obs.get("accn"))
+                    filed = str(obs.get("filed") or "").strip()
+                    fp = str(obs.get("fp") or "").strip().upper()
+                    out.append(
+                        FactObservation(
+                            metric=metric,
+                            concept=concept,
+                            unit=str(unit),
+                            value=value,
+                            period_start=str(obs.get("start") or "").strip(),
+                            period_end=period_end,
+                            fiscal_year=int(obs["fy"]) if str(obs.get("fy") or "").isdigit() else None,
+                            fiscal_period=fp,
+                            form=form,
+                            filed_date=filed,
+                            accession_nodash=accession,
+                            frame=str(obs.get("frame") or ""),
+                            concept_rank=concept_rank,
+                        )
                     )
-                )
     return out
 
 
@@ -704,15 +744,28 @@ def observation_value(observations: dict[str, FactObservation | None], metric: s
     return obs.value if obs is not None else None
 
 
-def selected_accession(observations: dict[str, FactObservation | None]) -> str:
-    revenue_obs = observations.get("revenue")
-    if revenue_obs is not None and revenue_obs.accession_nodash:
-        return revenue_obs.accession_nodash
+def selected_financial_observation(observations: dict[str, FactObservation | None]) -> FactObservation | None:
+    for metric in PRIMARY_FINANCIAL_OBSERVATION_ORDER:
+        obs = observations.get(metric)
+        if obs is not None and (obs.accession_nodash or obs.filed_date):
+            return obs
     candidates = [obs for obs in observations.values() if obs is not None and obs.accession_nodash]
     if not candidates:
-        return ""
-    candidates.sort(key=lambda obs: (obs.filed_date, -obs.concept_rank), reverse=True)
-    return candidates[0].accession_nodash
+        candidates = [obs for obs in observations.values() if obs is not None and obs.filed_date]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda obs: (obs.concept_rank, obs.filed_date))
+    return candidates[0]
+
+
+def selected_accession(observations: dict[str, FactObservation | None]) -> str:
+    obs = selected_financial_observation(observations)
+    return obs.accession_nodash if obs is not None and obs.accession_nodash else ""
+
+
+def selected_filed_date(observations: dict[str, FactObservation | None]) -> str:
+    obs = selected_financial_observation(observations)
+    return obs.filed_date if obs is not None and obs.filed_date else ""
 
 
 def build_financial_statement_rows(
@@ -732,10 +785,10 @@ def build_financial_statement_rows(
         observations = {metric: mapping.get((period_end, fiscal_period, form)) for metric, mapping in metric_maps.items()}
         if not any(observations.values()):
             continue
-        filed_dates = [obs.filed_date for obs in observations.values() if obs is not None and obs.filed_date]
         fiscal_years = [obs.fiscal_year for obs in observations.values() if obs is not None and obs.fiscal_year is not None]
         capex = observation_value(observations, "capital_expenditures")
         ocf = observation_value(observations, "operating_cash_flow")
+        filed_date = selected_filed_date(observations)
         payload = {
             metric: {
                 "concept": obs.concept,
@@ -753,7 +806,7 @@ def build_financial_statement_rows(
                 "fiscal_year": max(fiscal_years) if fiscal_years else None,
                 "fiscal_period": fiscal_period,
                 "form": form,
-                "filed_date": max(filed_dates) if filed_dates else "",
+                "filed_date": filed_date,
                 "accession_nodash": selected_accession(observations),
                 "revenue": observation_value(observations, "revenue"),
                 "gross_profit": observation_value(observations, "gross_profit"),

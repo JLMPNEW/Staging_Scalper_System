@@ -49,6 +49,8 @@ tmpomvpuh6h/
 !ticker_mapping/All_tickers_biotech_enriched.csv
 !ticker_mapping/reverse_split_events_fmp.csv
 !biotech_index/data/*.csv
+!med_devices/data/fda_company_aliases.csv
+!med_devices/data/fda_manufacturer_overrides.csv
 !SEC_fundamentals/sec_issuer_metric_override_seed.csv
 !SEC_fundamentals/sec_metric_mapping_full.csv
 
