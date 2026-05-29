@@ -880,8 +880,8 @@ calibration:
     convex_risk_penalty_enabled: true
     risk_penalty_convexity: 0.35
     risk_penalty_inflection: 50.0
-    # Keep promoted V2 on legacy; run --growth-drag-curve smooth_linear for the challenger.
-    growth_drag_curve: "legacy"
+    # Smooth curve removes cliff effects at growth thresholds; promoted as production hygiene.
+    growth_drag_curve: "smooth_linear"
     holdout_top_k: 25
     best_rows_limit: 25
     bootstrap_iterations: 200
