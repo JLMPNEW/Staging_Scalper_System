@@ -1,0 +1,17 @@
+ticker,fda_evidence_type,regulatory_stage,evidence_confidence,next_review_date,source,manual_evidence_note
+AVR,pending_pma_ide,pending_pma_ide,90,2026-11-30,analyst_manual_review,DurAVR is an investigational valve program; do not expect standard commercial 510k/PMA approval rows until PMA transition.
+DCTH,manual_device_footprint,no_valid_openfda_pma_id_found,80,2026-11-30,analyst_manual_review,HEPZATO KIT is retained as a manual device/drug combination footprint; supplied P200004/P200005 validate to unrelated applicants.
+ELMD,legacy_clearance_outside_feature_window,commercial_device_legacy_510k,95,2027-05-26,openfda_verified,SmartVest 510k records K132794 and K053248 are valid for Electromed but older than the active feature window.
+EMBC,ticker_entity_conflict_excluded,local_universe_entity_conflict,99,2026-11-30,analyst_manual_review,Local EMBC row is Embecta Corp.; reject Embrace Change SPAC mapping.
+ESTA,pending_pma_track,pending_pma_not_indexed_as_approved,90,2026-11-30,analyst_manual_review,Motiva implant PMA tracking retained as pending; do not query as approved PMA until final approval evidence is available.
+FEED,ticker_entity_conflict_excluded,local_universe_entity_conflict,99,2026-11-30,analyst_manual_review,Local FEED row is ENvue Medical; reject Frelii software mapping.
+GCTK,pre_commercial_ide,pre_commercial_ide,90,2026-11-30,analyst_manual_review,GlucoTrack glucose monitoring platform remains pre-commercial/IDE stage with no active commercial 510k row.
+INFU,establishment_listing_service_provider,service_provider_no_sponsor_records,90,2026-11-30,analyst_manual_review,InfuSystem is an infusion-pump leasing/logistics/service provider; use establishment/listing evidence when available rather than sponsor approval rows.
+MBOT,pre_commercial_ide,pre_commercial_ide,90,2026-11-30,analyst_manual_review,LIBERTY robotic system remains pre-commercial; do not fabricate commercial clearance rows.
+OWLT,manual_device_footprint,no_valid_openfda_submission_id_found,85,2026-11-30,openfda_verified,Owlet footprint retained manually; supplied K232301/K231433/K233434 validate to unrelated applicants.
+SNWV,ticker_entity_conflict_excluded,local_universe_entity_conflict,99,2026-11-30,openfda_verified,Local SNWV row is SANUWAVE; reject Shockwave/JNJ mapping and supplied P200019/K203309.
+TLSI,ticker_entity_conflict_excluded,local_universe_entity_conflict,99,2026-11-30,analyst_manual_review,Local TLSI row is TriSalus; reject Telos Genomics SaMD/RUO mapping.
+VMD,service_provider_no_sponsor_records,dme_service_provider,95,2026-11-30,analyst_manual_review,Viemed is a home respiratory/DME service provider using third-party equipment; no sponsor 510k/PMA ownership expected.
+VREX,manual_oem_component_footprint,no_valid_openfda_submission_id_found,85,2026-11-30,openfda_verified,Varex OEM component footprint retained manually; supplied K193498/K173546/K210214 are missing or validate to unrelated applicants.
+VTAK,ticker_entity_conflict_excluded,local_universe_entity_conflict,99,2026-11-30,analyst_manual_review,Local VTAK row is Catheter Precision; reject Viatris NDA/NDC combination-product mapping.
+WRBY,class_i_exempt_listing,class_i_exempt_listing,95,2027-05-26,analyst_manual_review,Warby Parker spectacle-frame/lens footprint is listing-only and intentionally bypasses standard 510k/PMA endpoints.

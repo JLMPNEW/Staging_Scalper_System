@@ -18,7 +18,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from med_devices.core.config import DEFAULT_NEUTRAL_SCORE, cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.market_policy import scoring_market_sources, select_latest_rows_by_source_priority  # noqa: E402
@@ -91,7 +91,9 @@ FEATURE_FIELDS = [
     "return_on_assets",
     "return_on_equity",
     "interest_coverage",
+    "accrual_ratio",
     "gross_margin_trend_3y",
+    "quarterly_revenue_surprise_yoy",
     "financial_history_years",
     "min_core_group_years",
     "data_confidence_score",
@@ -103,15 +105,17 @@ FEATURE_FIELDS = [
     "valuation_score_v1",
     "value_trap_score",
 ]
-DEFAULT_NEUTRAL_COMPONENT_SCORE = 25.0
+DEFAULT_NEUTRAL_COMPONENT_SCORE = DEFAULT_NEUTRAL_SCORE
 DEFAULT_FUNDAMENTAL_COMPONENT_WEIGHTS = {
-    "gross_margin": 0.18,
-    "operating_margin": 0.18,
-    "fcf_margin": 0.17,
-    "revenue_growth": 0.15,
-    "balance_sheet": 0.12,
-    "rd_intensity": 0.10,
-    "history_confidence": 0.10,
+    "gross_margin": 0.13,
+    "operating_margin": 0.13,
+    "fcf_margin": 0.16,
+    "revenue_growth": 0.14,
+    "balance_sheet": 0.10,
+    "rd_intensity": 0.08,
+    "history_confidence": 0.08,
+    "accrual_quality": 0.10,
+    "dilution_control": 0.08,
 }
 DEFAULT_VALUATION_COMPONENT_WEIGHTS = {
     "ev_to_sales": 0.35,
@@ -203,7 +207,9 @@ class FeatureRow:
     return_on_assets: float | None = None
     return_on_equity: float | None = None
     interest_coverage: float | None = None
+    accrual_ratio: float | None = None
     gross_margin_trend_3y: float | None = None
+    quarterly_revenue_surprise_yoy: float | None = None
     growth_to_ev_sales: float | None = None
     financial_history_years: float = 0.0
     min_core_group_years: float = 0.0
@@ -662,9 +668,16 @@ def gross_margin_trend(rows: list[FinancialRow]) -> float | None:
         and row.values.get("revenue") is not None
     ]
     annual_rows.sort(key=lambda item: (item.period_end, item.filed_date))
+    recent_rows = annual_rows[-3:]
+    for prev, curr in zip(recent_rows[:-1], recent_rows[1:]):
+        prev_rev = prev.values.get("revenue") or 0.0
+        curr_rev = curr.values.get("revenue") or 0.0
+        if prev_rev > 0 and abs(curr_rev / prev_rev - 1.0) > 0.80:
+            LOGGER.debug("gross_margin_trend: revenue discontinuity detected; skipping trend")
+            return None
     gm_series = [
         safe_div(row.values.get("gross_profit"), row.values.get("revenue"))
-        for row in annual_rows[-3:]
+        for row in recent_rows
     ]
     values = [value for value in gm_series if value is not None]
     if len(values) < 2:
@@ -761,6 +774,13 @@ def build_raw_feature_row(
     feature.net_income_ttm = ttm_values["net_income"]
     feature.operating_cash_flow_ttm = ttm_values["operating_cash_flow"]
     feature.capital_expenditures_ttm = ttm_values["capital_expenditures"]
+    if feature.capital_expenditures_ttm is not None and feature.capital_expenditures_ttm < 0:
+        LOGGER.debug(
+            "%s: capital_expenditures_ttm is negative (%.0f); normalizing sign for FCF",
+            company.ticker,
+            feature.capital_expenditures_ttm,
+        )
+        feature.capital_expenditures_ttm = abs(feature.capital_expenditures_ttm)
     feature.research_and_development_ttm = ttm_values["research_and_development"]
     feature.interest_expense_ttm = ttm_values["interest_expense"]
     computed_fcf = None
@@ -778,13 +798,24 @@ def build_raw_feature_row(
         prior_rd = prior_annual.values.get("research_and_development")
         if current_rd is not None and prior_rd is not None:
             feature.rd_growth_yoy = safe_div(current_rd - prior_rd, prior_rd)
+    if interim is not None and prior_interim is not None:
+        interim_revenue = interim.values.get("revenue")
+        prior_interim_revenue = prior_interim.values.get("revenue")
+        if interim_revenue is not None and prior_interim_revenue is not None:
+            feature.quarterly_revenue_surprise_yoy = safe_div(
+                interim_revenue - prior_interim_revenue,
+                abs(prior_interim_revenue),
+            )
     feature.gross_margin_ttm = safe_div(feature.gross_profit_ttm, feature.revenue_ttm)
     feature.operating_margin_ttm = safe_div(feature.operating_income_ttm, feature.revenue_ttm)
     feature.net_margin_ttm = safe_div(feature.net_income_ttm, feature.revenue_ttm)
     feature.fcf_margin_ttm = safe_div(feature.free_cash_flow_ttm, feature.revenue_ttm)
     feature.rd_to_revenue_ttm = safe_div(feature.research_and_development_ttm, feature.revenue_ttm)
     if feature.revenue_yoy_growth is not None and feature.fcf_margin_ttm is not None:
-        feature.rule_of_40 = (feature.revenue_yoy_growth + feature.fcf_margin_ttm) * 100.0
+        annual_end = parse_date(annual.period_end) if annual is not None else None
+        period_gap_days = (asof - annual_end).days if annual_end is not None else 999
+        if period_gap_days <= 270 or feature.ttm_method == "annual_plus_interim_ytd_delta":
+            feature.rule_of_40 = (feature.revenue_yoy_growth + feature.fcf_margin_ttm) * 100.0
 
     feature.cash_and_investments = latest_metric(financial_rows, "cash_and_investments")
     feature.total_debt = latest_metric(financial_rows, "total_debt")
@@ -806,8 +837,18 @@ def build_raw_feature_row(
     feature.fcf_yield = safe_div(feature.free_cash_flow_ttm, feature.market_cap)
     feature.net_debt_to_revenue = safe_div(feature.net_debt, feature.revenue_ttm)
     feature.return_on_assets = safe_div(feature.net_income_ttm, feature.total_assets)
-    feature.return_on_equity = safe_div(feature.net_income_ttm, feature.stockholders_equity)
-    feature.interest_coverage = safe_div(feature.operating_income_ttm, abs(feature.interest_expense_ttm) if feature.interest_expense_ttm is not None else None)
+    if feature.stockholders_equity is not None and feature.stockholders_equity > 0:
+        feature.return_on_equity = safe_div(feature.net_income_ttm, feature.stockholders_equity)
+    if feature.interest_expense_ttm is not None and feature.interest_expense_ttm > 0:
+        feature.interest_coverage = safe_div(feature.operating_income_ttm, feature.interest_expense_ttm)
+    if feature.net_income_ttm is not None and feature.operating_cash_flow_ttm is not None:
+        prior_total_assets = prior_annual.values.get("total_assets") if prior_annual is not None else None
+        if feature.total_assets is not None and prior_total_assets is not None:
+            avg_assets = (feature.total_assets + prior_total_assets) / 2.0
+            if avg_assets > 0:
+                feature.accrual_ratio = safe_div(feature.net_income_ttm - feature.operating_cash_flow_ttm, avg_assets)
+        if feature.accrual_ratio is None and feature.total_assets is not None and feature.total_assets > 0:
+            feature.accrual_ratio = safe_div(feature.net_income_ttm - feature.operating_cash_flow_ttm, feature.total_assets)
     feature.gross_margin_trend_3y = gross_margin_trend(financial_rows)
     feature.financial_history_years = history_years(financial_rows)
     feature.min_core_group_years = min_core_history_years(financial_rows)
@@ -862,10 +903,12 @@ def build_raw_feature_row(
 
 def winsorize_pairs(values: list[tuple[int, float]], *, low_pct: float, high_pct: float) -> list[tuple[int, float]]:
     if len(values) < 4:
-        return values
+        return list(values)
+    if not 0.0 <= low_pct < high_pct <= 1.0:
+        raise ValueError(f"winsor bounds must satisfy 0 <= low < high <= 1, got {low_pct}, {high_pct}")
     sorted_values = sorted(value for _, value in values)
-    low_idx = max(0, int(max(0.0, min(1.0, low_pct)) * len(sorted_values)))
-    high_idx = min(len(sorted_values) - 1, int(max(0.0, min(1.0, high_pct)) * len(sorted_values)))
+    low_idx = max(0, min(len(sorted_values) - 1, math.ceil(low_pct * len(sorted_values)) - 1))
+    high_idx = max(0, min(len(sorted_values) - 1, math.ceil(high_pct * len(sorted_values)) - 1))
     low_bound = sorted_values[low_idx]
     high_bound = sorted_values[high_idx]
     if low_bound > high_bound:
@@ -899,6 +942,7 @@ def percentile_scores(
     field_name: str,
     *,
     higher_is_better: bool,
+    exclude_nonpositive: bool = False,
     winsor_low_pct: float = 0.05,
     winsor_high_pct: float = 0.95,
 ) -> dict[int, float]:
@@ -907,7 +951,7 @@ def percentile_scores(
         value = to_float(getattr(row, field_name))
         if value is None:
             continue
-        if field_name in {"ev_to_sales", "price_to_sales"} and value <= 0:
+        if exclude_nonpositive and value <= 0:
             continue
         values.append((idx, value))
     return percentile_from_pairs(
@@ -923,6 +967,7 @@ def percentile_scores_by_subsector(
     field_name: str,
     *,
     higher_is_better: bool,
+    exclude_nonpositive: bool = False,
     blend_weight: float,
     winsor_low_pct: float,
     winsor_high_pct: float,
@@ -931,6 +976,7 @@ def percentile_scores_by_subsector(
         rows,
         field_name,
         higher_is_better=higher_is_better,
+        exclude_nonpositive=exclude_nonpositive,
         winsor_low_pct=winsor_low_pct,
         winsor_high_pct=winsor_high_pct,
     )
@@ -939,7 +985,7 @@ def percentile_scores_by_subsector(
         value = to_float(getattr(row, field_name))
         if value is None:
             continue
-        if field_name in {"ev_to_sales", "price_to_sales"} and value <= 0:
+        if exclude_nonpositive and value <= 0:
             continue
         subsector = str(row.subsector or "unknown").strip().lower() or "unknown"
         by_subsector.setdefault(subsector, []).append((idx, value))
@@ -953,21 +999,27 @@ def percentile_scores_by_subsector(
                 winsor_high_pct=winsor_high_pct,
             )
         )
-    blend = clamp(blend_weight, 0.0, 1.0) / 100.0 if blend_weight > 1.0 else clamp(blend_weight, 0.0, 1.0)
+    blend = clamp(blend_weight, 0.0, 1.0)
     out: dict[int, float] = {}
-    for idx in set(universe_scores) | set(subsector_scores):
-        universe_score = universe_scores.get(idx, 50.0)
-        subsector_score = subsector_scores.get(idx, 50.0)
-        out[idx] = blend * subsector_score + (1.0 - blend) * universe_score
+    for idx in universe_scores:
+        universe_score = universe_scores[idx]
+        subsector = str(rows[idx].subsector or "unknown").strip().lower() or "unknown"
+        subsector_score = subsector_scores.get(idx)
+        if subsector_score is None or len(by_subsector.get(subsector, [])) < 3:
+            out[idx] = universe_score
+        else:
+            out[idx] = blend * subsector_score + (1.0 - blend) * universe_score
     return out
 
 
-def neutral_missing(score: float | None, neutral: float) -> float:
-    return neutral if score is None or not math.isfinite(score) else score
-
-
 def weighted_score(components: list[tuple[float | None, float]], *, neutral: float) -> float:
-    return sum(neutral_missing(score, neutral) * weight for score, weight in components)
+    active = [(score, weight) for score, weight in components if score is not None and math.isfinite(score)]
+    if not active:
+        return neutral
+    total_weight = sum(weight for _, weight in active)
+    if total_weight <= 0:
+        return neutral
+    return sum(score * weight for score, weight in active) / total_weight
 
 
 def history_confidence(row: FeatureRow, *, core_min_years: float, core_min_group_years: float) -> float:
@@ -987,11 +1039,12 @@ def apply_scores(rows: list[FeatureRow], *, policy: FinancialFeaturePolicy) -> N
         ev_to_sales = row.ev_to_sales
         row.growth_to_ev_sales = safe_div(max(growth, -0.25) if growth is not None else None, ev_to_sales)
 
-    def scores(field_name: str, *, higher_is_better: bool) -> dict[int, float]:
+    def scores(field_name: str, *, higher_is_better: bool, exclude_nonpositive: bool = False) -> dict[int, float]:
         return percentile_scores_by_subsector(
             rows,
             field_name,
             higher_is_better=higher_is_better,
+            exclude_nonpositive=exclude_nonpositive,
             blend_weight=policy.subsector_blend_weight,
             winsor_low_pct=policy.winsor_low_pct,
             winsor_high_pct=policy.winsor_high_pct,
@@ -1004,8 +1057,10 @@ def apply_scores(rows: list[FeatureRow], *, policy: FinancialFeaturePolicy) -> N
         "revenue_yoy_growth": scores("revenue_yoy_growth", higher_is_better=True),
         "net_debt_to_revenue": scores("net_debt_to_revenue", higher_is_better=False),
         "rd_to_revenue_ttm": scores("rd_to_revenue_ttm", higher_is_better=True),
-        "ev_to_sales": scores("ev_to_sales", higher_is_better=False),
-        "price_to_sales": scores("price_to_sales", higher_is_better=False),
+        "accrual_ratio": scores("accrual_ratio", higher_is_better=False),
+        "shares_yoy_growth": scores("shares_yoy_growth", higher_is_better=False),
+        "ev_to_sales": scores("ev_to_sales", higher_is_better=False, exclude_nonpositive=True),
+        "price_to_sales": scores("price_to_sales", higher_is_better=False, exclude_nonpositive=True),
         "fcf_yield": scores("fcf_yield", higher_is_better=True),
         "growth_to_ev_sales": scores("growth_to_ev_sales", higher_is_better=True),
     }
@@ -1030,6 +1085,8 @@ def apply_scores(rows: list[FeatureRow], *, policy: FinancialFeaturePolicy) -> N
                 (score_maps["net_debt_to_revenue"].get(idx), policy.fundamental_weights["balance_sheet"]),
                 (score_maps["rd_to_revenue_ttm"].get(idx), policy.fundamental_weights["rd_intensity"]),
                 (hist_score, policy.fundamental_weights["history_confidence"]),
+                (score_maps["accrual_ratio"].get(idx), policy.fundamental_weights["accrual_quality"]),
+                (score_maps["shares_yoy_growth"].get(idx), policy.fundamental_weights["dilution_control"]),
             ],
             neutral=policy.neutral_component_score,
         )
@@ -1072,6 +1129,8 @@ def apply_scores(rows: list[FeatureRow], *, policy: FinancialFeaturePolicy) -> N
             "revenue_growth": score_maps["revenue_yoy_growth"].get(idx),
             "balance_sheet": score_maps["net_debt_to_revenue"].get(idx),
             "rd_intensity": score_maps["rd_to_revenue_ttm"].get(idx),
+            "accrual_quality": score_maps["accrual_ratio"].get(idx),
+            "dilution_control": score_maps["shares_yoy_growth"].get(idx),
             "ev_to_sales": score_maps["ev_to_sales"].get(idx),
             "price_to_sales": score_maps["price_to_sales"].get(idx),
             "fcf_yield": score_maps["fcf_yield"].get(idx),
@@ -1147,7 +1206,9 @@ def upsert_feature_rows(conn: Any, rows: list[FeatureRow]) -> int:
         "return_on_assets",
         "return_on_equity",
         "interest_coverage",
+        "accrual_ratio",
         "gross_margin_trend_3y",
+        "quarterly_revenue_surprise_yoy",
         "financial_history_years",
         "min_core_group_years",
         "data_confidence_score",
@@ -1233,8 +1294,8 @@ def upsert_feature_rows(conn: Any, rows: list[FeatureRow]) -> int:
 
 def replace_data_quality_issues(conn: Any, rows: list[FeatureRow], *, asof: str) -> int:
     conn.execute(
-        "DELETE FROM data_quality_issues WHERE asof_date = ? AND table_name = ?",
-        (asof, "feature_financial_valuation"),
+        "DELETE FROM data_quality_issues WHERE table_name = ? AND asof_date = ?",
+        ("feature_financial_valuation", asof),
     )
     issue_rows: list[tuple[Any, ...]] = []
     now = utc_now()

@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.logging_utils import configure_utc_logging
+from biotech_index.core.scoring_math import convex_risk_drag as shared_convex_risk_drag
 
 
 LOGGER = logging.getLogger("score_multibagger_candidates")
@@ -228,13 +229,13 @@ def as_bool(raw: object, default: bool = False) -> bool:
 
 
 def convex_risk_drag(risk: float, weight: float, config: dict[str, Any], section: str) -> float:
-    base_drag = weight * risk
-    if not as_bool(cfg_get(config, f"{section}.convex_risk_penalty_enabled", False), False):
-        return base_drag
-    convexity = float(cfg_get(config, f"{section}.risk_penalty_convexity", 0.35))
-    inflection = float(cfg_get(config, f"{section}.risk_penalty_inflection", 50.0))
-    excess = max(0.0, risk - inflection) / max(1.0, 100.0 - inflection)
-    return base_drag * (1.0 + convexity * excess)
+    return shared_convex_risk_drag(
+        risk,
+        weight,
+        enabled=as_bool(cfg_get(config, f"{section}.convex_risk_penalty_enabled", False), False),
+        convexity=float(cfg_get(config, f"{section}.risk_penalty_convexity", 0.35)),
+        inflection=float(cfg_get(config, f"{section}.risk_penalty_inflection", 50.0)),
+    )
 
 
 def parse_json(raw: object) -> dict[str, Any]:

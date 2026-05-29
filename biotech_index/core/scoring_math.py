@@ -20,6 +20,30 @@ def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
 
 
+def convex_risk_drag(
+    risk: float,
+    weight: float,
+    *,
+    enabled: bool,
+    convexity: float = 0.35,
+    inflection: float = 50.0,
+) -> float:
+    """Shared convex risk penalty used by production and support scorers."""
+    if not math.isfinite(risk):
+        risk = 100.0
+    if not math.isfinite(weight) or weight < 0.0:
+        raise ValueError(f"risk penalty weight must be finite and >= 0, got {weight}")
+    base_drag = weight * risk
+    if not enabled:
+        return base_drag
+    if not math.isfinite(convexity) or convexity < 0.0:
+        raise ValueError(f"risk penalty convexity must be finite and >= 0, got {convexity}")
+    if not math.isfinite(inflection) or inflection >= 100.0:
+        raise ValueError(f"risk penalty inflection must be finite and < 100.0, got {inflection}")
+    excess = max(0.0, min(1.0, (risk - inflection) / max(1e-9, 100.0 - inflection)))
+    return base_drag * (1.0 + convexity * excess)
+
+
 def normalize_growth_curve(raw: object) -> str:
     """Normalize configured growth scoring curve names."""
     value = str(raw or GROWTH_CURVE_LEGACY).strip().lower().replace("-", "_")

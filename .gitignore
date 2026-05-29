@@ -50,7 +50,10 @@ tmpomvpuh6h/
 !ticker_mapping/reverse_split_events_fmp.csv
 !biotech_index/data/*.csv
 !med_devices/data/fda_company_aliases.csv
+!med_devices/data/fda_company_footprints.csv
+!med_devices/data/fda_manual_footprint_evidence.csv
 !med_devices/data/fda_manufacturer_overrides.csv
+!med_devices/data/fda_regulatory_review_overrides.csv
 !SEC_fundamentals/sec_issuer_metric_override_seed.csv
 !SEC_fundamentals/sec_metric_mapping_full.csv
 

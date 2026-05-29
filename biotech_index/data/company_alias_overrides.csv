@@ -58,9 +58,51 @@ PRAX,Praxis Precision Medicines,manual_sponsor_alias,0.95,Exact CTGov lead spons
 ZLAB,Zai Lab (US) LLC,manual_sponsor_alias,0.95,Exact CTGov sponsor alias for Zai Lab trials
 ZLAB,Zai Lab (Shanghai) Co., Ltd.,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Zai Lab trials
 ZNTL,Zentalis Pharmaceuticals Inc,manual_sponsor_alias,0.95,CTGov sponsor alias
+TARA,Protara Therapeutics,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Protara active TARA-002 and choline chloride trials
+TARA,Protara Therapeutics Inc,manual_sponsor_alias,0.95,Issuer/sponsor alias for Protara Therapeutics
+TARA,Protara Therapeutics, Inc.,manual_sponsor_alias,0.95,Issuer/sponsor alias for Protara Therapeutics
+QURE,UniQure Biopharma B.V.,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for uniQure AMT gene-therapy trials
+QURE,UniQure Biopharma BV,manual_sponsor_alias,0.95,Normalized CTGov sponsor alias for uniQure AMT gene-therapy trials
+QURE,uniQure Biopharma B.V.,manual_sponsor_alias,0.95,Case-preserving CTGov sponsor alias for uniQure AMT gene-therapy trials
+RARE,Ultragenyx Pharmaceutical Inc,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Ultragenyx active rare-disease trials
+RARE,Ultragenyx Pharmaceutical Inc.,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias variant for Ultragenyx active rare-disease trials
+RARE,Ultragenyx Gene Therapy,manual_sponsor_alias,0.95,Ultragenyx gene-therapy operating sponsor alias
+LNTH,Lantheus Medical Imaging,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Lantheus radiopharma/radiotherapeutic trials
+LNTH,Lantheus Biosciences Ltd.,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Lantheus clinical trials
+LNTH,Lantheus,manual_sponsor_alias,0.95,Short CTGov sponsor/collaborator alias for Lantheus
 CRMD,CorMedix,manual_sponsor_alias,0.95,CTGov sponsor short name for DefenCath studies
 CRMD,CorMedix Inc,manual_sponsor_alias,0.95,CTGov sponsor alias for DefenCath studies
 CRMD,Cormedix,manual_sponsor_alias,0.95,CTGov sponsor capitalization variant
 DRUG,Bright Minds Biosciences Pty Ltd,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for Bright Minds Biosciences trials
 IMMX,Nexcella Inc,manual_parent_subsidiary,0.95,Immix affiliate lead sponsor alias for NXC-201 CTGov studies
 SXTP,60 Degrees Pharmaceuticals LLC,manual_sponsor_alias,0.95,Exact CTGov lead sponsor alias for 60 Degrees tafenoquine babesiosis study
+ADMA,ADMA Biologics,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+AMPH,Amphastar Pharmaceuticals,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+ASMB,Assembly Biosciences,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+BHVN,Biohaven Therapeutics Ltd.,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+CING,Cingulate Therapeutics,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+CRNX,Crinetics Pharmaceuticals Inc.,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+CTNM,Contineum Therapeutics,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+DFTX,Definium Therapeutics US Inc.,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+EDSA,Edesa Biotech,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+EYPT,EyePoint Pharmaceuticals Inc.,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+FDMT,4D Molecular Therapeutics,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+HRMY,Harmony Biosciences Management Inc.,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+HRMY,Epygenix,manual_subsidiary_alias,0.85,Harmony acquired Epygenix program evidence
+IMTX,Immatics US Inc.,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+IMTX,Immatics Biotechnologies GmbH,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+IMVT,Immunovant Sciences GmbH,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+INVA,Innoviva Specialty Therapeutics,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+IVA,Inventiva Pharma,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+LQDA,Liquidia Technologies Inc.,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+MIST,Milestone Pharmaceuticals Inc.,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+PHVS,Pharvaris Netherlands B.V.,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+RXRX,Recursion Pharmaceuticals Inc.,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+SGMT,Sagimet Biosciences Inc.,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+ZBIO,Zenas BioPharma,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+ZBIO,Zenas BioPharma (USA) LLC,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+ZYME,Zymeworks BC Inc.,manual_sponsor_alias,0.95,Manual activation sponsor alias validated 2026-05-27
+SIBN,SI-BONE,manual_sponsor_alias,0.95,SI-BONE CTGov sponsor alias for post-market device studies
+SIBN,SI-BONE Inc,manual_sponsor_alias,0.95,SI-BONE CTGov sponsor alias for post-market device studies
+NEO,NeoGenomics Laboratories,manual_sponsor_alias,0.95,NeoGenomics Laboratories CTGov sponsor alias
+NEO,NeoGenomics Laboratories Inc,manual_sponsor_alias,0.95,NeoGenomics Laboratories CTGov sponsor alias

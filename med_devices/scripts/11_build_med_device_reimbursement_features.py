@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.text_norm import normalize_org_name, normalize_ticker  # noqa: E402
 
@@ -40,6 +40,12 @@ FIELDNAMES = [
     "mapped_product_code_count",
     "reimbursement_code_count",
     "rate_row_count",
+    "billing_category",
+    "payment_rate_status",
+    "primary_payment_file",
+    "regional_mac_name",
+    "regional_payment_rate",
+    "regional_rate_status",
     "hard_red_flag",
     "hard_red_flag_reasons",
     "review_reason",
@@ -68,6 +74,8 @@ class ReimbursementPolicy:
     mention_count_boost_cap: float
     low_confidence_hard_flag: bool
     use_fallback_policy_scan_when_unmapped: bool
+    zip_mac_csv: str = ""
+    billing_zip: str = ""
 
 
 @dataclass
@@ -84,6 +92,12 @@ class ReimbursementFeatureRow:
     mapped_product_code_count: int = 0
     reimbursement_code_count: int = 0
     rate_row_count: int = 0
+    billing_category: str = ""
+    payment_rate_status: str = ""
+    primary_payment_file: str = ""
+    regional_mac_name: str = ""
+    regional_payment_rate: float | None = None
+    regional_rate_status: str = ""
     hard_red_flag: int = 0
     hard_red_flag_reasons: list[str] | None = None
     review_reason: str = ""
@@ -109,6 +123,26 @@ class CompanyReimbursementEvidence:
     matched_policy_ids: list[str]
 
 
+@dataclass(frozen=True)
+class ReimbursementClassification:
+    ticker: str
+    billing_category: str
+    payment_rate_status: str
+    primary_payment_file: str
+    coverage_score: float | None = None
+    payment_score: float | None = None
+    review_reason: str = ""
+    notes: str = ""
+
+
+@dataclass(frozen=True)
+class ZipMacRule:
+    zip3_start: int
+    zip3_end: int
+    mac_name: str
+    source: str = ""
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build med-device reimbursement and market-access feature rows.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -117,6 +151,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", type=str, default="")
     parser.add_argument("--tickers", type=str, default="")
     parser.add_argument("--max-tickers", type=int, default=0)
+    parser.add_argument("--billing-zip", type=str, default="")
     return parser.parse_args()
 
 
@@ -155,9 +190,16 @@ def cfg_bool(config: dict[str, Any], dotted_key: str, default: bool) -> bool:
     return default
 
 
-def reimbursement_policy(config: dict[str, Any]) -> ReimbursementPolicy:
+def reimbursement_policy(config: dict[str, Any], *, billing_zip_override: str = "") -> ReimbursementPolicy:
     source_ids_raw = cfg_get(config, "reimbursement_features.source_ids", ["cms_coverage_api", "cms_payment_files"])
     source_ids = [str(value).strip() for value in source_ids_raw] if isinstance(source_ids_raw, list) else ["cms_coverage_api", "cms_payment_files"]
+    coverage_weight = cfg_float(config, "reimbursement_features.coverage_weight", 0.60)
+    payment_weight = cfg_float(config, "reimbursement_features.payment_weight", 0.40)
+    if abs((coverage_weight + payment_weight) - 1.0) > 0.0001:
+        raise ValueError(
+            f"reimbursement_features.coverage_weight ({coverage_weight}) + "
+            f"payment_weight ({payment_weight}) must sum to 1.0, got {coverage_weight + payment_weight:.4f}"
+        )
     return ReimbursementPolicy(
         source_ids=[source_id for source_id in source_ids if source_id],
         no_data_score=cfg_float(config, "reimbursement_features.no_data_score", 25.0),
@@ -166,8 +208,8 @@ def reimbursement_policy(config: dict[str, Any]) -> ReimbursementPolicy:
         company_mention_score=cfg_float(config, "reimbursement_features.company_mention_score", 45.0),
         policy_evidence_score=cfg_float(config, "reimbursement_features.policy_evidence_score", 60.0),
         rate_evidence_score=cfg_float(config, "reimbursement_features.rate_evidence_score", 65.0),
-        coverage_weight=cfg_float(config, "reimbursement_features.coverage_weight", 0.60),
-        payment_weight=cfg_float(config, "reimbursement_features.payment_weight", 0.40),
+        coverage_weight=coverage_weight,
+        payment_weight=payment_weight,
         mention_count_boost_per_hit=cfg_float(config, "reimbursement_features.mention_count_boost_per_hit", 0.5),
         mention_count_boost_cap=cfg_float(config, "reimbursement_features.mention_count_boost_cap", 8.0),
         low_confidence_hard_flag=cfg_bool(config, "reimbursement_features.low_confidence_hard_flag", False),
@@ -176,6 +218,8 @@ def reimbursement_policy(config: dict[str, Any]) -> ReimbursementPolicy:
             "reimbursement_features.use_fallback_policy_scan_when_unmapped",
             True,
         ),
+        zip_mac_csv=str(cfg_get(config, "reimbursement_features.zip_mac_csv", "") or "").strip(),
+        billing_zip=billing_zip_override.strip() or str(cfg_get(config, "reimbursement_features.default_billing_zip", "") or "").strip(),
     )
 
 
@@ -205,6 +249,128 @@ def load_companies(conn: Any, *, ticker_filter: set[str], max_tickers: int) -> l
     return out
 
 
+def row_get(row: dict[str, str], *keys: str) -> str:
+    lowered = {str(key).strip().lower(): str(value or "") for key, value in row.items()}
+    for key in keys:
+        value = row.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+        value = lowered.get(key.lower())
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def load_company_classifications(path: Path | None) -> dict[str, ReimbursementClassification]:
+    if path is None or not path.exists():
+        return {}
+    out: dict[str, ReimbursementClassification] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
+            if not ticker:
+                continue
+            if ticker in out:
+                LOGGER.warning("Duplicate ticker in classification CSV; later row overwrites earlier: %s", ticker)
+            out[ticker] = ReimbursementClassification(
+                ticker=ticker,
+                billing_category=row_get(row, "billing_category", "category"),
+                payment_rate_status=row_get(row, "payment_rate_status", "payment_status"),
+                primary_payment_file=row_get(row, "primary_payment_file", "payment_file", "cms_file"),
+                coverage_score=to_float(row_get(row, "coverage_score")),
+                payment_score=to_float(row_get(row, "payment_score")),
+                review_reason=row_get(row, "review_reason"),
+                notes=row_get(row, "notes", "note"),
+            )
+    return out
+
+
+def parse_zip3(raw: object) -> int | None:
+    digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    if len(digits) < 3:
+        return None
+    return int(digits[:3])
+
+
+def load_zip_mac_rules(path: Path | None) -> list[ZipMacRule]:
+    if path is None or not path.exists():
+        return []
+    rules: list[ZipMacRule] = []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            start = parse_zip3(row_get(row, "zip3_start", "zip_prefix", "zip3"))
+            end = parse_zip3(row_get(row, "zip3_end", "zip_prefix", "zip3"))
+            mac_name = row_get(row, "mac_name", "mac")
+            if start is None or end is None or not mac_name:
+                continue
+            rules.append(
+                ZipMacRule(
+                    zip3_start=min(start, end),
+                    zip3_end=max(start, end),
+                    mac_name=mac_name,
+                    source=row_get(row, "source"),
+                )
+            )
+    return rules
+
+
+def mac_for_zip(zip_code: str, rules: list[ZipMacRule]) -> str:
+    zip3 = parse_zip3(zip_code)
+    if zip3 is None:
+        return ""
+    for rule in rules:
+        if rule.zip3_start <= zip3 <= rule.zip3_end:
+            return rule.mac_name
+    return ""
+
+
+def regional_rate_for_codes(
+    conn: Any,
+    *,
+    source_ids: list[str],
+    codes: set[str],
+    billing_zip: str,
+    zip_mac_rules: list[ZipMacRule],
+) -> dict[str, Any]:
+    if not billing_zip:
+        return {}
+    mac_name = mac_for_zip(billing_zip, zip_mac_rules)
+    if not mac_name:
+        return {"regional_rate_status": "zip_mac_not_found", "billing_zip": billing_zip}
+    if not source_ids or not codes:
+        return {"regional_rate_status": "no_matched_codes", "billing_zip": billing_zip, "regional_mac_name": mac_name}
+    source_placeholders = ",".join("?" for _ in source_ids)
+    code_placeholders = ",".join("?" for _ in codes)
+    rows = conn.execute(
+        f"""
+        SELECT c.code, r.payment_rate, r.payment_system, r.effective_date, r.locality
+        FROM fact_reimbursement_rate r
+        JOIN dim_reimbursement_code c
+          ON c.reimbursement_code_id = r.reimbursement_code_id
+        WHERE r.source_id IN ({source_placeholders})
+          AND c.code IN ({code_placeholders})
+          AND LOWER(COALESCE(r.locality, '')) = LOWER(?)
+          AND r.payment_rate IS NOT NULL
+        ORDER BY COALESCE(r.effective_date, '') DESC, r.reimbursement_rate_id DESC
+        """,
+        [*source_ids, *sorted(codes), mac_name],
+    ).fetchall()
+    if not rows:
+        return {"regional_rate_status": "local_mac_rate_not_found", "billing_zip": billing_zip, "regional_mac_name": mac_name}
+    row = rows[0]
+    return {
+        "regional_rate_status": "local_mac_rate_found",
+        "billing_zip": billing_zip,
+        "regional_mac_name": mac_name,
+        "regional_payment_rate": to_float(row["payment_rate"]),
+        "regional_code": str(row["code"] or ""),
+        "regional_payment_system": str(row["payment_system"] or ""),
+        "regional_effective_date": str(row["effective_date"] or ""),
+    }
+
+
 def source_row_counts(conn: Any, source_ids: list[str]) -> tuple[int, int, int]:
     if not source_ids:
         return 0, 0, 0
@@ -222,6 +388,34 @@ def source_row_counts(conn: Any, source_ids: list[str]) -> tuple[int, int, int]:
         source_ids,
     ).fetchone()
     return int(policies["n"] or 0), int(codes["n"] or 0), int(rates["n"] or 0)
+
+
+def mapped_reimbursement_row_count(conn: Any, source_ids: list[str]) -> int:
+    if not source_ids:
+        return 0
+    placeholders = ",".join("?" for _ in source_ids)
+    policy_row = conn.execute(
+        f"SELECT COUNT(*) AS n FROM map_company_reimbursement_policy WHERE source_id IN ({placeholders})",
+        source_ids,
+    ).fetchone()
+    code_row = conn.execute(
+        f"SELECT COUNT(*) AS n FROM map_company_reimbursement_code WHERE source_id IN ({placeholders})",
+        source_ids,
+    ).fetchone()
+    return int(policy_row["n"] or 0) + int(code_row["n"] or 0)
+
+
+def preflight_reimbursement_links(conn: Any, policy: ReimbursementPolicy, *, require_links: bool) -> None:
+    if not require_links:
+        return
+    policy_count, code_count, rate_count = source_row_counts(conn, policy.source_ids)
+    if policy_count + code_count + rate_count <= 0:
+        return
+    mapping_count = mapped_reimbursement_row_count(conn, policy.source_ids)
+    if mapping_count <= 0:
+        raise RuntimeError(
+            "CMS reimbursement source rows exist but company reimbursement mappings are empty; run scripts 14 and 15 before script 11."
+        )
 
 
 def load_policy_search_rows(conn: Any, source_ids: list[str]) -> list[PolicySearchRow]:
@@ -271,7 +465,7 @@ def mapped_product_codes(conn: Any, company_id: int) -> set[str]:
         rows = conn.execute(
             f"""
             SELECT DISTINCT product_code
-            FROM {table}
+            FROM {quote_identifier(table)}
             WHERE company_id = ?
               AND COALESCE(product_code, '') != ''
             """,
@@ -417,11 +611,108 @@ def blended_score(coverage_score: float, payment_score: float, *, policy: Reimbu
     return round((coverage_score * policy.coverage_weight + payment_score * policy.payment_weight) / total, 2)
 
 
-def build_rows(conn: Any, companies: list[Company], *, asof: str, policy: ReimbursementPolicy) -> list[ReimbursementFeatureRow]:
+RECOGNIZED_BUNDLED_PAYMENT_STATUSES = {
+    "bundled_ipps",
+    "bundled_opps",
+    "bundled_opps_ipps",
+    "cash_pay_or_out_of_pocket",
+    "commercial_contract_no_cms",
+    "commercial_vision_or_cash_pay",
+    "component_pricing_no_direct_cms",
+    "developmental_premarket_no_active_billing",
+    "dental_or_cash_pay",
+    "enterprise_saas_no_clinical_code",
+    "esrd_bundle",
+    "external_report_mismatch_guard",
+    "imaging_provider_mpfs_rates",
+    "jurisdictional_mac_priced",
+    "laboratory_overhead_no_direct_code",
+    "large_lab_clfs_array",
+    "pharmacy_benefit_or_ncpdp",
+    "packaged_apc_asc",
+    "packaged_status_n",
+    "procedure_rate_mpfs",
+    "state_public_health_bundle",
+    "upstream_b2b_no_clinical_code",
+    "veterinary_no_cms",
+}
+RATE_EVIDENCE_RESOLVED_REVIEW_REASONS = {
+    "code_mapping_without_payment_rate",
+    "payment_rate_missing_clfs",
+    "payment_rate_missing_dmepos",
+    "payment_rate_missing_mpfs",
+    "payment_rate_missing_opps",
+}
+REIMBURSEMENT_DQ_REASONS = {"cms_reimbursement_data_not_loaded", "code_mapping_without_payment_rate"}
+PRODUCT_CODE_REVIEW_REASON_REPLACEMENTS = {
+    "product_code_missing_clfs": "payment_rate_missing_clfs",
+    "product_code_missing_dmepos": "payment_rate_missing_dmepos",
+    "product_code_missing_mpfs": "payment_rate_missing_mpfs",
+    "product_code_missing_opps": "payment_rate_missing_opps",
+}
+
+
+def adjusted_classification_review_reason(
+    row: ReimbursementFeatureRow,
+    classification: ReimbursementClassification,
+) -> str:
+    reason = classification.review_reason.strip()
+    normalized = reason.lower()
+    if not normalized:
+        return ""
+    if row.rate_row_count > 0 and normalized in RATE_EVIDENCE_RESOLVED_REVIEW_REASONS:
+        return ""
+    if row.reimbursement_code_count > 0 and normalized in PRODUCT_CODE_REVIEW_REASON_REPLACEMENTS:
+        if row.rate_row_count > 0:
+            return ""
+        return PRODUCT_CODE_REVIEW_REASON_REPLACEMENTS[normalized]
+    return reason
+
+
+def apply_company_classification(
+    row: ReimbursementFeatureRow,
+    classification: ReimbursementClassification | None,
+    *,
+    policy: ReimbursementPolicy,
+) -> None:
+    if classification is None:
+        return
+    row.billing_category = classification.billing_category
+    row.payment_rate_status = classification.payment_rate_status
+    row.primary_payment_file = classification.primary_payment_file
+    status = classification.payment_rate_status.strip().lower()
+    review_reason = adjusted_classification_review_reason(row, classification)
+    if status in RECOGNIZED_BUNDLED_PAYMENT_STATUSES and row.rate_row_count <= 0:
+        if classification.coverage_score is not None:
+            row.coverage_clarity_score = max(row.coverage_clarity_score, classification.coverage_score)
+        if classification.payment_score is not None:
+            row.payment_adequacy_score = max(row.payment_adequacy_score, classification.payment_score)
+        row.score = blended_score(row.coverage_clarity_score, row.payment_adequacy_score, policy=policy)
+        row.review_reason = review_reason
+    elif review_reason:
+        row.review_reason = review_reason
+        if classification.coverage_score is not None:
+            row.coverage_clarity_score = max(row.coverage_clarity_score, classification.coverage_score)
+        if classification.payment_score is not None:
+            row.payment_adequacy_score = max(row.payment_adequacy_score, classification.payment_score)
+        row.score = blended_score(row.coverage_clarity_score, row.payment_adequacy_score, policy=policy)
+
+
+def build_rows(
+    conn: Any,
+    companies: list[Company],
+    *,
+    asof: str,
+    policy: ReimbursementPolicy,
+    classifications: dict[str, ReimbursementClassification] | None = None,
+    zip_mac_rules: list[ZipMacRule] | None = None,
+) -> list[ReimbursementFeatureRow]:
     policy_count, global_code_count, global_rate_count = source_row_counts(conn, policy.source_ids)
     policy_rows = load_policy_search_rows(conn, policy.source_ids)
     mapped_evidence = load_mapped_reimbursement_evidence(conn, policy.source_ids)
     use_mapped_evidence = bool(mapped_evidence)
+    classifications = classifications or {}
+    zip_mac_rules = zip_mac_rules or []
     rows: list[ReimbursementFeatureRow] = []
     for company in companies:
         product_codes = mapped_product_codes(conn, company.company_id)
@@ -482,6 +773,22 @@ def build_rows(conn: Any, companies: list[Company], *, asof: str, policy: Reimbu
             row.payment_adequacy_score = policy.no_data_payment_adequacy_score
             row.score = policy.no_data_score
             row.review_reason = "no_company_reimbursement_mapping"
+        classification = classifications.get(company.ticker)
+        apply_company_classification(row, classification, policy=policy)
+        regional_rate = regional_rate_for_codes(
+            conn,
+            source_ids=policy.source_ids,
+            codes=matched_codes,
+            billing_zip=policy.billing_zip,
+            zip_mac_rules=zip_mac_rules,
+        )
+        if regional_rate.get("regional_mac_name"):
+            row.regional_mac_name = str(regional_rate.get("regional_mac_name") or "")
+        row.regional_payment_rate = to_float(regional_rate.get("regional_payment_rate"))
+        row.regional_rate_status = str(regional_rate.get("regional_rate_status") or "")
+        if row.regional_rate_status == "local_mac_rate_found":
+            row.payment_adequacy_score = max(row.payment_adequacy_score, policy.rate_evidence_score)
+            row.score = blended_score(row.coverage_clarity_score, row.payment_adequacy_score, policy=policy)
         if row.review_reason:
             reasons.append(row.review_reason)
         row.hard_red_flag = 1 if policy.low_confidence_hard_flag and reasons else 0
@@ -503,7 +810,14 @@ def build_rows(conn: Any, companies: list[Company], *, asof: str, policy: Reimbu
                 "company_mention_count": mention_count,
                 "matched_rate_row_count": matched_rate_count,
             },
+            "regional_rate_routing": regional_rate,
             "review_reason": row.review_reason,
+            "company_reimbursement_classification": {
+                "billing_category": row.billing_category,
+                "payment_rate_status": row.payment_rate_status,
+                "primary_payment_file": row.primary_payment_file,
+                "notes": classification.notes if classification else "",
+            },
             "score_weights": {
                 "coverage": policy.coverage_weight,
                 "payment": policy.payment_weight,
@@ -525,10 +839,12 @@ def upsert_feature_rows(conn: Any, rows: list[ReimbursementFeatureRow]) -> int:
             asof_date, company_id, ticker, company_name, score,
             coverage_clarity_score, payment_adequacy_score, policy_evidence_count,
             company_mention_count, mapped_product_code_count, reimbursement_code_count,
-            rate_row_count, hard_red_flag, hard_red_flag_reasons, review_reason,
+            rate_row_count, billing_category, payment_rate_status, primary_payment_file,
+            regional_mac_name, regional_payment_rate, regional_rate_status,
+            hard_red_flag, hard_red_flag_reasons, review_reason,
             payload_json, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(asof_date, company_id) DO UPDATE SET
             ticker = excluded.ticker,
             company_name = excluded.company_name,
@@ -540,6 +856,12 @@ def upsert_feature_rows(conn: Any, rows: list[ReimbursementFeatureRow]) -> int:
             mapped_product_code_count = excluded.mapped_product_code_count,
             reimbursement_code_count = excluded.reimbursement_code_count,
             rate_row_count = excluded.rate_row_count,
+            billing_category = excluded.billing_category,
+            payment_rate_status = excluded.payment_rate_status,
+            primary_payment_file = excluded.primary_payment_file,
+            regional_mac_name = excluded.regional_mac_name,
+            regional_payment_rate = excluded.regional_payment_rate,
+            regional_rate_status = excluded.regional_rate_status,
             hard_red_flag = excluded.hard_red_flag,
             hard_red_flag_reasons = excluded.hard_red_flag_reasons,
             review_reason = excluded.review_reason,
@@ -560,6 +882,12 @@ def upsert_feature_rows(conn: Any, rows: list[ReimbursementFeatureRow]) -> int:
                 row.mapped_product_code_count,
                 row.reimbursement_code_count,
                 row.rate_row_count,
+                row.billing_category,
+                row.payment_rate_status,
+                row.primary_payment_file,
+                row.regional_mac_name,
+                row.regional_payment_rate,
+                row.regional_rate_status,
                 row.hard_red_flag,
                 ";".join(row.hard_red_flag_reasons or []),
                 row.review_reason,
@@ -575,13 +903,15 @@ def upsert_feature_rows(conn: Any, rows: list[ReimbursementFeatureRow]) -> int:
 
 def replace_data_quality_issues(conn: Any, rows: list[ReimbursementFeatureRow], *, asof: str) -> int:
     conn.execute(
-        "DELETE FROM data_quality_issues WHERE asof_date = ? AND table_name = ?",
-        (asof, "feature_reimbursement"),
+        "DELETE FROM data_quality_issues WHERE table_name = ? AND asof_date = ?",
+        ("feature_reimbursement", asof),
     )
     issue_rows: list[tuple[Any, ...]] = []
     now = utc_now()
     for row in rows:
         if not row.review_reason:
+            continue
+        if row.review_reason not in REIMBURSEMENT_DQ_REASONS:
             continue
         issue_rows.append(
             (
@@ -639,7 +969,12 @@ def main() -> None:
             base_dir=base_dir,
         )
     )
-    policy = reimbursement_policy(config)
+    policy = reimbursement_policy(config, billing_zip_override=args.billing_zip)
+    classification_raw = str(cfg_get(config, "reimbursement_features.company_classification_csv", "") or "").strip()
+    classifications = load_company_classifications(
+        resolve_path(classification_raw, base_dir=base_dir) if classification_raw else None
+    )
+    zip_mac_rules = load_zip_mac_rules(resolve_path(policy.zip_mac_csv, base_dir=base_dir) if policy.zip_mac_csv else None)
     ticker_filter = {normalize_ticker(value) for value in str(args.tickers or "").split(",") if normalize_ticker(value)}
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
@@ -652,7 +987,22 @@ def main() -> None:
             raise ValueError("No active companies selected")
         run_id = start_run(conn, run_type="build_med_device_reimbursement_features", input_path=config_path)
         try:
-            rows = build_rows(conn, companies, asof=asof, policy=policy)
+            preflight_reimbursement_links(
+                conn,
+                policy,
+                require_links=str(cfg_get(config, "reimbursement_features.require_entity_linking_when_cms_loaded", True))
+                .strip()
+                .lower()
+                in {"1", "true", "yes", "y", "on"},
+            )
+            rows = build_rows(
+                conn,
+                companies,
+                asof=asof,
+                policy=policy,
+                classifications=classifications,
+                zip_mac_rules=zip_mac_rules,
+            )
             upserted = upsert_feature_rows(conn, rows)
             issue_count = replace_data_quality_issues(conn, rows, asof=asof)
             write_csv(output_csv, rows)

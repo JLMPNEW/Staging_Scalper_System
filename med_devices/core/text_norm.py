@@ -37,7 +37,9 @@ def normalize_subsector(raw: object) -> str:
 
 
 def normalize_code(raw: object) -> str:
-    return "".join(ch for ch in str(raw or "").upper().strip() if ch.isalnum())[:12]
+    text = str(raw or "").upper().strip()
+    base = re.split(r"[-\s]", text, maxsplit=1)[0]
+    return "".join(ch for ch in base if ch.isalnum())[:12]
 
 
 def as_bool(raw: object) -> bool:

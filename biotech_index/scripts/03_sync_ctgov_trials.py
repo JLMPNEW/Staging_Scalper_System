@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
@@ -246,6 +247,11 @@ def row_get(row: dict[str, str], *keys: str) -> str:
     return ""
 
 
+def looks_like_nct_id(raw: object) -> bool:
+    text = str(raw or "").strip().upper()
+    return len(text) == 11 and text.startswith("NCT") and text[3:].isdigit()
+
+
 def load_ctgov_search_overrides(path: Path | None, *, default_query_fields: list[str]) -> dict[str, list[SearchTerm]]:
     if path is None or not path.exists():
         return {}
@@ -256,6 +262,8 @@ def load_ctgov_search_overrides(path: Path | None, *, default_query_fields: list
             raise ValueError(f"CTGov search overrides CSV has no header: {path}")
         for row_raw in reader:
             row = {str(k): str(v or "") for k, v in row_raw.items()}
+            if not parse_bool(row_get(row, "enabled", "Enabled"), default=True):
+                continue
             ticker = row_get(row, "ticker", "Ticker", "Tickers").upper().replace(".", "-")
             search_term = row_get(row, "search_term", "SearchTerm", "alias", "Alias")
             if not ticker or not search_term:
@@ -352,10 +360,13 @@ def sync_one_company(
             )
             for search in job.searches:
                 for query_field in search.query_fields:
+                    exact_nct_lookup = str(query_field or "").strip().lower() == "query.term" and looks_like_nct_id(
+                        search.search_term
+                    )
                     found = client.search_studies(
                         alias=search.search_term,
                         query_fields=[query_field],
-                        interventional_only=True,
+                        interventional_only=not exact_nct_lookup,
                     )
                     studies.update(found)
                     if search.link_from_search:

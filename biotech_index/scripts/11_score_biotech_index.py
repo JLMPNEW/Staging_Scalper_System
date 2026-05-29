@@ -43,6 +43,7 @@ from biotech_index.core.pipeline_guards import (  # noqa: E402
     validate_full_universe_coverage,
     validate_layer_freshness,
 )
+from biotech_index.core.scoring_math import convex_risk_drag as shared_convex_risk_drag  # noqa: E402
 
 
 LOGGER = logging.getLogger("score_biotech_index")
@@ -246,15 +247,13 @@ def optional_score(raw_scores: dict[str, Any], row: dict[str, Any], key: str) ->
 
 
 def convex_risk_drag(risk: float, weight: float, config: dict[str, Any], section: str) -> float:
-    base_drag = weight * risk
-    if not as_bool(cfg_get(config, f"{section}.convex_risk_penalty_enabled", False), False):
-        return base_drag
-    convexity = float(cfg_get(config, f"{section}.risk_penalty_convexity", 0.35))
-    inflection = float(cfg_get(config, f"{section}.risk_penalty_inflection", 50.0))
-    if not math.isfinite(inflection) or inflection >= 100.0:
-        raise ValueError(f"{section}.risk_penalty_inflection must be finite and < 100.0, got {inflection}")
-    excess = max(0.0, min(1.0, (risk - inflection) / max(1e-9, 100.0 - inflection)))
-    return base_drag * (1.0 + convexity * excess)
+    return shared_convex_risk_drag(
+        risk,
+        weight,
+        enabled=as_bool(cfg_get(config, f"{section}.convex_risk_penalty_enabled", False), False),
+        convexity=float(cfg_get(config, f"{section}.risk_penalty_convexity", 0.35)),
+        inflection=float(cfg_get(config, f"{section}.risk_penalty_inflection", 50.0)),
+    )
 
 
 def score_confidence_multiplier(
@@ -1059,6 +1058,14 @@ def investment_weight_profile(config: dict[str, Any], commercial: dict[str, Any]
     negative = [name for name, value in weights.items() if value < 0.0]
     if negative:
         raise ValueError(f"Investment weight profile '{profile_name}' has negative weight(s): {', '.join(negative)}")
+    non_finite = [name for name, value in weights.items() if not math.isfinite(value)]
+    if non_finite:
+        raise ValueError(f"Investment weight profile '{profile_name}' has non-finite weight(s): {', '.join(non_finite)}")
+    risk_penalty = float(weights.get("risk_penalty", 0.15))
+    if not 0.0 < risk_penalty <= 1.0:
+        raise ValueError(
+            f"Investment weight profile '{profile_name}' risk_penalty must be in (0, 1], got {risk_penalty}"
+        )
     positive_total = sum(value for name, value in weights.items() if name != "risk_penalty")
     if positive_total <= 1e-12 or abs(positive_total - 1.0) > 1e-3:
         raise ValueError(
@@ -1205,18 +1212,20 @@ def score_rows(
             "mature_defensive_score": mature_defensive,
             "expected_return_quality_score": expected_return_quality,
         }
-        valuation_component_score = (
-            quality_adjusted_valuation_score
-            if as_bool(cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True), True)
-            else valuation_score
+        use_quality_adjusted_valuation = as_bool(
+            cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True),
+            True,
         )
+        use_quality_adjusted_guidance = as_bool(
+            cfg_get(config, "biotech_scoring.use_quality_adjusted_guidance_component", True),
+            True,
+        )
+        valuation_component_score = quality_adjusted_valuation_score if use_quality_adjusted_valuation else valuation_score
         forward_guidance_component_score = (
-            quality_adjusted_guidance_score
-            if as_bool(cfg_get(config, "biotech_scoring.use_quality_adjusted_guidance_component", True), True)
-            else forward_guidance_score
+            quality_adjusted_guidance_score if use_quality_adjusted_guidance else forward_guidance_score
         )
-        used_quality_adjusted_valuation = 1.0 if valuation_component_score == quality_adjusted_valuation_score else 0.0
-        used_quality_adjusted_guidance = 1.0 if forward_guidance_component_score == quality_adjusted_guidance_score else 0.0
+        used_quality_adjusted_valuation = 1.0 if use_quality_adjusted_valuation else 0.0
+        used_quality_adjusted_guidance = 1.0 if use_quality_adjusted_guidance else 0.0
         valuation_quality_adjustment_delta = valuation_score - quality_adjusted_valuation_score
         guidance_quality_adjustment_delta = forward_guidance_score - quality_adjusted_guidance_score
         profile_name, profile_weights = investment_weight_profile(config, commercial)
@@ -1246,8 +1255,8 @@ def score_rows(
         pre_confidence_investment_score = clamp(investment_positive - investment_risk_drag)
         effective_post_confidence_risk_drag = effective_pre_confidence_risk_drag * confidence_multiplier
         confidence_adjusted_score_reduction = pre_confidence_investment_score * (1.0 - confidence_multiplier)
-        effective_total_risk_drag = effective_post_confidence_risk_drag + confidence_adjusted_score_reduction
         investment_score = clamp(pre_confidence_investment_score * confidence_multiplier)
+        effective_total_risk_drag = max(0.0, investment_positive - investment_score)
         raw_opportunity = investment_score if investment_enabled else clinical_opportunity
         core_veto_reasons = core_structural_veto_reasons(payload, commercial, core_veto_settings)
         event_reasons = event_hard_weakness_reasons(payload, policy_settings)
@@ -1583,7 +1592,7 @@ def score_rows(
                     payload,
                     commercial,
                     core_veto_reasons=core_veto_reasons,
-                    force_core_veto_avoid=force_core_veto_avoid,
+                    force_core_veto_avoid=force_core_veto_avoid and bool(core_veto_reasons),
                 ),
                 "primary_nct": ctgov.get("primary_nct", ""),
                 "primary_trial_title": ctgov.get("primary_trial_title", ""),
@@ -1783,6 +1792,7 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
     update_fields = [field for field in fields if field not in {"asof_date", "company_id"}]
     update_clause = ", ".join(f"{field} = excluded.{field}" for field in [*update_fields, "updated_at"])
     with conn:
+        conn.execute("DELETE FROM daily_scores WHERE asof_date = ?", (asof_date,))
         conn.executemany(
             f"""
             INSERT INTO daily_scores(

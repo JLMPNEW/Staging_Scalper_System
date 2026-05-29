@@ -149,6 +149,7 @@ ctgov_audit:
   audit_csv: "ctgov_trial_link_audit.csv"
   review_csv: "ctgov_trial_link_review.csv"
   manual_verification_csv: "ctgov_manual_verification_queue.csv"
+  manual_activation_overrides_csv: "data/ctgov_manual_activation_overrides.csv"
   final_scoring_universe_csv: "ctgov_final_scoring_universe.csv"
   evidence_csv: "ctgov_trial_evidence.csv"
   manifest_json: "ctgov_audit_manifest.json"
@@ -656,6 +657,7 @@ biotech_reports:
   shadow_top_candidates_csv: "biotech_shadow_top20_candidates.csv"
   ranking_diagnostics_csv: "biotech_ranking_order_diagnostics.csv"
   action_tiers:
+    high_confidence_score_min: 55.0
     allocation_rank_max: 10
     allocation_score_min: 50.0
     research_rank_max: 20

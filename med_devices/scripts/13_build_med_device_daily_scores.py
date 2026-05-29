@@ -8,6 +8,7 @@ import logging
 import math
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +18,8 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from med_devices.core.config import DEFAULT_NEUTRAL_SCORE, cfg_get, load_yaml, resolve_path  # noqa: E402
+from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 
@@ -26,16 +27,25 @@ from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 LOGGER = logging.getLogger("build_med_device_daily_scores")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_WEIGHTS = {
-    "fundamental_quality": 0.25,
-    "durable_growth": 0.15,
-    "fda_product": 0.15,
-    "reimbursement": 0.10,
-    "valuation": 0.20,
-    "technical_entry": 0.10,
+    "fundamental_quality": 0.20,
+    "durable_growth": 0.10,
+    "fda_product": 0.17,
+    "reimbursement": 0.15,
+    "valuation": 0.18,
+    "technical_entry": 0.15,
     "sentiment_catalyst": 0.05,
+}
+ALLOWED_FEATURE_TABLES = {
+    "feature_financial_valuation",
+    "feature_fda_product_risk",
+    "feature_reimbursement",
+    "feature_technical_entry",
+    "feature_durable_growth",
+    "feature_sentiment_catalyst",
 }
 FIELDNAMES = [
     "asof_date",
+    "scoring_model_version",
     "rank",
     "company_id",
     "ticker",
@@ -67,6 +77,7 @@ FIELDNAMES = [
 @dataclass
 class ScoreRow:
     asof_date: str
+    scoring_model_version: str
     rank: int
     company_id: int
     ticker: str
@@ -94,6 +105,8 @@ class ScoreRow:
     review_reason: str = ""
     top_positive_drivers: list[str] = field(default_factory=list)
     top_negative_drivers: list[str] = field(default_factory=list)
+    durable_growth_proxy_available: bool = False
+    sentiment_proxy_available: bool = False
 
 
 def parse_args() -> argparse.Namespace:
@@ -126,6 +139,16 @@ def cfg_float(config: dict[str, Any], dotted_key: str, default: float) -> float:
     return value
 
 
+def cfg_bool(config: dict[str, Any], dotted_key: str, default: bool) -> bool:
+    raw = cfg_get(config, dotted_key, default)
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 def component_neutral(config: dict[str, Any], component: str, legacy_key: str, default: float) -> float:
     nested_key = f"scoring.component_neutral_defaults.{component}"
     raw = cfg_get(config, nested_key, None)
@@ -140,6 +163,16 @@ def component_neutral(config: dict[str, Any], component: str, legacy_key: str, d
 def score_or(raw: object, default: float) -> float:
     value = to_float(raw)
     return default if value is None else value
+
+
+def parse_date(raw: object) -> datetime | None:
+    text = str(raw or "").strip()[:10]
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        return None
 
 
 def latest_financial_asof(conn: Any) -> str:
@@ -184,7 +217,11 @@ def load_financial_rows(conn: Any, *, asof: str, ticker_filter: set[str], max_ti
         """
         SELECT *
         FROM feature_financial_valuation
-        WHERE asof_date = ?
+        WHERE asof_date = (
+            SELECT MAX(asof_date)
+            FROM feature_financial_valuation
+            WHERE asof_date <= ?
+        )
         ORDER BY ticker
         """,
         (asof,),
@@ -202,81 +239,278 @@ def load_financial_rows(conn: Any, *, asof: str, ticker_filter: set[str], max_ti
 
 
 def load_latest_feature(conn: Any, table: str, score_col: str, *, asof: str) -> dict[int, dict[str, Any]]:
+    if table not in ALLOWED_FEATURE_TABLES:
+        raise ValueError(f"Unknown feature table: {table}")
     if not table_exists(conn, table):
         return {}
-    columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    table_sql = quote_identifier(table)
+    columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_sql})").fetchall()}
     if not {"company_id", "asof_date", score_col}.issubset(columns):
         return {}
     rows = conn.execute(
         f"""
         SELECT t.*
-        FROM {table} t
+        FROM {table_sql} t
         JOIN (
             SELECT company_id, MAX(asof_date) AS asof_date
-            FROM {table}
+            FROM {table_sql}
             WHERE asof_date <= ?
             GROUP BY company_id
         ) latest ON latest.company_id = t.company_id AND latest.asof_date = t.asof_date
         """,
         (asof,),
     ).fetchall()
-    return {int(row["company_id"]): dict(row) for row in rows}
+    seen: set[int] = set()
+    out: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        company_id = int(row["company_id"])
+        if company_id in seen:
+            LOGGER.warning(
+                "load_latest_feature: duplicate company_id=%d in %s at asof<=%s; keeping first occurrence",
+                company_id,
+                table,
+                asof,
+            )
+            continue
+        seen.add(company_id)
+        out[company_id] = dict(row)
+    return out
 
 
-def percentile(values: list[tuple[int, float]], *, higher_is_better: bool) -> dict[int, float]:
+def feature_row_count(conn: Any, table: str, *, asof: str) -> int:
+    if table not in ALLOWED_FEATURE_TABLES:
+        raise ValueError(f"Unknown feature table: {table}")
+    if not table_exists(conn, table):
+        return 0
+    table_sql = quote_identifier(table)
+    row = conn.execute(f"SELECT COUNT(*) AS n FROM {table_sql} WHERE asof_date <= ?", (asof,)).fetchone()
+    return int(row["n"] or 0) if row is not None else 0
+
+
+def preflight_required_features(conn: Any, *, asof: str) -> None:
+    required = {
+        "feature_financial_valuation": "run script 06 first",
+        "feature_fda_product_risk": "run script 10 first",
+        "feature_reimbursement": "run scripts 14, 15, then 11 first",
+        "feature_technical_entry": "run script 12 first",
+    }
+    missing = [f"{table} ({hint})" for table, hint in required.items() if feature_row_count(conn, table, asof=asof) <= 0]
+    if missing:
+        raise RuntimeError(f"Required upstream feature table(s) are empty as of {asof}: {', '.join(missing)}")
+
+
+def feature_latest_asof(conn: Any, table: str, *, asof: str) -> str:
+    if table not in ALLOWED_FEATURE_TABLES:
+        raise ValueError(f"Unknown feature table: {table}")
+    if not table_exists(conn, table):
+        return ""
+    table_sql = quote_identifier(table)
+    row = conn.execute(f"SELECT MAX(asof_date) AS asof_date FROM {table_sql} WHERE asof_date <= ?", (asof,)).fetchone()
+    return str(row["asof_date"] or "") if row is not None else ""
+
+
+def preflight_feature_freshness(conn: Any, *, asof: str, max_staleness_days: int) -> None:
+    asof_date = parse_date(asof)
+    if asof_date is None:
+        raise ValueError(f"Invalid scoring asof date: {asof}")
+    stale: list[str] = []
+    for table in ("feature_financial_valuation", "feature_fda_product_risk", "feature_reimbursement", "feature_technical_entry"):
+        latest = feature_latest_asof(conn, table, asof=asof)
+        latest_date = parse_date(latest)
+        if latest_date is None:
+            stale.append(f"{table}:missing")
+            continue
+        days_stale = (asof_date - latest_date).days
+        if days_stale < 0 or days_stale > max_staleness_days:
+            stale.append(f"{table}:{days_stale}d")
+    if stale:
+        raise RuntimeError(
+            f"Required upstream feature table(s) are stale for {asof}; max_staleness_days={max_staleness_days}: "
+            + ", ".join(stale)
+        )
+
+
+def percentile(
+    values: list[tuple[int, float]],
+    *,
+    higher_is_better: bool,
+    winsor_low_pct: float = 0.05,
+    winsor_high_pct: float = 0.95,
+) -> dict[int, float]:
     if not values:
         return {}
-    values.sort(key=lambda item: item[1])
-    if len(values) == 1:
-        return {values[0][0]: 50.0}
+    ranked_values = list(values)
+    if len(ranked_values) >= 4:
+        if not 0.0 <= winsor_low_pct < winsor_high_pct <= 1.0:
+            raise ValueError(
+                f"winsor bounds must satisfy 0 <= low < high <= 1, got {winsor_low_pct}, {winsor_high_pct}"
+            )
+        sorted_values = sorted(value for _, value in ranked_values)
+        low_bound = sorted_values[max(0, min(len(sorted_values) - 1, math.ceil(winsor_low_pct * len(sorted_values)) - 1))]
+        high_bound = sorted_values[max(0, min(len(sorted_values) - 1, math.ceil(winsor_high_pct * len(sorted_values)) - 1))]
+        if low_bound > high_bound:
+            low_bound, high_bound = high_bound, low_bound
+        ranked_values = [(company_id, max(low_bound, min(high_bound, value))) for company_id, value in ranked_values]
+    ranked_values.sort(key=lambda item: item[1])
+    if len(ranked_values) == 1:
+        return {ranked_values[0][0]: 50.0}
     out: dict[int, float] = {}
-    denominator = len(values) - 1
-    for rank, (company_id, _) in enumerate(values):
+    denominator = len(ranked_values) - 1
+    for rank, (company_id, _) in enumerate(ranked_values):
         pct = 100.0 * rank / denominator
         out[company_id] = pct if higher_is_better else 100.0 - pct
     return out
 
 
 def durable_growth_proxy(financial_rows: list[dict[str, Any]]) -> dict[int, float]:
-    growth_pairs: list[tuple[int, float]] = []
-    cagr_pairs: list[tuple[int, float]] = []
-    stability_pairs: list[tuple[int, float]] = []
-    rule_pairs: list[tuple[int, float]] = []
     margin_trend_pairs: list[tuple[int, float]] = []
+    rd_growth_pairs: list[tuple[int, float]] = []
+    dilution_pairs: list[tuple[int, float]] = []
+    leverage_pairs: list[tuple[int, float]] = []
+    confidence_pairs: list[tuple[int, float]] = []
     for row in financial_rows:
         company_id = int(row["company_id"])
-        growth = to_float(row.get("revenue_yoy_growth"))
-        cagr = to_float(row.get("revenue_cagr_3y"))
-        stability = to_float(row.get("revenue_growth_stability_5y"))
-        rule = to_float(row.get("rule_of_40"))
-        margin_trend = to_float(row.get("operating_margin_trend_3y")) or to_float(row.get("gross_margin_trend_3y"))
-        if growth is not None:
-            growth_pairs.append((company_id, growth))
-        if cagr is not None:
-            cagr_pairs.append((company_id, cagr))
-        if stability is not None:
-            stability_pairs.append((company_id, stability))
-        if rule is not None:
-            rule_pairs.append((company_id, rule))
+        margin_trend = to_float(row.get("gross_margin_trend_3y"))
+        rd_growth = to_float(row.get("rd_growth_yoy"))
+        dilution = to_float(row.get("shares_yoy_growth"))
+        leverage = to_float(row.get("net_debt_to_revenue"))
+        confidence = to_float(row.get("data_confidence_score"))
         if margin_trend is not None:
             margin_trend_pairs.append((company_id, margin_trend))
-    growth_scores = percentile(growth_pairs, higher_is_better=True)
-    cagr_scores = percentile(cagr_pairs, higher_is_better=True)
-    stability_scores = percentile(stability_pairs, higher_is_better=False)
-    rule_scores = percentile(rule_pairs, higher_is_better=True)
+        if rd_growth is not None:
+            rd_growth_pairs.append((company_id, rd_growth))
+        if dilution is not None:
+            dilution_pairs.append((company_id, dilution))
+        if leverage is not None:
+            leverage_pairs.append((company_id, leverage))
+        if confidence is not None:
+            confidence_pairs.append((company_id, confidence))
     margin_scores = percentile(margin_trend_pairs, higher_is_better=True)
+    rd_scores = percentile(rd_growth_pairs, higher_is_better=True)
+    dilution_scores = percentile(dilution_pairs, higher_is_better=False)
+    leverage_scores = percentile(leverage_pairs, higher_is_better=False)
+    confidence_scores = percentile(confidence_pairs, higher_is_better=True)
     out: dict[int, float] = {}
     for row in financial_rows:
         company_id = int(row["company_id"])
-        out[company_id] = round(
-            0.35 * growth_scores.get(company_id, 50.0)
-            + 0.30 * cagr_scores.get(company_id, 50.0)
-            + 0.15 * stability_scores.get(company_id, 50.0)
-            + 0.10 * rule_scores.get(company_id, 50.0)
-            + 0.10 * margin_scores.get(company_id, 50.0),
-            2,
-        )
+        available_scores = [
+            (margin_scores.get(company_id), 0.30),
+            (rd_scores.get(company_id), 0.20),
+            (dilution_scores.get(company_id), 0.20),
+            (leverage_scores.get(company_id), 0.15),
+            (confidence_scores.get(company_id), 0.15),
+        ]
+        active = [(score, weight) for score, weight in available_scores if score is not None]
+        if len(active) < 2:
+            continue
+        total_weight = sum(weight for _, weight in active)
+        out[company_id] = round(sum(float(score) * weight for score, weight in active) / total_weight, 2)
     return out
+
+
+def sentiment_catalyst_proxy(financial_rows: list[dict[str, Any]]) -> dict[int, float]:
+    surprise_pairs: list[tuple[int, float]] = []
+    for row in financial_rows:
+        surprise = to_float(row.get("quarterly_revenue_surprise_yoy"))
+        if surprise is not None:
+            surprise_pairs.append((int(row["company_id"]), surprise))
+    surprise_scores = percentile(surprise_pairs, higher_is_better=True)
+    return {company_id: round(score, 2) for company_id, score in surprise_scores.items()}
+
+
+def durable_proxy_available(financial_item: dict[str, Any]) -> bool:
+    return (
+        sum(
+            1
+            for key in ("gross_margin_trend_3y", "rd_growth_yoy", "shares_yoy_growth", "net_debt_to_revenue", "data_confidence_score")
+            if to_float(financial_item.get(key)) is not None
+        )
+        >= 2
+    )
+
+
+def upsert_durable_growth_proxy_rows(conn: Any, rows: list[ScoreRow]) -> int:
+    now = utc_now()
+    payload_rows = [
+        (
+            row.asof_date,
+            row.company_id,
+            row.durable_growth_score,
+            json.dumps(
+                {
+                    "source": "daily_score_durable_proxy",
+                    "inputs": [
+                        "gross_margin_trend_3y",
+                        "rd_growth_yoy",
+                        "shares_yoy_growth",
+                        "net_debt_to_revenue",
+                        "data_confidence_score",
+                    ],
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+            now,
+            now,
+        )
+        for row in rows
+        if row.durable_growth_proxy_available
+    ]
+    if not payload_rows:
+        return 0
+    conn.executemany(
+        """
+        INSERT INTO feature_durable_growth(asof_date, company_id, score, payload_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(asof_date, company_id) DO UPDATE SET
+            score = excluded.score,
+            payload_json = excluded.payload_json,
+            updated_at = excluded.updated_at
+        """,
+        payload_rows,
+    )
+    return len(payload_rows)
+
+
+def upsert_sentiment_proxy_rows(conn: Any, rows: list[ScoreRow]) -> int:
+    now = utc_now()
+    payload_rows = [
+        (
+            row.asof_date,
+            row.company_id,
+            row.sentiment_catalyst_score,
+            row.sentiment_catalyst_score,
+            50.0,
+            json.dumps(
+                {"source": "daily_score_quarterly_revenue_surprise_proxy", "input": "quarterly_revenue_surprise_yoy"},
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+            now,
+            now,
+        )
+        for row in rows
+        if row.sentiment_proxy_available
+    ]
+    if not payload_rows:
+        return 0
+    conn.executemany(
+        """
+        INSERT INTO feature_sentiment_catalyst(
+            asof_date, company_id, score, estimate_revision_proxy_score, event_risk_score,
+            payload_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(asof_date, company_id) DO UPDATE SET
+            score = excluded.score,
+            estimate_revision_proxy_score = excluded.estimate_revision_proxy_score,
+            event_risk_score = excluded.event_risk_score,
+            payload_json = excluded.payload_json,
+            updated_at = excluded.updated_at
+        """,
+        payload_rows,
+    )
+    return len(payload_rows)
 
 
 def score_drivers(row: ScoreRow) -> tuple[list[str], list[str]]:
@@ -293,6 +527,34 @@ def score_drivers(row: ScoreRow) -> tuple[list[str], list[str]]:
     below_neutral = [(name, score) for name, score in items if score < 50.0]
     negatives = [f"{name}:{score:.1f}" for name, score in sorted(below_neutral, key=lambda item: item[1])[:3]]
     return positives, negatives
+
+
+def weighted_available_score(scores: dict[str, float], available: dict[str, bool], weights: dict[str, float]) -> float:
+    active_keys = [key for key, is_available in available.items() if is_available and key in scores]
+    total_weight = sum(weights[key] for key in active_keys)
+    if total_weight <= 0:
+        return DEFAULT_NEUTRAL_SCORE
+    return sum(scores[key] * weights[key] for key in active_keys) / total_weight
+
+
+def value_trap_discount(value_trap_score: float, *, start: float = 40.0) -> float:
+    if value_trap_score <= start:
+        return 1.0
+    return max(0.50, 1.0 - ((value_trap_score - start) / (2.0 * (100.0 - start))))
+
+
+def cross_sectional_percentile_rank(rows: list[ScoreRow]) -> None:
+    pairs = [
+        (idx, row.composite_score)
+        for idx, row in enumerate(rows)
+        if row.composite_score is not None and math.isfinite(row.composite_score)
+    ]
+    if len(pairs) <= 1:
+        return
+    pairs.sort(key=lambda item: item[1])
+    denominator = len(pairs) - 1
+    for rank, (idx, _) in enumerate(pairs):
+        rows[idx].composite_score = round(100.0 * rank / denominator, 2)
 
 
 def load_previous_scores(conn: Any, *, asof: str) -> dict[int, dict[str, Any]]:
@@ -334,8 +596,10 @@ def classify(row: ScoreRow, *, gates: dict[str, float]) -> None:
         reasons.append("technical_below_gate")
     if row.hard_red_flag:
         reasons.append("hard_red_flag")
-    if row.value_trap_score >= gates["value_trap_max"]:
+    if row.value_trap_score >= gates["value_trap_hard_max"]:
         reasons.append("value_trap")
+    elif row.value_trap_score >= gates["value_trap_max"]:
+        reasons.append("value_trap_soft_gate")
 
     row.review_reason = ";".join(reasons)
     row.gate_status = "pass" if not reasons else "fail"
@@ -370,26 +634,30 @@ def build_rows(
     financial_rows = load_financial_rows(conn, asof=asof, ticker_filter=ticker_filter, max_tickers=max_tickers)
     fda_rows = load_latest_feature(conn, "feature_fda_product_risk", "fda_product_score", asof=asof)
     reimbursement_rows = load_latest_feature(conn, "feature_reimbursement", "score", asof=asof)
-    technical_rows = load_latest_feature(conn, "feature_technical_entry", "score", asof=asof)
+    technical_rows = load_latest_feature(conn, "feature_technical_entry", "technical_score", asof=asof)
     durable_rows = load_latest_feature(conn, "feature_durable_growth", "score", asof=asof)
     sentiment_rows = load_latest_feature(conn, "feature_sentiment_catalyst", "score", asof=asof)
     durable_proxy = durable_growth_proxy(financial_rows)
+    sentiment_proxy = sentiment_catalyst_proxy(financial_rows)
     neutral_fundamental = component_neutral(config, "fundamental_quality", "scoring.neutral_fundamental_quality_score", 50.0)
     neutral_durable = component_neutral(config, "durable_growth", "scoring.neutral_durable_growth_score", 50.0)
     neutral_reimbursement = component_neutral(config, "reimbursement", "scoring.neutral_reimbursement_score", 50.0)
-    neutral_fda_no_data = component_neutral(config, "fda_product", "scoring.neutral_fda_no_data_score", 55.0)
+    neutral_fda_no_data = component_neutral(config, "fda_product", "scoring.neutral_fda_no_data_score", 45.0)
     neutral_valuation = component_neutral(config, "valuation", "scoring.neutral_valuation_score", 50.0)
     neutral_technical = component_neutral(config, "technical_entry", "scoring.neutral_technical_entry_score", 50.0)
     neutral_sentiment = component_neutral(config, "sentiment_catalyst", "scoring.neutral_sentiment_catalyst_score", 50.0)
     gates = {
-        "composite_min": cfg_float(config, "scoring.gates.composite_min", 75.0),
-        "fundamental_quality_min": cfg_float(config, "scoring.gates.fundamental_quality_min", 65.0),
-        "fda_product_min": cfg_float(config, "scoring.gates.fda_product_min", 55.0),
-        "reimbursement_min": cfg_float(config, "scoring.gates.reimbursement_min", 50.0),
-        "valuation_min": cfg_float(config, "scoring.gates.valuation_min", 60.0),
-        "technical_entry_min": cfg_float(config, "scoring.gates.technical_entry_min", 55.0),
+        "composite_min": cfg_float(config, "scoring.gates.composite_min", 70.0),
+        "fundamental_quality_min": cfg_float(config, "scoring.gates.fundamental_quality_min", 60.0),
+        "fda_product_min": cfg_float(config, "scoring.gates.fda_product_min", 50.0),
+        "reimbursement_min": cfg_float(config, "scoring.gates.reimbursement_min", 45.0),
+        "valuation_min": cfg_float(config, "scoring.gates.valuation_min", 55.0),
+        "technical_entry_min": cfg_float(config, "scoring.gates.technical_entry_min", 50.0),
         "value_trap_max": cfg_float(config, "scoring.gates.value_trap_max", 40.0),
+        "value_trap_hard_max": cfg_float(config, "scoring.gates.value_trap_hard_max", 85.0),
     }
+    rank_composite = cfg_bool(config, "scoring.cross_sectional_composite_rank", True)
+    model_version = str(cfg_get(config, "scoring.model_version", "med_device_score_v1") or "med_device_score_v1").strip()
     rows: list[ScoreRow] = []
     for item in financial_rows:
         company_id = int(item["company_id"])
@@ -398,28 +666,42 @@ def build_rows(
         technical_item = technical_rows.get(company_id, {})
         durable_item = durable_rows.get(company_id, {})
         sentiment_item = sentiment_rows.get(company_id, {})
+        has_durable_proxy = company_id in durable_proxy
+        has_sentiment_proxy = company_id in sentiment_proxy
+        durable_table_score = to_float(durable_item.get("score")) if durable_item else None
+        sentiment_table_score = to_float(sentiment_item.get("score")) if sentiment_item else None
+        has_durable_live_score = durable_table_score is not None or has_durable_proxy
+        has_sentiment_live_score = sentiment_table_score is not None or has_sentiment_proxy
         fda_hard_flag = int(fda_item.get("hard_red_flag") or 0) if fda_item else 0
         fda_data_available = int(fda_item.get("fda_data_available") or 0) if fda_item else 0
         reimbursement_hard_flag = int(reimbursement_item.get("hard_red_flag") or 0) if reimbursement_item else 0
+        fda_review_state = str(fda_item.get("review_adjusted_fda_state") or "") if fda_item else ""
         fda_score = score_or(fda_item.get("fda_product_score"), neutral_fda_no_data) if fda_item else neutral_fda_no_data
-        if fda_item and not fda_data_available:
+        if fda_item and not fda_data_available and not fda_review_state.startswith("manual_fda_footprint_"):
             fda_score = neutral_fda_no_data
         durable_score = (
             score_or(durable_item.get("score"), durable_proxy.get(company_id, neutral_durable))
             if durable_item
             else durable_proxy.get(company_id, neutral_durable)
         )
+        sentiment_score = (
+            score_or(sentiment_item.get("score"), sentiment_proxy.get(company_id, neutral_sentiment))
+            if sentiment_item
+            else sentiment_proxy.get(company_id, neutral_sentiment)
+        )
+        technical_score = score_or(technical_item.get("technical_score"), neutral_technical) if technical_item else neutral_technical
         live_components = [
             to_float(item.get("fundamental_quality_score_v1")) is not None,
-            bool(durable_item) or any(to_float(item.get(key)) is not None for key in ("revenue_yoy_growth", "revenue_cagr_3y", "rule_of_40")),
-            bool(fda_item) and bool(fda_data_available),
-            bool(reimbursement_item),
+            has_durable_live_score,
+            bool(fda_item) and to_float(fda_item.get("fda_product_score")) is not None,
+            bool(reimbursement_item) and to_float(reimbursement_item.get("score")) is not None,
             to_float(item.get("valuation_score_v1")) is not None,
-            bool(technical_item),
-            bool(sentiment_item),
+            bool(technical_item) and to_float(technical_item.get("technical_score")) is not None,
+            has_sentiment_live_score,
         ]
         row = ScoreRow(
             asof_date=asof,
+            scoring_model_version=model_version,
             rank=0,
             company_id=company_id,
             ticker=normalize_ticker(item.get("ticker")),
@@ -431,8 +713,8 @@ def build_rows(
             fda_data_available=fda_data_available,
             reimbursement_score=score_or(reimbursement_item.get("score"), neutral_reimbursement) if reimbursement_item else neutral_reimbursement,
             valuation_score=score_or(item.get("valuation_score_v1"), neutral_valuation),
-            technical_entry_score=score_or(technical_item.get("score"), neutral_technical) if technical_item else neutral_technical,
-            sentiment_catalyst_score=score_or(sentiment_item.get("score"), neutral_sentiment) if sentiment_item else neutral_sentiment,
+            technical_entry_score=technical_score,
+            sentiment_catalyst_score=sentiment_score,
             value_trap_score=to_float(item.get("value_trap_score")) or 0.0,
             live_component_count=sum(1 for value in live_components if value),
             data_completeness_score=round(100.0 * sum(1 for value in live_components if value) / len(live_components), 2),
@@ -445,28 +727,51 @@ def build_rows(
                 ]
                 if reason
             ),
+            durable_growth_proxy_available=has_durable_proxy,
+            sentiment_proxy_available=has_sentiment_proxy,
         )
         row.fda_product_score = row.fda_product_score if row.fda_product_score is not None else 50.0
         row.durable_growth_score = row.durable_growth_score if row.durable_growth_score is not None else 50.0
         row.reimbursement_score = row.reimbursement_score if row.reimbursement_score is not None else neutral_reimbursement
         row.technical_entry_score = row.technical_entry_score if row.technical_entry_score is not None else neutral_technical
         row.sentiment_catalyst_score = row.sentiment_catalyst_score if row.sentiment_catalyst_score is not None else neutral_sentiment
+        component_scores = {
+            "fundamental_quality": row.fundamental_quality_score,
+            "durable_growth": row.durable_growth_score,
+            "fda_product": row.fda_product_score,
+            "reimbursement": row.reimbursement_score,
+            "valuation": row.valuation_score,
+            "technical_entry": row.technical_entry_score,
+            "sentiment_catalyst": row.sentiment_catalyst_score,
+        }
+        component_available = {
+            "fundamental_quality": live_components[0],
+            "durable_growth": live_components[1],
+            "fda_product": live_components[2],
+            "reimbursement": live_components[3],
+            "valuation": live_components[4],
+            "technical_entry": live_components[5],
+            "sentiment_catalyst": live_components[6],
+        }
+        raw_composite = weighted_available_score(component_scores, component_available, weights)
         row.composite_score = round(
-            clamp(
-                weights["fundamental_quality"] * row.fundamental_quality_score
-                + weights["durable_growth"] * row.durable_growth_score
-                + weights["fda_product"] * row.fda_product_score
-                + weights["reimbursement"] * row.reimbursement_score
-                + weights["valuation"] * row.valuation_score
-                + weights["technical_entry"] * row.technical_entry_score
-                + weights["sentiment_catalyst"] * row.sentiment_catalyst_score
-            ),
+            clamp(raw_composite * value_trap_discount(row.value_trap_score)),
             2,
         )
+        rows.append(row)
+    if rank_composite:
+        cross_sectional_percentile_rank(rows)
+    for row in rows:
         classify(row, gates=gates)
         row.top_positive_drivers, row.top_negative_drivers = score_drivers(row)
-        rows.append(row)
-    rows.sort(key=lambda item: item.composite_score, reverse=True)
+    rows.sort(
+        key=lambda item: (
+            -item.composite_score,
+            -item.fundamental_quality_score,
+            -item.data_completeness_score,
+            item.ticker,
+        )
+    )
     for rank, row in enumerate(rows, start=1):
         row.rank = rank
     previous_scores = load_previous_scores(conn, asof=asof)
@@ -491,15 +796,16 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
     conn.executemany(
         """
         INSERT INTO med_device_daily_scores(
-            asof_date, company_id, composite_score, fundamental_quality_score,
+            asof_date, company_id, scoring_model_version, composite_score, fundamental_quality_score,
             durable_growth_score, fda_product_score, reimbursement_score, valuation_score,
             technical_entry_score, sentiment_catalyst_score, value_trap_score, rank,
             data_completeness_score, live_component_count, composite_score_delta, rank_delta,
             classification_change, classification, gate_status, review_reason, hard_red_flag, hard_red_flag_reasons,
             top_positive_drivers_json, top_negative_drivers_json, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(asof_date, company_id) DO UPDATE SET
+            scoring_model_version = excluded.scoring_model_version,
             composite_score = excluded.composite_score,
             fundamental_quality_score = excluded.fundamental_quality_score,
             durable_growth_score = excluded.durable_growth_score,
@@ -528,6 +834,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
             (
                 row.asof_date,
                 row.company_id,
+                row.scoring_model_version,
                 row.composite_score,
                 row.fundamental_quality_score,
                 row.durable_growth_score,
@@ -593,6 +900,12 @@ def main() -> None:
         run_id = start_run(conn, run_type="build_med_device_daily_scores", input_path=config_path)
         try:
             asof = args.asof.strip() or latest_financial_asof(conn)
+            preflight_required_features(conn, asof=asof)
+            preflight_feature_freshness(
+                conn,
+                asof=asof,
+                max_staleness_days=int(cfg_get(config, "scoring.max_feature_staleness_days", 7)),
+            )
             rows = build_rows(
                 conn,
                 asof=asof,
@@ -602,6 +915,8 @@ def main() -> None:
                 max_tickers=int(args.max_tickers),
             )
             upserted = upsert_rows(conn, rows)
+            upsert_durable_growth_proxy_rows(conn, rows)
+            upsert_sentiment_proxy_rows(conn, rows)
             write_csv(output_csv, rows)
             message = f"asof={asof} rows={upserted} output={output_csv}"
             finish_run(conn, run_id=run_id, status="success", row_count=upserted, message=message)

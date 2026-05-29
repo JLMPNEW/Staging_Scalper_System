@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import requests
+import requests  # type: ignore[reportMissingModuleSource]
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +81,17 @@ DEFAULT_METRIC_CONCEPTS: dict[str, list[str]] = {
     ],
     "gross_profit": ["GrossProfit"],
     "operating_income": ["OperatingIncomeLoss", "ProfitLossFromOperatingActivities"],
+    "cost_of_revenue": [
+        "CostOfRevenue",
+        "CostOfGoodsAndServicesSold",
+        "CostOfGoodsSold",
+        "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization",
+    ],
+    "selling_general_admin": [
+        "SellingGeneralAndAdministrativeExpense",
+        "GeneralAndAdministrativeExpense",
+        "SellingAndMarketingExpense",
+    ],
     "net_income": ["NetIncomeLoss", "ProfitLoss"],
     "operating_cash_flow": [
         "NetCashProvidedByUsedInOperatingActivities",
@@ -90,7 +101,9 @@ DEFAULT_METRIC_CONCEPTS: dict[str, list[str]] = {
     ],
     "capital_expenditures": [
         "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsToAcquirePropertyAndEquipment",
         "PaymentsToAcquireProductiveAssets",
+        "PaymentsToAcquireOtherProductiveAssets",
         "PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities",
     ],
     "research_and_development": [
@@ -125,26 +138,54 @@ DEFAULT_METRIC_CONCEPTS: dict[str, list[str]] = {
         "NumberOfSharesIssued",
     ],
 }
+DEFAULT_CAPEX_COMPONENT_CONCEPTS = [
+    "PaymentsToAcquireBuildings",
+    "PaymentsToAcquireOtherPropertyPlantAndEquipment",
+    "PaymentsToAcquireMachineryAndEquipment",
+    "PaymentsToAcquireFurnitureAndFixtures",
+    "PaymentsToAcquireLeaseholdImprovements",
+]
 DEFAULT_DEBT_DIRECT_CONCEPTS = [
     "DebtAndFinanceLeaseObligations",
     "LongTermDebtAndFinanceLeaseObligations",
     "LongTermDebt",
     "Debt",
     "Borrowings",
+    "FinanceLeaseLiability",
+    "DebtInstrumentCarryingAmount",
+    "NotesPayable",
+    "ConvertibleDebt",
+    "SecuredDebt",
 ]
 DEFAULT_DEBT_CURRENT_CONCEPTS = [
     "LongTermDebtCurrent",
     "LongTermDebtAndFinanceLeaseObligationsCurrent",
+    "LongTermDebtAndCapitalLeaseObligationsCurrent",
     "ShortTermBorrowings",
     "ShortTermDebt",
     "CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings",
     "CurrentPortionOfLongtermBorrowings",
     "ShorttermBorrowings",
+    "FinanceLeaseLiabilityCurrent",
+    "ConvertibleDebtCurrent",
+    "ConvertibleNotesPayableCurrent",
+    "NotesPayableCurrent",
+    "OtherNotesPayableCurrent",
+    "NotesPayableRelatedPartiesClassifiedCurrent",
+    "SecuredDebtCurrent",
+    "LinesOfCreditCurrent",
 ]
 DEFAULT_DEBT_NONCURRENT_CONCEPTS = [
     "LongTermDebtNoncurrent",
     "LongTermDebtAndFinanceLeaseObligationsNoncurrent",
+    "LongTermDebtAndCapitalLeaseObligations",
+    "LongTermDebtAndCapitalLeaseObligationsNoncurrent",
     "LongtermBorrowings",
+    "FinanceLeaseLiabilityNoncurrent",
+    "ConvertibleDebtNoncurrent",
+    "LongTermNotesPayable",
+    "NotesPayableRelatedPartiesNoncurrent",
+    "SecuredDebtNoncurrent",
 ]
 
 
@@ -188,6 +229,7 @@ class SecIngestionPolicy:
     debt_direct_concepts: list[str]
     debt_current_concepts: list[str]
     debt_noncurrent_concepts: list[str]
+    capex_component_concepts: list[str]
     composite_debt_concept_rank: int
     preferred_units: dict[str, set[str]]
 
@@ -312,6 +354,10 @@ def sec_ingestion_policy(config: dict[str, Any]) -> SecIngestionPolicy:
         debt_direct_concepts=concept_list(debt_cfg.get("direct"), DEFAULT_DEBT_DIRECT_CONCEPTS),
         debt_current_concepts=concept_list(debt_cfg.get("current"), DEFAULT_DEBT_CURRENT_CONCEPTS),
         debt_noncurrent_concepts=concept_list(debt_cfg.get("noncurrent"), DEFAULT_DEBT_NONCURRENT_CONCEPTS),
+        capex_component_concepts=concept_list(
+            cfg_get(config, "sec_ingestion.capex_component_concepts", DEFAULT_CAPEX_COMPONENT_CONCEPTS),
+            DEFAULT_CAPEX_COMPONENT_CONCEPTS,
+        ),
         composite_debt_concept_rank=int(cfg_get(config, "sec_ingestion.composite_debt_concept_rank", 1000)),
         preferred_units=preferred_units_map(cfg_get(config, "sec_ingestion.preferred_units", {})),
     )
@@ -739,9 +785,78 @@ def build_debt_map(
     return out
 
 
+def build_composite_capex_map(
+    companyfacts: dict[str, Any],
+    policy: SecIngestionPolicy | None = None,
+) -> dict[tuple[str, str, str], FactObservation]:
+    policy = policy or sec_ingestion_policy({})
+    direct = build_metric_map(
+        companyfacts,
+        "capital_expenditures",
+        policy.metric_concepts.get("capital_expenditures", DEFAULT_METRIC_CONCEPTS["capital_expenditures"]),
+        policy,
+    )
+    component_best: dict[tuple[str, str, str, str], FactObservation] = {}
+    for obs in flatten_metric_observations(companyfacts, "capital_expenditures", policy.capex_component_concepts, policy):
+        key = (obs.period_end, obs.fiscal_period, obs.form, obs.concept)
+        existing = component_best.get(key)
+        if existing is None or observation_sort_key(obs) > observation_sort_key(existing):
+            component_best[key] = obs
+
+    component_groups: dict[tuple[str, str, str], list[FactObservation]] = {}
+    for key, obs in component_best.items():
+        component_groups.setdefault(key[:3], []).append(obs)
+
+    out = dict(direct)
+    for key, observations in component_groups.items():
+        if key in out:
+            continue
+        if not observations:
+            continue
+        observations.sort(key=lambda obs: (obs.concept_rank, obs.concept))
+        template = observations[0]
+        out[key] = FactObservation(
+            metric="capital_expenditures",
+            concept="composite_capex_components",
+            unit=template.unit,
+            value=sum(max(0.0, obs.value) for obs in observations),
+            period_start=template.period_start,
+            period_end=template.period_end,
+            fiscal_year=template.fiscal_year,
+            fiscal_period=template.fiscal_period,
+            form=template.form,
+            filed_date=max(obs.filed_date for obs in observations),
+            accession_nodash=template.accession_nodash,
+            frame=template.frame,
+            concept_rank=policy.composite_debt_concept_rank + 1,
+        )
+    return out
+
+
 def observation_value(observations: dict[str, FactObservation | None], metric: str) -> float | None:
     obs = observations.get(metric)
     return obs.value if obs is not None else None
+
+
+def has_primary_statement_evidence(observations: dict[str, FactObservation | None]) -> bool:
+    return any(observations.get(metric) is not None for metric in PRIMARY_FINANCIAL_OBSERVATION_ORDER)
+
+
+def has_balance_sheet_evidence(observations: dict[str, FactObservation | None]) -> bool:
+    return any(
+        observations.get(metric) is not None
+        for metric in ("cash_and_investments", "total_assets", "stockholders_equity")
+    )
+
+
+def derived_payload(concept: str, *, inputs: dict[str, float | None], note: str) -> dict[str, Any]:
+    return {
+        "concept": concept,
+        "unit": "USD",
+        "derived": True,
+        "inputs": {key: value for key, value in inputs.items() if value is not None},
+        "note": note,
+    }
 
 
 def selected_financial_observation(observations: dict[str, FactObservation | None]) -> FactObservation | None:
@@ -778,6 +893,7 @@ def build_financial_statement_rows(
         metric: build_metric_map(companyfacts, metric, concepts, policy)
         for metric, concepts in policy.metric_concepts.items()
     }
+    metric_maps["capital_expenditures"] = build_composite_capex_map(companyfacts, policy)
     metric_maps["total_debt"] = build_debt_map(companyfacts, policy)
     keys = sorted(set().union(*(set(mapping.keys()) for mapping in metric_maps.values())))
     rows: list[dict[str, Any]] = []
@@ -799,6 +915,65 @@ def build_financial_statement_rows(
             for metric, obs in observations.items()
             if obs is not None
         }
+        primary_evidence = has_primary_statement_evidence(observations)
+        balance_sheet_evidence = has_balance_sheet_evidence(observations)
+        research_and_development = observation_value(observations, "research_and_development")
+        if research_and_development is None and primary_evidence:
+            research_and_development = 0.0
+            payload["research_and_development"] = derived_payload(
+                "assumed_zero_not_separately_reported",
+                inputs={},
+                note="No SEC companyfacts R&D expense fact was present for this statement period.",
+            )
+
+        if capex is None and ocf is not None:
+            capex = 0.0
+            payload["capital_expenditures"] = derived_payload(
+                "assumed_zero_not_separately_reported",
+                inputs={"operating_cash_flow": ocf},
+                note="Operating cash flow was reported but no cash capital-expenditure fact was present.",
+            )
+
+        total_debt = observation_value(observations, "total_debt")
+        if total_debt is None and balance_sheet_evidence:
+            total_debt = 0.0
+            payload["total_debt"] = derived_payload(
+                "assumed_zero_no_debt_fact",
+                inputs={},
+                note="Balance-sheet facts were reported but no recognized debt or finance-lease fact was present.",
+            )
+
+        operating_income = observation_value(observations, "operating_income")
+        if operating_income is None:
+            gross_profit = observation_value(observations, "gross_profit")
+            revenue = observation_value(observations, "revenue")
+            sg_and_a = observation_value(observations, "selling_general_admin")
+            cost_of_revenue = observation_value(observations, "cost_of_revenue")
+            rd_for_derivation = research_and_development or 0.0
+            if gross_profit is not None and sg_and_a is not None:
+                operating_income = gross_profit - sg_and_a - rd_for_derivation
+                payload["operating_income"] = derived_payload(
+                    "derived_gross_profit_less_sga_and_rd",
+                    inputs={
+                        "gross_profit": gross_profit,
+                        "selling_general_admin": sg_and_a,
+                        "research_and_development": rd_for_derivation,
+                    },
+                    note="Direct operating-income fact was absent; derived from reported gross profit and operating-expense components.",
+                )
+            elif revenue is not None and cost_of_revenue is not None and sg_and_a is not None:
+                operating_income = revenue - cost_of_revenue - sg_and_a - rd_for_derivation
+                payload["operating_income"] = derived_payload(
+                    "derived_revenue_less_cost_of_revenue_sga_and_rd",
+                    inputs={
+                        "revenue": revenue,
+                        "cost_of_revenue": cost_of_revenue,
+                        "selling_general_admin": sg_and_a,
+                        "research_and_development": rd_for_derivation,
+                    },
+                    note="Direct operating-income fact was absent; derived from reported revenue and operating-cost components.",
+                )
+
         rows.append(
             {
                 "company_id": company.company_id,
@@ -810,15 +985,15 @@ def build_financial_statement_rows(
                 "accession_nodash": selected_accession(observations),
                 "revenue": observation_value(observations, "revenue"),
                 "gross_profit": observation_value(observations, "gross_profit"),
-                "operating_income": observation_value(observations, "operating_income"),
+                "operating_income": operating_income,
                 "net_income": observation_value(observations, "net_income"),
                 "operating_cash_flow": ocf,
                 "capital_expenditures": capex,
                 "free_cash_flow": (ocf - capex) if ocf is not None and capex is not None else None,
-                "research_and_development": observation_value(observations, "research_and_development"),
+                "research_and_development": research_and_development,
                 "interest_expense": observation_value(observations, "interest_expense"),
                 "cash_and_investments": observation_value(observations, "cash_and_investments"),
-                "total_debt": observation_value(observations, "total_debt"),
+                "total_debt": total_debt,
                 "total_assets": observation_value(observations, "total_assets"),
                 "stockholders_equity": observation_value(observations, "stockholders_equity"),
                 "shares_outstanding": observation_value(observations, "shares_outstanding"),

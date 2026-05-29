@@ -85,6 +85,9 @@ class LinkPolicy:
     max_policy_rows: int
     code_source_ids: list[str] | None = None
     override_csv: str = ""
+    manual_rate_csv: str = ""
+    manual_rate_audit_csv: str = ""
+    manual_rate_validation_tolerance_pct: float = 5.0
     unmapped_output_csv: str = ""
     enable_descriptor_matching: bool = True
     descriptor_confidence: float = 70.0
@@ -150,6 +153,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--unmapped-output-csv", type=Path, default=None)
+    parser.add_argument("--manual-rate-audit-csv", type=Path, default=None)
     parser.add_argument("--tickers", type=str, default="")
     parser.add_argument("--max-policies", type=int, default=0)
     parser.add_argument("--min-confidence", type=float, default=0.0)
@@ -193,6 +197,11 @@ def link_policy(config: dict[str, Any]) -> LinkPolicy:
         max_policy_rows=max(0, int(cfg_get(config, "reimbursement_entity_linking.max_policy_rows", 0))),
         code_source_ids=[source_id for source_id in code_source_ids if source_id],
         override_csv=str(cfg_get(config, "reimbursement_entity_linking.override_csv", "") or "").strip(),
+        manual_rate_csv=str(cfg_get(config, "reimbursement_entity_linking.manual_rate_csv", "") or "").strip(),
+        manual_rate_audit_csv=str(cfg_get(config, "reimbursement_entity_linking.manual_rate_audit_csv", "") or "").strip(),
+        manual_rate_validation_tolerance_pct=float(
+            cfg_get(config, "reimbursement_entity_linking.manual_rate_validation_tolerance_pct", 5.0)
+        ),
         unmapped_output_csv=str(cfg_get(config, "reimbursement_entity_linking.unmapped_output_csv", "") or "").strip(),
         enable_descriptor_matching=as_bool(
             cfg_get(config, "reimbursement_entity_linking.enable_descriptor_matching", True),
@@ -244,6 +253,15 @@ def add_alias(
     existing = aliases.get(key)
     if existing is None or confidence > existing.confidence:
         aliases[key] = CompanyAlias(company_id, ticker, company_name, norm, method, confidence)
+
+
+def alias_confidence_score(raw: object) -> float:
+    value = to_float(raw)
+    if value is None:
+        return 100.0
+    if 0.0 <= value <= 1.0:
+        return value * 100.0
+    return value
 
 
 def build_aliases(conn: Any, *, ticker_filter: set[str], policy: LinkPolicy) -> list[CompanyAlias]:
@@ -309,18 +327,29 @@ def build_aliases(conn: Any, *, ticker_filter: set[str], policy: LinkPolicy) -> 
             """,
             company_ids,
         ).fetchall()
+        alias_companies: dict[str, set[int]] = {}
+        for row in alias_rows:
+            if int(row["is_manual"] or 0):
+                continue
+            term = normalize_org_name(str(row["alias_norm"] or row["alias_raw"] or ""))
+            if term:
+                alias_companies.setdefault(term, set()).add(int(row["company_id"]))
+        ambiguous_terms = {term for term, company_ids in alias_companies.items() if len(company_ids) > 1}
         for row in alias_rows:
             company_id = int(row["company_id"])
             ticker, company_name = meta[company_id]
-            raw_confidence = to_float(row["confidence"]) or 1.0
-            confidence = min(98.0, max(0.0, raw_confidence * 100.0))
-            method = "manual_alias" if int(row["is_manual"] or 0) else "company_alias"
+            is_manual = int(row["is_manual"] or 0)
+            term = str(row["alias_norm"] or row["alias_raw"] or "")
+            if not is_manual and normalize_org_name(term) in ambiguous_terms:
+                continue
+            confidence = min(98.0, max(0.0, alias_confidence_score(row["confidence"])))
+            method = "manual_alias" if is_manual else "company_alias"
             add_alias(
                 aliases,
                 company_id=company_id,
                 ticker=ticker,
                 company_name=company_name,
-                term=str(row["alias_norm"] or row["alias_raw"] or ""),
+                term=term,
                 method=method,
                 confidence=confidence,
                 min_length=policy.min_term_length,
@@ -438,6 +467,249 @@ def reimbursement_code_ids(conn: Any, codes: set[str], *, source_ids: list[str] 
     for row in rows:
         out.setdefault(str(row["code"] or ""), []).append(int(row["reimbursement_code_id"]))
     return out
+
+
+def ensure_manual_reimbursement_code(
+    conn: Any,
+    *,
+    code: str,
+    code_type: str,
+    source_id: str,
+    short_description: str,
+    long_description: str,
+) -> int:
+    now = utc_now()
+    normalized_type = normalize_org_name(code_type or "HCPCS").replace(" ", "_")[:24] or "HCPCS"
+    existing = conn.execute(
+        """
+        SELECT reimbursement_code_id
+        FROM dim_reimbursement_code
+        WHERE code_type = ?
+          AND code = ?
+          AND COALESCE(effective_date, '') = ''
+        """,
+        (normalized_type, code),
+    ).fetchone()
+    if existing is not None:
+        reimbursement_code_id = int(existing["reimbursement_code_id"])
+        conn.execute(
+            """
+            UPDATE dim_reimbursement_code
+            SET short_description = COALESCE(NULLIF(?, ''), short_description),
+                long_description = COALESCE(NULLIF(?, ''), long_description),
+                source_id = COALESCE(NULLIF(?, ''), source_id),
+                updated_at = ?
+            WHERE reimbursement_code_id = ?
+            """,
+            (short_description, long_description, source_id, now, reimbursement_code_id),
+        )
+        return reimbursement_code_id
+    cursor = conn.execute(
+        """
+        INSERT INTO dim_reimbursement_code(
+            code_type, code, short_description, long_description, source_id, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (normalized_type, code, short_description or None, long_description or None, source_id or None, now, now),
+    )
+    return int(cursor.lastrowid)
+
+
+def upsert_manual_reimbursement_rate(
+    conn: Any,
+    *,
+    reimbursement_code_id: int,
+    payment_system: str,
+    effective_date: str,
+    locality: str,
+    payment_rate: float | None,
+    status_indicator: str,
+    apc: str,
+    drg: str,
+    source_id: str,
+    payload: dict[str, Any],
+) -> None:
+    now = utc_now()
+    existing = conn.execute(
+        """
+        SELECT reimbursement_rate_id
+        FROM fact_reimbursement_rate
+        WHERE reimbursement_code_id = ?
+          AND payment_system = ?
+          AND COALESCE(effective_date, '') = COALESCE(?, '')
+          AND COALESCE(locality, '') = COALESCE(?, '')
+          AND COALESCE(source_id, '') = COALESCE(?, '')
+        """,
+        (reimbursement_code_id, payment_system, effective_date or None, locality or None, source_id),
+    ).fetchone()
+    payload_json = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+    values = (
+        reimbursement_code_id,
+        payment_system,
+        effective_date or None,
+        locality or None,
+        apc or None,
+        drg or None,
+        payment_rate,
+        status_indicator or None,
+        source_id,
+        payload_json,
+        now,
+    )
+    if existing is not None:
+        conn.execute(
+            """
+            UPDATE fact_reimbursement_rate
+            SET apc = ?, drg = ?, payment_rate = ?, status_indicator = ?,
+                payload_json = ?, updated_at = ?
+            WHERE reimbursement_rate_id = ?
+            """,
+            (apc or None, drg or None, payment_rate, status_indicator or None, payload_json, now, int(existing["reimbursement_rate_id"])),
+        )
+        return
+    conn.execute(
+        """
+        INSERT INTO fact_reimbursement_rate(
+            reimbursement_code_id, payment_system, effective_date, locality, apc, drg,
+            payment_rate, status_indicator, source_id, payload_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (*values, now),
+    )
+
+
+def official_rate_validation(
+    conn: Any,
+    *,
+    reimbursement_code_id: int,
+    manual_payment_rate: float | None,
+    tolerance_pct: float,
+) -> dict[str, Any]:
+    if manual_payment_rate is None:
+        return {
+            "validation_status": "non_flat_rate_status",
+            "official_rate_count": 0,
+            "nearest_official_rate": "",
+            "official_rate_delta_pct": "",
+            "official_payment_system": "",
+            "official_locality": "",
+        }
+    rows = conn.execute(
+        """
+        SELECT payment_system, locality, effective_date, payment_rate
+        FROM fact_reimbursement_rate
+        WHERE reimbursement_code_id = ?
+          AND payment_rate IS NOT NULL
+          AND LOWER(payment_system) NOT LIKE '%manual%'
+          AND LOWER(payment_system) NOT LIKE '%benchmark%'
+          AND LOWER(payment_system) NOT LIKE '%override%'
+        """,
+        (reimbursement_code_id,),
+    ).fetchall()
+    if not rows:
+        return {
+            "validation_status": "manual_benchmark_unverified",
+            "official_rate_count": 0,
+            "nearest_official_rate": "",
+            "official_rate_delta_pct": "",
+            "official_payment_system": "",
+            "official_locality": "",
+        }
+    nearest = min(rows, key=lambda item: abs(float(item["payment_rate"] or 0.0) - manual_payment_rate))
+    nearest_rate = float(nearest["payment_rate"] or 0.0)
+    if abs(nearest_rate) <= 1e-12:
+        delta_pct = 0.0 if abs(manual_payment_rate) <= 1e-12 else 100.0
+    else:
+        delta_pct = abs(manual_payment_rate - nearest_rate) / abs(nearest_rate) * 100.0
+    status = "official_rate_match" if delta_pct <= tolerance_pct else "official_rate_conflict"
+    return {
+        "validation_status": status,
+        "official_rate_count": len(rows),
+        "nearest_official_rate": round(nearest_rate, 4),
+        "official_rate_delta_pct": round(delta_pct, 4),
+        "official_payment_system": str(nearest["payment_system"] or ""),
+        "official_locality": str(nearest["locality"] or ""),
+    }
+
+
+def load_manual_rate_rows(
+    conn: Any,
+    path: Path,
+    *,
+    policy: LinkPolicy,
+    audit_rows: list[dict[str, Any]] | None = None,
+) -> int:
+    if not path.exists():
+        return 0
+    count = 0
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for raw_row in reader:
+            code = normalize_code(row_get(raw_row, "code", "reimbursement_code", "hcpcs", "cpt"))
+            if not code:
+                continue
+            code_type = row_get(raw_row, "code_type", "code_system") or "HCPCS"
+            source_id = row_get(raw_row, "source_id") or ((policy.code_source_ids or policy.source_ids or ["cms_payment_files"])[0])
+            reimbursement_code_id = ensure_manual_reimbursement_code(
+                conn,
+                code=code,
+                code_type=code_type,
+                source_id=source_id,
+                short_description=row_get(raw_row, "short_description", "description"),
+                long_description=row_get(raw_row, "long_description", "notes"),
+            )
+            payment_rate = to_float(row_get(raw_row, "payment_rate", "rate", "payment_amount"))
+            status_indicator = row_get(raw_row, "status_indicator", "status")
+            if payment_rate is None and not status_indicator:
+                continue
+            validation = official_rate_validation(
+                conn,
+                reimbursement_code_id=reimbursement_code_id,
+                manual_payment_rate=payment_rate,
+                tolerance_pct=policy.manual_rate_validation_tolerance_pct,
+            )
+            upsert_manual_reimbursement_rate(
+                conn,
+                reimbursement_code_id=reimbursement_code_id,
+                payment_system=row_get(raw_row, "payment_system") or "manual_benchmark",
+                effective_date=row_get(raw_row, "effective_date"),
+                locality=row_get(raw_row, "locality") or "national",
+                payment_rate=payment_rate,
+                status_indicator=status_indicator,
+                apc=row_get(raw_row, "apc"),
+                drg=row_get(raw_row, "drg"),
+                source_id=source_id,
+                payload={
+                    "manual_rate_row": {str(key): str(value or "") for key, value in raw_row.items()},
+                    "rate_basis": row_get(raw_row, "rate_basis"),
+                    "notes": row_get(raw_row, "notes"),
+                    "official_rate_validation": validation,
+                },
+            )
+            if audit_rows is not None:
+                audit_rows.append(
+                    {
+                        "code": code,
+                        "code_type": code_type,
+                        "payment_system": row_get(raw_row, "payment_system") or "manual_benchmark",
+                        "effective_date": row_get(raw_row, "effective_date"),
+                        "locality": row_get(raw_row, "locality") or "national",
+                        "payment_rate": "" if payment_rate is None else payment_rate,
+                        "status_indicator": status_indicator,
+                        "validation_status": validation["validation_status"],
+                        "official_rate_count": validation["official_rate_count"],
+                        "nearest_official_rate": validation["nearest_official_rate"],
+                        "official_rate_delta_pct": validation["official_rate_delta_pct"],
+                        "official_payment_system": validation["official_payment_system"],
+                        "official_locality": validation["official_locality"],
+                        "rate_basis": row_get(raw_row, "rate_basis"),
+                        "notes": row_get(raw_row, "notes"),
+                    }
+                )
+            count += 1
+    return count
 
 
 def build_matches(conn: Any, aliases: list[CompanyAlias], policies: list[PolicyRow], *, min_confidence: float) -> list[MatchRow]:
@@ -775,27 +1047,21 @@ def load_override_matches(
             if confidence < min_confidence:
                 continue
             source_id = row_get(raw_row, "source_id") or ((policy.code_source_ids or policy.source_ids or ["cms_payment_files"])[0])
+            code_type = row_get(raw_row, "code_type", "code_system") or "HCPCS"
+            short_description = row_get(raw_row, "short_description", "description", "product_name")
+            long_description = row_get(raw_row, "long_description", "notes")
+            manual_code_id = ensure_manual_reimbursement_code(
+                conn,
+                code=code,
+                code_type=code_type,
+                source_id=source_id,
+                short_description=short_description,
+                long_description=long_description,
+            )
             code_ids = reimbursement_code_ids(conn, {code}, source_ids=policy.code_source_ids or policy.source_ids)
-            company_id, company_name = company
             if not code_ids.get(code):
-                matches.append(
-                    MatchRow(
-                        company_id,
-                        ticker,
-                        company_name,
-                        None,
-                        "manual_override",
-                        "",
-                        None,
-                        code,
-                        confidence,
-                        row_get(raw_row, "mapping_method") or "manual_override",
-                        row_get(raw_row, "matched_term", "product_name", "notes"),
-                        row_get(raw_row, "notes", "product_name"),
-                        source_id,
-                    )
-                )
-                continue
+                code_ids = {code: [manual_code_id]}
+            company_id, company_name = company
             for code_id in code_ids[code]:
                 matches.append(
                     MatchRow(
@@ -1028,6 +1294,31 @@ def write_unmapped_csv(path: Path, company_meta: dict[int, tuple[str, str]], map
         writer.writerows(rows)
 
 
+def write_manual_rate_audit_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    fieldnames = [
+        "code",
+        "code_type",
+        "payment_system",
+        "effective_date",
+        "locality",
+        "payment_rate",
+        "status_indicator",
+        "validation_status",
+        "official_rate_count",
+        "nearest_official_rate",
+        "official_rate_delta_pct",
+        "official_payment_system",
+        "official_locality",
+        "rate_basis",
+        "notes",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def main() -> None:
     configure_utc_logging()
     args = parse_args()
@@ -1056,6 +1347,13 @@ def main() -> None:
         )
     )
     policy = link_policy(config)
+    manual_rate_audit_csv = (
+        args.manual_rate_audit_csv.expanduser().resolve()
+        if args.manual_rate_audit_csv
+        else resolve_path(policy.manual_rate_audit_csv, base_dir=base_dir)
+        if policy.manual_rate_audit_csv
+        else None
+    )
     min_confidence = float(args.min_confidence or policy.min_auto_confidence)
     ticker_filter = {normalize_ticker(value) for value in str(args.tickers or "").split(",") if normalize_ticker(value)}
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
@@ -1084,6 +1382,15 @@ def main() -> None:
                         min_confidence=min_confidence,
                     )
             )
+            manual_rate_count = 0
+            manual_rate_audit_rows: list[dict[str, Any]] = []
+            if policy.manual_rate_csv:
+                manual_rate_count = load_manual_rate_rows(
+                    conn,
+                    resolve_path(policy.manual_rate_csv, base_dir=base_dir),
+                    policy=policy,
+                    audit_rows=manual_rate_audit_rows,
+                )
             matches = dedupe_matches(matches)
             if policy.replace_existing_mappings:
                 with conn:
@@ -1095,9 +1402,12 @@ def main() -> None:
             write_csv(output_csv, matches)
             mapped_company_ids = load_mapped_company_ids(conn, sorted(company_meta), policy=policy)
             write_unmapped_csv(unmapped_output_csv, company_meta, mapped_company_ids)
+            if manual_rate_audit_csv is not None:
+                write_manual_rate_audit_csv(manual_rate_audit_csv, manual_rate_audit_rows)
             message = (
                 f"policies_scanned={len(policies)} aliases={len(aliases)} matches={len(matches)} "
                 f"policy_maps={policy_count} code_maps={code_count} mapped_companies={len(mapped_company_ids)} output={output_csv} "
+                f"manual_rates={manual_rate_count} manual_rate_audit={manual_rate_audit_csv or ''} "
                 f"unmapped_output={unmapped_output_csv}"
             )
             finish_run(conn, run_id=run_id, status="success", row_count=len(matches), message=message)

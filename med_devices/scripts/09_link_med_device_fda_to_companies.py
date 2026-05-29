@@ -132,10 +132,17 @@ ALLOWED_FACT_TABLES = {
 ALIAS_SOURCE_PRIORITY = {
     "manual_override": 5,
     "extra_alias_csv": 4,
+    "fda_footprint_csv": 4,
     "dim_company_alias": 3,
     "company_name_fragment": 2,
     "company_name": 2,
     "ticker": 1,
+}
+EXCLUDED_MAPPING_METHODS = {
+    "do_not_map",
+    "non_us_traded_parent",
+    "not_in_investible_universe",
+    "out_of_universe",
 }
 
 
@@ -174,6 +181,15 @@ class ResolvedCompany:
     company_name: str
 
 
+@dataclass(frozen=True)
+class CompanyFootprint:
+    company: ResolvedCompany
+    primary_fda_entity: str
+    product_codes: tuple[str, ...]
+    premarket_numbers: tuple[str, ...]
+    fei_numbers: tuple[str, ...]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Link FDA manufacturers/sponsors to public med-device companies.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -182,6 +198,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-confidence", type=float, default=None)
     parser.add_argument("--high-volume-threshold", type=int, default=None)
     parser.add_argument("--extra-alias-csv", type=Path, default=None, help="Optional CSV: ticker,alias_raw[,source].")
+    parser.add_argument(
+        "--footprint-csv",
+        type=Path,
+        default=None,
+        help="Optional CSV with ticker,primary_fda_entity,premarket_numbers,fei_numbers.",
+    )
     parser.add_argument(
         "--manual-overrides-csv",
         type=Path,
@@ -272,6 +294,48 @@ def row_get(row: dict[str, str], *keys: str) -> str:
     return ""
 
 
+def method_key(raw: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(raw or "").strip().lower()).strip("_")
+
+
+def is_excluded_match(match: ManufacturerMatch) -> bool:
+    return match.company_id is None and method_key(match.method) in EXCLUDED_MAPPING_METHODS
+
+
+def split_multi_value(raw: object) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in re.split(r"[;|]", str(raw or "")):
+        value = item.strip()
+        if value and value not in seen:
+            out.append(value)
+            seen.add(value)
+    return out
+
+
+def normalize_submission_identifier(raw: object) -> str:
+    value = re.sub(r"[^A-Z0-9-]+", "", str(raw or "").upper().strip())
+    if not value or not any(ch.isdigit() for ch in value):
+        return ""
+    unsupported = {
+        "510KDENOVOPIPELINE",
+        "510KPIPELINE",
+        "CLASSIREGISTRY",
+        "DISTRIBUTIONONLY",
+        "DMF",
+        "FEI-ONLY",
+        "FEIONLY",
+        "MASTERFILE",
+        "PMA-PIPELINE",
+        "PMAPIPELINE",
+    }
+    return "" if value in unsupported else value
+
+
+def normalize_fei(raw: object) -> str:
+    return re.sub(r"[^0-9]+", "", str(raw or "").strip())
+
+
 def load_company_lookup(conn: Any) -> tuple[dict[int, ResolvedCompany], dict[str, ResolvedCompany]]:
     by_id: dict[int, ResolvedCompany] = {}
     by_ticker: dict[str, ResolvedCompany] = {}
@@ -294,7 +358,56 @@ def load_company_lookup(conn: Any) -> tuple[dict[int, ResolvedCompany], dict[str
     return by_id, by_ticker
 
 
-def build_aliases(conn: Any, *, extra_alias_csv: Path | None = None) -> list[CompanyAlias]:
+def load_company_footprints(conn: Any, path: Path | None) -> list[CompanyFootprint]:
+    if path is None:
+        return []
+    if not path.exists():
+        LOGGER.warning("Configured FDA footprint CSV does not exist: %s", path)
+        return []
+    _, by_ticker = load_company_lookup(conn)
+    out: list[CompanyFootprint] = []
+    for row in read_csv_flexible(path):
+        ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
+        company = by_ticker.get(ticker)
+        if company is None:
+            continue
+        primary_entity = row_get(row, "primary_fda_entity", "fda_entity", "manufacturer_name")
+        premarket_numbers = tuple(
+            value
+            for value in (normalize_submission_identifier(item) for item in split_multi_value(row_get(row, "premarket_numbers", "premarket_number")))
+            if value
+        )
+        product_codes = tuple(
+            value
+            for value in (
+                re.sub(r"[^A-Z0-9]+", "", item.upper().strip()) for item in split_multi_value(row_get(row, "product_codes", "product_code"))
+            )
+            if value
+        )
+        fei_numbers = tuple(
+            value for value in (normalize_fei(item) for item in split_multi_value(row_get(row, "fei_numbers", "fei_number"))) if value
+        )
+        if not primary_entity and not product_codes and not premarket_numbers and not fei_numbers:
+            continue
+        out.append(
+            CompanyFootprint(
+                company=company,
+                primary_fda_entity=primary_entity,
+                product_codes=product_codes,
+                premarket_numbers=premarket_numbers,
+                fei_numbers=fei_numbers,
+            )
+        )
+    LOGGER.info("Loaded FDA footprint link records: rows=%d path=%s", len(out), path)
+    return out
+
+
+def build_aliases(
+    conn: Any,
+    *,
+    extra_alias_csv: Path | None = None,
+    footprint_csv: Path | None = None,
+) -> list[CompanyAlias]:
     companies = conn.execute(
         """
         SELECT company_id, ticker, company_name
@@ -314,7 +427,7 @@ def build_aliases(conn: Any, *, extra_alias_csv: Path | None = None) -> list[Com
             if source != "company_name" and (normalize_ticker(fragment) == ticker or len(core) <= 2):
                 continue
             tokens = name_tokens(core)
-            if not tokens and source not in {"manual_override", "extra_alias_csv"}:
+            if not tokens and source not in {"manual_override", "extra_alias_csv", "fda_footprint_csv"}:
                 continue
             key = (company_id, core)
             existing_idx = seen_index.get(key)
@@ -376,6 +489,15 @@ def build_aliases(conn: Any, *, extra_alias_csv: Path | None = None) -> list[Com
         LOGGER.info("Loaded FDA/company extra aliases: rows=%d path=%s", loaded, extra_alias_csv)
     elif extra_alias_csv is not None:
         LOGGER.warning("Configured FDA extra alias CSV does not exist: %s", extra_alias_csv)
+    for footprint in load_company_footprints(conn, footprint_csv):
+        if footprint.primary_fda_entity:
+            add(
+                footprint.company.company_id,
+                footprint.company.ticker,
+                footprint.company.company_name,
+                footprint.primary_fda_entity,
+                "fda_footprint_csv",
+            )
     return aliases
 
 
@@ -447,7 +569,7 @@ def score_alias(manufacturer_name: str, alias: CompanyAlias, *, token_score_weig
     alias_first = alias.alias_core.split()[0] if alias.alias_core.split() else ""
     if len(overlap) > 1 and manufacturer_first and manufacturer_first == alias_first:
         score += 3.0
-    if alias.source == "extra_alias_csv" and len(overlap) > 1:
+    if alias.source in {"extra_alias_csv", "fda_footprint_csv"} and len(overlap) > 1:
         score += 3.0
     return min(91.0, score), f"token_overlap:{alias.source}:{','.join(sorted(overlap))}"
 
@@ -547,6 +669,16 @@ def load_manual_overrides(conn: Any, path: Path | None) -> dict[tuple[str, str],
     rows = read_csv_flexible(path)
     loaded = 0
     for row in rows:
+        method = row_get(row, "mapping_method", "method") or "manual_override"
+        normalized_method = method_key(method)
+        reason = row_get(row, "review_reason", "note", "notes")
+        raw_confidence = row_get(row, "confidence", "mapping_confidence")
+        confidence = 0.0 if normalized_method in EXCLUDED_MAPPING_METHODS else 99.0
+        if raw_confidence:
+            try:
+                confidence = float(raw_confidence)
+            except ValueError:
+                LOGGER.warning("Ignoring invalid manual override confidence: %s", row)
         ticker = normalize_ticker(row_get(row, "ticker", "mapped_ticker", "symbol"))
         company_id_text = row_get(row, "company_id", "mapped_company_id")
         company: ResolvedCompany | None = None
@@ -555,23 +687,34 @@ def load_manual_overrides(conn: Any, path: Path | None) -> dict[tuple[str, str],
         if company is None and ticker:
             company = by_ticker.get(ticker)
         if company is None:
+            if normalized_method in EXCLUDED_MAPPING_METHODS:
+                match = ManufacturerMatch(
+                    None,
+                    "",
+                    "",
+                    confidence,
+                    normalized_method,
+                    reason or "excluded_from_investible_universe",
+                    matched_alias=row_get(row, "alias_raw", "alias", "manufacturer_name", "fda_manufacturer_name"),
+                    matched_alias_source="manual_override",
+                    manual_override_used=1,
+                )
+                manufacturer_id = row_get(row, "fda_manufacturer_id", "manufacturer_id")
+                manufacturer_name = row_get(row, "manufacturer_name", "fda_manufacturer_name", "alias_raw", "alias")
+                if manufacturer_id.isdigit():
+                    out[("id", manufacturer_id)] = match
+                if manufacturer_name:
+                    out[("name", normalize_org_name(manufacturer_name))] = match
+                loaded += 1
+                continue
             LOGGER.warning("Skipping FDA manual override with unresolved company: %s", row)
             continue
-        confidence = 99.0
-        raw_confidence = row_get(row, "confidence", "mapping_confidence")
-        if raw_confidence:
-            try:
-                confidence = float(raw_confidence)
-            except ValueError:
-                LOGGER.warning("Ignoring invalid manual override confidence: %s", row)
-        method = row_get(row, "mapping_method", "method") or "manual_override"
-        reason = row_get(row, "review_reason", "note", "notes")
         match = ManufacturerMatch(
             company.company_id,
             company.ticker,
             company.company_name,
             confidence,
-            method,
+            normalized_method or method,
             reason,
             matched_alias=row_get(row, "alias_raw", "alias", "manufacturer_name", "fda_manufacturer_name"),
             matched_alias_source="manual_override",
@@ -621,9 +764,185 @@ def update_fact_company_ids(conn: Any, *, min_confidence: float) -> None:
                   AND m.mapping_confidence >= ?
             )
             WHERE fda_manufacturer_id IS NOT NULL
+              AND COALESCE(company_id, -1) != COALESCE((
+                SELECT parent_company_id
+                FROM dim_fda_manufacturer m
+                WHERE m.fda_manufacturer_id = {table}.fda_manufacturer_id
+                  AND m.mapping_confidence >= ?
+              ), -1)
             """,
-            (min_confidence,),
+            (min_confidence, min_confidence),
         )
+
+
+def approval_submission_clause(identifier: str) -> tuple[str, list[str]]:
+    if identifier.startswith("P") and re.match(r"^P[0-9]{5,}", identifier):
+        return "(submission_number = ? OR submission_number LIKE ?)", [identifier, f"{identifier}-%"]
+    return "submission_number = ?", [identifier]
+
+
+def org_names_corroborate(left: str, right: str) -> bool:
+    left_core = strip_suffixes(normalize_org_name(left))
+    right_core = strip_suffixes(normalize_org_name(right))
+    if not left_core or not right_core:
+        return False
+    if left_core == right_core or whole_word_substring(left_core, right_core):
+        return True
+    left_tokens = name_tokens(left_core)
+    right_tokens = name_tokens(right_core)
+    if not left_tokens or not right_tokens:
+        return False
+    overlap = left_tokens & right_tokens
+    if len(overlap) >= 2:
+        coverage = len(overlap) / max(1, min(len(left_tokens), len(right_tokens)))
+        return coverage >= 0.67
+    if len(overlap) == 1:
+        token = next(iter(overlap))
+        return strong_token(token) and (len(left_tokens) == 1 or len(right_tokens) == 1)
+    return False
+
+
+def approval_candidate_is_confirmed(footprint: CompanyFootprint, row: Any) -> bool:
+    manufacturer_name = str(row["manufacturer_name"] or "")
+    # Exact submission numbers are still not enough by themselves; analyst-supplied IDs can be stale
+    # or wrong. Require the FDA applicant/manufacturer to corroborate the ticker's FDA footprint.
+    return (
+        org_names_corroborate(footprint.primary_fda_entity, manufacturer_name)
+        or org_names_corroborate(footprint.company.company_name, manufacturer_name)
+    )
+
+
+def apply_footprint_fact_links(conn: Any, footprints: list[CompanyFootprint]) -> dict[str, int]:
+    counts = {
+        "approval_rows": 0,
+        "manufacturer_rows": 0,
+        "inspection_rows": 0,
+        "compliance_rows": 0,
+        "conflict_rows": 0,
+        "unconfirmed_approval_rows": 0,
+    }
+    if not footprints:
+        return counts
+    now = utc_now()
+    for footprint in footprints:
+        company = footprint.company
+        for submission_number in footprint.premarket_numbers:
+            clause, params = approval_submission_clause(submission_number)
+            approval_rows = conn.execute(
+                f"""
+                SELECT a.fda_approval_id, a.company_id, a.fda_manufacturer_id,
+                       a.submission_number, a.product_code, a.device_name,
+                       m.manufacturer_name, m.parent_company_id, m.mapping_confidence
+                FROM fact_fda_approval a
+                LEFT JOIN dim_fda_manufacturer m
+                  ON m.fda_manufacturer_id = a.fda_manufacturer_id
+                WHERE {clause}
+                """,
+                params,
+            ).fetchall()
+            for approval in approval_rows:
+                if not approval_candidate_is_confirmed(footprint, approval):
+                    counts["unconfirmed_approval_rows"] += 1
+                    LOGGER.warning(
+                        "Skipping unconfirmed FDA footprint approval link: ticker=%s submission=%s product_code=%s applicant=%s",
+                        company.ticker,
+                        str(approval["submission_number"] or ""),
+                        str(approval["product_code"] or ""),
+                        str(approval["manufacturer_name"] or ""),
+                    )
+                    continue
+                if approval["company_id"] is not None and int(approval["company_id"]) != company.company_id:
+                    counts["conflict_rows"] += 1
+                    LOGGER.warning(
+                        "FDA footprint approval link has existing company conflict: ticker=%s submission=%s mapped_company_id=%s",
+                        company.ticker,
+                        str(approval["submission_number"] or ""),
+                        approval["company_id"],
+                    )
+                    continue
+                manufacturer_id = approval["fda_manufacturer_id"]
+                if manufacturer_id is not None:
+                    cur = conn.execute(
+                        """
+                        UPDATE dim_fda_manufacturer
+                        SET parent_company_id = ?,
+                            mapping_confidence = CASE WHEN mapping_confidence > 99.0 THEN mapping_confidence ELSE 99.0 END,
+                            mapping_method = CASE WHEN mapping_confidence > 99.0 THEN mapping_method ELSE 'fda_footprint_premarket' END,
+                            updated_at = ?
+                        WHERE fda_manufacturer_id = ?
+                          AND (
+                            parent_company_id IS NULL
+                            OR parent_company_id = ?
+                            OR mapping_confidence < 95.0
+                          )
+                        """,
+                        (company.company_id, now, int(manufacturer_id), company.company_id),
+                    )
+                    counts["manufacturer_rows"] += max(0, cur.rowcount if cur.rowcount is not None else 0)
+                cur = conn.execute(
+                    """
+                    UPDATE fact_fda_approval
+                    SET company_id = ?,
+                        updated_at = ?
+                    WHERE fda_approval_id = ?
+                      AND (
+                        company_id IS NULL
+                        OR company_id = ?
+                      )
+                    """,
+                    (company.company_id, now, int(approval["fda_approval_id"]), company.company_id),
+                )
+                counts["approval_rows"] += max(0, cur.rowcount if cur.rowcount is not None else 0)
+        if footprint.fei_numbers:
+            placeholders = ", ".join("?" for _ in footprint.fei_numbers)
+            cur = conn.execute(
+                f"""
+                UPDATE dim_fda_manufacturer
+                SET parent_company_id = ?,
+                    mapping_confidence = CASE WHEN mapping_confidence > 99.0 THEN mapping_confidence ELSE 99.0 END,
+                    mapping_method = CASE WHEN mapping_confidence > 99.0 THEN mapping_method ELSE 'fda_footprint_fei' END,
+                    updated_at = ?
+                WHERE fei_number IN ({placeholders})
+                  AND (
+                    parent_company_id IS NULL
+                    OR parent_company_id = ?
+                    OR mapping_confidence < 95.0
+                  )
+                """,
+                (company.company_id, now, *footprint.fei_numbers, company.company_id),
+            )
+            counts["manufacturer_rows"] += max(0, cur.rowcount if cur.rowcount is not None else 0)
+            if table_exists(conn, "fact_fda_inspection"):
+                cur = conn.execute(
+                    f"""
+                    UPDATE fact_fda_inspection
+                    SET company_id = ?,
+                        updated_at = ?
+                    WHERE fei_number IN ({placeholders})
+                      AND (
+                        company_id IS NULL
+                        OR company_id = ?
+                      )
+                    """,
+                    (company.company_id, now, *footprint.fei_numbers, company.company_id),
+                )
+                counts["inspection_rows"] += max(0, cur.rowcount if cur.rowcount is not None else 0)
+            if table_exists(conn, "fact_fda_compliance_action"):
+                cur = conn.execute(
+                    f"""
+                    UPDATE fact_fda_compliance_action
+                    SET company_id = ?,
+                        updated_at = ?
+                    WHERE fei_number IN ({placeholders})
+                      AND (
+                        company_id IS NULL
+                        OR company_id = ?
+                      )
+                    """,
+                    (company.company_id, now, *footprint.fei_numbers, company.company_id),
+                )
+                counts["compliance_rows"] += max(0, cur.rowcount if cur.rowcount is not None else 0)
+    return counts
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -676,6 +995,21 @@ def main() -> None:
         if extra_alias_raw
         else None
     )
+    footprint_raw = str(
+        cfg_get(
+            config,
+            "fda_entity_linking.footprint_csv",
+            cfg_get(config, "fda_features.footprint_csv", ""),
+        )
+        or ""
+    ).strip()
+    footprint_csv = (
+        args.footprint_csv.expanduser().resolve()
+        if args.footprint_csv
+        else resolve_path(footprint_raw, base_dir=base_dir)
+        if footprint_raw
+        else None
+    )
     manual_overrides_raw = str(cfg_get(config, "fda_entity_linking.manual_overrides_csv", "") or "").strip()
     manual_overrides_csv = (
         args.manual_overrides_csv.expanduser().resolve()
@@ -693,7 +1027,8 @@ def main() -> None:
         init_db(conn)
         run_id = start_run(conn, run_type="link_med_device_fda_to_companies", input_path=config_path)
         try:
-            aliases = build_aliases(conn, extra_alias_csv=extra_alias_csv)
+            aliases = build_aliases(conn, extra_alias_csv=extra_alias_csv, footprint_csv=footprint_csv)
+            footprints = load_company_footprints(conn, footprint_csv)
             manual_overrides = load_manual_overrides(conn, manual_overrides_csv)
             counts_by_manufacturer = load_fact_counts(conn)
             manufacturers = conn.execute(
@@ -746,7 +1081,11 @@ def main() -> None:
                     (0, 0, 0, 0, 0),
                 )
                 total_rows = approval_rows + recall_rows + adverse_rows + inspection_rows + compliance_rows
-                high_volume_unmapped = 1 if parent_company_id is None and total_rows >= high_volume_threshold else 0
+                high_volume_unmapped = (
+                    1
+                    if parent_company_id is None and total_rows >= high_volume_threshold and not is_excluded_match(match)
+                    else 0
+                )
                 high_volume_unmapped_count += high_volume_unmapped
                 if high_volume_unmapped:
                     LOGGER.warning(
@@ -782,11 +1121,21 @@ def main() -> None:
                 )
             if update_facts:
                 update_fact_company_ids(conn, min_confidence=min_confidence)
+                footprint_link_counts = apply_footprint_fact_links(conn, footprints)
+            else:
+                footprint_link_counts = {
+                    "approval_rows": 0,
+                    "manufacturer_rows": 0,
+                    "inspection_rows": 0,
+                    "compliance_rows": 0,
+                    "conflict_rows": 0,
+                }
             write_csv(output_csv, rows)
             message = (
                 f"manufacturers={len(rows)} mapped={mapped} ambiguous={ambiguous} "
                 f"high_volume_unmapped={high_volume_unmapped_count} aliases={len(aliases)} "
-                f"manual_overrides={len(manual_overrides)} min_confidence={min_confidence} output={output_csv}"
+                f"manual_overrides={len(manual_overrides)} footprint_links={footprint_link_counts} "
+                f"min_confidence={min_confidence} output={output_csv}"
             )
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=message)
             LOGGER.info("FDA entity linking complete: %s", message)

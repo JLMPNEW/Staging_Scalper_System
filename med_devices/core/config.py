@@ -9,6 +9,7 @@ from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 ENV_DEFAULT_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
+DEFAULT_NEUTRAL_SCORE = 50.0
 
 
 def expand_env_vars(raw: Any) -> str:

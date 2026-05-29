@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import requests
+import requests  # type: ignore[reportMissingModuleSource]
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +39,7 @@ DEFAULT_BASE_URL = "https://api.fda.gov/device"
 FIELDNAMES = [
     "endpoint_name",
     "path",
+    "search",
     "status",
     "pages_fetched",
     "api_records_seen",
@@ -93,6 +94,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--endpoints", type=str, default="", help="Optional comma-separated endpoint names.")
     parser.add_argument("--max-records", type=int, default=0, help="Optional per-endpoint max record override.")
+    parser.add_argument("--targeted-footprints", action="store_true", help="Fetch exact FDA submission IDs from the footprint CSV.")
+    parser.add_argument("--targeted-entity-names", action="store_true", help="Also fetch exact applicant-name rows for device footprint entities.")
+    parser.add_argument("--targeted-only", action="store_true", help="Only run targeted footprint fetches, not the broad endpoint sync.")
+    parser.add_argument("--footprint-csv", type=Path, default=None, help="Optional FDA footprint CSV override.")
+    parser.add_argument("--target-limit", type=int, default=100, help="Max records per targeted footprint query.")
     parser.add_argument("--allow-partial", action="store_true")
     return parser.parse_args()
 
@@ -134,6 +140,72 @@ def normalize_product_code(raw: object) -> str:
 
 def compact_json(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def read_csv_flexible(path: Path) -> list[dict[str, str]]:
+    last_error: Exception | None = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            with path.open("r", encoding=encoding, newline="") as handle:
+                reader = csv.DictReader(handle)
+                if reader.fieldnames is None:
+                    raise ValueError(f"CSV has no header: {path}")
+                return [{str(key): str(value or "") for key, value in row.items()} for row in reader]
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    raise ValueError(f"Could not decode CSV {path}: {last_error}")
+
+
+def row_get(row: dict[str, str], *keys: str) -> str:
+    lowered = {str(key).strip().lower(): str(value or "") for key, value in row.items()}
+    for key in keys:
+        value = row.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+        value = lowered.get(key.lower())
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def split_multi_value(raw: object) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in re.split(r"[;|]", str(raw or "")):
+        value = item.strip()
+        if value and value not in seen:
+            out.append(value)
+            seen.add(value)
+    return out
+
+
+def normalize_submission_identifier(raw: object) -> str:
+    value = re.sub(r"[^A-Z0-9-]+", "", str(raw or "").upper().strip())
+    if not value or not any(ch.isdigit() for ch in value):
+        return ""
+    unsupported = {
+        "510KDENOVOPIPELINE",
+        "510KPIPELINE",
+        "CLASSIREGISTRY",
+        "DISTRIBUTIONONLY",
+        "DMF",
+        "FEI-ONLY",
+        "FEIONLY",
+        "MASTERFILE",
+        "PMA-PIPELINE",
+        "PMAPIPELINE",
+    }
+    return "" if value in unsupported else value
+
+
+def quote_openfda_value(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def endpoint_slug(raw: object, *, max_length: int = 48) -> str:
+    slug = re.sub(r"[^A-Z0-9]+", "_", str(raw or "").upper()).strip("_")
+    return slug[:max_length] or "UNKNOWN"
 
 
 def json_list(raw: Any) -> list[Any]:
@@ -304,7 +376,8 @@ def fetch_openfda_page(
     last_text = ""
     last_payload: dict[str, Any] = {}
     headers = {"User-Agent": policy.user_agent, "Accept": "application/json,text/plain,*/*"}
-    for attempt in range(max(1, policy.max_retries)):
+    total_attempts = max(1, policy.max_retries + 1)
+    for attempt in range(total_attempts):
         response = session.get(url, params=params, headers=headers, timeout=policy.timeout_sec)
         last_status = int(response.status_code)
         last_text = response.text
@@ -315,7 +388,7 @@ def fetch_openfda_page(
             last_payload = {}
         if response.status_code == 200:
             return last_status, last_text, last_payload
-        if response.status_code in {429, 500, 502, 503, 504} and attempt < policy.max_retries - 1:
+        if response.status_code in {429, 500, 502, 503, 504} and attempt < total_attempts - 1:
             time.sleep(max(0.1, policy.sleep_sec) * (attempt + 1) * 2)
             continue
         return last_status, last_text, last_payload
@@ -340,6 +413,72 @@ def is_openfda_not_found(payload: dict[str, Any]) -> bool:
 
 def endpoint_url(policy: FdaPolicy, endpoint: EndpointConfig) -> str:
     return f"{policy.base_url}/{endpoint.path.lstrip('/')}"
+
+
+def build_targeted_footprint_endpoints(
+    path: Path | None,
+    *,
+    target_limit: int,
+    include_entity_names: bool = False,
+) -> list[EndpointConfig]:
+    if path is None:
+        return []
+    if not path.exists():
+        LOGGER.warning("Configured FDA footprint CSV does not exist: %s", path)
+        return []
+    out: list[EndpointConfig] = []
+    seen: set[tuple[str, str]] = set()
+    for row in read_csv_flexible(path):
+        for raw_identifier in split_multi_value(row_get(row, "premarket_numbers", "premarket_number")):
+            identifier = normalize_submission_identifier(raw_identifier)
+            if not identifier:
+                continue
+            if identifier.startswith("K") and re.match(r"^K[0-9]{5,}$", identifier):
+                endpoint = EndpointConfig(
+                    name=f"target_510k_{identifier}",
+                    path="510k.json",
+                    enabled=True,
+                    search=f"k_number:{quote_openfda_value(identifier)}",
+                    sort="",
+                    max_records=max(1, target_limit),
+                )
+            elif identifier.startswith("P") and re.match(r"^P[0-9]{5,}$", identifier):
+                endpoint = EndpointConfig(
+                    name=f"target_pma_{identifier}",
+                    path="pma.json",
+                    enabled=True,
+                    search=f"pma_number:{quote_openfda_value(identifier)}",
+                    sort="",
+                    max_records=max(1, target_limit),
+                )
+            else:
+                continue
+            key = (endpoint.path, endpoint.search)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(endpoint)
+        if include_entity_names and row_get(row, "footprint_category", "category") == "device_manufacturer":
+            entity = row_get(row, "primary_fda_entity", "fda_entity", "manufacturer_name")
+            if not entity:
+                continue
+            slug = endpoint_slug(row_get(row, "ticker", "symbol") + "_" + entity)
+            for name, path_name in (("510k", "510k.json"), ("pma", "pma.json")):
+                endpoint = EndpointConfig(
+                    name=f"target_entity_{name}_{slug}",
+                    path=path_name,
+                    enabled=True,
+                    search=f"applicant:{quote_openfda_value(entity)}",
+                    sort="decision_date:desc",
+                    max_records=max(1, target_limit),
+                )
+                key = (endpoint.path, endpoint.search)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(endpoint)
+    LOGGER.info("Built targeted FDA footprint queries: rows=%d path=%s", len(out), path)
+    return out
 
 
 def page_params(
@@ -476,7 +615,11 @@ def upsert_classification(conn: Any, payload: dict[str, Any], *, source_id: str)
 
 
 def upsert_approval(conn: Any, payload: dict[str, Any], *, endpoint_name: str, source_id: str) -> int:
-    if endpoint_name == "approvals_510k":
+    if (
+        endpoint_name == "approvals_510k"
+        or endpoint_name.startswith("target_510k_")
+        or endpoint_name.startswith("target_entity_510k_")
+    ):
         submission_number = field(payload, "k_number")
         submission_type = "510k"
         applicant = field(payload, "applicant")
@@ -540,20 +683,28 @@ def upsert_approval(conn: Any, payload: dict[str, Any], *, endpoint_name: str, s
     return 1
 
 
+def recall_key_part(raw: object) -> str:
+    return re.sub(r"[^A-Z0-9]+", "", str(raw or "").upper()).strip()
+
+
 def recall_key(payload: dict[str, Any], *, endpoint_name: str) -> str:
+    # Endpoint is source evidence, not recall identity. Keeping it out of the key
+    # lets downstream canonical scoring collapse recall/enforcement duplicates.
     primary = field(payload, "recall_number", "res_event_number")
     event_id = field(payload, "event_id")
-    if primary or event_id:
-        return f"{endpoint_name}:{primary}:{event_id}"
+    if primary:
+        return f"recall_number:{recall_key_part(primary)}"
+    if event_id:
+        return f"event_id:{recall_key_part(event_id)}"
     material = compact_json(
         {
-            "firm": field(payload, "recalling_firm", "firm_name"),
+            "firm": normalize_org_name(field(payload, "recalling_firm", "firm_name")),
             "date": field(payload, "recall_initiation_date", "event_date_initiated"),
-            "reason": field(payload, "reason_for_recall"),
-            "product": field(payload, "product_description"),
+            "reason": normalize_org_name(field(payload, "reason_for_recall")),
+            "product": normalize_org_name(field(payload, "product_description")),
         }
     )
-    return f"{endpoint_name}:hash:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
+    return f"hash:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
 
 
 def upsert_recall(conn: Any, payload: dict[str, Any], *, endpoint_name: str, source_id: str) -> int:
@@ -788,7 +939,17 @@ def upsert_endpoint_records(conn: Any, endpoint_name: str, results: list[Any], *
             continue
         if endpoint_name == "classification":
             count += upsert_classification(conn, payload, source_id=source_id)
-        elif endpoint_name in {"approvals_510k", "approvals_pma"}:
+        elif (
+            endpoint_name == "approvals_510k"
+            or endpoint_name.startswith("target_510k_")
+            or endpoint_name.startswith("target_entity_510k_")
+        ):
+            count += upsert_approval(conn, payload, endpoint_name=endpoint_name, source_id=source_id)
+        elif (
+            endpoint_name == "approvals_pma"
+            or endpoint_name.startswith("target_pma_")
+            or endpoint_name.startswith("target_entity_pma_")
+        ):
             count += upsert_approval(conn, payload, endpoint_name=endpoint_name, source_id=source_id)
         elif endpoint_name in {"recall", "enforcement"}:
             count += upsert_recall(conn, payload, endpoint_name=endpoint_name, source_id=source_id)
@@ -849,7 +1010,43 @@ def main() -> None:
         )
     )
     endpoint_filter = {value.strip() for value in str(args.endpoints or "").split(",") if value.strip()}
-    endpoints = [endpoint for endpoint in policy.endpoints if endpoint.enabled and (not endpoint_filter or endpoint.name in endpoint_filter)]
+    endpoints = (
+        []
+        if args.targeted_only
+        else [endpoint for endpoint in policy.endpoints if endpoint.enabled and (not endpoint_filter or endpoint.name in endpoint_filter)]
+    )
+    if args.targeted_footprints or args.targeted_only:
+        footprint_raw = str(
+            cfg_get(
+                config,
+                "fda_core_ingestion.targeted_footprint_csv",
+                cfg_get(config, "fda_features.footprint_csv", ""),
+            )
+            or ""
+        ).strip()
+        footprint_csv = (
+            args.footprint_csv.expanduser().resolve()
+            if args.footprint_csv
+            else resolve_path(footprint_raw, base_dir=base_dir)
+            if footprint_raw
+            else None
+        )
+        targeted_endpoints = build_targeted_footprint_endpoints(
+            footprint_csv,
+            target_limit=max(1, args.target_limit),
+            include_entity_names=args.targeted_entity_names,
+        )
+        if endpoint_filter:
+            targeted_endpoints = [
+                endpoint
+                for endpoint in targeted_endpoints
+                if endpoint.name in endpoint_filter
+                or ("approvals_510k" in endpoint_filter and endpoint.name.startswith("target_510k_"))
+                or ("approvals_pma" in endpoint_filter and endpoint.name.startswith("target_pma_"))
+                or ("entity_510k" in endpoint_filter and endpoint.name.startswith("target_entity_510k_"))
+                or ("entity_pma" in endpoint_filter and endpoint.name.startswith("target_entity_pma_"))
+            ]
+        endpoints.extend(targeted_endpoints)
     if not endpoints:
         raise ValueError("No FDA endpoints selected")
     api_key = resolve_api_key(config, policy=policy, base_dir=base_dir)
@@ -1017,6 +1214,7 @@ def main() -> None:
                     {
                         "endpoint_name": endpoint.name,
                         "path": endpoint.path,
+                        "search": endpoint.search,
                         "status": status,
                         "pages_fetched": pages,
                         "api_records_seen": seen,

@@ -28,6 +28,8 @@ from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 
 LOGGER = logging.getLogger("build_med_device_technical_features")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+TECH_WINSOR_LOW_PCT = 0.05
+TECH_WINSOR_HIGH_PCT = 0.95
 FIELDNAMES = [
     "asof_date",
     "company_id",
@@ -38,6 +40,7 @@ FIELDNAMES = [
     "latest_price_date",
     "latest_close",
     "avg_dollar_volume_60d",
+    "volume_trend_ratio",
     "return_21d",
     "return_63d",
     "return_126d",
@@ -59,6 +62,7 @@ FIELDNAMES = [
     "trend_quality_score",
     "relative_strength_score",
     "liquidity_score",
+    "volume_breakout_score",
     "volatility_risk_score",
     "technical_entry_score",
     "entry_signal",
@@ -81,6 +85,7 @@ class Bar:
     source_id: str
     bar_date: str
     close: float
+    raw_close: float | None
     high: float | None
     low: float | None
     volume: float | None
@@ -97,6 +102,7 @@ class TechnicalRow:
     latest_price_date: str = ""
     latest_close: float | None = None
     avg_dollar_volume_60d: float | None = None
+    volume_trend_ratio: float | None = None
     return_21d: float | None = None
     return_63d: float | None = None
     return_126d: float | None = None
@@ -118,6 +124,7 @@ class TechnicalRow:
     trend_quality_score: float | None = None
     relative_strength_score: float | None = None
     liquidity_score: float | None = None
+    volume_breakout_score: float | None = None
     volatility_risk_score: float | None = None
     technical_entry_score: float | None = None
     entry_signal: str = "unavailable"
@@ -271,6 +278,7 @@ def load_price_history(
             source_id=str(row["source_id"] or ""),
             bar_date=bar_date,
             close=close,
+            raw_close=raw_close,
             high=to_float(row["high"]),
             low=to_float(row["low"]),
             volume=to_float(row["volume"]),
@@ -306,7 +314,7 @@ def momentum_12_1(values: list[float]) -> float | None:
 
 
 def rsi(values: list[float], window: int = 14) -> float | None:
-    if len(values) <= window:
+    if len(values) < window + 2:
         return None
     deltas = [cur - prev for prev, cur in zip(values[:-1], values[1:])]
     if len(deltas) < window:
@@ -347,17 +355,21 @@ def max_drawdown(values: list[float], window: int) -> float | None:
 
 
 def atr_pct(bars: list[Bar], window: int = 14) -> float | None:
-    if len(bars) <= window:
+    if len(bars) < window + 2:
         return None
+    lookback = bars[-(window * 2 + 1) :]
     ranges: list[float] = []
-    for prev, cur in zip(bars[-window - 1 : -1], bars[-window:]):
+    for prev, cur in zip(lookback[:-1], lookback[1:]):
         high = cur.high if cur.high is not None else cur.close
         low = cur.low if cur.low is not None else cur.close
         true_range = max(high - low, abs(high - prev.close), abs(low - prev.close))
         ranges.append(true_range)
-    if not ranges:
+    if len(ranges) < window:
         return None
-    return safe_div(sum(ranges) / len(ranges), bars[-1].close)
+    atr = sum(ranges[:window]) / window
+    for true_range in ranges[window:]:
+        atr = ((atr * (window - 1)) + true_range) / window
+    return safe_div(atr, bars[-1].close)
 
 
 def staleness_days(latest_price_date: str, asof: date) -> int | None:
@@ -375,6 +387,13 @@ def percentile_scores(rows: list[TechnicalRow], field_name: str, *, higher_is_be
             pairs.append((idx, value))
     if not pairs:
         return {}
+    if len(pairs) >= 4:
+        sorted_values = sorted(value for _, value in pairs)
+        low_bound = sorted_values[max(0, min(len(sorted_values) - 1, math.ceil(TECH_WINSOR_LOW_PCT * len(sorted_values)) - 1))]
+        high_bound = sorted_values[max(0, min(len(sorted_values) - 1, math.ceil(TECH_WINSOR_HIGH_PCT * len(sorted_values)) - 1))]
+        if low_bound > high_bound:
+            low_bound, high_bound = high_bound, low_bound
+        pairs = [(idx, max(low_bound, min(high_bound, value))) for idx, value in pairs]
     pairs.sort(key=lambda item: item[1])
     if len(pairs) == 1:
         return {pairs[0][0]: 50.0}
@@ -403,7 +422,15 @@ def build_raw_row(
     row.market_source_id = bars[-1].source_id
     row.latest_price_date = bars[-1].bar_date
     row.latest_close = bars[-1].close
-    row.avg_dollar_volume_60d = sum(bar.close * (bar.volume or 0.0) for bar in bars[-60:]) / min(len(bars), 60)
+    recent_bars = bars[-60:]
+    row.avg_dollar_volume_60d = sum(bar.close * (bar.volume or 0.0) for bar in recent_bars) / max(1, len(recent_bars))
+    recent_volumes = [float(bar.volume) for bar in bars[-5:] if bar.volume is not None]
+    historical_volumes = [float(bar.volume) for bar in bars[-60:-5] if bar.volume is not None]
+    if len(recent_volumes) >= 3 and len(historical_volumes) >= 40:
+        row.volume_trend_ratio = safe_div(
+            sum(recent_volumes) / len(recent_volumes),
+            sum(historical_volumes) / len(historical_volumes),
+        )
     row.return_21d = trailing_return(closes, 21)
     row.return_63d = trailing_return(closes, 63)
     row.return_126d = trailing_return(closes, 126)
@@ -435,29 +462,55 @@ def build_raw_row(
     return row
 
 
+def cross_rank_trend_quality(rows: list[TechnicalRow]) -> None:
+    pairs = [
+        (idx, float(row.trend_quality_score))
+        for idx, row in enumerate(rows)
+        if row.trend_quality_score is not None and row.entry_signal != "insufficient_price_history"
+    ]
+    if len(pairs) <= 1:
+        return
+    pairs.sort(key=lambda item: item[1])
+    denominator = len(pairs) - 1
+    for rank, (idx, _) in enumerate(pairs):
+        rows[idx].trend_quality_score = round(100.0 * rank / denominator, 2)
+
+
 def apply_scores(rows: list[TechnicalRow], *, entry_thresholds: dict[str, float]) -> None:
     score_maps = {
         "relative_strength_63d": percentile_scores(rows, "relative_strength_63d", higher_is_better=True),
         "relative_strength_126d": percentile_scores(rows, "relative_strength_126d", higher_is_better=True),
         "avg_dollar_volume_60d": percentile_scores(rows, "avg_dollar_volume_60d", higher_is_better=True),
+        "volume_trend_ratio": percentile_scores(rows, "volume_trend_ratio", higher_is_better=True),
         "realized_vol_60d": percentile_scores(rows, "realized_vol_60d", higher_is_better=False),
     }
+    failed_indices: set[int] = set()
     for idx, row in enumerate(rows):
-        if row.latest_close is None or row.sma_200 is None:
+        if row.latest_close is None or row.sma_50 is None:
             row.technical_entry_score = 0.0
             row.entry_signal = "insufficient_price_history"
             row.data_quality_status = "fail"
+            failed_indices.add(idx)
             continue
         trend = 50.0
-        trend += 15.0 if row.price_vs_sma_200 is not None and row.price_vs_sma_200 > 0 else -20.0
         trend += 10.0 if row.price_vs_sma_50 is not None and row.price_vs_sma_50 > 0 else -10.0
-        trend += 10.0 if row.sma_50_vs_200 is not None and row.sma_50_vs_200 > 0 else -10.0
-        trend += 10.0 if row.sma_200_slope_63d is not None and row.sma_200_slope_63d > 0 else -5.0
+        if row.sma_200 is not None:
+            trend += 15.0 if row.price_vs_sma_200 is not None and row.price_vs_sma_200 > 0 else -20.0
+            trend += 10.0 if row.sma_50_vs_200 is not None and row.sma_50_vs_200 > 0 else -10.0
+            trend += 10.0 if row.sma_200_slope_63d is not None and row.sma_200_slope_63d > 0 else -5.0
+        else:
+            trend -= 5.0
         if row.pct_from_52w_high is not None and row.pct_from_52w_high >= -0.10 and (row.return_126d or 0.0) > 0:
             trend += 5.0
         if row.atr_14_pct is not None and row.atr_14_pct > 0.08:
             trend -= 5.0
         row.trend_quality_score = round(clamp(trend), 2)
+
+    cross_rank_trend_quality(rows)
+
+    for idx, row in enumerate(rows):
+        if idx in failed_indices:
+            continue
         row.relative_strength_score = round(
             clamp(
                 0.60 * score_maps["relative_strength_63d"].get(idx, 50.0)
@@ -466,12 +519,15 @@ def apply_scores(rows: list[TechnicalRow], *, entry_thresholds: dict[str, float]
             2,
         )
         row.liquidity_score = round(clamp(score_maps["avg_dollar_volume_60d"].get(idx, 50.0)), 2)
+        row.volume_breakout_score = round(clamp(score_maps["volume_trend_ratio"].get(idx, 50.0)), 2)
         row.volatility_risk_score = round(clamp(score_maps["realized_vol_60d"].get(idx, 50.0)), 2)
+        trend_quality_score = row.trend_quality_score if row.trend_quality_score is not None else 50.0
         score = (
-            0.35 * row.trend_quality_score
+            0.35 * trend_quality_score
             + 0.30 * row.relative_strength_score
-            + 0.20 * row.liquidity_score
-            + 0.15 * row.volatility_risk_score
+            + 0.15 * row.liquidity_score
+            + 0.10 * row.volume_breakout_score
+            + 0.10 * row.volatility_risk_score
         )
         row.technical_entry_score = round(clamp(score), 2)
         if row.technical_entry_score >= entry_thresholds["strong_entry"]:
@@ -482,10 +538,13 @@ def apply_scores(rows: list[TechnicalRow], *, entry_thresholds: dict[str, float]
             row.entry_signal = "watchlist_wait_for_confirmation"
         else:
             row.entry_signal = "weak_entry"
+        if row.missing_fields and row.entry_signal in {"strong_entry", "good_entry"}:
+            row.entry_signal = "watchlist_wait_for_history"
         row.payload["component_scores"] = {
             "trend_quality": row.trend_quality_score,
             "relative_strength": row.relative_strength_score,
             "liquidity": row.liquidity_score,
+            "volume_breakout": row.volume_breakout_score,
             "volatility_risk": row.volatility_risk_score,
         }
 
@@ -494,109 +553,79 @@ def upsert_rows(conn: Any, rows: list[TechnicalRow]) -> int:
     if not rows:
         return 0
     now = utc_now()
-    conn.executemany(
-        """
-        INSERT INTO feature_technical_entry(
-            asof_date, company_id, ticker, company_name, subsector, market_source_id,
-            latest_price_date, latest_close, avg_dollar_volume_60d, return_21d,
-            return_63d, return_126d, return_252d, momentum_12_1, relative_strength_63d,
-            relative_strength_126d, sma_50, sma_200, price_vs_sma_50, price_vs_sma_200,
-            sma_50_vs_200, sma_200_slope_63d, rsi_14, atr_14_pct, realized_vol_60d,
-            max_drawdown_252d, pct_from_52w_high, score, trend_quality_score, relative_strength_score,
-            liquidity_score, volatility_risk_score, entry_signal, data_quality_status,
-            missing_fields, payload_json, created_at, updated_at
+    fields = [
+        "asof_date",
+        "company_id",
+        "ticker",
+        "company_name",
+        "subsector",
+        "market_source_id",
+        "latest_price_date",
+        "latest_close",
+        "avg_dollar_volume_60d",
+        "volume_trend_ratio",
+        "return_21d",
+        "return_63d",
+        "return_126d",
+        "return_252d",
+        "momentum_12_1",
+        "relative_strength_63d",
+        "relative_strength_126d",
+        "sma_50",
+        "sma_200",
+        "price_vs_sma_50",
+        "price_vs_sma_200",
+        "sma_50_vs_200",
+        "sma_200_slope_63d",
+        "rsi_14",
+        "atr_14_pct",
+        "realized_vol_60d",
+        "max_drawdown_252d",
+        "pct_from_52w_high",
+        "technical_score",
+        "trend_quality_score",
+        "relative_strength_score",
+        "liquidity_score",
+        "volume_breakout_score",
+        "volatility_risk_score",
+        "entry_signal",
+        "data_quality_status",
+        "missing_fields",
+        "payload_json",
+    ]
+    payload_rows: list[tuple[Any, ...]] = []
+    for row in rows:
+        values = {field: getattr(row, field, None) for field in fields}
+        values["technical_score"] = row.technical_entry_score
+        values["missing_fields"] = ";".join(row.missing_fields)
+        values["payload_json"] = json.dumps(
+            {
+                "source": "technical_entry_builder",
+                "entry_signal": row.entry_signal,
+                "data_quality_status": row.data_quality_status,
+                "missing_fields": row.missing_fields,
+                **row.payload,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        payload_rows.append(tuple(values[field] for field in fields) + (now, now))
+    field_sql = ", ".join(fields)
+    placeholder_sql = ", ".join("?" for _ in fields)
+    update_sql = ",\n            ".join(
+        f"{field} = excluded.{field}" for field in fields if field not in {"asof_date", "company_id"}
+    )
+    conn.executemany(
+        f"""
+        INSERT INTO feature_technical_entry(
+            {field_sql}, created_at, updated_at
+        )
+        VALUES ({placeholder_sql}, ?, ?)
         ON CONFLICT(asof_date, company_id) DO UPDATE SET
-            ticker = excluded.ticker,
-            company_name = excluded.company_name,
-            subsector = excluded.subsector,
-            market_source_id = excluded.market_source_id,
-            latest_price_date = excluded.latest_price_date,
-            latest_close = excluded.latest_close,
-            avg_dollar_volume_60d = excluded.avg_dollar_volume_60d,
-            return_21d = excluded.return_21d,
-            return_63d = excluded.return_63d,
-            return_126d = excluded.return_126d,
-            return_252d = excluded.return_252d,
-            momentum_12_1 = excluded.momentum_12_1,
-            relative_strength_63d = excluded.relative_strength_63d,
-            relative_strength_126d = excluded.relative_strength_126d,
-            sma_50 = excluded.sma_50,
-            sma_200 = excluded.sma_200,
-            price_vs_sma_50 = excluded.price_vs_sma_50,
-            price_vs_sma_200 = excluded.price_vs_sma_200,
-            sma_50_vs_200 = excluded.sma_50_vs_200,
-            sma_200_slope_63d = excluded.sma_200_slope_63d,
-            rsi_14 = excluded.rsi_14,
-            atr_14_pct = excluded.atr_14_pct,
-            realized_vol_60d = excluded.realized_vol_60d,
-            max_drawdown_252d = excluded.max_drawdown_252d,
-            pct_from_52w_high = excluded.pct_from_52w_high,
-            score = excluded.score,
-            trend_quality_score = excluded.trend_quality_score,
-            relative_strength_score = excluded.relative_strength_score,
-            liquidity_score = excluded.liquidity_score,
-            volatility_risk_score = excluded.volatility_risk_score,
-            entry_signal = excluded.entry_signal,
-            data_quality_status = excluded.data_quality_status,
-            missing_fields = excluded.missing_fields,
-            payload_json = excluded.payload_json,
+            {update_sql},
             updated_at = excluded.updated_at
         """,
-        [
-            (
-                row.asof_date,
-                row.company_id,
-                row.ticker,
-                row.company_name,
-                row.subsector,
-                row.market_source_id,
-                row.latest_price_date,
-                row.latest_close,
-                row.avg_dollar_volume_60d,
-                row.return_21d,
-                row.return_63d,
-                row.return_126d,
-                row.return_252d,
-                row.momentum_12_1,
-                row.relative_strength_63d,
-                row.relative_strength_126d,
-                row.sma_50,
-                row.sma_200,
-                row.price_vs_sma_50,
-                row.price_vs_sma_200,
-                row.sma_50_vs_200,
-                row.sma_200_slope_63d,
-                row.rsi_14,
-                row.atr_14_pct,
-                row.realized_vol_60d,
-                row.max_drawdown_252d,
-                row.pct_from_52w_high,
-                row.technical_entry_score,
-                row.trend_quality_score,
-                row.relative_strength_score,
-                row.liquidity_score,
-                row.volatility_risk_score,
-                row.entry_signal,
-                row.data_quality_status,
-                ";".join(row.missing_fields),
-                json.dumps(
-                    {
-                        "source": "technical_entry_builder",
-                        "entry_signal": row.entry_signal,
-                        "data_quality_status": row.data_quality_status,
-                        "missing_fields": row.missing_fields,
-                        **row.payload,
-                    },
-                    ensure_ascii=True,
-                    sort_keys=True,
-                ),
-                now,
-                now,
-            )
-            for row in rows
-        ],
+        payload_rows,
     )
     return len(rows)
 

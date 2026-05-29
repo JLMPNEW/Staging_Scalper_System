@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -1508,7 +1509,8 @@ def refresh_sec_latest_documents(conn: sqlite3.Connection, accessions: Iterable[
             refreshed += 1
 
     if conn.in_transaction:
-        savepoint = quote_identifier(f"refresh_sec_latest_documents_{id(target_accessions)}")
+        accession_digest = hashlib.sha1("|".join(target_accessions).encode("utf-8")).hexdigest()[:16]
+        savepoint = quote_identifier(f"refresh_sec_latest_documents_{accession_digest}")
         conn.execute(f"SAVEPOINT {savepoint}")
         try:
             refresh_rows()

@@ -135,7 +135,7 @@ class CachedHttpClient:
                 LOGGER.warning("Ignoring empty JSON cache file: %s", path)
         text = self._get_text(url=url, params=params, headers=headers or {})
         parsed = json.loads(text)
-        if parsed is None or parsed == {}:
+        if parsed is None:
             raise ValueError(f"Refusing to cache empty JSON response from {url}")
         with _CACHE_WRITE_LOCK:
             path.parent.mkdir(parents=True, exist_ok=True)

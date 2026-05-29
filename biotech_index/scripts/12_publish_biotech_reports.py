@@ -295,6 +295,7 @@ def action_tier_settings(config: dict[str, Any]) -> dict[str, float]:
     if not isinstance(settings, dict):
         settings = {}
     return {
+        "high_confidence_score_min": float(settings.get("high_confidence_score_min", 55.0)),
         "allocation_rank_max": float(settings.get("allocation_rank_max", 10)),
         "allocation_score_min": float(settings.get("allocation_score_min", 50.0)),
         "research_rank_max": float(settings.get("research_rank_max", 20)),
@@ -313,11 +314,17 @@ def apply_action_tier(
     rank = int(to_float(out.get(rank_field), 0.0))
     score = to_float(out.get(score_field), 0.0)
     allocation_rank_max = int(settings["allocation_rank_max"])
+    high_confidence_score_min = float(settings["high_confidence_score_min"])
     allocation_score_min = float(settings["allocation_score_min"])
     research_rank_max = int(settings["research_rank_max"])
     research_score_min = float(settings["research_score_min"])
 
-    if rank > 0 and rank <= allocation_rank_max and score >= allocation_score_min:
+    if rank > 0 and rank <= allocation_rank_max and score >= high_confidence_score_min:
+        tier = "high_confidence_allocation"
+        reason = f"rank<={allocation_rank_max} and score>={high_confidence_score_min:g}"
+        allocation_flag = 1
+        research_flag = 0
+    elif rank > 0 and rank <= allocation_rank_max and score >= allocation_score_min:
         tier = "allocation_candidate"
         reason = f"rank<={allocation_rank_max} and score>={allocation_score_min:g}"
         allocation_flag = 1

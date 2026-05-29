@@ -478,16 +478,16 @@ def compute_survival_row(
         runway = 0.0
     elif ttm_burn is not None and ttm_burn > 0 and cash is not None:
         runway = cash / (ttm_burn / 12.0)
-    elif ocf_ttm is not None and ocf_ttm > 0 and cash is not None:
+    elif ocf_ttm is not None and ocf_ttm >= 0 and cash is not None:
         revenue_buffer_pct = float(cfg_get(config, "financial_survival.profitable_runway_revenue_buffer_pct", 0.10))
         runway_cap = float(cfg_get(config, "financial_survival.profitable_company_runway_cap_months", 120.0))
         if revenue_ttm is not None and revenue_ttm > 0.0 and revenue_buffer_pct > 0.0:
             monthly_proxy_burn = max((revenue_ttm * revenue_buffer_pct) / 12.0, 1.0)
             runway = min(runway_cap, cash / monthly_proxy_burn)
-            proxies.append("positive_operating_cash_flow_revenue_buffer_runway_proxy")
+            proxies.append("nonnegative_operating_cash_flow_revenue_buffer_runway_proxy")
         else:
             runway = runway_cap
-            proxies.append("positive_operating_cash_flow_runway_cap")
+            proxies.append("nonnegative_operating_cash_flow_runway_cap")
     else:
         runway = None
         missing.append("cash_runway_months")

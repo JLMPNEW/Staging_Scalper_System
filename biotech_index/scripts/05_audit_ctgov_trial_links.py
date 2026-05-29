@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
@@ -637,7 +638,14 @@ def recommend_company(
     primary = sorted(
         evidence_rows,
         key=lambda row: (
+            0
+            if any(
+                part == "outcome_override" or part.startswith("outcome_override:")
+                for part in split_codes(row.get("exclusion_reasons"))
+            )
+            else 1,
             float(row["trial_score"] or 0.0),
+            1 if row["qualifying_trial"] else 0,
             1 if row["is_active_status"] else 0,
             int(row["phase_rank"] or 0),
             str(row["last_update_post_date"] or ""),
@@ -1262,6 +1270,18 @@ def main() -> None:
     clean_json = output_dir / str(cfg_get(config, "ctgov_audit.locked_clean_universe_json", "ctgov_clean_universe_locked.json"))
     manifest_json = output_dir / str(cfg_get(config, "ctgov_audit.manifest_json", "ctgov_audit_manifest.json"))
     manual_decisions = load_manual_decisions(manual_verification_csv)
+    manual_activation_overrides_csv = resolve_optional_path(
+        cfg_get(config, "ctgov_audit.manual_activation_overrides_csv"),
+        base_dir=config_path.parent,
+    )
+    manual_activation_overrides = load_manual_decisions(manual_activation_overrides_csv) if manual_activation_overrides_csv else {}
+    if manual_activation_overrides:
+        manual_decisions.update(manual_activation_overrides)
+        LOGGER.info(
+            "Loaded CTGov manual activation overrides: rows=%d path=%s",
+            len(manual_activation_overrides),
+            manual_activation_overrides_csv,
+        )
     manual_verdict_count = sum(
         1
         for manual in manual_decisions.values()

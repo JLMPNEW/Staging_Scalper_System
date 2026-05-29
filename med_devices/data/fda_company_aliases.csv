@@ -4,17 +4,45 @@ ABT,Abbott Medical,operating_unit,Abbott cardiovascular/medical device operating
 ABT,Abbott Molecular,operating_unit,Abbott diagnostics operating unit
 ABT,St Jude Medical,acquired_subsidiary,Acquired by Abbott
 ABT,Thoratec,acquired_subsidiary,Acquired by St Jude Medical then Abbott
+AORT,Artivion Inc,operating_unit,Artivion operating entity for FDA device records
+AORT,CryoLife,legacy_operating_name,Artivion legacy operating name
+AVNS,Avanos Medical Inc,operating_unit,Avanos operating entity for FDA device records
+AVNS,Halyard Health,legacy_operating_name,Avanos legacy operating name
+AVR,Anteris Technologies Global Corp,operating_unit,Anteris operating entity for FDA device records
+AXGN,Axogen Corporation,operating_unit,Axogen operating entity for FDA device records
 BDX,C R Bard,acquired_subsidiary,Acquired by Becton Dickinson
 BDX,Bard Peripheral Vascular,operating_unit,Bard operating unit under Becton Dickinson
 BDX,CareFusion,acquired_subsidiary,Acquired by Becton Dickinson
+BAX,Baxter Healthcare Corp,operating_unit,Baxter operating entity for device records
+BAX,Hill-Rom Services,acquired_subsidiary,Hillrom operating entity under Baxter
+BAX,Gambro,acquired_subsidiary,Renal care operating entity under Baxter
 BSX,Guidant,acquired_subsidiary,Acquired by Boston Scientific
+CLPT,ClearPoint Neuro Inc,operating_unit,ClearPoint operating entity for FDA device records
+CLPT,MRI Interventions,legacy_operating_name,ClearPoint legacy operating name
+DCTH,Delcath Systems Inc,operating_unit,Delcath operating entity for FDA device records
 DHR,Beckman Coulter,operating_company,Danaher diagnostics operating company
 DHR,Cepheid,operating_company,Danaher diagnostics operating company
 ENOV,DJO,legacy_operating_name,Enovis legacy orthopedic/bracing operating name
+ELMD,Electromed Inc,operating_unit,Electromed operating entity for FDA device records
+EMBC,Embecta Corp,operating_unit,Embecta operating entity for FDA device records
+ESTA,Establishment Labs SA,operating_unit,Establishment Labs operating entity for FDA device records
+FEED,ENvue Medical Inc,operating_unit,ENvue operating entity for FDA device records
 FMS,Fresenius Medical Care Renal Therapies Group,operating_unit,Fresenius Medical Care public parent trades as FMS
+GCTK,GlucoTrack Inc,operating_unit,GlucoTrack operating entity for FDA device records
 GEHC,GE Medical Systems,legacy_name,Legacy GE Healthcare medical systems entity
+HAE,Haemonetics Corp,operating_unit,Haemonetics operating entity for FDA device records
+HAE,Haemonetics Corporation,operating_unit,Haemonetics operating entity for FDA device records
+IART,Integra LifeSciences,operating_unit,Integra operating entity for FDA device records
+IART,Integra LifeSciences Corp,operating_unit,Integra operating entity for FDA device records
+INFU,InfuSystem Holdings Inc,operating_unit,InfuSystem operating entity for FDA device records
+INFU,InfuSystem Inc,operating_unit,InfuSystem operating entity for FDA device records
+INGN,Inogen Inc,operating_unit,Inogen operating entity for FDA device records
+MBOT,Microbot Medical Inc,operating_unit,Microbot operating entity for FDA device records
 MDT,Covidien,acquired_subsidiary,Acquired by Medtronic
+MDT,Covidien LLC,acquired_subsidiary,Acquired by Medtronic
+MDT,Medtronic Inc,operating_unit,Medtronic operating entity
 MDT,Medtronic MiniMed,operating_unit,Medtronic diabetes operating unit
+MDT,Medtronic Vascular,operating_unit,Medtronic vascular operating unit
 MDT,Scientia Vascular,acquired_subsidiary,Medtronic announced acquisition for neurovascular portfolio
 MDT,Sofamor Danek,legacy_operating_name,Medtronic spine legacy operating name
 MDLN,Medline Inc,public_parent,Medline public parent trades as MDLN
@@ -31,7 +59,32 @@ PHG,Philips Respironics,operating_unit,Royal Philips healthcare operating unit
 PHG,Philips Ultrasound,operating_unit,Royal Philips healthcare operating unit
 PHG,Spectranetics,acquired_subsidiary,Acquired by Philips
 PHG,Volcano Corporation,acquired_subsidiary,Acquired by Philips
+PODD,Insulet Corporation,operating_unit,Insulet operating entity for Omnipod device records
+NVST,Nobel Biocare,operating_unit,Envista dental implant operating unit
+NVST,Ormco,operating_unit,Envista orthodontics operating unit
+NVST,Kerr,operating_unit,Envista dental operating unit
+OSUR,OraSure Technologies,operating_unit,OraSure operating entity for IVD records
+OWLT,Owlet Inc,operating_unit,Owlet operating entity for infant monitor records
+OWLT,Owlet Baby Care Inc,operating_unit,Owlet operating entity for infant monitor records
+PLSE,Pulse Biosciences Inc,operating_unit,Pulse Biosciences operating entity
+PRCT,PROCEPT BioRobotics Corporation,operating_unit,PROCEPT operating entity for Aquablation device records
+PROF,Profound Medical Inc,operating_unit,Profound Medical operating entity
+QDEL,Quidel Corporation,operating_unit,QuidelOrtho legacy operating entity
+QDEL,Ortho-Clinical Diagnostics,acquired_subsidiary,Ortho Clinical Diagnostics operating entity under QuidelOrtho
+RDNT,DeepHealth,operating_unit,RadNet AI software operating entity
+RVTY,PerkinElmer,legacy_operating_name,Revvity legacy PerkinElmer operating entity
+RVTY,Euroimmun,operating_unit,Revvity Euroimmun IVD operating entity
+SNWV,SANUWAVE Health Inc,operating_unit,SANUWAVE operating entity for FDA device records
 SOLV,3M Health Care,pre_spin_operating_unit,Solventum predecessor health care business
+STIM,Neuronetics Inc,operating_unit,Neuronetics operating entity for FDA device records
+TLSI,TriSalus Life Sciences Inc,operating_unit,TriSalus operating entity for FDA device records
+VCYT,Veracyte Inc,operating_unit,Veracyte operating entity for diagnostic records
+VMD,Viemed Healthcare Inc,operating_unit,Viemed operating entity for FDA device records
+VREX,Varex Imaging Corporation,operating_unit,Varex Imaging operating entity
+VTAK,Catheter Precision Inc,operating_unit,Catheter Precision operating entity for FDA device records
+WAT,Waters Technologies Corp,operating_unit,Waters operating entity for clinical instrument records
+WRBY,Warby Parker Inc,operating_unit,Warby Parker operating entity for ophthalmic records
+WRBY,JAND Inc,operating_unit,Warby Parker operating legal entity
 SYK,Mako Surgical,acquired_subsidiary,Acquired by Stryker
 SYK,Wright Medical,acquired_subsidiary,Acquired by Stryker
 TMO,Life Technologies,acquired_subsidiary,Acquired by Thermo Fisher Scientific

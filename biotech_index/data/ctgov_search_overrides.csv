@@ -1,4 +1,4 @@
-﻿ticker,search_term,query_field,source,confidence,link_from_search,notes
+﻿ticker,search_term,query_field,source,confidence,link_from_search,notes,enabled
 ABSI,ABS-201,query.intr,manual_program,0.85,true,Program/intervention search term for Absci clinical trial discovery
 ABSI,Absci,query.spons,manual_sponsor_search,0.90,true,Company short-name sponsor search
 AGMB,AGMB-129,query.intr,manual_program,0.85,true,Agomab program/intervention search
@@ -52,7 +52,6 @@ MRNA,mRNA-1345,query.intr,manual_program,0.85,true,Moderna RSV vaccine program s
 MRNA,mRNA-1647,query.intr,manual_program,0.85,true,Moderna CMV vaccine program search
 MRNA,mRNA-1083,query.intr,manual_program,0.80,true,Moderna flu/COVID vaccine program search
 MRNA,NCT04470427,query.term,manual_nct,0.95,true,User-verified Moderna Phase 3/pivotal NCT
-MRNA,NCT05815411,query.term,manual_nct,0.95,true,User-verified Moderna Phase 3/pivotal NCT
 MRNA,NCT05127330,query.term,manual_nct,0.95,true,User-verified Moderna Phase 3/pivotal NCT
 PCRX,Pacira Pharmaceuticals,query.spons,manual_sponsor_search,0.95,true,Pacira historical/operating sponsor search
 PCRX,Pacira BioSciences,query.spons,manual_sponsor_search,0.95,true,Pacira sponsor search
@@ -83,13 +82,11 @@ ROIV,Kinevant Sciences GmbH,query.spons,manual_parent_subsidiary,0.85,true,Roiva
 ROIV,IMVT-1402,query.intr,manual_program,0.85,true,Roivant/Immunovant program search
 ROIV,batoclimab,query.intr,manual_program,0.85,true,Roivant/Immunovant program search
 ROIV,brepocitinib,query.intr,manual_program,0.85,true,Roivant/Priovant program search
-ROIV,NCT05061602,query.term,manual_nct,0.95,true,User-verified Roivant subsidiary Phase 3 NCT
 ROIV,NCT06153758,query.term,manual_nct,0.95,true,User-verified Roivant subsidiary Phase 3 NCT
 ROIV,NCT05524571,query.term,manual_nct,0.95,true,User-verified Roivant subsidiary Fast Track NCT
 ZNTL,azenosertib,query.intr,manual_program,0.90,true,Zentalis program/intervention search
 ZNTL,ZN-c3,query.intr,manual_program,0.85,true,Zentalis historical code/intervention search
 ZNTL,ASPENOVA,query.term,manual_program,0.85,true,Zentalis Phase 3 study acronym search
-ZNTL,NCT06734567,query.term,manual_nct,0.95,true,User-verified Zentalis Phase 3 NCT
 CDXS,CDX-7108,query.intr,manual_program,0.90,true,Codexis current interventional program search
 ABOS,ACU193,query.intr,manual_program,0.90,true,Acumen current interventional program search
 ABOS,sabirnetug,query.intr,manual_program,0.90,true,Acumen current interventional program search
@@ -104,8 +101,8 @@ SANA,SC262,query.intr,manual_program,0.90,true,Sana active program/intervention 
 SANA,NCT06294236,query.term,manual_nct,0.95,true,User-verified Sana SC291 NCT
 SLNO,DCCR,query.intr,manual_program,0.90,true,Soleno DCCR program/intervention search
 SLNO,diazoxide choline,query.intr,manual_program,0.90,true,Soleno DCCR generic intervention search
-SLNO,NCT03440814,query.term,manual_nct,0.95,true,User-verified Soleno DCCR NCT
-SLNO,NCT03714373,query.term,manual_nct,0.95,true,User-verified Soleno DCCR NCT
+SLNO,NCT03440814,query.term,manual_nct,0.95,true,User-verified Soleno DCCR NCT,false
+SLNO,NCT03714373,query.term,manual_nct,0.95,true,User-verified Soleno DCCR NCT,false
 ZVRA,arimoclomol,query.intr,manual_program,0.90,true,Zevra arimoclomol program/intervention search
 ZVRA,KP415,query.intr,manual_program,0.85,true,Zevra KP415 program/intervention search
 ZVRA,NCT02612129,query.term,manual_nct,0.95,true,User-verified Zevra arimoclomol NCT
@@ -137,7 +134,7 @@ COYA,NCT07161999,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NC
 JSPR,NCT06162728,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
 JSPR,NCT06353971,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
 JSPR,NCT06736262,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
-KRRO,NCT06677307,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
+KRRO,NCT06677307,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26,false
 PASG,NCT04747431,query.term,manual_nct_batch44,0.95,true,Batch 44 CTGov exact-NCT seed for controlled validation as of 2026-04-26
 CRSP,NCT06925542,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
 BMRN,NCT07126262,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
@@ -162,3 +159,75 @@ ONC,NCT07414836,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT re
 ONC,NCT06427941,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
 ONC,NCT06589596,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
 ONC,NCT06120283,query.term,manual_nct_reconcile_20260516,0.95,false,Exact NCT refresh seed from NCT-first reconciliation; relation=lead
+ADMA,ADMA Biologics,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+ADMA,ASCENIV,query.intr,manual_activation_program,0.90,true,Manual activation program search validated 2026-05-27
+AMPH,Amphastar Pharmaceuticals,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+ASMB,Assembly Biosciences,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+ASMB,ABI-4334,query.intr,manual_activation_program,0.90,true,Manual activation program search validated 2026-05-27
+ASMB,ABI-5366,query.intr,manual_activation_program,0.90,true,Manual activation program search validated 2026-05-27
+BHVN,Biohaven Therapeutics Ltd,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+BHVN,BHV-7000,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+BHVN,BHV-1300,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+BHVN,BHV-1530,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+BHVN,troriluzole,query.intr,manual_activation_program,0.90,true,Manual activation program search validated 2026-05-27
+CING,Cingulate Therapeutics,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+CING,CTx-1301,query.intr,manual_activation_program,0.90,true,Manual activation program search validated 2026-05-27
+CRNX,Crinetics Pharmaceuticals,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+CRNX,paltusotine,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+CRNX,atumelnant,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+CRNX,CRN04894,query.intr,manual_activation_program,0.90,true,Manual activation program search validated 2026-05-27
+CTNM,Contineum Therapeutics,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+CTNM,PIPE-791,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+CTNM,PIPE-307,query.intr,manual_activation_program,0.90,true,Manual activation program search validated 2026-05-27
+DFTX,Definium Therapeutics,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+DFTX,DT120,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+DFTX,DT402,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+EDSA,Edesa Biotech,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+EDSA,paridiprubart,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+EDSA,EB05,query.intr,manual_activation_program,0.90,true,Manual activation program search validated 2026-05-27
+ESPR,Esperion Therapeutics,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+ESPR,bempedoic acid,query.intr,manual_activation_program,0.90,true,Manual activation program search validated 2026-05-27
+EYPT,EyePoint Pharmaceuticals,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+EYPT,EYP-1901,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+FDMT,4D Molecular Therapeutics,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+FDMT,4D-150,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+FDMT,4D-310,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+HRMY,Harmony Biosciences,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+HRMY,HBS-301,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+HRMY,pitolisant,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+HRMY,Epygenix,query.spons,manual_activation_subsidiary,0.85,true,Manual activation subsidiary search validated 2026-05-27
+IMTX,Immatics,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+IMTX,IMA203,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+IMTX,IMA402,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+IMVT,Immunovant Sciences,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+IMVT,IMVT-1402,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+IMVT,batoclimab,query.intr,manual_activation_program,0.90,true,Manual activation program search validated 2026-05-27
+INVA,Innoviva Specialty Therapeutics,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+INVA,sulbactam-durlobactam,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+IRWD,Ironwood Pharmaceuticals,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+IRWD,apraglutide,query.intr,manual_activation_program,0.90,true,Manual activation program search pending CTGov refresh
+IVA,Inventiva Pharma,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+IVA,lanifibranor,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+LQDA,Liquidia Technologies,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+LQDA,L606,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+LQDA,LIQ861,query.intr,manual_activation_program,0.90,true,Manual activation program search validated 2026-05-27
+MIST,Milestone Pharmaceuticals,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+MIST,etripamil,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+PHVS,Pharvaris,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+PHVS,deucrictibant,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+RXRX,Recursion Pharmaceuticals,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+RXRX,REC-4881,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+RXRX,REC-1245,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+SGMT,Sagimet Biosciences,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+SGMT,denifanstat,query.intr,manual_activation_program,0.90,true,Manual activation program search validated 2026-05-27
+SGMT,TVB-3567,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+ZBIO,Zenas BioPharma,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+ZBIO,obexelimab,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+ZYME,Zymeworks,query.spons,manual_activation_sponsor,0.95,true,Manual activation sponsor search validated 2026-05-27
+ZYME,ZW251,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+ZYME,ZW191,query.intr,manual_activation_program,0.95,true,Manual activation program search validated 2026-05-27
+ZYME,zanidatamab,query.intr,manual_activation_program,0.90,true,Manual activation program search validated 2026-05-27
+SIBN,NCT03932006,query.term,manual_post_market_device_nct,0.95,true,SI-BONE STABLe post-market device study exact NCT seed,false
+SIBN,NCT05047445,query.term,manual_post_market_device_nct,0.95,true,SI-BONE SALLY post-market device study exact NCT seed,false
+NEO,NeoGenomics Laboratories,query.spons,manual_diagnostics_sponsor,0.95,true,NeoGenomics Laboratories sponsor/entity search,true
+NEO,NCT05221086,query.term,manual_diagnostics_nct,0.95,true,NeoGenomics SIGHT clinical utility study exact NCT seed,true

@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import requests
+import requests  # type: ignore[reportMissingModuleSource]
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]

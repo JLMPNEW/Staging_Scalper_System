@@ -16,7 +16,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from med_devices.core.config import DEFAULT_NEUTRAL_SCORE, cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, start_run  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 
@@ -120,9 +120,20 @@ def load_feature_rows(conn: Any, *, asof: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def baseline_score(row: dict[str, Any], *, fundamental_weight: float, valuation_weight: float) -> float:
-    fundamental = parse_float(row.get("fundamental_quality_score_v1")) or 0.0
-    valuation = parse_float(row.get("valuation_score_v1")) or 0.0
+def score_or_neutral(raw: Any, neutral_score: float) -> float:
+    value = parse_float(raw)
+    return value if value is not None else neutral_score
+
+
+def baseline_score(
+    row: dict[str, Any],
+    *,
+    fundamental_weight: float,
+    valuation_weight: float,
+    neutral_score: float,
+) -> float:
+    fundamental = score_or_neutral(row.get("fundamental_quality_score_v1"), neutral_score)
+    valuation = score_or_neutral(row.get("valuation_score_v1"), neutral_score)
     total = max(1e-12, fundamental_weight + valuation_weight)
     return round((fundamental * fundamental_weight + valuation * valuation_weight) / total, 2)
 
@@ -313,6 +324,7 @@ def main() -> None:
     top_bottom_n = max(1, int(cfg_get(config, "financial_baseline_qa.top_bottom_n", 20)))
     fundamental_weight = cfg_float(config, "financial_baseline_qa.baseline_score_weights.fundamental_quality", 0.55)
     valuation_weight = cfg_float(config, "financial_baseline_qa.baseline_score_weights.valuation", 0.45)
+    neutral_score = cfg_float(config, "financial_features.neutral_component_score", DEFAULT_NEUTRAL_SCORE)
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
@@ -327,6 +339,7 @@ def main() -> None:
                     row,
                     fundamental_weight=fundamental_weight,
                     valuation_weight=valuation_weight,
+                    neutral_score=neutral_score,
                 )
             previous_scores = read_previous_ranked_scores(ranked_csv)
             ranked = sorted(rows, key=lambda row: parse_float(row.get("stage4_baseline_score")) or 0.0, reverse=True)

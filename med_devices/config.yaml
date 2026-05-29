@@ -240,6 +240,15 @@ sec_ingestion:
     operating_income:
       - OperatingIncomeLoss
       - ProfitLossFromOperatingActivities
+    cost_of_revenue:
+      - CostOfRevenue
+      - CostOfGoodsAndServicesSold
+      - CostOfGoodsSold
+      - CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization
+    selling_general_admin:
+      - SellingGeneralAndAdministrativeExpense
+      - GeneralAndAdministrativeExpense
+      - SellingAndMarketingExpense
     net_income:
       - NetIncomeLoss
       - ProfitLoss
@@ -250,7 +259,9 @@ sec_ingestion:
       - CashFlowsFromUsedInOperations
     capital_expenditures:
       - PaymentsToAcquirePropertyPlantAndEquipment
+      - PaymentsToAcquirePropertyAndEquipment
       - PaymentsToAcquireProductiveAssets
+      - PaymentsToAcquireOtherProductiveAssets
       - PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities
     research_and_development:
       - ResearchAndDevelopmentExpense
@@ -286,18 +297,45 @@ sec_ingestion:
       - LongTermDebt
       - Debt
       - Borrowings
+      - FinanceLeaseLiability
+      - DebtInstrumentCarryingAmount
+      - NotesPayable
+      - ConvertibleDebt
+      - SecuredDebt
     current:
       - LongTermDebtCurrent
       - LongTermDebtAndFinanceLeaseObligationsCurrent
+      - LongTermDebtAndCapitalLeaseObligationsCurrent
       - ShortTermBorrowings
       - ShortTermDebt
       - CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings
       - CurrentPortionOfLongtermBorrowings
       - ShorttermBorrowings
+      - FinanceLeaseLiabilityCurrent
+      - ConvertibleDebtCurrent
+      - ConvertibleNotesPayableCurrent
+      - NotesPayableCurrent
+      - OtherNotesPayableCurrent
+      - NotesPayableRelatedPartiesClassifiedCurrent
+      - SecuredDebtCurrent
+      - LinesOfCreditCurrent
     noncurrent:
       - LongTermDebtNoncurrent
       - LongTermDebtAndFinanceLeaseObligationsNoncurrent
+      - LongTermDebtAndCapitalLeaseObligations
+      - LongTermDebtAndCapitalLeaseObligationsNoncurrent
       - LongtermBorrowings
+      - FinanceLeaseLiabilityNoncurrent
+      - ConvertibleDebtNoncurrent
+      - LongTermNotesPayable
+      - NotesPayableRelatedPartiesNoncurrent
+      - SecuredDebtNoncurrent
+  capex_component_concepts:
+    - PaymentsToAcquireBuildings
+    - PaymentsToAcquireOtherPropertyPlantAndEquipment
+    - PaymentsToAcquireMachineryAndEquipment
+    - PaymentsToAcquireFurnitureAndFixtures
+    - PaymentsToAcquireLeaseholdImprovements
   composite_debt_concept_rank: 1000
 
 financial_features:
@@ -307,20 +345,22 @@ financial_features:
   core_calibration_min_fact_years: 7.0
   core_calibration_min_core_group_years: 5.0
   short_history_min_fact_years: 3.0
-  neutral_component_score: 25.0
+  neutral_component_score: 50.0
   subsector_percentile_blend_weight: 0.60
-  winsor_low_pct: 0.05
-  winsor_high_pct: 0.95
+  winsor_low_pct: 0.10
+  winsor_high_pct: 0.90
   ttm_sanity_min_annual_ratio: 0.20
   ttm_sanity_max_annual_ratio: 3.00
   fundamental_component_weights:
-    gross_margin: 0.18
-    operating_margin: 0.18
-    fcf_margin: 0.17
-    revenue_growth: 0.15
-    balance_sheet: 0.12
-    rd_intensity: 0.10
-    history_confidence: 0.10
+    gross_margin: 0.13
+    operating_margin: 0.13
+    fcf_margin: 0.16
+    revenue_growth: 0.14
+    balance_sheet: 0.10
+    rd_intensity: 0.08
+    history_confidence: 0.08
+    accrual_quality: 0.10
+    dilution_control: 0.08
   valuation_component_weights:
     ev_to_sales: 0.35
     price_to_sales: 0.20
@@ -356,6 +396,7 @@ financial_baseline_qa:
 
 fda_core_ingestion:
   output_csv: "../output/med_devices_reports/med_device_fda_core_ingestion_coverage.csv"
+  targeted_footprint_csv: "data/fda_company_footprints.csv"
   source_id: "openfda_device"
   base_url: "https://api.fda.gov/device"
   api_key_env: "OPENFDA_API_KEY"
@@ -434,12 +475,17 @@ technical_features:
 
 fda_features:
   output_csv: "../output/med_devices_reports/med_device_fda_product_risk_features.csv"
+  hard_red_review_csv: "../output/med_devices_reports/fda_hard_red_review_{asof}.csv"
+  review_override_csv: "data/fda_regulatory_review_overrides.csv"
+  footprint_csv: "data/fda_company_footprints.csv"
+  manual_footprint_evidence_csv: "data/fda_manual_footprint_evidence.csv"
   source_id: "openfda_device"
   normalization:
     revenue_floor: 100000000.0
   recall_decay_half_life_days: 730.0
   innovation_score:
     base_score: 25.0
+    approval_12m_log_weight: 24.0
     approval_log_weight: 18.0
     pma_log_weight: 16.0
     product_code_log_weight: 12.0
@@ -458,14 +504,23 @@ fda_features:
   no_data_risk_score: 65.0
   min_mapping_confidence_for_high_confidence: 75.0
   recall_severity_weights:
-    class_i: 1.0
-    class_ii: 2.5
-    class_iii: 5.0
-    unknown: 1.5
+    class_i: 5.0
+    class_ii: 2.0
+    class_iii: 0.5
+    unknown: 1.0
   hard_red_flags:
     class_i_recall_lookback_months: 36
+    class_i_recall_min_count: 5
+    class_i_recall_min_severity_per_billion_revenue: 10.0
     death_event_lookback_months: 24
     death_event_min_count: 1
+    death_event_hard_min_count: 3
+    death_event_min_rate_per_billion_revenue: 1.0
+    low_mapping_confidence_is_hard_red: false
+  review_state:
+    mapping_confirmed_min_confidence: 95.0
+    open_class_i_12m_confirmed_min_count: 1
+    open_class_i_36m_confirmed_min_count: 2
   score_weights:
     regulatory_risk: 0.60
     regulatory_innovation: 0.40
@@ -565,6 +620,10 @@ cms_reimbursement_ingestion:
 
 reimbursement_features:
   output_csv: "../output/med_devices_reports/med_device_reimbursement_features.csv"
+  require_entity_linking_when_cms_loaded: true
+  company_classification_csv: "data/reimbursement_company_classifications.csv"
+  zip_mac_csv: "data/reimbursement_zip_mac_map.csv"
+  default_billing_zip: ""
   source_ids:
     - "cms_coverage_api"
     - "cms_payment_files"
@@ -585,6 +644,9 @@ reimbursement_entity_linking:
   output_csv: "../output/med_devices_reports/med_device_reimbursement_entity_mapping.csv"
   unmapped_output_csv: "../output/med_devices_reports/med_device_reimbursement_unmapped_companies.csv"
   override_csv: "data/reimbursement_mapping_overrides.csv"
+  manual_rate_csv: "data/reimbursement_manual_payment_rates.csv"
+  manual_rate_audit_csv: "../output/med_devices_reports/med_device_reimbursement_manual_rate_audit.csv"
+  manual_rate_validation_tolerance_pct: 5.0
   source_ids:
     - "cms_coverage_api"
   code_source_ids:
@@ -645,36 +707,43 @@ ib_price_validation:
     - low_ib_avg_dollar_volume
 
 scoring:
+  model_version: "med_device_score_v1_2026_05_percentile"
   output_csv: "../output/med_devices_reports/med_device_daily_composite_scores.csv"
+  review_pack_dir: "../output/med_devices_reports/score_review_pack"
+  backtest_output_csv: "../output/med_devices_reports/med_device_score_backtest.csv"
+  calibration_output_csv: "../output/med_devices_reports/med_device_score_calibration.csv"
   neutral_durable_growth_score: 50.0
-  neutral_fda_no_data_score: 55.0
+  neutral_fda_no_data_score: 45.0
   neutral_reimbursement_score: 50.0
   neutral_technical_entry_score: 50.0
   neutral_sentiment_catalyst_score: 50.0
+  max_feature_staleness_days: 7
+  cross_sectional_composite_rank: true
   component_neutral_defaults:
     fundamental_quality: 50.0
     durable_growth: 50.0
-    fda_product: 55.0
+    fda_product: 45.0
     reimbursement: 50.0
     valuation: 50.0
     technical_entry: 50.0
     sentiment_catalyst: 50.0
   composite_weights:
-    fundamental_quality: 0.25
-    durable_growth: 0.15
-    fda_product: 0.15
-    reimbursement: 0.10
-    valuation: 0.20
-    technical_entry: 0.10
+    fundamental_quality: 0.20
+    durable_growth: 0.10
+    fda_product: 0.17
+    reimbursement: 0.15
+    valuation: 0.18
+    technical_entry: 0.15
     sentiment_catalyst: 0.05
   gates:
-    composite_min: 75
-    fundamental_quality_min: 65
-    fda_product_min: 55
-    reimbursement_min: 50
-    valuation_min: 60
-    technical_entry_min: 55
+    composite_min: 70
+    fundamental_quality_min: 60
+    fda_product_min: 50
+    reimbursement_min: 45
+    valuation_min: 55
+    technical_entry_min: 50
     value_trap_max: 40
+    value_trap_hard_max: 85
 
 stage_plan:
   stage_1:

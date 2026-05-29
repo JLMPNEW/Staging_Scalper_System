@@ -319,6 +319,38 @@ CREATE TABLE IF NOT EXISTS fact_fda_recall (
     FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS fact_fda_recall_canonical (
+    canonical_recall_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_recall_key TEXT NOT NULL UNIQUE,
+    recall_number TEXT,
+    event_id TEXT,
+    company_id INTEGER,
+    fda_manufacturer_id INTEGER,
+    product_code TEXT,
+    classification TEXT,
+    max_severity_weight REAL,
+    status TEXT,
+    is_open INTEGER NOT NULL DEFAULT 0,
+    is_terminated INTEGER NOT NULL DEFAULT 0,
+    recall_initiation_date TEXT,
+    center_classification_date TEXT,
+    termination_date TEXT,
+    recalling_firm TEXT,
+    product_description TEXT,
+    reason_for_recall TEXT,
+    source_count INTEGER NOT NULL DEFAULT 0,
+    source_endpoints TEXT,
+    source_priority TEXT,
+    mapping_confidence REAL,
+    mapping_method TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (fda_manufacturer_id) REFERENCES dim_fda_manufacturer(fda_manufacturer_id) ON DELETE SET NULL,
+    FOREIGN KEY (product_code) REFERENCES dim_fda_product_code(product_code) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS fact_fda_adverse_event (
     adverse_event_id TEXT PRIMARY KEY,
     company_id INTEGER,
@@ -657,7 +689,9 @@ CREATE TABLE IF NOT EXISTS feature_financial_valuation (
     return_on_assets REAL,
     return_on_equity REAL,
     interest_coverage REAL,
+    accrual_ratio REAL,
     gross_margin_trend_3y REAL,
+    quarterly_revenue_surprise_yoy REAL,
     financial_history_years REAL,
     min_core_group_years REAL,
     data_confidence_score REAL,
@@ -703,10 +737,12 @@ CREATE TABLE IF NOT EXISTS feature_technical_entry (
     realized_vol_60d REAL,
     max_drawdown_252d REAL,
     pct_from_52w_high REAL,
-    score REAL,
+    volume_trend_ratio REAL,
+    technical_score REAL,
     trend_quality_score REAL,
     relative_strength_score REAL,
     liquidity_score REAL,
+    volume_breakout_score REAL,
     volatility_risk_score REAL,
     entry_signal TEXT,
     data_quality_status TEXT,
@@ -734,6 +770,7 @@ CREATE TABLE IF NOT EXISTS feature_sentiment_catalyst (
 CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     asof_date TEXT NOT NULL,
     company_id INTEGER NOT NULL,
+    scoring_model_version TEXT,
     composite_score REAL,
     fundamental_quality_score REAL,
     durable_growth_score REAL,
@@ -794,6 +831,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_fda_recall_unique
 ON fact_fda_recall(COALESCE(recall_number, ''), COALESCE(event_id, ''), source_id);
 CREATE INDEX IF NOT EXISTS idx_fact_fda_approval_company_date ON fact_fda_approval(company_id, decision_date);
 CREATE INDEX IF NOT EXISTS idx_fact_fda_recall_company_date ON fact_fda_recall(company_id, recall_initiation_date);
+CREATE INDEX IF NOT EXISTS idx_fact_fda_recall_canonical_company_date
+ON fact_fda_recall_canonical(company_id, recall_initiation_date);
+CREATE INDEX IF NOT EXISTS idx_fact_fda_recall_canonical_class_status
+ON fact_fda_recall_canonical(classification, is_open, is_terminated);
 CREATE INDEX IF NOT EXISTS idx_fact_fda_adverse_company_date ON fact_fda_adverse_event(company_id, report_date);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_reimbursement_policy_unique
 ON fact_reimbursement_policy(policy_type, COALESCE(policy_id, ''), COALESCE(effective_date, ''));
@@ -813,6 +854,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_clinical_trial_status_unique
 ON fact_clinical_trial_status(nct_id, COALESCE(company_id, -1));
 CREATE INDEX IF NOT EXISTS idx_feature_financial_valuation_asof
 ON feature_financial_valuation(asof_date, ticker);
+CREATE INDEX IF NOT EXISTS idx_feature_financial_valuation_company_asof
+ON feature_financial_valuation(company_id, asof_date DESC);
+CREATE INDEX IF NOT EXISTS idx_feature_fda_product_risk_company_asof
+ON feature_fda_product_risk(company_id, asof_date DESC);
+CREATE INDEX IF NOT EXISTS idx_feature_reimbursement_company_asof
+ON feature_reimbursement(company_id, asof_date DESC);
+CREATE INDEX IF NOT EXISTS idx_feature_technical_entry_company_asof
+ON feature_technical_entry(company_id, asof_date DESC);
+CREATE INDEX IF NOT EXISTS idx_feature_durable_growth_company_asof
+ON feature_durable_growth(company_id, asof_date DESC);
+CREATE INDEX IF NOT EXISTS idx_feature_sentiment_catalyst_company_asof
+ON feature_sentiment_catalyst(company_id, asof_date DESC);
 CREATE INDEX IF NOT EXISTS idx_scores_asof_rank ON med_device_daily_scores(asof_date, rank);
 """
 
@@ -859,6 +912,7 @@ def connect(db_path: Path, *, timeout_sec: float = 30.0) -> ManagedConnection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
+    conn.execute("PRAGMA foreign_keys = ON")
     _ensure_table_optional_columns(conn, "fact_price_ohlcv", {"price_adjustment": "TEXT"})
     _ensure_table_optional_columns(
         conn,
@@ -888,7 +942,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             "return_on_assets": "REAL",
             "return_on_equity": "REAL",
             "interest_coverage": "REAL",
+            "accrual_ratio": "REAL",
             "gross_margin_trend_3y": "REAL",
+            "quarterly_revenue_surprise_yoy": "REAL",
             "data_confidence_score": "REAL",
         },
     )
@@ -911,6 +967,12 @@ def init_db(conn: sqlite3.Connection) -> None:
             "mapped_product_code_count": "INTEGER",
             "reimbursement_code_count": "INTEGER",
             "rate_row_count": "INTEGER",
+            "billing_category": "TEXT",
+            "payment_rate_status": "TEXT",
+            "primary_payment_file": "TEXT",
+            "regional_mac_name": "TEXT",
+            "regional_payment_rate": "REAL",
+            "regional_rate_status": "TEXT",
             "hard_red_flag_reasons": "TEXT",
             "review_reason": "TEXT",
         },
@@ -923,7 +985,24 @@ def init_db(conn: sqlite3.Connection) -> None:
             "latest_fda_event_date": "TEXT",
             "mapped_manufacturer_count": "INTEGER",
             "avg_mapping_confidence": "REAL",
+            "raw_fda_red_flag": "INTEGER",
+            "confirmed_hard_red_flag": "INTEGER",
+            "review_adjusted_fda_state": "TEXT",
+            "dedup_class_i_recall_count_36m": "INTEGER",
+            "open_class_i_recall_count_12m": "INTEGER",
+            "open_class_i_recall_count_36m": "INTEGER",
+            "terminated_class_i_recall_count_36m": "INTEGER",
+            "canonical_recall_duplicate_source_count": "INTEGER",
             "review_reason": "TEXT",
+            "clearance_metrics_suppressed": "INTEGER",
+            "clearance_metrics_suppression_reason": "TEXT",
+            "approval_product_code_filter": "TEXT",
+            "approval_product_code_filter_note": "TEXT",
+            "fda_evidence_type": "TEXT",
+            "regulatory_stage": "TEXT",
+            "evidence_confidence": "REAL",
+            "next_review_date": "TEXT",
+            "manual_evidence_note": "TEXT",
         },
     )
     _ensure_table_optional_columns(
@@ -937,6 +1016,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             "latest_price_date": "TEXT",
             "latest_close": "REAL",
             "avg_dollar_volume_60d": "REAL",
+            "volume_trend_ratio": "REAL",
             "return_21d": "REAL",
             "return_63d": "REAL",
             "return_126d": "REAL",
@@ -955,6 +1035,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             "realized_vol_60d": "REAL",
             "max_drawdown_252d": "REAL",
             "pct_from_52w_high": "REAL",
+            "technical_score": "REAL",
+            "volume_breakout_score": "REAL",
             "volatility_risk_score": "REAL",
             "entry_signal": "TEXT",
             "data_quality_status": "TEXT",
@@ -965,6 +1047,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn,
         "med_device_daily_scores",
         {
+            "scoring_model_version": "TEXT",
             "value_trap_score": "REAL",
             "data_completeness_score": "REAL",
             "live_component_count": "INTEGER",
@@ -1001,8 +1084,11 @@ def _ensure_table_optional_columns(conn: sqlite3.Connection, table_name: str, co
         if not SAFE_IDENTIFIER_RE.fullmatch(str(column or "")):
             raise ValueError(f"Unsafe SQLite column name: {column!r}")
         normalized_type = str(column_type or "").strip().upper()
-        if normalized_type not in {"TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC", "DATE", "BOOLEAN"}:
-            raise ValueError(f"Unsafe SQLite column type for {table_name}.{column}: {column_type!r}")
+        if normalized_type not in {"TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC"}:
+            raise ValueError(
+                f"Non-standard SQLite column type for {table_name}.{column}: {column_type!r}. "
+                "Use TEXT, INTEGER, REAL, BLOB, or NUMERIC."
+            )
         conn.execute(f"ALTER TABLE {quote_identifier(table_name)} ADD COLUMN {quote_identifier(column)} {normalized_type}")
 
 

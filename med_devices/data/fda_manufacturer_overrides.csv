@@ -3,7 +3,32 @@ fda_manufacturer_id,manufacturer_name,ticker,company_id,confidence,mapping_metho
 183,ABBOTT MEDICAL,ABT,3,99,manual_override,High-volume FDA manufacturer under Abbott
 935,Abbott Molecular,ABT,3,99,manual_override,Abbott diagnostics operating unit
 799,"Abbott Molecular, Inc.",ABT,3,99,manual_override,Abbott diagnostics operating unit
+453,"Alphatec Spine, Inc.",ATEC,,97,manual_override,Confirmed exact-core Alphatec Spine operating entity
+283,"Becton Dickinson & Company",BDX,10,99,manual_override,Confirmed direct Becton Dickinson corporate identity
+983,"Becton Dickinson & Co.",BDX,10,99,manual_override,Confirmed Becton Dickinson abbreviation variant
+764,"BARD PERIPHERAL VASCULAR, INC.",BDX,10,99,manual_override,Confirmed Bard subsidiary acquired by Becton Dickinson in 2017
+1046,"CareFusion 303, Inc.",BDX,10,99,manual_override,Confirmed CareFusion operating entity acquired by Becton Dickinson in 2015
+1193,"Bard Peripheral Vascular Inc",BDX,10,99,manual_override,Confirmed address-form Bard Peripheral Vascular subsidiary acquired by Becton Dickinson in 2017
 16,"Fresenius Medical Care Renal Therapies Group, LLC",FMS,,99,manual_override,Fresenius Medical Care public parent trades as FMS
+288,"GE Medical Systems, LLC",GEHC,14,99,manual_override,Confirmed core legacy GE Healthcare medical systems entity
+1085,"GE MEDICAL SYSTEMS ISRAEL, FUNCTIONAL IMAGING",GEHC,14,95,manual_override,Confirmed regional operating subset of GE Medical Systems
+1033,"GE Healthcare LLC",GEHC,14,99,manual_override,Confirmed GE Healthcare operating entity after LLC suffix normalization
+1067,"GE Healthcare",GEHC,14,97,manual_override,Confirmed GE Healthcare parent/root operating name
+1041,"Baxter Healthcare Corporation",BAX,34,99,manual_override,Confirmed Baxter operating entity tied to Volara respiratory therapy Class I recall
+981,"Integra LifeSciences Corp. (NeuroSciences)",IART,75,99,manual_override,Confirmed Integra LifeSciences Neurosciences operating entity
 456,"Medline Industries, LP",MDLN,,99,manual_override,Medline public parent trades as MDLN
+563,"Medtronic MiniMed, Inc.",MDT,6,99,manual_override,Confirmed Medtronic diabetes operating division
+124,"Covidien LLC",MDT,6,99,manual_override,Confirmed Covidien acquisition by Medtronic in 2015
+210,"Medtronic, Inc.",MDT,6,99,manual_override,Confirmed core Medtronic operating entity
+808,"Medtronic Neuromodulation",MDT,6,97,manual_override,Confirmed Medtronic operating division via parent match boost
+1072,"Medtronic Perfusion Systems",MDT,6,97,manual_override,Confirmed Medtronic operating division via parent match boost
+1107,"MEDTRONIC PUERTO RICO OPERATIONS CO.",MDT,6,99,manual_override,Confirmed wholly owned Medtronic manufacturing/operations entity tied to death adverse-event review
+1016,"Insulet Corporation",PODD,32,99,manual_override,Confirmed Insulet operating entity tied to Omnipod 5 Class I recall
 519,"PHILIPS MEDICAL SYSTEMS NEDERLAND B.V.",PHG,,99,manual_override,Royal Philips parent trades as PHG
 158,"Scientia Vascular, Inc.",MDT,6,99,manual_override,Medtronic acquisition for neurovascular portfolio
+979,"Stryker Sustainability Solutions",SYK,4,97,manual_override,Confirmed Stryker operating unit
+982,"Stryker Corporation",SYK,4,99,manual_override,Confirmed direct Stryker corporate identity
+1035,"Stryker Communications",SYK,4,97,manual_override,Confirmed Stryker operating division via parent match boost
+1039,"Stryker Medical Division of Stryker Corporation",SYK,4,97,manual_override,Confirmed Stryker medical division via parent match boost
+997,"Olympus Corporation of the Americas",,,0,out_of_universe,Parent does not trade on a US exchange in the investible universe
+1113,"UNOMEDICAL DEVICES S.A DE C.V",,,0,out_of_universe,Parent does not trade on a US exchange in the investible universe

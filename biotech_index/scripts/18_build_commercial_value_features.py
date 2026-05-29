@@ -629,7 +629,7 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
     net_margin = safe_div(net_income_ttm, ttm_revenue)
     price_to_sales = safe_div(market_cap, ttm_revenue)
     ev_to_sales = safe_div(enterprise_value, ttm_revenue)
-    pe_ratio = safe_div(market_cap, net_income_ttm)
+    pe_ratio = safe_div(market_cap, net_income_ttm) if net_income_ttm is not None and net_income_ttm > 0.0 else None
     fcf_yield = safe_div(free_cash_flow_ttm, market_cap)
 
     commercial_stage_flag = bool(ttm_revenue is not None and ttm_revenue >= float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000)))

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
 import csv
 import logging
+import re
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -32,7 +34,8 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_SEED = PACKAGE_ROOT / "data" / "ctgov_nct_reconciliation_seed.csv"
 
 ACTIVE_STATUSES = {"RECRUITING", "ACTIVE_NOT_RECRUITING", "ENROLLING_BY_INVITATION", "NOT_YET_RECRUITING"}
-SEARCH_OVERRIDE_FIELDS = ["ticker", "search_term", "query_field", "source", "confidence", "link_from_search", "notes"]
+NCT_RE = re.compile(r"^NCT\d{8}$", re.IGNORECASE)
+SEARCH_OVERRIDE_FIELDS = ["ticker", "search_term", "query_field", "source", "confidence", "link_from_search", "notes", "enabled"]
 PROGRAM_OVERRIDE_FIELDS = ["enabled", "ticker", "nct_id", "confidence", "source_name", "notes"]
 AUDIT_FIELDS = [
     "ticker",
@@ -45,6 +48,7 @@ AUDIT_FIELDS = [
     "ctgov_found",
     "db_trial_before",
     "db_link_before",
+    "local_linked_tickers",
     "overall_status",
     "active_like",
     "study_type",
@@ -56,12 +60,29 @@ AUDIT_FIELDS = [
     "last_update_post_date",
     "sponsor_relation",
     "existing_link_roles",
+    "validation_bucket",
     "recommendation",
     "applied_db_update",
     "search_override_added",
     "program_override_added",
     "notes",
 ]
+OVERRIDE_VALIDATION_FIELDS = [
+    "source_file",
+    "override_type",
+    "row_number",
+    "enabled",
+    "ticker",
+    "nct_id",
+    "company_found",
+    "company_active",
+    "nct_found",
+    "linked_to_ticker",
+    "local_linked_tickers",
+    "status",
+    "notes",
+]
+OVERRIDE_STRICT_FAILURE_STATUSES = {"invalid_nct_format", "missing_company", "missing_nct", "missing_required_columns"}
 
 
 @dataclass(frozen=True)
@@ -86,6 +107,22 @@ def parse_args() -> argparse.Namespace:
         "--apply-overrides",
         action="store_true",
         help="Append safe exact-NCT refresh seeds and explicit program owner overrides when recommended.",
+    )
+    parser.add_argument(
+        "--validate-overrides",
+        action="store_true",
+        help="Validate configured NCT-bearing override CSVs against the local CTGov DB.",
+    )
+    parser.add_argument(
+        "--validate-overrides-only",
+        action="store_true",
+        help="Only validate override CSVs; do not read/fetch seed NCTs.",
+    )
+    parser.add_argument("--override-validation-csv", type=Path, default=None)
+    parser.add_argument(
+        "--strict-overrides",
+        action="store_true",
+        help="Exit non-zero when override validation finds missing company or missing NCT references.",
     )
     return parser.parse_args()
 
@@ -187,6 +224,23 @@ def existing_links(conn: sqlite3.Connection, *, company_id: int, nct_id: str) ->
         (company_id, nct_id),
     ).fetchall()
     return [f"{row['match_role']}:{row['match_method']}:{float(row['confidence'] or 0.0):.2f}" for row in rows]
+
+
+def local_linked_tickers(conn: sqlite3.Connection, nct_id: str) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT c.ticker, l.match_role, l.match_method, l.confidence
+        FROM trial_company_links l
+        JOIN companies c ON c.company_id = l.company_id
+        WHERE l.nct_id = ?
+        ORDER BY c.ticker, l.match_role, l.confidence DESC
+        """,
+        (nct_id,),
+    ).fetchall()
+    return [
+        f"{row['ticker']}:{row['match_role']}:{row['match_method']}:{float(row['confidence'] or 0.0):.2f}"
+        for row in rows
+    ]
 
 
 def sponsor_relation(study: dict[str, Any], norm_aliases: set[str], tokens: list[set[str]]) -> tuple[str, str]:
@@ -346,6 +400,150 @@ def recommendation_for(
     return "reject_wrong_company_or_needs_review"
 
 
+def validation_bucket_for(
+    *,
+    company: dict[str, Any] | None,
+    found: bool,
+    active_like: bool,
+    interventional: bool,
+    relation: str,
+    expected_relation: str,
+    linked_tickers: list[str],
+    seed_ticker: str,
+) -> str:
+    if company is None:
+        return "missing_company"
+    if not found:
+        return "nct_not_found_ctgov"
+    if linked_tickers and not any(item.split(":", 1)[0].upper() == seed_ticker.upper() for item in linked_tickers):
+        return "different_ticker_local_link"
+    if not active_like:
+        return "inactive_or_terminal"
+    if not interventional:
+        return "non_interventional"
+    if relation:
+        return "valid_ticker_match"
+    if expected_relation == "program":
+        return "program_owner_candidate"
+    return "sponsor_mismatch_needs_review"
+
+
+def read_csv_records(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    if not path.exists():
+        return [], []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return list(reader.fieldnames or []), [{str(k): str(v or "") for k, v in row.items()} for row in reader]
+
+
+def validate_override_rows(
+    conn: sqlite3.Connection,
+    *,
+    path: Path,
+    override_type: str,
+    nct_field: str,
+    ticker_field: str = "ticker",
+) -> list[dict[str, Any]]:
+    fieldnames, rows = read_csv_records(path)
+    if not rows:
+        return []
+    if ticker_field not in fieldnames or nct_field not in fieldnames:
+        return [
+            {
+                "source_file": str(path),
+                "override_type": override_type,
+                "row_number": "",
+                "enabled": "",
+                "ticker": "",
+                "nct_id": "",
+                "company_found": False,
+                "company_active": False,
+                "nct_found": False,
+                "linked_to_ticker": False,
+                "local_linked_tickers": "",
+                "status": "missing_required_columns",
+                "notes": f"required_columns={ticker_field},{nct_field}",
+            }
+        ]
+
+    out: list[dict[str, Any]] = []
+    for row_number, row in enumerate(rows, start=2):
+        enabled = as_bool(row.get("enabled", "true"), default=True)
+        if not enabled:
+            continue
+        ticker = normalize_ticker(row.get(ticker_field))
+        raw_nct = str(row.get(nct_field) or "").strip().upper()
+        if not ticker or not raw_nct:
+            continue
+        if not NCT_RE.match(raw_nct):
+            if override_type == "search_override":
+                continue
+            out.append(
+                {
+                    "source_file": str(path),
+                    "override_type": override_type,
+                    "row_number": row_number,
+                    "enabled": enabled,
+                    "ticker": ticker,
+                    "nct_id": raw_nct,
+                    "company_found": False,
+                    "company_active": False,
+                    "nct_found": False,
+                    "linked_to_ticker": False,
+                    "local_linked_tickers": "",
+                    "status": "invalid_nct_format",
+                    "notes": "",
+                }
+            )
+            continue
+
+        company = conn.execute(
+            "SELECT company_id, is_active FROM companies WHERE ticker = ?",
+            (ticker,),
+        ).fetchone()
+        nct_found = conn.execute("SELECT 1 FROM trials WHERE nct_id = ?", (raw_nct,)).fetchone() is not None
+        linked = local_linked_tickers(conn, raw_nct) if nct_found else []
+        linked_to_ticker = any(item.split(":", 1)[0].upper() == ticker.upper() for item in linked)
+        if company is None:
+            status = "missing_company"
+        elif not nct_found:
+            status = "missing_nct"
+        elif not bool(company["is_active"]):
+            status = "inactive_company_reference"
+        elif not linked_to_ticker and override_type != "program_owner_override":
+            status = "nct_not_linked_to_ticker"
+        elif not linked_to_ticker and override_type == "program_owner_override":
+            status = "program_override_pending_link"
+        else:
+            status = "ok"
+        out.append(
+            {
+                "source_file": str(path),
+                "override_type": override_type,
+                "row_number": row_number,
+                "enabled": enabled,
+                "ticker": ticker,
+                "nct_id": raw_nct,
+                "company_found": company is not None,
+                "company_active": bool(company["is_active"]) if company else False,
+                "nct_found": nct_found,
+                "linked_to_ticker": linked_to_ticker,
+                "local_linked_tickers": "|".join(linked),
+                "status": status,
+                "notes": "",
+            }
+        )
+    return out
+
+
+def write_override_validation(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=OVERRIDE_VALIDATION_FIELDS, lineterminator="\n", extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def main() -> None:
     configure_utc_logging()
     args = parse_args()
@@ -361,6 +559,11 @@ def main() -> None:
         if args.output_csv
         else resolve_path("../output/biotech_index_reports/ctgov_nct_reconciliation_audit.csv", base_dir=base_dir)
     )
+    override_validation_csv = (
+        args.override_validation_csv.expanduser().resolve()
+        if args.override_validation_csv
+        else resolve_path("../output/biotech_index_reports/ctgov_nct_override_validation.csv", base_dir=base_dir)
+    )
     studies_url = str(cfg_get(config, "ctgov.studies_url", "https://clinicaltrials.gov/api/v2/studies"))
     cache_dir = resolve_path(cfg_get(config, "ctgov.cache_dir", "../output/biotech_index_cache"), base_dir=base_dir)
     ttl_hours = float(cfg_get(config, "ctgov.json_ttl_hours", 168.0))
@@ -369,11 +572,16 @@ def main() -> None:
         cfg_get(config, "trial_linking.program_owner_overrides_csv", "data/ctgov_program_owner_overrides.csv"),
         base_dir=base_dir,
     )
+    trial_status_overrides_path = resolve_path(
+        cfg_get(config, "ctgov_audit.trial_status_overrides_csv", "data/ctgov_trial_status_overrides.csv"),
+        base_dir=base_dir,
+    )
 
-    seeds = read_seed(seed_csv)
-    if not seeds:
+    seeds = [] if args.validate_overrides_only else read_seed(seed_csv)
+    if not seeds and not args.validate_overrides_only:
         raise ValueError(f"No enabled NCT seed rows found: {seed_csv}")
     audit_rows: list[dict[str, Any]] = []
+    override_validation_rows: list[dict[str, Any]] = []
     search_rows_to_add: list[dict[str, Any]] = []
     program_rows_to_add: list[dict[str, Any]] = []
     existing_search_keys = read_existing_override_keys(search_overrides_path, ("ticker", "search_term", "query_field"))
@@ -381,138 +589,200 @@ def main() -> None:
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
-        with CachedHttpClient(
-            cache_dir=cache_dir,
-            sleep_sec=float(cfg_get(config, "ctgov.sleep_sec", 0.2)),
-            timeout_sec=float(cfg_get(config, "ctgov.timeout_sec", 45.0)),
-            max_retries=int(cfg_get(config, "ctgov.max_retries", 3)),
-            throttle=HostThrottle(),
-        ) as http:
-            for seed in seeds:
-                company, aliases, tokens = company_context(conn, seed.ticker)
-                db_trial_before = conn.execute("SELECT 1 FROM trials WHERE nct_id = ?", (seed.nct_id,)).fetchone() is not None
-                links_before = existing_links(conn, company_id=int(company["company_id"]), nct_id=seed.nct_id) if company else []
-                study, fetch_error = fetch_study_by_nct(http, studies_url=studies_url, nct_id=seed.nct_id, ttl_hours=ttl_hours)
-                parsed = parse_study(study) if study else None
-                relation, sponsors_text = sponsor_relation(study, aliases, tokens) if study and company else ("", "")
-                collaborators = "; ".join(
-                    sponsor.sponsor_name
-                    for sponsor in parse_sponsors(study or {})
-                    if sponsor.sponsor_role == "collaborator"
-                )
-                overall_status = parsed.overall_status if parsed else ""
-                study_type = parsed.study_type if parsed else ""
-                active_like = overall_status.upper() in ACTIVE_STATUSES
-                interventional = study_type.upper() == "INTERVENTIONAL"
-                recommendation = recommendation_for(
-                    company=company,
-                    found=bool(parsed),
-                    active_like=active_like,
-                    interventional=interventional,
-                    relation=relation,
-                    expected_relation=seed.expected_relation,
-                )
-                applied_db_update = False
-                if args.apply_db and study and parsed:
-                    upsert_study(conn, study, asof_date=asof_date)
-                    applied_db_update = True
+        if not args.validate_overrides_only:
+            with CachedHttpClient(
+                cache_dir=cache_dir,
+                sleep_sec=float(cfg_get(config, "ctgov.sleep_sec", 0.2)),
+                timeout_sec=float(cfg_get(config, "ctgov.timeout_sec", 45.0)),
+                max_retries=int(cfg_get(config, "ctgov.max_retries", 3)),
+                throttle=HostThrottle(),
+            ) as http:
+                for seed in seeds:
+                    company, aliases, tokens = company_context(conn, seed.ticker)
+                    db_trial_before = conn.execute("SELECT 1 FROM trials WHERE nct_id = ?", (seed.nct_id,)).fetchone() is not None
+                    links_before = existing_links(conn, company_id=int(company["company_id"]), nct_id=seed.nct_id) if company else []
+                    linked_tickers = local_linked_tickers(conn, seed.nct_id)
+                    study, fetch_error = fetch_study_by_nct(http, studies_url=studies_url, nct_id=seed.nct_id, ttl_hours=ttl_hours)
+                    parsed = parse_study(study) if study else None
+                    relation, sponsors_text = sponsor_relation(study, aliases, tokens) if study and company else ("", "")
+                    collaborators = "; ".join(
+                        sponsor.sponsor_name
+                        for sponsor in parse_sponsors(study or {})
+                        if sponsor.sponsor_role == "collaborator"
+                    )
+                    overall_status = parsed.overall_status if parsed else ""
+                    study_type = parsed.study_type if parsed else ""
+                    active_like = overall_status.upper() in ACTIVE_STATUSES
+                    interventional = study_type.upper() == "INTERVENTIONAL"
+                    recommendation = recommendation_for(
+                        company=company,
+                        found=bool(parsed),
+                        active_like=active_like,
+                        interventional=interventional,
+                        relation=relation,
+                        expected_relation=seed.expected_relation,
+                    )
+                    validation_bucket = validation_bucket_for(
+                        company=company,
+                        found=bool(parsed),
+                        active_like=active_like,
+                        interventional=interventional,
+                        relation=relation,
+                        expected_relation=seed.expected_relation,
+                        linked_tickers=linked_tickers,
+                        seed_ticker=seed.ticker,
+                    )
+                    applied_db_update = False
+                    if args.apply_db and study and parsed:
+                        upsert_study(conn, study, asof_date=asof_date)
+                        applied_db_update = True
 
-                search_added = False
-                program_added = False
-                if args.apply_overrides and recommendation == "accept_sponsor_link":
-                    key = (seed.ticker.upper(), seed.nct_id.upper(), "QUERY.TERM")
-                    if key not in existing_search_keys:
-                        search_rows_to_add.append(
-                            {
-                                "ticker": seed.ticker,
-                                "search_term": seed.nct_id,
-                                "query_field": "query.term",
-                                "source": source_tag,
-                                "confidence": "0.95",
-                                "link_from_search": "false",
-                                "notes": f"Exact NCT refresh seed from NCT-first reconciliation; relation={relation or 'sponsor'}",
-                            }
-                        )
-                        existing_search_keys.add(key)
-                        search_added = True
-                elif args.apply_overrides and recommendation == "needs_program_owner_review" and seed.expected_relation == "program":
-                    key = (seed.ticker.upper(), seed.nct_id.upper(), "QUERY.TERM")
-                    if key not in existing_search_keys:
-                        search_rows_to_add.append(
-                            {
-                                "ticker": seed.ticker,
-                                "search_term": seed.nct_id,
-                                "query_field": "query.term",
-                                "source": f"{source_tag}_review",
-                                "confidence": "0.95",
-                                "link_from_search": "false",
-                                "notes": "Exact NCT refresh seed pending program-owner review; does not create program link.",
-                            }
-                        )
-                        existing_search_keys.add(key)
-                        search_added = True
-                if args.apply_overrides and recommendation == "accept_program_override":
-                    key = (seed.ticker.upper(), seed.nct_id.upper())
-                    if key not in existing_program_keys:
-                        program_rows_to_add.append(
-                            {
-                                "enabled": "true",
-                                "ticker": seed.ticker,
-                                "nct_id": seed.nct_id,
-                                "confidence": "0.95",
-                                "source_name": source_tag,
-                                "notes": seed.notes,
-                            }
-                        )
-                        existing_program_keys.add(key)
-                        program_added = True
+                    search_added = False
+                    program_added = False
+                    if args.apply_overrides and recommendation == "accept_sponsor_link":
+                        key = (seed.ticker.upper(), seed.nct_id.upper(), "QUERY.TERM")
+                        if key not in existing_search_keys:
+                            search_rows_to_add.append(
+                                {
+                                    "ticker": seed.ticker,
+                                    "search_term": seed.nct_id,
+                                    "query_field": "query.term",
+                                    "source": source_tag,
+                                    "confidence": "0.95",
+                                    "link_from_search": "false",
+                                    "notes": f"Exact NCT refresh seed from NCT-first reconciliation; relation={relation or 'sponsor'}",
+                                    "enabled": "true",
+                                }
+                            )
+                            existing_search_keys.add(key)
+                            search_added = True
+                    elif args.apply_overrides and recommendation == "needs_program_owner_review" and seed.expected_relation == "program":
+                        key = (seed.ticker.upper(), seed.nct_id.upper(), "QUERY.TERM")
+                        if key not in existing_search_keys:
+                            search_rows_to_add.append(
+                                {
+                                    "ticker": seed.ticker,
+                                    "search_term": seed.nct_id,
+                                    "query_field": "query.term",
+                                    "source": f"{source_tag}_review",
+                                    "confidence": "0.95",
+                                    "link_from_search": "false",
+                                    "notes": "Exact NCT refresh seed pending program-owner review; does not create program link.",
+                                    "enabled": "true",
+                                }
+                            )
+                            existing_search_keys.add(key)
+                            search_added = True
+                    if args.apply_overrides and recommendation == "accept_program_override":
+                        key = (seed.ticker.upper(), seed.nct_id.upper())
+                        if key not in existing_program_keys:
+                            program_rows_to_add.append(
+                                {
+                                    "enabled": "true",
+                                    "ticker": seed.ticker,
+                                    "nct_id": seed.nct_id,
+                                    "confidence": "0.95",
+                                    "source_name": source_tag,
+                                    "notes": seed.notes,
+                                }
+                            )
+                            existing_program_keys.add(key)
+                            program_added = True
 
-                audit_rows.append(
-                    {
-                        "ticker": seed.ticker,
-                        "nct_id": seed.nct_id,
-                        "expected_company": seed.expected_company,
-                        "candidate": seed.candidate,
-                        "expected_relation": seed.expected_relation,
-                        "company_found": bool(company),
-                        "company_status": "" if not company else f"{company['universe_status']}/active={company['is_active']}",
-                        "ctgov_found": bool(parsed),
-                        "db_trial_before": db_trial_before,
-                        "db_link_before": bool(links_before),
-                        "overall_status": overall_status,
-                        "active_like": active_like,
-                        "study_type": study_type,
-                        "interventional": interventional,
-                        "phase_text": parsed.phase_text if parsed else "",
-                        "brief_title": parsed.brief_title if parsed else "",
-                        "lead_sponsor": parsed.lead_sponsor if parsed else "",
-                        "collaborators": collaborators,
-                        "last_update_post_date": parsed.last_update_post_date if parsed else "",
-                        "sponsor_relation": relation,
-                        "existing_link_roles": "|".join(links_before),
-                        "recommendation": recommendation,
-                        "applied_db_update": applied_db_update,
-                        "search_override_added": search_added,
-                        "program_override_added": program_added,
-                        "notes": fetch_error or " | ".join(part for part in [seed.notes, sponsors_text] if part),
-                    }
+                    audit_rows.append(
+                        {
+                            "ticker": seed.ticker,
+                            "nct_id": seed.nct_id,
+                            "expected_company": seed.expected_company,
+                            "candidate": seed.candidate,
+                            "expected_relation": seed.expected_relation,
+                            "company_found": bool(company),
+                            "company_status": "" if not company else f"{company['universe_status']}/active={company['is_active']}",
+                            "ctgov_found": bool(parsed),
+                            "db_trial_before": db_trial_before,
+                            "db_link_before": bool(links_before),
+                            "local_linked_tickers": "|".join(linked_tickers),
+                            "overall_status": overall_status,
+                            "active_like": active_like,
+                            "study_type": study_type,
+                            "interventional": interventional,
+                            "phase_text": parsed.phase_text if parsed else "",
+                            "brief_title": parsed.brief_title if parsed else "",
+                            "lead_sponsor": parsed.lead_sponsor if parsed else "",
+                            "collaborators": collaborators,
+                            "last_update_post_date": parsed.last_update_post_date if parsed else "",
+                            "sponsor_relation": relation,
+                            "existing_link_roles": "|".join(links_before),
+                            "validation_bucket": validation_bucket,
+                            "recommendation": recommendation,
+                            "applied_db_update": applied_db_update,
+                            "search_override_added": search_added,
+                            "program_override_added": program_added,
+                            "notes": fetch_error or " | ".join(part for part in [seed.notes, sponsors_text] if part),
+                        }
+                    )
+        if args.validate_overrides or args.validate_overrides_only:
+            override_validation_rows.extend(
+                validate_override_rows(
+                    conn,
+                    path=search_overrides_path,
+                    override_type="search_override",
+                    nct_field="search_term",
                 )
+            )
+            override_validation_rows.extend(
+                validate_override_rows(
+                    conn,
+                    path=program_overrides_path,
+                    override_type="program_owner_override",
+                    nct_field="nct_id",
+                )
+            )
+            override_validation_rows.extend(
+                validate_override_rows(
+                    conn,
+                    path=trial_status_overrides_path,
+                    override_type="trial_status_override",
+                    nct_field="nct_id",
+                )
+            )
 
     if args.apply_overrides:
         append_rows(search_overrides_path, SEARCH_OVERRIDE_FIELDS, search_rows_to_add)
         append_rows(program_overrides_path, PROGRAM_OVERRIDE_FIELDS, program_rows_to_add)
-    write_audit(output_csv, audit_rows)
+    if audit_rows or not args.validate_overrides_only:
+        write_audit(output_csv, audit_rows)
+    if args.validate_overrides or args.validate_overrides_only:
+        write_override_validation(override_validation_csv, override_validation_rows)
+        failures = [
+            row for row in override_validation_rows if str(row.get("status") or "") in OVERRIDE_STRICT_FAILURE_STATUSES
+        ]
+        if failures:
+            LOGGER.warning(
+                "NCT override validation found %d strict failure(s); report=%s",
+                len(failures),
+                override_validation_csv,
+            )
+        if failures and args.strict_overrides:
+            raise RuntimeError(
+                f"NCT override validation failed strict mode: failures={len(failures)} report={override_validation_csv}"
+            )
     counts: dict[str, int] = {}
     for row in audit_rows:
         counts[str(row["recommendation"])] = counts.get(str(row["recommendation"]), 0) + 1
+    override_counts: dict[str, int] = {}
+    for row in override_validation_rows:
+        override_counts[str(row["status"])] = override_counts.get(str(row["status"]), 0) + 1
     LOGGER.info(
-        "NCT reconciliation complete: seeds=%d audit=%s apply_db=%s search_overrides_added=%d program_overrides_added=%d recommendations=%s",
+        "NCT reconciliation complete: seeds=%d audit=%s apply_db=%s search_overrides_added=%d program_overrides_added=%d recommendations=%s override_validation=%s override_statuses=%s",
         len(seeds),
         output_csv,
         args.apply_db,
         len(search_rows_to_add),
         len(program_rows_to_add),
         counts,
+        override_validation_csv if (args.validate_overrides or args.validate_overrides_only) else "",
+        override_counts,
     )
 
 

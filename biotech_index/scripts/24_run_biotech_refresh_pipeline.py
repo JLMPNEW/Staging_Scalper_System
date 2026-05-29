@@ -276,6 +276,7 @@ def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bo
             Step("multibagger_features", "21_build_multibagger_features.py", multibagger_feature_args),
             Step("multibagger_scores", "22_score_multibagger_candidates.py"),
             Step("multibagger_reports", "23_publish_multibagger_report.py"),
+            Step("universe_coverage_audit", "32_audit_biotech_universe_coverage.py"),
         ]
     )
     return steps
@@ -352,6 +353,17 @@ def snapshot_direct_output_files(
     snapshot_dir = snapshot_root / asof.replace("-", "")
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     run_start = datetime.fromisoformat(run_started_at.replace("Z", "+00:00"))
+    manifest_path = snapshot_dir / "snapshot_manifest.json"
+    previous_snapshot_names: set[str] = set()
+    if manifest_path.exists():
+        try:
+            previous_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            previous_manifest = {}
+        if isinstance(previous_manifest, dict):
+            for item in previous_manifest.get("files", []):
+                if isinstance(item, dict) and str(item.get("name") or "").strip():
+                    previous_snapshot_names.add(str(item["name"]))
     source_files = [
         source
         for source in sorted(list(source_dir.iterdir()), key=lambda item: item.name.lower())
@@ -367,6 +379,7 @@ def snapshot_direct_output_files(
         if (
             stale.is_file()
             and stale.suffix.lower() in include_extensions
+            and stale.name in previous_snapshot_names
             and stale.name not in source_names
             and datetime.fromtimestamp(stale.stat().st_mtime, timezone.utc) < run_start
         ):
@@ -410,10 +423,9 @@ def snapshot_direct_output_files(
         "notes": [
             "Snapshot folder name is derived from the data as-of date, not the wall-clock run date.",
             "Only direct files in source_dir are copied; subdirectories and calibration folders are not copied.",
-            "Existing direct CSV/JSON files in this dated snapshot folder are replaced before copying.",
+            "Only files listed in the previous snapshot manifest are eligible for stale cleanup.",
         ],
     }
-    manifest_path = snapshot_dir / "snapshot_manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
     stat = manifest_path.stat()
     copied_files.append(
@@ -839,8 +851,19 @@ def validate_score_csv(
         raise RuntimeError(f"{path} validation failed: " + " | ".join(failures))
 
 
-def validate_required_csv_columns(path: Path, *, asof: str, required_columns: list[str]) -> None:
-    validate_required_csv_columns_with_presence(path, asof=asof, required_columns=required_columns)
+def validate_required_csv_columns(
+    path: Path,
+    *,
+    asof: str,
+    required_columns: list[str],
+    allow_empty_rows: bool = False,
+) -> None:
+    validate_required_csv_columns_with_presence(
+        path,
+        asof=asof,
+        required_columns=required_columns,
+        allow_empty_rows=allow_empty_rows,
+    )
 
 
 def validate_required_csv_columns_with_presence(
@@ -849,6 +872,7 @@ def validate_required_csv_columns_with_presence(
     asof: str,
     required_columns: list[str],
     present_columns: list[str] | None = None,
+    allow_empty_rows: bool = False,
 ) -> None:
     if not path.exists():
         raise FileNotFoundError(f"Required pipeline output CSV not found: {path}")
@@ -858,7 +882,7 @@ def validate_required_csv_columns_with_presence(
         fieldnames = [str(field or "") for field in (reader.fieldnames or [])]
 
     failures: list[str] = []
-    if not rows:
+    if not rows and not allow_empty_rows:
         failures.append("CSV has no data rows")
     presence_columns = list(present_columns or [])
     missing_columns = [column for column in [*required_columns, *presence_columns] if column not in fieldnames]
@@ -974,6 +998,7 @@ def validate_final_outputs(
         multibagger_candidates_csv,
         asof=asof,
         required_columns=multibagger_required_columns,
+        allow_empty_rows=True,
     )
     elapsed = round(time.monotonic() - start, 3)
     LOGGER.info("Finished final_output_validation status=success elapsed=%.3fs expected_tickers=%d", elapsed, len(expected_tickers))
