@@ -43,6 +43,11 @@ from biotech_index.core.constants import (  # noqa: E402
 from biotech_index.core.db import connect  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 from biotech_index.core.market_policy import calibration_market_sources  # noqa: E402
+from biotech_index.core.scoring_math import (  # noqa: E402
+    GROWTH_DRAG_CURVES,
+    normalize_growth_drag_curve,
+    score_growth_drag as shared_growth_drag_score,
+)
 from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
 
 
@@ -82,7 +87,6 @@ DEFAULT_BOOTSTRAP_SEED = 1729
 DEFAULT_HOLDOUT_TOP_K = 25
 DEFAULT_BEST_ROWS_LIMIT = 25
 DEFAULT_SELECTED_TICKER_DIAGNOSTIC_TOP_RANKS = 3
-GROWTH_DRAG_CURVES = frozenset({"legacy", "smooth_linear"})
 CURRENT_CONFIG_CANDIDATE_NAME = "current_config"
 RAW_SCORE_KEYS = [
     "catalyst_score_raw",
@@ -195,7 +199,7 @@ class CalibrationParams:
     convex_risk_penalty_enabled: bool = True
     risk_penalty_convexity: float = 0.35
     risk_penalty_inflection: float = 50.0
-    growth_drag_curve: str = "legacy"
+    growth_drag_curve: str = "smooth_linear"
     use_quality_adjusted_valuation_component: bool = True
     use_quality_adjusted_guidance_component: bool = True
     rank_quality_caps_enabled: bool = True
@@ -386,7 +390,7 @@ def parse_args() -> argparse.Namespace:
         default="",
         help=(
             "Curve for mature-defensive growth drag diagnostics. Defaults to "
-            "calibration.tier1.growth_drag_curve; use smooth_linear for the challenger."
+            "calibration.tier1.growth_drag_curve, then biotech_scoring.growth_drag_curve."
         ),
     )
     parser.add_argument(
@@ -592,19 +596,6 @@ def table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
-def normalize_growth_drag_curve(raw: object) -> str:
-    curve = str(raw or "legacy").strip().lower()
-    if not curve:
-        return "legacy"
-    if curve == "linear":
-        return "smooth_linear"
-    if curve not in GROWTH_DRAG_CURVES:
-        raise ValueError(
-            f"Unsupported growth drag curve '{raw}'. Expected one of: {','.join(sorted(GROWTH_DRAG_CURVES))}"
-        )
-    return curve
-
-
 def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
     stack = cfg_get(config, "calibration.tier1.recommended_stack", {}) or {}
     costs = cfg_get(config, "calibration.tier1.costs", {}) or {}
@@ -677,7 +668,13 @@ def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
                 ),
             ),
         ),
-        growth_drag_curve=normalize_growth_drag_curve(cfg_get(config, "calibration.tier1.growth_drag_curve", "legacy")),
+        growth_drag_curve=normalize_growth_drag_curve(
+            cfg_get(
+                config,
+                "calibration.tier1.growth_drag_curve",
+                cfg_get(config, "biotech_scoring.growth_drag_curve", "legacy"),
+            )
+        ),
         use_quality_adjusted_valuation_component=as_bool(
             cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True),
             True,
@@ -1629,52 +1626,8 @@ def finite_float(raw: object) -> float | None:
     return value if value is not None and math.isfinite(value) else None
 
 
-def interpolate_piecewise(value: float, points: list[tuple[float, float]]) -> float:
-    if not points:
-        raise ValueError("interpolate_piecewise requires at least one point")
-    ordered = sorted(points)
-    if value <= ordered[0][0]:
-        return ordered[0][1]
-    if value >= ordered[-1][0]:
-        return ordered[-1][1]
-    for (left_x, left_y), (right_x, right_y) in zip(ordered, ordered[1:]):
-        if left_x <= value <= right_x:
-            span = right_x - left_x
-            if abs(span) <= 1e-12:
-                return right_y
-            ratio = (value - left_x) / span
-            return left_y + ratio * (right_y - left_y)
-    return ordered[-1][1]
-
-
 def growth_drag_score(*growth_values: object, curve: str = "legacy") -> float:
-    parsed = [value for value in (finite_float(raw) for raw in growth_values) if value is not None]
-    if not parsed:
-        return 50.0
-    best_growth = max(parsed)
-    curve_name = normalize_growth_drag_curve(curve)
-    if curve_name == "smooth_linear":
-        return clamp(
-            interpolate_piecewise(
-                best_growth,
-                [
-                    (-0.20, 100.0),
-                    (-0.10, 75.0),
-                    (0.0, 50.0),
-                    (0.10, 25.0),
-                    (0.20, 0.0),
-                ],
-            )
-        )
-    if best_growth >= 0.20:
-        return 0.0
-    if best_growth >= 0.10:
-        return 25.0
-    if best_growth >= 0.0:
-        return 50.0
-    if best_growth >= -0.10:
-        return 75.0
-    return 100.0
+    return shared_growth_drag_score(*growth_values, curve=curve)
 
 
 def market_cap_maturity_score(market_cap: object) -> float:

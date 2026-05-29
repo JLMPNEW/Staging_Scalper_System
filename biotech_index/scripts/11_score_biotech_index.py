@@ -43,7 +43,11 @@ from biotech_index.core.pipeline_guards import (  # noqa: E402
     validate_full_universe_coverage,
     validate_layer_freshness,
 )
-from biotech_index.core.scoring_math import convex_risk_drag as shared_convex_risk_drag  # noqa: E402
+from biotech_index.core.scoring_math import (  # noqa: E402
+    convex_risk_drag as shared_convex_risk_drag,
+    normalize_growth_drag_curve,
+    score_growth_drag as shared_growth_drag_score,
+)
 
 
 LOGGER = logging.getLogger("score_biotech_index")
@@ -250,7 +254,7 @@ def convex_risk_drag(risk: float, weight: float, config: dict[str, Any], section
     return shared_convex_risk_drag(
         risk,
         weight,
-        enabled=as_bool(cfg_get(config, f"{section}.convex_risk_penalty_enabled", False), False),
+        enabled=as_bool(cfg_get(config, f"{section}.convex_risk_penalty_enabled", True), True),
         convexity=float(cfg_get(config, f"{section}.risk_penalty_convexity", 0.35)),
         inflection=float(cfg_get(config, f"{section}.risk_penalty_inflection", 50.0)),
     )
@@ -418,20 +422,18 @@ def finite_float(raw: object) -> float | None:
     return value if math.isfinite(value) else None
 
 
-def growth_drag_score(*growth_values: object) -> float:
-    parsed = [value for value in (finite_float(raw) for raw in growth_values) if value is not None]
-    if not parsed:
-        return 50.0
-    best_growth = max(parsed)
-    if best_growth >= 0.20:
-        return 0.0
-    if best_growth >= 0.10:
-        return 25.0
-    if best_growth >= 0.0:
-        return 50.0
-    if best_growth >= -0.10:
-        return 75.0
-    return 100.0
+def configured_growth_drag_curve(config: dict[str, Any]) -> str:
+    return normalize_growth_drag_curve(
+        cfg_get(
+            config,
+            "biotech_scoring.growth_drag_curve",
+            cfg_get(config, "calibration.tier1.growth_drag_curve", "legacy"),
+        )
+    )
+
+
+def growth_drag_score(*growth_values: object, curve: str = "legacy") -> float:
+    return shared_growth_drag_score(*growth_values, curve=curve)
 
 
 def market_cap_maturity_score(market_cap: object) -> float:
@@ -449,13 +451,19 @@ def market_cap_maturity_score(market_cap: object) -> float:
     return 0.0
 
 
-def mature_defensive_score(commercial: dict[str, Any], forward_guidance: dict[str, Any]) -> float:
+def mature_defensive_score(
+    commercial: dict[str, Any],
+    forward_guidance: dict[str, Any],
+    *,
+    growth_drag_curve: str = "legacy",
+) -> float:
     if to_float(commercial.get("commercial_stage_flag"), 0.0) <= 0.0:
         return 0.0
     size_score = market_cap_maturity_score(commercial.get("market_cap"))
     growth_drag = growth_drag_score(
         forward_guidance.get("forward_revenue_growth_pct"),
         commercial.get("revenue_yoy_growth_pct"),
+        curve=growth_drag_curve,
     )
     upside_drag = 100.0 - clamp(to_float(commercial.get("institutional_upside_capacity_score"), 50.0))
     score = clamp(0.40 * size_score + 0.35 * growth_drag + 0.25 * upside_drag)
@@ -1090,7 +1098,7 @@ def validate_clinical_weights(weights: dict[str, Any]) -> None:
     total = sum(values.values())
     if abs(total - 1.0) > 1e-3:
         raise ValueError(f"biotech_scoring.weights positive components sum to {total:.4f}; expected 1.0 +/- 0.001")
-    risk_penalty = float(weights.get("risk_penalty", 0.25))
+    risk_penalty = float(weights.get("risk_penalty", 0.15))
     if not 0.0 < risk_penalty <= 1.0:
         raise ValueError(f"biotech_scoring.weights.risk_penalty must be in (0, 1], got {risk_penalty}")
 
@@ -1109,9 +1117,10 @@ def score_rows(
     credibility_w = float(weights.get("credibility", 0.25))
     financial_w = float(weights.get("financial_quality", 0.15))
     momentum_w = float(weights.get("momentum", 0.05))
-    risk_w = float(weights.get("risk_penalty", 0.25))
+    risk_w = float(weights.get("risk_penalty", 0.15))
 
     investment_enabled = as_bool(cfg_get(config, "biotech_scoring.use_investment_score", True), True)
+    growth_drag_curve = configured_growth_drag_curve(config)
     core_veto_settings = core_structural_veto_settings(config)
     production_baseline = tier1_production_baseline(config)
     policy_settings = production_policy_settings(config)
@@ -1189,7 +1198,11 @@ def score_rows(
         )
         leverage_score = clamp(to_float(commercial.get("leverage_score"), 50.0))
         value_trap_score = clamp(to_float(commercial.get("value_trap_score"), 0.0))
-        mature_defensive = mature_defensive_score(commercial, forward_guidance)
+        mature_defensive = mature_defensive_score(
+            commercial,
+            forward_guidance,
+            growth_drag_curve=growth_drag_curve,
+        )
         quality_adjusted_valuation_score = clamp(to_float(commercial.get("quality_adjusted_valuation_score"), valuation_score))
         forward_valuation_score = to_float(forward_guidance.get("forward_valuation_score"), 50.0)
         quality_forward_valuation_score = clamp(
@@ -1422,6 +1435,7 @@ def score_rows(
                 "tier1_selection_gate_score": round(selection_gate, 4),
                 "investment_profile": profile_name,
                 "investment_weights": profile_weights,
+                "growth_drag_curve": growth_drag_curve,
                 "clinical_risk_drag": round(clinical_risk_drag, 4),
                 "investment_risk_drag": round(investment_risk_drag, 4),
                 "effective_pre_confidence_risk_drag": round(effective_pre_confidence_risk_drag, 4),

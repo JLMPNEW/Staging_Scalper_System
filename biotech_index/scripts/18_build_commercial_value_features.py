@@ -559,11 +559,9 @@ def score_institutional_upside_capacity(market_cap: float | None) -> float:
 def validate_weight_sum(section: str, weights: dict[str, Any], keys: list[str], *, expected: float = 1.0) -> None:
     total = sum(float(weights.get(key, 0.0)) for key in keys)
     if abs(total - expected) > 1e-6:
-        LOGGER.warning(
-            "%s additive weights sum to %.6f, expected %.6f; check config before relying on calibration output.",
-            section,
-            total,
-            expected,
+        raise ValueError(
+            f"{section} additive weights sum to {total:.6f}, expected {expected:.6f}; "
+            "fix config before building commercial value features."
         )
 
 
@@ -678,10 +676,25 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
         pe_ratio,
         ev_to_sales,
     )
-    quality_adjusted_valuation_score = clamp(valuation_score * max(0.0, 1.0 - 0.45 * value_trap_score / 100.0))
+    quality_adjusted_cfg = cfg_get(config, "commercial_value.quality_adjusted_valuation", {}) or {}
+    value_trap_valuation_discount = clamp(
+        float(quality_adjusted_cfg.get("value_trap_discount", 0.45)),
+        0.0,
+        1.0,
+    )
+    quality_adjusted_valuation_score = clamp(
+        valuation_score * max(0.0, 1.0 - value_trap_valuation_discount * value_trap_score / 100.0)
+    )
     upside_capacity_score = score_upside_capacity(market_cap)
     institutional_upside_capacity_score = score_institutional_upside_capacity(market_cap)
-    commercial_stage_score = 80.0 if commercial_stage_flag else 45.0 if ttm_revenue and ttm_revenue > 0 else 15.0
+    commercial_stage_scores = cfg_get(config, "commercial_value.commercial_stage_scores", {}) or {}
+    commercial_stage_score = (
+        float(commercial_stage_scores.get("commercial", 80.0))
+        if commercial_stage_flag
+        else float(commercial_stage_scores.get("revenue_positive", 45.0))
+        if ttm_revenue and ttm_revenue > 0
+        else float(commercial_stage_scores.get("pre_revenue", 15.0))
+    )
 
     quality_weights = cfg_get(config, "commercial_value.quality_weights", {}) or {}
     commercial_quality_score = clamp(
