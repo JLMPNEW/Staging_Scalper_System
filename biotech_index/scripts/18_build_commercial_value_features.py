@@ -40,6 +40,28 @@ LOGGER = logging.getLogger("build_commercial_value_features")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 SQLITE_PARAM_CHUNK_SIZE = 800
 QUARTER_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
+DEFAULT_UPSIDE_CAPACITY_POINTS = [
+    (150_000_000.0, 35.0),
+    (550_000_000.0, 55.0),
+    (1_750_000_000.0, 80.0),
+    (5_500_000_000.0, 84.0),
+    (15_800_000_000.0, 74.0),
+    (35_400_000_000.0, 58.0),
+    (70_700_000_000.0, 40.0),
+    (158_100_000_000.0, 28.0),
+    (250_000_000_000.0, 16.0),
+]
+DEFAULT_INSTITUTIONAL_UPSIDE_CAPACITY_POINTS = [
+    (150_000_000.0, 40.0),
+    (550_000_000.0, 60.0),
+    (1_750_000_000.0, 74.0),
+    (5_500_000_000.0, 82.0),
+    (15_800_000_000.0, 78.0),
+    (35_400_000_000.0, 64.0),
+    (70_700_000_000.0, 52.0),
+    (158_100_000_000.0, 38.0),
+    (250_000_000_000.0, 26.0),
+]
 
 
 def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
@@ -72,6 +94,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-companies", type=int, default=0, help="Smoke-test limit. 0 means all.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
     parser.add_argument("--allow-missing-market", action="store_true", help="Build low-quality rows for companies without market features instead of failing freshness validation.")
+    parser.add_argument(
+        "--allow-stale-market",
+        action="store_true",
+        help="For historical validation rebuilds, continue when latest market features are older than the configured freshness window.",
+    )
     return parser.parse_args()
 
 
@@ -117,6 +144,56 @@ def safe_div(num: float | None, den: float | None) -> float | None:
 
 def as_bool(raw: object) -> bool:
     return str(raw or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def parse_market_cap_curve_points(
+    raw: object,
+    default: list[tuple[float, float]],
+    *,
+    section: str,
+) -> list[tuple[float, float]]:
+    if raw in (None, ""):
+        return list(default)
+    if not isinstance(raw, list):
+        raise ValueError(f"{section} must be a list of market_cap/score mappings")
+    points: list[tuple[float, float]] = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"{section}[{index}] must be a mapping")
+        market_cap = to_float(item.get("market_cap"))
+        score = to_float(item.get("score"))
+        if market_cap is None or market_cap <= 0.0 or score is None:
+            raise ValueError(f"{section}[{index}] requires positive market_cap and finite score")
+        points.append((market_cap, clamp(score)))
+    if len(points) < 2:
+        raise ValueError(f"{section} requires at least two points")
+    return sorted(points)
+
+
+def log_linear_market_cap_score(
+    market_cap: float | None,
+    points: list[tuple[float, float]],
+    *,
+    default_score: float = 50.0,
+) -> float:
+    if market_cap is None or market_cap <= 0.0:
+        return default_score
+    ordered = sorted(points)
+    if market_cap <= ordered[0][0]:
+        return clamp(ordered[0][1])
+    if market_cap >= ordered[-1][0]:
+        return clamp(ordered[-1][1])
+    log_cap = math.log10(market_cap)
+    for (left_cap, left_score), (right_cap, right_score) in zip(ordered, ordered[1:]):
+        if left_cap <= market_cap <= right_cap:
+            left_log = math.log10(left_cap)
+            right_log = math.log10(right_cap)
+            span = right_log - left_log
+            if abs(span) <= 1e-12:
+                return clamp(right_score)
+            ratio = (log_cap - left_log) / span
+            return clamp(left_score + ratio * (right_score - left_score))
+    return clamp(ordered[-1][1])
 
 
 def read_scoring_tickers(path: Path) -> set[str]:
@@ -509,9 +586,20 @@ def score_value_trap(
     return clamp(score)
 
 
-def score_upside_capacity(market_cap: float | None) -> float:
+def score_upside_capacity(market_cap: float | None, config: dict[str, Any] | None = None) -> float:
     if market_cap is None or market_cap <= 0:
         return 50.0
+    curve_cfg = cfg_get(config or {}, "commercial_value.upside_capacity_curve", {}) or {}
+    if as_bool(curve_cfg.get("enabled")):
+        curve = str(curve_cfg.get("curve") or "log_linear").strip().lower().replace("-", "_")
+        if curve != "log_linear":
+            raise ValueError(f"Unsupported commercial_value.upside_capacity_curve.curve: {curve}")
+        points = parse_market_cap_curve_points(
+            curve_cfg.get("points"),
+            DEFAULT_UPSIDE_CAPACITY_POINTS,
+            section="commercial_value.upside_capacity_curve.points",
+        )
+        return log_linear_market_cap_score(market_cap, points, default_score=50.0)
     # Tier-1 investability sweet spot: enough upside to rerate, but
     # not so small that liquidity/survival lottery effects dominate.
     if market_cap < 300_000_000:
@@ -533,10 +621,21 @@ def score_upside_capacity(market_cap: float | None) -> float:
     return 16.0
 
 
-def score_institutional_upside_capacity(market_cap: float | None) -> float:
+def score_institutional_upside_capacity(market_cap: float | None, config: dict[str, Any] | None = None) -> float:
     """Upside score with less lottery-ticket bias than raw market-cap size."""
     if market_cap is None or market_cap <= 0:
         return 50.0
+    curve_cfg = cfg_get(config or {}, "commercial_value.institutional_upside_capacity_curve", {}) or {}
+    if as_bool(curve_cfg.get("enabled")):
+        curve = str(curve_cfg.get("curve") or "log_linear").strip().lower().replace("-", "_")
+        if curve != "log_linear":
+            raise ValueError(f"Unsupported commercial_value.institutional_upside_capacity_curve.curve: {curve}")
+        points = parse_market_cap_curve_points(
+            curve_cfg.get("points"),
+            DEFAULT_INSTITUTIONAL_UPSIDE_CAPACITY_POINTS,
+            section="commercial_value.institutional_upside_capacity_curve.points",
+        )
+        return log_linear_market_cap_score(market_cap, points, default_score=50.0)
     if market_cap < 300_000_000:
         return 40.0
     if market_cap < 1_000_000_000:
@@ -685,8 +784,8 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
     quality_adjusted_valuation_score = clamp(
         valuation_score * max(0.0, 1.0 - value_trap_valuation_discount * value_trap_score / 100.0)
     )
-    upside_capacity_score = score_upside_capacity(market_cap)
-    institutional_upside_capacity_score = score_institutional_upside_capacity(market_cap)
+    upside_capacity_score = score_upside_capacity(market_cap, config)
+    institutional_upside_capacity_score = score_institutional_upside_capacity(market_cap, config)
     commercial_stage_scores = cfg_get(config, "commercial_value.commercial_stage_scores", {}) or {}
     commercial_stage_score = (
         float(commercial_stage_scores.get("commercial", 80.0))
@@ -908,6 +1007,25 @@ def main() -> None:
                         "Commercial value feature build continuing without market rows for %d ticker(s): %s",
                         len(missing_market_tickers),
                         ",".join(sorted(missing_market_tickers)[:25]) + (f"...(+{len(missing_market_tickers) - 25})" if len(missing_market_tickers) > 25 else ""),
+                    )
+            if args.allow_stale_market:
+                fresh_rows: list[dict[str, Any]] = []
+                stale_market_tickers: list[str] = []
+                for company in freshness_base_rows:
+                    company_id = int(company["company_id"])
+                    market_row = market_by_company.get(company_id)
+                    market_asof = parse_date(market_row.get("asof_date") if market_row else None)
+                    age_days = (asof_date - market_asof).days if market_asof is not None else 999_999
+                    if age_days > max_market_staleness_days:
+                        stale_market_tickers.append(str(company.get("ticker") or ""))
+                    else:
+                        fresh_rows.append(company)
+                freshness_base_rows = fresh_rows
+                if stale_market_tickers:
+                    LOGGER.warning(
+                        "Commercial value feature build continuing with stale market rows for %d ticker(s): %s",
+                        len(stale_market_tickers),
+                        ",".join(sorted(stale_market_tickers)[:25]) + (f"...(+{len(stale_market_tickers) - 25})" if len(stale_market_tickers) > 25 else ""),
                     )
             validate_layer_freshness(
                 base_rows=freshness_base_rows,

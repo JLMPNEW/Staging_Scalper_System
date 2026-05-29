@@ -387,6 +387,12 @@ commercial_value:
     commercial: 80.0
     revenue_positive: 45.0
     pre_revenue: 15.0
+  upside_capacity_curve:
+    enabled: false
+    curve: "log_linear"
+  institutional_upside_capacity_curve:
+    enabled: false
+    curve: "log_linear"
   # smooth_zero removes artificial ranking jumps around flat growth.
   growth_curve: "smooth_zero"
   quality_weights:
