@@ -3910,9 +3910,10 @@ def main() -> None:
         raise ValueError(f"Invalid --end-asof date: {args.end_asof}")
     horizons = parse_int_list(args.horizons, default=[20, 60, 120])
     top_ns = parse_int_list(args.top_n, default=[10, 20, 30])
+    market_sources_raw = args.market_sources if str(args.market_sources or "").strip() else None
     market_sources = [
         token.strip()
-        for raw_source in normalize_string_list(args.market_sources, calibration_market_sources(config))
+        for raw_source in normalize_string_list(market_sources_raw, calibration_market_sources(config))
         for token in str(raw_source).split(",")
         if token.strip()
     ]
