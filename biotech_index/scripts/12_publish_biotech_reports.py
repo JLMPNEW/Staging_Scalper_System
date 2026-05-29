@@ -769,6 +769,7 @@ def build_shadow_top_rows(
         config,
         min_addv20=0.0,
         strict_feature_lag=strict_feature_lag,
+        growth_drag_curve=params.growth_drag_curve,
     )
     ret_key = "_shadow_report_return"
     if any(ret_key in row for row in observations):

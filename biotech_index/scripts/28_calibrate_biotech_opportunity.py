@@ -16,7 +16,7 @@ import time
 from collections import defaultdict
 from collections.abc import Iterable as IterableABC
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 from statistics import median
@@ -82,6 +82,7 @@ DEFAULT_BOOTSTRAP_SEED = 1729
 DEFAULT_HOLDOUT_TOP_K = 25
 DEFAULT_BEST_ROWS_LIMIT = 25
 DEFAULT_SELECTED_TICKER_DIAGNOSTIC_TOP_RANKS = 3
+GROWTH_DRAG_CURVES = frozenset({"legacy", "smooth_linear"})
 CURRENT_CONFIG_CANDIDATE_NAME = "current_config"
 RAW_SCORE_KEYS = [
     "catalyst_score_raw",
@@ -194,6 +195,7 @@ class CalibrationParams:
     convex_risk_penalty_enabled: bool = True
     risk_penalty_convexity: float = 0.35
     risk_penalty_inflection: float = 50.0
+    growth_drag_curve: str = "legacy"
     use_quality_adjusted_valuation_component: bool = True
     use_quality_adjusted_guidance_component: bool = True
     rank_quality_caps_enabled: bool = True
@@ -377,6 +379,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Chronological train fraction for in-sample candidate ranking. Defaults to calibration.tier1.train_fraction or 0.70.",
+    )
+    parser.add_argument(
+        "--growth-drag-curve",
+        choices=sorted(GROWTH_DRAG_CURVES),
+        default="",
+        help=(
+            "Curve for mature-defensive growth drag diagnostics. Defaults to "
+            "calibration.tier1.growth_drag_curve; use smooth_linear for the challenger."
+        ),
     )
     parser.add_argument(
         "--strict-feature-lag",
@@ -581,6 +592,19 @@ def table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
+def normalize_growth_drag_curve(raw: object) -> str:
+    curve = str(raw or "legacy").strip().lower()
+    if not curve:
+        return "legacy"
+    if curve == "linear":
+        return "smooth_linear"
+    if curve not in GROWTH_DRAG_CURVES:
+        raise ValueError(
+            f"Unsupported growth drag curve '{raw}'. Expected one of: {','.join(sorted(GROWTH_DRAG_CURVES))}"
+        )
+    return curve
+
+
 def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
     stack = cfg_get(config, "calibration.tier1.recommended_stack", {}) or {}
     costs = cfg_get(config, "calibration.tier1.costs", {}) or {}
@@ -653,6 +677,7 @@ def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
                 ),
             ),
         ),
+        growth_drag_curve=normalize_growth_drag_curve(cfg_get(config, "calibration.tier1.growth_drag_curve", "legacy")),
         use_quality_adjusted_valuation_component=as_bool(
             cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True),
             True,
@@ -1604,11 +1629,43 @@ def finite_float(raw: object) -> float | None:
     return value if value is not None and math.isfinite(value) else None
 
 
-def growth_drag_score(*growth_values: object) -> float:
+def interpolate_piecewise(value: float, points: list[tuple[float, float]]) -> float:
+    if not points:
+        raise ValueError("interpolate_piecewise requires at least one point")
+    ordered = sorted(points)
+    if value <= ordered[0][0]:
+        return ordered[0][1]
+    if value >= ordered[-1][0]:
+        return ordered[-1][1]
+    for (left_x, left_y), (right_x, right_y) in zip(ordered, ordered[1:]):
+        if left_x <= value <= right_x:
+            span = right_x - left_x
+            if abs(span) <= 1e-12:
+                return right_y
+            ratio = (value - left_x) / span
+            return left_y + ratio * (right_y - left_y)
+    return ordered[-1][1]
+
+
+def growth_drag_score(*growth_values: object, curve: str = "legacy") -> float:
     parsed = [value for value in (finite_float(raw) for raw in growth_values) if value is not None]
     if not parsed:
         return 50.0
     best_growth = max(parsed)
+    curve_name = normalize_growth_drag_curve(curve)
+    if curve_name == "smooth_linear":
+        return clamp(
+            interpolate_piecewise(
+                best_growth,
+                [
+                    (-0.20, 100.0),
+                    (-0.10, 75.0),
+                    (0.0, 50.0),
+                    (0.10, 25.0),
+                    (0.20, 0.0),
+                ],
+            )
+        )
     if best_growth >= 0.20:
         return 0.0
     if best_growth >= 0.10:
@@ -1635,13 +1692,14 @@ def market_cap_maturity_score(market_cap: object) -> float:
     return 0.0
 
 
-def mature_defensive_score(observation: Mapping[str, Any]) -> float:
+def mature_defensive_score(observation: Mapping[str, Any], *, growth_drag_curve: str = "legacy") -> float:
     if (to_float(observation.get("commercial_stage_flag"), 0.0) or 0.0) <= 0.0:
         return 0.0
     size_score = market_cap_maturity_score(observation.get("market_cap"))
     growth_drag = growth_drag_score(
         observation.get("forward_revenue_growth_pct"),
         observation.get("revenue_yoy_growth_pct"),
+        curve=growth_drag_curve,
     )
     upside_drag = 100.0 - clamp(to_float(observation.get("institutional_upside_capacity_score"), 50.0))
     score = clamp(0.40 * size_score + 0.35 * growth_drag + 0.25 * upside_drag)
@@ -1817,6 +1875,7 @@ def load_observations(
     *,
     min_addv20: float,
     strict_feature_lag: bool,
+    growth_drag_curve: str,
 ) -> list[dict[str, Any]]:
     observations: list[dict[str, Any]] = []
     revenue_min = float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000.0))
@@ -1980,7 +2039,14 @@ def load_observations(
                     "diag_forward_guidance_recency_days": guidance_recency_days if guidance_recency_days is not None else "",
                 }
             )
-            mature_score = mature_defensive_score(observation)
+            growth_drag = growth_drag_score(
+                observation.get("forward_revenue_growth_pct"),
+                observation.get("revenue_yoy_growth_pct"),
+                curve=growth_drag_curve,
+            )
+            mature_score = mature_defensive_score(observation, growth_drag_curve=growth_drag_curve)
+            observation["diag_growth_drag_curve"] = growth_drag_curve
+            observation["diag_growth_drag_score"] = growth_drag
             observation["diag_mature_defensive_score"] = mature_score
             observation["diag_mature_defensive_flag"] = 1.0 if mature_score >= 60.0 else 0.0
             expected_score = expected_return_quality_score(observation)
@@ -3984,6 +4050,8 @@ def main() -> None:
             active_medium_horizons,
         )
     params = load_calibration_params(config)
+    if args.growth_drag_curve:
+        params = replace(params, growth_drag_curve=normalize_growth_drag_curve(args.growth_drag_curve))
     specs = generate_weight_specs(config, candidate_limit=max(0, int(args.candidate_limit)))
     policies = generate_selection_policies(config)
     candidate_name_filters = parse_name_filters(args.candidate_name_filter)
@@ -4058,6 +4126,7 @@ def main() -> None:
             config,
             min_addv20=min_addv20,
             strict_feature_lag=strict_feature_lag,
+            growth_drag_curve=params.growth_drag_curve,
         )
         if not observations:
             raise ValueError("No Tier-1 feature observations remain after exclusions.")
@@ -4264,6 +4333,7 @@ def main() -> None:
             "convex_risk_penalty_enabled": params.convex_risk_penalty_enabled,
             "risk_penalty_convexity": params.risk_penalty_convexity,
             "risk_penalty_inflection": params.risk_penalty_inflection,
+            "growth_drag_curve": params.growth_drag_curve,
         },
         "best_medium_term_rank1": best_medium_term,
         "elapsed_sec": round(time.perf_counter() - start_time, 3),
