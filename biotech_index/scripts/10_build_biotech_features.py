@@ -46,6 +46,10 @@ FEATURE_CSV_FIELDNAMES = [
     "momentum_score_raw",
     "primary_nct",
     "primary_trial_title",
+    "ctgov_evidence_type",
+    "company_strategy_category",
+    "ctgov_review_bucket",
+    "ctgov_manual_root_cause",
     "verified_qualifying_active_trial_count",
     "phase2_3_active_trials",
     "lead_phase2_3_active_trials",
@@ -64,6 +68,16 @@ FEATURE_CSV_FIELDNAMES = [
     "sec_regulatory_catalyst_count",
     "sec_dilution_event_count",
     "sec_negative_clinical_event_count",
+    "sec_catalyst_raw_score",
+    "sec_catalyst_recency_adjusted_score",
+    "sec_catalyst_score_used",
+    "sec_catalyst_decay_delta",
+    "sec_catalyst_latest_event_type",
+    "sec_catalyst_latest_filing_date",
+    "sec_catalyst_latest_event_date",
+    "sec_catalyst_recency_days",
+    "sec_catalyst_recency_basis",
+    "sec_catalyst_event_types",
     "manual_verdict",
     "feature_json",
 ]
@@ -80,6 +94,54 @@ CATALYST_COMPONENT_MAX = {
     "regulatory_or_positive_clinical_event": 25.0,
 }
 CATALYST_POSITIVE_MAX = sum(CATALYST_COMPONENT_MAX.values())
+SEC_CATALYST_EVENT_WEIGHTS = {
+    "pdufa_date": 18.0,
+    "nda_bla_accepted": 16.0,
+    "regulatory_submission": 7.0,
+    "endpoint_met": 10.0,
+    "clinical_update_positive": 5.0,
+}
+DEFAULT_PIPELINE_QUALITY_SETTINGS = {
+    "effective_program_phase23_weight": 0.75,
+    "effective_collaborator_phase23_weight": 0.25,
+    "lead_phase23_cap": 35.0,
+    "lead_phase23_weight": 7.0,
+    "program_phase23_cap": 18.0,
+    "program_phase23_weight": 6.0,
+    "lead_active_cap": 15.0,
+    "lead_active_weight": 3.0,
+    "pivotal_core_cap": 12.0,
+    "pivotal_core_weight": 6.0,
+    "pipeline_density_cap": 10.0,
+    "pipeline_density_weight": 10.0,
+    "collab_phase23_cap": 5.0,
+    "collab_phase23_weight": 0.5,
+    "collab_penalty_threshold": 0.50,
+    "collab_penalty_cap": 25.0,
+    "collab_penalty_weight": 50.0,
+}
+
+DIAGNOSTICS_SERVICE_CATEGORIES = frozenset(
+    {
+        "clinical_research_services",
+        "molecular_diagnostics",
+        "molecular_diagnostics_laboratory",
+        "precision_medicine_diagnostics",
+        "life_science_tools_services",
+        "sterilization_services",
+    }
+)
+DEVICE_CATEGORIES = frozenset(
+    {
+        "diabetes_device",
+        "medical_device_infrastructure",
+        "medical_device_therapeutic_platform",
+        "post_market_device_services",
+        "surgical_regenerative_devices",
+        "surgical_robotics_device",
+        "non_therapeutic_device_removed",
+    }
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,6 +164,38 @@ def parse_date(raw: object) -> date | None:
         return datetime.strptime(text, "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def decay_multiplier_for_date(event_date: object, asof_date: date, *, half_life_days: float) -> tuple[float, int | None]:
+    parsed = parse_date(event_date)
+    if parsed is None:
+        return 0.0, None
+    age_days = max(0, (asof_date - parsed).days)
+    if half_life_days <= 0.0:
+        return 1.0, age_days
+    return math.pow(0.5, age_days / half_life_days), age_days
+
+
+def sec_catalyst_event_multiplier(
+    *,
+    event_type: str,
+    filing_date: object,
+    event_date: object,
+    asof_date: date,
+    half_life_days: float,
+) -> tuple[float, int | None, str]:
+    parsed_event_date = parse_date(event_date)
+    if event_type == "pdufa_date" and parsed_event_date is not None and parsed_event_date >= asof_date:
+        days_until = (parsed_event_date - asof_date).days
+        if half_life_days <= 0.0:
+            return 1.0, days_until, "pdufa_event_date_proximity"
+        return math.pow(0.5, days_until / half_life_days), days_until, "pdufa_event_date_proximity"
+    multiplier, age_days = decay_multiplier_for_date(
+        filing_date,
+        asof_date,
+        half_life_days=half_life_days,
+    )
+    return multiplier, age_days, "filing_age"
 
 
 def to_float(raw: object, default: float = 0.0) -> float:
@@ -192,6 +286,134 @@ def read_csv(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(path)
     return pd.read_csv(path, dtype=str).fillna("")
+
+
+def bounded_float(raw: object, default: float, *, low: float | None = None, high: float | None = None) -> float:
+    value = to_float(raw, default)
+    if low is not None:
+        value = max(low, value)
+    if high is not None:
+        value = min(high, value)
+    return value
+
+
+def load_pipeline_quality_settings(config: dict[str, Any]) -> dict[str, float]:
+    raw = cfg_get(config, "biotech_features.pipeline_quality", {}) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    settings = dict(DEFAULT_PIPELINE_QUALITY_SETTINGS)
+    for key, default in DEFAULT_PIPELINE_QUALITY_SETTINGS.items():
+        settings[key] = bounded_float(raw.get(key), default, low=0.0)
+    return settings
+
+
+def load_sec_catalyst_event_weights(config: dict[str, Any]) -> dict[str, float]:
+    raw = cfg_get(config, "biotech_features.sec_event_weights", {}) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    weights: dict[str, float] = {}
+    for event_type, default in SEC_CATALYST_EVENT_WEIGHTS.items():
+        weights[event_type] = bounded_float(raw.get(event_type), default, low=0.0)
+    return weights
+
+
+def configured_source_priority(raw: object, default: list[str]) -> list[str]:
+    if not isinstance(raw, list):
+        return default
+    out = [str(item).strip().lower() for item in raw if str(item).strip()]
+    return out or default
+
+
+def resolve_going_concern_status(
+    *,
+    screen: Any,
+    survival: dict[str, Any] | None,
+    source_priority: list[str],
+) -> tuple[str, str, str]:
+    db_status = str((survival or {}).get("going_concern_status") or "").strip().lower()
+    csv_status = str(screen.get("going_concern_status") or "").strip().lower()
+    latest_status = str(
+        screen.get("latest_periodic_going_concern_status")
+        or (survival or {}).get("latest_periodic_going_concern_status")
+        or ""
+    ).strip().lower()
+    for source in source_priority:
+        if source == "db" and db_status:
+            return db_status, latest_status, "db"
+        if source == "csv" and csv_status:
+            return csv_status, latest_status, "csv"
+    if db_status:
+        return db_status, latest_status, "db"
+    if csv_status:
+        return csv_status, latest_status, "csv"
+    return "", latest_status, ""
+
+
+def load_company_strategy_overrides(path: Path | None) -> dict[str, str]:
+    df = read_optional_csv(path)
+    if df.empty:
+        return {}
+    required = {"ticker", "company_strategy_category"}
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError(f"Company strategy override CSV missing required columns: {','.join(missing)}")
+    out: dict[str, str] = {}
+    for row in df.to_dict("records"):
+        ticker = normalize_ticker(row.get("ticker"))
+        category = str(row.get("company_strategy_category") or "").strip().lower()
+        if ticker and category:
+            out[ticker] = category
+    return out
+
+
+def company_strategy_category(
+    *,
+    ticker: str,
+    universe_row: Any,
+    category_overrides: dict[str, str],
+) -> str:
+    override = category_overrides.get(ticker)
+    if override:
+        return override
+    root_cause = str(universe_row.get("root_cause_category") or "").strip().lower()
+    manual_root = str(universe_row.get("manual_root_cause") or "").strip().lower()
+    if root_cause == "post_market_device_only" or manual_root == "post_market_device_only":
+        return "post_market_device_services"
+    if as_bool(universe_row.get("company_diagnostic_like")):
+        return "diagnostics_services"
+    return "clinical_therapeutics"
+
+
+def ctgov_evidence_type(
+    *,
+    active_lead: int,
+    active_collab: int,
+    active_program: int,
+    lead_phase2_3: int,
+    program_phase2_3: int,
+    collaborator_phase2_3: int,
+    strategy_category: str,
+    universe_row: Any,
+) -> str:
+    final_status = str(universe_row.get("final_status") or "").strip().lower()
+    manual_verdict = str(universe_row.get("manual_verdict") or "").strip().lower()
+    root_cause = str(universe_row.get("root_cause_category") or "").strip().lower()
+    manual_root = str(universe_row.get("manual_root_cause") or "").strip().lower()
+    category = strategy_category.strip().lower()
+
+    if final_status == "remove" or manual_verdict == "manual_remove":
+        if category in DEVICE_CATEGORIES or root_cause == "post_market_device_only" or manual_root == "post_market_device_only":
+            return "non_therapeutic_device_removed"
+        return "removed"
+    if category in DIAGNOSTICS_SERVICE_CATEGORIES:
+        return "diagnostics_services"
+    if active_program > 0 or program_phase2_3 > 0:
+        return "program_owner_active"
+    if active_lead > 0 or lead_phase2_3 > 0:
+        return "lead_sponsor_active"
+    if active_collab > 0 or collaborator_phase2_3 > 0:
+        return "collaborator_only_active"
+    return "historical_only"
 
 
 def load_company_ids(conn: sqlite3.Connection) -> dict[str, int]:
@@ -363,11 +585,19 @@ def is_actionable_sec_event(event_type: str, excerpt: str) -> bool:
     return True
 
 
-def load_recent_sec_event_summary(conn: sqlite3.Connection, asof_date: date, *, lookback_days: int = 730) -> dict[int, dict[str, Any]]:
+def load_recent_sec_event_summary(
+    conn: sqlite3.Connection,
+    asof_date: date,
+    *,
+    lookback_days: int = 730,
+    sec_catalyst_half_life_days: float = 90.0,
+    sec_catalyst_event_weights: dict[str, float] | None = None,
+) -> dict[int, dict[str, Any]]:
+    event_weights = sec_catalyst_event_weights or SEC_CATALYST_EVENT_WEIGHTS
     cutoff = (asof_date - timedelta(days=max(1, lookback_days))).isoformat()
     event_rows = conn.execute(
         """
-        SELECT company_id, filing_date, form, event_type, polarity, confidence, extracted_text, accession_nodash
+        SELECT company_id, filing_date, form, event_type, event_date, event_value, polarity, confidence, extracted_text, accession_nodash
         FROM sec_events
         WHERE filing_date >= ?
           AND filing_date <= ?
@@ -387,7 +617,29 @@ def load_recent_sec_event_summary(conn: sqlite3.Connection, asof_date: date, *, 
         filing_date = str(row["filing_date"] or "")
         polarity = str(row["polarity"] or "neutral")
         accession = str(row["accession_nodash"] or "")
-        bucket = summary.setdefault(company_id, {"counts": {}, "polarity_counts": {}, "latest_filing_dates": {}, "recent_events": []})
+        bucket = summary.setdefault(
+            company_id,
+            {
+                "counts": {},
+                "polarity_counts": {},
+                "latest_filing_dates": {},
+                "recent_events": [],
+                "sec_catalyst_recency": {
+                    "raw_score": 0.0,
+                    "recency_adjusted_score": 0.0,
+                    "event_count": 0,
+                    "latest_filing_date": "",
+                    "latest_event_date": "",
+                    "latest_event_type": "",
+                    "recency_days": "",
+                    "recency_basis": "",
+                    "max_event_age_days": "",
+                    "event_types": [],
+                    "future_pdufa_event_count": 0,
+                    "half_life_days": sec_catalyst_half_life_days,
+                },
+            },
+        )
         count_key = (company_id, event_type, polarity, accession)
         if count_key not in seen_count_keys:
             seen_count_keys.add(count_key)
@@ -396,11 +648,47 @@ def load_recent_sec_event_summary(conn: sqlite3.Connection, asof_date: date, *, 
             latest = str(bucket["latest_filing_dates"].get(event_type) or "")
             if not latest or filing_date > latest:
                 bucket["latest_filing_dates"][event_type] = filing_date
+            event_weight = event_weights.get(event_type)
+            if event_weight is not None:
+                event_date = str(row["event_date"] or "")
+                multiplier, age_days, recency_basis = sec_catalyst_event_multiplier(
+                    event_type=event_type,
+                    filing_date=filing_date,
+                    event_date=event_date,
+                    asof_date=asof_date,
+                    half_life_days=sec_catalyst_half_life_days,
+                )
+                recency = bucket["sec_catalyst_recency"]
+                recency["raw_score"] = round(float(recency.get("raw_score") or 0.0) + event_weight, 6)
+                recency["recency_adjusted_score"] = round(
+                    float(recency.get("recency_adjusted_score") or 0.0) + event_weight * multiplier,
+                    6,
+                )
+                recency["event_count"] = int(recency.get("event_count") or 0) + 1
+                event_types = recency.setdefault("event_types", [])
+                if isinstance(event_types, list) and event_type not in event_types:
+                    event_types.append(event_type)
+                if recency_basis == "pdufa_event_date_proximity":
+                    recency["future_pdufa_event_count"] = int(recency.get("future_pdufa_event_count") or 0) + 1
+                if age_days is not None:
+                    max_age = recency.get("max_event_age_days")
+                    max_age_value = to_int(max_age) if str(max_age if max_age is not None else "").strip() else None
+                    if max_age_value is None or age_days > max_age_value:
+                        recency["max_event_age_days"] = age_days
+                latest_event_date = str(recency.get("latest_filing_date") or "")
+                if filing_date and (not latest_event_date or filing_date > latest_event_date):
+                    recency["latest_filing_date"] = filing_date
+                    recency["latest_event_date"] = event_date
+                    recency["latest_event_type"] = event_type
+                    recency["recency_days"] = "" if age_days is None else age_days
+                    recency["recency_basis"] = recency_basis
         if per_company_seen.get(company_id, 0) >= 5:
             continue
         bucket["recent_events"].append(
             {
                 "filing_date": filing_date,
+                "event_date": str(row["event_date"] or ""),
+                "event_value": str(row["event_value"] or ""),
                 "form": str(row["form"] or ""),
                 "event_type": event_type,
                 "polarity": polarity,
@@ -432,7 +720,11 @@ def empty_evidence_summary() -> dict[str, Any]:
     }
 
 
-def evidence_summary(evidence_df: pd.DataFrame, ticker: str) -> dict[str, Any]:
+def evidence_summary(
+    evidence_df: pd.DataFrame,
+    ticker: str,
+    pipeline_quality_settings: dict[str, float],
+) -> dict[str, Any]:
     if evidence_df.empty:
         return empty_evidence_summary()
     ev = cast(Any, evidence_df[evidence_df["ticker"].str.upper() == ticker.upper()].copy())
@@ -480,18 +772,45 @@ def evidence_summary(evidence_df: pd.DataFrame, ticker: str) -> dict[str, Any]:
     collab_only_active = int((collab_mask & ~lead_mask & ~program_mask).sum())
     verified_active = int(len(active))
     collab_ratio = round(collab_only_active / verified_active, 4) if verified_active else 0.0
-    effective_phase23 = round(lead_phase23 + (0.75 * program_phase23) + (0.25 * collab_phase23), 4)
+    effective_phase23 = round(
+        lead_phase23
+        + pipeline_quality_settings["effective_program_phase23_weight"] * program_phase23
+        + pipeline_quality_settings["effective_collaborator_phase23_weight"] * collab_phase23,
+        4,
+    )
     pipeline_density = effective_phase23 / verified_active if verified_active else 0.0
     pivotal_core = int((pivotal_mask & (lead_mask | program_mask)).sum())
 
     core_quality = 0.0
-    core_quality += min(35.0, lead_phase23 * 7.0)
-    core_quality += min(18.0, program_phase23 * 6.0)
-    core_quality += min(15.0, lead_active * 3.0)
-    core_quality += min(12.0, pivotal_core * 6.0)
-    core_quality += min(10.0, pipeline_density * 10.0)
-    core_quality += min(5.0, collab_phase23 * 0.5)
-    core_quality -= min(25.0, max(0.0, collab_ratio - 0.50) * 50.0)
+    core_quality += min(
+        pipeline_quality_settings["lead_phase23_cap"],
+        lead_phase23 * pipeline_quality_settings["lead_phase23_weight"],
+    )
+    core_quality += min(
+        pipeline_quality_settings["program_phase23_cap"],
+        program_phase23 * pipeline_quality_settings["program_phase23_weight"],
+    )
+    core_quality += min(
+        pipeline_quality_settings["lead_active_cap"],
+        lead_active * pipeline_quality_settings["lead_active_weight"],
+    )
+    core_quality += min(
+        pipeline_quality_settings["pivotal_core_cap"],
+        pivotal_core * pipeline_quality_settings["pivotal_core_weight"],
+    )
+    core_quality += min(
+        pipeline_quality_settings["pipeline_density_cap"],
+        pipeline_density * pipeline_quality_settings["pipeline_density_weight"],
+    )
+    core_quality += min(
+        pipeline_quality_settings["collab_phase23_cap"],
+        collab_phase23 * pipeline_quality_settings["collab_phase23_weight"],
+    )
+    core_quality -= min(
+        pipeline_quality_settings["collab_penalty_cap"],
+        max(0.0, collab_ratio - pipeline_quality_settings["collab_penalty_threshold"])
+        * pipeline_quality_settings["collab_penalty_weight"],
+    )
     core_quality = clamp(core_quality)
     collaborator_heavy = collab_ratio >= 0.60 and collab_only_active > (lead_active + program_active)
 
@@ -528,7 +847,10 @@ def evidence_summary(evidence_df: pd.DataFrame, ticker: str) -> dict[str, Any]:
     }
 
 
-def build_evidence_summary_index(evidence_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
+def build_evidence_summary_index(
+    evidence_df: pd.DataFrame,
+    pipeline_quality_settings: dict[str, float],
+) -> dict[str, dict[str, Any]]:
     if evidence_df.empty or "ticker" not in evidence_df.columns:
         return {}
     out: dict[str, dict[str, Any]] = {}
@@ -538,7 +860,7 @@ def build_evidence_summary_index(evidence_df: pd.DataFrame) -> dict[str, dict[st
         if not normalized:
             LOGGER.warning("Skipping blank ticker in evidence summary index")
             continue
-        out[normalized] = evidence_summary(group, normalized)
+        out[normalized] = evidence_summary(group, normalized, pipeline_quality_settings)
     return out
 
 
@@ -552,6 +874,12 @@ def compute_feature_row(
     min_liquidity_addv20: float,
     low_liquidity_addv20: float,
     strong_liquidity_addv20: float,
+    category_overrides: dict[str, str],
+    going_concern_source_priority: list[str],
+    survival_score_blend_weight: float,
+    sec_catalyst_event_weights: dict[str, float],
+    sec_catalyst_recency_decay_enabled: bool,
+    sec_catalyst_half_life_days: float,
     market: dict[str, Any] | None,
     survival: dict[str, Any] | None,
     sec_events: dict[str, Any] | None,
@@ -571,6 +899,24 @@ def compute_feature_row(
     collaborator_heavy = bool(evidence.get("collaborator_heavy_flag"))
     outcome_override_excluded = to_int(evidence.get("outcome_override_excluded_rows"))
     outcome_override_review = to_int(evidence.get("outcome_override_review_rows"))
+    review_bucket = str(universe_row.get("review_bucket") or "")
+    root_cause_category = str(universe_row.get("root_cause_category") or "")
+    manual_root_cause = str(universe_row.get("manual_root_cause") or root_cause_category)
+    strategy_category = company_strategy_category(
+        ticker=ticker,
+        universe_row=universe_row,
+        category_overrides=category_overrides,
+    )
+    evidence_type = ctgov_evidence_type(
+        active_lead=active_lead,
+        active_collab=active_collab,
+        active_program=active_program,
+        lead_phase2_3=lead_phase2_3,
+        program_phase2_3=program_phase2_3,
+        collaborator_phase2_3=collaborator_phase2_3,
+        strategy_category=strategy_category,
+        universe_row=universe_row,
+    )
     total_trials = to_int(universe_row.get("total_linked_trials"))
     pipeline_density = to_float(universe_row.get("pipeline_density"))
     stale_active = to_int(universe_row.get("stale_active_trials"))
@@ -588,8 +934,11 @@ def compute_feature_row(
     rnd_disclosure = as_bool(screen.get("has_recent_rnd_disclosure"))
     pipeline_disclosure = as_bool(screen.get("has_pipeline_disclosure"))
     rnd_fact_hit_count = to_int(screen.get("recent_rnd_fact_hit_count"))
-    going_status = str(screen.get("going_concern_status") or "").strip().lower()
-    latest_gc_status = str(screen.get("latest_periodic_going_concern_status") or "").strip().lower()
+    going_status, latest_gc_status, going_concern_source = resolve_going_concern_status(
+        screen=screen,
+        survival=survival,
+        source_priority=going_concern_source_priority,
+    )
     google_gc_confirmed = as_bool(screen.get("google_going_concern_confirmed"))
     reverse_2y = to_int(screen.get("reverse_split_hits_2y"))
     reverse_5y = to_int(screen.get("reverse_split_hits_5y"))
@@ -650,6 +999,40 @@ def compute_feature_row(
     dilution_events = atm_program + atm_facility + public_offering + pipe_financing + shelf_registration + financing_shelf
     partnership_events = partnership_license + partnership_signed
     sec_gc_events = going_concern_confirmed + going_concern
+    sec_catalyst_raw_score = (
+        pdufa_date * sec_catalyst_event_weights["pdufa_date"]
+        + nda_bla_accepted * sec_catalyst_event_weights["nda_bla_accepted"]
+        + regulatory_submission * sec_catalyst_event_weights["regulatory_submission"]
+        + endpoint_met * sec_catalyst_event_weights["endpoint_met"]
+        + clinical_update_positive * sec_catalyst_event_weights["clinical_update_positive"]
+    )
+    sec_catalyst_recency = dict(sec_events.get("sec_catalyst_recency", {}) if sec_events else {})
+    sec_catalyst_recency_adjusted_score = to_float(
+        sec_catalyst_recency.get("recency_adjusted_score"),
+        sec_catalyst_raw_score,
+    )
+    sec_catalyst_score_used = (
+        sec_catalyst_recency_adjusted_score
+        if sec_catalyst_recency_decay_enabled
+        else sec_catalyst_raw_score
+    )
+    sec_catalyst_decay_delta = sec_catalyst_score_used - sec_catalyst_raw_score
+    sec_catalyst_latest_filing_date = str(sec_catalyst_recency.get("latest_filing_date") or "")
+    sec_catalyst_latest_event_date = str(sec_catalyst_recency.get("latest_event_date") or "")
+    sec_catalyst_latest_event_type = str(sec_catalyst_recency.get("latest_event_type") or "")
+    sec_catalyst_recency_basis = str(sec_catalyst_recency.get("recency_basis") or "")
+    sec_catalyst_event_types_raw = sec_catalyst_recency.get("event_types", [])
+    sec_catalyst_event_types = (
+        "|".join(str(item) for item in sec_catalyst_event_types_raw)
+        if isinstance(sec_catalyst_event_types_raw, list)
+        else str(sec_catalyst_event_types_raw or "")
+    )
+    sec_catalyst_recency_days_raw = sec_catalyst_recency.get("recency_days")
+    sec_catalyst_recency_days = (
+        to_int(sec_catalyst_recency_days_raw)
+        if str(sec_catalyst_recency_days_raw if sec_catalyst_recency_days_raw is not None else "").strip()
+        else ""
+    )
 
     catalyst_components = {
         "verified_active_trials": min(
@@ -691,14 +1074,11 @@ def compute_feature_row(
         catalyst_penalty += 6.0
     catalyst_components["regulatory_or_positive_clinical_event"] = min(
         CATALYST_COMPONENT_MAX["regulatory_or_positive_clinical_event"],
-        pdufa_date * 18.0
-        + nda_bla_accepted * 16.0
-        + regulatory_submission * 7.0
-        + endpoint_met * 10.0
-        + clinical_update_positive * 5.0,
+        sec_catalyst_score_used,
     )
     catalyst_positive_raw = sum(catalyst_components.values())
-    catalyst_raw = clamp((catalyst_positive_raw / CATALYST_POSITIVE_MAX) * 100.0 - catalyst_penalty)
+    catalyst_positive_after_penalty = max(0.0, catalyst_positive_raw - catalyst_penalty)
+    catalyst_raw = clamp((catalyst_positive_after_penalty / CATALYST_POSITIVE_MAX) * 100.0)
 
     credibility_raw = 0.0
     credibility_raw += min(25.0, active_lead * 5.0)
@@ -801,7 +1181,11 @@ def compute_feature_row(
         financial_quality_raw += 5.0
     financial_quality_raw = clamp(financial_quality_raw)
     if survival:
-        financial_quality_raw = (financial_quality_raw * 0.45) + (survival_score_for_calc * 0.55)
+        feature_quality_weight = 1.0 - survival_score_blend_weight
+        financial_quality_raw = (
+            financial_quality_raw * feature_quality_weight
+            + survival_score_for_calc * survival_score_blend_weight
+        )
     else:
         financial_quality_raw -= 8.0
     financial_quality_raw = clamp(financial_quality_raw)
@@ -816,9 +1200,14 @@ def compute_feature_row(
     feature_json = {
         "ticker": ticker,
         "company_name": str(universe_row.get("company_name") or ""),
+        "company_strategy_category": strategy_category,
         "ctgov": {
             "primary_nct": str(universe_row.get("primary_nct") or ""),
             "primary_trial_title": str(universe_row.get("primary_trial_title") or ""),
+            "ctgov_evidence_type": evidence_type,
+            "review_bucket": review_bucket,
+            "root_cause_category": root_cause_category,
+            "manual_root_cause": manual_root_cause,
             "verified_qualifying_active_trial_count": verified_active,
             "active_lead_sponsor_trials": active_lead,
             "active_collaborator_trials": active_collab,
@@ -859,6 +1248,7 @@ def compute_feature_row(
             "market_data_quality": str(market.get("market_data_quality") if market else ""),
             "going_concern_status": going_status,
             "latest_periodic_going_concern_status": latest_gc_status,
+            "going_concern_source": going_concern_source,
             "reverse_split_hits_2y": reverse_2y,
             "reverse_split_hits_5y": reverse_5y,
         },
@@ -890,6 +1280,20 @@ def compute_feature_row(
             "dilution_event_count": dilution_events,
             "partnership_event_count": partnership_events,
             "going_concern_event_count": sec_gc_events,
+            "sec_catalyst_raw_score": round(sec_catalyst_raw_score, 4),
+            "sec_catalyst_recency_adjusted_score": round(sec_catalyst_recency_adjusted_score, 4),
+            "sec_catalyst_score_used": round(sec_catalyst_score_used, 4),
+            "sec_catalyst_decay_delta": round(sec_catalyst_decay_delta, 4),
+            "sec_catalyst_recency_decay_enabled": sec_catalyst_recency_decay_enabled,
+            "sec_catalyst_decay_half_life_days": sec_catalyst_half_life_days,
+            "sec_catalyst_latest_filing_date": sec_catalyst_latest_filing_date,
+            "sec_catalyst_latest_event_date": sec_catalyst_latest_event_date,
+            "sec_catalyst_latest_event_type": sec_catalyst_latest_event_type,
+            "sec_catalyst_recency_days": sec_catalyst_recency_days,
+            "sec_catalyst_recency_basis": sec_catalyst_recency_basis,
+            "sec_catalyst_event_types": sec_catalyst_event_types,
+            "sec_catalyst_max_event_age_days": sec_catalyst_recency.get("max_event_age_days", ""),
+            "sec_catalyst_future_pdufa_event_count": sec_catalyst_recency.get("future_pdufa_event_count", 0),
             "recent_events": list(sec_events.get("recent_events", []) if sec_events else []),
         },
         "raw_scores": {
@@ -903,8 +1307,19 @@ def compute_feature_row(
                 for key, value in sorted(catalyst_components.items())
             },
             "catalyst_positive_raw_sum": round(catalyst_positive_raw, 4),
+            "catalyst_positive_after_penalty": round(catalyst_positive_after_penalty, 4),
             "catalyst_positive_max_sum": round(CATALYST_POSITIVE_MAX, 4),
             "catalyst_penalty": round(catalyst_penalty, 4),
+            "catalyst_penalty_normalized": round((catalyst_penalty / CATALYST_POSITIVE_MAX) * 100.0, 4),
+            "catalyst_penalty_unit_space": "raw_points_pre_normalization",
+            "survival_score_blend_weight": round(survival_score_blend_weight, 4),
+            "sec_catalyst_raw_score": round(sec_catalyst_raw_score, 4),
+            "sec_catalyst_recency_adjusted_score": round(sec_catalyst_recency_adjusted_score, 4),
+            "sec_catalyst_score_used": round(sec_catalyst_score_used, 4),
+            "sec_catalyst_decay_delta": round(sec_catalyst_decay_delta, 4),
+            "sec_catalyst_recency_decay_enabled": sec_catalyst_recency_decay_enabled,
+            "sec_catalyst_recency_basis": sec_catalyst_recency_basis,
+            "sec_catalyst_event_types": sec_catalyst_event_types,
         },
         "manual": {
             "manual_verdict": str(universe_row.get("manual_verdict") or ""),
@@ -923,6 +1338,10 @@ def compute_feature_row(
         "momentum_score_raw": round(momentum_raw, 4),
         "primary_nct": feature_json["ctgov"]["primary_nct"],
         "primary_trial_title": feature_json["ctgov"]["primary_trial_title"],
+        "ctgov_evidence_type": evidence_type,
+        "company_strategy_category": strategy_category,
+        "ctgov_review_bucket": review_bucket,
+        "ctgov_manual_root_cause": manual_root_cause,
         "verified_qualifying_active_trial_count": verified_active,
         "phase2_3_active_trials": phase2_3,
         "lead_phase2_3_active_trials": lead_phase2_3,
@@ -941,6 +1360,16 @@ def compute_feature_row(
         "sec_regulatory_catalyst_count": regulatory_catalysts,
         "sec_dilution_event_count": dilution_events,
         "sec_negative_clinical_event_count": negative_clinical_events,
+        "sec_catalyst_raw_score": round(sec_catalyst_raw_score, 4),
+        "sec_catalyst_recency_adjusted_score": round(sec_catalyst_recency_adjusted_score, 4),
+        "sec_catalyst_score_used": round(sec_catalyst_score_used, 4),
+        "sec_catalyst_decay_delta": round(sec_catalyst_decay_delta, 4),
+        "sec_catalyst_latest_event_type": sec_catalyst_latest_event_type,
+        "sec_catalyst_latest_filing_date": sec_catalyst_latest_filing_date,
+        "sec_catalyst_latest_event_date": sec_catalyst_latest_event_date,
+        "sec_catalyst_recency_days": sec_catalyst_recency_days,
+        "sec_catalyst_recency_basis": sec_catalyst_recency_basis,
+        "sec_catalyst_event_types": sec_catalyst_event_types,
         "manual_verdict": str(universe_row.get("manual_verdict") or ""),
         "feature_json": json.dumps(feature_json, ensure_ascii=True, sort_keys=True),
     }
@@ -999,16 +1428,45 @@ def main() -> None:
     universe_csv = resolve_path(cfg_get(config, "biotech_features.final_scoring_universe_csv"), base_dir=base_dir)
     evidence_csv = resolve_path(cfg_get(config, "biotech_features.ctgov_evidence_csv"), base_dir=base_dir)
     trial_status_overrides_csv = resolve_optional_path(cfg_get(config, "ctgov_audit.trial_status_overrides_csv"), base_dir=base_dir)
+    category_overrides_csv = resolve_optional_path(
+        cfg_get(config, "biotech_features.company_strategy_overrides_csv"),
+        base_dir=base_dir,
+    )
     screen_csv = resolve_path(cfg_get(config, "biotech_features.screen_results_csv"), base_dir=base_dir)
     output_csv = output_dir / str(cfg_get(config, "biotech_features.output_csv", "biotech_daily_features.csv"))
     min_liquidity = float(cfg_get(config, "biotech_features.min_liquidity_addv20", 1_000_000))
     low_liquidity = float(cfg_get(config, "biotech_features.low_liquidity_addv20", 2_000_000))
     strong_liquidity = float(cfg_get(config, "biotech_features.strong_liquidity_addv20", 10_000_000))
+    sec_decay_cfg = cfg_get(config, "biotech_features.sec_event_recency_decay", {}) or {}
+    if not isinstance(sec_decay_cfg, dict):
+        sec_decay_cfg = {}
+    sec_catalyst_recency_decay_enabled = as_bool(sec_decay_cfg.get("enabled", True))
+    sec_catalyst_half_life_days = max(1.0, float(sec_decay_cfg.get("half_life_days", 90.0)))
+    pipeline_quality_settings = load_pipeline_quality_settings(config)
+    sec_catalyst_event_weights = load_sec_catalyst_event_weights(config)
+    going_concern_source_priority = configured_source_priority(
+        cfg_get(config, "financial_survival.going_concern_source_priority", ["db", "csv"]),
+        ["db", "csv"],
+    )
+    survival_score_blend_weight = bounded_float(
+        cfg_get(config, "financial_survival.survival_score_blend_weight", 0.55),
+        0.55,
+        low=0.0,
+        high=1.0,
+    )
+    survival_max_staleness_days = int(
+        cfg_get(
+            config,
+            "biotech_features.financial_survival_max_staleness_days",
+            cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2),
+        )
+    )
 
     universe = read_csv(universe_csv)
     evidence_df = read_csv(evidence_csv)
     evidence_df = apply_trial_status_overrides(evidence_df, read_optional_csv(trial_status_overrides_csv))
     screen = read_csv(screen_csv)
+    category_overrides = load_company_strategy_overrides(category_overrides_csv)
     universe = universe[universe["scoring_include"].map(as_bool)].copy()
     universe_records = cast(list[dict[str, Any]], cast(Any, universe).to_dict("records"))
     normalized_universe = [(normalize_ticker(row.get("ticker")), row) for row in universe_records]
@@ -1023,7 +1481,7 @@ def main() -> None:
         )
         if ticker
     }
-    evidence_by_ticker = build_evidence_summary_index(evidence_df)
+    evidence_by_ticker = build_evidence_summary_index(evidence_df, pipeline_quality_settings)
 
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     run_id: int | None = None
@@ -1050,6 +1508,8 @@ def main() -> None:
                 conn,
                 asof_date,
                 lookback_days=int(cfg_get(config, "sec_event_parser.lookback_days", 730)),
+                sec_catalyst_half_life_days=sec_catalyst_half_life_days,
+                sec_catalyst_event_weights=sec_catalyst_event_weights,
             )
             rows: list[dict[str, Any]] = []
             skipped: list[str] = []
@@ -1075,6 +1535,12 @@ def main() -> None:
                         min_liquidity_addv20=min_liquidity,
                         low_liquidity_addv20=low_liquidity,
                         strong_liquidity_addv20=strong_liquidity,
+                        category_overrides=category_overrides,
+                        going_concern_source_priority=going_concern_source_priority,
+                        survival_score_blend_weight=survival_score_blend_weight,
+                        sec_catalyst_event_weights=sec_catalyst_event_weights,
+                        sec_catalyst_recency_decay_enabled=sec_catalyst_recency_decay_enabled,
+                        sec_catalyst_half_life_days=sec_catalyst_half_life_days,
                         market=market,
                         survival=survival_features.get(company_id),
                         sec_events=sec_event_summary.get(company_id),
@@ -1098,7 +1564,7 @@ def main() -> None:
                 layer_rows_by_company=survival_features,
                 asof_date=asof_date,
                 context="biotech feature build financial_survival_features",
-                max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2)),
+                max_staleness_days=survival_max_staleness_days,
             )
             upsert_features(conn, rows, asof_date.isoformat())
             write_csv(output_csv, rows)

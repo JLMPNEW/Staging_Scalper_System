@@ -237,11 +237,40 @@ biotech_features:
   output_dir: "../output/biotech_index_reports"
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
   ctgov_evidence_csv: "../output/biotech_index_reports/ctgov_trial_evidence.csv"
+  company_strategy_overrides_csv: "data/company_strategy_overrides.csv"
   screen_results_csv: "../output/preload_biotech_screen/biotech_screen_results_all.csv"
   output_csv: "biotech_daily_features.csv"
   min_liquidity_addv20: 1000000
   low_liquidity_addv20: 2000000
   strong_liquidity_addv20: 10000000
+  financial_survival_max_staleness_days: 2
+  pipeline_quality:
+    effective_program_phase23_weight: 0.75
+    effective_collaborator_phase23_weight: 0.25
+    lead_phase23_cap: 35.0
+    lead_phase23_weight: 7.0
+    program_phase23_cap: 18.0
+    program_phase23_weight: 6.0
+    lead_active_cap: 15.0
+    lead_active_weight: 3.0
+    pivotal_core_cap: 12.0
+    pivotal_core_weight: 6.0
+    pipeline_density_cap: 10.0
+    pipeline_density_weight: 10.0
+    collab_phase23_cap: 5.0
+    collab_phase23_weight: 0.5
+    collab_penalty_threshold: 0.50
+    collab_penalty_cap: 25.0
+    collab_penalty_weight: 50.0
+  sec_event_weights:
+    pdufa_date: 18.0
+    nda_bla_accepted: 16.0
+    regulatory_submission: 7.0
+    endpoint_met: 10.0
+    clinical_update_positive: 5.0
+  sec_event_recency_decay:
+    enabled: true
+    half_life_days: 90
 
 sec_filings:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
@@ -433,6 +462,7 @@ financial_survival:
   missing_burn_proxy_penalty: 10
   profitable_company_runway_cap_months: 120
   profitable_runway_revenue_buffer_pct: 0.10
+  survival_score_blend_weight: 0.55
   going_concern_source_priority:
     - "db"
     - "csv"
@@ -643,7 +673,6 @@ biotech_scoring:
 biotech_reports:
   output_dir: "../output/biotech_index_reports"
   top_n: 10
-  alerts_score_change_min: 12
   index_weights:
     top_n_avg_score: 0.70
     full_universe_avg_score: 0.20
@@ -866,7 +895,7 @@ calibration:
       lcb_z: 1.0
       cvar_q: 0.05
       omega_hurdle: 0.0
-      min_selected_observations: 30
+      min_selected_observations: 60
       min_asof_dates: 8
       min_net_lcb_return_pct: 0.0
       min_sortino: 0.0

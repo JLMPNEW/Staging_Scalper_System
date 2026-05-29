@@ -27,6 +27,7 @@ from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 
 LOGGER = logging.getLogger("publish_biotech_reports")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+CALIBRATION_SHADOW_MODULE = PACKAGE_ROOT / "scripts" / "28_calibrate_biotech_opportunity.py"
 
 
 def first_nonblank(*values: object) -> object:
@@ -90,6 +91,10 @@ TOP_SCORE_FIELDS = [
     "momentum_score",
     "primary_nct",
     "primary_trial_title",
+    "ctgov_evidence_type",
+    "company_strategy_category",
+    "ctgov_review_bucket",
+    "ctgov_manual_root_cause",
     "lead_phase2_3_active_trials",
     "program_phase2_3_active_trials",
     "collaborator_phase2_3_active_trials",
@@ -124,6 +129,23 @@ TOP_SCORE_FIELDS = [
     "forward_guidance_override_reason",
     "financial_data_quality",
     "sec_regulatory_catalyst_count",
+    "sec_catalyst_raw_score",
+    "sec_catalyst_recency_adjusted_score",
+    "sec_catalyst_score_used",
+    "sec_catalyst_decay_delta",
+    "sec_catalyst_latest_filing_date",
+    "sec_catalyst_latest_event_date",
+    "sec_catalyst_latest_event_type",
+    "sec_catalyst_recency_days",
+    "sec_catalyst_recency_basis",
+    "sec_catalyst_event_types",
+    "sec_event_recency_decay_enabled",
+    "sec_event_recency_half_life_days",
+    "sec_event_pre_decay_points",
+    "sec_event_post_decay_points",
+    "sec_event_decay_delta",
+    "latest_positive_sec_event_age_days",
+    "latest_positive_sec_event_type",
     "sec_dilution_event_count",
     "sec_negative_clinical_event_count",
     "industry",
@@ -172,6 +194,27 @@ SHADOW_SCORE_FIELDS = [
     "no_forward_guidance_flag",
     "guidance_staleness_flag",
     "no_guidance_negative_growth_flag",
+    "ctgov_evidence_type",
+    "company_strategy_category",
+    "ctgov_review_bucket",
+    "ctgov_manual_root_cause",
+    "sec_catalyst_raw_score",
+    "sec_catalyst_recency_adjusted_score",
+    "sec_catalyst_score_used",
+    "sec_catalyst_decay_delta",
+    "sec_catalyst_latest_filing_date",
+    "sec_catalyst_latest_event_date",
+    "sec_catalyst_latest_event_type",
+    "sec_catalyst_recency_days",
+    "sec_catalyst_recency_basis",
+    "sec_catalyst_event_types",
+    "sec_event_recency_decay_enabled",
+    "sec_event_recency_half_life_days",
+    "sec_event_pre_decay_points",
+    "sec_event_post_decay_points",
+    "sec_event_decay_delta",
+    "latest_positive_sec_event_age_days",
+    "latest_positive_sec_event_type",
 ]
 
 RANKING_DIAGNOSTIC_FIELDS = [
@@ -378,6 +421,8 @@ def load_scores(conn: sqlite3.Connection, asof_date: str) -> list[dict[str, Any]
             s.tier1_selection_gate_score, s.data_quality_confidence_multiplier,
             s.clinical_risk_drag, s.investment_risk_drag,
             s.rank, s.bucket, s.top_evidence_json,
+            s.ctgov_evidence_type, s.company_strategy_category,
+            s.ctgov_review_bucket, s.ctgov_manual_root_cause,
             c.ticker, c.company_name, c.exchange, c.industry, c.industry_aggregate
         FROM daily_scores s
         JOIN companies c ON c.company_id = s.company_id
@@ -619,6 +664,10 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "momentum_score": row.get("momentum_score", ""),
         "primary_nct": evidence.get("primary_nct", "") if isinstance(evidence, dict) else "",
         "primary_trial_title": evidence.get("primary_trial_title", "") if isinstance(evidence, dict) else "",
+        "ctgov_evidence_type": row.get("ctgov_evidence_type", ctgov_quality.get("ctgov_evidence_type", "") if isinstance(ctgov_quality, dict) else ""),
+        "company_strategy_category": row.get("company_strategy_category", ctgov_quality.get("company_strategy_category", "") if isinstance(ctgov_quality, dict) else ""),
+        "ctgov_review_bucket": row.get("ctgov_review_bucket", ctgov_quality.get("ctgov_review_bucket", "") if isinstance(ctgov_quality, dict) else ""),
+        "ctgov_manual_root_cause": row.get("ctgov_manual_root_cause", ctgov_quality.get("ctgov_manual_root_cause", "") if isinstance(ctgov_quality, dict) else ""),
         "lead_phase2_3_active_trials": ctgov_quality.get("lead_phase2_3_active_trials", "") if isinstance(ctgov_quality, dict) else "",
         "program_phase2_3_active_trials": ctgov_quality.get("program_phase2_3_active_trials", "") if isinstance(ctgov_quality, dict) else "",
         "collaborator_phase2_3_active_trials": ctgov_quality.get("collaborator_phase2_3_active_trials", "") if isinstance(ctgov_quality, dict) else "",
@@ -653,6 +702,23 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "forward_guidance_override_reason": primary_guidance.get("override_reason", "") if isinstance(primary_guidance, dict) else "",
         "financial_data_quality": risk_flags.get("financial_data_quality", "") if isinstance(risk_flags, dict) else "",
         "sec_regulatory_catalyst_count": sec_events.get("regulatory_catalyst_count", "") if isinstance(sec_events, dict) else "",
+        "sec_catalyst_raw_score": sec_events.get("sec_catalyst_raw_score", "") if isinstance(sec_events, dict) else "",
+        "sec_catalyst_recency_adjusted_score": sec_events.get("sec_catalyst_recency_adjusted_score", "") if isinstance(sec_events, dict) else "",
+        "sec_catalyst_score_used": sec_events.get("sec_catalyst_score_used", "") if isinstance(sec_events, dict) else "",
+        "sec_catalyst_decay_delta": sec_events.get("sec_catalyst_decay_delta", "") if isinstance(sec_events, dict) else "",
+        "sec_catalyst_latest_filing_date": sec_events.get("sec_catalyst_latest_filing_date", "") if isinstance(sec_events, dict) else "",
+        "sec_catalyst_latest_event_date": sec_events.get("sec_catalyst_latest_event_date", "") if isinstance(sec_events, dict) else "",
+        "sec_catalyst_latest_event_type": sec_events.get("sec_catalyst_latest_event_type", "") if isinstance(sec_events, dict) else "",
+        "sec_catalyst_recency_days": sec_events.get("sec_catalyst_recency_days", "") if isinstance(sec_events, dict) else "",
+        "sec_catalyst_recency_basis": sec_events.get("sec_catalyst_recency_basis", "") if isinstance(sec_events, dict) else "",
+        "sec_catalyst_event_types": sec_events.get("sec_catalyst_event_types", "") if isinstance(sec_events, dict) else "",
+        "sec_event_recency_decay_enabled": sec_events.get("sec_catalyst_recency_decay_enabled", "") if isinstance(sec_events, dict) else "",
+        "sec_event_recency_half_life_days": sec_events.get("sec_catalyst_decay_half_life_days", "") if isinstance(sec_events, dict) else "",
+        "sec_event_pre_decay_points": sec_events.get("sec_catalyst_raw_score", "") if isinstance(sec_events, dict) else "",
+        "sec_event_post_decay_points": sec_events.get("sec_catalyst_score_used", "") if isinstance(sec_events, dict) else "",
+        "sec_event_decay_delta": sec_events.get("sec_catalyst_decay_delta", "") if isinstance(sec_events, dict) else "",
+        "latest_positive_sec_event_age_days": sec_events.get("sec_catalyst_recency_days", "") if isinstance(sec_events, dict) else "",
+        "latest_positive_sec_event_type": sec_events.get("sec_catalyst_latest_event_type", "") if isinstance(sec_events, dict) else "",
         "sec_dilution_event_count": sec_events.get("dilution_event_count", "") if isinstance(sec_events, dict) else "",
         "sec_negative_clinical_event_count": sec_events.get("negative_clinical_event_count", "") if isinstance(sec_events, dict) else "",
         "industry": row.get("industry", ""),
@@ -661,7 +727,7 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_calibration_module() -> Any:
-    module_path = PACKAGE_ROOT / "scripts" / "28_calibrate_biotech_opportunity.py"
+    module_path = CALIBRATION_SHADOW_MODULE
     spec = importlib.util.spec_from_file_location("biotech_tier1_calibration_shadow", module_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load calibration module from {module_path}")
@@ -705,6 +771,8 @@ def build_shadow_top_rows(
         strict_feature_lag=strict_feature_lag,
     )
     ret_key = "_shadow_report_return"
+    if any(ret_key in row for row in observations):
+        raise RuntimeError(f"Reserved shadow return key already exists in calibration observations: {ret_key}")
     for row in observations:
         row[ret_key] = 0.0
     selected = calibration.select_top_rows(
@@ -780,6 +848,27 @@ def build_shadow_top_rows(
                 row.get("diag_no_guidance_negative_growth_flag"),
                 row.get("no_guidance_negative_growth_flag"),
             ),
+            "ctgov_evidence_type": row.get("ctgov_evidence_type", ""),
+            "company_strategy_category": row.get("company_strategy_category", ""),
+            "ctgov_review_bucket": row.get("ctgov_review_bucket", ""),
+            "ctgov_manual_root_cause": row.get("ctgov_manual_root_cause", ""),
+            "sec_catalyst_raw_score": row.get("sec_catalyst_raw_score", ""),
+            "sec_catalyst_recency_adjusted_score": row.get("sec_catalyst_recency_adjusted_score", ""),
+            "sec_catalyst_score_used": row.get("sec_catalyst_score_used", ""),
+            "sec_catalyst_decay_delta": row.get("sec_catalyst_decay_delta", ""),
+            "sec_catalyst_latest_filing_date": row.get("sec_catalyst_latest_filing_date", ""),
+            "sec_catalyst_latest_event_date": row.get("sec_catalyst_latest_event_date", ""),
+            "sec_catalyst_latest_event_type": row.get("sec_catalyst_latest_event_type", ""),
+            "sec_catalyst_recency_days": row.get("sec_catalyst_recency_days", ""),
+            "sec_catalyst_recency_basis": row.get("sec_catalyst_recency_basis", ""),
+            "sec_catalyst_event_types": row.get("sec_catalyst_event_types", ""),
+            "sec_event_recency_decay_enabled": row.get("sec_event_recency_decay_enabled", ""),
+            "sec_event_recency_half_life_days": row.get("sec_event_recency_half_life_days", ""),
+            "sec_event_pre_decay_points": row.get("sec_event_pre_decay_points", ""),
+            "sec_event_post_decay_points": row.get("sec_event_post_decay_points", ""),
+            "sec_event_decay_delta": row.get("sec_event_decay_delta", ""),
+            "latest_positive_sec_event_age_days": row.get("latest_positive_sec_event_age_days", ""),
+            "latest_positive_sec_event_type": row.get("latest_positive_sec_event_type", ""),
         }
         out.append(apply_action_tier(shadow_row, tier_settings, score_field="shadow_score"))
     return out
@@ -1207,13 +1296,7 @@ def main() -> None:
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     base_output_dir = resolve_path(cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
     top_n = int(cfg_get(config, "biotech_reports.top_n", 20))
-    score_change_min = float(
-        cfg_get(
-            config,
-            "biotech_reports.alert_config.score_change_min",
-            cfg_get(config, "biotech_reports.alerts_score_change_min", 12),
-        )
-    )
+    score_change_min = float(cfg_get(config, "biotech_reports.alert_config.score_change_min", 12))
     rank_move_min = int(cfg_get(config, "biotech_reports.alert_config.rank_move_min", 5))
     bucket_transition_enabled = str(
         cfg_get(config, "biotech_reports.alert_config.bucket_transition_enabled", True)

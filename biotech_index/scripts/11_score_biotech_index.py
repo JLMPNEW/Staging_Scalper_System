@@ -1305,6 +1305,10 @@ def score_rows(
         sec_liq = payload.get("sec_and_liquidity", {}) if isinstance(payload, dict) else {}
         survival = payload.get("financial_survival", {}) if isinstance(payload, dict) else {}
         sec_events = payload.get("sec_events", {}) if isinstance(payload, dict) else {}
+        company_strategy_category = str(payload.get("company_strategy_category") or "") if isinstance(payload, dict) else ""
+        ctgov_evidence_type = str(ctgov.get("ctgov_evidence_type") or "")
+        ctgov_review_bucket = str(ctgov.get("review_bucket") or "")
+        ctgov_manual_root_cause = str(ctgov.get("manual_root_cause") or "")
         commercial_evidence = {
             "latest_period_end": commercial.get("latest_period_end", ""),
             "ttm_revenue": commercial.get("ttm_revenue", ""),
@@ -1341,6 +1345,10 @@ def score_rows(
             "primary_trial_title": ctgov.get("primary_trial_title", ""),
             "top_ncts": ctgov.get("top_ncts", []),
             "ctgov_quality": {
+                "ctgov_evidence_type": ctgov_evidence_type,
+                "company_strategy_category": company_strategy_category,
+                "ctgov_review_bucket": ctgov_review_bucket,
+                "ctgov_manual_root_cause": ctgov_manual_root_cause,
                 "verified_qualifying_active_trial_count": ctgov.get("verified_qualifying_active_trial_count", 0),
                 "phase2_3_active_trials": ctgov.get("phase2_3_active_trials", 0),
                 "lead_phase2_3_active_trials": ctgov.get("lead_phase2_3_active_trials", 0),
@@ -1596,6 +1604,10 @@ def score_rows(
                 ),
                 "primary_nct": ctgov.get("primary_nct", ""),
                 "primary_trial_title": ctgov.get("primary_trial_title", ""),
+                "ctgov_evidence_type": ctgov_evidence_type,
+                "company_strategy_category": company_strategy_category,
+                "ctgov_review_bucket": ctgov_review_bucket,
+                "ctgov_manual_root_cause": ctgov_manual_root_cause,
                 "verified_qualifying_active_trial_count": ctgov.get("verified_qualifying_active_trial_count", 0),
                 "phase2_3_active_trials": ctgov.get("phase2_3_active_trials", 0),
                 "lead_phase2_3_active_trials": ctgov.get("lead_phase2_3_active_trials", 0),
@@ -1738,6 +1750,10 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "bucket",
         "primary_nct",
         "primary_trial_title",
+        "ctgov_evidence_type",
+        "company_strategy_category",
+        "ctgov_review_bucket",
+        "ctgov_manual_root_cause",
         "verified_qualifying_active_trial_count",
         "phase2_3_active_trials",
         "lead_phase2_3_active_trials",
@@ -1770,6 +1786,10 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "bucket",
         "primary_nct",
         "primary_trial_title",
+        "ctgov_evidence_type",
+        "company_strategy_category",
+        "ctgov_review_bucket",
+        "ctgov_manual_root_cause",
         "commercial_risk_overlay_reasons",
         "rank_quality_cap_reasons",
         "rank_quality_cap_veto_reasons",
@@ -1886,6 +1906,10 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "momentum_score",
         "primary_nct",
         "primary_trial_title",
+        "ctgov_evidence_type",
+        "company_strategy_category",
+        "ctgov_review_bucket",
+        "ctgov_manual_root_cause",
         "verified_qualifying_active_trial_count",
         "phase2_3_active_trials",
         "lead_phase2_3_active_trials",

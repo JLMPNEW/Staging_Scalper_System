@@ -640,12 +640,18 @@ def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
                 cfg_get(config, "biotech_scoring.risk_penalty_convexity", 0.35),
             )
         ),
-        risk_penalty_inflection=float(
-            cfg_get(
-                config,
-                "calibration.tier1.risk_penalty_inflection",
-                cfg_get(config, "biotech_scoring.risk_penalty_inflection", 50.0),
-            )
+        risk_penalty_inflection=min(
+            99.0,
+            max(
+                0.0,
+                float(
+                    cfg_get(
+                        config,
+                        "calibration.tier1.risk_penalty_inflection",
+                        cfg_get(config, "biotech_scoring.risk_penalty_inflection", 50.0),
+                    )
+                ),
+            ),
         ),
         use_quality_adjusted_valuation_component=as_bool(
             cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True),
@@ -711,8 +717,8 @@ def convex_risk_drag(risk: float, weight: float, params: CalibrationParams) -> f
     base_drag = weight * risk
     if not params.convex_risk_penalty_enabled:
         return base_drag
-    inflection = params.risk_penalty_inflection
-    excess = max(0.0, min(1.0, (risk - inflection) / max(1e-9, 100.0 - inflection)))
+    inflection = min(99.0, max(0.0, params.risk_penalty_inflection))
+    excess = max(0.0, min(1.0, (risk - inflection) / max(1.0, 100.0 - inflection)))
     return base_drag * (1.0 + params.risk_penalty_convexity * excess)
 
 
@@ -1522,7 +1528,7 @@ def load_snapshot_dates(
 def load_excluded_tickers(conn: sqlite3.Connection, *, exclude_current_removals: bool, extra: set[str]) -> set[str]:
     out = set(extra)
     if exclude_current_removals:
-        raise NotImplementedError(
+        raise ValueError(
             "exclude_current_removals requires a temporal removal_date history column that is not yet available "
             "in the schema. Current inactive/remove status would retroactively exclude historical snapshots and "
             "bias calibration. Use calibration.exclude_tickers for explicit non-temporal exclusions."
@@ -1869,12 +1875,39 @@ def load_observations(
                 raw_score_values[score_key] = value
                 if missing:
                     missing_raw_score_fields.append(score_key)
+            ctgov_payload = payload.get("ctgov", {}) if isinstance(payload, dict) else {}
+            sec_event_payload = payload.get("sec_events", {}) if isinstance(payload, dict) else {}
             observation = {
                 "asof_date": str(row["asof_date"]),
                 "company_id": company_id,
                 "ticker": normalize_ticker(row["ticker"]),
                 "company_name": str(row.get("company_name") or ""),
                 "profile_name": profile_name,
+                "ctgov_evidence_type": str(ctgov_payload.get("ctgov_evidence_type") or ""),
+                "company_strategy_category": str(payload.get("company_strategy_category") or "") if isinstance(payload, dict) else "",
+                "ctgov_review_bucket": str(ctgov_payload.get("review_bucket") or ""),
+                "ctgov_manual_root_cause": str(ctgov_payload.get("manual_root_cause") or ""),
+                "sec_catalyst_raw_score": to_float(sec_event_payload.get("sec_catalyst_raw_score"), 0.0) or 0.0,
+                "sec_catalyst_recency_adjusted_score": to_float(
+                    sec_event_payload.get("sec_catalyst_recency_adjusted_score"),
+                    0.0,
+                )
+                or 0.0,
+                "sec_catalyst_score_used": to_float(sec_event_payload.get("sec_catalyst_score_used"), 0.0) or 0.0,
+                "sec_catalyst_decay_delta": to_float(sec_event_payload.get("sec_catalyst_decay_delta"), 0.0) or 0.0,
+                "sec_catalyst_latest_filing_date": str(sec_event_payload.get("sec_catalyst_latest_filing_date") or ""),
+                "sec_catalyst_latest_event_date": str(sec_event_payload.get("sec_catalyst_latest_event_date") or ""),
+                "sec_catalyst_latest_event_type": str(sec_event_payload.get("sec_catalyst_latest_event_type") or ""),
+                "sec_catalyst_recency_days": sec_event_payload.get("sec_catalyst_recency_days", ""),
+                "sec_catalyst_recency_basis": str(sec_event_payload.get("sec_catalyst_recency_basis") or ""),
+                "sec_catalyst_event_types": str(sec_event_payload.get("sec_catalyst_event_types") or ""),
+                "sec_event_recency_decay_enabled": sec_event_payload.get("sec_catalyst_recency_decay_enabled", ""),
+                "sec_event_recency_half_life_days": sec_event_payload.get("sec_catalyst_decay_half_life_days", ""),
+                "sec_event_pre_decay_points": to_float(sec_event_payload.get("sec_catalyst_raw_score"), 0.0) or 0.0,
+                "sec_event_post_decay_points": to_float(sec_event_payload.get("sec_catalyst_score_used"), 0.0) or 0.0,
+                "sec_event_decay_delta": to_float(sec_event_payload.get("sec_catalyst_decay_delta"), 0.0) or 0.0,
+                "latest_positive_sec_event_age_days": sec_event_payload.get("sec_catalyst_recency_days", ""),
+                "latest_positive_sec_event_type": str(sec_event_payload.get("sec_catalyst_latest_event_type") or ""),
                 "confidence_multiplier": confidence,
                 **raw_score_values,
                 "diag_raw_score_missing_count": float(len(missing_raw_score_fields)),
@@ -2611,7 +2644,7 @@ def robust_objective(selected: dict[str, Any], baseline: dict[str, Any], *, para
     top3_spread = to_float(summary_metric_spread(selected, baseline, "top3_gain_contribution_pct"), 0.0) or 0.0
     omega_weight = 0.15 if omega_is_distinct else 0.0
     positive_weight_sum = 0.16 + 0.44 + 0.20 + omega_weight + 0.06 + 0.02 + 0.02 + 0.02
-    positive_scale = 0.86 / positive_weight_sum
+    positive_scale = 0.86 / positive_weight_sum if positive_weight_sum > 0.0 else 0.0
     return (
         positive_scale
         * (

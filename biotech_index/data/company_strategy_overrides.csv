@@ -1,0 +1,21 @@
+ticker,company_strategy_category,notes
+AVNS,medical_device_infrastructure,Healthcare device/infrastructure collaborator; diagnostic tag only.
+BBNX,diabetes_device,Device-adjacent diabetes platform collaborator; diagnostic tag only.
+CAI,precision_medicine_diagnostics,Precision medicine diagnostics/services company retained in biotech universe.
+CDNA,molecular_diagnostics,Molecular diagnostics company retained in biotech universe.
+ENOV,medical_device_infrastructure,Device-adjacent healthcare equipment collaborator; diagnostic tag only.
+EW,medical_device_infrastructure,Medical device infrastructure company retained in broad healthcare/biotech universe.
+IART,surgical_regenerative_devices,Surgical/regenerative device company retained in broad healthcare/biotech universe.
+IQV,clinical_research_services,CRO/healthcare IT services company retained in biotech universe.
+LNTH,radiopharma_therapeutic_hybrid,Radiopharma/diagnostics hybrid with therapeutic pipeline.
+MDT,medical_device_infrastructure,Medical device infrastructure company retained in broad healthcare/biotech universe.
+MYGN,molecular_diagnostics,Molecular diagnostics company retained in biotech universe.
+NEO,molecular_diagnostics_laboratory,Oncology molecular diagnostics laboratory retained in biotech universe.
+NVCR,medical_device_therapeutic_platform,Tumor Treating Fields device platform; move to device model if strict drug-only universe is required.
+PODD,diabetes_device,Diabetes delivery device platform retained in broad healthcare/biotech universe.
+PRCT,surgical_robotics_device,Surgical robotics/device company retained in broad healthcare/biotech universe.
+PSNL,molecular_diagnostics,Molecular diagnostics company retained in biotech universe.
+SIBN,non_therapeutic_device_removed,Removed from biotech scoring as post-market device-only.
+STE,sterilization_services,Healthcare sterilization/services company retained in broad healthcare/biotech universe.
+TCMD,post_market_device_services,Post-market device/services company retained in biotech universe.
+TMO,life_science_tools_services,Life-science tools/services company retained in biotech universe.

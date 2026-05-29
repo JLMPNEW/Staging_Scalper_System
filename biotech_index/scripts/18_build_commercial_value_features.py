@@ -695,6 +695,10 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
     )
     value_weights = cfg_get(config, "commercial_value.value_weights", {}) or {}
     penalty_weights = cfg_get(config, "commercial_value.penalty_weights", {}) or {}
+    value_trap_drag = max(
+        0.0,
+        min(1.0, float(penalty_weights.get("value_trap_drag", value_weights.get("value_trap_drag", 0.22)))),
+    )
     # Leverage is additive quality because supported debt can be durable; value-trap risk is a post-score drag
     # because cheapness paired with deteriorating fundamentals should not raise the commercial value score.
     commercial_value_score = clamp(
@@ -702,7 +706,7 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
         + float(value_weights.get("valuation", 0.18)) * quality_adjusted_valuation_score
         + float(value_weights.get("upside_capacity", 0.04)) * upside_capacity_score
         + float(value_weights.get("commercial_stage", 0.20)) * commercial_stage_score
-        - float(penalty_weights.get("value_trap_drag", value_weights.get("value_trap_drag", 0.22))) * value_trap_score
+        - value_trap_drag * value_trap_score
     )
 
     if len(missing) <= 1:
