@@ -146,6 +146,26 @@ def as_bool(raw: object) -> bool:
     return str(raw or "").strip().lower() in {"1", "true", "yes", "y"}
 
 
+def market_int(raw: object, *, field: str, ticker: object) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return int(raw)
+    text = str(raw).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in {"true", "yes", "y", "on"}:
+        return 1
+    if lowered in {"false", "no", "n", "off"}:
+        return 0
+    value = to_float(raw)
+    if value is None:
+        LOGGER.warning("Ignoring non-numeric market %s for %s: %r", field, ticker, raw)
+        return None
+    return int(value)
+
+
 def parse_market_cap_curve_points(
     raw: object,
     default: list[tuple[float, float]],
@@ -697,6 +717,14 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
     free_cash_flow_ttm = ttm_amount(rows, "free_cash_flow", proxies)
     rd_expense_ttm = ttm_amount(rows, "rd_expense", proxies)
     sgna_expense_ttm = ttm_amount(rows, "sgna_expense", proxies)
+    partial_ttm_proxy_fields = sorted(
+        {
+            proxy[len("partial_quarter_annualized_") :]
+            for proxy in proxies
+            if proxy.startswith("partial_quarter_annualized_")
+        }
+    )
+    partial_ttm_proxy_flag = bool(partial_ttm_proxy_fields)
 
     prev_quarter_revenue = closest_period_amount(rows, "revenue", latest_period_date or asof_date, 60, 150, proxies)
     prior_year_revenue = closest_period_amount(rows, "revenue", latest_period_date or asof_date, 270, 455, proxies)
@@ -827,18 +855,22 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
         data_quality = "medium"
     else:
         data_quality = "low"
+    if partial_ttm_proxy_flag and data_quality == "high":
+        data_quality = "medium"
 
     payload = {
         "source": "sec_companyfacts_primary_market_optional",
         "market_source": str(market.get("source") if market else ""),
         "market_price_adjustment": str(market.get("price_adjustment") if market else ""),
-        "market_is_adjusted": int(to_float(market.get("is_adjusted") if market else None) or 0),
+        "market_is_adjusted": market_int(market.get("is_adjusted") if market else None, field="is_adjusted", ticker=company["ticker"]),
         "market_asof_date": str(market.get("asof_date") if market else ""),
         "market_last_bar_date": str(market.get("last_bar_date") if market else ""),
-        "market_bar_count": int(to_float(market.get("bar_count") if market else None) or 0),
+        "market_bar_count": market_int(market.get("bar_count") if market else None, field="bar_count", ticker=company["ticker"]),
         "market_data_quality": str(market.get("market_data_quality") if market else ""),
         "growth_curve": growth_curve,
         "latest_shares_period_end": str(shares_row.get("period_end") if shares_row else ""),
+        "partial_ttm_proxy_flag": int(partial_ttm_proxy_flag),
+        "partial_ttm_proxy_fields": partial_ttm_proxy_fields,
         "component_scores": {
             "revenue_scale_score": round(revenue_scale_score, 4),
             "revenue_growth_score": round(revenue_growth_score, 4),

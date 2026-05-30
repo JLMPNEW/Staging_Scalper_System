@@ -17,7 +17,7 @@ from collections import defaultdict
 from collections.abc import Iterable as IterableABC
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import median
 from types import MappingProxyType
@@ -68,6 +68,14 @@ DEFAULT_CVAR_Q = 0.05
 DEFAULT_OMEGA_HURDLE = 0.0
 DEFAULT_MIN_SELECTED_OBSERVATIONS = 30
 DEFAULT_MIN_ASOF_DATES = 8
+DEFAULT_SEC_CATALYST_EVENT_WEIGHTS = {
+    "pdufa_date": 18.0,
+    "nda_bla_accepted": 16.0,
+    "regulatory_submission": 7.0,
+    "endpoint_met": 10.0,
+    "clinical_update_positive": 5.0,
+}
+SHORT_TERM_CATALYST_EVENT_TYPES = frozenset(DEFAULT_SEC_CATALYST_EVENT_WEIGHTS)
 DEFAULT_MIN_NET_LCB_RETURN_PCT = 0.0
 DEFAULT_MIN_SORTINO = 0.0
 DEFAULT_MIN_PROFIT_FACTOR = 1.15
@@ -143,6 +151,7 @@ SPREAD_KEYS = [
     "rank_quality_cap_exposure_pct",
     "mature_defensive_exposure_pct",
     "expected_return_quality_exposure_pct",
+    "short_term_catalyst_timing_exposure_pct",
     "top3_gain_contribution_pct",
 ]
 SPREAD_KEYS.extend(f"soft_reason_{reason}_exposure_pct" for reason in SOFT_WEAKNESS_REASONS)
@@ -165,6 +174,7 @@ BOOTSTRAP_METRIC_KEYS = [
     "rank_quality_cap_exposure_pct",
     "mature_defensive_exposure_pct",
     "expected_return_quality_exposure_pct",
+    "short_term_catalyst_timing_exposure_pct",
     "illiquid_weakness_exposure_pct",
 ]
 
@@ -271,6 +281,7 @@ class SelectionPolicy:
     guidance_staleness_penalty: float = 0.0
     mature_defensive_penalty: float = 0.0
     expected_return_quality_bonus: float = 0.0
+    short_term_catalyst_timing_bonus: float = 0.0
     targeted_soft_weakness_penalty: float = 0.0
     hard_veto_reasons: tuple[str, ...] = ()
     hard_weakness_penalty_reasons: tuple[str, ...] = ()
@@ -458,6 +469,105 @@ def parse_date(raw: object) -> date | None:
         return datetime.strptime(text[:10], "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def load_sec_catalyst_event_weights(config: dict[str, Any]) -> dict[str, float]:
+    raw = cfg_get(config, "biotech_features.sec_event_weights", {}) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    out: dict[str, float] = {}
+    for event_type, default in DEFAULT_SEC_CATALYST_EVENT_WEIGHTS.items():
+        out[event_type] = float(raw.get(event_type, default))
+    return out
+
+
+def decay_multiplier_for_date(event_date: object, asof_date: date, *, half_life_days: float) -> tuple[float, int | None]:
+    parsed = parse_date(event_date)
+    if parsed is None:
+        return 0.0, None
+    age_days = max(0, (asof_date - parsed).days)
+    if half_life_days <= 0.0:
+        return 1.0, age_days
+    return math.pow(0.5, age_days / half_life_days), age_days
+
+
+def sec_catalyst_event_multiplier(
+    *,
+    event_type: str,
+    filing_date: object,
+    event_date: object,
+    asof_date: date,
+    half_life_days: float,
+) -> tuple[float, int | None, str]:
+    parsed_event_date = parse_date(event_date)
+    if event_type == "pdufa_date" and parsed_event_date is not None and parsed_event_date >= asof_date:
+        days_until = (parsed_event_date - asof_date).days
+        if half_life_days <= 0.0:
+            return 1.0, days_until, "pdufa_event_date_proximity"
+        return math.pow(0.5, days_until / half_life_days), days_until, "pdufa_event_date_proximity"
+    multiplier, age_days = decay_multiplier_for_date(
+        filing_date,
+        asof_date,
+        half_life_days=half_life_days,
+    )
+    return multiplier, age_days, "filing_age"
+
+
+def is_actionable_sec_event(event_type: str, excerpt: str) -> bool:
+    text = " ".join(str(excerpt or "").lower().split())
+    if not text:
+        return False
+
+    hypothetical_terms = (
+        "can place",
+        "could place",
+        "may place",
+        "can impose",
+        "could impose",
+        "may impose",
+        "could result",
+        "may result",
+        "risk factors",
+        "there can be no assurance",
+        "we may",
+        "we could",
+        "if we",
+    )
+    generic_nda_terms = (
+        "an nda must contain",
+        "a bla must contain",
+        "once the submission has been",
+        "if the nda",
+        "if the bla",
+        "as part of an nda",
+        "submitted to the fda as part of",
+    )
+
+    if event_type in {"clinical_hold", "partial_clinical_hold"}:
+        if any(term in text for term in hypothetical_terms):
+            return False
+        return any(term in text for term in ("imposed", "placed", "issued", "maintained", "continued", "received", "announced"))
+
+    if event_type == "clinical_update_negative":
+        if any(term in text for term in hypothetical_terms):
+            return False
+        if any(term in text for term in ("repurchase", "retained earnings", "license termination rights", "bankruptcy or similar")):
+            return False
+        return any(term in text for term in ("topline", "clinical", "phase 1", "phase 2", "phase 3", "trial", "study", "program", "safety signal"))
+
+    if event_type in {"nda_bla_accepted", "regulatory_submission", "pdufa_date"}:
+        if any(term in text for term in generic_nda_terms):
+            return False
+        if event_type == "regulatory_submission" and any(
+            term in text for term in ("can submit", "may submit", "would submit", "is required to submit")
+        ):
+            return False
+
+    if event_type == "going_concern_confirmed":
+        if any(term in text for term in ("no substantial doubt", "alleviate substantial doubt", "alleviated substantial doubt")):
+            return False
+
+    return True
 
 
 def parse_int_list(raw: str, *, default: list[int]) -> list[int]:
@@ -913,7 +1023,7 @@ def generate_weight_specs(config: dict[str, Any], *, candidate_limit: int = 0) -
     base_credibility = float(weights.get("credibility", 0.25))
     base_financial = float(weights.get("financial_quality", 0.15))
     base_momentum = float(weights.get("momentum", 0.05))
-    base_risk = float(weights.get("risk_penalty", 0.25))
+    base_risk = float(weights.get("risk_penalty", 0.15))
     base_clinical_profile, base_commercial_profile = base_profiles_from_config(config)
 
     specs: list[WeightSpec] = [
@@ -1170,6 +1280,7 @@ def policy_signature(policy: SelectionPolicy) -> tuple[Any, ...]:
         round(float(policy.guidance_staleness_penalty), 6),
         round(float(policy.mature_defensive_penalty), 6),
         round(float(policy.expected_return_quality_bonus), 6),
+        round(float(policy.short_term_catalyst_timing_bonus), 6),
         round(float(policy.targeted_soft_weakness_penalty), 6),
         tuple(policy.hard_veto_reasons),
         tuple(policy.hard_weakness_penalty_reasons),
@@ -1219,6 +1330,7 @@ def policy_from_dict(raw: dict[str, Any], *, fallback_name: str) -> SelectionPol
         guidance_staleness_penalty=float(raw.get("guidance_staleness_penalty", 0.0)),
         mature_defensive_penalty=float(raw.get("mature_defensive_penalty", 0.0)),
         expected_return_quality_bonus=float(raw.get("expected_return_quality_bonus", 0.0)),
+        short_term_catalyst_timing_bonus=float(raw.get("short_term_catalyst_timing_bonus", 0.0)),
         targeted_soft_weakness_penalty=float(raw.get("targeted_soft_weakness_penalty", 0.0)),
         hard_veto_reasons=reason_tuple(raw.get("hard_veto_reasons")),
         hard_weakness_penalty_reasons=reason_tuple(raw.get("hard_weakness_penalty_reasons")),
@@ -1255,6 +1367,10 @@ def validate_commercial_penalty_policy(policy: SelectionPolicy) -> None:
         )
 
 
+def production_policy_float(config: dict[str, Any], key: str, default: float) -> float:
+    return float(cfg_get(config, f"biotech_scoring.production_policy.{key}", default))
+
+
 def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]:
     raw_policies = cfg_get(config, "calibration.tier1.selection_policies", None)
     policies: list[SelectionPolicy] = []
@@ -1264,6 +1380,14 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
                 policies.append(policy_from_dict(raw, fallback_name=f"custom_policy_{idx}"))
         if policies:
             return policies
+
+    prod_event_penalty = production_policy_float(config, "event_hard_penalty", 10.0)
+    prod_soft_penalty = production_policy_float(config, "soft_weakness_penalty", 8.0)
+    prod_value_trap_penalty = production_policy_float(config, "value_trap_penalty", 10.0)
+    prod_leverage_penalty = production_policy_float(config, "leverage_fragility_penalty", 6.0)
+    prod_guidance_penalty = production_policy_float(config, "guidance_staleness_penalty", 4.0)
+    prod_mature_penalty = production_policy_float(config, "mature_defensive_penalty", 0.0)
+    prod_expected_return_bonus = production_policy_float(config, "expected_return_quality_bonus", 0.0)
 
     builtin_policies = [
         SelectionPolicy(
@@ -1298,7 +1422,7 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
             policy_name="core_veto_event_drag",
             description="Exclude core structural hard weakness and penalize event/dilution hard reasons.",
             hard_veto=True,
-            hard_weakness_penalty=10.0,
+            hard_weakness_penalty=prod_event_penalty,
             hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
             hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
         ),
@@ -1375,10 +1499,10 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
             policy_name="core_veto_event_drag_quality_guardrail",
             description="Exclude core weakness, penalize event/dilution risk, and penalize value-trap, leverage, and stale-guidance diagnostics.",
             hard_veto=True,
-            hard_weakness_penalty=10.0,
-            value_trap_penalty=10.0,
-            leverage_fragility_penalty=6.0,
-            guidance_staleness_penalty=4.0,
+            hard_weakness_penalty=prod_event_penalty,
+            value_trap_penalty=prod_value_trap_penalty,
+            leverage_fragility_penalty=prod_leverage_penalty,
+            guidance_staleness_penalty=prod_guidance_penalty,
             hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
             hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
         ),
@@ -1389,12 +1513,12 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
                 "profiles, and reward expected-return quality diagnostics."
             ),
             hard_veto=True,
-            hard_weakness_penalty=10.0,
+            hard_weakness_penalty=prod_event_penalty,
             value_trap_penalty=8.0,
             leverage_fragility_penalty=4.0,
             guidance_staleness_penalty=3.0,
-            mature_defensive_penalty=6.0,
-            expected_return_quality_bonus=4.0,
+            mature_defensive_penalty=prod_mature_penalty if prod_mature_penalty > 0.0 else 6.0,
+            expected_return_quality_bonus=prod_expected_return_bonus if prod_expected_return_bonus > 0.0 else 4.0,
             hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
             hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
         ),
@@ -1435,8 +1559,8 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
             policy_name="core_veto_event_soft_drag",
             description="Exclude core structural hard weakness, penalize event/dilution reasons, and apply a soft weakness drag.",
             hard_veto=True,
-            hard_weakness_penalty=10.0,
-            soft_weakness_penalty=8.0,
+            hard_weakness_penalty=prod_event_penalty,
+            soft_weakness_penalty=prod_soft_penalty,
             hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
             hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
         ),
@@ -1444,11 +1568,27 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
             policy_name="core_veto_event_soft_drag_quality_guardrail",
             description="Exclude core weakness, penalize event/dilution and soft weakness, plus value-trap/leverage/stale-guidance diagnostics.",
             hard_veto=True,
-            hard_weakness_penalty=10.0,
-            soft_weakness_penalty=8.0,
-            value_trap_penalty=10.0,
-            leverage_fragility_penalty=6.0,
-            guidance_staleness_penalty=4.0,
+            hard_weakness_penalty=prod_event_penalty,
+            soft_weakness_penalty=prod_soft_penalty,
+            value_trap_penalty=prod_value_trap_penalty,
+            leverage_fragility_penalty=prod_leverage_penalty,
+            guidance_staleness_penalty=prod_guidance_penalty,
+            hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+            hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
+        ),
+        SelectionPolicy(
+            policy_name="core_veto_event_soft_drag_quality_guardrail_short_term_catalyst_timing",
+            description=(
+                "Production guardrail policy with a small bonus for near-term PDUFA proximity or fresh "
+                "positive/regulatory SEC catalysts."
+            ),
+            hard_veto=True,
+            hard_weakness_penalty=prod_event_penalty,
+            soft_weakness_penalty=prod_soft_penalty,
+            value_trap_penalty=prod_value_trap_penalty,
+            leverage_fragility_penalty=prod_leverage_penalty,
+            guidance_staleness_penalty=prod_guidance_penalty,
+            short_term_catalyst_timing_bonus=5.0,
             hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
             hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
         ),
@@ -1478,6 +1618,7 @@ def policy_fields(policy: SelectionPolicy) -> dict[str, Any]:
         "selection_policy_guidance_staleness_penalty": policy.guidance_staleness_penalty,
         "selection_policy_mature_defensive_penalty": policy.mature_defensive_penalty,
         "selection_policy_expected_return_quality_bonus": policy.expected_return_quality_bonus,
+        "selection_policy_short_term_catalyst_timing_bonus": policy.short_term_catalyst_timing_bonus,
         "selection_policy_targeted_soft_weakness_penalty": policy.targeted_soft_weakness_penalty,
         "selection_policy_hard_veto_reasons": "|".join(policy.hard_veto_reasons),
         "selection_policy_hard_weakness_penalty_reasons": "|".join(policy.hard_weakness_penalty_reasons),
@@ -1507,6 +1648,7 @@ def policy_output_keys() -> list[str]:
         "selection_policy_guidance_staleness_penalty",
         "selection_policy_mature_defensive_penalty",
         "selection_policy_expected_return_quality_bonus",
+        "selection_policy_short_term_catalyst_timing_bonus",
         "selection_policy_targeted_soft_weakness_penalty",
         "selection_policy_hard_veto_reasons",
         "selection_policy_hard_weakness_penalty_reasons",
@@ -1547,6 +1689,71 @@ def load_snapshot_dates(
     return dates
 
 
+def load_score_aligned_snapshot_dates(
+    conn: sqlite3.Connection,
+    *,
+    start_asof: date | None,
+    end_asof: date | None,
+    fridays_only: bool,
+    max_snapshots: int,
+) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT ds.asof_date
+        FROM daily_scores ds
+        INNER JOIN multibagger_scores_daily ms ON ms.asof_date = ds.asof_date
+        GROUP BY ds.asof_date
+        ORDER BY ds.asof_date
+        """
+    ).fetchall()
+    dates: list[str] = []
+    for row in rows:
+        parsed = parse_date(row["asof_date"])
+        if parsed is None:
+            continue
+        if start_asof and parsed < start_asof:
+            continue
+        if end_asof and parsed > end_asof:
+            continue
+        if fridays_only and parsed.weekday() != 4:
+            continue
+        dates.append(parsed.isoformat())
+    if max_snapshots > 0:
+        dates = dates[-max_snapshots:]
+    return dates
+
+
+def validate_calibration_date_universe(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_dates: list[str],
+    start_asof: date | None,
+    end_asof: date | None,
+    fridays_only: bool,
+    max_snapshots: int,
+) -> None:
+    score_aligned_dates = load_score_aligned_snapshot_dates(
+        conn,
+        start_asof=start_asof,
+        end_asof=end_asof,
+        fridays_only=fridays_only,
+        max_snapshots=max_snapshots,
+    )
+    if snapshot_dates == score_aligned_dates:
+        return
+    feature_set = set(snapshot_dates)
+    score_set = set(score_aligned_dates)
+    feature_only = sorted(feature_set - score_set)
+    score_only = sorted(score_set - feature_set)
+    raise ValueError(
+        "Tier-1 calibration date universe mismatch: "
+        f"daily_features_dates={len(snapshot_dates)} score_aligned_dates={len(score_aligned_dates)} "
+        f"feature_only={feature_only[:10]}{'... ' if len(feature_only) > 10 else ''}"
+        f"score_only={score_only[:10]}{'... ' if len(score_only) > 10 else ''}. "
+        "Rebuild daily_scores and multibagger_scores_daily on the same defined date grid before calibration."
+    )
+
+
 def load_excluded_tickers(conn: sqlite3.Connection, *, exclude_current_removals: bool, extra: set[str]) -> set[str]:
     out = set(extra)
     if exclude_current_removals:
@@ -1581,6 +1788,100 @@ def load_feature_rows(conn: sqlite3.Connection, asof_date: str, excluded_tickers
         payload["ticker"] = ticker
         out.append(payload)
     return out
+
+
+def load_sec_catalyst_timing_summary(
+    conn: sqlite3.Connection,
+    asof_date: date,
+    *,
+    lookback_days: int,
+    half_life_days: float,
+    event_weights: Mapping[str, float],
+    recency_decay_enabled: bool,
+) -> dict[int, dict[str, Any]]:
+    cutoff = (asof_date - timedelta(days=max(1, lookback_days))).isoformat()
+    event_types = sorted(event_weights)
+    if not event_types:
+        return {}
+    placeholders = ",".join("?" for _ in event_types)
+    rows = conn.execute(
+        f"""
+        SELECT company_id, filing_date, event_type, event_date, confidence, extracted_text, accession_nodash
+        FROM sec_events
+        WHERE filing_date >= ?
+          AND filing_date <= ?
+          AND event_type IN ({placeholders})
+        ORDER BY filing_date DESC, confidence DESC, event_id DESC
+        """,
+        (cutoff, asof_date.isoformat(), *event_types),
+    ).fetchall()
+
+    summary: dict[int, dict[str, Any]] = {}
+    seen: set[tuple[int, str, str]] = set()
+    for row in rows:
+        event_type = str(row["event_type"] or "")
+        excerpt = str(row["extracted_text"] or "")
+        if not is_actionable_sec_event(event_type, excerpt):
+            continue
+        company_id = int(row["company_id"])
+        accession = str(row["accession_nodash"] or "")
+        key = (company_id, event_type, accession)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        event_weight = float(event_weights.get(event_type, 0.0))
+        filing_date = str(row["filing_date"] or "")
+        event_date = str(row["event_date"] or "")
+        multiplier, recency_days, recency_basis = sec_catalyst_event_multiplier(
+            event_type=event_type,
+            filing_date=filing_date,
+            event_date=event_date,
+            asof_date=asof_date,
+            half_life_days=half_life_days,
+        )
+        bucket = summary.setdefault(
+            company_id,
+            {
+                "sec_catalyst_raw_score": 0.0,
+                "sec_catalyst_recency_adjusted_score": 0.0,
+                "sec_catalyst_latest_filing_date": "",
+                "sec_catalyst_latest_event_date": "",
+                "sec_catalyst_latest_event_type": "",
+                "sec_catalyst_recency_days": "",
+                "sec_catalyst_recency_basis": "",
+                "sec_catalyst_event_types": [],
+            },
+        )
+        bucket["sec_catalyst_raw_score"] = round(float(bucket["sec_catalyst_raw_score"]) + event_weight, 6)
+        bucket["sec_catalyst_recency_adjusted_score"] = round(
+            float(bucket["sec_catalyst_recency_adjusted_score"]) + event_weight * multiplier,
+            6,
+        )
+        event_type_values = bucket.setdefault("sec_catalyst_event_types", [])
+        if isinstance(event_type_values, list) and event_type not in event_type_values:
+            event_type_values.append(event_type)
+        latest_filing = str(bucket.get("sec_catalyst_latest_filing_date") or "")
+        if filing_date and (not latest_filing or filing_date > latest_filing):
+            bucket["sec_catalyst_latest_filing_date"] = filing_date
+            bucket["sec_catalyst_latest_event_date"] = event_date
+            bucket["sec_catalyst_latest_event_type"] = event_type
+            bucket["sec_catalyst_recency_days"] = "" if recency_days is None else recency_days
+            bucket["sec_catalyst_recency_basis"] = recency_basis
+
+    for bucket in summary.values():
+        raw_score = float(bucket["sec_catalyst_raw_score"])
+        adjusted_score = float(bucket["sec_catalyst_recency_adjusted_score"])
+        score_used = adjusted_score if recency_decay_enabled else raw_score
+        bucket["sec_catalyst_score_used"] = round(score_used, 6)
+        bucket["sec_catalyst_decay_delta"] = round(score_used - raw_score, 6)
+        event_type_values = bucket.get("sec_catalyst_event_types")
+        bucket["sec_catalyst_event_types"] = (
+            "|".join(str(item) for item in event_type_values)
+            if isinstance(event_type_values, list)
+            else str(event_type_values or "")
+        )
+    return summary
 
 
 def load_latest_table(
@@ -1676,6 +1977,54 @@ def expected_return_quality_score(observation: Mapping[str, Any]) -> float:
         - 0.05 * mature_drag
     )
     return clamp(score)
+
+
+def linear_window_score(days: float, *, full_credit_days: float, zero_credit_days: float) -> float:
+    if days < 0.0 or days >= zero_credit_days:
+        return 0.0
+    if days <= full_credit_days:
+        return 100.0
+    span = max(1.0, zero_credit_days - full_credit_days)
+    return clamp(100.0 * (zero_credit_days - days) / span)
+
+
+def short_term_catalyst_timing_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
+    """Score near-term catalyst timing without replacing the base catalyst model."""
+    latest_type = str(observation.get("sec_catalyst_latest_event_type") or "").strip().lower()
+    event_types = set(reason_tuple(observation.get("sec_catalyst_event_types")))
+    if latest_type:
+        event_types.add(latest_type)
+    if not event_types.intersection(SHORT_TERM_CATALYST_EVENT_TYPES):
+        return {
+            "diag_short_term_catalyst_timing_score": 0.0,
+            "diag_short_term_catalyst_timing_flag": 0.0,
+            "diag_short_term_catalyst_timing_basis": "",
+        }
+
+    days = finite_float(observation.get("sec_catalyst_recency_days"))
+    catalyst_points = finite_float(observation.get("sec_catalyst_score_used"))
+    if days is None or catalyst_points is None or catalyst_points <= 0.0:
+        return {
+            "diag_short_term_catalyst_timing_score": 0.0,
+            "diag_short_term_catalyst_timing_flag": 0.0,
+            "diag_short_term_catalyst_timing_basis": "",
+        }
+
+    basis = str(observation.get("sec_catalyst_recency_basis") or "").strip().lower()
+    if basis == "pdufa_event_date_proximity" and "pdufa_date" in event_types:
+        timing_score = linear_window_score(days, full_credit_days=45.0, zero_credit_days=180.0)
+        basis_label = "future_pdufa_proximity"
+    else:
+        timing_score = linear_window_score(days, full_credit_days=30.0, zero_credit_days=180.0)
+        basis_label = "positive_sec_filing_age"
+
+    event_strength = clamp(catalyst_points, 0.0, 18.0) / 18.0
+    score = clamp(timing_score * event_strength)
+    return {
+        "diag_short_term_catalyst_timing_score": score,
+        "diag_short_term_catalyst_timing_flag": 1.0 if score >= 50.0 else 0.0,
+        "diag_short_term_catalyst_timing_basis": basis_label if score > 0.0 else "",
+    }
 
 
 def raw_score_value(raw_scores: dict[str, Any], row: dict[str, Any], key: str) -> tuple[float, bool]:
@@ -1851,7 +2200,27 @@ def load_observations(
             cfg_get(config, "biotech_scoring.missing_score_defaults.institutional_upside_capacity_score", 50.0)
         ),
     }
+    sec_decay_cfg = cfg_get(config, "biotech_features.sec_event_recency_decay", {}) or {}
+    if not isinstance(sec_decay_cfg, dict):
+        sec_decay_cfg = {}
+    sec_catalyst_recency_decay_enabled = as_bool(sec_decay_cfg.get("enabled", True), True)
+    sec_catalyst_half_life_days = max(1.0, float(sec_decay_cfg.get("half_life_days", 90.0)))
+    sec_catalyst_event_weights = load_sec_catalyst_event_weights(config)
+    sec_catalyst_lookback_days = int(cfg_get(config, "sec_event_parser.lookback_days", 730))
     for asof_date in dates:
+        parsed_asof_date = parse_date(asof_date)
+        sec_catalyst_timing_by_company = (
+            load_sec_catalyst_timing_summary(
+                conn,
+                parsed_asof_date,
+                lookback_days=sec_catalyst_lookback_days,
+                half_life_days=sec_catalyst_half_life_days,
+                event_weights=sec_catalyst_event_weights,
+                recency_decay_enabled=sec_catalyst_recency_decay_enabled,
+            )
+            if parsed_asof_date is not None
+            else {}
+        )
         features = load_feature_rows(conn, asof_date, excluded_tickers)
         commercial_by_company = load_latest_table(
             conn,
@@ -1889,6 +2258,10 @@ def load_observations(
                     missing_raw_score_fields.append(score_key)
             ctgov_payload = payload.get("ctgov", {}) if isinstance(payload, dict) else {}
             sec_event_payload = payload.get("sec_events", {}) if isinstance(payload, dict) else {}
+            if not isinstance(sec_event_payload, dict):
+                sec_event_payload = {}
+            if "sec_catalyst_score_used" not in sec_event_payload:
+                sec_event_payload = {**sec_event_payload, **sec_catalyst_timing_by_company.get(company_id, {})}
             observation = {
                 "asof_date": str(row["asof_date"]),
                 "company_id": company_id,
@@ -1992,6 +2365,7 @@ def load_observations(
                     "diag_forward_guidance_recency_days": guidance_recency_days if guidance_recency_days is not None else "",
                 }
             )
+            observation.update(short_term_catalyst_timing_fields(observation))
             growth_drag = growth_drag_score(
                 observation.get("forward_revenue_growth_pct"),
                 observation.get("revenue_yoy_growth_pct"),
@@ -2093,7 +2467,7 @@ def forward_return(
     if not bars:
         return None, "", ""
     days = [bar.day for bar in bars]
-    entry_idx = bisect.bisect_right(days, asof) if next_bar_entry else bisect.bisect_right(days, asof) - 1
+    entry_idx = bisect.bisect_right(days, asof) if next_bar_entry else bisect.bisect_left(days, asof) - 1
     if entry_idx < 0 or entry_idx >= len(bars):
         return None, "", ""
     target_idx = entry_idx + horizon
@@ -2115,6 +2489,7 @@ def add_forward_returns(
     next_bar_entry: bool,
 ) -> None:
     cost = float(round_trip_cost_bps) / 10_000.0
+    missing_return_counts: defaultdict[tuple[int, str], int] = defaultdict(int)
     for row in rows:
         ticker = normalize_ticker(row.get("ticker"))
         asof = parse_date(row.get("asof_date"))
@@ -2126,6 +2501,7 @@ def add_forward_returns(
                 row[f"{prefix}_net_return"] = ""
                 row[f"{prefix}_entry_date"] = ""
                 row[f"{prefix}_target_date"] = ""
+                missing_return_counts[(horizon, "invalid_asof_date")] += 1
                 continue
             ret, entry_date, target_date = forward_return(
                 bars,
@@ -2137,6 +2513,22 @@ def add_forward_returns(
             row[f"{prefix}_net_return"] = ret - cost if ret is not None else ""
             row[f"{prefix}_entry_date"] = entry_date
             row[f"{prefix}_target_date"] = target_date
+            if ret is None:
+                if not bars:
+                    reason = "no_market_bars"
+                elif not entry_date:
+                    reason = "no_entry_bar"
+                elif not target_date:
+                    reason = "insufficient_horizon_bars"
+                else:
+                    reason = "invalid_entry_close"
+                missing_return_counts[(horizon, reason)] += 1
+    if missing_return_counts:
+        summary = ", ".join(
+            f"{horizon}d:{reason}={count}"
+            for (horizon, reason), count in sorted(missing_return_counts.items())
+        )
+        LOGGER.warning("Forward-return coverage gaps: %s", summary)
 
 
 def score_observation(row: dict[str, Any], spec: WeightSpec, params: CalibrationParams) -> dict[str, Any]:
@@ -2512,6 +2904,7 @@ def selection_quality_summary(
             "rank_quality_cap_exposure_pct": pct_flag(rows, "rank_quality_cap_flag"),
             "mature_defensive_exposure_pct": pct_flag(rows, "diag_mature_defensive_flag"),
             "expected_return_quality_exposure_pct": pct_flag(rows, "diag_expected_return_quality_flag"),
+            "short_term_catalyst_timing_exposure_pct": pct_flag(rows, "diag_short_term_catalyst_timing_flag"),
             "avg_binary_weakness_count": mean_numeric(rows, "diag_binary_weakness_count"),
             "avg_hard_weakness_count": mean_numeric(rows, "diag_hard_weakness_count"),
             "avg_core_hard_weakness_count": mean_numeric(rows, "diag_core_hard_weakness_count"),
@@ -2526,6 +2919,7 @@ def selection_quality_summary(
             "avg_leverage_fragility_score": mean_numeric(rows, "diag_leverage_fragility_score"),
             "avg_mature_defensive_score": mean_numeric(rows, "diag_mature_defensive_score"),
             "avg_expected_return_quality_score": mean_numeric(rows, "diag_expected_return_quality_score"),
+            "avg_short_term_catalyst_timing_score": mean_numeric(rows, "diag_short_term_catalyst_timing_score"),
             "mean_institutional_upside_capacity_score": mean_numeric(rows, "institutional_upside_capacity_score"),
             "mean_quality_adjusted_valuation_score": mean_numeric(rows, "quality_adjusted_valuation_score"),
             "mean_quality_adjusted_guidance_score": mean_numeric(rows, "quality_adjusted_guidance_score"),
@@ -2840,6 +3234,9 @@ def policy_adjusted_score(
         + policy.expected_return_quality_bonus
         * max(0.0, min(100.0, to_float(row.get("diag_expected_return_quality_score"), 0.0) or 0.0))
         / 100.0
+        + policy.short_term_catalyst_timing_bonus
+        * max(0.0, min(100.0, to_float(row.get("diag_short_term_catalyst_timing_score"), 0.0) or 0.0))
+        / 100.0
     )
     scores["pre_rank_cap_selection_score"] = clamp(adjusted)
     adjusted, rank_cap, rank_cap_reasons = apply_rank_quality_caps_to_score(adjusted, row, params)
@@ -2922,7 +3319,22 @@ def split_rows_by_completed_return_date(
             if str(row.get("asof_date") or "") and to_float(row.get(ret_key)) is not None
         }
     )
+    all_dates = sorted({str(row.get("asof_date") or "") for row in rows if str(row.get("asof_date") or "")})
+    dropped_dates = sorted(set(all_dates) - set(eligible_dates))
+    if dropped_dates:
+        LOGGER.warning(
+            "Horizon %sd: dropped %d/%d as-of dates with no completed forward returns; first=%s last=%s",
+            horizon,
+            len(dropped_dates),
+            len(all_dates),
+            dropped_dates[0],
+            dropped_dates[-1],
+        )
     if len(eligible_dates) < 2:
+        LOGGER.warning(
+            "Horizon %sd: fewer than two eligible dates with completed forward returns; test set will be empty.",
+            horizon,
+        )
         eligible_set = set(eligible_dates)
         return [row for row in rows if str(row.get("asof_date") or "") in eligible_set], [], eligible_dates, []
     bounded_fraction = max(0.10, min(0.90, float(train_fraction)))
@@ -3312,6 +3724,10 @@ def build_holdout_rows(grid_rows: list[dict[str, Any]], *, limit: int = 25) -> l
         "selected_stale_guidance_exposure_pct",
         "selected_no_guidance_negative_growth_exposure_pct",
         "selected_rank_quality_cap_exposure_pct",
+        "selected_mature_defensive_exposure_pct",
+        "selected_expected_return_quality_exposure_pct",
+        "selected_short_term_catalyst_timing_exposure_pct",
+        "selected_avg_short_term_catalyst_timing_score",
         "selected_large_loss_20pct_rate_pct",
         "selected_large_loss_40pct_rate_pct",
         "selected_top3_gain_contribution_pct",
@@ -3668,6 +4084,13 @@ def selected_ticker_diagnostic_record(
         "mature_defensive_flag": row.get("diag_mature_defensive_flag", ""),
         "expected_return_quality_score": row.get("diag_expected_return_quality_score", ""),
         "expected_return_quality_flag": row.get("diag_expected_return_quality_flag", ""),
+        "short_term_catalyst_timing_score": row.get("diag_short_term_catalyst_timing_score", ""),
+        "short_term_catalyst_timing_flag": row.get("diag_short_term_catalyst_timing_flag", ""),
+        "short_term_catalyst_timing_basis": row.get("diag_short_term_catalyst_timing_basis", ""),
+        "sec_catalyst_latest_event_type": row.get("sec_catalyst_latest_event_type", ""),
+        "sec_catalyst_recency_days": row.get("sec_catalyst_recency_days", ""),
+        "sec_catalyst_recency_basis": row.get("sec_catalyst_recency_basis", ""),
+        "sec_catalyst_score_used": row.get("sec_catalyst_score_used", ""),
         "guidance_staleness_flag": row.get("diag_guidance_staleness_flag", ""),
         "no_forward_guidance_flag": row.get("diag_no_forward_guidance_flag", ""),
         "stale_guidance_flag": row.get("diag_stale_guidance_flag", ""),
@@ -4059,15 +4482,25 @@ def main() -> None:
     )
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
+        fridays_only = not args.include_non_fridays
+        max_snapshots = max(0, int(args.max_snapshots))
         snapshot_dates = load_snapshot_dates(
             conn,
             start_asof=start_asof,
             end_asof=end_asof,
-            fridays_only=not args.include_non_fridays,
-            max_snapshots=max(0, int(args.max_snapshots)),
+            fridays_only=fridays_only,
+            max_snapshots=max_snapshots,
         )
         if not snapshot_dates:
             raise ValueError("No daily_features snapshot dates found for Tier-1 calibration.")
+        validate_calibration_date_universe(
+            conn,
+            snapshot_dates=snapshot_dates,
+            start_asof=start_asof,
+            end_asof=end_asof,
+            fridays_only=fridays_only,
+            max_snapshots=max_snapshots,
+        )
         excluded_tickers = load_excluded_tickers(
             conn,
             exclude_current_removals=exclude_current_removals,

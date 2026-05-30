@@ -75,6 +75,39 @@ EXPECTED_COMMERCIAL_RISK_FIELDS = frozenset(
         "commercial_risk_sub_scores",
     }
 )
+
+PRODUCTION_SELECTION_POLICIES = frozenset(
+    {
+        "raw_legacy_score",
+        "hard_weakness_veto",
+        "hard_veto_soft_drag",
+        "investable_core_risk_cap",
+        "core_veto_event_drag",
+        "core_veto_event_soft_drag",
+        "core_veto_event_drag_quality_guardrail",
+        "core_veto_event_soft_drag_quality_guardrail",
+        "core_veto_event_drag_business_shock_strict",
+        "core_veto_event_drag_expected_return_tilt",
+        "core_veto_event_drag_mature_defensive_guard",
+    }
+)
+SOFT_DRAG_SELECTION_POLICIES = frozenset(
+    {
+        "core_veto_event_soft_drag",
+        "core_veto_event_soft_drag_quality_guardrail",
+    }
+)
+QUALITY_GUARDRAIL_SELECTION_POLICIES = frozenset(
+    {
+        "core_veto_event_drag_quality_guardrail",
+        "core_veto_event_soft_drag_quality_guardrail",
+        "core_veto_event_drag_business_shock_strict",
+        "core_veto_event_drag_expected_return_tilt",
+        "core_veto_event_drag_mature_defensive_guard",
+    }
+)
+
+
 @dataclass(frozen=True)
 class BucketParams:
     high_min: float
@@ -375,28 +408,37 @@ def tier1_production_baseline(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def production_policy_settings(config: dict[str, Any]) -> dict[str, Any]:
+    def policy_float(key: str, default: object, *, min_value: float = 0.0, max_value: float = 100.0) -> float:
+        value = float(cfg_get(config, f"biotech_scoring.production_policy.{key}", default))
+        if not min_value <= value <= max_value:
+            raise ValueError(
+                f"biotech_scoring.production_policy.{key} must be between "
+                f"{min_value:g} and {max_value:g}, got {value:g}"
+            )
+        return value
+
     event_hard_penalty = cfg_get(config, "biotech_scoring.production_policy.event_hard_penalty", None)
     soft_weakness_penalty = cfg_get(config, "biotech_scoring.production_policy.soft_weakness_penalty", None)
     if event_hard_penalty is None:
         raise ValueError("Missing required config key biotech_scoring.production_policy.event_hard_penalty")
     if soft_weakness_penalty is None:
         raise ValueError("Missing required config key biotech_scoring.production_policy.soft_weakness_penalty")
+    event_hard_penalty_value = float(event_hard_penalty)
+    soft_weakness_penalty_value = float(soft_weakness_penalty)
+    for key, value in {
+        "event_hard_penalty": event_hard_penalty_value,
+        "soft_weakness_penalty": soft_weakness_penalty_value,
+    }.items():
+        if not 0.0 <= value <= 100.0:
+            raise ValueError(f"biotech_scoring.production_policy.{key} must be between 0 and 100, got {value:g}")
     return {
-        "event_hard_penalty": float(event_hard_penalty),
-        "soft_weakness_penalty": float(soft_weakness_penalty),
-        "value_trap_penalty": float(cfg_get(config, "biotech_scoring.production_policy.value_trap_penalty", 0.0)),
-        "leverage_fragility_penalty": float(
-            cfg_get(config, "biotech_scoring.production_policy.leverage_fragility_penalty", 0.0)
-        ),
-        "guidance_staleness_penalty": float(
-            cfg_get(config, "biotech_scoring.production_policy.guidance_staleness_penalty", 0.0)
-        ),
-        "mature_defensive_penalty": float(
-            cfg_get(config, "biotech_scoring.production_policy.mature_defensive_penalty", 0.0)
-        ),
-        "expected_return_quality_bonus": float(
-            cfg_get(config, "biotech_scoring.production_policy.expected_return_quality_bonus", 0.0)
-        ),
+        "event_hard_penalty": event_hard_penalty_value,
+        "soft_weakness_penalty": soft_weakness_penalty_value,
+        "value_trap_penalty": policy_float("value_trap_penalty", 0.0),
+        "leverage_fragility_penalty": policy_float("leverage_fragility_penalty", 0.0),
+        "guidance_staleness_penalty": policy_float("guidance_staleness_penalty", 0.0),
+        "mature_defensive_penalty": policy_float("mature_defensive_penalty", 0.0),
+        "expected_return_quality_bonus": policy_float("expected_return_quality_bonus", 0.0),
         "event_hard_reasons": set(
             parse_string_list(
                 cfg_get(config, "biotech_scoring.production_policy.event_hard_reasons", EVENT_HARD_WEAKNESS_DEFAULT_REASONS),
@@ -409,10 +451,8 @@ def production_policy_settings(config: dict[str, Any]) -> dict[str, Any]:
                 SOFT_WEAKNESS_DEFAULT_REASONS,
             )
         ),
-        "commercial_fragility_threshold": float(
-            cfg_get(config, "biotech_scoring.production_policy.commercial_fragility_threshold", 70.0)
-        ),
-        "high_risk_threshold": float(cfg_get(config, "biotech_scoring.production_policy.high_risk_threshold", 75.0)),
+        "commercial_fragility_threshold": policy_float("commercial_fragility_threshold", 70.0),
+        "high_risk_threshold": policy_float("high_risk_threshold", 75.0),
         "commercial_stage_revenue_min": float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000)),
     }
 
@@ -817,37 +857,21 @@ def apply_production_selection_policy(
     settings: dict[str, Any],
     diagnostics: dict[str, float] | None = None,
 ) -> tuple[float, float, float, float, float]:
-    known_policies = {
-        "raw_legacy_score",
-        "hard_weakness_veto",
-        "hard_veto_soft_drag",
-        "investable_core_risk_cap",
-        "core_veto_event_drag",
-        "core_veto_event_soft_drag",
-        "core_veto_event_drag_quality_guardrail",
-        "core_veto_event_soft_drag_quality_guardrail",
-        "core_veto_event_drag_business_shock_strict",
-        "core_veto_event_drag_expected_return_tilt",
-        "core_veto_event_drag_mature_defensive_guard",
-    }
-    if selection_policy not in known_policies:
-        raise ValueError(f"Unknown biotech_scoring.production_baseline.selection_policy: {selection_policy!r}")
+    if selection_policy not in PRODUCTION_SELECTION_POLICIES:
+        raise ValueError(
+            "Unknown biotech_scoring.production_baseline.selection_policy: "
+            f"{selection_policy!r}; supported={sorted(PRODUCTION_SELECTION_POLICIES)}"
+        )
     event_penalty = 0.0
     soft_penalty = 0.0
     if selection_policy.startswith("core_veto_event") and event_reasons:
         event_penalty = float(settings.get("event_hard_penalty") or 0.0)
-    if selection_policy in {"core_veto_event_soft_drag", "core_veto_event_soft_drag_quality_guardrail"} and soft_reasons:
+    if selection_policy in SOFT_DRAG_SELECTION_POLICIES and soft_reasons:
         soft_penalty = float(settings.get("soft_weakness_penalty") or 0.0)
     diagnostics = diagnostics or {}
     quality_penalty = 0.0
     quality_bonus = 0.0
-    if selection_policy in {
-        "core_veto_event_drag_quality_guardrail",
-        "core_veto_event_soft_drag_quality_guardrail",
-        "core_veto_event_drag_business_shock_strict",
-        "core_veto_event_drag_expected_return_tilt",
-        "core_veto_event_drag_mature_defensive_guard",
-    }:
+    if selection_policy in QUALITY_GUARDRAIL_SELECTION_POLICIES:
         quality_penalty += (
             float(settings.get("value_trap_penalty") or 0.0)
             * clamp(diagnostics.get("value_trap_score", 0.0))
@@ -1266,10 +1290,10 @@ def score_rows(
         effective_pre_confidence_risk_drag = investment_risk_drag
         confidence_multiplier = score_confidence_multiplier(config, payload, commercial, forward_guidance, profile_name)
         pre_confidence_investment_score = clamp(investment_positive - investment_risk_drag)
-        effective_post_confidence_risk_drag = effective_pre_confidence_risk_drag * confidence_multiplier
         confidence_adjusted_score_reduction = pre_confidence_investment_score * (1.0 - confidence_multiplier)
         investment_score = clamp(pre_confidence_investment_score * confidence_multiplier)
         effective_total_risk_drag = max(0.0, investment_positive - investment_score)
+        effective_post_confidence_risk_drag = effective_pre_confidence_risk_drag
         raw_opportunity = investment_score if investment_enabled else clinical_opportunity
         core_veto_reasons = core_structural_veto_reasons(payload, commercial, core_veto_settings)
         event_reasons = event_hard_weakness_reasons(payload, policy_settings)
@@ -2011,6 +2035,10 @@ def main() -> None:
                     + ",".join(sorted(missing_forward)[:25])
                     + (f"...(+{len(missing_forward) - 25})" if len(missing_forward) > 25 else "")
                 )
+            require_governance_features = as_bool(
+                cfg_get(config, "biotech_scoring.require_governance_features", False),
+                False,
+            )
             missing_governance = [str(row["ticker"]) for row in features if int(row["company_id"]) not in governance_by_company]
             if missing_governance:
                 message = (
@@ -2018,7 +2046,7 @@ def main() -> None:
                     + ",".join(sorted(missing_governance)[:25])
                     + (f"...(+{len(missing_governance) - 25})" if len(missing_governance) > 25 else "")
                 )
-                if as_bool(cfg_get(config, "biotech_scoring.require_governance_features", False), False):
+                if require_governance_features:
                     raise RuntimeError(message)
                 LOGGER.warning("%s; continuing with empty governance diagnostics for missing companies.", message)
             max_upstream_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0))
@@ -2036,13 +2064,27 @@ def main() -> None:
                 context="biotech scoring forward_guidance_features_daily",
                 max_staleness_days=max_upstream_staleness_days,
             )
-            validate_layer_freshness(
-                base_rows=features,
-                layer_rows_by_company=governance_by_company,
-                asof_date=asof_date,
-                context="biotech scoring governance_event_features_daily",
-                max_staleness_days=max_upstream_staleness_days,
-            )
+            if require_governance_features:
+                validate_layer_freshness(
+                    base_rows=features,
+                    layer_rows_by_company=governance_by_company,
+                    asof_date=asof_date,
+                    context="biotech scoring governance_event_features_daily",
+                    max_staleness_days=max_upstream_staleness_days,
+                )
+            elif governance_by_company:
+                governance_base_rows = [
+                    row for row in features if int(row["company_id"]) in governance_by_company
+                ]
+                validate_layer_freshness(
+                    base_rows=governance_base_rows,
+                    layer_rows_by_company=governance_by_company,
+                    asof_date=asof_date,
+                    context="biotech scoring optional governance_event_features_daily",
+                    max_staleness_days=max_upstream_staleness_days,
+                )
+            else:
+                LOGGER.warning("Skipping optional governance freshness validation because no governance rows are available.")
             scored = score_rows(features, config, commercial_by_company, forward_by_company, governance_by_company)
             validate_full_universe_coverage(
                 expected_tickers=expected_tickers,

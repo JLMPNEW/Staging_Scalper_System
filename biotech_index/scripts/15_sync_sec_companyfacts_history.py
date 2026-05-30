@@ -396,13 +396,15 @@ def normalize_rows(observations: list[dict[str, Any]], *, company_id: int) -> li
             row["revenue"] = sum(float(value or 0.0) for value in revenue_components if value is not None)
             proxies.append("revenue_component_sum")
         if row.get("gross_profit") is None and row.get("revenue") is not None and row.get("cost_of_revenue") is not None:
-            row["gross_profit"] = float(row["revenue"]) - abs(float(row["cost_of_revenue"]))
-            proxies.append("gross_profit_revenue_minus_cost_of_revenue")
+            # Preserve the SEC fact sign convention; expense concepts may be negative in source filings.
+            row["gross_profit"] = float(row["revenue"]) - float(row["cost_of_revenue"])
+            proxies.append("gross_profit_revenue_minus_cost_of_revenue_raw_sign")
         if row.get("operating_income") is None and row.get("revenue") is not None:
             operating_costs = [row.get("cost_of_revenue"), row.get("rd_expense"), row.get("sgna_expense")]
             if all(value is not None for value in operating_costs):
-                row["operating_income"] = float(row["revenue"]) - sum(abs(float(value or 0.0)) for value in operating_costs)
-                proxies.append("operating_income_revenue_minus_cost_rd_sgna")
+                # Preserve the SEC fact sign convention; expense concepts may be negative in source filings.
+                row["operating_income"] = float(row["revenue"]) - sum(float(value or 0.0) for value in operating_costs)
+                proxies.append("operating_income_revenue_minus_cost_rd_sgna_raw_sign")
         if row.get("eps_diluted") is None and row.get("net_income") is not None and row.get("weighted_average_shares_diluted"):
             shares = float(row["weighted_average_shares_diluted"])
             if shares > 0:
@@ -416,7 +418,8 @@ def normalize_rows(observations: list[dict[str, Any]], *, company_id: int) -> li
                 row["shares_outstanding"] = row.get("weighted_average_shares_basic")
                 proxies.append("weighted_basic_shares_for_shares_outstanding")
         if row.get("operating_cash_flow") is not None and row.get("capital_expenditures") is not None:
-            row["free_cash_flow"] = float(row["operating_cash_flow"]) - abs(float(row["capital_expenditures"]))
+            # Preserve the SEC fact sign convention; capital expenditures may already be negative.
+            row["free_cash_flow"] = float(row["operating_cash_flow"]) - float(row["capital_expenditures"])
 
         missing: list[str] = []
         for field in ("cash_and_investments", "revenue", "rd_expense", "operating_cash_flow", "current_assets", "current_liabilities"):
@@ -968,7 +971,14 @@ def build_sign_convention_audit_rows(
             gross_proposed = revenue - cost
             gross_source = payload_source_concept(row, "gross_profit")
             gross_reported = to_float(row.get("gross_profit")) if gross_source else None
-            source_status = "reported" if gross_source else "proxied" if "gross_profit_revenue_minus_cost_of_revenue" in proxy_fields else "derived"
+            gross_proxy_used = bool(
+                {
+                    "gross_profit_revenue_minus_cost_of_revenue",
+                    "gross_profit_revenue_minus_cost_of_revenue_raw_sign",
+                }
+                & proxy_fields
+            )
+            source_status = "reported" if gross_source else "proxied" if gross_proxy_used else "derived"
             if gross_reported is not None:
                 summary["gross_comparable"] += 1
             notes = [f"negative_components={','.join(negative_components)}"] if negative_components else []
@@ -1001,7 +1011,14 @@ def build_sign_convention_audit_rows(
             op_proposed = revenue - sum((cost, rd_expense, sgna_expense))
             op_source = payload_source_concept(row, "operating_income")
             op_reported = to_float(row.get("operating_income")) if op_source else None
-            source_status = "reported" if op_source else "proxied" if "operating_income_revenue_minus_cost_rd_sgna" in proxy_fields else "derived"
+            operating_proxy_used = bool(
+                {
+                    "operating_income_revenue_minus_cost_rd_sgna",
+                    "operating_income_revenue_minus_cost_rd_sgna_raw_sign",
+                }
+                & proxy_fields
+            )
+            source_status = "reported" if op_source else "proxied" if operating_proxy_used else "derived"
             if op_reported is not None:
                 summary["operating_comparable"] += 1
             notes = [f"negative_components={','.join(negative_components)}"] if negative_components else []

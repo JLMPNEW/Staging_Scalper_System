@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
-from med_devices.core.text_norm import normalize_org_name, normalize_ticker  # noqa: E402
+from med_devices.core.text_norm import normalize_org_name, normalize_submission_identifier, normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("link_med_device_fda_to_companies")
@@ -190,6 +190,18 @@ class CompanyFootprint:
     fei_numbers: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ProductLineOverride:
+    manufacturer_id: int | None
+    manufacturer_name_norm: str
+    company: ResolvedCompany
+    confidence: float
+    method: str
+    product_codes: frozenset[str]
+    keywords: tuple[str, ...]
+    note: str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Link FDA manufacturers/sponsors to public med-device companies.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -313,23 +325,8 @@ def split_multi_value(raw: object) -> list[str]:
     return out
 
 
-def normalize_submission_identifier(raw: object) -> str:
-    value = re.sub(r"[^A-Z0-9-]+", "", str(raw or "").upper().strip())
-    if not value or not any(ch.isdigit() for ch in value):
-        return ""
-    unsupported = {
-        "510KDENOVOPIPELINE",
-        "510KPIPELINE",
-        "CLASSIREGISTRY",
-        "DISTRIBUTIONONLY",
-        "DMF",
-        "FEI-ONLY",
-        "FEIONLY",
-        "MASTERFILE",
-        "PMA-PIPELINE",
-        "PMAPIPELINE",
-    }
-    return "" if value in unsupported else value
+def normalize_product_code(raw: object) -> str:
+    return re.sub(r"[^A-Z0-9]+", "", str(raw or "").upper().strip())
 
 
 def normalize_fei(raw: object) -> str:
@@ -731,6 +728,62 @@ def load_manual_overrides(conn: Any, path: Path | None) -> dict[tuple[str, str],
     return out
 
 
+def load_product_line_overrides(conn: Any, path: Path | None) -> list[ProductLineOverride]:
+    if path is None:
+        return []
+    if not path.exists():
+        LOGGER.warning("Configured FDA product-line override CSV does not exist: %s", path)
+        return []
+    _, by_ticker = load_company_lookup(conn)
+    out: list[ProductLineOverride] = []
+    for row in read_csv_flexible(path):
+        ticker = normalize_ticker(row_get(row, "ticker", "mapped_ticker", "symbol"))
+        company = by_ticker.get(ticker)
+        if company is None:
+            LOGGER.warning("Skipping FDA product-line override with unresolved ticker: %s", row)
+            continue
+        manufacturer_id_text = row_get(row, "fda_manufacturer_id", "manufacturer_id")
+        manufacturer_id = int(manufacturer_id_text) if manufacturer_id_text.isdigit() else None
+        manufacturer_name = row_get(row, "manufacturer_name", "fda_manufacturer_name")
+        manufacturer_name_norm = normalize_org_name(manufacturer_name)
+        product_codes = frozenset(
+            code
+            for code in (normalize_product_code(item) for item in split_multi_value(row_get(row, "product_codes", "product_code")))
+            if code
+        )
+        keywords = tuple(
+            keyword.casefold()
+            for keyword in split_multi_value(row_get(row, "match_keywords", "keywords", "keyword"))
+            if keyword.strip()
+        )
+        if manufacturer_id is None and not manufacturer_name_norm:
+            LOGGER.warning("Skipping FDA product-line override without manufacturer identifier: %s", row)
+            continue
+        if not product_codes and not keywords:
+            LOGGER.warning("Skipping FDA product-line override without product codes or keywords: %s", row)
+            continue
+        raw_confidence = row_get(row, "confidence", "mapping_confidence")
+        try:
+            confidence = float(raw_confidence) if raw_confidence else 97.0
+        except ValueError:
+            LOGGER.warning("Ignoring invalid product-line override confidence: %s", row)
+            confidence = 97.0
+        out.append(
+            ProductLineOverride(
+                manufacturer_id=manufacturer_id,
+                manufacturer_name_norm=manufacturer_name_norm,
+                company=company,
+                confidence=confidence,
+                method=row_get(row, "mapping_method", "method") or "product_line_override",
+                product_codes=product_codes,
+                keywords=keywords,
+                note=row_get(row, "note", "review_reason", "notes"),
+            )
+        )
+    LOGGER.info("Loaded FDA product-line overrides: rows=%d path=%s", len(out), path)
+    return out
+
+
 def load_fact_counts(conn: Any) -> dict[int, tuple[int, int, int, int, int]]:
     counts: dict[int, list[int]] = {}
     queries = [
@@ -773,6 +826,109 @@ def update_fact_company_ids(conn: Any, *, min_confidence: float) -> None:
             """,
             (min_confidence, min_confidence),
         )
+
+
+PRODUCT_LINE_FACT_TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "fact_fda_approval": (
+        "fda_approval_id",
+        ("product_code", "submission_number", "device_name", "decision", "payload_json"),
+    ),
+    "fact_fda_recall": (
+        "fda_recall_id",
+        (
+            "product_code",
+            "recall_number",
+            "event_id",
+            "classification",
+            "status",
+            "recalling_firm",
+            "reason_for_recall",
+            "payload_json",
+        ),
+    ),
+    "fact_fda_adverse_event": (
+        "adverse_event_id",
+        ("product_code", "event_type", "device_problem_codes", "patient_problem_codes", "payload_json"),
+    ),
+}
+
+
+def product_line_override_matches(row: Any, override: ProductLineOverride) -> bool:
+    product_code = normalize_product_code(row["product_code"] if "product_code" in row.keys() else "")
+    if product_code and product_code in override.product_codes:
+        return True
+    if not override.keywords:
+        return False
+    text = " ".join(str(row[key] or "") for key in row.keys()).casefold()
+    return any(keyword in text for keyword in override.keywords)
+
+
+def product_line_override_manufacturer_ids(conn: Any, override: ProductLineOverride) -> list[int]:
+    if override.manufacturer_id is not None:
+        return [override.manufacturer_id]
+    if not override.manufacturer_name_norm:
+        return []
+    rows = conn.execute(
+        """
+        SELECT fda_manufacturer_id
+        FROM dim_fda_manufacturer
+        WHERE manufacturer_name_norm = ?
+        """,
+        (override.manufacturer_name_norm,),
+    ).fetchall()
+    return [int(row["fda_manufacturer_id"]) for row in rows]
+
+
+def apply_product_line_fact_links(conn: Any, overrides: list[ProductLineOverride]) -> dict[str, int]:
+    counts = {table_name: 0 for table_name in PRODUCT_LINE_FACT_TABLES}
+    if not overrides:
+        return counts
+    now = utc_now()
+    for override in overrides:
+        manufacturer_ids = product_line_override_manufacturer_ids(conn, override)
+        if not manufacturer_ids:
+            LOGGER.warning("Product-line override found no manufacturer rows: %s", override)
+            continue
+        for manufacturer_id in manufacturer_ids:
+            for table_name, (pk_column, text_columns) in PRODUCT_LINE_FACT_TABLES.items():
+                if not table_exists(conn, table_name):
+                    continue
+                columns = ", ".join(text_columns)
+                rows = conn.execute(
+                    f"""
+                    SELECT {pk_column}, company_id, {columns}
+                    FROM {table_name}
+                    WHERE fda_manufacturer_id = ?
+                    """,
+                    (manufacturer_id,),
+                ).fetchall()
+                for row in rows:
+                    if not product_line_override_matches(row, override):
+                        continue
+                    if row["company_id"] is not None and int(row["company_id"]) != override.company.company_id:
+                        LOGGER.warning(
+                            "Skipping FDA product-line override conflict: table=%s row_id=%s ticker=%s existing_company_id=%s",
+                            table_name,
+                            row[pk_column],
+                            override.company.ticker,
+                            row["company_id"],
+                        )
+                        continue
+                    cur = conn.execute(
+                        f"""
+                        UPDATE {table_name}
+                        SET company_id = ?,
+                            updated_at = ?
+                        WHERE {pk_column} = ?
+                          AND (
+                            company_id IS NULL
+                            OR company_id = ?
+                          )
+                        """,
+                        (override.company.company_id, now, row[pk_column], override.company.company_id),
+                    )
+                    counts[table_name] += max(0, cur.rowcount if cur.rowcount is not None else 0)
+    return counts
 
 
 def approval_submission_clause(identifier: str) -> tuple[str, list[str]]:
@@ -1018,6 +1174,12 @@ def main() -> None:
         if manual_overrides_raw
         else None
     )
+    product_line_overrides_raw = str(cfg_get(config, "fda_entity_linking.product_line_overrides_csv", "") or "").strip()
+    product_line_overrides_csv = (
+        resolve_path(product_line_overrides_raw, base_dir=base_dir)
+        if product_line_overrides_raw
+        else None
+    )
     update_facts = (
         not args.no_fact_update
         and str(cfg_get(config, "fda_entity_linking.update_fact_company_ids", True)).strip().lower() not in {"0", "false", "no"}
@@ -1030,6 +1192,7 @@ def main() -> None:
             aliases = build_aliases(conn, extra_alias_csv=extra_alias_csv, footprint_csv=footprint_csv)
             footprints = load_company_footprints(conn, footprint_csv)
             manual_overrides = load_manual_overrides(conn, manual_overrides_csv)
+            product_line_overrides = load_product_line_overrides(conn, product_line_overrides_csv)
             counts_by_manufacturer = load_fact_counts(conn)
             manufacturers = conn.execute(
                 """
@@ -1121,20 +1284,28 @@ def main() -> None:
                 )
             if update_facts:
                 update_fact_company_ids(conn, min_confidence=min_confidence)
+                product_line_link_counts = apply_product_line_fact_links(conn, product_line_overrides)
                 footprint_link_counts = apply_footprint_fact_links(conn, footprints)
             else:
+                product_line_link_counts = {
+                    "fact_fda_approval": 0,
+                    "fact_fda_recall": 0,
+                    "fact_fda_adverse_event": 0,
+                }
                 footprint_link_counts = {
                     "approval_rows": 0,
                     "manufacturer_rows": 0,
                     "inspection_rows": 0,
                     "compliance_rows": 0,
                     "conflict_rows": 0,
+                    "unconfirmed_approval_rows": 0,
                 }
             write_csv(output_csv, rows)
             message = (
                 f"manufacturers={len(rows)} mapped={mapped} ambiguous={ambiguous} "
                 f"high_volume_unmapped={high_volume_unmapped_count} aliases={len(aliases)} "
                 f"manual_overrides={len(manual_overrides)} footprint_links={footprint_link_counts} "
+                f"product_line_links={product_line_link_counts} "
                 f"min_confidence={min_confidence} output={output_csv}"
             )
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=message)

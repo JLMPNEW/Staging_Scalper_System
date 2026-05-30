@@ -97,6 +97,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-final-validation", action="store_true", help="Skip final as-of/coverage validation after a full pipeline run.")
     parser.add_argument("--skip-form4-preflight", action="store_true", help="Skip the staging Form 4 database freshness preflight.")
     parser.add_argument("--reuse-unchanged-historical", action="store_true", help="Reuse exact-signature governance rows for historical snapshot runs.")
+    parser.add_argument(
+        "--history-restatement",
+        action="store_true",
+        help=(
+            "Restate derived historical feature/score layers over a date grid after raw source tables are current. "
+            "This does not run raw upstream sync steps."
+        ),
+    )
+    parser.add_argument("--history-start-asof", type=str, default="", help="Earliest YYYY-MM-DD date for --history-restatement.")
+    parser.add_argument("--history-end-asof", type=str, default="", help="Latest YYYY-MM-DD date for --history-restatement. Defaults to --asof.")
+    parser.add_argument(
+        "--history-dates",
+        type=str,
+        default="",
+        help="Optional comma-separated YYYY-MM-DD date grid for --history-restatement. Overrides source-table date loading.",
+    )
+    parser.add_argument(
+        "--history-date-source",
+        choices=["daily_scores", "daily_features"],
+        default="daily_scores",
+        help="Source table for --history-restatement date grid when --history-dates is omitted.",
+    )
+    parser.add_argument(
+        "--history-fridays-only",
+        action="store_true",
+        help="Restrict --history-restatement source-table date grid to Fridays.",
+    )
     return parser.parse_args()
 
 
@@ -157,7 +184,7 @@ def validate_config(config: dict[str, Any]) -> None:
     optional_defaults = {
         "governance_events.form4_required": True,
         "governance_events.reuse_unchanged_historical": False,
-        "biotech_refresh.step_timeout_sec": 7200.0,
+        "biotech_refresh.step_timeout_sec": 14400.0,
         "calibration.exclude_tickers": [],
     }
     for key, default in optional_defaults.items():
@@ -264,7 +291,8 @@ def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bo
         steps.append(Step("ib_market", "17_sync_market_data_ib.py", ib_args))
     if not skip_yahoo:
         steps.append(Step("yahoo_market_adjusted", "17_sync_market_data_yahoo_adjusted.py", yahoo_args))
-    steps.append(Step("market_policy_audit", "31_audit_market_data_policy.py"))
+    if not (skip_ib and skip_yahoo):
+        steps.append(Step("market_policy_audit", "31_audit_market_data_policy.py"))
     steps.extend(
         [
             Step("commercial_value", "18_build_commercial_value_features.py", commercial_args),
@@ -280,6 +308,87 @@ def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bo
         ]
     )
     return steps
+
+
+def historical_restatement_steps(*, reuse_unchanged_historical: bool = True) -> list[Step]:
+    """Derived layers that can be safely restated from already-synced source tables."""
+    governance_args: tuple[str, ...] = ("--reuse-unchanged-historical",) if reuse_unchanged_historical else ()
+    return [
+        Step("financial_survival", "16_build_financial_survival_features.py"),
+        Step("commercial_value", "18_build_commercial_value_features.py", ("--allow-missing-market",)),
+        Step("forward_guidance", "19_parse_forward_guidance.py", ("--run-mode", "full_backfill")),
+        Step("governance_events", "20_build_governance_event_features.py", governance_args),
+        Step("biotech_features", "10_build_biotech_features.py"),
+        Step("biotech_scores", "11_score_biotech_index.py"),
+        Step("multibagger_features", "21_build_multibagger_features.py", ("--allow-missing-market",)),
+        Step("multibagger_scores", "22_score_multibagger_candidates.py"),
+    ]
+
+
+def parse_history_dates(raw: str) -> list[str]:
+    dates: list[str] = []
+    seen: set[str] = set()
+    for part in str(raw or "").replace(";", ",").replace("|", ",").split(","):
+        parsed = parse_date(part)
+        if parsed is None:
+            if str(part or "").strip():
+                raise ValueError(f"Invalid historical restatement date: {part!r}")
+            continue
+        text = parsed.isoformat()
+        if text not in seen:
+            dates.append(text)
+            seen.add(text)
+    return dates
+
+
+def load_history_date_grid(
+    conn: sqlite3.Connection,
+    *,
+    source_table: str,
+    explicit_dates: str,
+    start_asof: str,
+    end_asof: str,
+    default_end_asof: str,
+    fridays_only: bool,
+) -> list[str]:
+    dates = parse_history_dates(explicit_dates)
+    start_date = parse_date(start_asof)
+    if start_asof and start_date is None:
+        raise ValueError(f"Invalid --history-start-asof date: {start_asof}")
+    end_date = parse_date(end_asof) or parse_date(default_end_asof)
+    if (end_asof or default_end_asof) and end_date is None:
+        raise ValueError(f"Invalid historical restatement end date: {end_asof or default_end_asof}")
+    if not dates:
+        table_sql = quote_identifier(source_table)
+        rows = conn.execute(f"SELECT DISTINCT asof_date FROM {table_sql} WHERE asof_date IS NOT NULL ORDER BY asof_date").fetchall()
+        for row in rows:
+            parsed = parse_date(row["asof_date"])
+            if parsed is None:
+                continue
+            if start_date is not None and parsed < start_date:
+                continue
+            if end_date is not None and parsed > end_date:
+                continue
+            if fridays_only and parsed.weekday() != 4:
+                continue
+            dates.append(parsed.isoformat())
+    else:
+        filtered: list[str] = []
+        for text in dates:
+            parsed = parse_date(text)
+            if parsed is None:
+                continue
+            if start_date is not None and parsed < start_date:
+                continue
+            if end_date is not None and parsed > end_date:
+                continue
+            if fridays_only and parsed.weekday() != 4:
+                continue
+            filtered.append(text)
+        dates = filtered
+    if not dates:
+        raise RuntimeError("Historical restatement date grid is empty.")
+    return dates
 
 
 def write_timing_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -308,7 +417,12 @@ def terminate_process_tree(process: subprocess.Popen[str]) -> None:
                 timeout=30,
             )
         else:
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            pgid = os.getpgid(process.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(pgid, signal.SIGKILL)
     except Exception as exc:
         LOGGER.warning("Failed to terminate process tree for pid=%s: %s", process.pid, exc)
     try:
@@ -512,7 +626,12 @@ def run_step(
             stdout_text, stderr_text = process.communicate(timeout=timeout_sec)
         except subprocess.TimeoutExpired:
             terminate_process_tree(process)
-            stdout_text, stderr_text = process.communicate(timeout=30)
+            try:
+                stdout_text, stderr_text = process.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                terminate_process_tree(process)
+                stdout_text = stdout_text or ""
+                stderr_text = (stderr_text or "") + "\nTimed out waiting for process tree termination."
             raise
     except subprocess.TimeoutExpired:
         elapsed = round(time.monotonic() - start, 3)
@@ -529,7 +648,7 @@ def run_step(
             "stderr_tail": text_tail(stderr_text),
         }
     elapsed = round(time.monotonic() - start, 3)
-    returncode = int(process.returncode or 0)
+    returncode = int(process.returncode if process.returncode is not None else -1)
     status = "success" if returncode == 0 else "failed"
     if stderr_text.strip():
         log_func = LOGGER.warning if status == "success" else LOGGER.error
@@ -1033,19 +1152,23 @@ def main() -> None:
         cfg_get(config, "biotech_refresh.timing_csv", "../output/biotech_index_reports/biotech_refresh_timing.csv"),
         base_dir=base_dir,
     )
-    raw_timeout_value = cfg_get(config, "biotech_refresh.step_timeout_sec", 7200.0)
+    raw_timeout_value = cfg_get(config, "biotech_refresh.step_timeout_sec", 14400.0)
     try:
         raw_timeout = float(raw_timeout_value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Invalid biotech_refresh.step_timeout_sec value: {raw_timeout_value!r}") from exc
     step_timeout_sec = raw_timeout if raw_timeout > 0 else None
     selected_steps = {step.strip() for step in args.steps.split(",") if step.strip()}
-    all_steps = pipeline_steps(
-        args.mode,
-        skip_ctgov=args.skip_ctgov,
-        skip_ib=args.skip_ib,
-        skip_yahoo=args.skip_yahoo,
-        reuse_unchanged_historical=args.reuse_unchanged_historical,
+    all_steps = (
+        historical_restatement_steps(reuse_unchanged_historical=True)
+        if args.history_restatement
+        else pipeline_steps(
+            args.mode,
+            skip_ctgov=args.skip_ctgov,
+            skip_ib=args.skip_ib,
+            skip_yahoo=args.skip_yahoo,
+            reuse_unchanged_historical=args.reuse_unchanged_historical,
+        )
     )
     if selected_steps:
         known = {step.name for step in all_steps}
@@ -1053,6 +1176,25 @@ def main() -> None:
         if unknown:
             raise ValueError(f"Unknown pipeline step(s): {', '.join(unknown)}")
     steps = [step for step in all_steps if not selected_steps or step.name in selected_steps]
+    history_dates: list[str] = []
+    if args.history_restatement:
+        with connect(db_path) as conn:
+            history_dates = load_history_date_grid(
+                conn,
+                source_table=args.history_date_source,
+                explicit_dates=args.history_dates,
+                start_asof=args.history_start_asof,
+                end_asof=args.history_end_asof,
+                default_end_asof=asof,
+                fridays_only=args.history_fridays_only,
+            )
+        LOGGER.info(
+            "Historical restatement date grid: dates=%d first=%s last=%s source=%s",
+            len(history_dates),
+            history_dates[0],
+            history_dates[-1],
+            "explicit" if args.history_dates else args.history_date_source,
+        )
     final_validation_enabled = as_bool(cfg_get(config, "biotech_refresh.validate_final_outputs", True))
     snapshot_outputs_enabled = as_bool(cfg_get(config, "biotech_refresh.snapshot_outputs.enabled", True))
     form4_preflight_enabled = as_bool(cfg_get(config, "biotech_refresh.form4_preflight.enabled", True), True)
@@ -1110,33 +1252,46 @@ def main() -> None:
             LOGGER.warning("Form 4 preflight skipped via --skip-form4-preflight.")
         elif form4_preflight_needed and not form4_preflight_enabled:
             LOGGER.warning("Form 4 preflight skipped because biotech_refresh.form4_preflight.enabled=false.")
-        for step in steps:
-            command = build_step_command(step, config_path=config_path, db_path=db_path, asof=asof)
-            row = {
-                "run_started_at": run_started_at,
-                "mode": args.mode,
-                "step": step.name,
-                "status": "running",
-                "elapsed_sec": "",
-                "returncode": "",
-                "command": " ".join(command),
-            }
-            timing_rows.append(row)
-            write_timing_csv(timing_csv, timing_rows)
-            timing_rows[-1] = run_step(
-                step,
-                command=command,
-                mode=args.mode,
-                run_started_at=run_started_at,
-                timeout_sec=step_timeout_sec,
-            )
-            write_timing_csv(timing_csv, timing_rows)
-            if timing_rows[-1]["status"] != "success":
-                raise SystemExit(int(timing_rows[-1]["returncode"]))
+        run_dates = history_dates if args.history_restatement else [asof]
+        effective_mode = "history_restatement" if args.history_restatement else args.mode
+        for run_asof in run_dates:
+            for step in steps:
+                command_step = step
+                timing_step = step
+                if args.history_restatement:
+                    timing_step = Step(f"{step.name}@{run_asof}", step.script, step.args, step.supports_asof)
+                command = build_step_command(command_step, config_path=config_path, db_path=db_path, asof=run_asof)
+                row = {
+                    "run_started_at": run_started_at,
+                    "mode": effective_mode,
+                    "step": timing_step.name,
+                    "status": "running",
+                    "elapsed_sec": "",
+                    "returncode": "",
+                    "command": " ".join(command),
+                }
+                timing_rows.append(row)
+                write_timing_csv(timing_csv, timing_rows)
+                timing_rows[-1] = run_step(
+                    timing_step,
+                    command=command,
+                    mode=effective_mode,
+                    run_started_at=run_started_at,
+                    timeout_sec=step_timeout_sec,
+                )
+                write_timing_csv(timing_csv, timing_rows)
+                if timing_rows[-1]["status"] != "success":
+                    step_returncode = int(timing_rows[-1]["returncode"])
+                    raise SystemExit(step_returncode if step_returncode > 0 else 1)
         if not args.skip_analyze:
-            timing_rows.append(analyze_db(db_path, run_started_at=run_started_at, mode=args.mode))
+            timing_rows.append(analyze_db(db_path, run_started_at=run_started_at, mode=effective_mode))
             write_timing_csv(timing_csv, timing_rows)
-        if not selected_steps and not args.skip_final_validation and final_validation_enabled:
+        if (
+            not args.history_restatement
+            and not selected_steps
+            and not args.skip_final_validation
+            and final_validation_enabled
+        ):
             validation_start = time.monotonic()
             timing_rows.append(
                 {
@@ -1178,7 +1333,7 @@ def main() -> None:
             LOGGER.warning("Final output validation SKIPPED via --skip-final-validation; output may be unvalidated.")
         elif not final_validation_enabled:
             LOGGER.warning("Final output validation skipped because biotech_refresh.validate_final_outputs=false.")
-        if snapshot_outputs_enabled and not selected_steps:
+        if snapshot_outputs_enabled and not args.history_restatement and not selected_steps:
             timing_rows.append(
                 snapshot_direct_output_files(
                     config,
@@ -1190,6 +1345,8 @@ def main() -> None:
                 )
             )
             write_timing_csv(timing_csv, timing_rows)
+        elif snapshot_outputs_enabled and args.history_restatement:
+            LOGGER.warning("Snapshot output copy skipped during historical restatement.")
         elif snapshot_outputs_enabled and selected_steps:
             LOGGER.warning("Snapshot output copy skipped because --steps was used.")
     finally:

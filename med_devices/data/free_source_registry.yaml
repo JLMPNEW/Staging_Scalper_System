@@ -122,6 +122,7 @@ sources:
       - stg_ib_ohlcv_daily
     canonical_tables:
       - fact_price_ohlcv
+      - fact_market_snapshot
     feature_stages:
       - technical_entry
       - valuation
@@ -149,6 +150,7 @@ sources:
       - stg_yahoo_ohlcv_daily
     canonical_tables:
       - fact_price_ohlcv
+      - fact_market_snapshot
     feature_stages:
       - technical_entry
       - valuation

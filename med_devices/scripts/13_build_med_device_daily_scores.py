@@ -27,12 +27,12 @@ from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 LOGGER = logging.getLogger("build_med_device_daily_scores")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_WEIGHTS = {
-    "fundamental_quality": 0.20,
-    "durable_growth": 0.10,
-    "fda_product": 0.17,
-    "reimbursement": 0.15,
-    "valuation": 0.18,
-    "technical_entry": 0.15,
+    "fundamental_quality": 0.25,
+    "durable_growth": 0.15,
+    "fda_product": 0.15,
+    "reimbursement": 0.10,
+    "valuation": 0.20,
+    "technical_entry": 0.10,
     "sentiment_catalyst": 0.05,
 }
 ALLOWED_FEATURE_TABLES = {
@@ -52,11 +52,21 @@ FIELDNAMES = [
     "company_name",
     "subsector",
     "composite_score",
+    "raw_composite_score",
+    "composite_percentile",
     "fundamental_quality_score",
     "durable_growth_score",
     "fda_product_score",
     "fda_data_available",
     "reimbursement_score",
+    "reimbursement_status",
+    "direct_code_evidence",
+    "payment_rate_evidence",
+    "coverage_policy_evidence",
+    "procedure_bundled_flag",
+    "capital_equipment_flag",
+    "diagnostics_lab_flag",
+    "unknown_reimbursement_flag",
     "valuation_score",
     "technical_entry_score",
     "sentiment_catalyst_score",
@@ -69,8 +79,40 @@ FIELDNAMES = [
     "hard_red_flag",
     "hard_red_flag_reasons",
     "classification",
+    "decision_bucket",
+    "entry_status",
     "gate_status",
     "review_reason",
+    "failed_gates",
+    "classification_reason",
+    "fda_review_state",
+    "market_cap",
+    "current_shares_outstanding",
+    "diluted_weighted_average_shares",
+    "basic_weighted_average_shares",
+    "shares_source_concept",
+    "shares_source_form",
+    "shares_source_period",
+    "market_cap_validated_flag",
+    "avg_dollar_volume_60d",
+    "liquidity_score",
+    "capacity_bucket",
+    "min_position_size_feasible",
+    "max_position_size_feasible",
+    "passed_raw_score_gate",
+    "passed_fundamental_gate",
+    "passed_growth_gate",
+    "passed_fda_gate",
+    "passed_reimbursement_gate",
+    "passed_valuation_gate",
+    "passed_technical_gate",
+    "passed_value_trap_gate",
+    "passed_data_quality_gate",
+    "passed_liquidity_gate",
+    "passed_fda_manual_review_gate",
+    "final_investability_gate",
+    "top_positive_drivers",
+    "top_negative_drivers",
 ]
 
 
@@ -84,11 +126,21 @@ class ScoreRow:
     company_name: str
     subsector: str
     composite_score: float = 0.0
+    raw_composite_score: float = 0.0
+    composite_percentile: float = 0.0
     fundamental_quality_score: float = 0.0
     durable_growth_score: float = 50.0
     fda_product_score: float = 50.0
     fda_data_available: int = 0
     reimbursement_score: float = 50.0
+    reimbursement_status: str = "unknown"
+    direct_code_evidence: int = 0
+    payment_rate_evidence: int = 0
+    coverage_policy_evidence: int = 0
+    procedure_bundled_flag: int = 0
+    capital_equipment_flag: int = 0
+    diagnostics_lab_flag: int = 0
+    unknown_reimbursement_flag: int = 1
     valuation_score: float = 0.0
     technical_entry_score: float = 50.0
     sentiment_catalyst_score: float = 50.0
@@ -101,12 +153,51 @@ class ScoreRow:
     hard_red_flag: int = 0
     hard_red_flag_reasons: str = ""
     classification: str = "unclassified"
+    decision_bucket: str = "unclassified"
+    entry_status: str = "unclassified"
     gate_status: str = "fail"
     review_reason: str = ""
+    failed_gates: str = ""
+    classification_reason: str = ""
+    fda_review_state: str = ""
+    market_cap: float | None = None
+    current_shares_outstanding: float | None = None
+    diluted_weighted_average_shares: float | None = None
+    basic_weighted_average_shares: float | None = None
+    shares_source_concept: str = ""
+    shares_source_form: str = ""
+    shares_source_period: str = ""
+    market_cap_validated_flag: int = 0
+    avg_dollar_volume_60d: float | None = None
+    liquidity_score: float | None = None
+    capacity_bucket: str = "unknown"
+    min_position_size_feasible: float | None = None
+    max_position_size_feasible: float | None = None
+    passed_raw_score_gate: int = 0
+    passed_fundamental_gate: int = 0
+    passed_growth_gate: int = 0
+    passed_fda_gate: int = 0
+    passed_reimbursement_gate: int = 0
+    passed_valuation_gate: int = 0
+    passed_technical_gate: int = 0
+    passed_value_trap_gate: int = 0
+    passed_data_quality_gate: int = 0
+    passed_liquidity_gate: int = 0
+    passed_fda_manual_review_gate: int = 0
+    final_investability_gate: int = 0
     top_positive_drivers: list[str] = field(default_factory=list)
     top_negative_drivers: list[str] = field(default_factory=list)
     durable_growth_proxy_available: bool = False
     sentiment_proxy_available: bool = False
+    sentiment_proxy_source: str = ""
+    sentiment_proxy_input: str = ""
+
+
+@dataclass(frozen=True)
+class SentimentProxy:
+    score: float
+    source: str
+    input_name: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -408,14 +499,105 @@ def durable_growth_proxy(financial_rows: list[dict[str, Any]]) -> dict[int, floa
     return out
 
 
-def sentiment_catalyst_proxy(financial_rows: list[dict[str, Any]]) -> dict[int, float]:
+def shrink_to_neutral(score: float, *, neutral: float, weight: float) -> float:
+    return round(neutral + (score - neutral) * weight, 2)
+
+
+def sentiment_catalyst_proxy(
+    financial_rows: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+    neutral: float,
+) -> dict[int, SentimentProxy]:
+    annual_fallback_enabled = cfg_bool(
+        config,
+        "scoring.sentiment_catalyst_proxy.annual_revenue_growth_fallback_enabled",
+        True,
+    )
+    rd_fallback_enabled = cfg_bool(
+        config,
+        "scoring.sentiment_catalyst_proxy.rd_scale_fallback_enabled",
+        True,
+    )
+    annual_weight = cfg_float(config, "scoring.sentiment_catalyst_proxy.annual_revenue_growth_weight", 0.75)
+    annual_min_revenue = cfg_float(
+        config,
+        "scoring.sentiment_catalyst_proxy.annual_revenue_growth_min_revenue_ttm",
+        10_000_000.0,
+    )
+    rd_weight = cfg_float(config, "scoring.sentiment_catalyst_proxy.rd_scale_weight", 0.50)
+    rd_max_revenue = cfg_float(
+        config,
+        "scoring.sentiment_catalyst_proxy.rd_scale_max_revenue_ttm",
+        5_000_000.0,
+    )
+    runway_weight = cfg_float(config, "scoring.sentiment_catalyst_proxy.pre_revenue_runway_weight", 0.60)
+    pre_revenue_rd_weight = cfg_float(config, "scoring.sentiment_catalyst_proxy.pre_revenue_rd_scale_weight", 0.40)
+    rd_log_transform = cfg_bool(config, "scoring.sentiment_catalyst_proxy.rd_scale_log_transform", True)
     surprise_pairs: list[tuple[int, float]] = []
+    annual_growth_pairs: list[tuple[int, float]] = []
+    runway_pairs: list[tuple[int, float]] = []
+    rd_scale_pairs: list[tuple[int, float]] = []
     for row in financial_rows:
+        company_id = int(row["company_id"])
         surprise = to_float(row.get("quarterly_revenue_surprise_yoy"))
         if surprise is not None:
-            surprise_pairs.append((int(row["company_id"]), surprise))
+            surprise_pairs.append((company_id, surprise))
+            continue
+        revenue_ttm = to_float(row.get("revenue_ttm"))
+        annual_growth = to_float(row.get("revenue_yoy_growth"))
+        if annual_fallback_enabled and annual_growth is not None and revenue_ttm is not None and revenue_ttm >= annual_min_revenue:
+            annual_growth_pairs.append((company_id, annual_growth))
+            continue
+        rd_ttm = to_float(row.get("annualized_research_and_development"))
+        if rd_ttm is None:
+            rd_ttm = to_float(row.get("research_and_development_ttm"))
+        pre_revenue = revenue_ttm is None or revenue_ttm <= rd_max_revenue
+        runway_years = to_float(row.get("financial_runway_years"))
+        if rd_fallback_enabled and pre_revenue and runway_years is not None and runway_years > 0:
+            runway_pairs.append((company_id, runway_years))
+        if rd_fallback_enabled and pre_revenue and rd_ttm is not None and abs(rd_ttm) > 0:
+            rd_value = math.log1p(abs(rd_ttm)) if rd_log_transform else abs(rd_ttm)
+            rd_scale_pairs.append((company_id, rd_value))
     surprise_scores = percentile(surprise_pairs, higher_is_better=True)
-    return {company_id: round(score, 2) for company_id, score in surprise_scores.items()}
+    annual_growth_scores = percentile(annual_growth_pairs, higher_is_better=True)
+    runway_scores = percentile(runway_pairs, higher_is_better=True)
+    rd_scale_scores = percentile(rd_scale_pairs, higher_is_better=True)
+    out: dict[int, SentimentProxy] = {
+        company_id: SentimentProxy(
+            score=round(score, 2),
+            source="daily_score_quarterly_revenue_surprise_proxy",
+            input_name="quarterly_revenue_surprise_yoy",
+        )
+        for company_id, score in surprise_scores.items()
+    }
+    for company_id, score in annual_growth_scores.items():
+        if company_id in out:
+            continue
+        out[company_id] = SentimentProxy(
+            score=shrink_to_neutral(score, neutral=neutral, weight=annual_weight),
+            source="daily_score_annual_revenue_growth_fallback",
+            input_name="revenue_yoy_growth",
+        )
+    pre_revenue_ids = sorted(set(runway_scores) | set(rd_scale_scores))
+    for company_id in pre_revenue_ids:
+        if company_id in out:
+            continue
+        components: list[tuple[float, float]] = []
+        if company_id in runway_scores:
+            components.append((float(runway_scores[company_id]), runway_weight))
+        if company_id in rd_scale_scores:
+            components.append((float(rd_scale_scores[company_id]), pre_revenue_rd_weight))
+        if not components:
+            continue
+        total_weight = sum(weight for _, weight in components)
+        blended = sum(score * weight for score, weight in components) / total_weight
+        out[company_id] = SentimentProxy(
+            score=shrink_to_neutral(blended, neutral=neutral, weight=rd_weight),
+            source="daily_score_pre_revenue_runway_rd_fallback",
+            input_name="financial_runway_years;annualized_research_and_development",
+        )
+    return out
 
 
 def durable_proxy_available(financial_item: dict[str, Any]) -> bool:
@@ -482,7 +664,10 @@ def upsert_sentiment_proxy_rows(conn: Any, rows: list[ScoreRow]) -> int:
             row.sentiment_catalyst_score,
             50.0,
             json.dumps(
-                {"source": "daily_score_quarterly_revenue_surprise_proxy", "input": "quarterly_revenue_surprise_yoy"},
+                {
+                    "source": row.sentiment_proxy_source or "daily_score_sentiment_proxy",
+                    "input": row.sentiment_proxy_input,
+                },
                 ensure_ascii=True,
                 sort_keys=True,
             ),
@@ -526,6 +711,8 @@ def score_drivers(row: ScoreRow) -> tuple[list[str], list[str]]:
     positives = [f"{name}:{score:.1f}" for name, score in sorted(items, key=lambda item: item[1], reverse=True)[:3]]
     below_neutral = [(name, score) for name, score in items if score < 50.0]
     negatives = [f"{name}:{score:.1f}" for name, score in sorted(below_neutral, key=lambda item: item[1])[:3]]
+    if row.unknown_reimbursement_flag and "reimbursement:unknown" not in negatives:
+        negatives.append("reimbursement:unknown")
     return positives, negatives
 
 
@@ -545,16 +732,18 @@ def value_trap_discount(value_trap_score: float, *, start: float = 40.0) -> floa
 
 def cross_sectional_percentile_rank(rows: list[ScoreRow]) -> None:
     pairs = [
-        (idx, row.composite_score)
+        (idx, row.raw_composite_score)
         for idx, row in enumerate(rows)
-        if row.composite_score is not None and math.isfinite(row.composite_score)
+        if row.raw_composite_score is not None and math.isfinite(row.raw_composite_score)
     ]
     if len(pairs) <= 1:
+        for row in rows:
+            row.composite_percentile = 50.0
         return
     pairs.sort(key=lambda item: item[1])
     denominator = len(pairs) - 1
     for rank, (idx, _) in enumerate(pairs):
-        rows[idx].composite_score = round(100.0 * rank / denominator, 2)
+        rows[idx].composite_percentile = round(100.0 * rank / denominator, 2)
 
 
 def load_previous_scores(conn: Any, *, asof: str) -> dict[int, dict[str, Any]]:
@@ -580,46 +769,165 @@ def load_previous_scores(conn: Any, *, asof: str) -> dict[int, dict[str, Any]]:
     return {int(row["company_id"]): dict(row) for row in rows}
 
 
+MANUAL_FDA_REVIEW_STATES = {"confirmed_hard_red", "regulatory_review_required", "mapping_review_required"}
+NON_LIVE_REIMBURSEMENT_STATUSES = {"", "unknown", "cms_data_not_loaded"}
+
+
+def int_flag(raw: object) -> int:
+    return 1 if str(raw or "").strip().lower() in {"1", "true", "yes", "y", "on"} or raw == 1 else 0
+
+
+def reimbursement_component_is_live(item: dict[str, Any], score: float | None) -> bool:
+    if score is None:
+        return False
+    status = str(item.get("reimbursement_status") or "").strip().lower()
+    if int_flag(item.get("unknown_reimbursement_flag")) or status in NON_LIVE_REIMBURSEMENT_STATUSES:
+        return False
+    return bool(
+        int_flag(item.get("direct_code_evidence"))
+        or int_flag(item.get("payment_rate_evidence"))
+        or int_flag(item.get("coverage_policy_evidence"))
+        or int_flag(item.get("procedure_bundled_flag"))
+        or int_flag(item.get("capital_equipment_flag"))
+        or int_flag(item.get("diagnostics_lab_flag"))
+    )
+
+
+def entry_status(technical_score: float) -> str:
+    if technical_score < 35.0:
+        return "avoid_technical_breakdown"
+    if technical_score < 45.0:
+        return "not_entry_ready"
+    if technical_score < 55.0:
+        return "watch_for_setup"
+    return "entry_eligible"
+
+
+def capacity_bucket(avg_dollar_volume_60d: float | None) -> str:
+    if avg_dollar_volume_60d is None:
+        return "unknown"
+    if avg_dollar_volume_60d >= 50_000_000.0:
+        return "institutional_liquid"
+    if avg_dollar_volume_60d >= 10_000_000.0:
+        return "liquid"
+    if avg_dollar_volume_60d >= 2_000_000.0:
+        return "moderate_capacity"
+    if avg_dollar_volume_60d >= 1_000_000.0:
+        return "minimum_capacity"
+    return "illiquid"
+
+
+def max_position_size(avg_dollar_volume_60d: float | None, *, participation_rate: float = 0.05) -> float | None:
+    if avg_dollar_volume_60d is None or avg_dollar_volume_60d <= 0:
+        return None
+    return round(avg_dollar_volume_60d * participation_rate, 2)
+
+
+def min_position_size(max_feasible: float | None, *, target_minimum: float = 25_000.0) -> float | None:
+    if max_feasible is None:
+        return None
+    return round(min(target_minimum, max_feasible), 2)
+
+
 def classify(row: ScoreRow, *, gates: dict[str, float]) -> None:
     reasons: list[str] = []
-    if row.composite_score < gates["composite_min"]:
+    row.entry_status = entry_status(row.technical_entry_score)
+    row.capacity_bucket = capacity_bucket(row.avg_dollar_volume_60d)
+    row.max_position_size_feasible = max_position_size(row.avg_dollar_volume_60d)
+    row.min_position_size_feasible = min_position_size(row.max_position_size_feasible)
+    row.passed_raw_score_gate = int(row.raw_composite_score >= gates["composite_min"])
+    row.passed_fundamental_gate = int(row.fundamental_quality_score >= gates["fundamental_quality_min"])
+    row.passed_growth_gate = int(row.durable_growth_score >= gates["durable_growth_min"])
+    row.passed_fda_gate = int((not row.fda_data_available and not row.fda_review_state) or row.fda_product_score >= gates["fda_product_min"])
+    reimbursement_live = row.unknown_reimbursement_flag == 0 and row.reimbursement_status not in NON_LIVE_REIMBURSEMENT_STATUSES
+    row.passed_reimbursement_gate = int(reimbursement_live and row.reimbursement_score >= gates["reimbursement_min"])
+    row.passed_valuation_gate = int(row.valuation_score >= gates["valuation_min"])
+    row.passed_technical_gate = int(row.technical_entry_score >= gates["technical_entry_min"])
+    row.passed_value_trap_gate = int(row.value_trap_score <= gates["value_trap_max"])
+    row.passed_data_quality_gate = int(row.data_completeness_score >= gates["data_completeness_min"])
+    row.passed_liquidity_gate = int(
+        row.avg_dollar_volume_60d is not None and row.avg_dollar_volume_60d >= gates["min_avg_dollar_volume_60d"]
+    )
+    manual_regulatory_state = row.fda_review_state in MANUAL_FDA_REVIEW_STATES
+    confirmed_hard_red = row.fda_review_state == "confirmed_hard_red"
+    row.passed_fda_manual_review_gate = int(not manual_regulatory_state and not row.hard_red_flag)
+
+    if not row.passed_raw_score_gate:
         reasons.append("composite_below_gate")
-    if row.fundamental_quality_score < gates["fundamental_quality_min"]:
+    if not row.passed_fundamental_gate:
         reasons.append("fundamental_below_gate")
-    if row.fda_data_available and row.fda_product_score < gates["fda_product_min"]:
+    if not row.passed_growth_gate:
+        reasons.append("growth_below_gate")
+    if not row.passed_fda_gate:
         reasons.append("fda_below_gate")
-    if row.reimbursement_score < gates["reimbursement_min"]:
+    if not row.passed_reimbursement_gate and not reimbursement_live:
+        reasons.append("reimbursement_missing_evidence")
+    elif not row.passed_reimbursement_gate:
         reasons.append("reimbursement_below_gate")
-    if row.valuation_score < gates["valuation_min"]:
+    if not row.passed_valuation_gate:
         reasons.append("valuation_below_gate")
-    if row.technical_entry_score < gates["technical_entry_min"]:
+    if not row.passed_technical_gate:
         reasons.append("technical_below_gate")
+    if not row.passed_data_quality_gate:
+        reasons.append("data_quality_below_gate")
+    if not row.passed_liquidity_gate:
+        reasons.append("liquidity_below_gate")
     if row.hard_red_flag:
         reasons.append("hard_red_flag")
+    elif manual_regulatory_state:
+        reasons.append("fda_review_required")
     if row.value_trap_score >= gates["value_trap_hard_max"]:
         reasons.append("value_trap")
-    elif row.value_trap_score >= gates["value_trap_max"]:
+    elif not row.passed_value_trap_gate:
         reasons.append("value_trap_soft_gate")
 
+    row.failed_gates = ";".join(reasons)
     row.review_reason = ";".join(reasons)
-    row.gate_status = "pass" if not reasons else "fail"
-    if row.gate_status == "pass":
-        row.classification = "tier_1_long_candidate"
-    elif row.hard_red_flag or (row.fda_data_available and row.fda_product_score < gates["fda_product_min"]):
+    row.final_investability_gate = int(
+        row.passed_raw_score_gate
+        and row.passed_fundamental_gate
+        and row.passed_growth_gate
+        and row.passed_fda_gate
+        and row.passed_reimbursement_gate
+        and row.passed_valuation_gate
+        and row.passed_technical_gate
+        and row.passed_value_trap_gate
+        and row.passed_data_quality_gate
+        and row.passed_liquidity_gate
+        and row.passed_fda_manual_review_gate
+    )
+    row.gate_status = "pass" if row.final_investability_gate else "fail"
+    if confirmed_hard_red:
+        row.classification = "avoid_confirmed_regulatory_risk"
+        row.classification_reason = "confirmed_hard_red"
+    elif manual_regulatory_state or row.hard_red_flag:
         row.classification = "manual_review_regulatory_risk"
-    elif row.fundamental_quality_score >= 75 and row.valuation_score < gates["valuation_min"]:
-        if row.valuation_score >= gates["valuation_min"] - 5.0:
-            row.classification = "quality_watchlist_near_price_gate"
-        elif row.valuation_score < 30.0:
-            row.classification = "quality_watchlist_significantly_overvalued"
-        else:
-            row.classification = "quality_watchlist_wait_for_price"
-    elif row.valuation_score >= 70 and row.fundamental_quality_score < gates["fundamental_quality_min"]:
+        row.classification_reason = "fda_manual_review_required"
+    elif not row.passed_data_quality_gate:
+        row.classification = "data_review_required"
+        row.classification_reason = "data_completeness_below_gate"
+    elif row.entry_status in {"avoid_technical_breakdown", "not_entry_ready"}:
+        row.classification = "watchlist_wait_for_entry"
+        row.classification_reason = row.entry_status
+    elif row.fundamental_quality_score >= gates["fundamental_quality_min"] and row.valuation_score < gates["valuation_min"]:
+        row.classification = "quality_watchlist_wait_for_price"
+        row.classification_reason = "quality_but_valuation_below_gate"
+    elif row.valuation_score >= 75.0 and row.fundamental_quality_score < gates["fundamental_quality_min"]:
         row.classification = "cheap_but_needs_proof"
-    elif row.composite_score >= 65:
+        row.classification_reason = "cheap_but_fundamental_below_gate"
+    elif not row.passed_value_trap_gate and row.raw_composite_score >= gates["watchlist_min"]:
+        row.classification = "cheap_but_needs_proof"
+        row.classification_reason = "value_trap_soft_gate"
+    elif row.final_investability_gate:
+        row.classification = "tier_1_long_candidate"
+        row.classification_reason = "all_tier1_gates_passed"
+    elif row.raw_composite_score >= gates["watchlist_min"]:
         row.classification = "watchlist"
+        row.classification_reason = "raw_score_above_watchlist_floor"
     else:
         row.classification = "avoid"
+        row.classification_reason = "raw_score_below_watchlist_floor"
+    row.decision_bucket = row.classification
 
 
 def build_rows(
@@ -638,7 +946,6 @@ def build_rows(
     durable_rows = load_latest_feature(conn, "feature_durable_growth", "score", asof=asof)
     sentiment_rows = load_latest_feature(conn, "feature_sentiment_catalyst", "score", asof=asof)
     durable_proxy = durable_growth_proxy(financial_rows)
-    sentiment_proxy = sentiment_catalyst_proxy(financial_rows)
     neutral_fundamental = component_neutral(config, "fundamental_quality", "scoring.neutral_fundamental_quality_score", 50.0)
     neutral_durable = component_neutral(config, "durable_growth", "scoring.neutral_durable_growth_score", 50.0)
     neutral_reimbursement = component_neutral(config, "reimbursement", "scoring.neutral_reimbursement_score", 50.0)
@@ -646,14 +953,19 @@ def build_rows(
     neutral_valuation = component_neutral(config, "valuation", "scoring.neutral_valuation_score", 50.0)
     neutral_technical = component_neutral(config, "technical_entry", "scoring.neutral_technical_entry_score", 50.0)
     neutral_sentiment = component_neutral(config, "sentiment_catalyst", "scoring.neutral_sentiment_catalyst_score", 50.0)
+    sentiment_proxy = sentiment_catalyst_proxy(financial_rows, config=config, neutral=neutral_sentiment)
     gates = {
-        "composite_min": cfg_float(config, "scoring.gates.composite_min", 70.0),
-        "fundamental_quality_min": cfg_float(config, "scoring.gates.fundamental_quality_min", 60.0),
-        "fda_product_min": cfg_float(config, "scoring.gates.fda_product_min", 50.0),
+        "composite_min": cfg_float(config, "scoring.gates.composite_min", 75.0),
+        "fundamental_quality_min": cfg_float(config, "scoring.gates.fundamental_quality_min", 70.0),
+        "durable_growth_min": cfg_float(config, "scoring.gates.durable_growth_min", 60.0),
+        "fda_product_min": cfg_float(config, "scoring.gates.fda_product_min", 60.0),
         "reimbursement_min": cfg_float(config, "scoring.gates.reimbursement_min", 45.0),
-        "valuation_min": cfg_float(config, "scoring.gates.valuation_min", 55.0),
-        "technical_entry_min": cfg_float(config, "scoring.gates.technical_entry_min", 50.0),
-        "value_trap_max": cfg_float(config, "scoring.gates.value_trap_max", 40.0),
+        "valuation_min": cfg_float(config, "scoring.gates.valuation_min", 60.0),
+        "technical_entry_min": cfg_float(config, "scoring.gates.technical_entry_min", 55.0),
+        "data_completeness_min": cfg_float(config, "scoring.gates.data_completeness_min", 90.0),
+        "min_avg_dollar_volume_60d": cfg_float(config, "scoring.gates.min_avg_dollar_volume_60d", 1_000_000.0),
+        "watchlist_min": cfg_float(config, "scoring.gates.watchlist_min", 60.0),
+        "value_trap_max": cfg_float(config, "scoring.gates.value_trap_max", 20.0),
         "value_trap_hard_max": cfg_float(config, "scoring.gates.value_trap_hard_max", 85.0),
     }
     rank_composite = cfg_bool(config, "scoring.cross_sectional_composite_rank", True)
@@ -667,7 +979,8 @@ def build_rows(
         durable_item = durable_rows.get(company_id, {})
         sentiment_item = sentiment_rows.get(company_id, {})
         has_durable_proxy = company_id in durable_proxy
-        has_sentiment_proxy = company_id in sentiment_proxy
+        sentiment_proxy_item = sentiment_proxy.get(company_id)
+        has_sentiment_proxy = sentiment_proxy_item is not None
         durable_table_score = to_float(durable_item.get("score")) if durable_item else None
         sentiment_table_score = to_float(sentiment_item.get("score")) if sentiment_item else None
         has_durable_live_score = durable_table_score is not None or has_durable_proxy
@@ -675,6 +988,19 @@ def build_rows(
         fda_hard_flag = int(fda_item.get("hard_red_flag") or 0) if fda_item else 0
         fda_data_available = int(fda_item.get("fda_data_available") or 0) if fda_item else 0
         reimbursement_hard_flag = int(reimbursement_item.get("hard_red_flag") or 0) if reimbursement_item else 0
+        reimbursement_table_score = to_float(reimbursement_item.get("score")) if reimbursement_item else None
+        reimbursement_status = str(reimbursement_item.get("reimbursement_status") or "unknown").strip().lower() if reimbursement_item else "unknown"
+        direct_code_evidence = int_flag(reimbursement_item.get("direct_code_evidence")) if reimbursement_item else 0
+        payment_rate_evidence = int_flag(reimbursement_item.get("payment_rate_evidence")) if reimbursement_item else 0
+        coverage_policy_evidence = int_flag(reimbursement_item.get("coverage_policy_evidence")) if reimbursement_item else 0
+        procedure_bundled_flag = int_flag(reimbursement_item.get("procedure_bundled_flag")) if reimbursement_item else 0
+        capital_equipment_flag = int_flag(reimbursement_item.get("capital_equipment_flag")) if reimbursement_item else 0
+        diagnostics_lab_flag = int_flag(reimbursement_item.get("diagnostics_lab_flag")) if reimbursement_item else 0
+        unknown_reimbursement_flag = int_flag(reimbursement_item.get("unknown_reimbursement_flag")) if reimbursement_item else 1
+        has_reimbursement_live_score = (
+            bool(reimbursement_item)
+            and reimbursement_component_is_live(reimbursement_item, reimbursement_table_score)
+        )
         fda_review_state = str(fda_item.get("review_adjusted_fda_state") or "") if fda_item else ""
         fda_score = score_or(fda_item.get("fda_product_score"), neutral_fda_no_data) if fda_item else neutral_fda_no_data
         if fda_item and not fda_data_available and not fda_review_state.startswith("manual_fda_footprint_"):
@@ -685,16 +1011,26 @@ def build_rows(
             else durable_proxy.get(company_id, neutral_durable)
         )
         sentiment_score = (
-            score_or(sentiment_item.get("score"), sentiment_proxy.get(company_id, neutral_sentiment))
+            score_or(
+                sentiment_item.get("score"),
+                sentiment_proxy_item.score if sentiment_proxy_item is not None else neutral_sentiment,
+            )
             if sentiment_item
-            else sentiment_proxy.get(company_id, neutral_sentiment)
+            else sentiment_proxy_item.score if sentiment_proxy_item is not None else neutral_sentiment
         )
         technical_score = score_or(technical_item.get("technical_score"), neutral_technical) if technical_item else neutral_technical
+        avg_dollar_volume_60d = to_float(technical_item.get("avg_dollar_volume_60d")) if technical_item else None
+        liquidity_score = to_float(technical_item.get("liquidity_score")) if technical_item else None
+        market_cap = to_float(item.get("market_cap"))
+        current_shares_outstanding = to_float(item.get("current_shares_outstanding"))
+        diluted_weighted_average_shares = to_float(item.get("diluted_weighted_average_shares"))
+        basic_weighted_average_shares = to_float(item.get("basic_weighted_average_shares"))
+        market_cap_validated_flag = int(item.get("market_cap_validated_flag") or 0)
         live_components = [
             to_float(item.get("fundamental_quality_score_v1")) is not None,
             has_durable_live_score,
             bool(fda_item) and to_float(fda_item.get("fda_product_score")) is not None,
-            bool(reimbursement_item) and to_float(reimbursement_item.get("score")) is not None,
+            has_reimbursement_live_score,
             to_float(item.get("valuation_score_v1")) is not None,
             bool(technical_item) and to_float(technical_item.get("technical_score")) is not None,
             has_sentiment_live_score,
@@ -711,7 +1047,15 @@ def build_rows(
             durable_growth_score=durable_score,
             fda_product_score=fda_score,
             fda_data_available=fda_data_available,
-            reimbursement_score=score_or(reimbursement_item.get("score"), neutral_reimbursement) if reimbursement_item else neutral_reimbursement,
+            reimbursement_score=score_or(reimbursement_table_score, neutral_reimbursement) if reimbursement_item else neutral_reimbursement,
+            reimbursement_status=reimbursement_status,
+            direct_code_evidence=direct_code_evidence,
+            payment_rate_evidence=payment_rate_evidence,
+            coverage_policy_evidence=coverage_policy_evidence,
+            procedure_bundled_flag=procedure_bundled_flag,
+            capital_equipment_flag=capital_equipment_flag,
+            diagnostics_lab_flag=diagnostics_lab_flag,
+            unknown_reimbursement_flag=unknown_reimbursement_flag,
             valuation_score=score_or(item.get("valuation_score_v1"), neutral_valuation),
             technical_entry_score=technical_score,
             sentiment_catalyst_score=sentiment_score,
@@ -729,6 +1073,19 @@ def build_rows(
             ),
             durable_growth_proxy_available=has_durable_proxy,
             sentiment_proxy_available=has_sentiment_proxy,
+            sentiment_proxy_source=sentiment_proxy_item.source if sentiment_proxy_item is not None else "",
+            sentiment_proxy_input=sentiment_proxy_item.input_name if sentiment_proxy_item is not None else "",
+            avg_dollar_volume_60d=avg_dollar_volume_60d,
+            liquidity_score=liquidity_score,
+            market_cap=market_cap,
+            current_shares_outstanding=current_shares_outstanding,
+            diluted_weighted_average_shares=diluted_weighted_average_shares,
+            basic_weighted_average_shares=basic_weighted_average_shares,
+            shares_source_concept=str(item.get("shares_source_concept") or ""),
+            shares_source_form=str(item.get("shares_source_form") or ""),
+            shares_source_period=str(item.get("shares_source_period") or ""),
+            market_cap_validated_flag=market_cap_validated_flag,
+            fda_review_state=fda_review_state,
         )
         row.fda_product_score = row.fda_product_score if row.fda_product_score is not None else 50.0
         row.durable_growth_score = row.durable_growth_score if row.durable_growth_score is not None else 50.0
@@ -754,19 +1111,24 @@ def build_rows(
             "sentiment_catalyst": live_components[6],
         }
         raw_composite = weighted_available_score(component_scores, component_available, weights)
-        row.composite_score = round(
+        row.raw_composite_score = round(
             clamp(raw_composite * value_trap_discount(row.value_trap_score)),
             2,
         )
+        row.composite_score = row.raw_composite_score
         rows.append(row)
     if rank_composite:
         cross_sectional_percentile_rank(rows)
+    else:
+        for row in rows:
+            row.composite_percentile = row.raw_composite_score
     for row in rows:
         classify(row, gates=gates)
         row.top_positive_drivers, row.top_negative_drivers = score_drivers(row)
     rows.sort(
         key=lambda item: (
-            -item.composite_score,
+            -item.composite_percentile,
+            -item.raw_composite_score,
             -item.fundamental_quality_score,
             -item.data_completeness_score,
             item.ticker,
@@ -793,42 +1155,88 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
     if not rows:
         return 0
     now = utc_now()
+    columns = [
+        "asof_date",
+        "company_id",
+        "scoring_model_version",
+        "composite_score",
+        "raw_composite_score",
+        "composite_percentile",
+        "fundamental_quality_score",
+        "durable_growth_score",
+        "fda_product_score",
+        "reimbursement_score",
+        "reimbursement_status",
+        "direct_code_evidence",
+        "payment_rate_evidence",
+        "coverage_policy_evidence",
+        "procedure_bundled_flag",
+        "capital_equipment_flag",
+        "diagnostics_lab_flag",
+        "unknown_reimbursement_flag",
+        "valuation_score",
+        "technical_entry_score",
+        "sentiment_catalyst_score",
+        "value_trap_score",
+        "rank",
+        "data_completeness_score",
+        "live_component_count",
+        "composite_score_delta",
+        "rank_delta",
+        "classification_change",
+        "classification",
+        "decision_bucket",
+        "entry_status",
+        "gate_status",
+        "review_reason",
+        "failed_gates",
+        "classification_reason",
+        "fda_review_state",
+        "market_cap",
+        "current_shares_outstanding",
+        "diluted_weighted_average_shares",
+        "basic_weighted_average_shares",
+        "shares_source_concept",
+        "shares_source_form",
+        "shares_source_period",
+        "market_cap_validated_flag",
+        "avg_dollar_volume_60d",
+        "liquidity_score",
+        "capacity_bucket",
+        "min_position_size_feasible",
+        "max_position_size_feasible",
+        "passed_raw_score_gate",
+        "passed_fundamental_gate",
+        "passed_growth_gate",
+        "passed_fda_gate",
+        "passed_reimbursement_gate",
+        "passed_valuation_gate",
+        "passed_technical_gate",
+        "passed_value_trap_gate",
+        "passed_data_quality_gate",
+        "passed_liquidity_gate",
+        "passed_fda_manual_review_gate",
+        "final_investability_gate",
+        "hard_red_flag",
+        "hard_red_flag_reasons",
+        "top_positive_drivers_json",
+        "top_negative_drivers_json",
+        "created_at",
+        "updated_at",
+    ]
+    placeholders = ", ".join("?" for _ in columns)
+    column_sql = ", ".join(quote_identifier(column) for column in columns)
+    update_sql = ",\n            ".join(
+        f"{quote_identifier(column)} = excluded.{quote_identifier(column)}"
+        for column in columns
+        if column not in {"asof_date", "company_id", "created_at"}
+    )
     conn.executemany(
-        """
-        INSERT INTO med_device_daily_scores(
-            asof_date, company_id, scoring_model_version, composite_score, fundamental_quality_score,
-            durable_growth_score, fda_product_score, reimbursement_score, valuation_score,
-            technical_entry_score, sentiment_catalyst_score, value_trap_score, rank,
-            data_completeness_score, live_component_count, composite_score_delta, rank_delta,
-            classification_change, classification, gate_status, review_reason, hard_red_flag, hard_red_flag_reasons,
-            top_positive_drivers_json, top_negative_drivers_json, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        f"""
+        INSERT INTO med_device_daily_scores({column_sql})
+        VALUES ({placeholders})
         ON CONFLICT(asof_date, company_id) DO UPDATE SET
-            scoring_model_version = excluded.scoring_model_version,
-            composite_score = excluded.composite_score,
-            fundamental_quality_score = excluded.fundamental_quality_score,
-            durable_growth_score = excluded.durable_growth_score,
-            fda_product_score = excluded.fda_product_score,
-            reimbursement_score = excluded.reimbursement_score,
-            valuation_score = excluded.valuation_score,
-            technical_entry_score = excluded.technical_entry_score,
-            sentiment_catalyst_score = excluded.sentiment_catalyst_score,
-            value_trap_score = excluded.value_trap_score,
-            rank = excluded.rank,
-            data_completeness_score = excluded.data_completeness_score,
-            live_component_count = excluded.live_component_count,
-            composite_score_delta = excluded.composite_score_delta,
-            rank_delta = excluded.rank_delta,
-            classification_change = excluded.classification_change,
-            classification = excluded.classification,
-            gate_status = excluded.gate_status,
-            review_reason = excluded.review_reason,
-            hard_red_flag = excluded.hard_red_flag,
-            hard_red_flag_reasons = excluded.hard_red_flag_reasons,
-            top_positive_drivers_json = excluded.top_positive_drivers_json,
-            top_negative_drivers_json = excluded.top_negative_drivers_json,
-            updated_at = excluded.updated_at
+            {update_sql}
         """,
         [
             (
@@ -836,10 +1244,20 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.company_id,
                 row.scoring_model_version,
                 row.composite_score,
+                row.raw_composite_score,
+                row.composite_percentile,
                 row.fundamental_quality_score,
                 row.durable_growth_score,
                 row.fda_product_score,
                 row.reimbursement_score,
+                row.reimbursement_status,
+                row.direct_code_evidence,
+                row.payment_rate_evidence,
+                row.coverage_policy_evidence,
+                row.procedure_bundled_flag,
+                row.capital_equipment_flag,
+                row.diagnostics_lab_flag,
+                row.unknown_reimbursement_flag,
                 row.valuation_score,
                 row.technical_entry_score,
                 row.sentiment_catalyst_score,
@@ -851,8 +1269,38 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.rank_delta,
                 row.classification_change,
                 row.classification,
+                row.decision_bucket,
+                row.entry_status,
                 row.gate_status,
                 row.review_reason,
+                row.failed_gates,
+                row.classification_reason,
+                row.fda_review_state,
+                row.market_cap,
+                row.current_shares_outstanding,
+                row.diluted_weighted_average_shares,
+                row.basic_weighted_average_shares,
+                row.shares_source_concept,
+                row.shares_source_form,
+                row.shares_source_period,
+                row.market_cap_validated_flag,
+                row.avg_dollar_volume_60d,
+                row.liquidity_score,
+                row.capacity_bucket,
+                row.min_position_size_feasible,
+                row.max_position_size_feasible,
+                row.passed_raw_score_gate,
+                row.passed_fundamental_gate,
+                row.passed_growth_gate,
+                row.passed_fda_gate,
+                row.passed_reimbursement_gate,
+                row.passed_valuation_gate,
+                row.passed_technical_gate,
+                row.passed_value_trap_gate,
+                row.passed_data_quality_gate,
+                row.passed_liquidity_gate,
+                row.passed_fda_manual_review_gate,
+                row.final_investability_gate,
                 row.hard_red_flag,
                 row.hard_red_flag_reasons,
                 json.dumps(row.top_positive_drivers, ensure_ascii=True),
@@ -867,7 +1315,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
 
 
 def row_to_dict(row: ScoreRow) -> dict[str, Any]:
-    return {field: getattr(row, field) for field in FIELDNAMES if hasattr(row, field)}
+    item = {field: getattr(row, field) for field in FIELDNAMES if hasattr(row, field)}
+    item["top_positive_drivers"] = "; ".join(row.top_positive_drivers)
+    item["top_negative_drivers"] = "; ".join(row.top_negative_drivers)
+    return item
 
 
 def write_csv(path: Path, rows: list[ScoreRow]) -> None:

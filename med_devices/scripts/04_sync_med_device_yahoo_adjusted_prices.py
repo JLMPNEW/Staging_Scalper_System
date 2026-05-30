@@ -720,17 +720,20 @@ def main() -> None:
             if policy.parallel_workers > 1 and len(jobs) > 1:
                 LOGGER.info("Fetching Yahoo prices in parallel: jobs=%d workers=%d", len(jobs), policy.parallel_workers)
                 with ThreadPoolExecutor(max_workers=policy.parallel_workers) as executor:
-                    futures = [
-                        executor.submit(
-                            fetch_price_job,
-                            idx,
-                            job,
-                            start_date=configured_start,
-                            asof_date=asof_date,
-                            policy=policy,
+                    futures = []
+                    for idx, job in enumerate(jobs, start=1):
+                        futures.append(
+                            executor.submit(
+                                fetch_price_job,
+                                idx,
+                                job,
+                                start_date=configured_start,
+                                asof_date=asof_date,
+                                policy=policy,
+                            )
                         )
-                        for idx, job in enumerate(jobs, start=1)
-                    ]
+                        if idx < len(jobs):
+                            time.sleep(max(0.0, policy.sleep_sec))
                     completed = 0
                     for future in as_completed(futures):
                         result = future.result()

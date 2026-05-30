@@ -30,6 +30,9 @@ FEED,ENvue Medical Inc,operating_unit,ENvue operating entity for FDA device reco
 FMS,Fresenius Medical Care Renal Therapies Group,operating_unit,Fresenius Medical Care public parent trades as FMS
 GCTK,GlucoTrack Inc,operating_unit,GlucoTrack operating entity for FDA device records
 GEHC,GE Medical Systems,legacy_name,Legacy GE Healthcare medical systems entity
+GEHC,Datex-Ohmeda Inc,legacy_ge_healthcare_entity,GEHC low-materiality review: anesthesia systems legacy legal entity maps to GE HealthCare parent.
+GEHC,Datex-Ohmeda,legacy_ge_healthcare_entity,GEHC low-materiality review: anesthesia systems legacy legal entity maps to GE HealthCare parent.
+GEHC,GE Healthcare Integrated IT Solutions,legacy_ge_healthcare_entity,GEHC low-materiality review: software/viewer legal entity maps to GE HealthCare parent.
 HAE,Haemonetics Corp,operating_unit,Haemonetics operating entity for FDA device records
 HAE,Haemonetics Corporation,operating_unit,Haemonetics operating entity for FDA device records
 IART,Integra LifeSciences,operating_unit,Integra operating entity for FDA device records

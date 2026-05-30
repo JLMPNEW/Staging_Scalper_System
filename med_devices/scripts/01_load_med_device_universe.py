@@ -303,8 +303,7 @@ def main() -> None:
         init_db(conn)
         run_id = start_run(conn, run_type="load_med_device_universe", input_path=universe_csv)
         try:
-            with conn:
-                row_count = upsert_universe(conn, companies)
+            row_count = upsert_universe(conn, companies)
             active_count = sum(1 for company in companies if company.is_active)
             finish_run(
                 conn,

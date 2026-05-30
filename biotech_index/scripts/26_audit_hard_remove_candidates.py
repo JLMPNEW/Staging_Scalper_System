@@ -236,8 +236,8 @@ def quote_ident(identifier: str) -> str:
         raise ValueError(f"Invalid SQL identifier contains control character: {identifier!r}")
     if not SQL_IDENTIFIER_RE.fullmatch(text):
         raise ValueError(f"Invalid SQL identifier: {identifier!r}")
-    if text.lower() in SQL_RESERVED_WORDS:
-        raise ValueError(f"SQL reserved word is not allowed as identifier: {identifier!r}")
+    # Quoting protects reserved words; the regex/control-character guards above
+    # are the meaningful safety checks for dynamic schema introspection.
     return '"' + text.replace('"', '""') + '"'
 
 
@@ -281,28 +281,32 @@ def table_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
     return [str(row["name"]) for row in conn.execute(f"PRAGMA table_info({quote_ident(table_name)})")]
 
 
-def purge_candidate_on_connection(conn: sqlite3.Connection, *, ticker: str, company_id: int | None) -> None:
-    normalized = normalize_ticker(ticker)
-    for table in table_names(conn):
-        columns = {col.lower(): col for col in table_columns(conn, table)}
-        ticker_col = columns.get("ticker") or columns.get("symbol")
-        if ticker_col:
-            conn.execute(
-                f"DELETE FROM {quote_ident(table)} WHERE UPPER(REPLACE({quote_ident(ticker_col)}, '.', '-')) = ?",
-                (normalized,),
-            )
-    if company_id is not None:
-        conn.execute("DELETE FROM companies WHERE company_id = ?", (company_id,))
+def load_company_accessions(conn: sqlite3.Connection, company_id: int | None) -> list[str]:
+    if company_id is None:
+        return []
+    table_set = set(table_names(conn))
+    if "sec_filings" not in table_set:
+        return []
+    columns = {col.lower() for col in table_columns(conn, "sec_filings")}
+    if "company_id" not in columns or "accession_nodash" not in columns:
+        return []
+    return [
+        str(row[0])
+        for row in conn.execute(
+            "SELECT accession_nodash FROM sec_filings WHERE company_id = ? AND accession_nodash IS NOT NULL",
+            (company_id,),
+        )
+        if str(row[0] or "")
+    ]
 
 
-def count_candidate_rows_in_table(
-    conn: sqlite3.Connection,
+def candidate_row_conditions(
     *,
-    table: str,
     columns: set[str],
     ticker: str,
     company_id: int | None,
-) -> int:
+    accession_nodashes: list[str] | None = None,
+) -> tuple[list[str], list[Any]]:
     conditions: list[str] = []
     params: list[Any] = []
     if company_id is not None and "company_id" in columns:
@@ -315,13 +319,46 @@ def count_candidate_rows_in_table(
         params.append(normalize_ticker(ticker))
 
     if company_id is not None and "accession_nodash" in columns and "company_id" not in columns:
-        conditions.append(
-            f"{quote_ident('accession_nodash')} IN ("
-            "SELECT accession_nodash FROM sec_filings WHERE company_id = ?"
-            ")"
-        )
-        params.append(company_id)
+        if accession_nodashes is None:
+            conditions.append(
+                f"{quote_ident('accession_nodash')} IN ("
+                "SELECT accession_nodash FROM sec_filings WHERE company_id = ?"
+                ")"
+            )
+            params.append(company_id)
+        elif accession_nodashes:
+            placeholders = ",".join("?" for _ in accession_nodashes)
+            conditions.append(f"{quote_ident('accession_nodash')} IN ({placeholders})")
+            params.extend(accession_nodashes)
 
+    return conditions, params
+
+
+def purge_candidate_on_connection(conn: sqlite3.Connection, *, ticker: str, company_id: int | None) -> None:
+    accession_nodashes = load_company_accessions(conn, company_id)
+    for table in table_names(conn):
+        columns = {col.lower() for col in table_columns(conn, table)}
+        conditions, params = candidate_row_conditions(
+            columns=columns,
+            ticker=ticker,
+            company_id=company_id,
+            accession_nodashes=accession_nodashes,
+        )
+        if not conditions:
+            continue
+        where_clause = " OR ".join(f"({condition})" for condition in conditions)
+        conn.execute(f"DELETE FROM {quote_ident(table)} WHERE {where_clause}", params)
+
+
+def count_candidate_rows_in_table(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    columns: set[str],
+    ticker: str,
+    company_id: int | None,
+) -> int:
+    conditions, params = candidate_row_conditions(columns=columns, ticker=ticker, company_id=company_id)
     if not conditions:
         return 0
     where_clause = " OR ".join(f"({condition})" for condition in conditions)

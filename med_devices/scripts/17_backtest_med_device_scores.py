@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -30,7 +31,11 @@ BASE_FIELDS = [
     "subsector",
     "rank",
     "classification",
+    "decision_bucket",
+    "entry_status",
     "composite_score",
+    "raw_composite_score",
+    "composite_percentile",
     "rank_bucket",
     "entry_price_date",
     "entry_price",
@@ -63,7 +68,7 @@ def to_float(raw: object) -> float | None:
         value = float(str(raw).strip())
     except (TypeError, ValueError):
         return None
-    return value
+    return value if math.isfinite(value) else None
 
 
 def latest_score_asof(conn: Any) -> str:
@@ -88,12 +93,12 @@ def load_scores(conn: Any, *, asof: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def rank_bucket(score: float) -> str:
-    if score >= 90.0:
+def rank_bucket(percentile: float) -> str:
+    if percentile >= 90.0:
         return "top_decile"
-    if score >= 80.0:
+    if percentile >= 80.0:
         return "top_quintile_ex_decile"
-    if score <= 20.0:
+    if percentile <= 20.0:
         return "bottom_quintile"
     return "middle"
 
@@ -165,6 +170,8 @@ def build_backtest_rows(
         source_id, series = price_series.get(ticker, ("", []))
         idx = entry_index(series, asof_date) if series else None
         composite_score = float(row["composite_score"] or 0.0)
+        raw_composite_score = float(row.get("raw_composite_score") or composite_score)
+        composite_percentile = float(row.get("composite_percentile") or composite_score)
         item = {
             "asof_date": asof,
             "scoring_model_version": row.get("scoring_model_version") or "",
@@ -173,8 +180,12 @@ def build_backtest_rows(
             "subsector": row.get("subsector") or "",
             "rank": row.get("rank") or "",
             "classification": row.get("classification") or "",
+            "decision_bucket": row.get("decision_bucket") or "",
+            "entry_status": row.get("entry_status") or "",
             "composite_score": composite_score,
-            "rank_bucket": rank_bucket(composite_score),
+            "raw_composite_score": raw_composite_score,
+            "composite_percentile": composite_percentile,
+            "rank_bucket": rank_bucket(composite_percentile),
             "entry_price_date": "",
             "entry_price": "",
             "price_source_id": source_id,
@@ -204,6 +215,7 @@ def summarize(rows: list[dict[str, Any]], *, horizons: list[int]) -> list[dict[s
     summary: list[dict[str, Any]] = []
     group_specs = [
         ("classification", sorted({str(row["classification"]) for row in rows})),
+        ("entry_status", sorted({str(row["entry_status"]) for row in rows})),
         ("rank_bucket", sorted({str(row["rank_bucket"]) for row in rows})),
     ]
     for group_name, group_values in group_specs:
@@ -237,6 +249,10 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
         writer.writerows(rows)
 
 
+def dated_output_dir(base_output_dir: Path, asof: str) -> Path:
+    return base_output_dir if base_output_dir.name == asof else base_output_dir / asof
+
+
 def main() -> None:
     configure_utc_logging()
     args = parse_args()
@@ -244,11 +260,6 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    output_csv = (
-        args.output_csv.expanduser().resolve()
-        if args.output_csv
-        else resolve_path(cfg_get(config, "scoring.backtest_output_csv", "../output/med_devices_reports/med_device_score_backtest.csv"), base_dir=base_dir)
-    )
     horizons = [int(item.strip()) for item in str(args.horizons or "30,60,120").split(",") if item.strip()]
     if not horizons or any(horizon <= 0 for horizon in horizons):
         raise ValueError("--horizons must contain positive integers")
@@ -256,6 +267,18 @@ def main() -> None:
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
         asof = args.asof.strip() or latest_score_asof(conn)
+        output_csv = (
+            args.output_csv.expanduser().resolve()
+            if args.output_csv
+            else dated_output_dir(
+                resolve_path(
+                    cfg_get(config, "scoring.review_pack_dir", "../output/med_devices_reports/score_review_pack"),
+                    base_dir=base_dir,
+                ),
+                asof,
+            )
+            / "med_device_score_backtest.csv"
+        )
         score_rows = load_scores(conn, asof=asof)
         if not score_rows:
             raise RuntimeError(f"No score rows found for {asof}")

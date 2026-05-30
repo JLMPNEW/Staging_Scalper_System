@@ -32,3 +32,6 @@ fda_manufacturer_id,manufacturer_name,ticker,company_id,confidence,mapping_metho
 1039,"Stryker Medical Division of Stryker Corporation",SYK,4,97,manual_override,Confirmed Stryker medical division via parent match boost
 997,"Olympus Corporation of the Americas",,,0,out_of_universe,Parent does not trade on a US exchange in the investible universe
 1113,"UNOMEDICAL DEVICES S.A DE C.V",,,0,out_of_universe,Parent does not trade on a US exchange in the investible universe
+19,"B Braun Medical Inc",,,0,out_of_universe,Private B. Braun group; explicit exclusion from public med-device universe
+1278,"GET TESTED INTERNATIONAL AB",,,0,out_of_universe,Private Swedish direct-to-consumer diagnostics provider outside the public universe
+988,"Cook Incorporated",,,0,out_of_universe,Private Cook Medical parent; route only divested product-line rows via fda_product_line_overrides.csv and exclude core Cook rows

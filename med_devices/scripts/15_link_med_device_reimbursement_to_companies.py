@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
-from med_devices.core.text_norm import normalize_code, normalize_org_name, normalize_ticker  # noqa: E402
+from med_devices.core.text_norm import as_bool, normalize_code, normalize_org_name, normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("link_med_device_reimbursement_to_companies")
@@ -85,6 +85,7 @@ class LinkPolicy:
     max_policy_rows: int
     code_source_ids: list[str] | None = None
     override_csv: str = ""
+    resolved_classification_csv: str = ""
     manual_rate_csv: str = ""
     manual_rate_audit_csv: str = ""
     manual_rate_validation_tolerance_pct: float = 5.0
@@ -167,17 +168,6 @@ def to_float(raw: object) -> float | None:
         return None
 
 
-def as_bool(raw: object, *, default: bool) -> bool:
-    if raw is None:
-        return default
-    text = str(raw).strip().lower()
-    if text in {"1", "true", "yes", "y", "on"}:
-        return True
-    if text in {"0", "false", "no", "n", "off"}:
-        return False
-    return default
-
-
 def link_policy(config: dict[str, Any]) -> LinkPolicy:
     raw_source_ids = cfg_get(config, "reimbursement_entity_linking.source_ids", ["cms_coverage_api"])
     source_ids = [str(value).strip() for value in raw_source_ids] if isinstance(raw_source_ids, list) else ["cms_coverage_api"]
@@ -197,6 +187,14 @@ def link_policy(config: dict[str, Any]) -> LinkPolicy:
         max_policy_rows=max(0, int(cfg_get(config, "reimbursement_entity_linking.max_policy_rows", 0))),
         code_source_ids=[source_id for source_id in code_source_ids if source_id],
         override_csv=str(cfg_get(config, "reimbursement_entity_linking.override_csv", "") or "").strip(),
+        resolved_classification_csv=str(
+            cfg_get(
+                config,
+                "reimbursement_entity_linking.resolved_classification_csv",
+                cfg_get(config, "reimbursement_features.company_classification_csv", ""),
+            )
+            or ""
+        ).strip(),
         manual_rate_csv=str(cfg_get(config, "reimbursement_entity_linking.manual_rate_csv", "") or "").strip(),
         manual_rate_audit_csv=str(cfg_get(config, "reimbursement_entity_linking.manual_rate_audit_csv", "") or "").strip(),
         manual_rate_validation_tolerance_pct=float(
@@ -1083,6 +1081,65 @@ def load_override_matches(
     return matches
 
 
+RESOLVED_NO_CODE_PAYMENT_STATUSES = {
+    "bundled_ipps",
+    "bundled_opps",
+    "bundled_opps_ipps",
+    "cash_fee_sched",
+    "cash_pay_or_out_of_pocket",
+    "commercial_contract_no_cms",
+    "commercial_vision_or_cash_pay",
+    "component_pricing_no_direct_cms",
+    "cpt_category_iii",
+    "dental_or_cash_pay",
+    "developmental_premarket_no_active_billing",
+    "enterprise_saas_no_clinical_code",
+    "esrd_bundle",
+    "external_report_mismatch_guard",
+    "facility_budget",
+    "hospital_overhead_budget",
+    "imaging_provider_mpfs_rates",
+    "jurisdictional_mac_priced",
+    "laboratory_overhead_no_direct_code",
+    "large_lab_clfs_array",
+    "not_applicable_ruo_b2b",
+    "ntap_add_on_payment",
+    "opo_cost_pass_through",
+    "opps_asp_passthrough",
+    "packaged_apc_asc",
+    "packaged_status_n",
+    "pharma_overhead",
+    "pharmacy_benefit_or_ncpdp",
+    "procedure_rate_mpfs",
+    "state_public_health_bundle",
+    "system_budget",
+    "upstream_b2b_no_clinical_code",
+    "veterinary_no_cms",
+}
+
+
+def load_resolved_no_code_company_ids(
+    path: Path | None,
+    company_meta: dict[int, tuple[str, str]],
+) -> set[int]:
+    if path is None or not path.exists():
+        return set()
+    ticker_to_company_id = {ticker: company_id for company_id, (ticker, _) in company_meta.items()}
+    resolved: set[int] = set()
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
+            if not ticker:
+                continue
+            status = normalize_org_name(row_get(row, "payment_rate_status", "payment_status")).lower().replace(" ", "_")
+            if status in RESOLVED_NO_CODE_PAYMENT_STATUSES:
+                company_id = ticker_to_company_id.get(ticker)
+                if company_id is not None:
+                    resolved.add(company_id)
+    return resolved
+
+
 def upsert_policy_mapping(conn: Any, match: MatchRow) -> None:
     if match.reimbursement_policy_id is None:
         return
@@ -1275,8 +1332,15 @@ def load_mapped_company_ids(conn: Any, company_ids: list[int], *, policy: LinkPo
     return {int(row["company_id"]) for row in rows}
 
 
-def write_unmapped_csv(path: Path, company_meta: dict[int, tuple[str, str]], mapped_company_ids: set[int]) -> None:
+def write_unmapped_csv(
+    path: Path,
+    company_meta: dict[int, tuple[str, str]],
+    mapped_company_ids: set[int],
+    *,
+    resolved_no_code_company_ids: set[int] | None = None,
+) -> None:
     fieldnames = ["company_id", "ticker", "company_name", "review_reason"]
+    resolved_no_code_company_ids = resolved_no_code_company_ids or set()
     rows = [
         {
             "company_id": company_id,
@@ -1285,7 +1349,7 @@ def write_unmapped_csv(path: Path, company_meta: dict[int, tuple[str, str]], map
             "review_reason": "no_reimbursement_code_mapping",
         }
         for company_id, (ticker, company_name) in sorted(company_meta.items(), key=lambda item: item[1][0])
-        if company_id not in mapped_company_ids
+        if company_id not in mapped_company_ids and company_id not in resolved_no_code_company_ids
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -1401,14 +1465,28 @@ def main() -> None:
                     policy_count, code_count = upsert_matches(conn, matches)
             write_csv(output_csv, matches)
             mapped_company_ids = load_mapped_company_ids(conn, sorted(company_meta), policy=policy)
-            write_unmapped_csv(unmapped_output_csv, company_meta, mapped_company_ids)
+            resolved_classification_csv = (
+                resolve_path(policy.resolved_classification_csv, base_dir=base_dir)
+                if policy.resolved_classification_csv
+                else None
+            )
+            resolved_no_code_company_ids = load_resolved_no_code_company_ids(
+                resolved_classification_csv,
+                company_meta,
+            )
+            write_unmapped_csv(
+                unmapped_output_csv,
+                company_meta,
+                mapped_company_ids,
+                resolved_no_code_company_ids=resolved_no_code_company_ids,
+            )
             if manual_rate_audit_csv is not None:
                 write_manual_rate_audit_csv(manual_rate_audit_csv, manual_rate_audit_rows)
             message = (
                 f"policies_scanned={len(policies)} aliases={len(aliases)} matches={len(matches)} "
                 f"policy_maps={policy_count} code_maps={code_count} mapped_companies={len(mapped_company_ids)} output={output_csv} "
                 f"manual_rates={manual_rate_count} manual_rate_audit={manual_rate_audit_csv or ''} "
-                f"unmapped_output={unmapped_output_csv}"
+                f"resolved_no_code={len(resolved_no_code_company_ids)} unmapped_output={unmapped_output_csv}"
             )
             finish_run(conn, run_id=run_id, status="success", row_count=len(matches), message=message)
             LOGGER.info("Reimbursement linking complete: %s", message)

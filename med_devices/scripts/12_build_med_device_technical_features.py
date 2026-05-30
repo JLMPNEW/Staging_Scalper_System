@@ -64,6 +64,7 @@ FIELDNAMES = [
     "liquidity_score",
     "volume_breakout_score",
     "volatility_risk_score",
+    "technical_score",
     "technical_entry_score",
     "entry_signal",
     "data_quality_status",
@@ -632,6 +633,7 @@ def upsert_rows(conn: Any, rows: list[TechnicalRow]) -> int:
 
 def row_to_dict(row: TechnicalRow) -> dict[str, Any]:
     out = {field: getattr(row, field) for field in FIELDNAMES if hasattr(row, field)}
+    out["technical_score"] = row.technical_entry_score
     out["missing_fields"] = ";".join(row.missing_fields)
     return out
 

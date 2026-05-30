@@ -70,6 +70,9 @@ FIELDNAMES = [
     "fda_data_available",
     "latest_fda_event_date",
     "fda_data_recency_score",
+    "mapped_manufacturer_count",
+    "avg_mapping_confidence",
+    "risk_mapping_confidence_min",
     "regulatory_innovation_score",
     "regulatory_risk_score",
     "fda_product_score",
@@ -518,11 +521,54 @@ def canonical_recall_key_from_row(item: Any) -> str:
 
 
 def source_endpoint_from_row(item: Any) -> str:
+    if "endpoint_name" in item.keys():
+        endpoint = str(item["endpoint_name"] or "").strip()
+        if endpoint:
+            return endpoint
     key = str(item["recall_key"] or "")
     prefix = key.split(":", 1)[0].strip()
     if prefix and prefix not in {"recall_number", "event_id", "hash"}:
         return prefix
     return str(item["source_id"] or "unknown")
+
+
+def has_explicit_endpoint_name(item: Any) -> bool:
+    return "endpoint_name" in item.keys() and bool(str(item["endpoint_name"] or "").strip())
+
+
+def recall_source_identity(item: Any) -> tuple[str, str, str, str, str]:
+    return (
+        source_endpoint_from_row(item),
+        normalize_recall_key_text(item["recall_number"]),
+        normalize_recall_key_text(item["event_id"]),
+        normalize_recall_key_text(item["product_code"]),
+        str(item["recall_initiation_date"] or item["center_classification_date"] or ""),
+    )
+
+
+def dedupe_recall_source_items(items: list[Any]) -> tuple[list[Any], list[int]]:
+    selected: dict[tuple[str, str, str, str, str], Any] = {}
+    duplicate_ids: list[int] = []
+    for item in items:
+        identity = recall_source_identity(item)
+        existing = selected.get(identity)
+        if existing is None:
+            selected[identity] = item
+            continue
+        existing_score = (
+            1 if has_explicit_endpoint_name(existing) else 0,
+            int(existing["fda_recall_id"]),
+        )
+        candidate_score = (
+            1 if has_explicit_endpoint_name(item) else 0,
+            int(item["fda_recall_id"]),
+        )
+        if candidate_score > existing_score:
+            duplicate_ids.append(int(existing["fda_recall_id"]))
+            selected[identity] = item
+        else:
+            duplicate_ids.append(int(item["fda_recall_id"]))
+    return list(selected.values()), sorted(duplicate_ids)
 
 
 def source_rank(source: object) -> int:
@@ -575,7 +621,8 @@ def refresh_canonical_recalls(conn: Any) -> int:
 
     now = utc_now()
     payload_rows: list[tuple[Any, ...]] = []
-    for canonical_key, items in grouped.items():
+    for canonical_key, raw_items in grouped.items():
+        items, duplicate_raw_ids = dedupe_recall_source_items(raw_items)
         ranked = sorted(
             items,
             key=lambda item: (
@@ -587,7 +634,7 @@ def refresh_canonical_recalls(conn: Any) -> int:
             reverse=True,
         )
         selected = ranked[0]
-        severity_item = max(items, key=lambda item: float(item["severity_weight"] or 1.0))
+        severity_item = max(items, key=lambda item: recall_severity_weight(item["classification"]))
         payload = safe_json_loads(selected["payload_json"])
         endpoints = sorted({source_endpoint_from_row(item) for item in items})
         manufacturer_item = max(items, key=lambda item: float(item["mapping_confidence"] or 0.0))
@@ -595,6 +642,7 @@ def refresh_canonical_recalls(conn: Any) -> int:
         source_payload = {
             "canonical_recall_key": canonical_key,
             "source_fda_recall_ids": [int(item["fda_recall_id"]) for item in items],
+            "duplicate_raw_fda_recall_ids": duplicate_raw_ids,
             "source_endpoints": endpoints,
             "selected_fda_recall_id": int(selected["fda_recall_id"]),
             "selected_payload": payload,
@@ -608,7 +656,7 @@ def refresh_canonical_recalls(conn: Any) -> int:
                 manufacturer_item["fda_manufacturer_id"],
                 selected["product_code"],
                 severity_item["classification"],
-                float(severity_item["severity_weight"] or 1.0),
+                recall_severity_weight(severity_item["classification"]),
                 selected["status"],
                 0 if is_terminated else 1,
                 is_terminated,
@@ -716,6 +764,17 @@ def is_class_i(classification: object) -> bool:
     return text in {"i", "class_i", "class_1", "classi", "class1"}
 
 
+def recall_severity_weight(classification: object) -> float:
+    text = re.sub(r"[^a-z0-9]+", "_", str(classification or "").strip().lower()).strip("_")
+    if text in {"i", "class_i", "class_1", "classi", "class1"}:
+        return 5.0
+    if text in {"ii", "class_ii", "class_2", "classii", "class2"}:
+        return 2.0
+    if text in {"iii", "class_iii", "class_3", "classiii", "class3"}:
+        return 0.5
+    return 1.0
+
+
 def count_recalls(conn: Any, row: FdaFeatureRow, *, asof: date, policy: FdaFeaturePolicy) -> None:
     long_start = months_before(asof, policy.long_months).isoformat()
     medium_start = months_before(asof, policy.medium_months).isoformat()
@@ -747,7 +806,7 @@ def count_recalls(conn: Any, row: FdaFeatureRow, *, asof: date, policy: FdaFeatu
         row.recall_severity_36m += float(item["severity_weight"] or 1.0) * decay * status_multiplier
         if is_class_i(item["classification"]):
             row.class_i_recall_count_36m += 1
-            row.dedup_class_i_recall_count_36m += 1
+            row.dedup_class_i_recall_count_36m += max(0, int(item["source_count"] or 1) - 1)
             update_risk_mapping_confidence(row, item["mapping_confidence"])
             if int(item["is_open"] or 0):
                 row.open_class_i_recall_count_36m += 1
@@ -1211,7 +1270,8 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
         INSERT INTO feature_fda_product_risk(
             asof_date, company_id, regulatory_innovation_score, regulatory_risk_score,
             fda_product_score, fda_data_available, latest_fda_event_date,
-            mapped_manufacturer_count, avg_mapping_confidence, hard_red_flag,
+            mapped_manufacturer_count, avg_mapping_confidence, risk_mapping_confidence_min,
+            hard_red_flag,
             hard_red_flag_reasons, raw_fda_red_flag, confirmed_hard_red_flag,
             review_adjusted_fda_state, dedup_class_i_recall_count_36m,
             open_class_i_recall_count_12m, open_class_i_recall_count_36m,
@@ -1222,7 +1282,7 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
             manual_evidence_note,
             payload_json, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(asof_date, company_id) DO UPDATE SET
             regulatory_innovation_score = excluded.regulatory_innovation_score,
             regulatory_risk_score = excluded.regulatory_risk_score,
@@ -1231,6 +1291,7 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
             latest_fda_event_date = excluded.latest_fda_event_date,
             mapped_manufacturer_count = excluded.mapped_manufacturer_count,
             avg_mapping_confidence = excluded.avg_mapping_confidence,
+            risk_mapping_confidence_min = excluded.risk_mapping_confidence_min,
             hard_red_flag = excluded.hard_red_flag,
             hard_red_flag_reasons = excluded.hard_red_flag_reasons,
             raw_fda_red_flag = excluded.raw_fda_red_flag,
@@ -1265,6 +1326,7 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
                 row.latest_fda_event_date,
                 row.mapped_manufacturer_count,
                 row.avg_mapping_confidence,
+                row.risk_mapping_confidence_min,
                 row.hard_red_flag,
                 ";".join(row.hard_red_flag_reasons or []),
                 row.raw_fda_red_flag,
@@ -1437,7 +1499,8 @@ def hard_red_review_rows(conn: Any, rows: list[FdaFeatureRow], *, asof: date) ->
          )
         WHERE c.company_id IN ({placeholders})
           AND (
-              LOWER(REPLACE(COALESCE(c.classification, ''), ' ', '_')) LIKE '%class_i%'
+              LOWER(REPLACE(REPLACE(COALESCE(c.classification, ''), ' ', '_'), '-', '_'))
+                  IN ('i', 'class_i', 'class_1', 'classi', 'class1')
               OR COALESCE(c.max_severity_weight, 0.0) >= 5.0
           )
         ORDER BY co.ticker, c.recall_initiation_date DESC, c.canonical_recall_key

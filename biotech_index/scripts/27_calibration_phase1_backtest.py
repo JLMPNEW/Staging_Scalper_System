@@ -111,13 +111,13 @@ def parse_args() -> argparse.Namespace:
         "--train-fraction",
         type=float,
         default=None,
-        help="Chronological train fraction for Phase 1 train/test diagnostic splits. Defaults to calibration.tier1.train_fraction or 0.70.",
+        help="Chronological train fraction for Phase 1 train/test diagnostic splits. Defaults to calibration.phase1.train_fraction or 0.70.",
     )
     parser.add_argument(
         "--bootstrap-iterations",
         type=int,
         default=None,
-        help="Bootstrap iterations for Phase 1 Top-N risk-adjusted CI diagnostics. Defaults to calibration.tier1.bootstrap_iterations.",
+        help="Bootstrap iterations for Phase 1 Top-N risk-adjusted CI diagnostics. Defaults to calibration.phase1.bootstrap_iterations.",
     )
     parser.add_argument("--exclude-tickers", type=str, default="")
     return parser.parse_args()
@@ -383,7 +383,7 @@ def forward_return(
     if not bars:
         return None, "", ""
     days = [bar.day for bar in bars]
-    entry_idx = bisect.bisect_right(days, asof) if next_bar_entry else bisect.bisect_right(days, asof) - 1
+    entry_idx = bisect.bisect_right(days, asof) if next_bar_entry else bisect.bisect_left(days, asof) - 1
     if entry_idx < 0 or entry_idx >= len(bars):
         return None, "", ""
     target_idx = entry_idx + horizon
@@ -405,6 +405,7 @@ def add_forward_returns(
     next_bar_entry: bool,
 ) -> None:
     cost = float(round_trip_cost_bps) / 10_000.0
+    missing_return_counts: defaultdict[tuple[int, str], int] = defaultdict(int)
     for row in rows:
         ticker = normalize_ticker(row.get("ticker"))
         asof = parse_date(row.get("asof_date"))
@@ -417,6 +418,7 @@ def add_forward_returns(
                 row[f"{prefix}_round_trip_cost_bps"] = round_trip_cost_bps
                 row[f"{prefix}_entry_date"] = ""
                 row[f"{prefix}_target_date"] = ""
+                missing_return_counts[(horizon, "invalid_asof_date")] += 1
                 continue
             ret, entry_date, target_date = forward_return(bars, asof, horizon, next_bar_entry=next_bar_entry)
             row[f"{prefix}_return"] = ret if ret is not None else ""
@@ -424,6 +426,22 @@ def add_forward_returns(
             row[f"{prefix}_round_trip_cost_bps"] = round_trip_cost_bps
             row[f"{prefix}_entry_date"] = entry_date
             row[f"{prefix}_target_date"] = target_date
+            if ret is None:
+                if not bars:
+                    reason = "no_market_bars"
+                elif not entry_date:
+                    reason = "no_entry_bar"
+                elif not target_date:
+                    reason = "insufficient_horizon_bars"
+                else:
+                    reason = "invalid_entry_close"
+                missing_return_counts[(horizon, reason)] += 1
+    if missing_return_counts:
+        summary = ", ".join(
+            f"{horizon}d:{reason}={count}"
+            for (horizon, reason), count in sorted(missing_return_counts.items())
+        )
+        LOGGER.warning("Forward-return coverage gaps: %s", summary)
 
 
 def nested_dict(payload: dict[str, Any], key: str) -> dict[str, Any]:
@@ -615,8 +633,8 @@ def safe_ratio(numerator: float | None, denominator: float | None) -> float | No
 def profit_factor(values: list[float]) -> float | None:
     gains = sum(value for value in values if value > 0.0)
     losses = -sum(value for value in values if value < 0.0)
-    if losses <= 0.0:
-        return None
+    if losses <= 1e-12:
+        return None if gains <= 1e-12 else 999.0
     return gains / losses
 
 
@@ -1753,13 +1771,13 @@ def main() -> None:
     train_fraction = (
         float(args.train_fraction)
         if args.train_fraction is not None
-        else float(cfg_get(config, "calibration.tier1.train_fraction", 0.70))
+        else float(cfg_get(config, "calibration.phase1.train_fraction", 0.70))
     )
     train_fraction = max(0.10, min(0.90, train_fraction))
     bootstrap_iterations = (
         int(args.bootstrap_iterations)
         if args.bootstrap_iterations is not None
-        else int(cfg_get(config, "calibration.tier1.bootstrap_iterations", 200))
+        else int(cfg_get(config, "calibration.phase1.bootstrap_iterations", 200))
     )
     bootstrap_iterations = max(0, bootstrap_iterations)
     next_bar_entry = (

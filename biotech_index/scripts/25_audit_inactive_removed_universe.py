@@ -281,6 +281,21 @@ def resolve_existing_csv(
     return latest_matching_file(output_dir, default_filename)
 
 
+def csv_staleness(path: Path | None, *, max_age_days: int, label: str) -> tuple[str, int | str]:
+    if path is None:
+        return "", ""
+    if max_age_days < 0:
+        return "", ""
+    modified_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    age_days = max(0, (datetime.now(timezone.utc) - modified_at).days)
+    if age_days > max_age_days:
+        raise ValueError(
+            f"{label} is stale: path={path} modified_at={modified_at.isoformat()} "
+            f"age_days={age_days} max_age_days={max_age_days}. Refresh the CTGov reactivation scan first."
+        )
+    return modified_at.isoformat(), age_days
+
+
 def load_db_companies(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     rows = conn.execute(
         """
@@ -597,6 +612,11 @@ def main() -> None:
     except ValueError as exc:
         raise ValueError(f"Invalid --asof date: {args.asof}") from exc
     ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if normalize_ticker(value)}
+    reactivation_scan_modified_at, reactivation_scan_age_days = csv_staleness(
+        reactivation_scan_path,
+        max_age_days=int(cfg_get(config, "inactive_removed_audit.max_reactivation_scan_staleness_days", 14)),
+        label="inactive_removed_audit.reactivation_scan_csv",
+    )
 
     active_listing_statuses = {
         value.strip().lower()
@@ -657,8 +677,11 @@ def main() -> None:
     )
 
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
-    with connect_readonly(db_path, timeout_sec=sqlite_timeout_sec) as conn:
+    conn = connect_readonly(db_path, timeout_sec=sqlite_timeout_sec)
+    try:
         db_rows = load_db_companies(conn)
+    finally:
+        conn.close()
 
     tickers = set()
     for ticker, row in screen_rows.items():
@@ -750,6 +773,8 @@ def main() -> None:
         "screen_results_csv": str(screen_path),
         "rescreen_results_csv": str(rescreen_path) if rescreen_path else "",
         "reactivation_scan_csv": str(reactivation_scan_path) if reactivation_scan_path else "",
+        "reactivation_scan_modified_at": reactivation_scan_modified_at,
+        "reactivation_scan_age_days": reactivation_scan_age_days,
         "conditional_exclusion_count": len(conditional_exclusions),
         "policy_inclusion_count": len(policy_inclusions),
         "database_path": str(db_path),

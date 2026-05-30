@@ -17,7 +17,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from biotech_index.core.db import connect  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 from biotech_index.core.market_policy import scoring_market_sources, select_latest_rows_by_source_priority  # noqa: E402
 from biotech_index.core.pipeline_guards import read_final_scoring_tickers  # noqa: E402
@@ -74,6 +73,15 @@ def as_bool(raw: object, default: bool = False) -> bool:
     if text in {"0", "false", "no", "n", "off"}:
         return False
     return default
+
+
+def connect_readonly(db_path: Path, *, timeout_sec: float) -> sqlite3.Connection:
+    if not db_path.exists():
+        raise FileNotFoundError(f"SQLite database not found: {db_path}")
+    conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout_sec)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    return conn
 
 
 def load_companies(conn: sqlite3.Connection, tickers: set[str]) -> dict[int, dict[str, Any]]:
@@ -155,9 +163,10 @@ def main() -> None:
     )
     sources = scoring_market_sources(config)
     require_adjusted = as_bool(cfg_get(config, "market_data_policy.require_adjusted_for_scoring", True), True)
-    max_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0))
+    max_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2))
 
-    with connect(db_path) as conn:
+    conn = connect_readonly(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0)))
+    try:
         asof = args.asof or latest_score_date(conn)
         asof_obj = parse_date(asof)
         if asof_obj is None:
@@ -174,6 +183,8 @@ def main() -> None:
         available_by_company: dict[int, list[dict[str, Any]]] = {}
         for row in rows:
             available_by_company.setdefault(int(row["company_id"]), []).append(dict(row))
+    finally:
+        conn.close()
 
     source_rank = {source: idx for idx, source in enumerate(sources)}
     audit_rows: list[dict[str, Any]] = []

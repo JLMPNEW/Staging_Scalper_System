@@ -65,6 +65,7 @@ FEATURE_FIELDS = [
     "capital_expenditures_ttm",
     "free_cash_flow_ttm",
     "research_and_development_ttm",
+    "annualized_research_and_development",
     "interest_expense_ttm",
     "revenue_yoy_growth",
     "rd_growth_yoy",
@@ -75,11 +76,22 @@ FEATURE_FIELDS = [
     "rd_to_revenue_ttm",
     "rule_of_40",
     "cash_and_investments",
+    "total_liquidity",
+    "latest_quarter_operating_cash_burn",
+    "annualized_operating_cash_burn",
+    "financial_runway_years",
     "total_debt",
     "total_assets",
     "stockholders_equity",
     "net_debt",
     "shares_outstanding",
+    "current_shares_outstanding",
+    "diluted_weighted_average_shares",
+    "basic_weighted_average_shares",
+    "shares_source_concept",
+    "shares_source_form",
+    "shares_source_period",
+    "market_cap_validated_flag",
     "shares_yoy_growth",
     "market_cap",
     "enterprise_value",
@@ -106,6 +118,18 @@ FEATURE_FIELDS = [
     "value_trap_score",
 ]
 DEFAULT_NEUTRAL_COMPONENT_SCORE = DEFAULT_NEUTRAL_SCORE
+CURRENT_SHARE_CONCEPTS = {
+    "EntityCommonStockSharesOutstanding",
+    "NumberOfSharesIssued",
+}
+DILUTED_WEIGHTED_SHARE_CONCEPTS = {
+    "WeightedAverageNumberOfDilutedSharesOutstanding",
+    "WeightedAverageNumberOfSharesOutstandingDiluted",
+}
+BASIC_WEIGHTED_SHARE_CONCEPTS = {
+    "WeightedAverageNumberOfBasicSharesOutstanding",
+    "WeightedAverageShares",
+}
 DEFAULT_FUNDAMENTAL_COMPONENT_WEIGHTS = {
     "gross_margin": 0.13,
     "operating_margin": 0.13,
@@ -143,11 +167,45 @@ class FinancialRow:
     form: str
     filed_date: str
     values: dict[str, float | None]
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ShareSelection:
+    value: float | None
+    concept: str
+    form: str
+    period_end: str
+    current_shares: float | None = None
+    diluted_weighted_average_shares: float | None = None
+    basic_weighted_average_shares: float | None = None
+
+
+@dataclass(frozen=True)
+class MarketShareSnapshot:
+    ticker: str
+    asof_date: str
+    source_id: str
+    shares_outstanding: float
+    market_cap: float | None
+    currency: str
+
+
+@dataclass(frozen=True)
+class ShareCountOverride:
+    ticker: str
+    current_shares_outstanding: float
+    asof_date: str
+    source: str
+    note: str
 
 
 @dataclass(frozen=True)
 class FinancialFeaturePolicy:
     market_sources: list[str]
+    share_count_sources: list[str]
+    share_count_max_staleness_days: int
+    allow_sec_weighted_average_share_fallback: bool
     max_staleness_days: int
     require_adjusted: bool
     core_min_years: float
@@ -182,6 +240,7 @@ class FeatureRow:
     capital_expenditures_ttm: float | None = None
     free_cash_flow_ttm: float | None = None
     research_and_development_ttm: float | None = None
+    annualized_research_and_development: float | None = None
     interest_expense_ttm: float | None = None
     revenue_yoy_growth: float | None = None
     rd_growth_yoy: float | None = None
@@ -192,11 +251,22 @@ class FeatureRow:
     rd_to_revenue_ttm: float | None = None
     rule_of_40: float | None = None
     cash_and_investments: float | None = None
+    total_liquidity: float | None = None
+    latest_quarter_operating_cash_burn: float | None = None
+    annualized_operating_cash_burn: float | None = None
+    financial_runway_years: float | None = None
     total_debt: float | None = None
     total_assets: float | None = None
     stockholders_equity: float | None = None
     net_debt: float | None = None
     shares_outstanding: float | None = None
+    current_shares_outstanding: float | None = None
+    diluted_weighted_average_shares: float | None = None
+    basic_weighted_average_shares: float | None = None
+    shares_source_concept: str = ""
+    shares_source_form: str = ""
+    shares_source_period: str = ""
+    market_cap_validated_flag: int = 0
     shares_yoy_growth: float | None = None
     market_cap: float | None = None
     enterprise_value: float | None = None
@@ -229,6 +299,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--output-csv", type=Path, default=None)
+    parser.add_argument("--share-count-overrides-csv", type=Path, default=None)
     parser.add_argument("--asof", type=str, default="", help="Feature as-of date, YYYY-MM-DD. Defaults to latest scoring bar.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
     parser.add_argument("--max-tickers", type=int, default=0)
@@ -251,6 +322,25 @@ def to_float(raw: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) else None
+
+
+def safe_json_loads(raw: object) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    try:
+        value = json.loads(str(raw))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def row_get(row: dict[str, Any], *names: str) -> str:
+    normalized = {str(key or "").strip().lower(): value for key, value in row.items()}
+    for name in names:
+        value = normalized.get(name.strip().lower())
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
 
 
 def safe_div(numerator: float | None, denominator: float | None) -> float | None:
@@ -325,8 +415,23 @@ def cfg_weight_map(config: dict[str, Any], dotted_key: str, default: dict[str, f
 
 
 def financial_feature_policy(config: dict[str, Any]) -> FinancialFeaturePolicy:
+    share_count_sources_raw = cfg_get(config, "financial_features.share_count_sources", ["ib_market_data", "yahoo_finance_backup"])
+    if isinstance(share_count_sources_raw, list):
+        share_count_sources = [str(item or "").strip() for item in share_count_sources_raw if str(item or "").strip()]
+    else:
+        share_count_sources = [
+            str(item or "").strip()
+            for item in str(share_count_sources_raw or "").split(",")
+            if str(item or "").strip()
+        ]
     return FinancialFeaturePolicy(
         market_sources=scoring_market_sources(config),
+        share_count_sources=share_count_sources or ["ib_market_data", "yahoo_finance_backup"],
+        share_count_max_staleness_days=int(cfg_get(config, "financial_features.share_count_max_staleness_days", 14)),
+        allow_sec_weighted_average_share_fallback=as_bool_config(
+            cfg_get(config, "financial_features.allow_sec_weighted_average_share_fallback", False),
+            default=False,
+        ),
         max_staleness_days=int(
             cfg_get(
                 config,
@@ -471,7 +576,8 @@ def load_financial_rows(conn: Any, companies: list[Company], *, asof: date) -> d
         SELECT company_id, period_end, fiscal_year, fiscal_period, form, filed_date,
                revenue, gross_profit, operating_income, net_income, operating_cash_flow,
                capital_expenditures, free_cash_flow, research_and_development, interest_expense,
-               cash_and_investments, total_debt, total_assets, stockholders_equity, shares_outstanding
+               cash_and_investments, total_debt, total_assets, stockholders_equity, shares_outstanding,
+               payload_json
         FROM fact_financial_statement
         WHERE company_id IN ({placeholders})
           AND period_end <= ?
@@ -492,8 +598,71 @@ def load_financial_rows(conn: Any, companies: list[Company], *, asof: date) -> d
             form=str(row["form"] or "").upper(),
             filed_date=str(row["filed_date"] or ""),
             values=values,
+            payload=safe_json_loads(row["payload_json"]),
         )
         out.setdefault(item.company_id, []).append(item)
+    return out
+
+
+def table_exists(conn: Any, table_name: str) -> bool:
+    row = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()
+    return row is not None
+
+
+def load_market_share_snapshots(
+    conn: Any,
+    companies: list[Company],
+    *,
+    asof: date,
+    sources: list[str],
+    max_staleness_days: int,
+) -> dict[str, MarketShareSnapshot]:
+    if not companies or not sources or not table_exists(conn, "fact_market_snapshot"):
+        return {}
+    tickers = [company.ticker for company in companies]
+    placeholders = ",".join("?" for _ in tickers)
+    source_placeholders = ",".join("?" for _ in sources)
+    rows = conn.execute(
+        f"""
+        SELECT ticker, asof_date, source_id, shares_outstanding, market_cap, currency
+        FROM fact_market_snapshot
+        WHERE ticker IN ({placeholders})
+          AND asof_date <= ?
+          AND source_id IN ({source_placeholders})
+          AND shares_outstanding IS NOT NULL
+          AND shares_outstanding > 0
+        ORDER BY ticker, source_id, asof_date DESC
+        """,
+        [*tickers, asof.isoformat(), *sources],
+    ).fetchall()
+    by_ticker_source: dict[tuple[str, str], MarketShareSnapshot] = {}
+    for row in rows:
+        snapshot_date = parse_date(row["asof_date"])
+        if snapshot_date is None or (asof - snapshot_date).days > max_staleness_days:
+            continue
+        ticker = normalize_ticker(row["ticker"])
+        source_id = str(row["source_id"] or "")
+        key = (ticker, source_id)
+        if key in by_ticker_source:
+            continue
+        shares = to_float(row["shares_outstanding"])
+        if shares is None or shares <= 0:
+            continue
+        by_ticker_source[key] = MarketShareSnapshot(
+            ticker=ticker,
+            asof_date=str(row["asof_date"] or ""),
+            source_id=source_id,
+            shares_outstanding=shares,
+            market_cap=to_float(row["market_cap"]),
+            currency=str(row["currency"] or ""),
+        )
+    out: dict[str, MarketShareSnapshot] = {}
+    for ticker in tickers:
+        for source_id in sources:
+            snapshot = by_ticker_source.get((ticker, source_id))
+            if snapshot is not None:
+                out[ticker] = snapshot
+                break
     return out
 
 
@@ -510,16 +679,110 @@ def latest_metric_row(rows: list[FinancialRow], metric: str) -> FinancialRow | N
     return candidates[0]
 
 
-def latest_shares(rows: list[FinancialRow]) -> float | None:
-    quarterly = [
+def metric_concept(row: FinancialRow, metric: str) -> str:
+    payload = row.payload.get(metric)
+    if isinstance(payload, dict):
+        return str(payload.get("concept") or "")
+    return ""
+
+
+def latest_share_value_by_concepts(rows: list[FinancialRow], concepts: set[str]) -> float | None:
+    candidates = [
         row
         for row in rows
-        if quarter_number(row.fiscal_period) is not None and row.values.get("shares_outstanding") is not None
+        if row.values.get("shares_outstanding") is not None and metric_concept(row, "shares_outstanding") in concepts
     ]
-    if quarterly:
-        quarterly.sort(key=lambda item: (item.period_end, item.filed_date), reverse=True)
-        return quarterly[0].values.get("shares_outstanding")
-    return latest_metric(rows, "shares_outstanding")
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item.period_end, item.filed_date), reverse=True)
+    return candidates[0].values.get("shares_outstanding")
+
+
+def select_shares(rows: list[FinancialRow], *, allow_weighted_average_fallback: bool = False) -> ShareSelection:
+    candidates = [row for row in rows if row.values.get("shares_outstanding") is not None]
+    if not candidates:
+        return ShareSelection(value=None, concept="", form="", period_end="")
+
+    current_candidates = [
+        row for row in candidates if metric_concept(row, "shares_outstanding") in CURRENT_SHARE_CONCEPTS
+    ]
+    diluted_candidates = [
+        row for row in candidates if metric_concept(row, "shares_outstanding") in DILUTED_WEIGHTED_SHARE_CONCEPTS
+    ]
+    basic_candidates = [
+        row for row in candidates if metric_concept(row, "shares_outstanding") in BASIC_WEIGHTED_SHARE_CONCEPTS
+    ]
+
+    current_shares = latest_share_value_by_concepts(rows, CURRENT_SHARE_CONCEPTS)
+    diluted_shares = latest_share_value_by_concepts(rows, DILUTED_WEIGHTED_SHARE_CONCEPTS)
+    basic_shares = latest_share_value_by_concepts(rows, BASIC_WEIGHTED_SHARE_CONCEPTS)
+
+    fallback_groups = (diluted_candidates, basic_candidates, candidates) if allow_weighted_average_fallback else ()
+    for group in (current_candidates, *fallback_groups):
+        if group:
+            group.sort(key=lambda item: (item.period_end, item.filed_date), reverse=True)
+            selected = group[0]
+            return ShareSelection(
+                value=selected.values.get("shares_outstanding"),
+                concept=metric_concept(selected, "shares_outstanding"),
+                form=selected.form,
+                period_end=selected.period_end,
+                current_shares=current_shares,
+                diluted_weighted_average_shares=diluted_shares,
+                basic_weighted_average_shares=basic_shares,
+            )
+
+    return ShareSelection(
+        value=None,
+        concept="",
+        form="",
+        period_end="",
+        current_shares=current_shares,
+        diluted_weighted_average_shares=diluted_shares,
+        basic_weighted_average_shares=basic_shares,
+    )
+
+
+def read_csv_flexible(path: Path) -> list[dict[str, str]]:
+    encodings = ("utf-8-sig", "utf-8", "cp1252")
+    for encoding in encodings:
+        try:
+            with path.open("r", encoding=encoding, newline="") as handle:
+                return [dict(row) for row in csv.DictReader(handle)]
+        except UnicodeDecodeError:
+            continue
+    with path.open("r", encoding=encodings[-1], newline="") as handle:
+        return [dict(row) for row in csv.DictReader(handle)]
+
+
+def load_share_count_overrides(path: Path | None, *, asof: date) -> dict[str, ShareCountOverride]:
+    if path is None:
+        return {}
+    if not path.exists():
+        LOGGER.warning("Configured share-count override CSV does not exist: %s", path)
+        return {}
+    out: dict[str, ShareCountOverride] = {}
+    skipped = 0
+    for raw_row in read_csv_flexible(path):
+        ticker = normalize_ticker(row_get(raw_row, "ticker", "symbol"))
+        shares = to_float(row_get(raw_row, "current_shares_outstanding", "shares_outstanding", "shares"))
+        override_asof = row_get(raw_row, "asof_date", "date", "period_end")
+        override_date = parse_date(override_asof) if override_asof else asof
+        if not ticker or shares is None or shares <= 0 or override_date is None or override_date > asof:
+            skipped += 1
+            continue
+        candidate = ShareCountOverride(
+            ticker=ticker,
+            current_shares_outstanding=shares,
+            asof_date=override_date.isoformat(),
+            source=row_get(raw_row, "source") or "manual_share_count_override",
+            note=row_get(raw_row, "note", "notes"),
+        )
+        existing = out.get(ticker)
+        if existing is None or candidate.asof_date > existing.asof_date:
+            out[ticker] = candidate
+    LOGGER.info("Loaded share-count overrides: rows=%d skipped=%d path=%s", len(out), skipped, path)
+    return out
 
 
 def latest_annual_row(rows: list[FinancialRow], metric: str = "revenue") -> FinancialRow | None:
@@ -558,6 +821,11 @@ def latest_interim_after_annual(rows: list[FinancialRow], annual: FinancialRow |
         if quarter_number(row.fiscal_period) in {1, 2, 3}
         and (not min_period or row.period_end > min_period)
     ]
+    revenue_candidates = [row for row in candidates if row.values.get("revenue") is not None]
+    flow_candidates = [
+        row for row in candidates if any(row.values.get(metric) is not None for metric in FLOW_METRICS)
+    ]
+    candidates = revenue_candidates or flow_candidates or candidates
     candidates.sort(key=lambda item: (item.period_end, item.filed_date), reverse=True)
     return candidates[0] if candidates else None
 
@@ -576,8 +844,62 @@ def prior_matching_interim(rows: list[FinancialRow], interim: FinancialRow | Non
         else:
             distance = abs((interim_date - row_date).days - 365)
         candidates.append((distance, row))
+    candidates = [candidate for candidate in candidates if candidate[0] <= 90]
+    if not candidates:
+        return None
+    revenue_candidates = [candidate for candidate in candidates if candidate[1].values.get("revenue") is not None]
+    flow_candidates = [
+        candidate
+        for candidate in candidates
+        if any(candidate[1].values.get(metric) is not None for metric in FLOW_METRICS)
+    ]
+    candidates = revenue_candidates or flow_candidates or candidates
     candidates.sort(key=lambda item: (item[0], item[1].period_end))
-    return candidates[0][1] if candidates and candidates[0][0] <= 90 else None
+    return candidates[0][1] if candidates else None
+
+
+def prior_sequential_interim(rows: list[FinancialRow], interim: FinancialRow | None) -> FinancialRow | None:
+    if interim is None:
+        return None
+    q = quarter_number(interim.fiscal_period)
+    if q is None or q <= 1:
+        return None
+    candidates = [
+        row
+        for row in rows
+        if row.fiscal_year == interim.fiscal_year
+        and quarter_number(row.fiscal_period) == q - 1
+        and row.period_end < interim.period_end
+        and any(row.values.get(metric) is not None for metric in FLOW_METRICS)
+    ]
+    if not candidates:
+        return None
+    revenue_candidates = [row for row in candidates if row.values.get("revenue") is not None]
+    candidates = revenue_candidates or candidates
+    candidates.sort(key=lambda item: (item.period_end, item.filed_date), reverse=True)
+    return candidates[0]
+
+
+def latest_quarter_flow_value(
+    rows: list[FinancialRow],
+    interim: FinancialRow | None,
+    metric: str,
+) -> float | None:
+    if interim is None:
+        return None
+    current_value = interim.values.get(metric)
+    if current_value is None:
+        return None
+    q = quarter_number(interim.fiscal_period)
+    if q is None:
+        return None
+    if q <= 1:
+        return current_value
+    prior_interim = prior_sequential_interim(rows, interim)
+    prior_value = prior_interim.values.get(metric) if prior_interim is not None else None
+    if prior_value is None:
+        return None
+    return current_value - prior_value
 
 
 def annualize_interim(value: float | None, fiscal_period: str) -> float | None:
@@ -731,6 +1053,9 @@ def build_raw_feature_row(
     short_min_years: float,
     ttm_sanity_min_annual_ratio: float,
     ttm_sanity_max_annual_ratio: float,
+    allow_sec_weighted_average_share_fallback: bool,
+    market_share_snapshot: MarketShareSnapshot | None = None,
+    share_override: ShareCountOverride | None = None,
 ) -> FeatureRow:
     feature = FeatureRow(
         asof_date=asof.isoformat(),
@@ -788,6 +1113,16 @@ def build_raw_feature_row(
         computed_fcf = feature.operating_cash_flow_ttm - feature.capital_expenditures_ttm
     feature.free_cash_flow_ttm = computed_fcf if computed_fcf is not None else ttm_values["free_cash_flow"]
     feature.ttm_method = methods.get("revenue", "unavailable")
+    latest_quarter_rd = latest_quarter_flow_value(financial_rows, interim, "research_and_development")
+    if latest_quarter_rd is not None and latest_quarter_rd > 0:
+        feature.annualized_research_and_development = latest_quarter_rd * 4.0
+    else:
+        interim_rd = interim.values.get("research_and_development") if interim is not None else None
+        annualized_rd = annualize_interim(interim_rd, interim.fiscal_period) if interim is not None else None
+        if annualized_rd is not None and annualized_rd > 0:
+            feature.annualized_research_and_development = annualized_rd
+        elif feature.research_and_development_ttm is not None and feature.research_and_development_ttm > 0:
+            feature.annualized_research_and_development = feature.research_and_development_ttm
 
     if annual is not None and prior_annual is not None:
         current_revenue = annual.values.get("revenue")
@@ -818,10 +1153,50 @@ def build_raw_feature_row(
             feature.rule_of_40 = (feature.revenue_yoy_growth + feature.fcf_margin_ttm) * 100.0
 
     feature.cash_and_investments = latest_metric(financial_rows, "cash_and_investments")
+    feature.total_liquidity = feature.cash_and_investments
+    latest_quarter_ocf = latest_quarter_flow_value(financial_rows, interim, "operating_cash_flow")
+    if latest_quarter_ocf is not None and latest_quarter_ocf < 0:
+        feature.latest_quarter_operating_cash_burn = abs(latest_quarter_ocf)
+        feature.annualized_operating_cash_burn = feature.latest_quarter_operating_cash_burn * 4.0
+    else:
+        interim_ocf = interim.values.get("operating_cash_flow") if interim is not None else None
+        annualized_ocf = annualize_interim(interim_ocf, interim.fiscal_period) if interim is not None else None
+        if annualized_ocf is not None and annualized_ocf < 0:
+            feature.annualized_operating_cash_burn = abs(annualized_ocf)
+            feature.latest_quarter_operating_cash_burn = feature.annualized_operating_cash_burn / 4.0
+        elif feature.operating_cash_flow_ttm is not None and feature.operating_cash_flow_ttm < 0:
+            feature.annualized_operating_cash_burn = abs(feature.operating_cash_flow_ttm)
+            feature.latest_quarter_operating_cash_burn = feature.annualized_operating_cash_burn / 4.0
+    feature.financial_runway_years = safe_div(feature.total_liquidity, feature.annualized_operating_cash_burn)
     feature.total_debt = latest_metric(financial_rows, "total_debt")
     feature.total_assets = latest_metric(financial_rows, "total_assets")
     feature.stockholders_equity = latest_metric(financial_rows, "stockholders_equity")
-    feature.shares_outstanding = latest_shares(financial_rows)
+    share_selection = select_shares(
+        financial_rows,
+        allow_weighted_average_fallback=allow_sec_weighted_average_share_fallback,
+    )
+    feature.shares_outstanding = share_selection.value
+    feature.current_shares_outstanding = share_selection.current_shares
+    feature.diluted_weighted_average_shares = share_selection.diluted_weighted_average_shares
+    feature.basic_weighted_average_shares = share_selection.basic_weighted_average_shares
+    feature.shares_source_concept = share_selection.concept
+    feature.shares_source_form = share_selection.form
+    feature.shares_source_period = share_selection.period_end
+    feature.market_cap_validated_flag = int(share_selection.concept in CURRENT_SHARE_CONCEPTS)
+    if market_share_snapshot is not None:
+        feature.shares_outstanding = market_share_snapshot.shares_outstanding
+        feature.current_shares_outstanding = market_share_snapshot.shares_outstanding
+        feature.shares_source_concept = f"{market_share_snapshot.source_id}_shares_outstanding"
+        feature.shares_source_form = market_share_snapshot.source_id
+        feature.shares_source_period = market_share_snapshot.asof_date
+        feature.market_cap_validated_flag = 1
+    if share_override is not None:
+        feature.shares_outstanding = share_override.current_shares_outstanding
+        feature.current_shares_outstanding = share_override.current_shares_outstanding
+        feature.shares_source_concept = "manual_current_shares_override"
+        feature.shares_source_form = share_override.source
+        feature.shares_source_period = share_override.asof_date
+        feature.market_cap_validated_flag = 1
     prior_shares = prior_annual.values.get("shares_outstanding") if prior_annual is not None else None
     if feature.shares_outstanding is not None and prior_shares is not None:
         feature.shares_yoy_growth = safe_div(feature.shares_outstanding - prior_shares, prior_shares)
@@ -830,6 +1205,8 @@ def build_raw_feature_row(
 
     if feature.latest_close is not None and feature.shares_outstanding is not None and feature.shares_outstanding > 0:
         feature.market_cap = feature.latest_close * feature.shares_outstanding
+    elif market_share_snapshot is not None and market_share_snapshot.market_cap is not None:
+        feature.market_cap = market_share_snapshot.market_cap
     if feature.market_cap is not None and feature.total_debt is not None and feature.cash_and_investments is not None:
         feature.enterprise_value = feature.market_cap + feature.total_debt - feature.cash_and_investments
     feature.price_to_sales = safe_div(feature.market_cap, feature.revenue_ttm)
@@ -883,6 +1260,8 @@ def build_raw_feature_row(
         feature.data_quality_status = "fail"
     elif feature.price_staleness_days is not None and feature.price_staleness_days > max_staleness_days:
         feature.data_quality_status = "review"
+    elif feature.market_cap is not None and feature.shares_source_concept and not feature.market_cap_validated_flag:
+        feature.data_quality_status = "review"
     elif "proxy" in feature.ttm_method or len(feature.missing_fields) >= 3:
         feature.data_quality_status = "review"
     else:
@@ -897,6 +1276,41 @@ def build_raw_feature_row(
         "metric_ttm_methods": methods,
         "financial_row_count": len(financial_rows),
         "missing_fields": feature.missing_fields,
+        "shares_source": {
+            "concept": feature.shares_source_concept,
+            "form": feature.shares_source_form,
+            "period": feature.shares_source_period,
+            "market_cap_validated": bool(feature.market_cap_validated_flag),
+        },
+        "pre_revenue_runway_inputs": {
+            "total_liquidity": feature.total_liquidity,
+            "latest_quarter_operating_cash_burn": feature.latest_quarter_operating_cash_burn,
+            "annualized_operating_cash_burn": feature.annualized_operating_cash_burn,
+            "financial_runway_years": feature.financial_runway_years,
+            "annualized_research_and_development": feature.annualized_research_and_development,
+        },
+        "share_count_override": (
+            {
+                "ticker": share_override.ticker,
+                "current_shares_outstanding": share_override.current_shares_outstanding,
+                "asof_date": share_override.asof_date,
+                "source": share_override.source,
+                "note": share_override.note,
+            }
+            if share_override is not None
+            else None
+        ),
+        "market_share_snapshot": (
+            {
+                "ticker": market_share_snapshot.ticker,
+                "source_id": market_share_snapshot.source_id,
+                "shares_outstanding": market_share_snapshot.shares_outstanding,
+                "market_cap": market_share_snapshot.market_cap,
+                "asof_date": market_share_snapshot.asof_date,
+            }
+            if market_share_snapshot is not None
+            else None
+        ),
     }
     return feature
 
@@ -1180,6 +1594,7 @@ def upsert_feature_rows(conn: Any, rows: list[FeatureRow]) -> int:
         "capital_expenditures_ttm",
         "free_cash_flow_ttm",
         "research_and_development_ttm",
+        "annualized_research_and_development",
         "interest_expense_ttm",
         "revenue_yoy_growth",
         "rd_growth_yoy",
@@ -1190,11 +1605,22 @@ def upsert_feature_rows(conn: Any, rows: list[FeatureRow]) -> int:
         "rd_to_revenue_ttm",
         "rule_of_40",
         "cash_and_investments",
+        "total_liquidity",
+        "latest_quarter_operating_cash_burn",
+        "annualized_operating_cash_burn",
+        "financial_runway_years",
         "total_debt",
         "total_assets",
         "stockholders_equity",
         "net_debt",
         "shares_outstanding",
+        "current_shares_outstanding",
+        "diluted_weighted_average_shares",
+        "basic_weighted_average_shares",
+        "shares_source_concept",
+        "shares_source_form",
+        "shares_source_period",
+        "market_cap_validated_flag",
         "shares_yoy_growth",
         "market_cap",
         "enterprise_value",
@@ -1344,7 +1770,9 @@ def build_features(
     *,
     asof: date,
     policy: FinancialFeaturePolicy,
+    share_overrides: dict[str, ShareCountOverride] | None = None,
 ) -> list[FeatureRow]:
+    share_overrides = share_overrides or {}
     price_rows = load_price_selection(
         conn,
         companies,
@@ -1354,6 +1782,13 @@ def build_features(
         require_adjusted=policy.require_adjusted,
     )
     financial_rows_by_company = load_financial_rows(conn, companies, asof=asof)
+    market_share_snapshots = load_market_share_snapshots(
+        conn,
+        companies,
+        asof=asof,
+        sources=policy.share_count_sources,
+        max_staleness_days=policy.share_count_max_staleness_days,
+    )
     rows = [
         build_raw_feature_row(
             company,
@@ -1366,6 +1801,9 @@ def build_features(
             short_min_years=policy.short_min_years,
             ttm_sanity_min_annual_ratio=policy.ttm_sanity_min_annual_ratio,
             ttm_sanity_max_annual_ratio=policy.ttm_sanity_max_annual_ratio,
+            allow_sec_weighted_average_share_fallback=policy.allow_sec_weighted_average_share_fallback,
+            market_share_snapshot=market_share_snapshots.get(company.ticker),
+            share_override=share_overrides.get(company.ticker),
         )
         for company in companies
     ]
@@ -1388,6 +1826,14 @@ def main() -> None:
             base_dir=base_dir,
         )
     )
+    override_raw = str(cfg_get(config, "financial_features.share_count_override_csv", "") or "").strip()
+    share_count_overrides_csv = (
+        args.share_count_overrides_csv.expanduser().resolve()
+        if args.share_count_overrides_csv
+        else resolve_path(override_raw, base_dir=base_dir)
+        if override_raw
+        else None
+    )
     policy = financial_feature_policy(config)
     ticker_filter = {normalize_ticker(value) for value in str(args.tickers or "").split(",") if normalize_ticker(value)}
 
@@ -1401,12 +1847,14 @@ def main() -> None:
         if not companies:
             raise ValueError("No active med-device companies selected")
         LOGGER.info(
-            "Building financial features: db=%s asof=%s companies=%d market_sources=%s",
+            "Building financial features: db=%s asof=%s companies=%d market_sources=%s share_count_sources=%s",
             db_path,
             asof.isoformat(),
             len(companies),
             ",".join(policy.market_sources),
+            ",".join(policy.share_count_sources),
         )
+        share_overrides = load_share_count_overrides(share_count_overrides_csv, asof=asof)
         run_id = start_run(conn, run_type="build_med_device_financial_features", input_path=config_path)
         try:
             rows = build_features(
@@ -1414,6 +1862,7 @@ def main() -> None:
                 companies,
                 asof=asof,
                 policy=policy,
+                share_overrides=share_overrides,
             )
             upserted = upsert_feature_rows(conn, rows)
             issue_count = replace_data_quality_issues(conn, rows, asof=asof.isoformat())

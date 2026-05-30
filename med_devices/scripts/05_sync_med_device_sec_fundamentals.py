@@ -117,6 +117,7 @@ DEFAULT_METRIC_CONCEPTS: dict[str, list[str]] = {
         "InterestExpenseOnBorrowings",
     ],
     "cash_and_investments": [
+        "CashCashEquivalentsAndShortTermInvestments",
         "CashAndCashEquivalentsAtCarryingValue",
         "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
         "CashAndCashEquivalentsAtFairValue",
@@ -138,6 +139,24 @@ DEFAULT_METRIC_CONCEPTS: dict[str, list[str]] = {
         "NumberOfSharesIssued",
     ],
 }
+DEFAULT_CASH_AND_INVESTMENTS_COMBINED_CONCEPTS = [
+    "CashCashEquivalentsAndShortTermInvestments",
+    "CashCashEquivalentsAndMarketableSecurities",
+]
+DEFAULT_CASH_AND_INVESTMENTS_CASH_CONCEPTS = [
+    "CashAndCashEquivalentsAtCarryingValue",
+    "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+    "CashAndCashEquivalentsAtFairValue",
+    "CashAndCashEquivalents",
+]
+DEFAULT_CASH_AND_INVESTMENTS_SECURITIES_CONCEPTS = [
+    "ShortTermInvestments",
+    "ShortTermInvestmentsAvailableForSale",
+    "MarketableSecurities",
+    "MarketableSecuritiesCurrent",
+    "AvailableForSaleSecuritiesCurrent",
+    "DebtSecuritiesAvailableForSaleCurrent",
+]
 DEFAULT_CAPEX_COMPONENT_CONCEPTS = [
     "PaymentsToAcquireBuildings",
     "PaymentsToAcquireOtherPropertyPlantAndEquipment",
@@ -230,6 +249,9 @@ class SecIngestionPolicy:
     debt_current_concepts: list[str]
     debt_noncurrent_concepts: list[str]
     capex_component_concepts: list[str]
+    cash_and_investments_combined_concepts: list[str]
+    cash_and_investments_cash_concepts: list[str]
+    cash_and_investments_securities_concepts: list[str]
     composite_debt_concept_rank: int
     preferred_units: dict[str, set[str]]
 
@@ -313,6 +335,8 @@ def preferred_units_map(raw: object) -> dict[str, set[str]]:
 def sec_ingestion_policy(config: dict[str, Any]) -> SecIngestionPolicy:
     debt_cfg = cfg_get(config, "sec_ingestion.debt_concepts", {})
     debt_cfg = debt_cfg if isinstance(debt_cfg, dict) else {}
+    liquidity_cfg = cfg_get(config, "sec_ingestion.cash_and_investments_concepts", {})
+    liquidity_cfg = liquidity_cfg if isinstance(liquidity_cfg, dict) else {}
     return SecIngestionPolicy(
         submissions_source_id=str(
             cfg_get(config, "sec_ingestion.submissions_source_id", DEFAULT_SEC_SUBMISSIONS_SOURCE)
@@ -358,16 +382,26 @@ def sec_ingestion_policy(config: dict[str, Any]) -> SecIngestionPolicy:
             cfg_get(config, "sec_ingestion.capex_component_concepts", DEFAULT_CAPEX_COMPONENT_CONCEPTS),
             DEFAULT_CAPEX_COMPONENT_CONCEPTS,
         ),
+        cash_and_investments_combined_concepts=concept_list(
+            liquidity_cfg.get("combined"),
+            DEFAULT_CASH_AND_INVESTMENTS_COMBINED_CONCEPTS,
+        ),
+        cash_and_investments_cash_concepts=concept_list(
+            liquidity_cfg.get("cash"),
+            DEFAULT_CASH_AND_INVESTMENTS_CASH_CONCEPTS,
+        ),
+        cash_and_investments_securities_concepts=concept_list(
+            liquidity_cfg.get("securities"),
+            DEFAULT_CASH_AND_INVESTMENTS_SECURITIES_CONCEPTS,
+        ),
         composite_debt_concept_rank=int(cfg_get(config, "sec_ingestion.composite_debt_concept_rank", 1000)),
         preferred_units=preferred_units_map(cfg_get(config, "sec_ingestion.preferred_units", {})),
     )
 
 
 def cache_is_fresh(path: Path, ttl_hours: float) -> bool:
-    if not path.exists():
+    if not path.exists() or ttl_hours <= 0:
         return False
-    if ttl_hours <= 0:
-        return True
     age_hours = (time.time() - path.stat().st_mtime) / 3600.0
     return age_hours <= ttl_hours
 
@@ -785,6 +819,59 @@ def build_debt_map(
     return out
 
 
+def build_cash_and_investments_map(
+    companyfacts: dict[str, Any],
+    policy: SecIngestionPolicy | None = None,
+) -> dict[tuple[str, str, str], FactObservation]:
+    policy = policy or sec_ingestion_policy({})
+    combined = build_metric_map(
+        companyfacts,
+        "cash_and_investments",
+        policy.cash_and_investments_combined_concepts,
+        policy,
+    )
+    cash = build_metric_map(
+        companyfacts,
+        "cash_and_investments",
+        policy.cash_and_investments_cash_concepts,
+        policy,
+    )
+    securities = build_metric_map(
+        companyfacts,
+        "cash_and_investments",
+        policy.cash_and_investments_securities_concepts,
+        policy,
+    )
+    out = dict(combined)
+    for key in sorted(set(cash) | set(securities)):
+        if key in out:
+            continue
+        cash_obs = cash.get(key)
+        securities_obs = securities.get(key)
+        if cash_obs is None and securities_obs is None:
+            continue
+        template = cash_obs or securities_obs
+        if template is None:
+            continue
+        out[key] = FactObservation(
+            metric="cash_and_investments",
+            concept="composite_cash_plus_short_term_investments",
+            unit=template.unit,
+            value=(cash_obs.value if cash_obs is not None else 0.0)
+            + (securities_obs.value if securities_obs is not None else 0.0),
+            period_start=template.period_start,
+            period_end=template.period_end,
+            fiscal_year=template.fiscal_year,
+            fiscal_period=template.fiscal_period,
+            form=template.form,
+            filed_date=max(cash_obs.filed_date if cash_obs else "", securities_obs.filed_date if securities_obs else ""),
+            accession_nodash=template.accession_nodash,
+            frame=template.frame,
+            concept_rank=policy.composite_debt_concept_rank + 2,
+        )
+    return out
+
+
 def build_composite_capex_map(
     companyfacts: dict[str, Any],
     policy: SecIngestionPolicy | None = None,
@@ -895,6 +982,7 @@ def build_financial_statement_rows(
     }
     metric_maps["capital_expenditures"] = build_composite_capex_map(companyfacts, policy)
     metric_maps["total_debt"] = build_debt_map(companyfacts, policy)
+    metric_maps["cash_and_investments"] = build_cash_and_investments_map(companyfacts, policy)
     keys = sorted(set().union(*(set(mapping.keys()) for mapping in metric_maps.values())))
     rows: list[dict[str, Any]] = []
     for period_end, fiscal_period, form in keys:

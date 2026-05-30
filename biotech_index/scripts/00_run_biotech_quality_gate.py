@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import compileall
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,6 +25,15 @@ LOGGER = logging.getLogger("run_biotech_quality_gate")
 class GateStep:
     name: str
     command: list[str]
+
+
+def compile_biotech_sources() -> None:
+    exclude_re = re.compile(r".*[\\/]_tmp_.*\.py$")
+    ok = True
+    for rel_path in ("biotech_index", "tests/biotech"):
+        ok = compileall.compile_dir(PROJECT_ROOT / rel_path, quiet=1, rx=exclude_re) and ok
+    if not ok:
+        raise SystemExit(1)
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,17 +62,22 @@ def require_executable(name: str) -> None:
 def run_step(step: GateStep) -> None:
     start = time.monotonic()
     print(f"==> {step.name}", flush=True)
-    completed = subprocess.run(step.command, cwd=PROJECT_ROOT)
+    if step.command == ["__compile_biotech_sources__"]:
+        compile_biotech_sources()
+        returncode = 0
+    else:
+        completed = subprocess.run(step.command, cwd=PROJECT_ROOT)
+        returncode = completed.returncode
     elapsed = time.monotonic() - start
-    if completed.returncode != 0:
-        raise SystemExit(f"{step.name} failed with exit code {completed.returncode} after {elapsed:.2f}s")
+    if returncode != 0:
+        raise SystemExit(f"{step.name} failed with exit code {returncode} after {elapsed:.2f}s")
     print(f"<== {step.name} passed in {elapsed:.2f}s", flush=True)
 
 
 def main() -> None:
     args = parse_args()
     steps = [
-        GateStep("compileall", [sys.executable, "-m", "compileall", "-q", "biotech_index", "tests/biotech"]),
+        GateStep("compileall", ["__compile_biotech_sources__"]),
     ]
     if not args.skip_pytest:
         steps.append(

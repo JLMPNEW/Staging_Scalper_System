@@ -42,5 +42,31 @@ def normalize_code(raw: object) -> str:
     return "".join(ch for ch in base if ch.isalnum())[:12]
 
 
-def as_bool(raw: object) -> bool:
-    return str(raw or "").strip().lower() in {"1", "true", "t", "yes", "y"}
+def normalize_submission_identifier(raw: object) -> str:
+    value = re.sub(r"[^A-Z0-9-]+", "", str(raw or "").upper().strip())
+    if not value or not any(ch.isdigit() for ch in value):
+        return ""
+    unsupported = {
+        "510KDENOVOPIPELINE",
+        "510KPIPELINE",
+        "CLASSIREGISTRY",
+        "DISTRIBUTIONONLY",
+        "DMF",
+        "FEI-ONLY",
+        "FEIONLY",
+        "MASTERFILE",
+        "PMA-PIPELINE",
+        "PMAPIPELINE",
+    }
+    return "" if value in unsupported else value
+
+
+def as_bool(raw: object, *, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    return default

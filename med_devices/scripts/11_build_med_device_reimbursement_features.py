@@ -46,6 +46,14 @@ FIELDNAMES = [
     "regional_mac_name",
     "regional_payment_rate",
     "regional_rate_status",
+    "reimbursement_status",
+    "direct_code_evidence",
+    "payment_rate_evidence",
+    "coverage_policy_evidence",
+    "procedure_bundled_flag",
+    "capital_equipment_flag",
+    "diagnostics_lab_flag",
+    "unknown_reimbursement_flag",
     "hard_red_flag",
     "hard_red_flag_reasons",
     "review_reason",
@@ -74,6 +82,7 @@ class ReimbursementPolicy:
     mention_count_boost_cap: float
     low_confidence_hard_flag: bool
     use_fallback_policy_scan_when_unmapped: bool
+    valid_no_rate_statuses: set[str]
     zip_mac_csv: str = ""
     billing_zip: str = ""
 
@@ -98,6 +107,14 @@ class ReimbursementFeatureRow:
     regional_mac_name: str = ""
     regional_payment_rate: float | None = None
     regional_rate_status: str = ""
+    reimbursement_status: str = "unknown"
+    direct_code_evidence: int = 0
+    payment_rate_evidence: int = 0
+    coverage_policy_evidence: int = 0
+    procedure_bundled_flag: int = 0
+    capital_equipment_flag: int = 0
+    diagnostics_lab_flag: int = 0
+    unknown_reimbursement_flag: int = 1
     hard_red_flag: int = 0
     hard_red_flag_reasons: list[str] | None = None
     review_reason: str = ""
@@ -218,6 +235,11 @@ def reimbursement_policy(config: dict[str, Any], *, billing_zip_override: str = 
             "reimbursement_features.use_fallback_policy_scan_when_unmapped",
             True,
         ),
+        valid_no_rate_statuses={
+            str(value).strip().lower()
+            for value in cfg_get(config, "reimbursement_features.valid_no_rate_statuses", [])
+            if str(value).strip()
+        },
         zip_mac_csv=str(cfg_get(config, "reimbursement_features.zip_mac_csv", "") or "").strip(),
         billing_zip=billing_zip_override.strip() or str(cfg_get(config, "reimbursement_features.default_billing_zip", "") or "").strip(),
     )
@@ -615,26 +637,73 @@ RECOGNIZED_BUNDLED_PAYMENT_STATUSES = {
     "bundled_ipps",
     "bundled_opps",
     "bundled_opps_ipps",
+    "cash_fee_sched",
     "cash_pay_or_out_of_pocket",
     "commercial_contract_no_cms",
     "commercial_vision_or_cash_pay",
     "component_pricing_no_direct_cms",
+    "cpt_category_iii",
     "developmental_premarket_no_active_billing",
     "dental_or_cash_pay",
     "enterprise_saas_no_clinical_code",
     "esrd_bundle",
     "external_report_mismatch_guard",
+    "facility_budget",
+    "hospital_overhead_budget",
     "imaging_provider_mpfs_rates",
     "jurisdictional_mac_priced",
     "laboratory_overhead_no_direct_code",
     "large_lab_clfs_array",
+    "not_applicable_ruo_b2b",
+    "ntap_add_on_payment",
+    "opo_cost_pass_through",
+    "opps_asp_passthrough",
     "pharmacy_benefit_or_ncpdp",
+    "pharma_overhead",
     "packaged_apc_asc",
     "packaged_status_n",
     "procedure_rate_mpfs",
     "state_public_health_bundle",
+    "system_budget",
     "upstream_b2b_no_clinical_code",
     "veterinary_no_cms",
+}
+PROCEDURE_BUNDLED_STATUS_TOKENS = {
+    "bundled",
+    "packaged",
+    "procedure",
+    "pass_through",
+    "pass-through",
+    "drg",
+    "ipps",
+    "ntap",
+    "opo",
+    "opps",
+    "apc",
+    "asc",
+}
+CAPITAL_EQUIPMENT_STATUS_TOKENS = {
+    "capital",
+    "capex",
+    "equipment",
+    "facility",
+    "imaging",
+    "overhead",
+    "system",
+    "utilization",
+}
+DIAGNOSTICS_LAB_STATUS_TOKENS = {
+    "assay",
+    "clfs",
+    "cytopathology",
+    "diagnostic",
+    "diagnostics",
+    "genetic",
+    "lab",
+    "laboratory",
+    "molecular",
+    "pathology",
+    "sequencing",
 }
 RATE_EVIDENCE_RESOLVED_REVIEW_REASONS = {
     "code_mapping_without_payment_rate",
@@ -650,6 +719,52 @@ PRODUCT_CODE_REVIEW_REASON_REPLACEMENTS = {
     "product_code_missing_mpfs": "payment_rate_missing_mpfs",
     "product_code_missing_opps": "payment_rate_missing_opps",
 }
+
+
+def has_any_token(text: str, tokens: set[str]) -> bool:
+    normalized = text.lower()
+    return any(token in normalized for token in tokens)
+
+
+def finalize_reimbursement_evidence(row: ReimbursementFeatureRow) -> None:
+    descriptor = " ".join(
+        [
+            row.billing_category,
+            row.payment_rate_status,
+            row.primary_payment_file,
+            row.review_reason,
+            row.regional_rate_status,
+        ]
+    ).lower()
+    status = row.payment_rate_status.strip().lower()
+    row.direct_code_evidence = int(row.reimbursement_code_count > 0)
+    row.payment_rate_evidence = int(row.rate_row_count > 0 or row.regional_rate_status == "local_mac_rate_found")
+    row.coverage_policy_evidence = int(row.policy_evidence_count > 0)
+    row.procedure_bundled_flag = int(
+        status in RECOGNIZED_BUNDLED_PAYMENT_STATUSES
+        or has_any_token(descriptor, PROCEDURE_BUNDLED_STATUS_TOKENS)
+    )
+    row.capital_equipment_flag = int(has_any_token(descriptor, CAPITAL_EQUIPMENT_STATUS_TOKENS))
+    row.diagnostics_lab_flag = int(has_any_token(descriptor, DIAGNOSTICS_LAB_STATUS_TOKENS))
+    if row.review_reason == "cms_reimbursement_data_not_loaded":
+        row.reimbursement_status = "cms_data_not_loaded"
+    elif row.payment_rate_evidence:
+        row.reimbursement_status = "direct_payment_evidence"
+    elif row.procedure_bundled_flag:
+        row.reimbursement_status = "procedure_bundled_or_indirect"
+    elif row.capital_equipment_flag:
+        row.reimbursement_status = "capital_equipment_indirect"
+    elif row.diagnostics_lab_flag:
+        row.reimbursement_status = "diagnostics_lab_pathway"
+    elif row.direct_code_evidence:
+        row.reimbursement_status = "direct_code_no_payment_rate"
+    elif row.coverage_policy_evidence:
+        row.reimbursement_status = "coverage_policy_only"
+    elif row.company_mention_count > 0:
+        row.reimbursement_status = "company_mention_only"
+    else:
+        row.reimbursement_status = "unknown"
+    row.unknown_reimbursement_flag = int(row.reimbursement_status in {"cms_data_not_loaded", "unknown"})
 
 
 def adjusted_classification_review_reason(
@@ -682,7 +797,16 @@ def apply_company_classification(
     row.primary_payment_file = classification.primary_payment_file
     status = classification.payment_rate_status.strip().lower()
     review_reason = adjusted_classification_review_reason(row, classification)
+    missing_rate_reason = row.review_reason in RATE_EVIDENCE_RESOLVED_REVIEW_REASONS
+    valid_no_rate_status = status in policy.valid_no_rate_statuses
     if status in RECOGNIZED_BUNDLED_PAYMENT_STATUSES and row.rate_row_count <= 0:
+        if classification.coverage_score is not None:
+            row.coverage_clarity_score = max(row.coverage_clarity_score, classification.coverage_score)
+        if classification.payment_score is not None:
+            row.payment_adequacy_score = max(row.payment_adequacy_score, classification.payment_score)
+        row.score = blended_score(row.coverage_clarity_score, row.payment_adequacy_score, policy=policy)
+        row.review_reason = review_reason
+    elif valid_no_rate_status and missing_rate_reason:
         if classification.coverage_score is not None:
             row.coverage_clarity_score = max(row.coverage_clarity_score, classification.coverage_score)
         if classification.payment_score is not None:
@@ -789,6 +913,7 @@ def build_rows(
         if row.regional_rate_status == "local_mac_rate_found":
             row.payment_adequacy_score = max(row.payment_adequacy_score, policy.rate_evidence_score)
             row.score = blended_score(row.coverage_clarity_score, row.payment_adequacy_score, policy=policy)
+        finalize_reimbursement_evidence(row)
         if row.review_reason:
             reasons.append(row.review_reason)
         row.hard_red_flag = 1 if policy.low_confidence_hard_flag and reasons else 0
@@ -818,6 +943,16 @@ def build_rows(
                 "primary_payment_file": row.primary_payment_file,
                 "notes": classification.notes if classification else "",
             },
+            "reimbursement_evidence": {
+                "reimbursement_status": row.reimbursement_status,
+                "direct_code_evidence": row.direct_code_evidence,
+                "payment_rate_evidence": row.payment_rate_evidence,
+                "coverage_policy_evidence": row.coverage_policy_evidence,
+                "procedure_bundled_flag": row.procedure_bundled_flag,
+                "capital_equipment_flag": row.capital_equipment_flag,
+                "diagnostics_lab_flag": row.diagnostics_lab_flag,
+                "unknown_reimbursement_flag": row.unknown_reimbursement_flag,
+            },
             "score_weights": {
                 "coverage": policy.coverage_weight,
                 "payment": policy.payment_weight,
@@ -841,10 +976,13 @@ def upsert_feature_rows(conn: Any, rows: list[ReimbursementFeatureRow]) -> int:
             company_mention_count, mapped_product_code_count, reimbursement_code_count,
             rate_row_count, billing_category, payment_rate_status, primary_payment_file,
             regional_mac_name, regional_payment_rate, regional_rate_status,
+            reimbursement_status, direct_code_evidence, payment_rate_evidence,
+            coverage_policy_evidence, procedure_bundled_flag, capital_equipment_flag,
+            diagnostics_lab_flag, unknown_reimbursement_flag,
             hard_red_flag, hard_red_flag_reasons, review_reason,
             payload_json, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(asof_date, company_id) DO UPDATE SET
             ticker = excluded.ticker,
             company_name = excluded.company_name,
@@ -862,6 +1000,14 @@ def upsert_feature_rows(conn: Any, rows: list[ReimbursementFeatureRow]) -> int:
             regional_mac_name = excluded.regional_mac_name,
             regional_payment_rate = excluded.regional_payment_rate,
             regional_rate_status = excluded.regional_rate_status,
+            reimbursement_status = excluded.reimbursement_status,
+            direct_code_evidence = excluded.direct_code_evidence,
+            payment_rate_evidence = excluded.payment_rate_evidence,
+            coverage_policy_evidence = excluded.coverage_policy_evidence,
+            procedure_bundled_flag = excluded.procedure_bundled_flag,
+            capital_equipment_flag = excluded.capital_equipment_flag,
+            diagnostics_lab_flag = excluded.diagnostics_lab_flag,
+            unknown_reimbursement_flag = excluded.unknown_reimbursement_flag,
             hard_red_flag = excluded.hard_red_flag,
             hard_red_flag_reasons = excluded.hard_red_flag_reasons,
             review_reason = excluded.review_reason,
@@ -888,6 +1034,14 @@ def upsert_feature_rows(conn: Any, rows: list[ReimbursementFeatureRow]) -> int:
                 row.regional_mac_name,
                 row.regional_payment_rate,
                 row.regional_rate_status,
+                row.reimbursement_status,
+                row.direct_code_evidence,
+                row.payment_rate_evidence,
+                row.coverage_policy_evidence,
+                row.procedure_bundled_flag,
+                row.capital_equipment_flag,
+                row.diagnostics_lab_flag,
+                row.unknown_reimbursement_flag,
                 row.hard_red_flag,
                 ";".join(row.hard_red_flag_reasons or []),
                 row.review_reason,

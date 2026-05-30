@@ -221,6 +221,30 @@ def to_int(raw: object, default: int = 0) -> int:
     return int(round(to_float(raw, float(default))))
 
 
+def optional_market_int(raw: object, *, field: str, ticker: object) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return int(raw)
+    text = str(raw).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in {"true", "yes", "y", "on"}:
+        return 1
+    if lowered in {"false", "no", "n", "off"}:
+        return 0
+    try:
+        value = float(text)
+    except ValueError:
+        LOGGER.warning("Ignoring non-numeric market %s for %s: %r", field, ticker, raw)
+        return None
+    if math.isnan(value) or math.isinf(value):
+        LOGGER.warning("Ignoring non-finite market %s for %s: %r", field, ticker, raw)
+        return None
+    return int(round(value))
+
+
 def as_bool(raw: object) -> bool:
     return str(raw or "").strip().lower() in {"1", "true", "yes", "y"}
 
@@ -1242,9 +1266,17 @@ def compute_feature_row(
             "market_source": str(market.get("source") if market else ""),
             "market_asof_date": str(market.get("asof_date") if market else ""),
             "market_price_adjustment": str(market.get("price_adjustment") if market else ""),
-            "market_is_adjusted": int(to_float(market.get("is_adjusted") if market else None, 0.0)),
+            "market_is_adjusted": optional_market_int(
+                market.get("is_adjusted") if market else None,
+                field="is_adjusted",
+                ticker=ticker,
+            ),
             "market_last_bar_date": str(market.get("last_bar_date") if market else ""),
-            "market_bar_count": to_int(market.get("bar_count") if market else None),
+            "market_bar_count": optional_market_int(
+                market.get("bar_count") if market else None,
+                field="bar_count",
+                ticker=ticker,
+            ),
             "market_data_quality": str(market.get("market_data_quality") if market else ""),
             "going_concern_status": going_status,
             "latest_periodic_going_concern_status": latest_gc_status,

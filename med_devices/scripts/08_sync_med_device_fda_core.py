@@ -29,7 +29,7 @@ from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
-from med_devices.core.text_norm import normalize_org_name  # noqa: E402
+from med_devices.core.text_norm import as_bool, normalize_org_name, normalize_submission_identifier  # noqa: E402
 
 
 LOGGER = logging.getLogger("sync_med_device_fda_core")
@@ -103,17 +103,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def as_bool(raw: object, *, default: bool) -> bool:
-    if raw is None:
-        return default
-    text = str(raw).strip().lower()
-    if text in {"1", "true", "yes", "y", "on"}:
-        return True
-    if text in {"0", "false", "no", "n", "off"}:
-        return False
-    return default
-
-
 def to_float(raw: object) -> float | None:
     try:
         value = float(str(raw).strip())
@@ -153,6 +142,7 @@ def read_csv_flexible(path: Path) -> list[dict[str, str]]:
                 return [{str(key): str(value or "") for key, value in row.items()} for row in reader]
         except UnicodeDecodeError as exc:
             last_error = exc
+            continue
     raise ValueError(f"Could not decode CSV {path}: {last_error}")
 
 
@@ -177,25 +167,6 @@ def split_multi_value(raw: object) -> list[str]:
             out.append(value)
             seen.add(value)
     return out
-
-
-def normalize_submission_identifier(raw: object) -> str:
-    value = re.sub(r"[^A-Z0-9-]+", "", str(raw or "").upper().strip())
-    if not value or not any(ch.isdigit() for ch in value):
-        return ""
-    unsupported = {
-        "510KDENOVOPIPELINE",
-        "510KPIPELINE",
-        "CLASSIREGISTRY",
-        "DISTRIBUTIONONLY",
-        "DMF",
-        "FEI-ONLY",
-        "FEIONLY",
-        "MASTERFILE",
-        "PMA-PIPELINE",
-        "PMAPIPELINE",
-    }
-    return "" if value in unsupported else value
 
 
 def quote_openfda_value(value: str) -> str:
@@ -225,12 +196,12 @@ def field(payload: dict[str, Any], *names: str) -> str:
 
 
 def severity_weight(classification: object) -> float:
-    text = str(classification or "").strip().lower().replace(" ", "_")
-    if "class_i" in text or text == "i":
+    text = re.sub(r"[^a-z0-9]+", "_", str(classification or "").strip().lower()).strip("_")
+    if text in {"i", "class_i", "class_1", "classi", "class1"}:
         return 5.0
-    if "class_ii" in text or text == "ii":
+    if text in {"ii", "class_ii", "class_2", "classii", "class2"}:
         return 2.0
-    if "class_iii" in text or text == "iii":
+    if text in {"iii", "class_iii", "class_3", "classiii", "class3"}:
         return 0.5
     return 1.0
 
@@ -716,12 +687,32 @@ def upsert_recall(conn: Any, payload: dict[str, Any], *, endpoint_name: str, sou
     key = recall_key(payload, endpoint_name=endpoint_name)
     classification = field(payload, "classification")
     row = conn.execute(
-        "SELECT fda_recall_id FROM fact_fda_recall WHERE recall_key = ? AND source_id = ?",
-        (key, source_id),
+        """
+        SELECT fda_recall_id
+        FROM fact_fda_recall
+        WHERE recall_key = ?
+          AND source_id = ?
+          AND COALESCE(endpoint_name, '') = ?
+        """,
+        (key, source_id, endpoint_name),
     ).fetchone()
+    if row is None:
+        row = conn.execute(
+            """
+            SELECT fda_recall_id
+            FROM fact_fda_recall
+            WHERE recall_key = ?
+              AND source_id = ?
+              AND COALESCE(endpoint_name, '') = ''
+            ORDER BY fda_recall_id
+            LIMIT 1
+            """,
+            (key, source_id),
+        ).fetchone()
     now = utc_now()
     values = (
         key,
+        endpoint_name,
         manufacturer_id,
         product_code or None,
         field(payload, "recall_number", "res_event_number"),
@@ -742,24 +733,25 @@ def upsert_recall(conn: Any, payload: dict[str, Any], *, endpoint_name: str, sou
         conn.execute(
             """
             INSERT INTO fact_fda_recall(
-                recall_key, company_id, fda_manufacturer_id, product_code, recall_number, event_id,
+                recall_key, endpoint_name, company_id, fda_manufacturer_id, product_code, recall_number, event_id,
                 classification, severity_weight, status, recalling_firm, reason_for_recall,
                 recall_initiation_date, center_classification_date, termination_date, source_id,
                 payload_json, created_at, updated_at
             )
             VALUES (
-                ?,
+                ?, ?,
                 (SELECT parent_company_id FROM dim_fda_manufacturer WHERE fda_manufacturer_id = ?),
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
-            (values[0], values[1], *values[1:], now),
+            (values[0], values[1], values[2], *values[2:], now),
         )
     else:
         conn.execute(
             """
             UPDATE fact_fda_recall
-            SET company_id = (SELECT parent_company_id FROM dim_fda_manufacturer WHERE fda_manufacturer_id = ?),
+            SET endpoint_name = ?,
+                company_id = (SELECT parent_company_id FROM dim_fda_manufacturer WHERE fda_manufacturer_id = ?),
                 fda_manufacturer_id = ?,
                 product_code = ?,
                 recall_number = ?,
@@ -777,7 +769,7 @@ def upsert_recall(conn: Any, payload: dict[str, Any], *, endpoint_name: str, sou
                 updated_at = ?
             WHERE fda_recall_id = ?
             """,
-            (values[1], *values[1:], int(row["fda_recall_id"])),
+            (values[1], values[2], *values[2:], int(row["fda_recall_id"])),
         )
     return 1
 

@@ -29,7 +29,7 @@ from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
-from med_devices.core.text_norm import normalize_code  # noqa: E402
+from med_devices.core.text_norm import as_bool, normalize_code  # noqa: E402
 
 
 LOGGER = logging.getLogger("sync_med_device_cms_reimbursement")
@@ -141,17 +141,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-payment-files", action="store_true")
     parser.add_argument("--allow-partial", action="store_true")
     return parser.parse_args()
-
-
-def as_bool(raw: object, *, default: bool) -> bool:
-    if raw is None:
-        return default
-    text = str(raw).strip().lower()
-    if text in {"1", "true", "yes", "y", "on"}:
-        return True
-    if text in {"0", "false", "no", "n", "off"}:
-        return False
-    return default
 
 
 def to_float(raw: object) -> float | None:

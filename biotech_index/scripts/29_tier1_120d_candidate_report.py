@@ -207,7 +207,7 @@ def as_bool(raw: object, default: bool = False) -> bool:
 def is_sparse_test_pass(row: dict[str, Any]) -> bool:
     value = str(row.get("test_calibration_pass") or "").strip().lower()
     state = str(row.get("test_calibration_pass_state") or "").strip().lower()
-    return value in {"", "sparse_data"} or state == "sparse_data"
+    return value == "sparse_data" or state == "sparse_data"
 
 
 def bootstrap_ci_status(boot: dict[str, Any]) -> str:

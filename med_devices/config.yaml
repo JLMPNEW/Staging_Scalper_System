@@ -180,6 +180,25 @@ yahoo_price_ingestion:
     - 503
     - 504
 
+market_snapshot_ingestion:
+  output_csv: "../output/med_devices_reports/med_device_market_snapshot_coverage.csv"
+  primary_source_id: "ib_market_data"
+  fallback_source_id: "yahoo_finance_backup"
+  yahoo_quote_url_template: "https://query1.finance.yahoo.com/v7/finance/quote"
+  yahoo_batch_size: 50
+  yfinance_share_history_days: 370
+  request_sleep_sec: 0.20
+  http_timeout_sec: 30.0
+  user_agent: "${MED_DEVICES_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  ib_host: "127.0.0.1"
+  ib_port: 7497
+  ib_client_id: 7731
+  ib_default_exchange: "SMART"
+  ib_default_currency: "USD"
+  ib_snapshot_timeout_sec: 3.0
+  ib_max_consecutive_misses: 5
+  ib_generic_tick_list: "258"
+
 sec_ingestion:
   output_csv: "../output/med_devices_reports/med_device_sec_ingestion_coverage.csv"
   submissions_source_id: "sec_submissions"
@@ -272,6 +291,7 @@ sec_ingestion:
       - FinanceCosts
       - InterestExpenseOnBorrowings
     cash_and_investments:
+      - CashCashEquivalentsAndShortTermInvestments
       - CashAndCashEquivalentsAtCarryingValue
       - CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents
       - CashAndCashEquivalentsAtFairValue
@@ -290,6 +310,22 @@ sec_ingestion:
       - WeightedAverageNumberOfBasicSharesOutstanding
       - WeightedAverageShares
       - NumberOfSharesIssued
+  cash_and_investments_concepts:
+    combined:
+      - CashCashEquivalentsAndShortTermInvestments
+      - CashCashEquivalentsAndMarketableSecurities
+    cash:
+      - CashAndCashEquivalentsAtCarryingValue
+      - CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents
+      - CashAndCashEquivalentsAtFairValue
+      - CashAndCashEquivalents
+    securities:
+      - ShortTermInvestments
+      - ShortTermInvestmentsAvailableForSale
+      - MarketableSecurities
+      - MarketableSecuritiesCurrent
+      - AvailableForSaleSecuritiesCurrent
+      - DebtSecuritiesAvailableForSaleCurrent
   debt_concepts:
     direct:
       - DebtAndFinanceLeaseObligations
@@ -340,6 +376,12 @@ sec_ingestion:
 
 financial_features:
   output_csv: "../output/med_devices_reports/med_device_financial_valuation_features.csv"
+  share_count_override_csv: "data/share_count_overrides.csv"
+  share_count_sources:
+    - "ib_market_data"
+    - "yahoo_finance_backup"
+  share_count_max_staleness_days: 14
+  allow_sec_weighted_average_share_fallback: false
   market_max_staleness_days: 7
   require_adjusted_prices: true
   core_calibration_min_fact_years: 7.0
@@ -458,6 +500,7 @@ fda_entity_linking:
   ambiguity_margin: 5.0
   extra_alias_csv: "data/fda_company_aliases.csv"
   manual_overrides_csv: "data/fda_manufacturer_overrides.csv"
+  product_line_overrides_csv: "data/fda_product_line_overrides.csv"
   max_candidate_summary: 5
   high_volume_unmapped_record_threshold: 50
   update_fact_company_ids: true
@@ -639,11 +682,15 @@ reimbursement_features:
   mention_count_boost_cap: 8.0
   low_confidence_hard_flag: false
   use_fallback_policy_scan_when_unmapped: true
+  valid_no_rate_statuses:
+    - "clfs_fee_schedule"
+    - "active_mac_gapfill_price_pending"
 
 reimbursement_entity_linking:
   output_csv: "../output/med_devices_reports/med_device_reimbursement_entity_mapping.csv"
   unmapped_output_csv: "../output/med_devices_reports/med_device_reimbursement_unmapped_companies.csv"
   override_csv: "data/reimbursement_mapping_overrides.csv"
+  resolved_classification_csv: "data/reimbursement_company_classifications.csv"
   manual_rate_csv: "data/reimbursement_manual_payment_rates.csv"
   manual_rate_audit_csv: "../output/med_devices_reports/med_device_reimbursement_manual_rate_audit.csv"
   manual_rate_validation_tolerance_pct: 5.0
@@ -707,7 +754,7 @@ ib_price_validation:
     - low_ib_avg_dollar_volume
 
 scoring:
-  model_version: "med_device_score_v1_2026_05_percentile"
+  model_version: "med_device_score_v5_2026_05_sentiment_fallbacks"
   output_csv: "../output/med_devices_reports/med_device_daily_composite_scores.csv"
   review_pack_dir: "../output/med_devices_reports/score_review_pack"
   backtest_output_csv: "../output/med_devices_reports/med_device_score_backtest.csv"
@@ -727,22 +774,36 @@ scoring:
     valuation: 50.0
     technical_entry: 50.0
     sentiment_catalyst: 50.0
+  sentiment_catalyst_proxy:
+    annual_revenue_growth_fallback_enabled: true
+    annual_revenue_growth_min_revenue_ttm: 10000000.0
+    annual_revenue_growth_weight: 0.75
+    rd_scale_fallback_enabled: true
+    rd_scale_max_revenue_ttm: 5000000.0
+    rd_scale_weight: 0.50
+    pre_revenue_runway_weight: 0.60
+    pre_revenue_rd_scale_weight: 0.40
+    rd_scale_log_transform: true
   composite_weights:
-    fundamental_quality: 0.20
-    durable_growth: 0.10
-    fda_product: 0.17
-    reimbursement: 0.15
-    valuation: 0.18
-    technical_entry: 0.15
+    fundamental_quality: 0.25
+    durable_growth: 0.15
+    fda_product: 0.15
+    reimbursement: 0.10
+    valuation: 0.20
+    technical_entry: 0.10
     sentiment_catalyst: 0.05
   gates:
-    composite_min: 70
-    fundamental_quality_min: 60
-    fda_product_min: 50
+    composite_min: 75
+    fundamental_quality_min: 70
+    durable_growth_min: 60
+    fda_product_min: 60
     reimbursement_min: 45
-    valuation_min: 55
-    technical_entry_min: 50
-    value_trap_max: 40
+    valuation_min: 60
+    technical_entry_min: 55
+    data_completeness_min: 90
+    min_avg_dollar_volume_60d: 1000000
+    watchlist_min: 60
+    value_trap_max: 20
     value_trap_hard_max: 85
 
 stage_plan:

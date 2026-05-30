@@ -17,8 +17,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from biotech_index.core.db import connect  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.market_policy import scoring_market_sources  # noqa: E402
 from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
 
 
@@ -87,6 +87,15 @@ def csv_rows_by_ticker(path: Path) -> dict[str, dict[str, str]]:
 
 def as_bool(raw: object) -> bool:
     return str(raw or "").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def connect_readonly(db_path: Path, *, timeout_sec: float) -> sqlite3.Connection:
+    if not db_path.exists():
+        raise FileNotFoundError(f"SQLite database not found: {db_path}")
+    conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout_sec)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    return conn
 
 
 def fnum(raw: object, default: float = 0.0) -> float:
@@ -158,7 +167,7 @@ def cleanup_classification(
     return "manual_review", "active in companies but not scored"
 
 
-def load_active_unscored_rows(conn: sqlite3.Connection, asof_date: str) -> list[sqlite3.Row]:
+def load_active_unscored_rows(conn: sqlite3.Connection, asof_date: str, market_source: str) -> list[sqlite3.Row]:
     return conn.execute(
         """
         SELECT c.company_id, c.ticker, c.company_name, c.sector, c.industry, c.source_screen_decision,
@@ -168,13 +177,13 @@ def load_active_unscored_rows(conn: sqlite3.Connection, asof_date: str) -> list[
                cv.asof_date AS commercial_asof, cv.data_quality AS commercial_data_quality
         FROM companies c
         LEFT JOIN daily_scores s ON s.company_id = c.company_id AND s.asof_date = ?
-        LEFT JOIN market_features_daily mf ON mf.company_id = c.company_id AND mf.asof_date = ?
+        LEFT JOIN market_features_daily mf ON mf.company_id = c.company_id AND mf.asof_date = ? AND mf.source = ?
         LEFT JOIN forward_guidance_features_daily fg ON fg.company_id = c.company_id AND fg.asof_date = ?
         LEFT JOIN commercial_value_features_daily cv ON cv.company_id = c.company_id AND cv.asof_date = ?
         WHERE c.is_active = 1 AND s.company_id IS NULL
         ORDER BY c.ticker
         """,
-        (asof_date, asof_date, asof_date, asof_date),
+        (asof_date, asof_date, market_source, asof_date, asof_date),
     ).fetchall()
 
 
@@ -183,9 +192,10 @@ def build_rows(
     *,
     asof_date: str,
     final_universe: dict[str, dict[str, str]],
+    market_source: str,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for row in load_active_unscored_rows(conn, asof_date):
+    for row in load_active_unscored_rows(conn, asof_date, market_source):
         ticker = normalize_ticker(row["ticker"])
         final_row = final_universe.get(ticker, {})
         action, reason = cleanup_classification(row, final_row)
@@ -246,10 +256,19 @@ def main() -> None:
         base_dir=base_dir,
     )
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
-    with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
+    market_sources = scoring_market_sources(config)
+    market_source = (
+        market_sources[0]
+        if market_sources
+        else str(cfg_get(config, "commercial_value.preferred_market_source", "yahoo_adjusted"))
+    )
+    conn = connect_readonly(db_path, timeout_sec=sqlite_timeout_sec)
+    try:
         asof_date = str(args.asof or latest_score_date(conn))[:10]
         final_universe = csv_rows_by_ticker(final_universe_csv)
-        rows = build_rows(conn, asof_date=asof_date, final_universe=final_universe)
+        rows = build_rows(conn, asof_date=asof_date, final_universe=final_universe, market_source=market_source)
+    finally:
+        conn.close()
 
     default_output = output_root / asof_date.replace("-", "") / "biotech_universe_coverage_audit.csv"
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else default_output

@@ -27,7 +27,7 @@ from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 
 LOGGER = logging.getLogger("publish_biotech_reports")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-CALIBRATION_SHADOW_MODULE = PACKAGE_ROOT / "scripts" / "28_calibrate_biotech_opportunity.py"
+DEFAULT_CALIBRATION_SHADOW_MODULE = PACKAGE_ROOT / "scripts" / "28_calibrate_biotech_opportunity.py"
 
 
 def first_nonblank(*values: object) -> object:
@@ -59,6 +59,7 @@ TOP_SCORE_FIELDS = [
     "core_structural_veto_flag",
     "core_structural_veto_reasons",
     "rank_demoted_by_core_veto",
+    "event_hard_weakness_reasons",
     "data_quality_confidence_multiplier",
     "clinical_risk_drag",
     "investment_risk_drag",
@@ -372,7 +373,7 @@ def apply_action_tier(
         reason = f"rank<={allocation_rank_max} and score>={allocation_score_min:g}"
         allocation_flag = 1
         research_flag = 0
-    elif score >= research_score_min and (rank <= 0 or rank <= research_rank_max):
+    elif rank > 0 and score >= research_score_min and rank <= research_rank_max:
         tier = "research_watchlist"
         reason = f"rank<={research_rank_max} and score>={research_score_min:g}"
         allocation_flag = 0
@@ -611,6 +612,13 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
     core_veto_reasons = core_veto.get("reasons", risk_flags.get("core_structural_veto_reasons", "")) if isinstance(core_veto, dict) else ""
     if isinstance(core_veto_reasons, list):
         core_veto_reasons = "|".join(str(reason) for reason in core_veto_reasons)
+    sec_catalyst_recency_days = sec_events.get("sec_catalyst_recency_days", "") if isinstance(sec_events, dict) else ""
+    sec_catalyst_recency_basis = sec_events.get("sec_catalyst_recency_basis", "") if isinstance(sec_events, dict) else ""
+    latest_positive_sec_event_age_days = (
+        ""
+        if sec_catalyst_recency_basis == "pdufa_event_date_proximity"
+        else sec_catalyst_recency_days
+    )
     return {
         "asof_date": row.get("asof_date", ""),
         "rank": row.get("rank", ""),
@@ -640,6 +648,7 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "rank_quality_cap_vetoed": row.get("rank_quality_cap_vetoed", score_components.get("rank_quality_cap_vetoed", "") if isinstance(score_components, dict) else ""),
         "rank_quality_cap_veto_reasons": row.get("rank_quality_cap_veto_reasons", "|".join(str(reason) for reason in score_components.get("rank_quality_cap_veto_reasons", [])) if isinstance(score_components, dict) and isinstance(score_components.get("rank_quality_cap_veto_reasons"), list) else score_components.get("rank_quality_cap_veto_reasons", "") if isinstance(score_components, dict) else ""),
         "event_hard_reasons": row.get("event_hard_weakness_reasons", "|".join(str(reason) for reason in score_components.get("production_policy_event_hard_reasons", [])) if isinstance(score_components, dict) and isinstance(score_components.get("production_policy_event_hard_reasons"), list) else risk_flags.get("event_hard_weakness_reasons", "") if isinstance(risk_flags, dict) else ""),
+        "event_hard_weakness_reasons": row.get("event_hard_weakness_reasons", "|".join(str(reason) for reason in score_components.get("production_policy_event_hard_reasons", [])) if isinstance(score_components, dict) and isinstance(score_components.get("production_policy_event_hard_reasons"), list) else risk_flags.get("event_hard_weakness_reasons", "") if isinstance(risk_flags, dict) else ""),
         "commercial_quality_score": row.get("commercial_quality_score", commercial_value.get("commercial_quality_score", "") if isinstance(commercial_value, dict) else ""),
         "commercial_value_score": row.get("commercial_value_score", commercial_value.get("commercial_value_score", "") if isinstance(commercial_value, dict) else ""),
         "forward_guidance_score": row.get("forward_guidance_score", score_components.get("forward_guidance_score", "") if isinstance(score_components, dict) else ""),
@@ -709,15 +718,30 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "sec_catalyst_latest_filing_date": sec_events.get("sec_catalyst_latest_filing_date", "") if isinstance(sec_events, dict) else "",
         "sec_catalyst_latest_event_date": sec_events.get("sec_catalyst_latest_event_date", "") if isinstance(sec_events, dict) else "",
         "sec_catalyst_latest_event_type": sec_events.get("sec_catalyst_latest_event_type", "") if isinstance(sec_events, dict) else "",
-        "sec_catalyst_recency_days": sec_events.get("sec_catalyst_recency_days", "") if isinstance(sec_events, dict) else "",
-        "sec_catalyst_recency_basis": sec_events.get("sec_catalyst_recency_basis", "") if isinstance(sec_events, dict) else "",
+        "sec_catalyst_recency_days": sec_catalyst_recency_days,
+        "sec_catalyst_recency_basis": sec_catalyst_recency_basis,
         "sec_catalyst_event_types": sec_events.get("sec_catalyst_event_types", "") if isinstance(sec_events, dict) else "",
         "sec_event_recency_decay_enabled": sec_events.get("sec_catalyst_recency_decay_enabled", "") if isinstance(sec_events, dict) else "",
         "sec_event_recency_half_life_days": sec_events.get("sec_catalyst_decay_half_life_days", "") if isinstance(sec_events, dict) else "",
-        "sec_event_pre_decay_points": sec_events.get("sec_catalyst_raw_score", "") if isinstance(sec_events, dict) else "",
-        "sec_event_post_decay_points": sec_events.get("sec_catalyst_score_used", "") if isinstance(sec_events, dict) else "",
-        "sec_event_decay_delta": sec_events.get("sec_catalyst_decay_delta", "") if isinstance(sec_events, dict) else "",
-        "latest_positive_sec_event_age_days": sec_events.get("sec_catalyst_recency_days", "") if isinstance(sec_events, dict) else "",
+        "sec_event_pre_decay_points": first_nonblank(
+            sec_events.get("sec_event_pre_decay_points", ""),
+            sec_events.get("sec_catalyst_raw_score", ""),
+        )
+        if isinstance(sec_events, dict)
+        else "",
+        "sec_event_post_decay_points": first_nonblank(
+            sec_events.get("sec_event_post_decay_points", ""),
+            sec_events.get("sec_catalyst_score_used", ""),
+        )
+        if isinstance(sec_events, dict)
+        else "",
+        "sec_event_decay_delta": first_nonblank(
+            sec_events.get("sec_event_decay_delta", ""),
+            sec_events.get("sec_catalyst_decay_delta", ""),
+        )
+        if isinstance(sec_events, dict)
+        else "",
+        "latest_positive_sec_event_age_days": latest_positive_sec_event_age_days,
         "latest_positive_sec_event_type": sec_events.get("sec_catalyst_latest_event_type", "") if isinstance(sec_events, dict) else "",
         "sec_dilution_event_count": sec_events.get("dilution_event_count", "") if isinstance(sec_events, dict) else "",
         "sec_negative_clinical_event_count": sec_events.get("negative_clinical_event_count", "") if isinstance(sec_events, dict) else "",
@@ -726,8 +750,15 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def load_calibration_module() -> Any:
-    module_path = CALIBRATION_SHADOW_MODULE
+def load_calibration_module(config: dict[str, Any] | None = None) -> Any:
+    module_path = (
+        resolve_path(
+            cfg_get(config, "biotech_reports.calibration_shadow_module"),
+            base_dir=PACKAGE_ROOT,
+        )
+        if config and cfg_get(config, "biotech_reports.calibration_shadow_module")
+        else DEFAULT_CALIBRATION_SHADOW_MODULE
+    )
     spec = importlib.util.spec_from_file_location("biotech_tier1_calibration_shadow", module_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load calibration module from {module_path}")
@@ -753,7 +784,7 @@ def build_shadow_top_rows(
     top_n = int(float(shadow.get("top_n", 20)))
     strict_feature_lag = str(shadow.get("strict_feature_lag", "false")).strip().lower() in {"1", "true", "yes", "on"}
 
-    calibration = load_calibration_module()
+    calibration = load_calibration_module(config)
     params = calibration.load_calibration_params(config)
     specs = {spec.candidate_name: spec for spec in calibration.generate_weight_specs(config)}
     policies = {policy.policy_name: policy for policy in calibration.generate_selection_policies(config)}
@@ -995,7 +1026,13 @@ def build_alerts(
         return alerts
 
     for row in current_scores:
-        company_id = int(row["company_id"])
+        try:
+            company_id = int(row.get("company_id") or 0)
+        except (TypeError, ValueError):
+            company_id = 0
+        if company_id <= 0:
+            LOGGER.warning("Skipping alert row without a valid company_id: ticker=%s", row.get("ticker", ""))
+            continue
         prev = previous_scores.get(company_id)
         if not prev:
             if int(row.get("rank") or 999999) <= top_n:

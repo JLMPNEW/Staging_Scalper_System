@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from statistics import median
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, TypeVar
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +48,7 @@ DEFAULT_ROUND_TRIP_COST_BPS = 40.0
 DEFAULT_LCB_Z = 1.0
 DEFAULT_CVAR_Q = 0.05
 DEFAULT_MIN_SELECTED_OBSERVATIONS = 30
+T = TypeVar("T")
 DEFAULT_MIN_ASOF_DATES = 8
 DEFAULT_MIN_NET_LCB_RETURN_PCT = 0.0
 DEFAULT_MIN_SORTINO = 0.0
@@ -746,7 +747,7 @@ def forward_return(bars: list[Bar], asof: date, horizon: int, *, next_bar_entry:
     if not bars:
         return None, "", ""
     days = [bar.day for bar in bars]
-    entry_idx = bisect.bisect_right(days, asof) if next_bar_entry else bisect.bisect_right(days, asof) - 1
+    entry_idx = bisect.bisect_right(days, asof) if next_bar_entry else bisect.bisect_left(days, asof) - 1
     if entry_idx < 0 or entry_idx >= len(bars):
         return None, "", ""
     target_idx = entry_idx + horizon
@@ -768,6 +769,7 @@ def add_forward_returns(
     next_bar_entry: bool,
 ) -> None:
     cost = round_trip_cost_bps / 10000.0
+    missing_return_counts: defaultdict[tuple[int, str], int] = defaultdict(int)
     for row in rows:
         ticker = normalize_ticker(row.get("ticker"))
         asof = parse_date(row.get("asof_date"))
@@ -779,6 +781,7 @@ def add_forward_returns(
                 row[f"{prefix}_net_return"] = ""
                 row[f"{prefix}_entry_date"] = ""
                 row[f"{prefix}_target_date"] = ""
+                missing_return_counts[(horizon, "invalid_asof_date")] += 1
                 continue
             ret, entry_date, target_date = forward_return(bars, asof, horizon, next_bar_entry=next_bar_entry)
             row[f"{prefix}_return"] = ret if ret is not None else ""
@@ -786,6 +789,22 @@ def add_forward_returns(
             row[f"{prefix}_entry_date"] = entry_date
             row[f"{prefix}_target_date"] = target_date
             row[f"{prefix}_round_trip_cost_bps"] = round_trip_cost_bps
+            if ret is None:
+                if not bars:
+                    reason = "no_market_bars"
+                elif not entry_date:
+                    reason = "no_entry_bar"
+                elif not target_date:
+                    reason = "insufficient_horizon_bars"
+                else:
+                    reason = "invalid_entry_close"
+                missing_return_counts[(horizon, reason)] += 1
+    if missing_return_counts:
+        summary = ", ".join(
+            f"{horizon}d:{reason}={count}"
+            for (horizon, reason), count in sorted(missing_return_counts.items())
+        )
+        LOGGER.warning("Forward-return coverage gaps: %s", summary)
 
 
 def mean(values: list[float]) -> float | None:
@@ -1287,6 +1306,17 @@ def split_rows_by_completed_return_date(
             if str(row.get("asof_date") or "") and to_float(row.get(ret_key)) is not None
         }
     )
+    all_dates = sorted({str(row.get("asof_date") or "") for row in rows if str(row.get("asof_date") or "")})
+    dropped_dates = sorted(set(all_dates) - set(eligible_dates))
+    if dropped_dates:
+        LOGGER.warning(
+            "Horizon %sd: dropped %d/%d as-of dates with no completed forward returns; first=%s last=%s",
+            horizon,
+            len(dropped_dates),
+            len(all_dates),
+            dropped_dates[0],
+            dropped_dates[-1],
+        )
     if len(eligible_dates) < 2:
         LOGGER.warning(
             "Horizon %sd: fewer than two eligible dates with completed forward returns; test set will be empty.",
@@ -1309,7 +1339,7 @@ def split_rows_by_completed_return_date(
     )
 
 
-def run_indexed_jobs[T](
+def run_indexed_jobs(
     jobs: list[Any],
     worker: Callable[[Any], T],
     *,
