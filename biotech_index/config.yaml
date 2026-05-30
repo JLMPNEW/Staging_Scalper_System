@@ -387,6 +387,7 @@ commercial_value:
     commercial: 80.0
     revenue_positive: 45.0
     pre_revenue: 15.0
+  # Disabled after 2026-05-28 validation: worsened 60d/120d holdout under current V2 weights.
   upside_capacity_curve:
     enabled: false
     curve: "log_linear"
