@@ -41,6 +41,20 @@ SCORE_FIELDS = [
     "fundamental_quality_score",
     "durable_growth_score",
     "fda_product_score",
+    "fda_product_score_legacy",
+    "fda_alpha_score",
+    "fda_safety_score",
+    "fda_clearance_velocity_score",
+    "fda_evidence_quality_score",
+    "fda_event_risk_score",
+    "fda_signal_mode",
+    "fda_signal_direction",
+    "fda_signal_reliability",
+    "fda_score_source",
+    "fda_gate_mode",
+    "fda_policy_reason",
+    "fda_gate_excluded",
+    "fda_component_weight",
     "reimbursement_score",
     "reimbursement_status",
     "direct_code_evidence",
@@ -361,6 +375,20 @@ def write_markdown(
                 f"overlay={row.get('technical_overlay_status') or row.get('entry_status') or 'unknown'} "
                 f"weight={first_float(row.get('technical_component_weight')):.2f}"
                 for row in tier1[:25]
+            ] or ["- None"]
+        ),
+        "",
+        "## FDA Policy Snapshot",
+        *(
+            [
+                f"- {row.get('rank')}. {row.get('ticker')}: "
+                f"fda={first_float(row.get('fda_product_score')):.2f} "
+                f"legacy={first_float(row.get('fda_product_score_legacy'), row.get('fda_product_score')):.2f} "
+                f"alpha={first_float(row.get('fda_alpha_score'), row.get('fda_product_score')):.2f} "
+                f"event_risk={first_float(row.get('fda_event_risk_score')):.2f} "
+                f"mode={row.get('fda_gate_mode') or 'legacy'} "
+                f"source={row.get('fda_score_source') or 'fda_product_score'}"
+                for row in top25
             ] or ["- None"]
         ),
         "",

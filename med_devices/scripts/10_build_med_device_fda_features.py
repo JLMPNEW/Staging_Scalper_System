@@ -22,7 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.fda_states import MANUAL_FDA_REVIEW_STATES, normalize_fda_state  # noqa: E402
 from med_devices.core.text_norm import normalize_ticker  # noqa: E402
@@ -45,11 +45,41 @@ NON_DATA_QUALITY_REVIEW_REASONS = {
     "manual_fda_infrastructure_or_indirect_footprint",
     "manual_fda_non_cdrh_or_service_footprint",
 }
+FDA_SIGNAL_LEGACY_BROAD = "legacy_broad"
+FDA_SIGNAL_CALIBRATED_ALPHA = "calibrated_alpha"
+FDA_SIGNAL_RISK_VETO_ONLY = "risk_veto_only"
+FDA_SIGNAL_NEUTRAL_OVERLAY = "neutral_overlay"
+FDA_SIGNAL_DISABLED = "disabled"
+FDA_SIGNAL_MODES = {
+    FDA_SIGNAL_LEGACY_BROAD,
+    FDA_SIGNAL_CALIBRATED_ALPHA,
+    FDA_SIGNAL_RISK_VETO_ONLY,
+    FDA_SIGNAL_NEUTRAL_OVERLAY,
+    FDA_SIGNAL_DISABLED,
+}
+FDA_DIRECTION_POSITIVE = "positive"
+FDA_DIRECTION_INVERSE = "inverse"
+FDA_DIRECTION_NEUTRAL = "neutral"
+FDA_DIRECTIONS = {FDA_DIRECTION_POSITIVE, FDA_DIRECTION_INVERSE, FDA_DIRECTION_NEUTRAL}
+OPTIONAL_FDA_FEATURE_COLUMNS = {
+    "calibration_cohort": "TEXT DEFAULT ''",
+    "fda_product_score_legacy": "REAL DEFAULT 0.0",
+    "fda_alpha_score": "REAL DEFAULT 0.0",
+    "fda_safety_score": "REAL DEFAULT 0.0",
+    "fda_clearance_velocity_score": "REAL DEFAULT 0.0",
+    "fda_evidence_quality_score": "REAL DEFAULT 0.0",
+    "fda_event_risk_score": "REAL DEFAULT 0.0",
+    "fda_signal_mode": "TEXT DEFAULT ''",
+    "fda_signal_direction": "TEXT DEFAULT ''",
+    "fda_signal_reliability": "REAL DEFAULT 0.0",
+    "fda_policy_reason": "TEXT DEFAULT ''",
+}
 FIELDNAMES = [
     "asof_date",
     "company_id",
     "ticker",
     "company_name",
+    "calibration_cohort",
     "approval_count_12m",
     "approval_count_24m",
     "approval_count_36m",
@@ -79,6 +109,16 @@ FIELDNAMES = [
     "regulatory_innovation_score",
     "regulatory_risk_score",
     "fda_product_score",
+    "fda_product_score_legacy",
+    "fda_alpha_score",
+    "fda_safety_score",
+    "fda_clearance_velocity_score",
+    "fda_evidence_quality_score",
+    "fda_event_risk_score",
+    "fda_signal_mode",
+    "fda_signal_direction",
+    "fda_signal_reliability",
+    "fda_policy_reason",
     "raw_fda_red_flag",
     "confirmed_hard_red_flag",
     "hard_red_flag",
@@ -141,6 +181,7 @@ class Company:
     company_id: int
     ticker: str
     company_name: str
+    calibration_cohort: str = ""
 
 
 @dataclass
@@ -149,6 +190,7 @@ class FdaFeatureRow:
     company_id: int
     ticker: str
     company_name: str
+    calibration_cohort: str = ""
     approval_count_12m: int = 0
     approval_count_24m: int = 0
     approval_count_36m: int = 0
@@ -180,6 +222,16 @@ class FdaFeatureRow:
     regulatory_innovation_score: float = 0.0
     regulatory_risk_score: float = 0.0
     fda_product_score: float = 0.0
+    fda_product_score_legacy: float = 0.0
+    fda_alpha_score: float = 0.0
+    fda_safety_score: float = 0.0
+    fda_clearance_velocity_score: float = 0.0
+    fda_evidence_quality_score: float = 0.0
+    fda_event_risk_score: float = 0.0
+    fda_signal_mode: str = FDA_SIGNAL_LEGACY_BROAD
+    fda_signal_direction: str = FDA_DIRECTION_POSITIVE
+    fda_signal_reliability: float = 1.0
+    fda_policy_reason: str = ""
     raw_fda_red_flag: int = 0
     confirmed_hard_red_flag: int = 0
     hard_red_flag: int = 0
@@ -229,10 +281,31 @@ class FdaFeaturePolicy:
     low_mapping_confidence_is_hard_red: bool
     regulatory_risk_weight: float
     regulatory_innovation_weight: float
+    alpha_neutral_score: float = 50.0
+    evidence_quality_data_weight: float = 0.40
+    evidence_quality_mapping_weight: float = 0.35
+    evidence_quality_recency_weight: float = 0.25
+    hard_red_alpha_cap: float = 20.0
+    review_required_alpha_cap: float = 35.0
+    regulatory_watch_alpha_cap: float = 50.0
+    no_data_default_score: float = 50.0
     mapping_confirmed_min_confidence: float = 95.0
     open_class_i_12m_confirmed_min_count: int = 1
     open_class_i_36m_confirmed_min_count: int = 2
     innovation_approval_12m_log_weight: float = 24.0
+
+
+@dataclass(frozen=True)
+class FdaSignalProfile:
+    mode: str = FDA_SIGNAL_CALIBRATED_ALPHA
+    reliability: float = 0.35
+    innovation_direction: str = FDA_DIRECTION_NEUTRAL
+    safety_direction: str = FDA_DIRECTION_POSITIVE
+    innovation_weight: float = 0.35
+    safety_weight: float = 0.45
+    evidence_weight: float = 0.20
+    no_data_score: float | None = None
+    rationale: str = ""
 
 
 def parse_args() -> argparse.Namespace:
@@ -383,6 +456,14 @@ def fda_feature_policy(config: dict[str, Any]) -> FdaFeaturePolicy:
         in {"1", "true", "yes", "y", "on"},
         regulatory_risk_weight=risk_weight,
         regulatory_innovation_weight=innovation_weight,
+        alpha_neutral_score=cfg_float(config, "fda_features.alpha.neutral_score", 50.0),
+        evidence_quality_data_weight=cfg_float(config, "fda_features.alpha.evidence_quality_data_weight", 0.40),
+        evidence_quality_mapping_weight=cfg_float(config, "fda_features.alpha.evidence_quality_mapping_weight", 0.35),
+        evidence_quality_recency_weight=cfg_float(config, "fda_features.alpha.evidence_quality_recency_weight", 0.25),
+        hard_red_alpha_cap=cfg_float(config, "fda_features.alpha.hard_red_cap", 20.0),
+        review_required_alpha_cap=cfg_float(config, "fda_features.alpha.review_required_cap", 35.0),
+        regulatory_watch_alpha_cap=cfg_float(config, "fda_features.alpha.regulatory_watch_cap", 50.0),
+        no_data_default_score=cfg_float(config, "fda_features.alpha.no_data_default_score", 50.0),
         mapping_confirmed_min_confidence=cfg_float(config, "fda_features.review_state.mapping_confirmed_min_confidence", 95.0),
         open_class_i_12m_confirmed_min_count=int(
             cfg_get(config, "fda_features.review_state.open_class_i_12m_confirmed_min_count", 1)
@@ -393,6 +474,120 @@ def fda_feature_policy(config: dict[str, Any]) -> FdaFeaturePolicy:
     )
 
 
+def optional_float(raw: object, default: float | None, *, context: str) -> float | None:
+    if raw is None or str(raw).strip() == "":
+        return default
+    value = to_float(raw)
+    if value is None:
+        raise ValueError(f"Config value must be numeric: {context}")
+    return value
+
+
+def normalized_signal_mode(raw: object, *, context: str) -> str:
+    mode = str(raw or FDA_SIGNAL_CALIBRATED_ALPHA).strip().lower()
+    aliases = {
+        "legacy": FDA_SIGNAL_LEGACY_BROAD,
+        "alpha": FDA_SIGNAL_CALIBRATED_ALPHA,
+        "calibrated": FDA_SIGNAL_CALIBRATED_ALPHA,
+        "risk_veto": FDA_SIGNAL_RISK_VETO_ONLY,
+        "neutral": FDA_SIGNAL_NEUTRAL_OVERLAY,
+        "overlay": FDA_SIGNAL_NEUTRAL_OVERLAY,
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in FDA_SIGNAL_MODES:
+        raise ValueError(f"{context}.mode must be one of {sorted(FDA_SIGNAL_MODES)}, got {mode!r}")
+    return mode
+
+
+def normalized_signal_direction(raw: object, *, context: str) -> str:
+    direction = str(raw or FDA_DIRECTION_NEUTRAL).strip().lower()
+    if direction not in FDA_DIRECTIONS:
+        raise ValueError(f"{context} must be one of {sorted(FDA_DIRECTIONS)}, got {direction!r}")
+    return direction
+
+
+def parse_fda_signal_profile(raw: object, *, default: FdaSignalProfile, context: str) -> FdaSignalProfile:
+    if raw is None:
+        return default
+    if not isinstance(raw, dict):
+        raise ValueError(f"{context} must be a mapping")
+    mode = normalized_signal_mode(raw.get("mode", default.mode), context=context)
+    reliability = optional_float(raw.get("reliability"), default.reliability, context=f"{context}.reliability")
+    innovation_direction = normalized_signal_direction(
+        raw.get("innovation_direction", default.innovation_direction),
+        context=f"{context}.innovation_direction",
+    )
+    safety_direction = normalized_signal_direction(
+        raw.get("safety_direction", default.safety_direction),
+        context=f"{context}.safety_direction",
+    )
+    innovation_weight = optional_float(raw.get("innovation_weight"), default.innovation_weight, context=f"{context}.innovation_weight")
+    safety_weight = optional_float(raw.get("safety_weight"), default.safety_weight, context=f"{context}.safety_weight")
+    evidence_weight = optional_float(raw.get("evidence_weight"), default.evidence_weight, context=f"{context}.evidence_weight")
+    no_data_score = optional_float(raw.get("no_data_score"), default.no_data_score, context=f"{context}.no_data_score")
+    if reliability is None or not 0.0 <= reliability <= 1.0:
+        raise ValueError(f"{context}.reliability must be in [0, 1]")
+    weights = [innovation_weight or 0.0, safety_weight or 0.0, evidence_weight or 0.0]
+    if any(weight < 0.0 for weight in weights) or sum(weights) <= 0.0:
+        raise ValueError(f"{context} weights must be non-negative and have positive total")
+    return FdaSignalProfile(
+        mode=mode,
+        reliability=float(reliability),
+        innovation_direction=innovation_direction,
+        safety_direction=safety_direction,
+        innovation_weight=float(innovation_weight or 0.0),
+        safety_weight=float(safety_weight or 0.0),
+        evidence_weight=float(evidence_weight or 0.0),
+        no_data_score=no_data_score,
+        rationale=str(raw.get("rationale", default.rationale) or "").strip(),
+    )
+
+
+def default_fda_signal_profile(config: dict[str, Any]) -> FdaSignalProfile:
+    default = FdaSignalProfile(
+        mode=FDA_SIGNAL_CALIBRATED_ALPHA,
+        reliability=cfg_float(config, "fda_features.alpha.default_reliability", 0.35),
+        innovation_direction=str(
+            cfg_get(config, "fda_features.alpha.default_innovation_direction", FDA_DIRECTION_NEUTRAL)
+        ).strip().lower(),
+        safety_direction=str(
+            cfg_get(config, "fda_features.alpha.default_safety_direction", FDA_DIRECTION_POSITIVE)
+        ).strip().lower(),
+        innovation_weight=cfg_float(config, "fda_features.alpha.default_innovation_weight", 0.35),
+        safety_weight=cfg_float(config, "fda_features.alpha.default_safety_weight", 0.45),
+        evidence_weight=cfg_float(config, "fda_features.alpha.default_evidence_weight", 0.20),
+        no_data_score=None,
+        rationale="default_shrunk_fda_alpha_profile",
+    )
+    return parse_fda_signal_profile(
+        cfg_get(config, "fda_features.signal_profile", None),
+        default=default,
+        context="fda_features.signal_profile",
+    )
+
+
+def fda_signal_profiles(config: dict[str, Any], default_profile: FdaSignalProfile) -> dict[str, FdaSignalProfile]:
+    raw_profiles = cfg_get(config, "fda_features.cohort_signal_profiles", {}) or {}
+    if not isinstance(raw_profiles, dict):
+        raise ValueError("fda_features.cohort_signal_profiles must be a mapping when provided")
+    out: dict[str, FdaSignalProfile] = {}
+    for cohort, raw_profile in raw_profiles.items():
+        out[str(cohort)] = parse_fda_signal_profile(
+            raw_profile,
+            default=default_profile,
+            context=f"fda_features.cohort_signal_profiles.{cohort}",
+        )
+    return out
+
+
+def table_exists(conn: Any, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
 def latest_asof(conn: Any) -> str:
     row = conn.execute("SELECT MAX(asof_date) AS asof_date FROM feature_financial_valuation").fetchone()
     asof = str(row["asof_date"] or "") if row is not None else ""
@@ -400,20 +595,39 @@ def latest_asof(conn: Any) -> str:
 
 
 def load_companies(conn: Any, *, ticker_filter: set[str], max_tickers: int) -> list[Company]:
-    rows = conn.execute(
-        """
-        SELECT company_id, ticker, company_name
-        FROM dim_company
-        WHERE is_active = 1
-        ORDER BY ticker
-        """
-    ).fetchall()
+    if table_exists(conn, "dim_company_model_taxonomy"):
+        rows = conn.execute(
+            """
+            SELECT c.company_id, c.ticker, c.company_name,
+                   COALESCE(t.calibration_cohort, '') AS calibration_cohort
+            FROM dim_company c
+            LEFT JOIN dim_company_model_taxonomy t ON t.company_id = c.company_id
+            WHERE c.is_active = 1
+            ORDER BY c.ticker
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT company_id, ticker, company_name, '' AS calibration_cohort
+            FROM dim_company
+            WHERE is_active = 1
+            ORDER BY ticker
+            """
+        ).fetchall()
     out: list[Company] = []
     for row in rows:
         ticker = normalize_ticker(row["ticker"])
         if ticker_filter and ticker not in ticker_filter:
             continue
-        out.append(Company(int(row["company_id"]), ticker, str(row["company_name"] or "")))
+        out.append(
+            Company(
+                int(row["company_id"]),
+                ticker,
+                str(row["company_name"] or ""),
+                str(row["calibration_cohort"] or "").strip(),
+            )
+        )
         if max_tickers > 0 and len(out) >= max_tickers:
             break
     return out
@@ -890,6 +1104,190 @@ def revenue_normalizer(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> float
     return max(policy.revenue_floor, revenue) / 1_000_000_000.0
 
 
+def shrink_to_neutral(score: float, *, neutral: float, reliability: float) -> float:
+    return neutral + (score - neutral) * max(0.0, min(1.0, reliability))
+
+
+def directional_score(score: float, direction: str, *, neutral: float) -> float:
+    if direction == FDA_DIRECTION_POSITIVE:
+        return score
+    if direction == FDA_DIRECTION_INVERSE:
+        return 100.0 - score
+    return neutral
+
+
+def percentile_from_pairs(pairs: list[tuple[int, float]], *, higher_is_better: bool) -> dict[int, float]:
+    if len(pairs) <= 1:
+        return {idx: 50.0 for idx, _ in pairs}
+    sorted_pairs = sorted(pairs, key=lambda item: item[1])
+    denominator = len(sorted_pairs) - 1
+    out: dict[int, float] = {}
+    for rank, (idx, _) in enumerate(sorted_pairs):
+        pct = 100.0 * rank / denominator
+        out[idx] = pct if higher_is_better else 100.0 - pct
+    return out
+
+
+def cohort_percentile_maps(
+    rows: list[FdaFeatureRow],
+    *,
+    field_name: str,
+    higher_is_better: bool,
+    min_cohort_n: int,
+) -> dict[int, float]:
+    global_pairs: list[tuple[int, float]] = []
+    by_cohort: dict[str, list[tuple[int, float]]] = {}
+    for idx, row in enumerate(rows):
+        value = to_float(getattr(row, field_name, None))
+        if value is None:
+            continue
+        global_pairs.append((idx, value))
+        by_cohort.setdefault(row.calibration_cohort or "unknown", []).append((idx, value))
+    global_scores = percentile_from_pairs(global_pairs, higher_is_better=higher_is_better)
+    out: dict[int, float] = {}
+    for pairs in by_cohort.values():
+        if len(pairs) >= min_cohort_n:
+            out.update(percentile_from_pairs(pairs, higher_is_better=higher_is_better))
+        else:
+            out.update({idx: global_scores.get(idx, 50.0) for idx, _ in pairs})
+    return out
+
+
+def fda_evidence_quality_score(
+    row: FdaFeatureRow,
+    *,
+    policy: FdaFeaturePolicy,
+    mapping_confidence_for_gate: float | None,
+) -> float:
+    data_score = 100.0 if row.fda_data_available else 0.0
+    mapping_score = mapping_confidence_for_gate
+    if mapping_score is None:
+        mapping_score = row.avg_mapping_confidence
+    if mapping_score is None:
+        mapping_score = 50.0 if row.fda_data_available else 25.0
+    recency_score = row.fda_data_recency_score
+    if recency_score is None:
+        recency_score = 60.0 if row.fda_data_available else 25.0
+    total_weight = (
+        policy.evidence_quality_data_weight
+        + policy.evidence_quality_mapping_weight
+        + policy.evidence_quality_recency_weight
+    )
+    if total_weight <= 0.0:
+        return 50.0
+    return round(
+        clamp(
+            (
+                data_score * policy.evidence_quality_data_weight
+                + mapping_score * policy.evidence_quality_mapping_weight
+                + recency_score * policy.evidence_quality_recency_weight
+            )
+            / total_weight
+        ),
+        2,
+    )
+
+
+def cap_fda_alpha_for_review_state(row: FdaFeatureRow, score: float, *, policy: FdaFeaturePolicy) -> float:
+    state = normalize_fda_state(row.review_adjusted_fda_state)
+    if row.confirmed_hard_red_flag or state == "confirmed_hard_red":
+        return min(score, policy.hard_red_alpha_cap)
+    if row.hard_red_flag or state in {"regulatory_review_required", "mapping_review_required"}:
+        return min(score, policy.review_required_alpha_cap)
+    if state == "regulatory_watch":
+        return min(score, policy.regulatory_watch_alpha_cap)
+    return score
+
+
+def fda_profile_for_row(
+    row: FdaFeatureRow,
+    default_profile: FdaSignalProfile,
+    profiles: dict[str, FdaSignalProfile],
+) -> FdaSignalProfile:
+    return profiles.get(row.calibration_cohort, default_profile)
+
+
+def apply_fda_alpha_scores(
+    rows: list[FdaFeatureRow],
+    *,
+    policy: FdaFeaturePolicy,
+    default_profile: FdaSignalProfile,
+    profiles: dict[str, FdaSignalProfile],
+    min_cohort_n: int,
+) -> None:
+    innovation_rank = cohort_percentile_maps(
+        rows,
+        field_name="fda_clearance_velocity_score",
+        higher_is_better=True,
+        min_cohort_n=min_cohort_n,
+    )
+    safety_rank = cohort_percentile_maps(
+        rows,
+        field_name="fda_safety_score",
+        higher_is_better=True,
+        min_cohort_n=min_cohort_n,
+    )
+    evidence_rank = cohort_percentile_maps(
+        rows,
+        field_name="fda_evidence_quality_score",
+        higher_is_better=True,
+        min_cohort_n=min_cohort_n,
+    )
+    for idx, row in enumerate(rows):
+        profile = fda_profile_for_row(row, default_profile, profiles)
+        row.fda_signal_mode = profile.mode
+        row.fda_signal_reliability = profile.reliability
+        row.fda_policy_reason = profile.rationale
+        row.fda_signal_direction = f"innovation:{profile.innovation_direction};safety:{profile.safety_direction}"
+        neutral = policy.alpha_neutral_score
+        state = normalize_fda_state(row.review_adjusted_fda_state)
+        if not row.fda_data_available and state.startswith("manual_fda_footprint_"):
+            alpha = row.fda_product_score_legacy
+        elif profile.mode == FDA_SIGNAL_DISABLED:
+            alpha = neutral
+        elif profile.mode == FDA_SIGNAL_LEGACY_BROAD:
+            alpha = row.fda_product_score_legacy
+        elif profile.mode in {FDA_SIGNAL_NEUTRAL_OVERLAY, FDA_SIGNAL_RISK_VETO_ONLY}:
+            alpha = neutral
+        else:
+            innovation_component = directional_score(
+                innovation_rank.get(idx, 50.0),
+                profile.innovation_direction,
+                neutral=neutral,
+            )
+            safety_component = directional_score(
+                safety_rank.get(idx, 50.0),
+                profile.safety_direction,
+                neutral=neutral,
+            )
+            evidence_component = evidence_rank.get(idx, 50.0)
+            total_weight = profile.innovation_weight + profile.safety_weight + profile.evidence_weight
+            raw = (
+                innovation_component * profile.innovation_weight
+                + safety_component * profile.safety_weight
+                + evidence_component * profile.evidence_weight
+            ) / total_weight
+            alpha = shrink_to_neutral(raw, neutral=neutral, reliability=profile.reliability)
+        if not row.fda_data_available and profile.no_data_score is not None:
+            alpha = profile.no_data_score
+        row.fda_alpha_score = round(clamp(cap_fda_alpha_for_review_state(row, alpha, policy=policy)), 2)
+        # Keep fda_product_score as the legacy broad score for downstream compatibility.
+        row.fda_product_score = row.fda_product_score_legacy
+        if row.payload is not None:
+            row.payload["alpha_scores"] = {
+                "fda_product_score_legacy": row.fda_product_score_legacy,
+                "fda_alpha_score": row.fda_alpha_score,
+                "fda_safety_score": row.fda_safety_score,
+                "fda_clearance_velocity_score": row.fda_clearance_velocity_score,
+                "fda_evidence_quality_score": row.fda_evidence_quality_score,
+                "fda_event_risk_score": row.fda_event_risk_score,
+                "fda_signal_mode": row.fda_signal_mode,
+                "fda_signal_direction": row.fda_signal_direction,
+                "fda_signal_reliability": row.fda_signal_reliability,
+                "fda_policy_reason": row.fda_policy_reason,
+            }
+
+
 def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
     has_fda_records = any(
         [
@@ -1001,13 +1399,27 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
     elif review_reasons:
         row.review_reason = ";".join(dict.fromkeys([row.review_reason, *review_reasons]))
     row.hard_red_flag_reasons = raw_hard_reasons
-    row.fda_product_score = round(
+    row.fda_product_score_legacy = round(
         clamp(
             policy.regulatory_risk_weight * row.regulatory_risk_score
             + policy.regulatory_innovation_weight * row.regulatory_innovation_score
         ),
         2,
     )
+    row.fda_safety_score = round(clamp(row.regulatory_risk_score), 2)
+    row.fda_clearance_velocity_score = round(clamp(row.regulatory_innovation_score), 2)
+    row.fda_event_risk_score = round(clamp(100.0 - row.regulatory_risk_score), 2)
+    row.fda_evidence_quality_score = fda_evidence_quality_score(
+        row,
+        policy=policy,
+        mapping_confidence_for_gate=mapping_confidence_for_gate,
+    )
+    row.fda_product_score = row.fda_product_score_legacy
+    row.fda_alpha_score = row.fda_product_score_legacy
+    row.fda_signal_mode = FDA_SIGNAL_LEGACY_BROAD
+    row.fda_signal_direction = FDA_DIRECTION_POSITIVE
+    row.fda_signal_reliability = 1.0
+    row.fda_policy_reason = "legacy_broad_score_before_alpha_calibration"
     row.payload = {
         "source": "fda_core",
         "counts": {
@@ -1066,6 +1478,18 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
         "score_weights": {
             "regulatory_risk": policy.regulatory_risk_weight,
             "regulatory_innovation": policy.regulatory_innovation_weight,
+        },
+        "alpha_scores": {
+            "fda_product_score_legacy": row.fda_product_score_legacy,
+            "fda_alpha_score": row.fda_alpha_score,
+            "fda_safety_score": row.fda_safety_score,
+            "fda_clearance_velocity_score": row.fda_clearance_velocity_score,
+            "fda_evidence_quality_score": row.fda_evidence_quality_score,
+            "fda_event_risk_score": row.fda_event_risk_score,
+            "fda_signal_mode": row.fda_signal_mode,
+            "fda_signal_direction": row.fda_signal_direction,
+            "fda_signal_reliability": row.fda_signal_reliability,
+            "fda_policy_reason": row.fda_policy_reason,
         },
         "risk_penalties": {
             "recall_severity_per_billion": policy.risk_recall_severity_weight,
@@ -1144,7 +1568,11 @@ def apply_footprint_override(row: FdaFeatureRow, footprint: dict[str, str]) -> N
         row.review_reason = review_reason
     score = to_float(row_get(footprint, "fda_product_score", "footprint_score"))
     if score is not None:
-        row.fda_product_score = round(clamp(score), 2)
+        manual_score = round(clamp(score), 2)
+        row.fda_product_score = manual_score
+        row.fda_product_score_legacy = manual_score
+        row.fda_alpha_score = manual_score
+        row.fda_policy_reason = row.fda_policy_reason or "manual_fda_footprint_score"
     if row.payload is None:
         row.payload = {}
     row.payload["manual_fda_footprint"] = {
@@ -1199,10 +1627,15 @@ def build_rows(
     review_overrides: dict[str, dict[str, str]] | None = None,
     footprint_overrides: dict[str, dict[str, str]] | None = None,
     manual_evidence: dict[str, dict[str, str]] | None = None,
+    default_signal_profile: FdaSignalProfile | None = None,
+    signal_profiles: dict[str, FdaSignalProfile] | None = None,
+    min_cohort_rank_n: int = 5,
 ) -> list[FdaFeatureRow]:
     review_overrides = review_overrides or {}
     footprint_overrides = footprint_overrides or {}
     manual_evidence = manual_evidence or {}
+    default_signal_profile = default_signal_profile or FdaSignalProfile()
+    signal_profiles = signal_profiles or {}
     rows: list[FdaFeatureRow] = []
     for company in companies:
         override = review_overrides.get(company.ticker)
@@ -1221,6 +1654,7 @@ def build_rows(
             company_id=company.company_id,
             ticker=company.ticker,
             company_name=company.company_name,
+            calibration_cohort=company.calibration_cohort,
         )
         if suppress_clearance_metrics:
             row.clearance_metrics_suppressed = 1
@@ -1263,101 +1697,144 @@ def build_rows(
         if override:
             apply_review_override(row, override)
         rows.append(row)
+    apply_fda_alpha_scores(
+        rows,
+        policy=policy,
+        default_profile=default_signal_profile,
+        profiles=signal_profiles,
+        min_cohort_n=min_cohort_rank_n,
+    )
     return rows
+
+
+def ensure_fda_feature_policy_columns(conn: Any) -> None:
+    if not table_exists(conn, "feature_fda_product_risk"):
+        return
+    existing = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(feature_fda_product_risk)").fetchall()
+    }
+    for column, ddl in OPTIONAL_FDA_FEATURE_COLUMNS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE feature_fda_product_risk ADD COLUMN {quote_identifier(column)} {ddl}")
 
 
 def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
     if not rows:
         return 0
+    ensure_fda_feature_policy_columns(conn)
     now = utc_now()
+    columns = [
+        "asof_date",
+        "company_id",
+        "regulatory_innovation_score",
+        "regulatory_risk_score",
+        "fda_product_score",
+        "fda_product_score_legacy",
+        "fda_alpha_score",
+        "fda_safety_score",
+        "fda_clearance_velocity_score",
+        "fda_evidence_quality_score",
+        "fda_event_risk_score",
+        "fda_signal_mode",
+        "fda_signal_direction",
+        "fda_signal_reliability",
+        "fda_policy_reason",
+        "fda_data_available",
+        "latest_fda_event_date",
+        "calibration_cohort",
+        "mapped_manufacturer_count",
+        "avg_mapping_confidence",
+        "risk_mapping_confidence_min",
+        "hard_red_flag",
+        "hard_red_flag_reasons",
+        "raw_fda_red_flag",
+        "confirmed_hard_red_flag",
+        "review_adjusted_fda_state",
+        "dedup_class_i_recall_count_36m",
+        "open_class_i_recall_count_12m",
+        "open_class_i_recall_count_36m",
+        "terminated_class_i_recall_count_36m",
+        "canonical_recall_duplicate_source_count",
+        "review_reason",
+        "clearance_metrics_suppressed",
+        "clearance_metrics_suppression_reason",
+        "approval_product_code_filter",
+        "approval_product_code_filter_note",
+        "fda_evidence_type",
+        "regulatory_stage",
+        "evidence_confidence",
+        "next_review_date",
+        "manual_evidence_note",
+        "payload_json",
+        "created_at",
+        "updated_at",
+    ]
+    placeholders = ", ".join("?" for _ in columns)
+    column_sql = ", ".join(quote_identifier(column) for column in columns)
+    update_sql = ",\n            ".join(
+        f"{quote_identifier(column)} = excluded.{quote_identifier(column)}"
+        for column in columns
+        if column not in {"asof_date", "company_id", "created_at"}
+    )
+
+    def row_values(row: FdaFeatureRow) -> tuple[Any, ...]:
+        values = {
+            "asof_date": row.asof_date,
+            "company_id": row.company_id,
+            "regulatory_innovation_score": row.regulatory_innovation_score,
+            "regulatory_risk_score": row.regulatory_risk_score,
+            "fda_product_score": row.fda_product_score,
+            "fda_product_score_legacy": row.fda_product_score_legacy,
+            "fda_alpha_score": row.fda_alpha_score,
+            "fda_safety_score": row.fda_safety_score,
+            "fda_clearance_velocity_score": row.fda_clearance_velocity_score,
+            "fda_evidence_quality_score": row.fda_evidence_quality_score,
+            "fda_event_risk_score": row.fda_event_risk_score,
+            "fda_signal_mode": row.fda_signal_mode,
+            "fda_signal_direction": row.fda_signal_direction,
+            "fda_signal_reliability": row.fda_signal_reliability,
+            "fda_policy_reason": row.fda_policy_reason,
+            "fda_data_available": row.fda_data_available,
+            "latest_fda_event_date": row.latest_fda_event_date,
+            "calibration_cohort": row.calibration_cohort,
+            "mapped_manufacturer_count": row.mapped_manufacturer_count,
+            "avg_mapping_confidence": row.avg_mapping_confidence,
+            "risk_mapping_confidence_min": row.risk_mapping_confidence_min,
+            "hard_red_flag": row.hard_red_flag,
+            "hard_red_flag_reasons": ";".join(row.hard_red_flag_reasons or []),
+            "raw_fda_red_flag": row.raw_fda_red_flag,
+            "confirmed_hard_red_flag": row.confirmed_hard_red_flag,
+            "review_adjusted_fda_state": row.review_adjusted_fda_state,
+            "dedup_class_i_recall_count_36m": row.dedup_class_i_recall_count_36m,
+            "open_class_i_recall_count_12m": row.open_class_i_recall_count_12m,
+            "open_class_i_recall_count_36m": row.open_class_i_recall_count_36m,
+            "terminated_class_i_recall_count_36m": row.terminated_class_i_recall_count_36m,
+            "canonical_recall_duplicate_source_count": row.canonical_recall_duplicate_source_count,
+            "review_reason": row.review_reason,
+            "clearance_metrics_suppressed": row.clearance_metrics_suppressed,
+            "clearance_metrics_suppression_reason": row.clearance_metrics_suppression_reason,
+            "approval_product_code_filter": row.approval_product_code_filter,
+            "approval_product_code_filter_note": row.approval_product_code_filter_note,
+            "fda_evidence_type": row.fda_evidence_type,
+            "regulatory_stage": row.regulatory_stage,
+            "evidence_confidence": row.evidence_confidence,
+            "next_review_date": row.next_review_date,
+            "manual_evidence_note": row.manual_evidence_note,
+            "payload_json": json.dumps(row.payload or {}, ensure_ascii=True, sort_keys=True),
+            "created_at": now,
+            "updated_at": now,
+        }
+        return tuple(values[column] for column in columns)
+
     conn.executemany(
-        """
-        INSERT INTO feature_fda_product_risk(
-            asof_date, company_id, regulatory_innovation_score, regulatory_risk_score,
-            fda_product_score, fda_data_available, latest_fda_event_date,
-            mapped_manufacturer_count, avg_mapping_confidence, risk_mapping_confidence_min,
-            hard_red_flag,
-            hard_red_flag_reasons, raw_fda_red_flag, confirmed_hard_red_flag,
-            review_adjusted_fda_state, dedup_class_i_recall_count_36m,
-            open_class_i_recall_count_12m, open_class_i_recall_count_36m,
-            terminated_class_i_recall_count_36m, canonical_recall_duplicate_source_count,
-            review_reason, clearance_metrics_suppressed, clearance_metrics_suppression_reason,
-            approval_product_code_filter, approval_product_code_filter_note,
-            fda_evidence_type, regulatory_stage, evidence_confidence, next_review_date,
-            manual_evidence_note,
-            payload_json, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        f"""
+        INSERT INTO feature_fda_product_risk({column_sql})
+        VALUES ({placeholders})
         ON CONFLICT(asof_date, company_id) DO UPDATE SET
-            regulatory_innovation_score = excluded.regulatory_innovation_score,
-            regulatory_risk_score = excluded.regulatory_risk_score,
-            fda_product_score = excluded.fda_product_score,
-            fda_data_available = excluded.fda_data_available,
-            latest_fda_event_date = excluded.latest_fda_event_date,
-            mapped_manufacturer_count = excluded.mapped_manufacturer_count,
-            avg_mapping_confidence = excluded.avg_mapping_confidence,
-            risk_mapping_confidence_min = excluded.risk_mapping_confidence_min,
-            hard_red_flag = excluded.hard_red_flag,
-            hard_red_flag_reasons = excluded.hard_red_flag_reasons,
-            raw_fda_red_flag = excluded.raw_fda_red_flag,
-            confirmed_hard_red_flag = excluded.confirmed_hard_red_flag,
-            review_adjusted_fda_state = excluded.review_adjusted_fda_state,
-            dedup_class_i_recall_count_36m = excluded.dedup_class_i_recall_count_36m,
-            open_class_i_recall_count_12m = excluded.open_class_i_recall_count_12m,
-            open_class_i_recall_count_36m = excluded.open_class_i_recall_count_36m,
-            terminated_class_i_recall_count_36m = excluded.terminated_class_i_recall_count_36m,
-            canonical_recall_duplicate_source_count = excluded.canonical_recall_duplicate_source_count,
-            review_reason = excluded.review_reason,
-            clearance_metrics_suppressed = excluded.clearance_metrics_suppressed,
-            clearance_metrics_suppression_reason = excluded.clearance_metrics_suppression_reason,
-            approval_product_code_filter = excluded.approval_product_code_filter,
-            approval_product_code_filter_note = excluded.approval_product_code_filter_note,
-            fda_evidence_type = excluded.fda_evidence_type,
-            regulatory_stage = excluded.regulatory_stage,
-            evidence_confidence = excluded.evidence_confidence,
-            next_review_date = excluded.next_review_date,
-            manual_evidence_note = excluded.manual_evidence_note,
-            payload_json = excluded.payload_json,
-            updated_at = excluded.updated_at
+            {update_sql}
         """,
-        [
-            (
-                row.asof_date,
-                row.company_id,
-                row.regulatory_innovation_score,
-                row.regulatory_risk_score,
-                row.fda_product_score,
-                row.fda_data_available,
-                row.latest_fda_event_date,
-                row.mapped_manufacturer_count,
-                row.avg_mapping_confidence,
-                row.risk_mapping_confidence_min,
-                row.hard_red_flag,
-                ";".join(row.hard_red_flag_reasons or []),
-                row.raw_fda_red_flag,
-                row.confirmed_hard_red_flag,
-                row.review_adjusted_fda_state,
-                row.dedup_class_i_recall_count_36m,
-                row.open_class_i_recall_count_12m,
-                row.open_class_i_recall_count_36m,
-                row.terminated_class_i_recall_count_36m,
-                row.canonical_recall_duplicate_source_count,
-                row.review_reason,
-                row.clearance_metrics_suppressed,
-                row.clearance_metrics_suppression_reason,
-                row.approval_product_code_filter,
-                row.approval_product_code_filter_note,
-                row.fda_evidence_type,
-                row.regulatory_stage,
-                row.evidence_confidence,
-                row.next_review_date,
-                row.manual_evidence_note,
-                json.dumps(row.payload or {}, ensure_ascii=True, sort_keys=True),
-                now,
-                now,
-            )
-            for row in rows
-        ],
+        [row_values(row) for row in rows],
     )
     return len(rows)
 
@@ -1602,6 +2079,9 @@ def main() -> None:
     manual_evidence_raw = str(cfg_get(config, "fda_features.manual_footprint_evidence_csv", "") or "").strip()
     manual_evidence_csv = resolve_path(manual_evidence_raw, base_dir=base_dir) if manual_evidence_raw else None
     policy = fda_feature_policy(config)
+    default_signal_profile = default_fda_signal_profile(config)
+    signal_profiles = fda_signal_profiles(config, default_signal_profile)
+    min_cohort_rank_n = int(cfg_get(config, "fda_features.alpha.min_cohort_rank_n", 5))
     ticker_filter = {normalize_ticker(value) for value in str(args.tickers or "").split(",") if normalize_ticker(value)}
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
@@ -1627,6 +2107,9 @@ def main() -> None:
                 review_overrides=review_overrides,
                 footprint_overrides=footprint_overrides,
                 manual_evidence=manual_evidence,
+                default_signal_profile=default_signal_profile,
+                signal_profiles=signal_profiles,
+                min_cohort_rank_n=min_cohort_rank_n,
             )
             upserted = upsert_feature_rows(conn, rows)
             issue_count = replace_data_quality_issues(conn, rows, asof=asof.isoformat())

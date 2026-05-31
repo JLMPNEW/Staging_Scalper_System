@@ -47,6 +47,16 @@ TECHNICAL_GATE_MODES = {
     TECHNICAL_GATE_BREAKDOWN_VETO_ONLY,
     TECHNICAL_GATE_DISABLED,
 }
+FDA_GATE_HARD_POSITIVE = "hard_positive"
+FDA_GATE_RISK_VETO_ONLY = "risk_veto_only"
+FDA_GATE_OVERLAY_ONLY = "overlay_only"
+FDA_GATE_DISABLED = "disabled"
+FDA_GATE_MODES = {
+    FDA_GATE_HARD_POSITIVE,
+    FDA_GATE_RISK_VETO_ONLY,
+    FDA_GATE_OVERLAY_ONLY,
+    FDA_GATE_DISABLED,
+}
 CALIBRATION_STATUS_PRODUCTION_ELIGIBLE = "production_eligible"
 CALIBRATION_STATUS_RESTRICTED_RESEARCH_ONLY = "restricted_research_only"
 CALIBRATION_STATUS_EXCLUDED_FROM_TIER1 = "excluded_from_tier1"
@@ -60,6 +70,20 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "calibration_status_reason": "TEXT DEFAULT ''",
     "cohort_score_template_id": "TEXT DEFAULT ''",
     "cohort_score_template_spec": "TEXT DEFAULT ''",
+    "fda_product_score_legacy": "REAL DEFAULT 0.0",
+    "fda_alpha_score": "REAL DEFAULT 0.0",
+    "fda_safety_score": "REAL DEFAULT 0.0",
+    "fda_clearance_velocity_score": "REAL DEFAULT 0.0",
+    "fda_evidence_quality_score": "REAL DEFAULT 0.0",
+    "fda_event_risk_score": "REAL DEFAULT 0.0",
+    "fda_signal_mode": "TEXT DEFAULT ''",
+    "fda_signal_direction": "TEXT DEFAULT ''",
+    "fda_signal_reliability": "REAL DEFAULT 0.0",
+    "fda_score_source": "TEXT DEFAULT ''",
+    "fda_gate_mode": "TEXT DEFAULT ''",
+    "fda_policy_reason": "TEXT DEFAULT ''",
+    "fda_gate_excluded": "INTEGER DEFAULT 0",
+    "fda_component_weight": "REAL DEFAULT 0.0",
     "technical_gate_mode": "TEXT DEFAULT ''",
     "technical_overlay_status": "TEXT DEFAULT ''",
     "technical_policy_reason": "TEXT DEFAULT ''",
@@ -116,6 +140,20 @@ FIELDNAMES = [
     "fundamental_quality_score",
     "durable_growth_score",
     "fda_product_score",
+    "fda_product_score_legacy",
+    "fda_alpha_score",
+    "fda_safety_score",
+    "fda_clearance_velocity_score",
+    "fda_evidence_quality_score",
+    "fda_event_risk_score",
+    "fda_signal_mode",
+    "fda_signal_direction",
+    "fda_signal_reliability",
+    "fda_score_source",
+    "fda_gate_mode",
+    "fda_policy_reason",
+    "fda_gate_excluded",
+    "fda_component_weight",
     "fda_data_available",
     "reimbursement_score",
     "reimbursement_status",
@@ -223,6 +261,20 @@ class ScoreRow:
     fundamental_quality_score: float = 0.0
     durable_growth_score: float = 50.0
     fda_product_score: float = 50.0
+    fda_product_score_legacy: float = 50.0
+    fda_alpha_score: float = 50.0
+    fda_safety_score: float = 50.0
+    fda_clearance_velocity_score: float = 50.0
+    fda_evidence_quality_score: float = 50.0
+    fda_event_risk_score: float = 0.0
+    fda_signal_mode: str = ""
+    fda_signal_direction: str = ""
+    fda_signal_reliability: float = 0.0
+    fda_score_source: str = "fda_product_score"
+    fda_gate_mode: str = FDA_GATE_HARD_POSITIVE
+    fda_policy_reason: str = ""
+    fda_gate_excluded: int = 0
+    fda_component_weight: float = DEFAULT_WEIGHTS["fda_product"]
     fda_data_available: int = 0
     reimbursement_score: float = 50.0
     reimbursement_status: str = "unknown"
@@ -855,7 +907,7 @@ def score_drivers(row: ScoreRow) -> tuple[list[str], list[str]]:
     items = [
         ("fundamental", row.fundamental_quality_score, 1.0),
         ("durable_growth", row.durable_growth_score, 1.0),
-        ("fda_product", row.fda_product_score, 1.0),
+        ("fda_product", row.fda_product_score, row.fda_component_weight),
         ("reimbursement", row.reimbursement_score, 1.0),
         ("valuation", row.valuation_score, 1.0),
         ("technical_entry", row.technical_entry_score, row.technical_component_weight),
@@ -865,6 +917,8 @@ def score_drivers(row: ScoreRow) -> tuple[list[str], list[str]]:
     positives = [f"{name}:{score:.1f}" for name, score in sorted(active_items, key=lambda item: item[1], reverse=True)[:3]]
     below_neutral = [(name, score) for name, score in active_items if score < 50.0]
     negatives = [f"{name}:{score:.1f}" for name, score in sorted(below_neutral, key=lambda item: item[1])[:3]]
+    if row.fda_component_weight <= WEIGHT_EPSILON and row.fda_gate_excluded:
+        positives.append(f"fda_overlay:{row.fda_gate_mode}")
     if row.technical_component_weight <= WEIGHT_EPSILON and row.technical_overlay_status:
         positives.append(f"technical_overlay:{row.technical_overlay_status}")
     if row.unknown_reimbursement_flag and "reimbursement:unknown" not in negatives:
@@ -951,6 +1005,15 @@ class TechnicalPolicy:
     gate_mode: str = TECHNICAL_GATE_HARD_POSITIVE
     entry_min: float | None = None
     breakdown_min: float = 35.0
+    block_classification: bool = True
+    rationale: str = ""
+
+
+@dataclass(frozen=True)
+class FdaGatePolicy:
+    gate_mode: str = FDA_GATE_HARD_POSITIVE
+    entry_min: float | None = None
+    max_event_risk: float = 75.0
     block_classification: bool = True
     rationale: str = ""
 
@@ -1241,6 +1304,82 @@ def technical_policy_for_row(row: ScoreRow, base_policy: TechnicalPolicy, profil
     return profiles.get(row.calibration_cohort, base_policy)
 
 
+def parse_fda_gate_policy(raw: object, *, default: FdaGatePolicy, context: str) -> FdaGatePolicy:
+    if raw is None:
+        return default
+    if not isinstance(raw, dict):
+        raise ValueError(f"{context} must be a mapping")
+    gate_mode = str(raw.get("gate_mode", default.gate_mode)).strip().lower()
+    aliases = {
+        "risk_veto": FDA_GATE_RISK_VETO_ONLY,
+        "veto_only": FDA_GATE_RISK_VETO_ONLY,
+        "overlay": FDA_GATE_OVERLAY_ONLY,
+        "neutral": FDA_GATE_OVERLAY_ONLY,
+    }
+    gate_mode = aliases.get(gate_mode, gate_mode)
+    if gate_mode not in FDA_GATE_MODES:
+        raise ValueError(f"{context}.gate_mode must be one of {sorted(FDA_GATE_MODES)}, got {gate_mode!r}")
+    entry_min = (
+        parse_optional_float(raw.get("entry_min"), context=f"{context}.entry_min")
+        if "entry_min" in raw
+        else default.entry_min
+    )
+    max_event_risk = (
+        parse_optional_float(raw.get("max_event_risk"), context=f"{context}.max_event_risk")
+        if "max_event_risk" in raw
+        else default.max_event_risk
+    )
+    if max_event_risk is None:
+        max_event_risk = default.max_event_risk
+    default_block = gate_mode in {FDA_GATE_HARD_POSITIVE, FDA_GATE_RISK_VETO_ONLY}
+    return FdaGatePolicy(
+        gate_mode=gate_mode,
+        entry_min=entry_min,
+        max_event_risk=max_event_risk,
+        block_classification=bool_from_raw(raw.get("block_classification"), default_block),
+        rationale=str(raw.get("rationale", default.rationale) or "").strip(),
+    )
+
+
+def base_fda_gate_policy(config: dict[str, Any], gates: dict[str, float]) -> FdaGatePolicy:
+    default = FdaGatePolicy(
+        gate_mode=FDA_GATE_RISK_VETO_ONLY,
+        entry_min=gates["fda_product_min"],
+        max_event_risk=75.0,
+        block_classification=True,
+        rationale="base_fda_risk_veto_not_global_positive_alpha",
+    )
+    return parse_fda_gate_policy(
+        cfg_get(config, "scoring.fda_policy", None),
+        default=default,
+        context="scoring.fda_policy",
+    )
+
+
+def cohort_fda_gate_policy_profiles(config: dict[str, Any], base_policy: FdaGatePolicy) -> dict[str, FdaGatePolicy]:
+    raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
+    if not isinstance(raw_profiles, dict):
+        raise ValueError("scoring.cohort_profiles must be a mapping when provided")
+    out: dict[str, FdaGatePolicy] = {}
+    for cohort, raw_profile in raw_profiles.items():
+        if not isinstance(raw_profile, dict):
+            continue
+        if str(raw_profile.get("enabled", True)).strip().lower() in {"0", "false", "no", "off"}:
+            continue
+        if "fda_policy" not in raw_profile:
+            continue
+        out[str(cohort)] = parse_fda_gate_policy(
+            raw_profile.get("fda_policy"),
+            default=base_policy,
+            context=f"scoring.cohort_profiles.{cohort}.fda_policy",
+        )
+    return out
+
+
+def fda_policy_for_row(row: ScoreRow, base_policy: FdaGatePolicy, profiles: dict[str, FdaGatePolicy]) -> FdaGatePolicy:
+    return profiles.get(row.calibration_cohort, base_policy)
+
+
 def cohort_component_weight_profiles(config: dict[str, Any], base_weights: dict[str, float]) -> dict[str, dict[str, float]]:
     raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
     if not isinstance(raw_profiles, dict):
@@ -1269,6 +1408,11 @@ SCORE_TEMPLATE_FIELD_TO_ATTR = {
     "fundamental_quality_score": "fundamental_quality_score",
     "durable_growth_score": "durable_growth_score",
     "fda_product_score": "fda_product_score",
+    "fda_alpha_score": "fda_alpha_score",
+    "fda_safety_score": "fda_safety_score",
+    "fda_clearance_velocity_score": "fda_clearance_velocity_score",
+    "fda_evidence_quality_score": "fda_evidence_quality_score",
+    "fda_event_risk_score": "fda_event_risk_score",
     "reimbursement_score": "reimbursement_score",
     "valuation_score": "valuation_score",
     "technical_entry_score": "technical_entry_score",
@@ -1283,6 +1427,11 @@ SCORE_TEMPLATE_FIELD_TO_COMPONENT = {
     "fundamental_quality_score": "fundamental_quality",
     "durable_growth_score": "durable_growth",
     "fda_product_score": "fda_product",
+    "fda_alpha_score": "fda_product",
+    "fda_safety_score": "fda_product",
+    "fda_clearance_velocity_score": "fda_product",
+    "fda_evidence_quality_score": "fda_product",
+    "fda_event_risk_score": "fda_product",
     "reimbursement_score": "reimbursement",
     "valuation_score": "valuation",
     "technical_entry_score": "technical_entry",
@@ -1366,18 +1515,26 @@ def score_template_spec(template: CohortScoreTemplate | None) -> str:
     )
 
 
-def score_template_technical_weight(template: CohortScoreTemplate | None) -> float:
+def score_template_component_weight(template: CohortScoreTemplate | None, component_name: str) -> float:
     if template is None:
         return 0.0
     total = sum(component.weight for component in template.components)
     if total <= 0:
         return 0.0
-    technical_weight = sum(
+    component_weight = sum(
         component.weight
         for component in template.components
-        if SCORE_TEMPLATE_FIELD_TO_COMPONENT[component.field] == "technical_entry"
+        if SCORE_TEMPLATE_FIELD_TO_COMPONENT[component.field] == component_name
     )
-    return technical_weight / total
+    return component_weight / total
+
+
+def score_template_technical_weight(template: CohortScoreTemplate | None) -> float:
+    return score_template_component_weight(template, "technical_entry")
+
+
+def score_template_fda_weight(template: CohortScoreTemplate | None) -> float:
+    return score_template_component_weight(template, "fda_product")
 
 
 def score_template_value(
@@ -1401,6 +1558,38 @@ def score_template_value(
     if denominator <= 0:
         return DEFAULT_NEUTRAL_SCORE
     return numerator / denominator
+
+
+def fda_score_source(config: dict[str, Any]) -> str:
+    source = str(cfg_get(config, "scoring.fda_score_source", "alpha_when_available") or "alpha_when_available").strip().lower()
+    allowed = {"legacy_product", "alpha_when_available", "alpha"}
+    if source not in allowed:
+        raise ValueError(f"scoring.fda_score_source must be one of {sorted(allowed)}, got {source!r}")
+    return source
+
+
+def selected_fda_score(item: dict[str, Any], *, neutral: float, source: str) -> tuple[float, str]:
+    if source in {"alpha", "alpha_when_available"}:
+        alpha = to_float(item.get("fda_alpha_score"))
+        if alpha is not None:
+            return score_or(alpha, neutral), "fda_alpha_score"
+        if source == "alpha":
+            return neutral, "fda_alpha_score_missing"
+    legacy = to_float(item.get("fda_product_score_legacy"))
+    if legacy is not None:
+        return score_or(legacy, neutral), "fda_product_score_legacy"
+    return score_or(item.get("fda_product_score"), neutral), "fda_product_score"
+
+
+def fda_score_available(item: dict[str, Any], *, source: str) -> bool:
+    if not item:
+        return False
+    if source in {"alpha", "alpha_when_available"}:
+        if to_float(item.get("fda_alpha_score")) is not None:
+            return True
+        if source == "alpha":
+            return False
+    return to_float(item.get("fda_product_score_legacy")) is not None or to_float(item.get("fda_product_score")) is not None
 
 
 def technical_score_source(config: dict[str, Any]) -> str:
@@ -1537,7 +1726,13 @@ def apply_pullback_candidate_tag(row: ScoreRow, policy: PullbackCandidatePolicy 
     row.pullback_candidate_template_id = policy.template_id
 
 
-def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: TechnicalPolicy | None = None) -> None:
+def classify(
+    row: ScoreRow,
+    *,
+    gates: dict[str, float],
+    technical_policy: TechnicalPolicy | None = None,
+    fda_policy: FdaGatePolicy | None = None,
+) -> None:
     if technical_policy is None:
         technical_policy = TechnicalPolicy(
             gate_mode=TECHNICAL_GATE_HARD_POSITIVE,
@@ -1545,6 +1740,14 @@ def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: Techni
             breakdown_min=35.0,
             block_classification=True,
             rationale="legacy_default_hard_positive_technical_gate",
+        )
+    if fda_policy is None:
+        fda_policy = FdaGatePolicy(
+            gate_mode=FDA_GATE_HARD_POSITIVE,
+            entry_min=gates["fda_product_min"],
+            max_event_risk=75.0,
+            block_classification=True,
+            rationale="legacy_default_hard_positive_fda_gate",
         )
     reasons: list[str] = []
     entry_score = row.technical_entry_status_score if row.technical_entry_status_score is not None else row.technical_entry_score
@@ -1561,7 +1764,28 @@ def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: Techni
     )
     row.passed_fundamental_gate = int(row.fundamental_quality_score >= gates["fundamental_quality_min"])
     row.passed_growth_gate = int(row.durable_growth_score >= gates["durable_growth_min"])
-    row.passed_fda_gate = int((not row.fda_data_available and not row.fda_review_state) or row.fda_product_score >= gates["fda_product_min"])
+    manual_regulatory_state = row.fda_review_state in MANUAL_FDA_REVIEW_STATES
+    confirmed_hard_red = row.fda_review_state == "confirmed_hard_red"
+    row.fda_gate_mode = fda_policy.gate_mode
+    row.fda_policy_reason = fda_policy.rationale
+    fda_entry_min = fda_policy.entry_min if fda_policy.entry_min is not None else gates["fda_product_min"]
+    base_fda_score_gate = int(
+        (not row.fda_data_available and not row.fda_review_state)
+        or row.fda_product_score >= fda_entry_min
+    )
+    if fda_policy.gate_mode == FDA_GATE_HARD_POSITIVE:
+        row.passed_fda_gate = base_fda_score_gate
+        row.fda_gate_excluded = 0
+    elif fda_policy.gate_mode == FDA_GATE_RISK_VETO_ONLY:
+        row.passed_fda_gate = int(
+            not manual_regulatory_state
+            and not row.hard_red_flag
+            and row.fda_event_risk_score <= fda_policy.max_event_risk
+        )
+        row.fda_gate_excluded = 1
+    else:
+        row.passed_fda_gate = 1
+        row.fda_gate_excluded = 1
     reimbursement_live = row.unknown_reimbursement_flag == 0 and row.reimbursement_status not in NON_LIVE_REIMBURSEMENT_STATUSES
     row.passed_reimbursement_gate = int(reimbursement_live and row.reimbursement_score >= gates["reimbursement_min"])
     row.passed_valuation_gate = int(row.valuation_score >= gates["valuation_min"])
@@ -1585,8 +1809,6 @@ def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: Techni
     row.passed_liquidity_gate = int(
         row.avg_dollar_volume_60d is not None and row.avg_dollar_volume_60d >= gates["min_avg_dollar_volume_60d"]
     )
-    manual_regulatory_state = row.fda_review_state in MANUAL_FDA_REVIEW_STATES
-    confirmed_hard_red = row.fda_review_state == "confirmed_hard_red"
     row.passed_fda_manual_review_gate = int(not manual_regulatory_state and not row.hard_red_flag)
 
     if not row.passed_raw_score_gate:
@@ -1599,7 +1821,7 @@ def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: Techni
     if not row.passed_growth_gate:
         reasons.append("growth_below_gate")
     if not row.passed_fda_gate:
-        reasons.append("fda_below_gate")
+        reasons.append("fda_risk_veto" if fda_policy.gate_mode == FDA_GATE_RISK_VETO_ONLY else "fda_below_gate")
     if not row.passed_reimbursement_gate and not reimbursement_live:
         reasons.append("reimbursement_missing_evidence")
     elif not row.passed_reimbursement_gate:
@@ -1634,6 +1856,7 @@ def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: Techni
     row.failed_gates = ";".join(reasons)
     row.review_reason = ";".join(reasons)
     technical_classification_block = bool(technical_policy.block_classification and not row.passed_technical_gate)
+    fda_classification_block = bool(fda_policy.block_classification and not row.passed_fda_gate)
     base_investability_gate = int(
         row.passed_raw_score_gate
         and row.passed_fundamental_gate
@@ -1647,6 +1870,7 @@ def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: Techni
         and row.passed_liquidity_gate
         and row.passed_fda_manual_review_gate
         and not technical_classification_block
+        and not fda_classification_block
     )
     row.final_investability_gate = int(base_investability_gate and not tier1_restricted)
     row.gate_status = "pass" if row.final_investability_gate else "fail"
@@ -1656,6 +1880,9 @@ def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: Techni
     elif manual_regulatory_state or row.hard_red_flag:
         row.classification = "manual_review_regulatory_risk"
         row.classification_reason = "fda_manual_review_required"
+    elif fda_classification_block:
+        row.classification = "manual_review_regulatory_risk" if fda_policy.gate_mode == FDA_GATE_RISK_VETO_ONLY else "watchlist"
+        row.classification_reason = "fda_risk_veto" if fda_policy.gate_mode == FDA_GATE_RISK_VETO_ONLY else "fda_below_gate"
     elif not row.passed_data_quality_gate:
         row.classification = "data_review_required"
         row.classification_reason = "data_completeness_below_gate"
@@ -1727,7 +1954,10 @@ def build_rows(
     score_template_profiles = cohort_score_template_profiles(config)
     default_technical_policy = base_technical_policy(config, gates)
     technical_policy_profiles = cohort_technical_policy_profiles(config, default_technical_policy)
+    default_fda_policy = base_fda_gate_policy(config, gates)
+    fda_policy_profiles = cohort_fda_gate_policy_profiles(config, default_fda_policy)
     pullback_candidate_profiles = cohort_pullback_candidate_profiles(config)
+    fda_source = fda_score_source(config)
     technical_source = technical_composite_score_source(config)
     technical_entry_source = technical_entry_status_score_source(config)
     rank_composite = cfg_bool(config, "scoring.cross_sectional_composite_rank", True)
@@ -1743,6 +1973,11 @@ def build_rows(
             score_template_technical_weight(active_score_template)
             if active_score_template is not None
             else active_weights.get("technical_entry", 0.0)
+        )
+        fda_component_weight = (
+            score_template_fda_weight(active_score_template)
+            if active_score_template is not None
+            else active_weights.get("fda_product", 0.0)
         )
         fda_item = fda_rows.get(company_id, {})
         reimbursement_item = reimbursement_rows.get(company_id, {})
@@ -1773,9 +2008,14 @@ def build_rows(
             and reimbursement_component_is_live(reimbursement_item, reimbursement_table_score)
         )
         fda_review_state = str(fda_item.get("review_adjusted_fda_state") or "").strip().lower() if fda_item else ""
-        fda_score = score_or(fda_item.get("fda_product_score"), neutral_fda_no_data) if fda_item else neutral_fda_no_data
+        fda_score, active_fda_score_source = (
+            selected_fda_score(fda_item, neutral=neutral_fda_no_data, source=fda_source)
+            if fda_item
+            else (neutral_fda_no_data, "no_fda_feature")
+        )
         if fda_item and not fda_data_available and not fda_review_state.startswith("manual_fda_footprint_"):
             fda_score = neutral_fda_no_data
+            active_fda_score_source = "neutral_no_mapped_fda_records"
         durable_score = (
             score_or(durable_item.get("score"), durable_proxy.get(company_id, neutral_durable))
             if durable_item
@@ -1831,7 +2071,7 @@ def build_rows(
         component_available = {
             "fundamental_quality": to_float(item.get("fundamental_quality_score_v1")) is not None,
             "durable_growth": has_durable_live_score,
-            "fda_product": bool(fda_item) and to_float(fda_item.get("fda_product_score")) is not None,
+            "fda_product": fda_score_available(fda_item, source=fda_source),
             "reimbursement": has_reimbursement_live_score,
             "valuation": to_float(item.get("valuation_score_v1")) is not None,
             "technical_entry": technical_score_available(technical_item, source=technical_source),
@@ -1841,6 +2081,11 @@ def build_rows(
             "fundamental_quality_score": component_available["fundamental_quality"],
             "durable_growth_score": component_available["durable_growth"],
             "fda_product_score": component_available["fda_product"],
+            "fda_alpha_score": bool(fda_item) and to_float(fda_item.get("fda_alpha_score")) is not None,
+            "fda_safety_score": bool(fda_item) and to_float(fda_item.get("fda_safety_score")) is not None,
+            "fda_clearance_velocity_score": bool(fda_item) and to_float(fda_item.get("fda_clearance_velocity_score")) is not None,
+            "fda_evidence_quality_score": bool(fda_item) and to_float(fda_item.get("fda_evidence_quality_score")) is not None,
+            "fda_event_risk_score": bool(fda_item) and to_float(fda_item.get("fda_event_risk_score")) is not None,
             "reimbursement_score": component_available["reimbursement"],
             "valuation_score": component_available["valuation"],
             "technical_entry_score": component_available["technical_entry"],
@@ -1887,6 +2132,21 @@ def build_rows(
             fundamental_quality_score=score_or(item.get("fundamental_quality_score_v1"), neutral_fundamental),
             durable_growth_score=durable_score,
             fda_product_score=fda_score,
+            fda_product_score_legacy=score_or(fda_item.get("fda_product_score_legacy"), fda_score) if fda_item else neutral_fda_no_data,
+            fda_alpha_score=score_or(fda_item.get("fda_alpha_score"), fda_score) if fda_item else neutral_fda_no_data,
+            fda_safety_score=score_or(fda_item.get("fda_safety_score"), 50.0) if fda_item else 50.0,
+            fda_clearance_velocity_score=score_or(fda_item.get("fda_clearance_velocity_score"), 50.0) if fda_item else 50.0,
+            fda_evidence_quality_score=score_or(fda_item.get("fda_evidence_quality_score"), 50.0) if fda_item else 50.0,
+            fda_event_risk_score=score_or(fda_item.get("fda_event_risk_score"), 0.0) if fda_item else 0.0,
+            fda_signal_mode=str(fda_item.get("fda_signal_mode") or "") if fda_item else "",
+            fda_signal_direction=str(fda_item.get("fda_signal_direction") or "") if fda_item else "",
+            fda_signal_reliability=(
+                (to_float(fda_item.get("fda_signal_reliability")) or 0.0)
+                if fda_item
+                else 0.0
+            ),
+            fda_score_source=active_fda_score_source,
+            fda_component_weight=fda_component_weight,
             fda_data_available=fda_data_available,
             reimbursement_score=score_or(reimbursement_table_score, neutral_reimbursement) if reimbursement_item else neutral_reimbursement,
             reimbursement_status=reimbursement_status,
@@ -1988,6 +2248,7 @@ def build_rows(
             row,
             gates=gates_for_row(row, gates, gate_profiles),
             technical_policy=technical_policy_for_row(row, default_technical_policy, technical_policy_profiles),
+            fda_policy=fda_policy_for_row(row, default_fda_policy, fda_policy_profiles),
         )
         apply_pullback_candidate_tag(row, pullback_candidate_profiles.get(row.calibration_cohort))
         row.top_positive_drivers, row.top_negative_drivers = score_drivers(row)
@@ -2047,6 +2308,20 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "fundamental_quality_score",
         "durable_growth_score",
         "fda_product_score",
+        "fda_product_score_legacy",
+        "fda_alpha_score",
+        "fda_safety_score",
+        "fda_clearance_velocity_score",
+        "fda_evidence_quality_score",
+        "fda_event_risk_score",
+        "fda_signal_mode",
+        "fda_signal_direction",
+        "fda_signal_reliability",
+        "fda_score_source",
+        "fda_gate_mode",
+        "fda_policy_reason",
+        "fda_gate_excluded",
+        "fda_component_weight",
         "reimbursement_score",
         "reimbursement_status",
         "direct_code_evidence",
@@ -2164,6 +2439,20 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.fundamental_quality_score,
                 row.durable_growth_score,
                 row.fda_product_score,
+                row.fda_product_score_legacy,
+                row.fda_alpha_score,
+                row.fda_safety_score,
+                row.fda_clearance_velocity_score,
+                row.fda_evidence_quality_score,
+                row.fda_event_risk_score,
+                row.fda_signal_mode,
+                row.fda_signal_direction,
+                row.fda_signal_reliability,
+                row.fda_score_source,
+                row.fda_gate_mode,
+                row.fda_policy_reason,
+                row.fda_gate_excluded,
+                row.fda_component_weight,
                 row.reimbursement_score,
                 row.reimbursement_status,
                 row.direct_code_evidence,
