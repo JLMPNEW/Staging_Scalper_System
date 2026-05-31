@@ -211,7 +211,8 @@ FORWARD_LOOKING_ONLY = re.compile(
 YEAR_RE = re.compile(r"\b(20\d{2})\b")
 TAG_RE = re.compile(r"<[^>]+>")
 WHITESPACE_RE = re.compile(r"\s+")
-AMOUNT_RE = r"(?:\$\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(billion|million|bn|mm|m|b)?|(\d+(?:,\d{3})*(?:\.\d+)?)\s*(billion|million|bn|mm|m|b))"
+AMOUNT_UNIT_RE = r"billion|billions|million|millions|thousand|thousands|bn|mm|m|k|b"
+AMOUNT_RE = rf"(?:\$\s*(\d+(?:,\d{{3}})*(?:\.\d+)?)\s*({AMOUNT_UNIT_RE})?|(\d+(?:,\d{{3}})*(?:\.\d+)?)\s*({AMOUNT_UNIT_RE}))"
 RANGE_CONNECTOR_RE = r"(?:\s*(?:-|–|—|to|and|through)\s*)"
 GUIDANCE_CUE_RE = re.compile(
     r"\b(guidance|outlook|expects?|expected|anticipates?|anticipated|projects?|projected|forecasts?|forecasted|guides?|range|reaffirms?|reiterates?|provides|provided|raise|raises|lower|lowers|target)\b",
@@ -356,6 +357,19 @@ def clean_text(raw: str) -> str:
     return WHITESPACE_RE.sub(" ", text).strip()
 
 
+def default_money_unit_from_text(raw: str) -> str | None:
+    text = " ".join(str(raw or "").lower().split())
+    if not text:
+        return None
+    if re.search(r"\bin\s+thousands\b|\b(?:amounts?|figures?|dollars?)\s+(?:are\s+)?(?:presented\s+)?in\s+thousands\b", text):
+        return "thousand"
+    if re.search(r"\bin\s+millions\b|\b(?:amounts?|figures?|dollars?)\s+(?:are\s+)?(?:presented\s+)?in\s+millions\b", text):
+        return "million"
+    if re.search(r"\bin\s+billions\b|\b(?:amounts?|figures?|dollars?)\s+(?:are\s+)?(?:presented\s+)?in\s+billions\b", text):
+        return "billion"
+    return None
+
+
 def money_value(raw_number: str, raw_unit: str | None, default_unit: str | None, *, per_share: bool = False) -> tuple[float | None, str]:
     value = to_float(raw_number)
     if value is None:
@@ -363,15 +377,13 @@ def money_value(raw_number: str, raw_unit: str | None, default_unit: str | None,
     if per_share:
         return value, "per_share"
     unit = (raw_unit or default_unit or "").strip().lower()
-    if unit in {"billion", "bn", "b"}:
+    if unit in {"billion", "billions", "bn", "b"}:
         return value * 1_000_000_000.0, "usd"
-    if unit in {"million", "mm", "m"}:
+    if unit in {"million", "millions", "mm", "m"}:
         return value * 1_000_000.0, "usd"
-    # Guidance in biotech filings normally uses dollars; if no unit is present,
-    # treat values above 1,000 as absolute dollars and smaller values as millions.
-    if value >= 1_000:
-        return value, "usd"
-    return value * 1_000_000.0, "usd"
+    if unit in {"thousand", "thousands", "k"}:
+        return value * 1_000.0, "usd"
+    return value, "usd"
 
 
 def amount_from_groups(groups: tuple[str | None, ...], start: int, default_unit: str | None, *, per_share: bool = False) -> tuple[float | None, str, str | None]:
@@ -419,6 +431,7 @@ def extract_period_label(window: str, guidance_year: int | None) -> str:
 def parse_metric_values(metric: str, window: str) -> tuple[float | None, float | None, float | None, str] | None:
     metric_pat = metric_regex(metric)
     per_share = metric in {"eps", "adjusted_eps"}
+    window_default_unit = default_money_unit_from_text(window)
     range_after = re.compile(
         metric_pat + r".{0,160}?" + AMOUNT_RE + RANGE_CONNECTOR_RE + AMOUNT_RE,
         re.IGNORECASE | re.DOTALL,
@@ -455,9 +468,10 @@ def parse_metric_values(metric: str, window: str) -> tuple[float | None, float |
             groups = match.groups()
             first_unit = groups[1] or groups[3]
             second_unit = groups[5] or groups[7]
-            default_unit = second_unit or first_unit
-            low, unit, _ = amount_from_groups(groups, 0, default_unit, per_share=per_share)
-            high, _, _ = amount_from_groups(groups, 4, default_unit, per_share=per_share)
+            first_default_unit = first_unit or second_unit or window_default_unit
+            second_default_unit = second_unit or first_unit or window_default_unit
+            low, unit, _ = amount_from_groups(groups, 0, first_default_unit, per_share=per_share)
+            high, _, _ = amount_from_groups(groups, 4, second_default_unit, per_share=per_share)
             if low is None or high is None:
                 continue
             if low > high:
@@ -469,7 +483,7 @@ def parse_metric_values(metric: str, window: str) -> tuple[float | None, float |
         if not has_metric_guidance_cue(snippet):
             continue
         groups = match.groups()
-        value, normalized_unit, _ = amount_from_groups(groups, 0, None, per_share=per_share)
+        value, normalized_unit, _ = amount_from_groups(groups, 0, window_default_unit, per_share=per_share)
         if value is not None:
             return value, value, value, normalized_unit
     return None
@@ -1491,9 +1505,9 @@ def parse_guidance_records(
     asof_date: date,
     min_confidence: float,
     max_windows_per_filing: int,
-    guidance_window_before_chars: int,
-    guidance_window_after_chars: int,
-    max_workers: int,
+    guidance_window_before_chars: int = 450,
+    guidance_window_after_chars: int = 900,
+    max_workers: int = 1,
 ) -> tuple[list[GuidanceRecord], dict[str, int]]:
     if not filings:
         return [], {}
@@ -1730,10 +1744,11 @@ def build_feature_row(
     if not records:
         trailing_growth = to_float((commercial or {}).get("revenue_yoy_growth_pct"))
         commercial_stage = bool(to_float((commercial or {}).get("commercial_stage_flag")) or 0.0)
+        no_guidance_quality_score = float(cfg_get(config, "forward_guidance.no_guidance_quality_score", 35.0))
         if commercial_stage and trailing_growth is not None and trailing_growth <= 0.0:
             guidance_score = float(cfg_get(config, "forward_guidance.no_guidance_negative_growth_score", 28.0))
         elif commercial_stage:
-            guidance_score = float(cfg_get(config, "forward_guidance.no_guidance_commercial_score", 35.0))
+            guidance_score = float(cfg_get(config, "forward_guidance.no_guidance_commercial_score", no_guidance_quality_score))
         else:
             guidance_score = float(cfg_get(config, "forward_guidance.no_guidance_clinical_score", 42.0))
         quality_adjusted_guidance_score = guidance_score
@@ -2169,8 +2184,8 @@ def main() -> None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
     ticker_filter = {normalize_ticker(part) for part in args.tickers.split(",") if normalize_ticker(part)}
     forms = {str(item).upper() for item in (cfg_get(config, "forward_guidance.forms", []) or [])}
-    lookback_days = int(cfg_get(config, "forward_guidance.lookback_days", 540))
-    max_filings_per_company = int(cfg_get(config, "forward_guidance.max_filings_per_company", 14))
+    lookback_days = int(cfg_get(config, "forward_guidance.lookback_days", 420))
+    max_filings_per_company = int(cfg_get(config, "forward_guidance.max_filings_per_company", 8))
     max_windows_per_filing = int(cfg_get(config, "forward_guidance.max_windows_per_filing", 40))
     guidance_window_before_chars = int(cfg_get(config, "forward_guidance.guidance_window_before_chars", 450))
     guidance_window_after_chars = int(cfg_get(config, "forward_guidance.guidance_window_after_chars", 900))
@@ -2235,8 +2250,9 @@ def main() -> None:
             context="forward guidance parse commercial_value_features_daily",
             max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2)),
         )
-        run_id: int | None = start_run(conn, run_type="parse_forward_guidance", input_path=universe_csv)
+        run_id: int | None = None
         try:
+            run_id = start_run(conn, run_type="parse_forward_guidance", input_path=universe_csv)
             overall_start = time.perf_counter()
             all_records: list[GuidanceRecord] = []
             records_by_company: dict[int, list[GuidanceRecord]] = {}

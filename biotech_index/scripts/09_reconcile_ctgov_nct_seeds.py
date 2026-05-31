@@ -789,8 +789,8 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except SystemExit:
+    except (SystemExit, KeyboardInterrupt, GeneratorExit):
         raise
-    except BaseException as exc:
+    except Exception as exc:
         LOGGER.exception("Fatal CTGov NCT reconciliation error: %s", exc)
         raise SystemExit(1) from exc

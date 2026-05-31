@@ -210,6 +210,7 @@ def create_taxonomy_table(conn: Any) -> None:
         CREATE TABLE IF NOT EXISTS dim_company_model_taxonomy (
             company_id INTEGER PRIMARY KEY,
             ticker TEXT NOT NULL,
+            company_name TEXT,
             primary_subsector_raw TEXT,
             calibration_cohort TEXT NOT NULL,
             reimbursement_model TEXT,
@@ -229,6 +230,9 @@ def create_taxonomy_table(conn: Any) -> None:
         )
         """
     )
+    existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(dim_company_model_taxonomy)").fetchall()}
+    if "company_name" not in existing:
+        conn.execute("ALTER TABLE dim_company_model_taxonomy ADD COLUMN company_name TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_company_model_taxonomy_cohort ON dim_company_model_taxonomy(calibration_cohort)")
 
 
@@ -321,7 +325,7 @@ def refine_calibration_cohort(
 
 def regulatory_model(row: dict[str, Any] | None, ticker: str, cohort: str) -> str:
     if row is not None:
-        state = str(row.get("fda_review_state") or "").strip().lower()
+        state = str(row.get("fda_review_state") or row.get("review_adjusted_fda_state") or "").strip().lower()
         if state in REGULATORY_MODEL_FDA_STATES:
             return state
     if cohort in {"life_science_tools_research_instruments", "healthcare_services_cro_other"}:
@@ -396,7 +400,7 @@ def build_rows(conn: Any) -> list[dict[str, Any]]:
 def upsert_rows(conn: Any, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
-    columns = [field for field in FIELDNAMES if field != "company_name"]
+    columns = list(FIELDNAMES)
     placeholders = ", ".join("?" for _ in columns)
     updates = ", ".join(f"{column} = excluded.{column}" for column in columns if column != "company_id")
     conn.executemany(

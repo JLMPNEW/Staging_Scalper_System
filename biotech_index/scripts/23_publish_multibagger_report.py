@@ -422,18 +422,17 @@ def main() -> None:
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         run_id: int | None = None
-        init_db(conn)
-        asof_obj = parse_date(args.asof) if args.asof else None
-        if args.asof and asof_obj is None:
-            raise ValueError(f"Invalid --asof date: {args.asof}")
-        asof_date = asof_obj.isoformat() if asof_obj else latest_score_date(conn)
-        run_id = start_run(conn, run_type="publish_multibagger_report", input_path=db_path)
         try:
+            init_db(conn)
+            asof_obj = parse_date(args.asof) if args.asof else None
+            if args.asof and asof_obj is None:
+                raise ValueError(f"Invalid --asof date: {args.asof}")
+            asof_date = asof_obj.isoformat() if asof_obj else latest_score_date(conn)
+            run_id = start_run(conn, run_type="publish_multibagger_report", input_path=db_path)
             rows = load_rows(conn, asof_date)
             if not rows:
                 raise ValueError(f"No multibagger score rows found for asof_date={asof_date}")
-            rows_with_bucket = [row for row in rows if row.get("bucket")]
-            flattened = [flatten(row) for row in rows_with_bucket]
+            flattened = [flatten(row) for row in rows]
             all_candidate_rows = [
                 row for row in flattened if row.get("bucket") and not str(row.get("bucket")).startswith("avoid")
             ]

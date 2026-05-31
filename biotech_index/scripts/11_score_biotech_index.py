@@ -518,20 +518,8 @@ def production_policy_settings(config: dict[str, Any]) -> dict[str, Any]:
             )
         return value
 
-    event_hard_penalty = cfg_get(config, "biotech_scoring.production_policy.event_hard_penalty", None)
-    soft_weakness_penalty = cfg_get(config, "biotech_scoring.production_policy.soft_weakness_penalty", None)
-    if event_hard_penalty is None:
-        raise ValueError("Missing required config key biotech_scoring.production_policy.event_hard_penalty")
-    if soft_weakness_penalty is None:
-        raise ValueError("Missing required config key biotech_scoring.production_policy.soft_weakness_penalty")
-    event_hard_penalty_value = float(event_hard_penalty)
-    soft_weakness_penalty_value = float(soft_weakness_penalty)
-    for key, value in {
-        "event_hard_penalty": event_hard_penalty_value,
-        "soft_weakness_penalty": soft_weakness_penalty_value,
-    }.items():
-        if not 0.0 <= value <= 100.0:
-            raise ValueError(f"biotech_scoring.production_policy.{key} must be between 0 and 100, got {value:g}")
+    event_hard_penalty_value = policy_float("event_hard_penalty", 10.0)
+    soft_weakness_penalty_value = policy_float("soft_weakness_penalty", 8.0)
     return {
         "event_hard_penalty": event_hard_penalty_value,
         "soft_weakness_penalty": soft_weakness_penalty_value,
@@ -1332,6 +1320,7 @@ def score_rows(
     missing_catalyst_raw: list[str] = []
     missing_credibility_raw: list[str] = []
     missing_financial_raw: list[str] = []
+    missing_risk_raw: list[str] = []
     missing_momentum_raw: list[str] = []
     for row in rows:
         company_id = int(row["company_id"])
@@ -1365,12 +1354,14 @@ def score_rows(
             missing_credibility_raw.append(str(row.get("ticker") or company_id))
         if financial_raw is None:
             missing_financial_raw.append(str(row.get("ticker") or company_id))
+        if risk_raw is None:
+            missing_risk_raw.append(str(row.get("ticker") or company_id))
         if momentum_raw is None:
             missing_momentum_raw.append(str(row.get("ticker") or company_id))
         catalyst = clamp(catalyst_raw if catalyst_raw is not None else 0.0)
         credibility = clamp(credibility_raw if credibility_raw is not None else 0.0)
         financial_quality = clamp(financial_raw if financial_raw is not None else 0.0)
-        risk = clamp(risk_raw if risk_raw is not None else 100.0)
+        risk = clamp(risk_raw if risk_raw is not None else 0.0)
         momentum = clamp(momentum_raw if momentum_raw is not None else 0.0)
         clinical_positive = (
             catalyst_w * catalyst
@@ -1499,7 +1490,7 @@ def score_rows(
         confidence_adjusted_score_reduction = pre_confidence_investment_score * (1.0 - confidence_multiplier)
         investment_score = clamp(pre_confidence_investment_score * confidence_multiplier)
         effective_total_risk_drag = max(0.0, investment_positive - investment_score)
-        effective_post_confidence_risk_drag = effective_pre_confidence_risk_drag
+        effective_post_confidence_risk_drag = effective_total_risk_drag
         raw_opportunity = investment_score if investment_enabled else clinical_opportunity
         core_veto_reasons = core_structural_veto_reasons(payload, commercial, core_veto_settings)
         event_reasons = event_hard_weakness_reasons(payload, policy_settings)
@@ -1912,6 +1903,12 @@ def score_rows(
             len(missing_financial_raw),
             ",".join(missing_financial_raw[:10]),
         )
+    if missing_risk_raw:
+        LOGGER.warning(
+            "risk_score_raw missing for %d row(s); used 0.0 fallback for sample=%s",
+            len(missing_risk_raw),
+            ",".join(missing_risk_raw[:10]),
+        )
     if missing_momentum_raw:
         LOGGER.warning(
             "momentum_score_raw missing for %d row(s); used 0.0 fallback for sample=%s",
@@ -2322,7 +2319,7 @@ def main() -> None:
                 if require_governance_features:
                     raise RuntimeError(message)
                 LOGGER.warning("%s; continuing with empty governance diagnostics for missing companies.", message)
-            max_upstream_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0))
+            max_upstream_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2))
             validate_layer_freshness(
                 base_rows=features,
                 layer_rows_by_company=commercial_by_company,

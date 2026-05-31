@@ -24,13 +24,16 @@ if str(PROJECT_ROOT) not in sys.path:
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
+from med_devices.core.fda_states import MANUAL_FDA_REVIEW_STATES, normalize_fda_state  # noqa: E402
 from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("build_med_device_fda_features")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 NON_DATA_QUALITY_REVIEW_REASONS = {
+    "duplicate_cleanup_required",
     "mapping_review_required",
+    "manual_review_required",
     "no_mapped_fda_records",
     "regulatory_review_required",
     "regulatory_watch",
@@ -262,6 +265,8 @@ def to_float(raw: object) -> float | None:
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
+    if not math.isfinite(value):
+        return low
     return max(low, min(high, value))
 
 
@@ -1473,8 +1478,7 @@ def hard_red_review_rows(conn: Any, rows: list[FdaFeatureRow], *, asof: date) ->
         for row in rows
         if (
             row.raw_fda_red_flag
-            or row.review_adjusted_fda_state
-            in {"mapping_review_required", "regulatory_review_required", "confirmed_hard_red"}
+            or normalize_fda_state(row.review_adjusted_fda_state) in MANUAL_FDA_REVIEW_STATES
         )
     }
     if not flagged:

@@ -13,13 +13,22 @@ GOING_CONCERN_STATUS_COL = "going_concern_status"
 GOING_CONCERN_HARD_STATUSES = frozenset(
     {
         "confirmed",
+        "hard",
         "confirmed_going_concern",
         "going_concern_confirmed",
         "google_confirmed_going_concern",
     }
 )
 GOING_CONCERN_SOFT_STATUSES = frozenset(
-    {"possible", "substantial_doubt", "going_concern", "going_concern_warning"}
+    {
+        "possible",
+        "possible_going_concern",
+        "soft",
+        "substantial_doubt",
+        "going_concern",
+        "going_concern_warning",
+        "warning",
+    }
 )
 
 CORE_HARD_WEAKNESS_REASONS = frozenset(

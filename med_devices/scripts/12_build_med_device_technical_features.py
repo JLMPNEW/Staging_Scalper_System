@@ -221,6 +221,8 @@ def safe_div(numerator: float | None, denominator: float | None) -> float | None
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
+    if not math.isfinite(value):
+        return low
     return max(low, min(high, value))
 
 

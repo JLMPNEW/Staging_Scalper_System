@@ -123,9 +123,18 @@ class CachedHttpClient:
                 cached_text = ""
             if cached_text:
                 try:
-                    return json.loads(cached_text)
+                    parsed_cache = json.loads(cached_text)
                 except json.JSONDecodeError:
                     LOGGER.warning("Ignoring invalid JSON cache file: %s", path)
+                    with _CACHE_WRITE_LOCK:
+                        try:
+                            path.unlink()
+                        except FileNotFoundError:
+                            pass
+                else:
+                    if parsed_cache is not None:
+                        return parsed_cache
+                    LOGGER.warning("Ignoring null JSON cache file: %s", path)
                     with _CACHE_WRITE_LOCK:
                         try:
                             path.unlink()

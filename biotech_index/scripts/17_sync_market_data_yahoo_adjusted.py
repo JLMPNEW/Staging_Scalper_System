@@ -57,6 +57,7 @@ CSV_FIELDNAMES = [
     "market_cap",
     "shares_outstanding",
     "avg_dollar_volume_20d",
+    "return_1m_pct",
     "return_3m_pct",
     "relative_strength_3m_vs_xbi",
     "price_vs_200d_pct",
@@ -530,8 +531,13 @@ def build_market_rows(
     continuity_max_missing_days: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     ordered_bars = sorted_bar_rows(bars)
-    closes = [value for value in (to_float(row.get("close")) for row in ordered_bars) if value is not None and value > 0]
-    volumes = [to_float(row.get("volume")) or 0.0 for row in ordered_bars if to_float(row.get("close")) is not None]
+    usable_bars = [
+        row
+        for row in ordered_bars
+        if (to_float(row.get("close")) is not None and (to_float(row.get("close")) or 0.0) > 0.0)
+    ]
+    closes = [to_float(row.get("close")) or 0.0 for row in usable_bars]
+    volumes = [to_float(row.get("volume")) or 0.0 for row in usable_bars]
     if not closes:
         raise ValueError(f"No usable adjusted close prices for {company.ticker}")
     continuity = continuity_report(
@@ -544,8 +550,9 @@ def build_market_rows(
     dollar_volumes = [closes[idx] * volumes[idx] for idx in range(min(len(closes), len(volumes)))]
     avg_volume_20d = sum(volumes[-20:]) / min(20, len(volumes)) if volumes else None
     avg_dollar_volume_20d = sum(dollar_volumes[-20:]) / min(20, len(dollar_volumes)) if dollar_volumes else None
-    high_52w = max((to_float(row.get("high")) or 0.0 for row in ordered_bars[-260:]), default=None)
-    low_52w = min((to_float(row.get("low")) or close for row in ordered_bars[-260:]), default=None)
+    window_52w = usable_bars[-260:]
+    high_52w = max((to_float(row.get("high")) or to_float(row.get("close")) or 0.0 for row in window_52w), default=None)
+    low_52w = min((to_float(row.get("low")) or to_float(row.get("close")) or close for row in window_52w), default=None)
     market_cap = close * shares if shares and shares > 0 else None
     sma_200 = sum(closes[-200:]) / min(200, len(closes)) if closes else None
     return_1m = pct_return(closes, 21)
@@ -1009,8 +1016,6 @@ def main() -> None:
                         asof_date=asof_date,
                     )
                     bars = merge_bars(existing, fetched)
-                    if fetch_error is not None and existing:
-                        failed_tickers.append(company.ticker)
                     if not bars and fetch_error is not None:
                         raise fetch_error
                     if not fetched and existing:
@@ -1042,10 +1047,12 @@ def main() -> None:
                 except Exception as exc:
                     failed_tickers.append(company.ticker)
                     LOGGER.warning("Yahoo adjusted market sync failed for %s: %s", company.ticker, exc)
+            unique_failed_tickers = list(dict.fromkeys(failed_tickers))
+            failed_ticker_set = set(unique_failed_tickers)
+            bars_to_upsert = [row for row in bars_to_upsert if str(row.get("ticker") or "").upper() not in failed_ticker_set]
             if companies and not features:
                 raise RuntimeError(f"Yahoo adjusted market sync produced no company feature rows; failed_tickers={','.join(failed_tickers)}")
             upsert_market_rows(conn, bars=bars_to_upsert, snapshots=snapshots, features=features)
-            unique_failed_tickers = list(dict.fromkeys(failed_tickers))
             failed_company_ids = {company.company_id for company in companies if company.ticker in set(unique_failed_tickers)}
             delete_market_rows_for_companies(conn, company_ids=failed_company_ids, asof_date=asof_date, source=source)
             successful_companies = [company for company in companies if company.company_id not in failed_company_ids]

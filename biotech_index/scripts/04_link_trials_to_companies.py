@@ -475,8 +475,8 @@ def main() -> None:
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
-        run_id = start_run(conn, run_type="link_trials_to_companies", input_path=db_path)
         try:
+            run_id = start_run(conn, run_type="link_trials_to_companies", input_path=db_path)
             companies = load_companies(conn, status_filter=status_filter, ticker_filter=ticker_filter)
             validate_nonempty_selection(
                 count=len(companies),
@@ -534,7 +534,7 @@ def main() -> None:
             finish_run(conn, run_id=run_id, status="success", row_count=len(links), message=message)
             LOGGER.info("Trial linking complete: %s", message)
         except BaseException as exc:
-            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 

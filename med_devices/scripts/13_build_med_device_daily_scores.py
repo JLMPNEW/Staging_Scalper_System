@@ -47,7 +47,19 @@ TECHNICAL_GATE_MODES = {
     TECHNICAL_GATE_BREAKDOWN_VETO_ONLY,
     TECHNICAL_GATE_DISABLED,
 }
+CALIBRATION_STATUS_PRODUCTION_ELIGIBLE = "production_eligible"
+CALIBRATION_STATUS_RESTRICTED_RESEARCH_ONLY = "restricted_research_only"
+CALIBRATION_STATUS_EXCLUDED_FROM_TIER1 = "excluded_from_tier1"
+CALIBRATION_STATUSES = {
+    CALIBRATION_STATUS_PRODUCTION_ELIGIBLE,
+    CALIBRATION_STATUS_RESTRICTED_RESEARCH_ONLY,
+    CALIBRATION_STATUS_EXCLUDED_FROM_TIER1,
+}
 OPTIONAL_DAILY_SCORE_COLUMNS = {
+    "calibration_status": "TEXT DEFAULT 'production_eligible'",
+    "calibration_status_reason": "TEXT DEFAULT ''",
+    "cohort_score_template_id": "TEXT DEFAULT ''",
+    "cohort_score_template_spec": "TEXT DEFAULT ''",
     "technical_gate_mode": "TEXT DEFAULT ''",
     "technical_overlay_status": "TEXT DEFAULT ''",
     "technical_policy_reason": "TEXT DEFAULT ''",
@@ -73,6 +85,8 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "technical_signal_direction": "TEXT DEFAULT ''",
     "technical_signal_reliability": "REAL DEFAULT 0.0",
     "technical_score_source": "TEXT DEFAULT ''",
+    "technical_entry_status_score": "REAL DEFAULT 0.0",
+    "technical_entry_status_score_source": "TEXT DEFAULT ''",
 }
 ALLOWED_FEATURE_TABLES = {
     "feature_financial_valuation",
@@ -94,6 +108,10 @@ FIELDNAMES = [
     "raw_composite_score",
     "composite_percentile",
     "calibration_cohort",
+    "calibration_status",
+    "calibration_status_reason",
+    "cohort_score_template_id",
+    "cohort_score_template_spec",
     "cohort_percentile",
     "fundamental_quality_score",
     "durable_growth_score",
@@ -126,6 +144,8 @@ FIELDNAMES = [
     "technical_signal_direction",
     "technical_signal_reliability",
     "technical_score_source",
+    "technical_entry_status_score",
+    "technical_entry_status_score_source",
     "sentiment_catalyst_score",
     "value_trap_score",
     "data_completeness_score",
@@ -195,6 +215,10 @@ class ScoreRow:
     raw_composite_score: float = 0.0
     composite_percentile: float = 0.0
     calibration_cohort: str = ""
+    calibration_status: str = CALIBRATION_STATUS_PRODUCTION_ELIGIBLE
+    calibration_status_reason: str = ""
+    cohort_score_template_id: str = ""
+    cohort_score_template_spec: str = ""
     cohort_percentile: float = 50.0
     fundamental_quality_score: float = 0.0
     durable_growth_score: float = 50.0
@@ -227,6 +251,8 @@ class ScoreRow:
     technical_signal_direction: str = ""
     technical_signal_reliability: float = 0.0
     technical_score_source: str = "legacy_setup"
+    technical_entry_status_score: float = 50.0
+    technical_entry_status_score_source: str = "legacy_setup"
     sentiment_catalyst_score: float = 50.0
     value_trap_score: float = 0.0
     data_completeness_score: float = 0.0
@@ -313,6 +339,8 @@ def to_float(raw: object) -> float | None:
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
+    if not math.isfinite(value):
+        return low
     return max(low, min(high, value))
 
 
@@ -940,6 +968,20 @@ class PullbackCandidatePolicy:
     rationale: str = ""
 
 
+@dataclass(frozen=True)
+class ScoreTemplateComponent:
+    field: str
+    direction: str
+    weight: float
+
+
+@dataclass(frozen=True)
+class CohortScoreTemplate:
+    template_id: str
+    components: tuple[ScoreTemplateComponent, ...]
+    rationale: str = ""
+
+
 def int_flag(raw: object) -> int:
     return 1 if str(raw or "").strip().lower() in {"1", "true", "yes", "y", "on"} or raw == 1 else 0
 
@@ -1064,6 +1106,50 @@ def gates_for_row(row: ScoreRow, base_gates: dict[str, float], profiles: dict[st
     return profiles.get(row.calibration_cohort, base_gates)
 
 
+def normalize_calibration_status(raw: object, *, context: str) -> str:
+    status = str(raw or CALIBRATION_STATUS_PRODUCTION_ELIGIBLE).strip().lower()
+    aliases = {
+        "production": CALIBRATION_STATUS_PRODUCTION_ELIGIBLE,
+        "eligible": CALIBRATION_STATUS_PRODUCTION_ELIGIBLE,
+        "research_only": CALIBRATION_STATUS_RESTRICTED_RESEARCH_ONLY,
+        "restricted": CALIBRATION_STATUS_RESTRICTED_RESEARCH_ONLY,
+        "exclude_tier1": CALIBRATION_STATUS_EXCLUDED_FROM_TIER1,
+        "excluded": CALIBRATION_STATUS_EXCLUDED_FROM_TIER1,
+    }
+    status = aliases.get(status, status)
+    if status not in CALIBRATION_STATUSES:
+        raise ValueError(f"{context} must be one of {sorted(CALIBRATION_STATUSES)}, got {status!r}")
+    return status
+
+
+def cohort_calibration_status_profiles(config: dict[str, Any]) -> dict[str, tuple[str, str]]:
+    raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
+    if not isinstance(raw_profiles, dict):
+        raise ValueError("scoring.cohort_profiles must be a mapping when provided")
+    out: dict[str, tuple[str, str]] = {}
+    for cohort, raw_profile in raw_profiles.items():
+        if not isinstance(raw_profile, dict):
+            continue
+        if str(raw_profile.get("enabled", True)).strip().lower() in {"0", "false", "no", "off"}:
+            continue
+        status = normalize_calibration_status(
+            raw_profile.get("calibration_status", CALIBRATION_STATUS_PRODUCTION_ELIGIBLE),
+            context=f"scoring.cohort_profiles.{cohort}.calibration_status",
+        )
+        reason = str(
+            raw_profile.get("calibration_status_reason")
+            or raw_profile.get("validation_note")
+            or raw_profile.get("source")
+            or ""
+        ).strip()
+        out[str(cohort)] = (status, reason)
+    return out
+
+
+def calibration_status_for_cohort(cohort: str, profiles: dict[str, tuple[str, str]]) -> tuple[str, str]:
+    return profiles.get(cohort, (CALIBRATION_STATUS_PRODUCTION_ELIGIBLE, ""))
+
+
 def bool_from_raw(raw: object, default: bool) -> bool:
     if raw is None:
         return default
@@ -1179,11 +1265,168 @@ def weights_for_cohort(cohort: str, base_weights: dict[str, float], profiles: di
     return profiles.get(cohort, base_weights)
 
 
+SCORE_TEMPLATE_FIELD_TO_ATTR = {
+    "fundamental_quality_score": "fundamental_quality_score",
+    "durable_growth_score": "durable_growth_score",
+    "fda_product_score": "fda_product_score",
+    "reimbursement_score": "reimbursement_score",
+    "valuation_score": "valuation_score",
+    "technical_entry_score": "technical_entry_score",
+    "technical_setup_score": "technical_setup_score",
+    "technical_core_score": "technical_core_score",
+    "technical_alpha_score": "technical_alpha_score",
+    "technical_pullback_score": "technical_pullback_score",
+    "sentiment_catalyst_score": "sentiment_catalyst_score",
+    "value_trap_score": "value_trap_score",
+}
+SCORE_TEMPLATE_FIELD_TO_COMPONENT = {
+    "fundamental_quality_score": "fundamental_quality",
+    "durable_growth_score": "durable_growth",
+    "fda_product_score": "fda_product",
+    "reimbursement_score": "reimbursement",
+    "valuation_score": "valuation",
+    "technical_entry_score": "technical_entry",
+    "technical_setup_score": "technical_entry",
+    "technical_core_score": "technical_entry",
+    "technical_alpha_score": "technical_entry",
+    "technical_pullback_score": "technical_entry",
+    "sentiment_catalyst_score": "sentiment_catalyst",
+    "value_trap_score": "valuation",
+}
+SCORE_TEMPLATE_DIRECTIONS = {"positive", "inverse"}
+
+
+def normalize_score_template_field(raw: object, *, context: str) -> str:
+    field = str(raw or "").strip()
+    if field not in SCORE_TEMPLATE_FIELD_TO_ATTR:
+        raise ValueError(
+            f"{context}.field must be one of {sorted(SCORE_TEMPLATE_FIELD_TO_ATTR)}, got {field!r}"
+        )
+    return field
+
+
+def parse_score_template_component(raw: object, *, context: str) -> ScoreTemplateComponent:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{context} must be a mapping")
+    field = normalize_score_template_field(raw.get("field"), context=context)
+    direction = str(raw.get("direction", "positive") or "positive").strip().lower()
+    if direction not in SCORE_TEMPLATE_DIRECTIONS:
+        raise ValueError(f"{context}.direction must be one of {sorted(SCORE_TEMPLATE_DIRECTIONS)}, got {direction!r}")
+    weight = to_float(raw.get("weight"))
+    if weight is None or weight < 0:
+        raise ValueError(f"{context}.weight must be a non-negative number")
+    return ScoreTemplateComponent(field=field, direction=direction, weight=weight)
+
+
+def parse_score_template(raw: object, *, context: str) -> CohortScoreTemplate:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{context} must be a mapping")
+    template_id = str(raw.get("template_id") or "").strip()
+    if not template_id:
+        raise ValueError(f"{context}.template_id is required")
+    raw_components = raw.get("components")
+    if not isinstance(raw_components, list) or not raw_components:
+        raise ValueError(f"{context}.components must be a non-empty list")
+    components = tuple(
+        parse_score_template_component(item, context=f"{context}.components[{idx}]")
+        for idx, item in enumerate(raw_components)
+    )
+    total = sum(component.weight for component in components)
+    if total <= 0:
+        raise ValueError(f"{context}.components must have positive total weight")
+    rationale = str(raw.get("rationale") or "").strip()
+    return CohortScoreTemplate(template_id=template_id, components=components, rationale=rationale)
+
+
+def cohort_score_template_profiles(config: dict[str, Any]) -> dict[str, CohortScoreTemplate]:
+    raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
+    if not isinstance(raw_profiles, dict):
+        raise ValueError("scoring.cohort_profiles must be a mapping when provided")
+    out: dict[str, CohortScoreTemplate] = {}
+    for cohort, raw_profile in raw_profiles.items():
+        if not isinstance(raw_profile, dict):
+            continue
+        if str(raw_profile.get("enabled", True)).strip().lower() in {"0", "false", "no", "off"}:
+            continue
+        if "score_template" not in raw_profile:
+            continue
+        out[str(cohort)] = parse_score_template(
+            raw_profile.get("score_template"),
+            context=f"scoring.cohort_profiles.{cohort}.score_template",
+        )
+    return out
+
+
+def score_template_spec(template: CohortScoreTemplate | None) -> str:
+    if template is None:
+        return ""
+    return ";".join(
+        f"{component.field}:{component.direction}:{component.weight:.2f}"
+        for component in template.components
+    )
+
+
+def score_template_technical_weight(template: CohortScoreTemplate | None) -> float:
+    if template is None:
+        return 0.0
+    total = sum(component.weight for component in template.components)
+    if total <= 0:
+        return 0.0
+    technical_weight = sum(
+        component.weight
+        for component in template.components
+        if SCORE_TEMPLATE_FIELD_TO_COMPONENT[component.field] == "technical_entry"
+    )
+    return technical_weight / total
+
+
+def score_template_value(
+    row: ScoreRow,
+    template: CohortScoreTemplate,
+    field_available: dict[str, bool],
+) -> float:
+    numerator = 0.0
+    denominator = 0.0
+    for component in template.components:
+        if not field_available.get(component.field, False):
+            continue
+        raw_value = to_float(getattr(row, SCORE_TEMPLATE_FIELD_TO_ATTR[component.field], None))
+        if raw_value is None:
+            continue
+        score = clamp(raw_value)
+        if component.direction == "inverse":
+            score = 100.0 - score
+        numerator += score * component.weight
+        denominator += component.weight
+    if denominator <= 0:
+        return DEFAULT_NEUTRAL_SCORE
+    return numerator / denominator
+
+
 def technical_score_source(config: dict[str, Any]) -> str:
     source = str(cfg_get(config, "scoring.technical_score_source", "legacy_setup") or "legacy_setup").strip().lower()
     allowed = {"legacy_setup", "alpha_when_available", "alpha"}
     if source not in allowed:
         raise ValueError(f"scoring.technical_score_source must be one of {sorted(allowed)}, got {source!r}")
+    return source
+
+
+def technical_composite_score_source(config: dict[str, Any]) -> str:
+    default = technical_score_source(config)
+    source = str(cfg_get(config, "scoring.technical_composite_score_source", default) or default).strip().lower()
+    allowed = {"legacy_setup", "alpha_when_available", "alpha"}
+    if source not in allowed:
+        raise ValueError(f"scoring.technical_composite_score_source must be one of {sorted(allowed)}, got {source!r}")
+    return source
+
+
+def technical_entry_status_score_source(config: dict[str, Any]) -> str:
+    source = str(
+        cfg_get(config, "scoring.technical_entry_status_score_source", "legacy_setup") or "legacy_setup"
+    ).strip().lower()
+    allowed = {"legacy_setup", "alpha_when_available", "alpha"}
+    if source not in allowed:
+        raise ValueError(f"scoring.technical_entry_status_score_source must be one of {sorted(allowed)}, got {source!r}")
     return source
 
 
@@ -1198,6 +1441,17 @@ def selected_technical_score(item: dict[str, Any], *, neutral: float, source: st
     if setup is not None:
         return score_or(setup, neutral), "technical_setup_score"
     return score_or(item.get("technical_score"), neutral), "technical_score"
+
+
+def technical_score_available(item: dict[str, Any], *, source: str) -> bool:
+    if not item:
+        return False
+    if source in {"alpha", "alpha_when_available"}:
+        if to_float(item.get("technical_alpha_score")) is not None:
+            return True
+        if source == "alpha":
+            return False
+    return to_float(item.get("technical_setup_score")) is not None or to_float(item.get("technical_score")) is not None
 
 
 def technical_overlay_status(entry: str, *, mode: str) -> str:
@@ -1269,7 +1523,8 @@ def apply_pullback_candidate_tag(row: ScoreRow, policy: PullbackCandidatePolicy 
         return
     if row.data_completeness_score < policy.data_completeness_min:
         return
-    if row.technical_entry_score > policy.technical_entry_max:
+    entry_score = row.technical_entry_status_score if row.technical_entry_status_score is not None else row.technical_entry_score
+    if entry_score > policy.technical_entry_max:
         return
     if row.fundamental_quality_score < policy.fundamental_quality_min:
         return
@@ -1292,7 +1547,8 @@ def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: Techni
             rationale="legacy_default_hard_positive_technical_gate",
         )
     reasons: list[str] = []
-    row.entry_status = entry_status(row.technical_entry_score)
+    entry_score = row.technical_entry_status_score if row.technical_entry_status_score is not None else row.technical_entry_score
+    row.entry_status = entry_status(entry_score)
     row.technical_gate_mode = technical_policy.gate_mode
     row.technical_policy_reason = technical_policy.rationale
     row.technical_overlay_status = technical_overlay_status(row.entry_status, mode=technical_policy.gate_mode)
@@ -1311,11 +1567,12 @@ def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: Techni
     row.passed_valuation_gate = int(row.valuation_score >= gates["valuation_min"])
     entry_min = technical_policy.entry_min if technical_policy.entry_min is not None else gates["technical_entry_min"]
     row.passed_technical_breakdown_veto = int(
-        row.technical_entry_score >= technical_policy.breakdown_min
+        entry_score >= technical_policy.breakdown_min
         and row.entry_status != "avoid_technical_breakdown"
+        and not row.technical_breakdown_flag
     )
     if technical_policy.gate_mode == TECHNICAL_GATE_HARD_POSITIVE:
-        row.passed_technical_gate = int(row.technical_entry_score >= entry_min)
+        row.passed_technical_gate = int(entry_score >= entry_min)
         row.technical_gate_excluded = 0
     elif technical_policy.gate_mode == TECHNICAL_GATE_BREAKDOWN_VETO_ONLY:
         row.passed_technical_gate = row.passed_technical_breakdown_veto
@@ -1367,11 +1624,17 @@ def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: Techni
         reasons.append("value_trap")
     elif not row.passed_value_trap_gate:
         reasons.append("value_trap_soft_gate")
+    tier1_restricted = row.calibration_status in {
+        CALIBRATION_STATUS_RESTRICTED_RESEARCH_ONLY,
+        CALIBRATION_STATUS_EXCLUDED_FROM_TIER1,
+    }
+    if tier1_restricted:
+        reasons.append(row.calibration_status)
 
     row.failed_gates = ";".join(reasons)
     row.review_reason = ";".join(reasons)
     technical_classification_block = bool(technical_policy.block_classification and not row.passed_technical_gate)
-    row.final_investability_gate = int(
+    base_investability_gate = int(
         row.passed_raw_score_gate
         and row.passed_fundamental_gate
         and row.passed_growth_gate
@@ -1385,6 +1648,7 @@ def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: Techni
         and row.passed_fda_manual_review_gate
         and not technical_classification_block
     )
+    row.final_investability_gate = int(base_investability_gate and not tier1_restricted)
     row.gate_status = "pass" if row.final_investability_gate else "fail"
     if confirmed_hard_red:
         row.classification = "avoid_confirmed_regulatory_risk"
@@ -1407,6 +1671,13 @@ def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: Techni
     elif not row.passed_value_trap_gate and row.raw_composite_score >= gates["watchlist_min"]:
         row.classification = "cheap_but_needs_proof"
         row.classification_reason = "value_trap_soft_gate"
+    elif tier1_restricted and base_investability_gate:
+        row.classification = "research_watchlist_restricted_cohort"
+        row.classification_reason = (
+            f"{row.calibration_status};{row.calibration_status_reason}"
+            if row.calibration_status_reason
+            else row.calibration_status
+        )
     elif row.final_investability_gate:
         row.classification = "tier_1_long_candidate"
         row.classification_reason = (
@@ -1451,19 +1722,28 @@ def build_rows(
     sentiment_proxy = sentiment_catalyst_proxy(financial_rows, config=config, neutral=neutral_sentiment)
     gates = base_scoring_gates(config)
     gate_profiles = cohort_gate_profiles(config, gates)
+    calibration_status_profiles = cohort_calibration_status_profiles(config)
     weight_profiles = cohort_component_weight_profiles(config, weights)
+    score_template_profiles = cohort_score_template_profiles(config)
     default_technical_policy = base_technical_policy(config, gates)
     technical_policy_profiles = cohort_technical_policy_profiles(config, default_technical_policy)
     pullback_candidate_profiles = cohort_pullback_candidate_profiles(config)
-    technical_source = technical_score_source(config)
+    technical_source = technical_composite_score_source(config)
+    technical_entry_source = technical_entry_status_score_source(config)
     rank_composite = cfg_bool(config, "scoring.cross_sectional_composite_rank", True)
     model_version = str(cfg_get(config, "scoring.model_version", "med_device_score_v1") or "med_device_score_v1").strip()
     rows: list[ScoreRow] = []
     for item in financial_rows:
         company_id = int(item["company_id"])
         cohort = taxonomy.get(company_id, "")
+        calibration_status, calibration_status_reason = calibration_status_for_cohort(cohort, calibration_status_profiles)
         active_weights = weights_for_cohort(cohort, weights, weight_profiles)
-        technical_component_weight = active_weights.get("technical_entry", 0.0)
+        active_score_template = score_template_profiles.get(cohort)
+        technical_component_weight = (
+            score_template_technical_weight(active_score_template)
+            if active_score_template is not None
+            else active_weights.get("technical_entry", 0.0)
+        )
         fda_item = fda_rows.get(company_id, {})
         reimbursement_item = reimbursement_rows.get(company_id, {})
         technical_item = technical_rows.get(company_id, {})
@@ -1514,12 +1794,24 @@ def build_rows(
             if technical_item
             else (neutral_technical, "no_technical_feature")
         )
+        technical_entry_status_score, active_technical_entry_status_score_source = (
+            selected_technical_score(technical_item, neutral=neutral_technical, source=technical_entry_source)
+            if technical_item
+            else (neutral_technical, "no_technical_feature")
+        )
         technical_trend_quality_score = score_or(technical_item.get("trend_quality_score"), neutral_technical) if technical_item else neutral_technical
         technical_relative_strength_score = score_or(technical_item.get("relative_strength_score"), neutral_technical) if technical_item else neutral_technical
         technical_liquidity_score = score_or(technical_item.get("liquidity_score"), neutral_technical) if technical_item else neutral_technical
         technical_volume_breakout_score = score_or(technical_item.get("volume_breakout_score"), neutral_technical) if technical_item else neutral_technical
         technical_volatility_risk_score = score_or(technical_item.get("volatility_risk_score"), neutral_technical) if technical_item else neutral_technical
-        technical_setup_score = score_or(technical_item.get("technical_setup_score"), technical_score) if technical_item else neutral_technical
+        technical_setup_score = (
+            score_or(
+                technical_item.get("technical_setup_score"),
+                score_or(technical_item.get("technical_score"), neutral_technical),
+            )
+            if technical_item
+            else neutral_technical
+        )
         technical_core_score = score_or(technical_item.get("technical_core_score"), neutral_technical) if technical_item else neutral_technical
         technical_alpha_score = score_or(technical_item.get("technical_alpha_score"), neutral_technical) if technical_item else neutral_technical
         technical_pullback_score = score_or(technical_item.get("technical_pullback_score"), neutral_technical) if technical_item else neutral_technical
@@ -1542,12 +1834,43 @@ def build_rows(
             "fda_product": bool(fda_item) and to_float(fda_item.get("fda_product_score")) is not None,
             "reimbursement": has_reimbursement_live_score,
             "valuation": to_float(item.get("valuation_score_v1")) is not None,
-            "technical_entry": bool(technical_item) and to_float(technical_item.get("technical_score")) is not None,
+            "technical_entry": technical_score_available(technical_item, source=technical_source),
             "sentiment_catalyst": has_sentiment_live_score,
         }
-        active_component_keys = [key for key, weight in active_weights.items() if weight > WEIGHT_EPSILON]
-        active_live_count = sum(1 for key in active_component_keys if component_available.get(key, False))
-        data_completeness = round(100.0 * active_live_count / len(active_component_keys), 2) if active_component_keys else 0.0
+        score_field_available = {
+            "fundamental_quality_score": component_available["fundamental_quality"],
+            "durable_growth_score": component_available["durable_growth"],
+            "fda_product_score": component_available["fda_product"],
+            "reimbursement_score": component_available["reimbursement"],
+            "valuation_score": component_available["valuation"],
+            "technical_entry_score": component_available["technical_entry"],
+            "technical_setup_score": bool(technical_item)
+            and (
+                to_float(technical_item.get("technical_setup_score")) is not None
+                or to_float(technical_item.get("technical_score")) is not None
+            ),
+            "technical_core_score": bool(technical_item) and to_float(technical_item.get("technical_core_score")) is not None,
+            "technical_alpha_score": bool(technical_item) and to_float(technical_item.get("technical_alpha_score")) is not None,
+            "technical_pullback_score": bool(technical_item) and to_float(technical_item.get("technical_pullback_score")) is not None,
+            "sentiment_catalyst_score": component_available["sentiment_catalyst"],
+            "value_trap_score": to_float(item.get("value_trap_score")) is not None,
+        }
+        if active_score_template is not None:
+            active_template_fields = [
+                component.field
+                for component in active_score_template.components
+                if component.weight > WEIGHT_EPSILON
+            ]
+            active_live_count = sum(1 for field in active_template_fields if score_field_available.get(field, False))
+            data_completeness = (
+                round(100.0 * active_live_count / len(active_template_fields), 2)
+                if active_template_fields
+                else 0.0
+            )
+        else:
+            active_component_keys = [key for key, weight in active_weights.items() if weight > WEIGHT_EPSILON]
+            active_live_count = sum(1 for key in active_component_keys if component_available.get(key, False))
+            data_completeness = round(100.0 * active_live_count / len(active_component_keys), 2) if active_component_keys else 0.0
         row = ScoreRow(
             asof_date=asof,
             scoring_model_version=model_version,
@@ -1557,6 +1880,10 @@ def build_rows(
             company_name=str(item.get("company_name") or ""),
             subsector=str(item.get("subsector") or ""),
             calibration_cohort=cohort,
+            calibration_status=calibration_status,
+            calibration_status_reason=calibration_status_reason,
+            cohort_score_template_id=active_score_template.template_id if active_score_template is not None else "",
+            cohort_score_template_spec=score_template_spec(active_score_template),
             fundamental_quality_score=score_or(item.get("fundamental_quality_score_v1"), neutral_fundamental),
             durable_growth_score=durable_score,
             fda_product_score=fda_score,
@@ -1588,6 +1915,8 @@ def build_rows(
             technical_signal_direction=technical_signal_direction,
             technical_signal_reliability=technical_signal_reliability,
             technical_score_source=active_technical_score_source,
+            technical_entry_status_score=technical_entry_status_score,
+            technical_entry_status_score_source=active_technical_entry_status_score_source,
             sentiment_catalyst_score=sentiment_score,
             value_trap_score=score_or(item.get("value_trap_score"), neutral_value_trap),
             live_component_count=active_live_count,
@@ -1622,6 +1951,11 @@ def build_rows(
         row.durable_growth_score = row.durable_growth_score if row.durable_growth_score is not None else 50.0
         row.reimbursement_score = row.reimbursement_score if row.reimbursement_score is not None else neutral_reimbursement
         row.technical_entry_score = row.technical_entry_score if row.technical_entry_score is not None else neutral_technical
+        row.technical_entry_status_score = (
+            row.technical_entry_status_score
+            if row.technical_entry_status_score is not None
+            else row.technical_setup_score
+        )
         row.sentiment_catalyst_score = row.sentiment_catalyst_score if row.sentiment_catalyst_score is not None else neutral_sentiment
         component_scores = {
             "fundamental_quality": row.fundamental_quality_score,
@@ -1632,7 +1966,11 @@ def build_rows(
             "technical_entry": row.technical_entry_score,
             "sentiment_catalyst": row.sentiment_catalyst_score,
         }
-        raw_composite = weighted_available_score(component_scores, component_available, active_weights)
+        raw_composite = (
+            score_template_value(row, active_score_template, score_field_available)
+            if active_score_template is not None
+            else weighted_available_score(component_scores, component_available, active_weights)
+        )
         row.raw_composite_score = round(
             clamp(raw_composite * value_trap_discount(row.value_trap_score)),
             2,
@@ -1701,6 +2039,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "raw_composite_score",
         "composite_percentile",
         "calibration_cohort",
+        "calibration_status",
+        "calibration_status_reason",
+        "cohort_score_template_id",
+        "cohort_score_template_spec",
         "cohort_percentile",
         "fundamental_quality_score",
         "durable_growth_score",
@@ -1732,6 +2074,8 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "technical_signal_direction",
         "technical_signal_reliability",
         "technical_score_source",
+        "technical_entry_status_score",
+        "technical_entry_status_score_source",
         "sentiment_catalyst_score",
         "value_trap_score",
         "rank",
@@ -1812,6 +2156,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.raw_composite_score,
                 row.composite_percentile,
                 row.calibration_cohort,
+                row.calibration_status,
+                row.calibration_status_reason,
+                row.cohort_score_template_id,
+                row.cohort_score_template_spec,
                 row.cohort_percentile,
                 row.fundamental_quality_score,
                 row.durable_growth_score,
@@ -1843,6 +2191,8 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.technical_signal_direction,
                 row.technical_signal_reliability,
                 row.technical_score_source,
+                row.technical_entry_status_score,
+                row.technical_entry_status_score_source,
                 row.sentiment_catalyst_score,
                 row.value_trap_score,
                 row.rank,

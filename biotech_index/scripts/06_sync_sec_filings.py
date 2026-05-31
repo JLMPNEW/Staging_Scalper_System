@@ -699,8 +699,8 @@ def main() -> None:
         )
         existing_documents_lock = Lock()
         LOGGER.info("Loaded %d existing SEC filing documents for resume", len(existing_documents))
-        run_id = start_run(conn, run_type="sync_sec_filings", input_path=universe_csv)
         try:
+            run_id = start_run(conn, run_type="sync_sec_filings", input_path=universe_csv)
             error_count = 0
             text_error_count = 0
             headers = {"User-Agent": user_agent, "Accept": "application/json,text/plain,*/*"}
@@ -793,9 +793,7 @@ def main() -> None:
             if status != "success" and not args.allow_partial:
                 raise SystemExit(2)
         except BaseException as exc:
-            if isinstance(exc, SystemExit):
-                raise
-            if run_id is not None:
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
     LOGGER.info("Synced SEC filings: companies=%d rows=%d output=%s", len(companies), len(rows_out), output_csv)

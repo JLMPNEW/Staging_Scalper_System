@@ -97,8 +97,12 @@ def main() -> None:
             )
         )
     if not args.skip_ruff:
-        require_executable("ruff")
-        steps.append(GateStep("ruff", ["ruff", "check", "--config", "ruff.biotech.toml", "biotech_index", "tests/biotech"]))
+        steps.append(
+            GateStep(
+                "ruff",
+                [sys.executable, "-m", "ruff", "check", "--config", "ruff.biotech.toml", "biotech_index", "tests/biotech"],
+            )
+        )
     if args.pyright:
         require_executable("pyright")
         steps.append(GateStep("pyright", ["pyright", "--project", "pyrightconfig.biotech.json"]))
@@ -110,9 +114,9 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except SystemExit:
+    except (SystemExit, KeyboardInterrupt, GeneratorExit):
         raise
-    except BaseException as exc:
+    except Exception as exc:
         logging.basicConfig(level=logging.ERROR, format="%(asctime)s %(levelname)s %(name)s %(message)s")
         LOGGER.exception("Fatal biotech quality gate error: %s", exc)
         raise SystemExit(1) from exc

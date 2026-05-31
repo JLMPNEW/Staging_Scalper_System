@@ -49,12 +49,15 @@ def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_
 
 CSV_FIELDNAMES = [
     "asof_date",
+    "company_id",
+    "source",
     "ticker",
     "company_name",
     "close_price",
     "market_cap",
     "shares_outstanding",
     "avg_dollar_volume_20d",
+    "return_1m_pct",
     "return_3m_pct",
     "relative_strength_3m_vs_xbi",
     "price_vs_200d_pct",
@@ -573,8 +576,13 @@ def build_market_rows(
     continuity_max_missing_days: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     ordered_bars = sorted_bar_rows(bars)
-    closes = [value for value in (to_float(row.get("close")) for row in ordered_bars) if value is not None and value > 0]
-    volumes = [to_float(row.get("volume")) or 0.0 for row in ordered_bars if to_float(row.get("close")) is not None]
+    usable_bars = [
+        row
+        for row in ordered_bars
+        if (to_float(row.get("close")) is not None and (to_float(row.get("close")) or 0.0) > 0.0)
+    ]
+    closes = [to_float(row.get("close")) or 0.0 for row in usable_bars]
+    volumes = [to_float(row.get("volume")) or 0.0 for row in usable_bars]
     if not closes:
         raise ValueError(f"No usable close prices for {company.ticker}")
     continuity = continuity_report(
@@ -587,8 +595,9 @@ def build_market_rows(
     dollar_volumes = [closes[idx] * volumes[idx] for idx in range(min(len(closes), len(volumes)))]
     avg_volume_20d = sum(volumes[-20:]) / min(20, len(volumes)) if volumes else None
     avg_dollar_volume_20d = sum(dollar_volumes[-20:]) / min(20, len(dollar_volumes)) if dollar_volumes else None
-    high_52w = max((to_float(row.get("high")) or 0.0 for row in ordered_bars[-260:]), default=None)
-    low_52w = min((to_float(row.get("low")) or close for row in ordered_bars[-260:]), default=None)
+    window_52w = usable_bars[-260:]
+    high_52w = max((to_float(row.get("high")) or to_float(row.get("close")) or 0.0 for row in window_52w), default=None)
+    low_52w = min((to_float(row.get("low")) or to_float(row.get("close")) or close for row in window_52w), default=None)
     market_cap = close * shares if shares and shares > 0 else None
     sma_200 = sum(closes[-200:]) / min(200, len(closes)) if closes else None
     return_1m = pct_return(closes, 21)
@@ -874,7 +883,7 @@ def load_current_feature_csv_rows(conn: sqlite3.Connection, companies: list[Comp
     placeholders = ",".join("?" for _ in company_names)
     rows = conn.execute(
         f"""
-        SELECT {", ".join(field for field in CSV_FIELDNAMES if field != "company_name")}, company_id
+        SELECT {", ".join(field for field in CSV_FIELDNAMES if field != "company_name")}
         FROM market_features_daily
         WHERE source = ? AND asof_date = ? AND company_id IN ({placeholders})
         """,
@@ -896,7 +905,12 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    output_csv = resolve_path(cfg_get(config, "ib_market_data.output_csv"), base_dir=base_dir)
+    global SOURCE
+    SOURCE = str(cfg_get(config, "ib_market_data.source", SOURCE) or SOURCE).strip() or SOURCE
+    output_csv = resolve_path(
+        cfg_get(config, "ib_market_data.output_csv", "../output/biotech_index_reports/ib_market_features.csv"),
+        base_dir=base_dir,
+    )
     final_universe_csv = resolve_path(cfg_get(config, "ib_market_data.final_scoring_universe_csv"), base_dir=base_dir)
     requested_asof_arg = parse_date(args.asof) if args.asof else None
     if args.asof and requested_asof_arg is None:
@@ -1154,11 +1168,13 @@ def main() -> None:
                     failed_tickers.append(company.ticker)
                     hard_failed_tickers.append(company.ticker)
                     LOGGER.warning("IB market sync failed for %s: %s", company.ticker, exc)
+            unique_failed_tickers = list(dict.fromkeys(failed_tickers))
+            unique_hard_failed_tickers = list(dict.fromkeys(hard_failed_tickers))
+            hard_failed_ticker_set = set(unique_hard_failed_tickers)
+            all_bars = [row for row in all_bars if str(row.get("ticker") or "").upper() not in hard_failed_ticker_set]
             if companies and not features:
                 raise RuntimeError(f"IB market sync produced no company feature rows; failed_tickers={','.join(failed_tickers)}")
             upsert_market_rows(conn, bars=all_bars, snapshots=snapshots, features=features)
-            unique_failed_tickers = list(dict.fromkeys(failed_tickers))
-            unique_hard_failed_tickers = list(dict.fromkeys(hard_failed_tickers))
             hard_failed_company_ids = {company.company_id for company in companies if company.ticker in set(unique_hard_failed_tickers)}
             delete_market_rows_for_companies(conn, company_ids=hard_failed_company_ids, asof_date=asof_date, source=SOURCE)
             successful_companies = [company for company in companies if company.company_id not in hard_failed_company_ids]

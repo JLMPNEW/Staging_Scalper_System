@@ -117,6 +117,8 @@ DEFAULT_PIPELINE_QUALITY_SETTINGS = {
     "collab_phase23_cap": 5.0,
     "collab_phase23_weight": 0.5,
     "collab_penalty_threshold": 0.50,
+    "collaborator_heavy_threshold": 0.60,
+    "core_pipeline_quality_multiplier": 0.18,
     "collab_penalty_cap": 25.0,
     "collab_penalty_weight": 50.0,
 }
@@ -836,7 +838,8 @@ def evidence_summary(
         * pipeline_quality_settings["collab_penalty_weight"],
     )
     core_quality = clamp(core_quality)
-    collaborator_heavy = collab_ratio >= 0.60 and collab_only_active > (lead_active + program_active)
+    collaborator_heavy_threshold = pipeline_quality_settings["collaborator_heavy_threshold"]
+    collaborator_heavy = collab_ratio >= collaborator_heavy_threshold and collab_only_active > (lead_active + program_active)
 
     top = cast(Any, active.copy())
     top["_score"] = top["trial_score"].map(to_float) if "trial_score" in top.columns else 0.0
@@ -901,6 +904,7 @@ def compute_feature_row(
     category_overrides: dict[str, str],
     going_concern_source_priority: list[str],
     survival_score_blend_weight: float,
+    core_pipeline_quality_multiplier: float,
     sec_catalyst_event_weights: dict[str, float],
     sec_catalyst_recency_decay_enabled: bool,
     sec_catalyst_half_life_days: float,
@@ -1082,7 +1086,7 @@ def compute_feature_row(
         "pipeline_density": min(CATALYST_COMPONENT_MAX["pipeline_density"], pipeline_density * 10.0),
         "core_pipeline_quality": min(
             CATALYST_COMPONENT_MAX["core_pipeline_quality"],
-            core_pipeline_quality * 0.18,
+            core_pipeline_quality * core_pipeline_quality_multiplier,
         ),
         "recent_trial_update": 0.0,
         "regulatory_or_positive_clinical_event": 0.0,
@@ -1519,8 +1523,8 @@ def main() -> None:
     run_id: int | None = None
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         init_db(conn)
-        run_id = start_run(conn, run_type="build_biotech_features", input_path=universe_csv)
         try:
+            run_id = start_run(conn, run_type="build_biotech_features", input_path=universe_csv)
             company_ids = load_company_ids(conn)
             survival_features = load_latest_survival_features(conn, asof_date)
             market_source_priority = scoring_market_sources(config)
@@ -1528,7 +1532,7 @@ def main() -> None:
                 conn,
                 asof_date,
                 source_priority=market_source_priority,
-                max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0)),
+                max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2)),
             )
             LOGGER.info("Biotech feature market source priority: %s", ",".join(market_source_priority))
             sec_filing_summary = load_recent_sec_filing_summary(
@@ -1570,6 +1574,7 @@ def main() -> None:
                         category_overrides=category_overrides,
                         going_concern_source_priority=going_concern_source_priority,
                         survival_score_blend_weight=survival_score_blend_weight,
+                        core_pipeline_quality_multiplier=pipeline_quality_settings["core_pipeline_quality_multiplier"],
                         sec_catalyst_event_weights=sec_catalyst_event_weights,
                         sec_catalyst_recency_decay_enabled=sec_catalyst_recency_decay_enabled,
                         sec_catalyst_half_life_days=sec_catalyst_half_life_days,

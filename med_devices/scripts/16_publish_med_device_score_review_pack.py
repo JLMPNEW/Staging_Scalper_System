@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,10 @@ SCORE_FIELDS = [
     "company_name",
     "subsector",
     "calibration_cohort",
+    "calibration_status",
+    "calibration_status_reason",
+    "cohort_score_template_id",
+    "cohort_score_template_spec",
     "composite_score",
     "raw_composite_score",
     "composite_percentile",
@@ -63,6 +68,8 @@ SCORE_FIELDS = [
     "technical_signal_direction",
     "technical_signal_reliability",
     "technical_score_source",
+    "technical_entry_status_score",
+    "technical_entry_status_score_source",
     "sentiment_catalyst_score",
     "value_trap_score",
     "data_completeness_score",
@@ -222,6 +229,22 @@ def decode_driver_list(raw: object) -> str:
     return str(value)
 
 
+def to_float(raw: object) -> float | None:
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def first_float(*raw_values: object, default: float = 0.0) -> float:
+    for raw in raw_values:
+        value = to_float(raw)
+        if value is not None:
+            return value
+    return default
+
+
 def clean_row(row: dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
     item["fda_review_state"] = (
@@ -275,6 +298,11 @@ def write_markdown(
 ) -> None:
     model_version = str(rows[0].get("scoring_model_version") or "") if rows else ""
     tier1 = [row for row in rows if row.get("classification") == "tier_1_long_candidate"]
+    restricted = [
+        row for row in rows
+        if str(row.get("calibration_status") or "").strip().lower()
+        in {"restricted_research_only", "excluded_from_tier1"}
+    ]
     regulatory_risk = [
         row
         for row in rows
@@ -288,10 +316,12 @@ def write_markdown(
     def line_items(items: list[dict[str, Any]], *, include_reason: bool = False) -> list[str]:
         out: list[str] = []
         for row in items:
+            raw_score = first_float(row.get("raw_composite_score"), row.get("composite_score"))
+            percentile = first_float(row.get("composite_percentile"))
             base = (
                 f"- {row.get('rank')}. {row.get('ticker')} "
-                f"raw={float(row.get('raw_composite_score') or row.get('composite_score') or 0.0):.2f} "
-                f"pct={float(row.get('composite_percentile') or 0.0):.2f} "
+                f"raw={raw_score:.2f} "
+                f"pct={percentile:.2f} "
                 f"({row.get('classification')})"
             )
             if include_reason:
@@ -313,12 +343,23 @@ def write_markdown(
         "## Tier-1 Long Candidates",
         *(line_items(tier1) or ["- None"]),
         "",
+        "## Restricted Research Cohorts",
+        *(
+            [
+                f"- {row.get('rank')}. {row.get('ticker')} "
+                f"cohort={row.get('calibration_cohort') or 'unknown'} "
+                f"status={row.get('calibration_status') or 'production_eligible'} "
+                f"reason={row.get('calibration_status_reason') or row.get('classification_reason') or 'not specified'}"
+                for row in restricted[:25]
+            ] or ["- None"]
+        ),
+        "",
         "## Technical Policy Snapshot",
         *(
             [
                 f"- {row.get('ticker')}: mode={row.get('technical_gate_mode') or 'legacy'} "
                 f"overlay={row.get('technical_overlay_status') or row.get('entry_status') or 'unknown'} "
-                f"weight={float(row.get('technical_component_weight') or 0.0):.2f}"
+                f"weight={first_float(row.get('technical_component_weight')):.2f}"
                 for row in tier1[:25]
             ] or ["- None"]
         ),
@@ -328,7 +369,7 @@ def write_markdown(
             [
                 f"- {row.get('rank')}. {row.get('ticker')} "
                 f"cohort={row.get('calibration_cohort') or 'unknown'} "
-                f"tech={float(row.get('technical_entry_score') or 0.0):.2f} "
+                f"tech={first_float(row.get('technical_entry_score')):.2f} "
                 f"template={row.get('pullback_candidate_template_id') or 'unknown'}"
                 for row in pullback_candidates[:25]
             ] or ["- None"]
@@ -376,6 +417,11 @@ def main() -> None:
         reimbursement_counts = reimbursement_status_counts(clean_rows)
         tier1 = [row for row in clean_rows if row["classification"] == "tier_1_long_candidate"]
         manual = [row for row in clean_rows if row["classification"] == "manual_review_regulatory_risk"]
+        restricted = [
+            row for row in clean_rows
+            if str(row.get("calibration_status") or "").strip().lower()
+            in {"restricted_research_only", "excluded_from_tier1"}
+        ]
         regulatory_risk = [
             row
             for row in clean_rows
@@ -388,6 +434,7 @@ def main() -> None:
         write_csv(output_dir / "med_device_score_review_all.csv", clean_rows, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_tier1.csv", tier1, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_manual_regulatory.csv", manual, SCORE_FIELDS)
+        write_csv(output_dir / "med_device_score_review_restricted_cohorts.csv", restricted, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_regulatory_risk.csv", regulatory_risk, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_top25.csv", top25, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_bottom25.csv", bottom25, SCORE_FIELDS)
@@ -406,7 +453,8 @@ def main() -> None:
         )
         print(
             f"review_pack_dir={output_dir} asof={asof} rows={len(rows)} "
-            f"tier1={len(tier1)} manual_regulatory={len(manual)} regulatory_risk={len(regulatory_risk)}"
+            f"tier1={len(tier1)} manual_regulatory={len(manual)} "
+            f"restricted_cohort={len(restricted)} regulatory_risk={len(regulatory_risk)}"
         )
 
 

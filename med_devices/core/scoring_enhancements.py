@@ -14,6 +14,14 @@ from statistics import mean, stdev
 LOGGER = logging.getLogger(__name__)
 
 
+def _finite_float(raw: object) -> float | None:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
 def winsorize(
     values: list[tuple[int, float]],
     *,
@@ -23,6 +31,7 @@ def winsorize(
     """Clip ``(id, value)`` pairs at nearest-rank quantile bounds."""
     if not 0.0 <= low_pct < high_pct <= 1.0:
         raise ValueError(f"low_pct ({low_pct}) must be < high_pct ({high_pct}), both in [0, 1]")
+    values = [(idx, value) for idx, raw_value in values if (value := _finite_float(raw_value)) is not None]
     if len(values) < 4:
         return list(values)
     sorted_values = sorted(value for _, value in values)
@@ -41,6 +50,7 @@ def zscore_normalize(
     winsor_high_pct: float = 0.95,
 ) -> dict[int, float]:
     """Winsorize, z-score, clip, and rescale to 0-100."""
+    values = [(idx, value) for idx, raw_value in values if (value := _finite_float(raw_value)) is not None]
     if not values:
         return {}
     if len(values) == 1:
@@ -75,12 +85,16 @@ def _fractional_rank(values: list[float]) -> list[float]:
 
 def compute_factor_ic(factor_scores: dict[int, float], forward_returns: dict[int, float]) -> float | None:
     """Return Spearman rank IC for overlapping factor scores and forward returns."""
-    ids = sorted(set(factor_scores) & set(forward_returns))
+    ids = sorted(
+        item
+        for item in set(factor_scores) & set(forward_returns)
+        if _finite_float(factor_scores[item]) is not None and _finite_float(forward_returns[item]) is not None
+    )
     if len(ids) < 5:
         LOGGER.debug("compute_factor_ic: only %d overlapping observations", len(ids))
         return None
-    factor_ranks = _fractional_rank([factor_scores[item] for item in ids])
-    return_ranks = _fractional_rank([forward_returns[item] for item in ids])
+    factor_ranks = _fractional_rank([float(factor_scores[item]) for item in ids])
+    return_ranks = _fractional_rank([float(forward_returns[item]) for item in ids])
     factor_avg = mean(factor_ranks)
     return_avg = mean(return_ranks)
     covariance = sum((a - factor_avg) * (b - return_avg) for a, b in zip(factor_ranks, return_ranks, strict=True)) / len(ids)
@@ -105,7 +119,11 @@ def blended_score(
     active = [
         key
         for key, available in component_available.items()
-        if available and key in component_scores and key in config_weights
+        if available
+        and key in component_scores
+        and key in config_weights
+        and _finite_float(component_scores[key]) is not None
+        and _finite_float(config_weights[key]) is not None
     ]
     if not active:
         return neutral
@@ -122,13 +140,13 @@ def blended_score(
         total_positive_ic = sum(positive_ic.values())
         use_ic = total_positive_ic > 1e-12
 
-    total_config_weight = sum(config_weights[key] for key in active)
+    total_config_weight = sum(float(config_weights[key]) for key in active)
     if total_config_weight <= 1e-12:
         return neutral
 
     effective_weights: dict[str, float] = {}
     for key in active:
-        config_share = config_weights[key] / total_config_weight
+        config_share = float(config_weights[key]) / total_config_weight
         if use_ic:
             ic_share = positive_ic.get(key, 0.0) / total_positive_ic
             effective_weights[key] = (1.0 - ic_blend_fraction) * config_share + ic_blend_fraction * ic_share
@@ -138,7 +156,7 @@ def blended_score(
     total_effective_weight = sum(effective_weights.values())
     if total_effective_weight <= 1e-12:
         return neutral
-    raw = sum(component_scores[key] * effective_weights[key] for key in active) / total_effective_weight
+    raw = sum(float(component_scores[key]) * effective_weights[key] for key in active) / total_effective_weight
     return max(0.0, min(100.0, raw))
 
 
@@ -152,6 +170,13 @@ def classify_with_conviction(
     value_trap_score: float = 0.0,
 ) -> tuple[str, str]:
     """Classify a score row and return a simple High/Medium/Low conviction label."""
+    composite_score = _finite_float(composite_score) or 0.0
+    value_trap_score = _finite_float(value_trap_score) or 0.0
+    component_scores = {
+        key: value
+        for key, raw_value in component_scores.items()
+        if (value := _finite_float(raw_value)) is not None
+    }
     fail: list[str] = []
     if composite_score < gates.get("composite_min", 70.0):
         fail.append("composite")

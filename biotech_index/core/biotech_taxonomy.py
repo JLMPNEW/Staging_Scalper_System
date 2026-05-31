@@ -5,6 +5,8 @@ import math
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
+from biotech_index.core.constants import GOING_CONCERN_HARD_STATUSES, GOING_CONCERN_SOFT_STATUSES
+
 MODEL_VERSION = "biotech_cohort_v1"
 
 NON_THERAPEUTIC_CATEGORIES = frozenset(
@@ -304,7 +306,7 @@ def classify_biotech_cohort(
         overlays.append("low_liquidity")
     if short_runway or severe_runway:
         overlays.append("short_runway")
-    if going_status in {"confirmed", "hard", "going_concern", "warning"}:
+    if going_status in GOING_CONCERN_HARD_STATUSES or going_status in GOING_CONCERN_SOFT_STATUSES:
         overlays.append("going_concern")
     if dilution_count > 0:
         overlays.append("recent_dilution")

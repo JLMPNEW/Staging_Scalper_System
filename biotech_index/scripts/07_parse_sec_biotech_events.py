@@ -857,7 +857,7 @@ def parse_filing_batch(
                     events_out.extend(future.result())
                 except BaseException as exc:
                     pending_raise = exc
-                    if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                    if isinstance(exc, (SystemExit, KeyboardInterrupt, GeneratorExit)):
                         LOGGER.warning(
                             "SEC event parser worker interrupted for accession=%s ticker=%s",
                             filing.accession_nodash,
@@ -1073,8 +1073,8 @@ def main() -> None:
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
         run_type = "parse_sec_biotech_events_export" if args.export_only else "parse_sec_biotech_events"
-        run_id = start_run(conn, run_type=run_type, input_path=db_path)
         try:
+            run_id = start_run(conn, run_type=run_type, input_path=db_path)
             target_accessions = load_target_accessions(conn, cutoff=cutoff, asof=asof_str, ticker_filter=ticker_filter)
             refreshed_manifest = ensure_latest_documents_for_accessions(conn, target_accessions)
             LOGGER.info(

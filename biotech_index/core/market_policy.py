@@ -48,11 +48,15 @@ def calibration_market_sources(config: dict[str, Any]) -> list[str]:
 
 
 def live_validation_primary_source(config: dict[str, Any]) -> str:
-    return str(cfg_get(config, "market_data_policy.live_validation_primary_source", "interactive_brokers") or "interactive_brokers")
+    sources = normalize_source_list(
+        cfg_get(config, "market_data_policy.live_validation_primary_source", "interactive_brokers"),
+        ["interactive_brokers"],
+    )
+    return sources[0]
 
 
 def source_priority_index(source_priority: list[str]) -> dict[str, int]:
-    return {source: idx for idx, source in enumerate(source_priority)}
+    return {source: idx for idx, source in enumerate(normalize_source_list(source_priority, []))}
 
 
 def row_date(raw: object) -> date | None:
@@ -84,9 +88,11 @@ def select_latest_rows_by_source_priority(
         row_dict = dict(row)
         company_id = int(row_dict["company_id"])
         row_asof = row_date(row_dict.get("asof_date"))
+        if row_asof is None or row_asof > asof_date:
+            continue
         age_days = (asof_date - row_asof).days if row_asof is not None else 999_999
         stale_rank = 1 if age_days > max_age else 0
-        source = str(row_dict.get("source") or "")
+        source = str(row_dict.get("source") or "").strip().lower()
         priority_rank = priority.get(source, 999)
         # Negative ordinal makes a newer row sort before an older row once source/staleness are equal.
         recency_rank = -(row_asof.toordinal() if row_asof is not None else 0)

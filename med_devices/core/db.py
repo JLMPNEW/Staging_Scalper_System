@@ -143,6 +143,28 @@ CREATE TABLE IF NOT EXISTS dim_company_alias (
     FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS dim_company_model_taxonomy (
+    company_id INTEGER PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    company_name TEXT,
+    primary_subsector_raw TEXT,
+    calibration_cohort TEXT NOT NULL,
+    reimbursement_model TEXT,
+    regulatory_model TEXT,
+    business_model TEXT,
+    procedure_sensitivity TEXT,
+    capital_equipment_flag INTEGER NOT NULL DEFAULT 0,
+    consumables_flag INTEGER NOT NULL DEFAULT 0,
+    diagnostics_flag INTEGER NOT NULL DEFAULT 0,
+    implantable_flag INTEGER NOT NULL DEFAULT 0,
+    single_product_risk_flag INTEGER NOT NULL DEFAULT 0,
+    taxonomy_confidence REAL NOT NULL DEFAULT 0.0,
+    taxonomy_source TEXT,
+    analyst_reviewed INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS dim_fda_manufacturer (
     fda_manufacturer_id INTEGER PRIMARY KEY AUTOINCREMENT,
     manufacturer_name TEXT NOT NULL,
@@ -823,6 +845,10 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     raw_composite_score REAL,
     composite_percentile REAL,
     calibration_cohort TEXT,
+    calibration_status TEXT DEFAULT 'production_eligible',
+    calibration_status_reason TEXT DEFAULT '',
+    cohort_score_template_id TEXT DEFAULT '',
+    cohort_score_template_spec TEXT DEFAULT '',
     cohort_percentile REAL,
     fundamental_quality_score REAL,
     durable_growth_score REAL,
@@ -854,6 +880,8 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     technical_signal_direction TEXT DEFAULT '',
     technical_signal_reliability REAL DEFAULT 0.0,
     technical_score_source TEXT DEFAULT '',
+    technical_entry_status_score REAL DEFAULT 0.0,
+    technical_entry_status_score_source TEXT DEFAULT '',
     sentiment_catalyst_score REAL,
     value_trap_score REAL,
     data_completeness_score REAL,
@@ -935,6 +963,8 @@ CREATE INDEX IF NOT EXISTS idx_dim_company_cik ON dim_company(cik);
 CREATE INDEX IF NOT EXISTS idx_dim_company_subsector ON dim_company(subsector);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dim_company_alias_unique
 ON dim_company_alias(company_id, alias_norm, COALESCE(source_id, 'manual'));
+CREATE INDEX IF NOT EXISTS idx_company_model_taxonomy_cohort
+ON dim_company_model_taxonomy(calibration_cohort);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dim_fda_manufacturer_unique
 ON dim_fda_manufacturer(manufacturer_name_norm, COALESCE(fei_number, ''));
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dim_reimbursement_code_unique
@@ -1037,6 +1067,27 @@ def init_db(conn: sqlite3.Connection) -> None:
             "interest_expense": "REAL",
             "total_assets": "REAL",
             "stockholders_equity": "REAL",
+        },
+    )
+    _ensure_table_optional_columns(
+        conn,
+        "dim_company_model_taxonomy",
+        {
+            "company_name": "TEXT",
+            "primary_subsector_raw": "TEXT",
+            "reimbursement_model": "TEXT",
+            "regulatory_model": "TEXT",
+            "business_model": "TEXT",
+            "procedure_sensitivity": "TEXT",
+            "capital_equipment_flag": "INTEGER",
+            "consumables_flag": "INTEGER",
+            "diagnostics_flag": "INTEGER",
+            "implantable_flag": "INTEGER",
+            "single_product_risk_flag": "INTEGER",
+            "taxonomy_confidence": "REAL",
+            "taxonomy_source": "TEXT",
+            "analyst_reviewed": "INTEGER",
+            "updated_at": "TEXT",
         },
     )
     _ensure_table_optional_columns(
@@ -1200,6 +1251,10 @@ def init_db(conn: sqlite3.Connection) -> None:
             "raw_composite_score": "REAL",
             "composite_percentile": "REAL",
             "calibration_cohort": "TEXT",
+            "calibration_status": "TEXT",
+            "calibration_status_reason": "TEXT",
+            "cohort_score_template_id": "TEXT",
+            "cohort_score_template_spec": "TEXT",
             "cohort_percentile": "REAL",
             "value_trap_score": "REAL",
             "data_completeness_score": "REAL",
@@ -1230,6 +1285,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             "technical_signal_direction": "TEXT",
             "technical_signal_reliability": "REAL",
             "technical_score_source": "TEXT",
+            "technical_entry_status_score": "REAL",
+            "technical_entry_status_score_source": "TEXT",
             "pullback_candidate_tag": "INTEGER",
             "pullback_candidate_reason": "TEXT",
             "pullback_candidate_template_id": "TEXT",

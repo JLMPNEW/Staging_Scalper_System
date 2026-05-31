@@ -995,9 +995,10 @@ def main() -> None:
     ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if normalize_ticker(value)}
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
-        init_db(conn)
-        run_id = start_run(conn, run_type="build_commercial_value_features", input_path=db_path)
+        run_id: int | None = None
         try:
+            init_db(conn)
+            run_id = start_run(conn, run_type="build_commercial_value_features", input_path=db_path)
             scoring_tickers = read_scoring_tickers(final_universe_csv)
             companies = load_companies(conn, scoring_tickers=scoring_tickers, ticker_filter=ticker_filter, max_companies=args.max_companies)
             subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_companies))
@@ -1014,7 +1015,7 @@ def main() -> None:
             company_ids = [int(company["company_id"]) for company in companies]
             fact_rows_by_company = load_fact_rows_bulk(conn, company_ids, asof_date)
             market_source_priority = scoring_market_sources(config)
-            max_market_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 0))
+            max_market_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2))
             market_by_company = load_latest_market_bulk(
                 conn,
                 company_ids,
@@ -1091,7 +1092,7 @@ def main() -> None:
             LOGGER.info("Built commercial value features: rows=%d output=%s", len(rows), output_csv)
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=f"asof={asof_date.isoformat()} output={output_csv}")
         except BaseException as exc:
-            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 

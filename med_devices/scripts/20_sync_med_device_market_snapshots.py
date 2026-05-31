@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tickers", type=str, default="")
     parser.add_argument("--max-tickers", type=int, default=0)
     parser.add_argument("--skip-ib", action="store_true", help="Skip IB and use Yahoo fallback directly.")
-    parser.add_argument("--use-ib", action="store_true", help="Opt in to deprecated IB fundamental snapshot lookup.")
+    parser.add_argument("--use-ib", action="store_true", help="Opt in to IB market-data snapshot lookup.")
     parser.add_argument("--skip-yahoo", action="store_true", help="Skip Yahoo fallback.")
     parser.add_argument("--allow-partial", action="store_true")
     return parser.parse_args()
@@ -299,7 +299,7 @@ def fetch_ib_snapshot(ib: Any, company: Company, *, policy: dict[str, Any], asof
         ib.cancelMktData(contract)
     except Exception as exc:
         payload["mkt_data_error"] = f"{type(exc).__name__}: {exc}"
-    if shares is None:
+    if shares is None and as_bool(cfg_get(policy, "enable_ib_fundamental_xml", False), default=False):
         try:
             xml_text = ib.reqFundamentalData(contract, "ReportSnapshot")
             xml_shares, xml_market_cap = parse_ib_fundamental_xml(str(xml_text or ""))
@@ -308,6 +308,8 @@ def fetch_ib_snapshot(ib: Any, company: Company, *, policy: dict[str, Any], asof
             payload["fundamental_xml_received"] = bool(xml_text)
         except Exception as exc:
             payload["fundamental_xml_error"] = f"{type(exc).__name__}: {exc}"
+    elif shares is None:
+        payload["fundamental_xml_skipped"] = "disabled_deprecated_ib_endpoint"
     if shares is None:
         return None
     return Snapshot(

@@ -834,7 +834,7 @@ def mark_current_run_failed(exc: BaseException, conn: Any | None = None) -> None
                     message=f"{type(exc).__name__}: {exc}",
                 )
         _RUN_CONTEXT["finished"] = True
-    except BaseException:
+    except Exception:
         LOGGER.exception("Could not mark audit run %s as failed", run_id)
 
 
@@ -1364,7 +1364,10 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except BaseException as exc:
+    except (SystemExit, KeyboardInterrupt, GeneratorExit) as exc:
         if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
             mark_current_run_failed(exc)
+        raise
+    except Exception as exc:
+        mark_current_run_failed(exc)
         raise

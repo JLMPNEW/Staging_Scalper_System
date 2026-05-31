@@ -209,7 +209,7 @@ class CalibrationParams:
     convex_risk_penalty_enabled: bool = True
     risk_penalty_convexity: float = 0.35
     risk_penalty_inflection: float = 50.0
-    growth_drag_curve: str = "smooth_linear"
+    growth_drag_curve: str = "legacy"
     use_quality_adjusted_valuation_component: bool = True
     use_quality_adjusted_guidance_component: bool = True
     rank_quality_caps_enabled: bool = True
@@ -394,6 +394,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Chronological train fraction for in-sample candidate ranking. Defaults to calibration.tier1.train_fraction or 0.70.",
+    )
+    parser.add_argument(
+        "--embargo-days",
+        type=int,
+        default=None,
+        help=(
+            "Calendar-day gap excluded around each train/test split to reduce forward-return overlap leakage. "
+            "Defaults to calibration.tier1.embargo_days or the max configured horizon."
+        ),
     )
     parser.add_argument(
         "--growth-drag-curve",
@@ -2521,7 +2530,7 @@ def forward_return(
     if not bars:
         return None, "", ""
     days = [bar.day for bar in bars]
-    entry_idx = bisect.bisect_right(days, asof) if next_bar_entry else bisect.bisect_left(days, asof) - 1
+    entry_idx = bisect.bisect_right(days, asof) if next_bar_entry else bisect.bisect_left(days, asof)
     if entry_idx < 0 or entry_idx >= len(bars):
         return None, "", ""
     target_idx = entry_idx + horizon
@@ -3364,6 +3373,7 @@ def split_rows_by_completed_return_date(
     *,
     horizon: int,
     train_fraction: float,
+    embargo_days: int = 0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
     ret_key = f"fwd_{horizon}d_net_return"
     eligible_dates = sorted(
@@ -3396,6 +3406,33 @@ def split_rows_by_completed_return_date(
     split_idx = max(1, min(len(eligible_dates) - 1, split_idx))
     train_dates = eligible_dates[:split_idx]
     test_dates = eligible_dates[split_idx:]
+    if embargo_days > 0 and train_dates and test_dates:
+        boundary = parse_date(test_dates[0])
+        if boundary is not None:
+            filtered_train_dates = []
+            for item in train_dates:
+                parsed = parse_date(item)
+                if parsed is not None and (boundary - parsed).days > embargo_days:
+                    filtered_train_dates.append(item)
+            if filtered_train_dates:
+                LOGGER.info(
+                    "Applied Tier-1 purged-train embargo for horizon %sd: days=%d train_dates=%d->%d test_dates=%d",
+                    horizon,
+                    embargo_days,
+                    len(train_dates),
+                    len(filtered_train_dates),
+                    len(test_dates),
+                )
+                train_dates = filtered_train_dates
+            else:
+                LOGGER.warning(
+                    "Skipping Tier-1 embargo for horizon %sd because it would empty the training split: days=%d train_dates=%d->%d test_dates=%d",
+                    horizon,
+                    embargo_days,
+                    len(train_dates),
+                    len(filtered_train_dates),
+                    len(test_dates),
+                )
     train_set = set(train_dates)
     test_set = set(test_dates)
     train_rows = [row for row in rows if str(row.get("asof_date") or "") in train_set]
@@ -4428,6 +4465,12 @@ def main() -> None:
         raise ValueError("calibration.tier1.train_fraction must be numeric") from exc
     if not 0.10 <= train_fraction <= 0.90:
         raise ValueError(f"--train-fraction must be between 0.10 and 0.90, got {train_fraction}")
+    embargo_days = (
+        int(args.embargo_days)
+        if args.embargo_days is not None
+        else int(cfg_get(config, "calibration.tier1.embargo_days", max(horizons)))
+    )
+    embargo_days = max(0, embargo_days)
     max_workers = (
         int(args.max_workers)
         if args.max_workers is not None
@@ -4592,6 +4635,7 @@ def main() -> None:
             observations,
             horizon=horizon,
             train_fraction=train_fraction,
+            embargo_days=embargo_days,
         )
         liquid_train_observations = liquidity_ok_rows(train_observations)
         liquid_test_observations = liquidity_ok_rows(test_observations)
@@ -4604,6 +4648,7 @@ def main() -> None:
             "train_snapshot_date_count": len(train_dates),
             "test_snapshot_dates": test_dates,
             "test_snapshot_date_count": len(test_dates),
+            "embargo_days": embargo_days,
             "train_observation_count": len(train_observations),
             "test_observation_count": len(test_observations),
             "train_liquidity_ok_observation_count": len(liquid_train_observations),
@@ -4725,6 +4770,7 @@ def main() -> None:
         "snapshot_dates": snapshot_dates,
         "snapshot_date_count": len(snapshot_dates),
         "train_fraction": train_fraction,
+        "embargo_days": embargo_days,
         "horizon_split_details": split_manifest,
         "observation_count_after_exclusions": len(observations),
         "ticker_count_after_exclusions": len(tickers),
@@ -4796,6 +4842,7 @@ def main() -> None:
             "tier1_binary_weakness_components.csv aggregates weakness reasons so scoring changes can target the true failure modes.",
             "Universe and selected summaries treat each ticker/date observation as a panel observation; repeat tickers on different dates are intentionally counted separately.",
             "Train/test splits are computed per horizon using dates with completed forward returns; compare cross-horizon results with the horizon_split_details manifest section.",
+            "Train/test splits apply an embargo around each split boundary by default to reduce overlap leakage from forward-return horizons.",
             "Financial quality and momentum profile weights are applied as residual weights after their embedded clinical-opportunity contribution to avoid double-counting.",
             "Current removals/manual exclusions are not excluded by default to reduce survivorship bias; set --exclude-current-removals to match current investable-universe diagnostics.",
         ],

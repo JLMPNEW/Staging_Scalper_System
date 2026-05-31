@@ -747,7 +747,7 @@ def forward_return(bars: list[Bar], asof: date, horizon: int, *, next_bar_entry:
     if not bars:
         return None, "", ""
     days = [bar.day for bar in bars]
-    entry_idx = bisect.bisect_right(days, asof) if next_bar_entry else bisect.bisect_left(days, asof) - 1
+    entry_idx = bisect.bisect_right(days, asof) if next_bar_entry else bisect.bisect_left(days, asof)
     if entry_idx < 0 or entry_idx >= len(bars):
         return None, "", ""
     target_idx = entry_idx + horizon

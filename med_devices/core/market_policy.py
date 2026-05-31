@@ -72,7 +72,8 @@ def row_date(raw: object) -> date | None:
 
 
 def is_adjusted_price_row(row: dict[str, Any]) -> bool:
-    if int(row.get("is_adjusted") or 0) == 1:
+    adjusted_raw = row.get("is_adjusted")
+    if str(adjusted_raw or "").strip().lower() in {"1", "true", "t", "yes", "y", "on"}:
         return True
     try:
         adj_close = float(str(row.get("adj_close")).strip())

@@ -427,7 +427,18 @@ def normalize_rows(observations: list[dict[str, Any]], *, company_id: int) -> li
                 missing.append(field)
         if cash is not None and short_term_investments is None:
             proxies.append("cash_only_for_cash_and_investments")
-        confidence = "high" if not missing[:2] else "medium" if row.get("cash_and_investments") is not None else "low"
+        missing_set = set(missing)
+        cash_is_proxy_only = "cash_only_for_cash_and_investments" in proxies
+        if (
+            "cash_and_investments" not in missing_set
+            and "revenue" not in missing_set
+            and not cash_is_proxy_only
+        ):
+            confidence = "high"
+        elif row.get("cash_and_investments") is not None:
+            confidence = "medium"
+        else:
+            confidence = "low"
         row["cash_source_concept"] = source_concepts.get("cash")
         row["rd_source_concept"] = source_concepts.get("rd_expense")
         row["ocf_source_concept"] = source_concepts.get("operating_cash_flow")
@@ -707,9 +718,7 @@ def fetch_companyfacts_result(
             observations=tuple(observations),
             normalized=tuple(normalized),
         )
-    except BaseException as exc:
-        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
-            raise
+    except Exception as exc:
         return CompanyFactsFetchResult(company=company, latest_source_filing_date=latest_source_filing_date, error=f"{type(exc).__name__}: {exc}")
 
 
@@ -1200,7 +1209,7 @@ def main() -> None:
     sleep_sec = float(cfg_get(config, "sec_companyfacts_history.sleep_sec", 0.15))
     timeout_sec = float(cfg_get(config, "sec_companyfacts_history.timeout_sec", 45.0))
     max_retries = int(cfg_get(config, "sec_companyfacts_history.max_retries", 3))
-    max_workers = max(1, int(cfg_get(config, "sec_companyfacts_history.max_workers", 4)))
+    max_workers = max(1, int(cfg_get(config, "sec_companyfacts_history.max_workers", 6)))
     sign_materiality_abs = float(cfg_get(config, "sec_companyfacts_history.sign_convention_materiality_abs", 5_000_000.0))
     sign_materiality_pct = float(cfg_get(config, "sec_companyfacts_history.sign_convention_materiality_pct", 0.05))
     sign_raw_win_warning_pct = float(cfg_get(config, "sec_companyfacts_history.sign_convention_raw_win_warning_pct", 5.0))
@@ -1245,8 +1254,8 @@ def main() -> None:
             )
             LOGGER.info("Wrote SEC companyfacts sign-convention audit from existing DB rows: rows=%d output=%s", len(audit_rows), sign_audit_csv)
             return
-        run_id = start_run(conn, run_type="sync_sec_companyfacts_history", input_path=universe_csv)
         try:
+            run_id = start_run(conn, run_type="sync_sec_companyfacts_history", input_path=universe_csv)
             error_count = 0
             sync_state_by_company = load_companyfacts_sync_state(conn, company_ids)
             fact_summary_by_company = load_companyfacts_fact_summary(conn, company_ids)

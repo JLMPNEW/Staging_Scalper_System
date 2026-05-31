@@ -1116,6 +1116,7 @@ MULTIBAGGER_SCORES_OPTIONAL_COLUMNS = {
     "tier1_no_guidance_negative_growth_flag": "REAL",
     "tier1_production_policy_quality_penalty": "REAL",
     "tier1_production_policy_quality_bonus": "REAL",
+    "liquidity_ok": "INTEGER",
 }
 
 

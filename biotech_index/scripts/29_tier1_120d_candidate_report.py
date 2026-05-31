@@ -14,7 +14,9 @@ from typing import Any, Iterable
 
 
 LOGGER = logging.getLogger("tier1_120d_candidate_report")
-DEFAULT_INPUT_DIR = Path("output/biotech_index_reports/calibration_tier1_120d_confirm")
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = PACKAGE_ROOT.parent
+DEFAULT_INPUT_DIR = PROJECT_ROOT / "output/biotech_index_reports/calibration_tier1_120d_confirm"
 
 HOLDOUT_FILE = "tier1_weight_calibration_holdout.csv"
 BOOTSTRAP_FILE = "tier1_weight_calibration_bootstrap_ci.csv"
@@ -79,6 +81,7 @@ SOFT_REASON_REPORT_COLUMNS = [
     "high_commercial_fragility",
     "high_tier1_risk_score",
     "recent_nt_filing",
+    "burn_acceleration",
     "early_stage_or_unadvanced_trial_anchor",
 ]
 

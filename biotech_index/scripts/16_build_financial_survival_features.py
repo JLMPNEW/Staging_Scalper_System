@@ -228,10 +228,14 @@ def load_fact_rows_bulk(conn: sqlite3.Connection, company_ids: list[int], asof_d
 
 
 def dedup_fact_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     out: list[dict[str, Any]] = []
     for row in rows:
-        key = (str(row.get("period_end") or ""), str(row.get("fiscal_period") or ""))
+        key = (
+            str(row.get("period_end") or ""),
+            str(row.get("fiscal_period") or ""),
+            str(row.get("form") or ""),
+        )
         if key in seen:
             continue
         seen.add(key)
@@ -245,6 +249,28 @@ def latest_nonnull(rows: list[dict[str, Any]], field: str) -> tuple[float | None
         if value is not None:
             return value, row
     return None, None
+
+
+def rows_after_marker(rows: list[dict[str, Any]], marker: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if marker is None:
+        return rows
+    for idx, row in enumerate(rows):
+        if row is marker:
+            return rows[idx + 1 :]
+    marker_key = (
+        str(marker.get("period_end") or ""),
+        str(marker.get("fiscal_period") or ""),
+        str(marker.get("form") or ""),
+    )
+    for idx, row in enumerate(rows):
+        row_key = (
+            str(row.get("period_end") or ""),
+            str(row.get("fiscal_period") or ""),
+            str(row.get("form") or ""),
+        )
+        if row_key == marker_key:
+            return rows[idx + 1 :]
+    return rows
 
 
 def closest_prior_value(rows: list[dict[str, Any]], field: str, target_date: date, min_days: int, max_days: int) -> float | None:
@@ -271,7 +297,14 @@ def amount_for_period(row: dict[str, Any], field: str, proxies: list[str]) -> fl
     return value
 
 
-def ttm_amount(rows: list[dict[str, Any]], field: str, proxies: list[str]) -> float | None:
+def ttm_amount(
+    rows: list[dict[str, Any]],
+    field: str,
+    proxies: list[str],
+    *,
+    asof_date: date | None = None,
+    max_fy_age_days: int = 550,
+) -> float | None:
     quarterly_values: list[float] = []
     for row in rows:
         fp = str(row.get("fiscal_period") or "").upper()
@@ -289,13 +322,24 @@ def ttm_amount(rows: list[dict[str, Any]], field: str, proxies: list[str]) -> fl
         return sum(quarterly_values[:4])
     for row in rows:
         if str(row.get("fiscal_period") or "").upper() == "FY":
+            period_end = parse_date(row.get("period_end"))
+            if asof_date is not None and period_end is not None:
+                age_days = (asof_date - period_end).days
+                if age_days < 0 or age_days > max_fy_age_days:
+                    continue
             value = to_float(row.get(field))
             if value is not None:
                 return value
     return None
 
 
-def burn_metrics(rows: list[dict[str, Any]], proxies: list[str], missing: list[str]) -> tuple[float | None, float | None, float | None]:
+def burn_metrics(
+    rows: list[dict[str, Any]],
+    proxies: list[str],
+    missing: list[str],
+    *,
+    asof_date: date | None = None,
+) -> tuple[float | None, float | None, float | None]:
     latest_ocf_row = next((row for row in rows if to_float(row.get("operating_cash_flow")) is not None), None)
     latest_burn: float | None = None
     if latest_ocf_row is not None:
@@ -310,9 +354,9 @@ def burn_metrics(rows: list[dict[str, Any]], proxies: list[str], missing: list[s
         else:
             missing.append("quarterly_cash_burn")
 
-    ocf_ttm = ttm_amount(rows, "operating_cash_flow", proxies)
+    ocf_ttm = ttm_amount(rows, "operating_cash_flow", proxies, asof_date=asof_date)
     if ocf_ttm is None:
-        net_income_ttm = ttm_amount(rows, "net_income", proxies)
+        net_income_ttm = ttm_amount(rows, "net_income", proxies, asof_date=asof_date)
         if net_income_ttm is not None:
             proxies.append("net_income_for_ttm_cash_burn")
             ocf_ttm = net_income_ttm
@@ -462,18 +506,20 @@ def compute_survival_row(
     proxies: list[str] = []
     ticker = str(company["ticker"] or "").upper()
     company_id = int(company["company_id"])
+    cash_field = "cash_and_investments"
     cash, cash_row = latest_nonnull(rows, "cash_and_investments")
     if cash is None:
+        cash_field = "cash_and_equivalents"
         cash, cash_row = latest_nonnull(rows, "cash_and_equivalents")
         if cash is not None:
             proxies.append("cash_and_equivalents_for_cash_and_investments")
     if cash is None:
         missing.append("cash_and_investments")
     negative_cash_flag = int(cash is not None and cash < 0.0)
-    latest_period_end = str((cash_row or rows[0] if rows else {}).get("period_end") or "")
+    latest_period_end = str((cash_row or {}).get("period_end") or "")
 
-    quarterly_burn, ttm_burn, ocf_ttm = burn_metrics(rows, proxies, missing)
-    revenue_ttm = ttm_amount(rows, "revenue", proxies)
+    quarterly_burn, ttm_burn, ocf_ttm = burn_metrics(rows, proxies, missing, asof_date=asof_date)
+    revenue_ttm = ttm_amount(rows, "revenue", proxies, asof_date=asof_date)
     if cash is not None and cash <= 0:
         runway = 0.0
     elif ttm_burn is not None and ttm_burn > 0 and cash is not None:
@@ -492,8 +538,8 @@ def compute_survival_row(
         runway = None
         missing.append("cash_runway_months")
 
-    rd_ttm = ttm_amount(rows, "rd_expense", proxies)
-    sgna_ttm = ttm_amount(rows, "sgna_expense", proxies)
+    rd_ttm = ttm_amount(rows, "rd_expense", proxies, asof_date=asof_date)
+    sgna_ttm = ttm_amount(rows, "sgna_expense", proxies, asof_date=asof_date)
     if rd_ttm is None:
         missing.append("rd_expense_ttm")
     if sgna_ttm is None:
@@ -516,20 +562,24 @@ def compute_survival_row(
     debt_to_cash = total_debt / cash if total_debt is not None and cash is not None and cash != 0 else None
 
     cash_period_date = parse_date(cash_row.get("period_end")) if cash_row else None
-    cash_qoq = pct_change(cash, closest_prior_value(rows[1:] if rows else [], "cash_and_investments", cash_period_date or asof_date, 30, 140))
-    cash_yoy = pct_change(cash, closest_prior_value(rows, "cash_and_investments", (cash_period_date or asof_date) - timedelta(days=365), 0, 120))
+    cash_qoq = pct_change(cash, closest_prior_value(rows_after_marker(rows, cash_row), cash_field, cash_period_date or asof_date, 30, 140))
+    cash_yoy = pct_change(cash, closest_prior_value(rows, cash_field, (cash_period_date or asof_date) - timedelta(days=365), 0, 120))
 
     latest_rd, rd_row = latest_nonnull(rows, "rd_expense")
     rd_period_date = parse_date(rd_row.get("period_end")) if rd_row else None
-    rd_qoq = pct_change(latest_rd, closest_prior_value(rows[1:] if rows else [], "rd_expense", rd_period_date or asof_date, 30, 140))
+    rd_qoq = pct_change(latest_rd, closest_prior_value(rows_after_marker(rows, rd_row), "rd_expense", rd_period_date or asof_date, 30, 140))
     rd_yoy = pct_change(latest_rd, closest_prior_value(rows, "rd_expense", (rd_period_date or asof_date) - timedelta(days=365), 0, 120))
 
     rd_growth_threshold = float(cfg_get(config, "financial_survival.rd_growth_threshold", 0.30))
     cash_decline_threshold = float(cfg_get(config, "financial_survival.cash_decline_threshold", -0.30))
     if rd_yoy is None:
-        missing.append("rd_yoy_growth")
+        missing.append("rd_yoy_change_pct")
     if cash_yoy is None:
-        missing.append("cash_yoy_change")
+        missing.append("cash_yoy_change_pct")
+    if rd_qoq is None:
+        missing.append("rd_qoq_change_pct")
+    if cash_qoq is None:
+        missing.append("cash_qoq_change_pct")
     burn_acceleration = int((rd_yoy is not None and rd_yoy > rd_growth_threshold) and (cash_yoy is not None and cash_yoy < cash_decline_threshold))
     short_runway_months = float(cfg_get(config, "financial_survival.short_runway_months", 6))
     severe_runway_months = float(cfg_get(config, "financial_survival.severe_runway_months", 3))
@@ -559,11 +609,25 @@ def compute_survival_row(
     for source in source_priority or ["db", "csv"]:
         if source == "db" and db_going_status:
             going_status = db_going_status
+            if csv_going_status and csv_going_status != db_going_status:
+                LOGGER.warning(
+                    "DB going_concern_status for %s overrides conflicting CSV value: db=%s csv=%s",
+                    ticker,
+                    db_going_status,
+                    csv_going_status,
+                )
             break
         if source == "csv" and csv_going_status:
             going_status = csv_going_status
             if not db_going_status:
                 LOGGER.warning("Using CSV going_concern_status for %s because DB value is absent", ticker)
+            elif csv_going_status != db_going_status:
+                LOGGER.warning(
+                    "CSV going_concern_status for %s overrides conflicting DB value due to configured priority: csv=%s db=%s",
+                    ticker,
+                    csv_going_status,
+                    db_going_status,
+                )
             break
     if not going_status:
         going_status = db_going_status or csv_going_status
@@ -732,7 +796,14 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    universe_csv = resolve_path(cfg_get(config, "sec_companyfacts_history.final_scoring_universe_csv"), base_dir=base_dir)
+    universe_csv = resolve_path(
+        cfg_get(
+            config,
+            "financial_survival.final_scoring_universe_csv",
+            cfg_get(config, "sec_companyfacts_history.final_scoring_universe_csv"),
+        ),
+        base_dir=base_dir,
+    )
     screen_csv = resolve_path(cfg_get(config, "biotech_features.screen_results_csv"), base_dir=base_dir)
     output_csv = resolve_path(cfg_get(config, "financial_survival.output_csv"), base_dir=base_dir)
     asof_date = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
@@ -766,8 +837,9 @@ def main() -> None:
             context="financial survival feature build",
             subset_mode=subset_mode,
         )
-        run_id = start_run(conn, run_type="build_financial_survival_features", input_path=universe_csv)
+        run_id: int | None = None
         try:
+            run_id = start_run(conn, run_type="build_financial_survival_features", input_path=universe_csv)
             company_ids = [int(company["company_id"]) for company in companies]
             fact_rows_by_company = load_fact_rows_bulk(conn, company_ids, asof_date)
             dilution_events_by_company = load_dilution_events_bulk(conn, company_ids=company_ids, asof_date=asof_date)
@@ -818,7 +890,7 @@ def main() -> None:
             LOGGER.info("Built financial survival features: rows=%d output=%s", len(rows), output_csv)
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=f"companies={len(companies)} output={output_csv}")
         except BaseException as exc:
-            if not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 

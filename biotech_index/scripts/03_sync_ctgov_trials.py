@@ -391,7 +391,7 @@ def sync_one_company(
             query_hits=tuple(query_hits),
         )
     except BaseException as exc:
-        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+        if isinstance(exc, (SystemExit, KeyboardInterrupt, GeneratorExit)):
             raise
         LOGGER.exception("CTGov sync failed for %s (%s): %s", job.ticker, job.company_name, exc)
         return SyncResult(
@@ -608,12 +608,11 @@ def main() -> None:
             ticker_filter=ticker_filter,
             max_companies=int(args.max_companies),
         )
-        run_id = start_run(conn, run_type="sync_ctgov_trials", input_path=db_path)
-        LOGGER.info("Loaded %d active company job(s) from %s", len(jobs), db_path)
-
         throttle = HostThrottle()
         results: list[SyncResult] = []
         try:
+            run_id = start_run(conn, run_type="sync_ctgov_trials", input_path=db_path)
+            LOGGER.info("Loaded %d active company job(s) from %s", len(jobs), db_path)
             validate_nonempty_selection(
                 count=len(jobs),
                 context="CTGov sync",
@@ -676,7 +675,7 @@ def main() -> None:
                         try:
                             result = future.result()
                         except BaseException as exc:
-                            if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                            if isinstance(exc, (SystemExit, KeyboardInterrupt, GeneratorExit)):
                                 raise
                             LOGGER.exception("Unexpected CTGov worker failure for %s: %s", job.ticker, exc)
                             result = SyncResult(

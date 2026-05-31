@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 ENV_DEFAULT_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
+LIST_DELIMITER_RE = re.compile(r"[;,|]")
 LOGGER = logging.getLogger(__name__)
 
 
@@ -77,9 +78,18 @@ def resolve_optional_path(raw: Any, *, base_dir: Path) -> Optional[Path]:
 
 def normalize_string_list(raw: Any, default: list[str] | None = None) -> list[str]:
     if raw is None:
-        return list(default or [])
-    if isinstance(raw, str):
-        return [raw]
-    if isinstance(raw, (list, tuple, set)):
-        return [str(item) for item in raw]
-    raise ValueError(f"Expected string list config value, got {type(raw).__name__}")
+        candidates = list(default or [])
+    elif isinstance(raw, str):
+        candidates = LIST_DELIMITER_RE.split(raw)
+    elif isinstance(raw, (list, tuple, set)):
+        candidates = list(raw)
+    else:
+        raise ValueError(f"Expected string list config value, got {type(raw).__name__}")
+    out: list[str] = []
+    for item in candidates:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            out.append(text)
+    return out

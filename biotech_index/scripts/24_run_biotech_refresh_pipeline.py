@@ -219,7 +219,7 @@ def validate_config(config: dict[str, Any]) -> None:
                 positive_total,
             )
         max_spec = float(multibagger.get("max_speculative_risk", 75.0))
-        avoid = float(multibagger.get("avoid_risk_min", 75.0))
+        avoid = float(multibagger.get("avoid_risk_min", 80.0))
         if avoid <= max_spec:
             LOGGER.warning(
                 "multibagger.avoid_risk_min (%s) is <= max_speculative_risk (%s); "

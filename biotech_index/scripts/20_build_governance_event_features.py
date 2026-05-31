@@ -477,7 +477,13 @@ def form4_metrics(
 ) -> dict[str, Any]:
     buy_codes = {code.upper() for code in normalize_string_list(cfg_get(config, "governance_events.buy_codes", ["P"]))}
     sell_codes = {code.upper() for code in normalize_string_list(cfg_get(config, "governance_events.sell_codes", ["S"]))}
-    exec_terms = normalize_string_list(cfg_get(config, "governance_events.executive_title_keywords", []))
+    exec_terms = normalize_string_list(
+        cfg_get(
+            config,
+            "governance_events.executive_title_keywords",
+            ["chief executive", "ceo", "chief financial", "cfo", "president"],
+        )
+    )
     director_terms = normalize_string_list(cfg_get(config, "governance_events.director_title_keywords", ["director"]))
     buy_days = int(cfg_get(config, "governance_events.insider_buy_lookback_days", 90))
     sell_days = int(cfg_get(config, "governance_events.insider_sell_lookback_days", 90))
@@ -550,7 +556,7 @@ def form4_metrics(
             if cluster_max >= min_cluster:
                 cluster_dates.add(event_date.isoformat())
 
-    ratio = sell_value_180 / max(buy_value_180, 1.0) if sell_value_180 > 0 else 0.0
+    ratio = sell_value_180 / buy_value_180 if sell_value_180 > 0 and buy_value_180 > 0 else None if sell_value_180 > 0 else 0.0
     return {
         "insider_buy_count_90d": buy_count,
         "insider_buy_value_90d": round(buy_value, 2),
@@ -558,7 +564,7 @@ def form4_metrics(
         "ceo_cfo_buy_count_180d": exec_buy_count,
         "director_buy_count_180d": director_buy_count,
         "insider_sell_value_90d": round(sell_value, 2),
-        "sell_to_buy_value_ratio_180d": round(ratio, 4),
+        "sell_to_buy_value_ratio_180d": round(ratio, 4) if ratio is not None else None,
         "planned_10b5_1_buy_count": planned_buy_count,
         "sample_form4_events": sample_events,
     }
@@ -1309,7 +1315,7 @@ def main() -> None:
         form4_conn = connect_form4_readonly(form4_db_path)
         snapshot_date = form4_snapshot_date(form4_conn, str(cfg_get(config, "governance_events.form4_snapshot_table", "sec_form4_daily_state")))
     except BaseException as exc:
-        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+        if isinstance(exc, (SystemExit, KeyboardInterrupt, GeneratorExit)):
             raise
         if form4_conn is not None:
             form4_conn.close()

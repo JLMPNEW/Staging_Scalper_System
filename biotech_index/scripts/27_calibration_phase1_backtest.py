@@ -114,6 +114,15 @@ def parse_args() -> argparse.Namespace:
         help="Chronological train fraction for Phase 1 train/test diagnostic splits. Defaults to calibration.phase1.train_fraction or 0.70.",
     )
     parser.add_argument(
+        "--embargo-days",
+        type=int,
+        default=None,
+        help=(
+            "Calendar-day gap excluded around the train/test split to reduce forward-return overlap leakage. "
+            "Defaults to calibration.phase1.embargo_days or the max configured horizon."
+        ),
+    )
+    parser.add_argument(
         "--bootstrap-iterations",
         type=int,
         default=None,
@@ -383,7 +392,7 @@ def forward_return(
     if not bars:
         return None, "", ""
     days = [bar.day for bar in bars]
-    entry_idx = bisect.bisect_right(days, asof) if next_bar_entry else bisect.bisect_left(days, asof) - 1
+    entry_idx = bisect.bisect_right(days, asof) if next_bar_entry else bisect.bisect_left(days, asof)
     if entry_idx < 0 or entry_idx >= len(bars):
         return None, "", ""
     target_idx = entry_idx + horizon
@@ -717,16 +726,26 @@ def prefixed(prefix: str, values: dict[str, Any]) -> dict[str, Any]:
     return {f"{prefix}{key}": value for key, value in values.items()}
 
 
-def bootstrap_metric_cis(values: list[float], *, iterations: int, seed: int) -> dict[str, Any]:
+def bootstrap_metric_cis(values: list[float], *, iterations: int, seed: int, block_size: int = 1) -> dict[str, Any]:
     if not values or iterations <= 0:
         return {}
     rng = random.Random(seed)
     n = len(values)
+    effective_block_size = max(1, min(n, int(block_size)))
     mean_samples: list[float] = []
     sortino_samples: list[float] = []
     profit_samples: list[float] = []
     for _ in range(iterations):
-        sample = [values[rng.randrange(n)] for _ in range(n)]
+        if effective_block_size <= 1:
+            sample = [values[rng.randrange(n)] for _ in range(n)]
+        else:
+            sample = []
+            while len(sample) < n:
+                start = rng.randrange(n)
+                for offset in range(effective_block_size):
+                    sample.append(values[(start + offset) % n])
+                    if len(sample) >= n:
+                        break
         avg = mean(sample)
         if avg is None:
             continue
@@ -745,13 +764,27 @@ def bootstrap_metric_cis(values: list[float], *, iterations: int, seed: int) -> 
         "sortino_like_ci95": rounded(quantile(sortino_samples, 0.95)),
         "profit_factor_ci05": rounded(quantile(profit_samples, 0.05)),
         "profit_factor_ci95": rounded(quantile(profit_samples, 0.95)),
+        "bootstrap_block_size_observations": effective_block_size,
     }
 
 
-def risk_adjusted_summary(values: list[float], *, bootstrap_iterations: int = 0, seed: int = 0) -> dict[str, Any]:
+def risk_adjusted_summary(
+    values: list[float],
+    *,
+    bootstrap_iterations: int = 0,
+    seed: int = 0,
+    bootstrap_block_size: int = 1,
+) -> dict[str, Any]:
     summary = {**summarize_returns(values), **summarize_return_risk(values)}
     summary["profit_factor"] = rounded(profit_factor(values))
-    summary.update(bootstrap_metric_cis(values, iterations=bootstrap_iterations, seed=seed))
+    summary.update(
+        bootstrap_metric_cis(
+            values,
+            iterations=bootstrap_iterations,
+            seed=seed,
+            block_size=bootstrap_block_size,
+        )
+    )
     return summary
 
 
@@ -807,10 +840,34 @@ def bucket_family(bucket_type: str, bucket: str) -> str:
 
 def build_correlation_rows(rows: list[dict[str, Any]], horizons: list[int]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    rows_by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        rows_by_date[str(row.get("asof_date") or "")].append(row)
     for horizon in horizons:
         ret_key = f"fwd_{horizon}d_return"
         for model_name, score_key in SCORE_MODELS.items():
             pairs = numeric_pairs(rows, score_key, ret_key)
+            cs_pearson_values: list[float] = []
+            cs_spearman_values: list[float] = []
+            cs_obs_counts: list[float] = []
+            for date_rows in rows_by_date.values():
+                date_pairs = numeric_pairs(date_rows, score_key, ret_key)
+                if len(date_pairs) < 5:
+                    continue
+                pearson_value = pearson_from_pairs(date_pairs)
+                spearman_value = spearman_from_pairs(date_pairs)
+                if pearson_value is not None:
+                    cs_pearson_values.append(pearson_value)
+                if spearman_value is not None:
+                    cs_spearman_values.append(spearman_value)
+                    cs_obs_counts.append(float(len(date_pairs)))
+            cs_spearman_mean = mean(cs_spearman_values)
+            cs_spearman_std = stdev(cs_spearman_values)
+            cs_spearman_t = (
+                cs_spearman_mean / (cs_spearman_std / math.sqrt(len(cs_spearman_values)))
+                if cs_spearman_mean is not None and cs_spearman_std not in {None, 0.0}
+                else None
+            )
             residual_pairs = (
                 linear_residual_pairs(rows, "biotech_opportunity_score", ret_key, score_key)
                 if score_key != "biotech_opportunity_score"
@@ -824,6 +881,12 @@ def build_correlation_rows(rows: list[dict[str, Any]], horizons: list[int]) -> l
                     "n": len(pairs),
                     "pearson_score_return": rounded(pearson_from_pairs(pairs)),
                     "spearman_score_return": rounded(spearman_from_pairs(pairs)),
+                    "cross_sectional_ic_dates": len(cs_spearman_values),
+                    "cross_sectional_avg_obs_per_date": rounded(mean(cs_obs_counts)),
+                    "cross_sectional_mean_pearson": rounded(mean(cs_pearson_values)),
+                    "cross_sectional_mean_spearman": rounded(cs_spearman_mean),
+                    "cross_sectional_spearman_std": rounded(cs_spearman_std),
+                    "cross_sectional_spearman_t_stat": rounded(cs_spearman_t),
                     "pearson_score_residual_return_after_biotech": rounded(pearson_from_pairs(residual_pairs)),
                     "spearman_score_residual_return_after_biotech": rounded(spearman_from_pairs(residual_pairs)),
                 }
@@ -1046,6 +1109,7 @@ def build_topn_risk_adjusted_rows(
         rows_by_date[str(row.get("asof_date") or "")].append(row)
     for horizon in horizons:
         ret_key = f"fwd_{horizon}d_net_return"
+        bootstrap_block_size = max(1, int(math.ceil(float(horizon) / 5.0)))
         for model_name, score_key in SCORE_MODELS.items():
             for top_n in top_ns:
                 selected_returns: list[float] = []
@@ -1079,11 +1143,13 @@ def build_topn_risk_adjusted_rows(
                     selected_returns,
                     bootstrap_iterations=bootstrap_iterations,
                     seed=seed_base,
+                    bootstrap_block_size=bootstrap_block_size,
                 )
                 baseline_summary = risk_adjusted_summary(
                     baseline_returns,
                     bootstrap_iterations=bootstrap_iterations,
                     seed=seed_base + 1,
+                    bootstrap_block_size=bootstrap_block_size,
                 )
                 spread_keys = [
                     "mean_return_pct",
@@ -1633,6 +1699,7 @@ def chronological_train_test_rows(
     snapshot_dates: list[str],
     *,
     train_fraction: float,
+    embargo_days: int = 0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
     if len(snapshot_dates) < 2:
         return rows, [], list(snapshot_dates), []
@@ -1640,6 +1707,31 @@ def chronological_train_test_rows(
     split_idx = max(1, min(len(snapshot_dates) - 1, split_idx))
     train_dates = snapshot_dates[:split_idx]
     test_dates = snapshot_dates[split_idx:]
+    if embargo_days > 0 and train_dates and test_dates:
+        boundary = parse_date(test_dates[0])
+        if boundary is not None:
+            filtered_train_dates = []
+            for item in train_dates:
+                parsed = parse_date(item)
+                if parsed is not None and (boundary - parsed).days > embargo_days:
+                    filtered_train_dates.append(item)
+            if filtered_train_dates:
+                LOGGER.info(
+                    "Applied Phase 1 purged-train embargo: days=%d train_dates=%d->%d test_dates=%d",
+                    embargo_days,
+                    len(train_dates),
+                    len(filtered_train_dates),
+                    len(test_dates),
+                )
+                train_dates = filtered_train_dates
+            else:
+                LOGGER.warning(
+                    "Skipping Phase 1 embargo because it would empty the training split: days=%d train_dates=%d->%d test_dates=%d",
+                    embargo_days,
+                    len(train_dates),
+                    len(filtered_train_dates),
+                    len(test_dates),
+                )
     train_set = set(train_dates)
     test_set = set(test_dates)
     return (
@@ -1734,7 +1826,7 @@ def main() -> None:
             cfg_get(
                 config,
                 "calibration.phase1.output_dir",
-                cfg_get(config, "calibration.phase1_output_dir", "../output/biotech_index_reports/calibration_phase1"),
+                "../output/biotech_index_reports/calibration_phase1",
             ),
             base_dir=base_dir,
         )
@@ -1756,9 +1848,10 @@ def main() -> None:
     )
     horizons = parse_int_list(args.horizons, default=default_horizons)
     top_ns = parse_int_list(args.top_n, default=[10, 20, 30])
+    market_sources_raw = args.market_sources if str(args.market_sources or "").strip() else None
     market_sources = [
         token.strip()
-        for raw_source in normalize_string_list(args.market_sources, calibration_market_sources(config))
+        for raw_source in normalize_string_list(market_sources_raw, calibration_market_sources(config))
         for token in str(raw_source).split(",")
         if token.strip()
     ]
@@ -1774,6 +1867,12 @@ def main() -> None:
         else float(cfg_get(config, "calibration.phase1.train_fraction", 0.70))
     )
     train_fraction = max(0.10, min(0.90, train_fraction))
+    embargo_days = (
+        int(args.embargo_days)
+        if args.embargo_days is not None
+        else int(cfg_get(config, "calibration.phase1.embargo_days", max(horizons)))
+    )
+    embargo_days = max(0, embargo_days)
     bootstrap_iterations = (
         int(args.bootstrap_iterations)
         if args.bootstrap_iterations is not None
@@ -1929,6 +2028,7 @@ def main() -> None:
         score_rows,
         snapshot_dates,
         train_fraction=train_fraction,
+        embargo_days=embargo_days,
     )
 
     write_csv(output_dir / "phase1_observations.csv", score_rows, observation_fields)
@@ -1981,6 +2081,7 @@ def main() -> None:
         "snapshot_dates": snapshot_dates,
         "snapshot_date_count": len(snapshot_dates),
         "train_fraction": train_fraction,
+        "embargo_days": embargo_days,
         "train_snapshot_dates": train_dates,
         "test_snapshot_dates": test_dates,
         "train_score_row_count": len(train_rows),
@@ -2007,6 +2108,7 @@ def main() -> None:
             "Phase 1 is diagnostic only and does not change config.yaml.",
             "Forward returns use the configured market source priority, trading-day horizons, and next-bar entry by default.",
             "Top-N and Tier-1 additive diagnostics use net forward returns after configured round-trip costs.",
+            "Train/test sample outputs apply an embargo around the split boundary by default to reduce overlap leakage from forward-return horizons.",
             "The horizon_days column name is retained for compatibility but represents trading bars, not calendar days.",
             "Current removals/manual exclusions are not excluded by default to reduce survivorship bias; set --exclude-current-removals to match current investable-universe diagnostics.",
             "phase1_bucket_diagnostics.csv separates bucket return behavior from risk, liquidity, and score-rank behavior.",

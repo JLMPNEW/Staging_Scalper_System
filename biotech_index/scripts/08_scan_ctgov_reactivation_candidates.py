@@ -701,8 +701,8 @@ def main() -> None:
     run_id: int | None = None
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         init_db(conn)
-        run_id = start_run(conn, run_type="scan_ctgov_reactivation_candidates", input_path=db_path)
         try:
+            run_id = start_run(conn, run_type="scan_ctgov_reactivation_candidates", input_path=db_path)
             jobs = load_jobs(
                 conn,
                 status_filter=status_filter,
@@ -777,7 +777,7 @@ def main() -> None:
                         try:
                             result = future.result()
                         except BaseException as exc:
-                            if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                            if isinstance(exc, (SystemExit, KeyboardInterrupt, GeneratorExit)):
                                 pending_raise = exc
                                 for pending in futures:
                                     pending.cancel()

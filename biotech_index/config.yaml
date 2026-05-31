@@ -12,6 +12,7 @@ company_master:
     - keep
     - review
     - remove
+  deactivate_absent_from_screen: true
 
 runtime:
   sqlite_timeout_sec: 30.0
@@ -261,6 +262,8 @@ biotech_features:
     collab_phase23_cap: 5.0
     collab_phase23_weight: 0.5
     collab_penalty_threshold: 0.50
+    collaborator_heavy_threshold: 0.60
+    core_pipeline_quality_multiplier: 0.18
     collab_penalty_cap: 25.0
     collab_penalty_weight: 50.0
   sec_event_weights:
@@ -309,6 +312,7 @@ sec_filings:
   max_workers: 4
 
 sec_event_parser:
+  final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
   output_csv: "../output/biotech_index_reports/sec_events.csv"
   lookback_days: 730
   min_confidence: 0.65
@@ -336,6 +340,7 @@ sec_companyfacts_history:
 ib_market_data:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
   output_csv: "../output/biotech_index_reports/ib_market_features.csv"
+  source: "interactive_brokers"
   host: "127.0.0.1"
   port: 7497
   client_id: 7717
@@ -465,6 +470,7 @@ forward_guidance:
     - "6-K/A"
 
 financial_survival:
+  final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
   output_csv: "../output/biotech_index_reports/financial_survival_features.csv"
   min_high_quality_runway_months: 18
   min_acceptable_runway_months: 12
@@ -504,6 +510,26 @@ biotech_scoring:
       - "excluded_non_therapeutic_healthcare"
       - "unclassified_review"
       - "weak_or_historical_pipeline"
+  cohort_performance_attribution:
+    output_dir: "../output/biotech_index_reports/cohort_performance_attribution"
+    horizons: [20, 60, 120]
+    top_n: [10, 20]
+    min_observations: 30
+    min_asof_dates: 6
+    train_fraction: 0.70
+    next_bar_entry: true
+    costs:
+      long_round_trip_bps: 40.0
+  commercial_growth_policy_calibration:
+    output_dir: "../output/biotech_index_reports/commercial_growth_policy_calibration"
+    target_cohort: "commercial_profitable_growth"
+    horizons: [20, 60, 120]
+    top_n: [10, 20]
+    candidate_pool_rank_max: 60
+    train_fraction: 0.70
+    next_bar_entry: true
+    costs:
+      long_round_trip_bps: 40.0
   production_baseline:
     enabled: true
     score_model: "biotech_opportunity_score"
@@ -802,6 +828,7 @@ governance_events:
 
 multibagger:
   output_dir: "../output/biotech_index_reports"
+  final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
   features_csv: "multibagger_features.csv"
   scores_csv: "biotech_multibagger_scores.csv"
   candidates_csv: "biotech_multibagger_candidates.csv"
@@ -895,6 +922,7 @@ calibration:
     output_dir: "../output/biotech_index_reports/calibration_phase1"
     exclude_current_removals: false
     train_fraction: 0.70
+    embargo_days: 120
     bootstrap_iterations: 200
     horizons:
       - 60
@@ -909,8 +937,10 @@ calibration:
     exclude_current_removals: false
     strict_feature_lag: true
     train_fraction: 0.70
+    embargo_days: 120
     next_bar_entry: true
     max_workers: 8
+    selection_policies: []
     convex_risk_penalty_enabled: true
     risk_penalty_convexity: 0.35
     risk_penalty_inflection: 50.0

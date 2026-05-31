@@ -65,6 +65,7 @@ SCORE_FIELDS = [
     "tier1_no_guidance_negative_growth_flag",
     "tier1_production_policy_quality_penalty",
     "tier1_production_policy_quality_bonus",
+    "liquidity_ok",
     "rank",
     "bucket",
     "top_evidence_json",
@@ -232,7 +233,7 @@ def convex_risk_drag(risk: float, weight: float, config: dict[str, Any], section
     return shared_convex_risk_drag(
         risk,
         weight,
-        enabled=as_bool(cfg_get(config, f"{section}.convex_risk_penalty_enabled", False), False),
+        enabled=as_bool(cfg_get(config, f"{section}.convex_risk_penalty_enabled", True), True),
         convexity=float(cfg_get(config, f"{section}.risk_penalty_convexity", 0.35)),
         inflection=float(cfg_get(config, f"{section}.risk_penalty_inflection", 50.0)),
     )
@@ -542,7 +543,7 @@ def bucket_for(
     max_high_risk = float(cfg_get(config, "multibagger.max_high_conviction_risk", 35))
     max_watch_risk = float(cfg_get(config, "multibagger.max_watchlist_risk", 55))
     max_spec_risk = float(cfg_get(config, "multibagger.max_speculative_risk", 75))
-    avoid_risk_min = float(cfg_get(config, "multibagger.avoid_risk_min", 75))
+    avoid_risk_min = float(cfg_get(config, "multibagger.avoid_risk_min", 80))
     large_cap_quality_max_risk = float(cfg_get(config, "multibagger.large_cap_quality_max_risk", max_watch_risk))
     avoid_fragility_min = float(cfg_get(config, "multibagger.avoid_fragility_min", 70))
     require_evidence = as_bool(cfg_get(config, "multibagger.require_event_or_catalyst", True), True)
@@ -1058,13 +1059,13 @@ def main() -> None:
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         run_id: int | None = None
-        init_db(conn)
-        asof_obj = parse_date(args.asof) if args.asof else None
-        if args.asof and asof_obj is None:
-            raise ValueError(f"Invalid --asof date: {args.asof}")
-        asof_date = asof_obj.isoformat() if asof_obj else latest_feature_date(conn)
-        run_id = start_run(conn, run_type="score_multibagger_candidates", input_path=db_path)
         try:
+            init_db(conn)
+            asof_obj = parse_date(args.asof) if args.asof else None
+            if args.asof and asof_obj is None:
+                raise ValueError(f"Invalid --asof date: {args.asof}")
+            asof_date = asof_obj.isoformat() if asof_obj else latest_feature_date(conn)
+            run_id = start_run(conn, run_type="score_multibagger_candidates", input_path=db_path)
             feature_rows = load_feature_rows(conn, asof_date)
             if not feature_rows:
                 raise ValueError(f"No multibagger_features_daily rows found for asof_date={asof_date}")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 from pathlib import Path
 from typing import Any
 
@@ -66,9 +67,10 @@ def parse_args() -> argparse.Namespace:
 
 def to_float(raw: object) -> float | None:
     try:
-        return float(str(raw).strip())
+        value = float(str(raw).strip())
     except (TypeError, ValueError):
         return None
+    return value if math.isfinite(value) else None
 
 
 def read_rows(path: Path) -> dict[tuple[str, str, str], dict[str, str]]:

@@ -455,8 +455,8 @@ def main() -> None:
     run_id: int | None = None
     with connect(db_path, timeout_sec=timeout_sec) as conn:
         init_db(conn)
-        run_id = start_run(conn, run_type="build_company_master", input_path=screen_path)
         try:
+            run_id = start_run(conn, run_type="build_company_master", input_path=screen_path)
             active_count = 0
             alias_count = 0
             alias_delete_ids: list[tuple[int]] = []

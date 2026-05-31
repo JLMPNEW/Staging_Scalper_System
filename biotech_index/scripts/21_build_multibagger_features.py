@@ -128,7 +128,13 @@ def to_int(raw: object, default: int = 0) -> int:
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
-    return max(low, min(high, value))
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return low
+    if not math.isfinite(numeric):
+        return low
+    return max(low, min(high, numeric))
 
 
 def parse_json(raw: object) -> dict[str, Any]:
@@ -423,7 +429,9 @@ def risk_penalty(
     ]
     base_weight_total = sum(weight for weight, _ in base_terms)
     penalty = sum(weight * value for weight, value in base_terms) / base_weight_total
-    market_cap = to_optional_float(commercial.get("market_cap")) or to_optional_float(market.get("market_cap"))
+    market_cap = to_optional_float(commercial.get("market_cap"))
+    if market_cap is None:
+        market_cap = to_optional_float(market.get("market_cap"))
     soft_cap = float(cfg_get(config, "multibagger.market_cap_soft_cap", 25_000_000_000))
     hard_cap = float(cfg_get(config, "multibagger.market_cap_hard_cap", 75_000_000_000))
     if market_cap is not None:
@@ -704,13 +712,16 @@ def main() -> None:
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         run_id: int | None = None
-        init_db(conn)
-        asof_obj = parse_date(args.asof) if args.asof else None
-        if args.asof and asof_obj is None:
-            raise ValueError(f"Invalid --asof date: {args.asof}")
-        asof_date = asof_obj.isoformat() if asof_obj else latest_feature_date(conn)
-        run_id = start_run(conn, run_type="build_multibagger_features", input_path=db_path)
         try:
+            init_db(conn)
+            asof_obj = parse_date(args.asof) if args.asof else None
+            if args.asof and asof_obj is None:
+                raise ValueError(f"Invalid --asof date: {args.asof}")
+            asof_date = asof_obj.isoformat() if asof_obj else latest_feature_date(conn)
+            effective_asof_obj = parse_date(asof_date)
+            if effective_asof_obj is None:
+                raise ValueError(f"Invalid resolved asof_date: {asof_date}")
+            run_id = start_run(conn, run_type="build_multibagger_features", input_path=db_path)
             base_rows = load_base_rows(conn, asof_date, ticker_filter, args.max_companies)
             validate_nonempty_selection(count=len(base_rows), context="multibagger feature build", subset_mode=subset_mode)
             loaded_tickers = [str(row["ticker"]) for row in base_rows]
@@ -777,7 +788,7 @@ def main() -> None:
                         company_id = int(row["company_id"])
                         market_row = market.get(company_id)
                         market_asof = parse_date(market_row.get("asof_date") if market_row else None)
-                        age_days = (asof_obj - market_asof).days if market_asof is not None and asof_obj is not None else 999_999
+                        age_days = (effective_asof_obj - market_asof).days if market_asof is not None else 999_999
                         if age_days > max_upstream_staleness_days:
                             stale_market_tickers.append(str(row.get("ticker") or ""))
                         else:

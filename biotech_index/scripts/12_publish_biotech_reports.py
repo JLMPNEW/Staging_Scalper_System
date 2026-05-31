@@ -731,7 +731,7 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "rank_quality_cap_reasons": row.get("rank_quality_cap_reasons", "|".join(str(reason) for reason in score_components.get("rank_quality_cap_reasons", [])) if isinstance(score_components, dict) and isinstance(score_components.get("rank_quality_cap_reasons"), list) else score_components.get("rank_quality_cap_reasons", "") if isinstance(score_components, dict) else ""),
         "rank_quality_cap_vetoed": row.get("rank_quality_cap_vetoed", score_components.get("rank_quality_cap_vetoed", "") if isinstance(score_components, dict) else ""),
         "rank_quality_cap_veto_reasons": row.get("rank_quality_cap_veto_reasons", "|".join(str(reason) for reason in score_components.get("rank_quality_cap_veto_reasons", [])) if isinstance(score_components, dict) and isinstance(score_components.get("rank_quality_cap_veto_reasons"), list) else score_components.get("rank_quality_cap_veto_reasons", "") if isinstance(score_components, dict) else ""),
-        "event_hard_reasons": row.get("event_hard_weakness_reasons", "|".join(str(reason) for reason in score_components.get("production_policy_event_hard_reasons", [])) if isinstance(score_components, dict) and isinstance(score_components.get("production_policy_event_hard_reasons"), list) else risk_flags.get("event_hard_weakness_reasons", "") if isinstance(risk_flags, dict) else ""),
+        "event_hard_reasons": row.get("event_hard_reasons", "|".join(str(reason) for reason in score_components.get("production_policy_event_hard_reasons", [])) if isinstance(score_components, dict) and isinstance(score_components.get("production_policy_event_hard_reasons"), list) else risk_flags.get("event_hard_reasons", "") if isinstance(risk_flags, dict) else ""),
         "event_hard_weakness_reasons": row.get("event_hard_weakness_reasons", "|".join(str(reason) for reason in score_components.get("production_policy_event_hard_reasons", [])) if isinstance(score_components, dict) and isinstance(score_components.get("production_policy_event_hard_reasons"), list) else risk_flags.get("event_hard_weakness_reasons", "") if isinstance(risk_flags, dict) else ""),
         "commercial_quality_score": row.get("commercial_quality_score", commercial_value.get("commercial_quality_score", "") if isinstance(commercial_value, dict) else ""),
         "commercial_value_score": row.get("commercial_value_score", commercial_value.get("commercial_value_score", "") if isinstance(commercial_value, dict) else ""),
@@ -1455,7 +1455,10 @@ def build_trial_validation_summary_rows(
 def build_evidence_cards(scores: list[dict[str, Any]], features: dict[int, dict[str, Any]], top_n: int) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
     for row in scores[:top_n]:
-        company_id = int(row["company_id"])
+        company_id = int(to_float(row.get("company_id"), 0.0) or 0)
+        if company_id <= 0:
+            LOGGER.warning("Skipping evidence card row without a valid company_id: ticker=%s", row.get("ticker", ""))
+            continue
         evidence = parse_json_object(row.get("top_evidence_json"), context="top_evidence_json", ticker=row.get("ticker"))
         feature_payload = parse_json_object(
             features.get(company_id, {}).get("feature_json"),
@@ -1492,7 +1495,7 @@ def main() -> None:
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     base_output_dir = resolve_path(cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
-    top_n = int(cfg_get(config, "biotech_reports.top_n", 20))
+    top_n = int(cfg_get(config, "biotech_reports.top_n", 10))
     score_change_min = float(cfg_get(config, "biotech_reports.alert_config.score_change_min", 12))
     rank_move_min = int(cfg_get(config, "biotech_reports.alert_config.rank_move_min", 5))
     bucket_transition_enabled = str(
@@ -1509,10 +1512,10 @@ def main() -> None:
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         run_id: int | None = None
-        init_db(conn)
-        asof_date = parse_date_text(args.asof) if args.asof else latest_score_date(conn)
-        run_id = start_run(conn, run_type="publish_biotech_reports", input_path=db_path)
         try:
+            init_db(conn)
+            asof_date = parse_date_text(args.asof) if args.asof else latest_score_date(conn)
+            run_id = start_run(conn, run_type="publish_biotech_reports", input_path=db_path)
             output_dir = dated_output_dir(base_output_dir, asof_date)
             index_csv = output_dir / str(cfg_get(config, "biotech_reports.index_latest_csv", "biotech_index_latest.csv"))
             top_csv = output_dir / str(cfg_get(config, "biotech_reports.top_candidates_csv", "biotech_top_candidates.csv"))
