@@ -184,6 +184,7 @@ market_snapshot_ingestion:
   output_csv: "../output/med_devices_reports/med_device_market_snapshot_coverage.csv"
   primary_source_id: "ib_market_data"
   fallback_source_id: "yahoo_finance_backup"
+  enable_ib_fundamentals: false
   yahoo_quote_url_template: "https://query1.finance.yahoo.com/v7/finance/quote"
   yahoo_batch_size: 50
   yfinance_share_history_days: 370
@@ -511,10 +512,107 @@ technical_features:
   lookback_days: 460
   min_trading_bars: 220
   max_staleness_days: 7
+  cohort_rank_min_n: 8
   entry_signal_thresholds:
     strong_entry: 80.0
     good_entry: 65.0
     watchlist: 50.0
+  default_signal_profile:
+    mode: "legacy"
+    reliability: 1.0
+    rationale: "default_legacy_setup_score"
+  cohort_signal_profiles:
+    capital_equipment_imaging_monitoring:
+      mode: "pullback_mean_reversion"
+      reliability: 0.65
+      trend_weight: 0.55
+      relative_strength_weight: 0.40
+      volume_weight: 0.05
+      volatility_weight: 0.0
+      breakdown_floor: 35.0
+      breakdown_cap: 45.0
+      rationale: "ic120_negative_inverse_capital_equipment_2026_05_31"
+    diabetes_wearables_drug_delivery:
+      mode: "trend_following"
+      reliability: 0.75
+      trend_weight: 0.45
+      relative_strength_weight: 0.45
+      volume_weight: 0.10
+      volatility_weight: 0.0
+      overextension_penalty_max: 25.0
+      breakdown_floor: 35.0
+      breakdown_cap: 45.0
+      rationale: "ic120_positive_diabetes_wearables_2026_05_31"
+    diagnostics_clinical_tests:
+      mode: "trend_following"
+      reliability: 0.60
+      trend_weight: 0.45
+      relative_strength_weight: 0.45
+      volume_weight: 0.10
+      volatility_weight: 0.0
+      overextension_penalty_max: 20.0
+      breakdown_floor: 35.0
+      breakdown_cap: 45.0
+      rationale: "ic120_positive_diagnostics_clinical_tests_2026_05_31"
+    healthcare_services_cro_other:
+      mode: "neutral_overlay"
+      reliability: 0.0
+      trend_weight: 0.55
+      relative_strength_weight: 0.40
+      volume_weight: 0.05
+      volatility_weight: 0.0
+      breakdown_floor: 35.0
+      breakdown_cap: 45.0
+      rationale: "neutralized_after_alpha_validation_weak_healthcare_services_2026_05_31"
+    hospital_supplies_consumables_dme:
+      mode: "neutral_overlay"
+      reliability: 0.0
+      trend_weight: 0.55
+      relative_strength_weight: 0.40
+      volume_weight: 0.05
+      volatility_weight: 0.0
+      breakdown_floor: 35.0
+      breakdown_cap: 45.0
+      rationale: "neutralized_after_alpha_validation_negative_hospital_supplies_2026_05_31"
+    implantable_interventional_devices_direct_payment:
+      mode: "pullback_mean_reversion"
+      reliability: 0.55
+      trend_weight: 0.55
+      relative_strength_weight: 0.40
+      volume_weight: 0.05
+      volatility_weight: 0.0
+      breakdown_floor: 35.0
+      breakdown_cap: 45.0
+      rationale: "ic120_negative_inverse_implantable_direct_trend_rs_2026_05_31"
+    implantable_interventional_devices_procedure_bundled:
+      mode: "neutral_overlay"
+      reliability: 0.0
+      trend_weight: 0.55
+      relative_strength_weight: 0.40
+      volume_weight: 0.05
+      volatility_weight: 0.0
+      breakdown_floor: 35.0
+      breakdown_cap: 45.0
+      rationale: "neutralized_after_alpha_validation_weak_implantable_bundled_2026_05_31"
+    life_science_tools_research_instruments:
+      mode: "trend_following"
+      reliability: 0.35
+      trend_weight: 0.35
+      relative_strength_weight: 0.35
+      volume_weight: 0.05
+      volatility_weight: 0.25
+      overextension_penalty_max: 10.0
+      breakdown_floor: 35.0
+      breakdown_cap: 45.0
+      rationale: "weak_positive_technical_life_science_tools_2026_05_31"
+    orthopedics_spine_dental:
+      mode: "neutral_overlay"
+      reliability: 0.0
+      rationale: "weak_unstable_technical_orthopedics_spine_dental_2026_05_31"
+    surgical_robotics_platforms:
+      mode: "neutral_overlay"
+      reliability: 0.0
+      rationale: "weak_unstable_technical_surgical_robotics_2026_05_31"
 
 fda_features:
   output_csv: "../output/med_devices_reports/med_device_fda_product_risk_features.csv"
@@ -754,7 +852,7 @@ ib_price_validation:
     - low_ib_avg_dollar_volume
 
 scoring:
-  model_version: "med_device_score_v5_2026_05_sentiment_fallbacks"
+  model_version: "med_device_score_v7_2026_05_implantable_reimbursement_taxonomy"
   output_csv: "../output/med_devices_reports/med_device_daily_composite_scores.csv"
   review_pack_dir: "../output/med_devices_reports/score_review_pack"
   backtest_output_csv: "../output/med_devices_reports/med_device_score_backtest.csv"
@@ -764,8 +862,40 @@ scoring:
   neutral_reimbursement_score: 50.0
   neutral_technical_entry_score: 50.0
   neutral_sentiment_catalyst_score: 50.0
+  neutral_value_trap_score: 50.0
   max_feature_staleness_days: 7
   cross_sectional_composite_rank: true
+  technical_score_source: "legacy_setup"
+  technical_policy:
+    gate_mode: "hard_positive"
+    entry_min: 55.0
+    breakdown_min: 35.0
+    block_classification: true
+    rationale: "base_hard_positive_technical_gate"
+  pullback_candidate_tags:
+    enabled: true
+    report_only: true
+    cohorts:
+      hospital_supplies_consumables_dme:
+        enabled: true
+        template_id: "ca9096586b29"
+        technical_entry_max: 45.0
+        fundamental_quality_min: 0.0
+        valuation_min: 35.0
+        fda_product_min: 55.0
+        value_trap_max: 30.0
+        data_completeness_min: 85.0
+        rationale: "validated_120d_pullback_tag_hospital_supplies_2026_05_30"
+      life_science_tools_research_instruments:
+        enabled: true
+        template_id: "a554f2e27a54"
+        technical_entry_max: 45.0
+        fundamental_quality_min: 0.0
+        valuation_min: 35.0
+        fda_product_min: 50.0
+        value_trap_max: 60.0
+        data_completeness_min: 85.0
+        rationale: "validated_120d_pullback_tag_life_science_tools_2026_05_30"
   component_neutral_defaults:
     fundamental_quality: 50.0
     durable_growth: 50.0
@@ -805,6 +935,140 @@ scoring:
     watchlist_min: 60
     value_trap_max: 20
     value_trap_hard_max: 85
+  cohort_profiles:
+    hospital_supplies_consumables_dme:
+      enabled: true
+      source: "calibration_promoted_2026_05_30"
+      validation_note: "Promoted after 120d validation selected 9/14 tickers, 64.29% ticker coverage, 66.67% improved selected ticker rate, 1.67% median cohort-excess, and positive LCB."
+      gates:
+        composite_min: 55
+        cohort_percentile_min: 60
+        fundamental_quality_min: 0
+        durable_growth_min: 0
+        fda_product_min: 0
+        reimbursement_min: 0
+        valuation_min: 0
+        technical_entry_min: 0
+        value_trap_max: 40
+
+historical_backfill:
+  start_asof: "2024-01-05"
+  end_asof: "latest_market_date"
+  backtest_end_asof: "auto_complete_max_horizon"
+  frequency: "weekly"
+  weekday: "friday"
+  stages: "financial,fda,reimbursement,technical,scores"
+  horizons: "30,60,120"
+  skip_existing: true
+  run_backtest: true
+  run_calibration: true
+  publish_review_packs: false
+  manifest_csv: "../output/med_devices_reports/historical_backfill/weekly_score_backfill_manifest.csv"
+
+calibration:
+  taxonomy_output_csv: "../output/med_devices_reports/calibration/med_device_calibration_cohorts.csv"
+  cohort_neutral_backtest_csv: "../output/med_devices_reports/calibration/med_device_cohort_neutral_backtest.csv"
+  cohort_neutral_summary_csv: "../output/med_devices_reports/calibration/med_device_cohort_neutral_backtest_summary.csv"
+  component_ic_csv: "../output/med_devices_reports/calibration/med_device_component_ic_by_cohort.csv"
+  technical_component_ic_csv: "../output/med_devices_reports/calibration/med_device_technical_component_ic_by_cohort.csv"
+  gate_grid_results_csv: "../output/med_devices_reports/calibration/med_device_gate_grid_results.csv"
+  recommendations_csv: "../output/med_devices_reports/calibration/med_device_calibration_recommendations_by_cohort.csv"
+  recommended_config_yaml: "../output/med_devices_reports/calibration/med_device_calibration_recommended_config.yaml"
+  horizons: "30,60,120"
+  train_end_asof: "2025-05-30"
+  validation_start_asof: "2025-06-06"
+  validation_end_asof: "2025-11-28"
+  embargo_days: 120
+  min_train_obs: 100
+  min_validation_obs: 40
+  min_unique_tickers: 5
+  min_selected_validation: 20
+  min_selected_ticker_coverage: 0.60
+  min_improved_selected_ticker_rate: 0.60
+  candidate_raw_score_min: "55,60,65,70"
+  candidate_cohort_percentile_min: "60,70,80,90"
+  candidate_fundamental_quality_min: "0,60,70"
+  candidate_fda_product_min: "0,50,60"
+  candidate_reimbursement_min: "0,45,55"
+  candidate_valuation_min: "0,55,60"
+  candidate_technical_entry_min: "0,45,55"
+  candidate_value_trap_max: "20,25,30,40"
+  objective:
+    median_excess_return: 0.35
+    lower_confidence_bound: 0.25
+    sortino: 0.15
+    profit_factor: 0.15
+    mean_excess_return: 0.10
+  refinement:
+    default_cohort: "hospital_supplies_consumables_dme"
+    output_csv: "../output/med_devices_reports/calibration/med_device_refined_gate_grid_results.csv"
+    recommendation_csv: "../output/med_devices_reports/calibration/med_device_refined_gate_recommendation.csv"
+    comparison_csv: "../output/med_devices_reports/calibration/med_device_refined_gate_comparison.csv"
+    raw_score_min: "52.5,55,57.5,60"
+    cohort_percentile_min: "55,60,65,70"
+    value_trap_max: "30,35,40"
+    min_avg_dollar_volume_60d: "0,1000000,2000000,5000000,10000000"
+    data_completeness_min: "85,90,100"
+    entry_status_policy: "entry_eligible_or_setup,entry_eligible_only"
+    fda_review_policy: "exclude_manual_hard_red,clean_or_cleared_only"
+    reimbursement_policy: "all_known,live_evidence_only,direct_or_bundled_or_capital"
+  taxonomy_audit:
+    cohort_audit_csv: "../output/med_devices_reports/calibration/med_device_cohort_taxonomy_audit.csv"
+    split_candidates_csv: "../output/med_devices_reports/calibration/med_device_cohort_split_candidates.csv"
+    feature_action_plan_csv: "../output/med_devices_reports/calibration/med_device_cohort_feature_action_plan.csv"
+  diagnosis:
+    default_cohort: "implantable_interventional_devices_direct_payment"
+    gate_csv: "../output/med_devices_reports/calibration/med_device_implantable_direct_payment_refined_gate_recommendation.csv"
+    summary_csv: "../output/med_devices_reports/calibration/med_device_{cohort}_diagnosis_summary.csv"
+    component_csv: "../output/med_devices_reports/calibration/med_device_{cohort}_component_diagnosis.csv"
+    exclusion_csv: "../output/med_devices_reports/calibration/med_device_{cohort}_gate_exclusion_diagnosis.csv"
+    ticker_csv: "../output/med_devices_reports/calibration/med_device_{cohort}_ticker_diagnosis.csv"
+  entry_policy_test:
+    default_cohort: "implantable_interventional_devices_direct_payment"
+    gate_csv: "../output/med_devices_reports/calibration/med_device_implantable_direct_payment_refined_gate_recommendation.csv"
+    ablation_csv: "../output/med_devices_reports/calibration/med_device_{cohort}_entry_policy_ablation.csv"
+    entry_bucket_csv: "../output/med_devices_reports/calibration/med_device_{cohort}_entry_status_bucket_test.csv"
+    technical_quintile_csv: "../output/med_devices_reports/calibration/med_device_{cohort}_technical_quintile_test.csv"
+  technical_neutral_gate_test:
+    default_cohort: "implantable_interventional_devices_direct_payment"
+    output_csv: "../output/med_devices_reports/calibration/med_device_implantable_direct_payment_technical_neutral_gate_grid_results.csv"
+    recommendation_csv: "../output/med_devices_reports/calibration/med_device_implantable_direct_payment_technical_neutral_gate_recommendation.csv"
+    comparison_csv: "../output/med_devices_reports/calibration/med_device_implantable_direct_payment_technical_neutral_gate_comparison.csv"
+    raw_score_min: "45,50,52.5,55,57.5,60"
+    cohort_percentile_min: "0,25,40,50,60,70"
+    value_trap_max: "20,30,40,60"
+    min_avg_dollar_volume_60d: "0,1000000,2000000,5000000"
+    data_completeness_min: "85,90,100"
+    fda_review_policy: "exclude_manual_hard_red,clean_or_cleared_only"
+    reimbursement_policy: "all_known,live_evidence_only,direct_or_bundled_or_capital"
+  selected_gate_attribution:
+    default_cohort: "implantable_interventional_devices_direct_payment"
+    grid_csv: "../output/med_devices_reports/calibration/med_device_implantable_direct_payment_technical_neutral_gate_grid_results.csv"
+    summary_csv: "../output/med_devices_reports/calibration/med_device_{cohort}_selected_gate_attribution_summary.csv"
+    ticker_csv: "../output/med_devices_reports/calibration/med_device_{cohort}_selected_gate_ticker_attribution.csv"
+    profile_csv: "../output/med_devices_reports/calibration/med_device_{cohort}_selected_gate_profile_attribution.csv"
+    filter_csv: "../output/med_devices_reports/calibration/med_device_{cohort}_selected_gate_single_filter_tests.csv"
+  entry_policy_templates:
+    default_cohort: "implantable_interventional_devices_direct_payment"
+    gate_csv: "../output/med_devices_reports/calibration/med_device_implantable_direct_payment_technical_neutral_gate_grid_results.csv"
+    output_csv: "../output/med_devices_reports/calibration/med_device_implantable_direct_payment_entry_policy_template_grid_results.csv"
+    recommendation_csv: "../output/med_devices_reports/calibration/med_device_implantable_direct_payment_entry_policy_template_recommendation.csv"
+    comparison_csv: "../output/med_devices_reports/calibration/med_device_implantable_direct_payment_entry_policy_template_comparison.csv"
+    momentum_technical_entry_min: "45,50,55,65"
+    pullback_technical_entry_max: "45,55,65,75"
+    pullback_fundamental_min: "0,55,60"
+    pullback_valuation_min: "35,40,45"
+    pullback_fda_product_min: "50,55,60"
+  pullback_candidate_tag:
+    output_csv: "../output/med_devices_reports/calibration/med_device_pullback_candidate_tag_grid_results.csv"
+    summary_csv: "../output/med_devices_reports/calibration/med_device_pullback_candidate_tag_summary.csv"
+    ticker_csv: "../output/med_devices_reports/calibration/med_device_pullback_candidate_tag_tickers.csv"
+    technical_entry_max: "45,55,65,75"
+    fundamental_quality_min: "0,55,60"
+    valuation_min: "35,40,45"
+    fda_product_min: "50,55,60"
+    value_trap_max: "30,40,60"
+    data_completeness_min: "85,90,100"
 
 stage_plan:
   stage_1:

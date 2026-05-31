@@ -83,6 +83,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
     parser.add_argument("--max-companies", type=int, default=0, help="Smoke-test limit. 0 means all.")
     parser.add_argument("--allow-missing-market", action="store_true", help="Build low-quality rows for companies without market features instead of failing historical snapshot validation.")
+    parser.add_argument(
+        "--allow-stale-market",
+        action="store_true",
+        help="Build rows for historical restatement dates when the latest available market row is stale by calendar-day validation.",
+    )
     return parser.parse_args()
 
 
@@ -765,6 +770,26 @@ def main() -> None:
                     freshness_base_rows = [
                         row for row in base_rows if int(row["company_id"]) in market_company_ids
                     ]
+                if args.allow_stale_market and layer_name == "market_features_daily":
+                    fresh_rows: list[dict[str, Any]] = []
+                    stale_market_tickers: list[str] = []
+                    for row in freshness_base_rows:
+                        company_id = int(row["company_id"])
+                        market_row = market.get(company_id)
+                        market_asof = parse_date(market_row.get("asof_date") if market_row else None)
+                        age_days = (asof_obj - market_asof).days if market_asof is not None and asof_obj is not None else 999_999
+                        if age_days > max_upstream_staleness_days:
+                            stale_market_tickers.append(str(row.get("ticker") or ""))
+                        else:
+                            fresh_rows.append(row)
+                    freshness_base_rows = fresh_rows
+                    if stale_market_tickers:
+                        LOGGER.warning(
+                            "Multibagger feature build continuing with stale market rows for %d ticker(s): %s",
+                            len(stale_market_tickers),
+                            ",".join(sorted(stale_market_tickers)[:25])
+                            + (f"...(+{len(stale_market_tickers) - 25})" if len(stale_market_tickers) > 25 else ""),
+                        )
                 validate_layer_freshness(
                     base_rows=freshness_base_rows,
                     layer_rows_by_company=layer_rows,

@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from med_devices.core.config import DEFAULT_NEUTRAL_SCORE, cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
+from med_devices.core.fda_states import MANUAL_FDA_REVIEW_STATES  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 
@@ -34,6 +35,44 @@ DEFAULT_WEIGHTS = {
     "valuation": 0.20,
     "technical_entry": 0.10,
     "sentiment_catalyst": 0.05,
+}
+WEIGHT_EPSILON = 1e-9
+TECHNICAL_GATE_HARD_POSITIVE = "hard_positive"
+TECHNICAL_GATE_OVERLAY_ONLY = "overlay_only"
+TECHNICAL_GATE_BREAKDOWN_VETO_ONLY = "breakdown_veto_only"
+TECHNICAL_GATE_DISABLED = "disabled"
+TECHNICAL_GATE_MODES = {
+    TECHNICAL_GATE_HARD_POSITIVE,
+    TECHNICAL_GATE_OVERLAY_ONLY,
+    TECHNICAL_GATE_BREAKDOWN_VETO_ONLY,
+    TECHNICAL_GATE_DISABLED,
+}
+OPTIONAL_DAILY_SCORE_COLUMNS = {
+    "technical_gate_mode": "TEXT DEFAULT ''",
+    "technical_overlay_status": "TEXT DEFAULT ''",
+    "technical_policy_reason": "TEXT DEFAULT ''",
+    "technical_gate_excluded": "INTEGER DEFAULT 0",
+    "technical_component_weight": "REAL DEFAULT 0.0",
+    "passed_technical_breakdown_veto": "INTEGER DEFAULT 1",
+    "pullback_candidate_tag": "INTEGER DEFAULT 0",
+    "pullback_candidate_reason": "TEXT DEFAULT ''",
+    "pullback_candidate_template_id": "TEXT DEFAULT ''",
+    "technical_trend_quality_score": "REAL DEFAULT 0.0",
+    "technical_relative_strength_score": "REAL DEFAULT 0.0",
+    "technical_liquidity_score": "REAL DEFAULT 0.0",
+    "technical_volume_breakout_score": "REAL DEFAULT 0.0",
+    "technical_volatility_risk_score": "REAL DEFAULT 0.0",
+    "technical_setup_score": "REAL DEFAULT 0.0",
+    "technical_core_score": "REAL DEFAULT 0.0",
+    "technical_alpha_score": "REAL DEFAULT 0.0",
+    "technical_pullback_score": "REAL DEFAULT 0.0",
+    "technical_overextension_score": "REAL DEFAULT 0.0",
+    "technical_breakdown_flag": "INTEGER DEFAULT 0",
+    "technical_liquidity_gate_flag": "INTEGER DEFAULT 0",
+    "technical_signal_mode": "TEXT DEFAULT ''",
+    "technical_signal_direction": "TEXT DEFAULT ''",
+    "technical_signal_reliability": "REAL DEFAULT 0.0",
+    "technical_score_source": "TEXT DEFAULT ''",
 }
 ALLOWED_FEATURE_TABLES = {
     "feature_financial_valuation",
@@ -54,6 +93,8 @@ FIELDNAMES = [
     "composite_score",
     "raw_composite_score",
     "composite_percentile",
+    "calibration_cohort",
+    "cohort_percentile",
     "fundamental_quality_score",
     "durable_growth_score",
     "fda_product_score",
@@ -69,6 +110,22 @@ FIELDNAMES = [
     "unknown_reimbursement_flag",
     "valuation_score",
     "technical_entry_score",
+    "technical_trend_quality_score",
+    "technical_relative_strength_score",
+    "technical_liquidity_score",
+    "technical_volume_breakout_score",
+    "technical_volatility_risk_score",
+    "technical_setup_score",
+    "technical_core_score",
+    "technical_alpha_score",
+    "technical_pullback_score",
+    "technical_overextension_score",
+    "technical_breakdown_flag",
+    "technical_liquidity_gate_flag",
+    "technical_signal_mode",
+    "technical_signal_direction",
+    "technical_signal_reliability",
+    "technical_score_source",
     "sentiment_catalyst_score",
     "value_trap_score",
     "data_completeness_score",
@@ -81,6 +138,14 @@ FIELDNAMES = [
     "classification",
     "decision_bucket",
     "entry_status",
+    "technical_gate_mode",
+    "technical_overlay_status",
+    "technical_policy_reason",
+    "technical_gate_excluded",
+    "technical_component_weight",
+    "pullback_candidate_tag",
+    "pullback_candidate_reason",
+    "pullback_candidate_template_id",
     "gate_status",
     "review_reason",
     "failed_gates",
@@ -106,6 +171,7 @@ FIELDNAMES = [
     "passed_reimbursement_gate",
     "passed_valuation_gate",
     "passed_technical_gate",
+    "passed_technical_breakdown_veto",
     "passed_value_trap_gate",
     "passed_data_quality_gate",
     "passed_liquidity_gate",
@@ -128,6 +194,8 @@ class ScoreRow:
     composite_score: float = 0.0
     raw_composite_score: float = 0.0
     composite_percentile: float = 0.0
+    calibration_cohort: str = ""
+    cohort_percentile: float = 50.0
     fundamental_quality_score: float = 0.0
     durable_growth_score: float = 50.0
     fda_product_score: float = 50.0
@@ -143,6 +211,22 @@ class ScoreRow:
     unknown_reimbursement_flag: int = 1
     valuation_score: float = 0.0
     technical_entry_score: float = 50.0
+    technical_trend_quality_score: float = 50.0
+    technical_relative_strength_score: float = 50.0
+    technical_liquidity_score: float = 50.0
+    technical_volume_breakout_score: float = 50.0
+    technical_volatility_risk_score: float = 50.0
+    technical_setup_score: float = 50.0
+    technical_core_score: float = 50.0
+    technical_alpha_score: float = 50.0
+    technical_pullback_score: float = 50.0
+    technical_overextension_score: float = 0.0
+    technical_breakdown_flag: int = 0
+    technical_liquidity_gate_flag: int = 0
+    technical_signal_mode: str = ""
+    technical_signal_direction: str = ""
+    technical_signal_reliability: float = 0.0
+    technical_score_source: str = "legacy_setup"
     sentiment_catalyst_score: float = 50.0
     value_trap_score: float = 0.0
     data_completeness_score: float = 0.0
@@ -155,6 +239,14 @@ class ScoreRow:
     classification: str = "unclassified"
     decision_bucket: str = "unclassified"
     entry_status: str = "unclassified"
+    technical_gate_mode: str = TECHNICAL_GATE_HARD_POSITIVE
+    technical_overlay_status: str = ""
+    technical_policy_reason: str = ""
+    technical_gate_excluded: int = 0
+    technical_component_weight: float = DEFAULT_WEIGHTS["technical_entry"]
+    pullback_candidate_tag: int = 0
+    pullback_candidate_reason: str = ""
+    pullback_candidate_template_id: str = ""
     gate_status: str = "fail"
     review_reason: str = ""
     failed_gates: str = ""
@@ -180,6 +272,7 @@ class ScoreRow:
     passed_reimbursement_gate: int = 0
     passed_valuation_gate: int = 0
     passed_technical_gate: int = 0
+    passed_technical_breakdown_veto: int = 1
     passed_value_trap_gate: int = 0
     passed_data_quality_gate: int = 0
     passed_liquidity_gate: int = 0
@@ -282,25 +375,40 @@ def table_exists(conn: Any, table_name: str) -> bool:
     return row is not None
 
 
-def load_weights(config: dict[str, Any]) -> dict[str, float]:
-    raw = cfg_get(config, "scoring.composite_weights", DEFAULT_WEIGHTS)
+def parse_component_weights(
+    raw: object,
+    *,
+    default_weights: dict[str, float],
+    context: str,
+) -> dict[str, float]:
+    if raw is None:
+        return dict(default_weights)
     if not isinstance(raw, dict):
-        return dict(DEFAULT_WEIGHTS)
+        raise ValueError(f"{context} must be a mapping")
     unknown = sorted(set(str(key) for key in raw) - set(DEFAULT_WEIGHTS))
     if unknown:
-        LOGGER.warning("Ignoring unknown composite scoring weight key(s): %s", ", ".join(unknown))
-    out = dict(DEFAULT_WEIGHTS)
+        LOGGER.warning("Ignoring unknown composite scoring weight key(s) in %s: %s", context, ", ".join(unknown))
+    out = dict(default_weights)
     for key, raw_value in raw.items():
-        if str(key) not in DEFAULT_WEIGHTS:
+        key_text = str(key)
+        if key_text not in DEFAULT_WEIGHTS:
             continue
         value = to_float(raw_value)
         if value is None or value < 0:
-            raise ValueError(f"Composite score weight must be non-negative numeric: {key}")
-        out[str(key)] = value
+            raise ValueError(f"Composite score weight must be non-negative numeric: {context}.{key_text}")
+        out[key_text] = value
     total = sum(out.values())
     if abs(total - 1.0) > 0.0001:
-        raise ValueError(f"Composite score weights must sum to 1.0: {total:.6f}")
+        raise ValueError(f"Composite score weights must sum to 1.0 for {context}: {total:.6f}")
     return out
+
+
+def load_weights(config: dict[str, Any]) -> dict[str, float]:
+    return parse_component_weights(
+        cfg_get(config, "scoring.composite_weights", DEFAULT_WEIGHTS),
+        default_weights=DEFAULT_WEIGHTS,
+        context="scoring.composite_weights",
+    )
 
 
 def load_financial_rows(conn: Any, *, asof: str, ticker_filter: set[str], max_tickers: int) -> list[dict[str, Any]]:
@@ -366,6 +474,23 @@ def load_latest_feature(conn: Any, table: str, score_col: str, *, asof: str) -> 
         seen.add(company_id)
         out[company_id] = dict(row)
     return out
+
+
+def load_company_model_taxonomy(conn: Any) -> dict[int, str]:
+    if not table_exists(conn, "dim_company_model_taxonomy"):
+        LOGGER.warning("dim_company_model_taxonomy is missing; cohort-specific scoring gates will not be applied")
+        return {}
+    rows = conn.execute(
+        """
+        SELECT company_id, calibration_cohort
+        FROM dim_company_model_taxonomy
+        """
+    ).fetchall()
+    return {
+        int(row["company_id"]): str(row["calibration_cohort"] or "").strip()
+        for row in rows
+        if str(row["calibration_cohort"] or "").strip()
+    }
 
 
 def feature_row_count(conn: Any, table: str, *, asof: str) -> int:
@@ -700,17 +825,20 @@ def upsert_sentiment_proxy_rows(conn: Any, rows: list[ScoreRow]) -> int:
 
 def score_drivers(row: ScoreRow) -> tuple[list[str], list[str]]:
     items = [
-        ("fundamental", row.fundamental_quality_score),
-        ("durable_growth", row.durable_growth_score),
-        ("fda_product", row.fda_product_score),
-        ("reimbursement", row.reimbursement_score),
-        ("valuation", row.valuation_score),
-        ("technical_entry", row.technical_entry_score),
-        ("sentiment_catalyst", row.sentiment_catalyst_score),
+        ("fundamental", row.fundamental_quality_score, 1.0),
+        ("durable_growth", row.durable_growth_score, 1.0),
+        ("fda_product", row.fda_product_score, 1.0),
+        ("reimbursement", row.reimbursement_score, 1.0),
+        ("valuation", row.valuation_score, 1.0),
+        ("technical_entry", row.technical_entry_score, row.technical_component_weight),
+        ("sentiment_catalyst", row.sentiment_catalyst_score, 1.0),
     ]
-    positives = [f"{name}:{score:.1f}" for name, score in sorted(items, key=lambda item: item[1], reverse=True)[:3]]
-    below_neutral = [(name, score) for name, score in items if score < 50.0]
+    active_items = [(name, score) for name, score, weight in items if weight > WEIGHT_EPSILON]
+    positives = [f"{name}:{score:.1f}" for name, score in sorted(active_items, key=lambda item: item[1], reverse=True)[:3]]
+    below_neutral = [(name, score) for name, score in active_items if score < 50.0]
     negatives = [f"{name}:{score:.1f}" for name, score in sorted(below_neutral, key=lambda item: item[1])[:3]]
+    if row.technical_component_weight <= WEIGHT_EPSILON and row.technical_overlay_status:
+        positives.append(f"technical_overlay:{row.technical_overlay_status}")
     if row.unknown_reimbursement_flag and "reimbursement:unknown" not in negatives:
         negatives.append("reimbursement:unknown")
     return positives, negatives
@@ -746,6 +874,24 @@ def cross_sectional_percentile_rank(rows: list[ScoreRow]) -> None:
         rows[idx].composite_percentile = round(100.0 * rank / denominator, 2)
 
 
+def cohort_percentile_rank(rows: list[ScoreRow]) -> None:
+    by_cohort: dict[str, list[tuple[int, float]]] = {}
+    for idx, row in enumerate(rows):
+        cohort = row.calibration_cohort or row.subsector or "unknown"
+        if row.raw_composite_score is None or not math.isfinite(row.raw_composite_score):
+            continue
+        by_cohort.setdefault(cohort, []).append((idx, row.raw_composite_score))
+    for pairs in by_cohort.values():
+        if len(pairs) <= 1:
+            for idx, _ in pairs:
+                rows[idx].cohort_percentile = 50.0
+            continue
+        pairs.sort(key=lambda item: item[1])
+        denominator = len(pairs) - 1
+        for rank, (idx, _) in enumerate(pairs):
+            rows[idx].cohort_percentile = round(100.0 * rank / denominator, 2)
+
+
 def load_previous_scores(conn: Any, *, asof: str) -> dict[int, dict[str, Any]]:
     previous = conn.execute(
         """
@@ -769,8 +915,29 @@ def load_previous_scores(conn: Any, *, asof: str) -> dict[int, dict[str, Any]]:
     return {int(row["company_id"]): dict(row) for row in rows}
 
 
-MANUAL_FDA_REVIEW_STATES = {"confirmed_hard_red", "regulatory_review_required", "mapping_review_required"}
 NON_LIVE_REIMBURSEMENT_STATUSES = {"", "unknown", "cms_data_not_loaded"}
+
+
+@dataclass(frozen=True)
+class TechnicalPolicy:
+    gate_mode: str = TECHNICAL_GATE_HARD_POSITIVE
+    entry_min: float | None = None
+    breakdown_min: float = 35.0
+    block_classification: bool = True
+    rationale: str = ""
+
+
+@dataclass(frozen=True)
+class PullbackCandidatePolicy:
+    enabled: bool = False
+    technical_entry_max: float = 45.0
+    fundamental_quality_min: float = 0.0
+    valuation_min: float = 35.0
+    fda_product_min: float = 50.0
+    value_trap_max: float = 60.0
+    data_completeness_min: float = 85.0
+    template_id: str = ""
+    rationale: str = ""
 
 
 def int_flag(raw: object) -> int:
@@ -829,20 +996,333 @@ def min_position_size(max_feasible: float | None, *, target_minimum: float = 25_
     return round(min(target_minimum, max_feasible), 2)
 
 
-def classify(row: ScoreRow, *, gates: dict[str, float]) -> None:
+GATE_KEYS = {
+    "composite_min",
+    "cohort_percentile_min",
+    "fundamental_quality_min",
+    "durable_growth_min",
+    "fda_product_min",
+    "reimbursement_min",
+    "valuation_min",
+    "technical_entry_min",
+    "data_completeness_min",
+    "min_avg_dollar_volume_60d",
+    "watchlist_min",
+    "value_trap_max",
+    "value_trap_hard_max",
+}
+
+
+def base_scoring_gates(config: dict[str, Any]) -> dict[str, float]:
+    return {
+        "composite_min": cfg_float(config, "scoring.gates.composite_min", 75.0),
+        "cohort_percentile_min": cfg_float(config, "scoring.gates.cohort_percentile_min", 0.0),
+        "fundamental_quality_min": cfg_float(config, "scoring.gates.fundamental_quality_min", 70.0),
+        "durable_growth_min": cfg_float(config, "scoring.gates.durable_growth_min", 60.0),
+        "fda_product_min": cfg_float(config, "scoring.gates.fda_product_min", 60.0),
+        "reimbursement_min": cfg_float(config, "scoring.gates.reimbursement_min", 45.0),
+        "valuation_min": cfg_float(config, "scoring.gates.valuation_min", 60.0),
+        "technical_entry_min": cfg_float(config, "scoring.gates.technical_entry_min", 55.0),
+        "data_completeness_min": cfg_float(config, "scoring.gates.data_completeness_min", 90.0),
+        "min_avg_dollar_volume_60d": cfg_float(config, "scoring.gates.min_avg_dollar_volume_60d", 1_000_000.0),
+        "watchlist_min": cfg_float(config, "scoring.gates.watchlist_min", 60.0),
+        "value_trap_max": cfg_float(config, "scoring.gates.value_trap_max", 20.0),
+        "value_trap_hard_max": cfg_float(config, "scoring.gates.value_trap_hard_max", 85.0),
+    }
+
+
+def cohort_gate_profiles(config: dict[str, Any], base_gates: dict[str, float]) -> dict[str, dict[str, float]]:
+    raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
+    if not isinstance(raw_profiles, dict):
+        raise ValueError("scoring.cohort_profiles must be a mapping when provided")
+    profiles: dict[str, dict[str, float]] = {}
+    for cohort, raw_profile in raw_profiles.items():
+        if not isinstance(raw_profile, dict):
+            continue
+        if str(raw_profile.get("enabled", True)).strip().lower() in {"0", "false", "no", "off"}:
+            continue
+        raw_gates = raw_profile.get("gates", {})
+        if not isinstance(raw_gates, dict):
+            raise ValueError(f"scoring.cohort_profiles.{cohort}.gates must be a mapping")
+        gates = dict(base_gates)
+        for key, raw_value in raw_gates.items():
+            key_text = str(key)
+            if key_text == "raw_composite_min":
+                key_text = "composite_min"
+            if key_text not in GATE_KEYS:
+                LOGGER.warning("Ignoring unknown cohort gate key for %s: %s", cohort, key)
+                continue
+            value = to_float(raw_value)
+            if value is None:
+                raise ValueError(f"Cohort gate value must be numeric: scoring.cohort_profiles.{cohort}.gates.{key}")
+            gates[key_text] = value
+        profiles[str(cohort)] = gates
+    return profiles
+
+
+def gates_for_row(row: ScoreRow, base_gates: dict[str, float], profiles: dict[str, dict[str, float]]) -> dict[str, float]:
+    return profiles.get(row.calibration_cohort, base_gates)
+
+
+def bool_from_raw(raw: object, default: bool) -> bool:
+    if raw is None:
+        return default
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def parse_optional_float(raw: object, *, context: str) -> float | None:
+    if raw is None or str(raw).strip() == "":
+        return None
+    value = to_float(raw)
+    if value is None:
+        raise ValueError(f"Config value must be numeric: {context}")
+    return value
+
+
+def parse_technical_policy(raw: object, *, default: TechnicalPolicy, context: str) -> TechnicalPolicy:
+    if raw is None:
+        return default
+    if not isinstance(raw, dict):
+        raise ValueError(f"{context} must be a mapping")
+    gate_mode = str(raw.get("gate_mode", default.gate_mode)).strip().lower()
+    if gate_mode not in TECHNICAL_GATE_MODES:
+        raise ValueError(f"{context}.gate_mode must be one of {sorted(TECHNICAL_GATE_MODES)}, got {gate_mode!r}")
+    entry_min = (
+        parse_optional_float(raw.get("entry_min"), context=f"{context}.entry_min")
+        if "entry_min" in raw
+        else default.entry_min
+    )
+    breakdown_min = (
+        parse_optional_float(raw.get("breakdown_min"), context=f"{context}.breakdown_min")
+        if "breakdown_min" in raw
+        else default.breakdown_min
+    )
+    if breakdown_min is None:
+        breakdown_min = default.breakdown_min
+    default_block = gate_mode in {TECHNICAL_GATE_HARD_POSITIVE, TECHNICAL_GATE_BREAKDOWN_VETO_ONLY}
+    block_classification = bool_from_raw(raw.get("block_classification"), default_block)
+    rationale = str(raw.get("rationale", default.rationale) or "").strip()
+    return TechnicalPolicy(
+        gate_mode=gate_mode,
+        entry_min=entry_min,
+        breakdown_min=breakdown_min,
+        block_classification=block_classification,
+        rationale=rationale,
+    )
+
+
+def base_technical_policy(config: dict[str, Any], gates: dict[str, float]) -> TechnicalPolicy:
+    default = TechnicalPolicy(
+        gate_mode=TECHNICAL_GATE_HARD_POSITIVE,
+        entry_min=gates["technical_entry_min"],
+        breakdown_min=35.0,
+        block_classification=True,
+        rationale="base_hard_positive_technical_gate",
+    )
+    return parse_technical_policy(
+        cfg_get(config, "scoring.technical_policy", None),
+        default=default,
+        context="scoring.technical_policy",
+    )
+
+
+def cohort_technical_policy_profiles(config: dict[str, Any], base_policy: TechnicalPolicy) -> dict[str, TechnicalPolicy]:
+    raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
+    if not isinstance(raw_profiles, dict):
+        raise ValueError("scoring.cohort_profiles must be a mapping when provided")
+    out: dict[str, TechnicalPolicy] = {}
+    for cohort, raw_profile in raw_profiles.items():
+        if not isinstance(raw_profile, dict):
+            continue
+        if str(raw_profile.get("enabled", True)).strip().lower() in {"0", "false", "no", "off"}:
+            continue
+        if "technical_policy" not in raw_profile:
+            continue
+        out[str(cohort)] = parse_technical_policy(
+            raw_profile.get("technical_policy"),
+            default=base_policy,
+            context=f"scoring.cohort_profiles.{cohort}.technical_policy",
+        )
+    return out
+
+
+def technical_policy_for_row(row: ScoreRow, base_policy: TechnicalPolicy, profiles: dict[str, TechnicalPolicy]) -> TechnicalPolicy:
+    return profiles.get(row.calibration_cohort, base_policy)
+
+
+def cohort_component_weight_profiles(config: dict[str, Any], base_weights: dict[str, float]) -> dict[str, dict[str, float]]:
+    raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
+    if not isinstance(raw_profiles, dict):
+        raise ValueError("scoring.cohort_profiles must be a mapping when provided")
+    out: dict[str, dict[str, float]] = {}
+    for cohort, raw_profile in raw_profiles.items():
+        if not isinstance(raw_profile, dict):
+            continue
+        if str(raw_profile.get("enabled", True)).strip().lower() in {"0", "false", "no", "off"}:
+            continue
+        if "composite_weights" not in raw_profile:
+            continue
+        out[str(cohort)] = parse_component_weights(
+            raw_profile.get("composite_weights"),
+            default_weights=base_weights,
+            context=f"scoring.cohort_profiles.{cohort}.composite_weights",
+        )
+    return out
+
+
+def weights_for_cohort(cohort: str, base_weights: dict[str, float], profiles: dict[str, dict[str, float]]) -> dict[str, float]:
+    return profiles.get(cohort, base_weights)
+
+
+def technical_score_source(config: dict[str, Any]) -> str:
+    source = str(cfg_get(config, "scoring.technical_score_source", "legacy_setup") or "legacy_setup").strip().lower()
+    allowed = {"legacy_setup", "alpha_when_available", "alpha"}
+    if source not in allowed:
+        raise ValueError(f"scoring.technical_score_source must be one of {sorted(allowed)}, got {source!r}")
+    return source
+
+
+def selected_technical_score(item: dict[str, Any], *, neutral: float, source: str) -> tuple[float, str]:
+    if source in {"alpha", "alpha_when_available"}:
+        alpha = to_float(item.get("technical_alpha_score"))
+        if alpha is not None:
+            return score_or(alpha, neutral), "technical_alpha_score"
+        if source == "alpha":
+            return neutral, "technical_alpha_score_missing"
+    setup = to_float(item.get("technical_setup_score"))
+    if setup is not None:
+        return score_or(setup, neutral), "technical_setup_score"
+    return score_or(item.get("technical_score"), neutral), "technical_score"
+
+
+def technical_overlay_status(entry: str, *, mode: str) -> str:
+    overlay = {
+        "entry_eligible": "momentum_confirmed",
+        "watch_for_setup": "setup_watch",
+        "not_entry_ready": "pullback_or_mean_reversion_candidate",
+        "avoid_technical_breakdown": "breakdown_risk",
+    }.get(entry, entry or "unclassified")
+    return overlay if mode == TECHNICAL_GATE_HARD_POSITIVE else f"{overlay}_{mode}"
+
+
+def parse_pullback_candidate_policy(raw: object, *, context: str) -> PullbackCandidatePolicy:
+    if raw is None:
+        return PullbackCandidatePolicy()
+    if not isinstance(raw, dict):
+        raise ValueError(f"{context} must be a mapping")
+
+    def optional_threshold(key: str, default: float) -> float:
+        if key not in raw:
+            return default
+        value = parse_optional_float(raw.get(key), context=f"{context}.{key}")
+        return default if value is None else value
+
+    return PullbackCandidatePolicy(
+        enabled=bool_from_raw(raw.get("enabled"), True),
+        technical_entry_max=optional_threshold("technical_entry_max", 45.0),
+        fundamental_quality_min=optional_threshold("fundamental_quality_min", 0.0),
+        valuation_min=optional_threshold("valuation_min", 35.0),
+        fda_product_min=optional_threshold("fda_product_min", 50.0),
+        value_trap_max=optional_threshold("value_trap_max", 60.0),
+        data_completeness_min=optional_threshold("data_completeness_min", 85.0),
+        template_id=str(raw.get("template_id") or "").strip(),
+        rationale=str(raw.get("rationale") or "validated_pullback_candidate_tag").strip(),
+    )
+
+
+def cohort_pullback_candidate_profiles(config: dict[str, Any]) -> dict[str, PullbackCandidatePolicy]:
+    raw_section = cfg_get(config, "scoring.pullback_candidate_tags", {}) or {}
+    if not isinstance(raw_section, dict):
+        raise ValueError("scoring.pullback_candidate_tags must be a mapping when provided")
+    if not bool_from_raw(raw_section.get("enabled"), False):
+        return {}
+    raw_profiles = raw_section.get("cohorts", {}) or {}
+    if not isinstance(raw_profiles, dict):
+        raise ValueError("scoring.pullback_candidate_tags.cohorts must be a mapping when provided")
+    out: dict[str, PullbackCandidatePolicy] = {}
+    for cohort, raw_profile in raw_profiles.items():
+        policy = parse_pullback_candidate_policy(
+            raw_profile,
+            context=f"scoring.pullback_candidate_tags.cohorts.{cohort}",
+        )
+        if policy.enabled:
+            out[str(cohort)] = policy
+    return out
+
+
+def apply_pullback_candidate_tag(row: ScoreRow, policy: PullbackCandidatePolicy | None) -> None:
+    row.pullback_candidate_tag = 0
+    row.pullback_candidate_reason = ""
+    row.pullback_candidate_template_id = ""
+    if policy is None or not policy.enabled:
+        return
+    if row.classification in {"manual_review_regulatory_risk", "avoid_confirmed_regulatory_risk", "data_review_required"}:
+        return
+    if row.fda_review_state in MANUAL_FDA_REVIEW_STATES or row.hard_red_flag:
+        return
+    if row.value_trap_score > policy.value_trap_max:
+        return
+    if row.data_completeness_score < policy.data_completeness_min:
+        return
+    if row.technical_entry_score > policy.technical_entry_max:
+        return
+    if row.fundamental_quality_score < policy.fundamental_quality_min:
+        return
+    if row.valuation_score < policy.valuation_min:
+        return
+    if row.fda_product_score < policy.fda_product_min:
+        return
+    row.pullback_candidate_tag = 1
+    row.pullback_candidate_reason = policy.rationale
+    row.pullback_candidate_template_id = policy.template_id
+
+
+def classify(row: ScoreRow, *, gates: dict[str, float], technical_policy: TechnicalPolicy | None = None) -> None:
+    if technical_policy is None:
+        technical_policy = TechnicalPolicy(
+            gate_mode=TECHNICAL_GATE_HARD_POSITIVE,
+            entry_min=gates["technical_entry_min"],
+            breakdown_min=35.0,
+            block_classification=True,
+            rationale="legacy_default_hard_positive_technical_gate",
+        )
     reasons: list[str] = []
     row.entry_status = entry_status(row.technical_entry_score)
+    row.technical_gate_mode = technical_policy.gate_mode
+    row.technical_policy_reason = technical_policy.rationale
+    row.technical_overlay_status = technical_overlay_status(row.entry_status, mode=technical_policy.gate_mode)
     row.capacity_bucket = capacity_bucket(row.avg_dollar_volume_60d)
     row.max_position_size_feasible = max_position_size(row.avg_dollar_volume_60d)
     row.min_position_size_feasible = min_position_size(row.max_position_size_feasible)
-    row.passed_raw_score_gate = int(row.raw_composite_score >= gates["composite_min"])
+    row.passed_raw_score_gate = int(
+        row.raw_composite_score >= gates["composite_min"]
+        and row.cohort_percentile >= gates.get("cohort_percentile_min", 0.0)
+    )
     row.passed_fundamental_gate = int(row.fundamental_quality_score >= gates["fundamental_quality_min"])
     row.passed_growth_gate = int(row.durable_growth_score >= gates["durable_growth_min"])
     row.passed_fda_gate = int((not row.fda_data_available and not row.fda_review_state) or row.fda_product_score >= gates["fda_product_min"])
     reimbursement_live = row.unknown_reimbursement_flag == 0 and row.reimbursement_status not in NON_LIVE_REIMBURSEMENT_STATUSES
     row.passed_reimbursement_gate = int(reimbursement_live and row.reimbursement_score >= gates["reimbursement_min"])
     row.passed_valuation_gate = int(row.valuation_score >= gates["valuation_min"])
-    row.passed_technical_gate = int(row.technical_entry_score >= gates["technical_entry_min"])
+    entry_min = technical_policy.entry_min if technical_policy.entry_min is not None else gates["technical_entry_min"]
+    row.passed_technical_breakdown_veto = int(
+        row.technical_entry_score >= technical_policy.breakdown_min
+        and row.entry_status != "avoid_technical_breakdown"
+    )
+    if technical_policy.gate_mode == TECHNICAL_GATE_HARD_POSITIVE:
+        row.passed_technical_gate = int(row.technical_entry_score >= entry_min)
+        row.technical_gate_excluded = 0
+    elif technical_policy.gate_mode == TECHNICAL_GATE_BREAKDOWN_VETO_ONLY:
+        row.passed_technical_gate = row.passed_technical_breakdown_veto
+        row.technical_gate_excluded = 0
+    else:
+        row.passed_technical_gate = 1
+        row.technical_gate_excluded = 1
     row.passed_value_trap_gate = int(row.value_trap_score <= gates["value_trap_max"])
     row.passed_data_quality_gate = int(row.data_completeness_score >= gates["data_completeness_min"])
     row.passed_liquidity_gate = int(
@@ -853,7 +1333,10 @@ def classify(row: ScoreRow, *, gates: dict[str, float]) -> None:
     row.passed_fda_manual_review_gate = int(not manual_regulatory_state and not row.hard_red_flag)
 
     if not row.passed_raw_score_gate:
-        reasons.append("composite_below_gate")
+        if row.raw_composite_score < gates["composite_min"]:
+            reasons.append("composite_below_gate")
+        if row.cohort_percentile < gates.get("cohort_percentile_min", 0.0):
+            reasons.append("cohort_percentile_below_gate")
     if not row.passed_fundamental_gate:
         reasons.append("fundamental_below_gate")
     if not row.passed_growth_gate:
@@ -867,7 +1350,11 @@ def classify(row: ScoreRow, *, gates: dict[str, float]) -> None:
     if not row.passed_valuation_gate:
         reasons.append("valuation_below_gate")
     if not row.passed_technical_gate:
-        reasons.append("technical_below_gate")
+        reasons.append(
+            "technical_breakdown_veto"
+            if technical_policy.gate_mode == TECHNICAL_GATE_BREAKDOWN_VETO_ONLY
+            else "technical_below_gate"
+        )
     if not row.passed_data_quality_gate:
         reasons.append("data_quality_below_gate")
     if not row.passed_liquidity_gate:
@@ -883,6 +1370,7 @@ def classify(row: ScoreRow, *, gates: dict[str, float]) -> None:
 
     row.failed_gates = ";".join(reasons)
     row.review_reason = ";".join(reasons)
+    technical_classification_block = bool(technical_policy.block_classification and not row.passed_technical_gate)
     row.final_investability_gate = int(
         row.passed_raw_score_gate
         and row.passed_fundamental_gate
@@ -895,6 +1383,7 @@ def classify(row: ScoreRow, *, gates: dict[str, float]) -> None:
         and row.passed_data_quality_gate
         and row.passed_liquidity_gate
         and row.passed_fda_manual_review_gate
+        and not technical_classification_block
     )
     row.gate_status = "pass" if row.final_investability_gate else "fail"
     if confirmed_hard_red:
@@ -906,9 +1395,9 @@ def classify(row: ScoreRow, *, gates: dict[str, float]) -> None:
     elif not row.passed_data_quality_gate:
         row.classification = "data_review_required"
         row.classification_reason = "data_completeness_below_gate"
-    elif row.entry_status in {"avoid_technical_breakdown", "not_entry_ready"}:
+    elif technical_classification_block:
         row.classification = "watchlist_wait_for_entry"
-        row.classification_reason = row.entry_status
+        row.classification_reason = row.technical_overlay_status or row.entry_status
     elif row.fundamental_quality_score >= gates["fundamental_quality_min"] and row.valuation_score < gates["valuation_min"]:
         row.classification = "quality_watchlist_wait_for_price"
         row.classification_reason = "quality_but_valuation_below_gate"
@@ -920,7 +1409,11 @@ def classify(row: ScoreRow, *, gates: dict[str, float]) -> None:
         row.classification_reason = "value_trap_soft_gate"
     elif row.final_investability_gate:
         row.classification = "tier_1_long_candidate"
-        row.classification_reason = "all_tier1_gates_passed"
+        row.classification_reason = (
+            "all_tier1_gates_passed"
+            if not row.technical_gate_excluded
+            else "all_tier1_nontechnical_gates_passed;technical_overlay_only"
+        )
     elif row.raw_composite_score >= gates["watchlist_min"]:
         row.classification = "watchlist"
         row.classification_reason = "raw_score_above_watchlist_floor"
@@ -945,6 +1438,7 @@ def build_rows(
     technical_rows = load_latest_feature(conn, "feature_technical_entry", "technical_score", asof=asof)
     durable_rows = load_latest_feature(conn, "feature_durable_growth", "score", asof=asof)
     sentiment_rows = load_latest_feature(conn, "feature_sentiment_catalyst", "score", asof=asof)
+    taxonomy = load_company_model_taxonomy(conn)
     durable_proxy = durable_growth_proxy(financial_rows)
     neutral_fundamental = component_neutral(config, "fundamental_quality", "scoring.neutral_fundamental_quality_score", 50.0)
     neutral_durable = component_neutral(config, "durable_growth", "scoring.neutral_durable_growth_score", 50.0)
@@ -953,26 +1447,23 @@ def build_rows(
     neutral_valuation = component_neutral(config, "valuation", "scoring.neutral_valuation_score", 50.0)
     neutral_technical = component_neutral(config, "technical_entry", "scoring.neutral_technical_entry_score", 50.0)
     neutral_sentiment = component_neutral(config, "sentiment_catalyst", "scoring.neutral_sentiment_catalyst_score", 50.0)
+    neutral_value_trap = cfg_float(config, "scoring.neutral_value_trap_score", 50.0)
     sentiment_proxy = sentiment_catalyst_proxy(financial_rows, config=config, neutral=neutral_sentiment)
-    gates = {
-        "composite_min": cfg_float(config, "scoring.gates.composite_min", 75.0),
-        "fundamental_quality_min": cfg_float(config, "scoring.gates.fundamental_quality_min", 70.0),
-        "durable_growth_min": cfg_float(config, "scoring.gates.durable_growth_min", 60.0),
-        "fda_product_min": cfg_float(config, "scoring.gates.fda_product_min", 60.0),
-        "reimbursement_min": cfg_float(config, "scoring.gates.reimbursement_min", 45.0),
-        "valuation_min": cfg_float(config, "scoring.gates.valuation_min", 60.0),
-        "technical_entry_min": cfg_float(config, "scoring.gates.technical_entry_min", 55.0),
-        "data_completeness_min": cfg_float(config, "scoring.gates.data_completeness_min", 90.0),
-        "min_avg_dollar_volume_60d": cfg_float(config, "scoring.gates.min_avg_dollar_volume_60d", 1_000_000.0),
-        "watchlist_min": cfg_float(config, "scoring.gates.watchlist_min", 60.0),
-        "value_trap_max": cfg_float(config, "scoring.gates.value_trap_max", 20.0),
-        "value_trap_hard_max": cfg_float(config, "scoring.gates.value_trap_hard_max", 85.0),
-    }
+    gates = base_scoring_gates(config)
+    gate_profiles = cohort_gate_profiles(config, gates)
+    weight_profiles = cohort_component_weight_profiles(config, weights)
+    default_technical_policy = base_technical_policy(config, gates)
+    technical_policy_profiles = cohort_technical_policy_profiles(config, default_technical_policy)
+    pullback_candidate_profiles = cohort_pullback_candidate_profiles(config)
+    technical_source = technical_score_source(config)
     rank_composite = cfg_bool(config, "scoring.cross_sectional_composite_rank", True)
     model_version = str(cfg_get(config, "scoring.model_version", "med_device_score_v1") or "med_device_score_v1").strip()
     rows: list[ScoreRow] = []
     for item in financial_rows:
         company_id = int(item["company_id"])
+        cohort = taxonomy.get(company_id, "")
+        active_weights = weights_for_cohort(cohort, weights, weight_profiles)
+        technical_component_weight = active_weights.get("technical_entry", 0.0)
         fda_item = fda_rows.get(company_id, {})
         reimbursement_item = reimbursement_rows.get(company_id, {})
         technical_item = technical_rows.get(company_id, {})
@@ -1001,7 +1492,7 @@ def build_rows(
             bool(reimbursement_item)
             and reimbursement_component_is_live(reimbursement_item, reimbursement_table_score)
         )
-        fda_review_state = str(fda_item.get("review_adjusted_fda_state") or "") if fda_item else ""
+        fda_review_state = str(fda_item.get("review_adjusted_fda_state") or "").strip().lower() if fda_item else ""
         fda_score = score_or(fda_item.get("fda_product_score"), neutral_fda_no_data) if fda_item else neutral_fda_no_data
         if fda_item and not fda_data_available and not fda_review_state.startswith("manual_fda_footprint_"):
             fda_score = neutral_fda_no_data
@@ -1018,7 +1509,26 @@ def build_rows(
             if sentiment_item
             else sentiment_proxy_item.score if sentiment_proxy_item is not None else neutral_sentiment
         )
-        technical_score = score_or(technical_item.get("technical_score"), neutral_technical) if technical_item else neutral_technical
+        technical_score, active_technical_score_source = (
+            selected_technical_score(technical_item, neutral=neutral_technical, source=technical_source)
+            if technical_item
+            else (neutral_technical, "no_technical_feature")
+        )
+        technical_trend_quality_score = score_or(technical_item.get("trend_quality_score"), neutral_technical) if technical_item else neutral_technical
+        technical_relative_strength_score = score_or(technical_item.get("relative_strength_score"), neutral_technical) if technical_item else neutral_technical
+        technical_liquidity_score = score_or(technical_item.get("liquidity_score"), neutral_technical) if technical_item else neutral_technical
+        technical_volume_breakout_score = score_or(technical_item.get("volume_breakout_score"), neutral_technical) if technical_item else neutral_technical
+        technical_volatility_risk_score = score_or(technical_item.get("volatility_risk_score"), neutral_technical) if technical_item else neutral_technical
+        technical_setup_score = score_or(technical_item.get("technical_setup_score"), technical_score) if technical_item else neutral_technical
+        technical_core_score = score_or(technical_item.get("technical_core_score"), neutral_technical) if technical_item else neutral_technical
+        technical_alpha_score = score_or(technical_item.get("technical_alpha_score"), neutral_technical) if technical_item else neutral_technical
+        technical_pullback_score = score_or(technical_item.get("technical_pullback_score"), neutral_technical) if technical_item else neutral_technical
+        technical_overextension_score = score_or(technical_item.get("technical_overextension_score"), 0.0) if technical_item else 0.0
+        technical_breakdown_flag = int_flag(technical_item.get("technical_breakdown_flag")) if technical_item else 0
+        technical_liquidity_gate_flag = int_flag(technical_item.get("technical_liquidity_gate_flag")) if technical_item else 0
+        technical_signal_mode = str(technical_item.get("technical_signal_mode") or "") if technical_item else ""
+        technical_signal_direction = str(technical_item.get("technical_signal_direction") or "") if technical_item else ""
+        technical_signal_reliability = score_or(technical_item.get("technical_signal_reliability"), 0.0) if technical_item else 0.0
         avg_dollar_volume_60d = to_float(technical_item.get("avg_dollar_volume_60d")) if technical_item else None
         liquidity_score = to_float(technical_item.get("liquidity_score")) if technical_item else None
         market_cap = to_float(item.get("market_cap"))
@@ -1026,15 +1536,18 @@ def build_rows(
         diluted_weighted_average_shares = to_float(item.get("diluted_weighted_average_shares"))
         basic_weighted_average_shares = to_float(item.get("basic_weighted_average_shares"))
         market_cap_validated_flag = int(item.get("market_cap_validated_flag") or 0)
-        live_components = [
-            to_float(item.get("fundamental_quality_score_v1")) is not None,
-            has_durable_live_score,
-            bool(fda_item) and to_float(fda_item.get("fda_product_score")) is not None,
-            has_reimbursement_live_score,
-            to_float(item.get("valuation_score_v1")) is not None,
-            bool(technical_item) and to_float(technical_item.get("technical_score")) is not None,
-            has_sentiment_live_score,
-        ]
+        component_available = {
+            "fundamental_quality": to_float(item.get("fundamental_quality_score_v1")) is not None,
+            "durable_growth": has_durable_live_score,
+            "fda_product": bool(fda_item) and to_float(fda_item.get("fda_product_score")) is not None,
+            "reimbursement": has_reimbursement_live_score,
+            "valuation": to_float(item.get("valuation_score_v1")) is not None,
+            "technical_entry": bool(technical_item) and to_float(technical_item.get("technical_score")) is not None,
+            "sentiment_catalyst": has_sentiment_live_score,
+        }
+        active_component_keys = [key for key, weight in active_weights.items() if weight > WEIGHT_EPSILON]
+        active_live_count = sum(1 for key in active_component_keys if component_available.get(key, False))
+        data_completeness = round(100.0 * active_live_count / len(active_component_keys), 2) if active_component_keys else 0.0
         row = ScoreRow(
             asof_date=asof,
             scoring_model_version=model_version,
@@ -1043,6 +1556,7 @@ def build_rows(
             ticker=normalize_ticker(item.get("ticker")),
             company_name=str(item.get("company_name") or ""),
             subsector=str(item.get("subsector") or ""),
+            calibration_cohort=cohort,
             fundamental_quality_score=score_or(item.get("fundamental_quality_score_v1"), neutral_fundamental),
             durable_growth_score=durable_score,
             fda_product_score=fda_score,
@@ -1058,10 +1572,26 @@ def build_rows(
             unknown_reimbursement_flag=unknown_reimbursement_flag,
             valuation_score=score_or(item.get("valuation_score_v1"), neutral_valuation),
             technical_entry_score=technical_score,
+            technical_trend_quality_score=technical_trend_quality_score,
+            technical_relative_strength_score=technical_relative_strength_score,
+            technical_liquidity_score=technical_liquidity_score,
+            technical_volume_breakout_score=technical_volume_breakout_score,
+            technical_volatility_risk_score=technical_volatility_risk_score,
+            technical_setup_score=technical_setup_score,
+            technical_core_score=technical_core_score,
+            technical_alpha_score=technical_alpha_score,
+            technical_pullback_score=technical_pullback_score,
+            technical_overextension_score=technical_overextension_score,
+            technical_breakdown_flag=technical_breakdown_flag,
+            technical_liquidity_gate_flag=technical_liquidity_gate_flag,
+            technical_signal_mode=technical_signal_mode,
+            technical_signal_direction=technical_signal_direction,
+            technical_signal_reliability=technical_signal_reliability,
+            technical_score_source=active_technical_score_source,
             sentiment_catalyst_score=sentiment_score,
-            value_trap_score=to_float(item.get("value_trap_score")) or 0.0,
-            live_component_count=sum(1 for value in live_components if value),
-            data_completeness_score=round(100.0 * sum(1 for value in live_components if value) / len(live_components), 2),
+            value_trap_score=score_or(item.get("value_trap_score"), neutral_value_trap),
+            live_component_count=active_live_count,
+            data_completeness_score=data_completeness,
             hard_red_flag=1 if fda_hard_flag or reimbursement_hard_flag else 0,
             hard_red_flag_reasons=";".join(
                 reason
@@ -1077,6 +1607,7 @@ def build_rows(
             sentiment_proxy_input=sentiment_proxy_item.input_name if sentiment_proxy_item is not None else "",
             avg_dollar_volume_60d=avg_dollar_volume_60d,
             liquidity_score=liquidity_score,
+            technical_component_weight=technical_component_weight,
             market_cap=market_cap,
             current_shares_outstanding=current_shares_outstanding,
             diluted_weighted_average_shares=diluted_weighted_average_shares,
@@ -1101,16 +1632,7 @@ def build_rows(
             "technical_entry": row.technical_entry_score,
             "sentiment_catalyst": row.sentiment_catalyst_score,
         }
-        component_available = {
-            "fundamental_quality": live_components[0],
-            "durable_growth": live_components[1],
-            "fda_product": live_components[2],
-            "reimbursement": live_components[3],
-            "valuation": live_components[4],
-            "technical_entry": live_components[5],
-            "sentiment_catalyst": live_components[6],
-        }
-        raw_composite = weighted_available_score(component_scores, component_available, weights)
+        raw_composite = weighted_available_score(component_scores, component_available, active_weights)
         row.raw_composite_score = round(
             clamp(raw_composite * value_trap_discount(row.value_trap_score)),
             2,
@@ -1122,8 +1644,14 @@ def build_rows(
     else:
         for row in rows:
             row.composite_percentile = row.raw_composite_score
+    cohort_percentile_rank(rows)
     for row in rows:
-        classify(row, gates=gates)
+        classify(
+            row,
+            gates=gates_for_row(row, gates, gate_profiles),
+            technical_policy=technical_policy_for_row(row, default_technical_policy, technical_policy_profiles),
+        )
+        apply_pullback_candidate_tag(row, pullback_candidate_profiles.get(row.calibration_cohort))
         row.top_positive_drivers, row.top_negative_drivers = score_drivers(row)
     rows.sort(
         key=lambda item: (
@@ -1151,9 +1679,19 @@ def build_rows(
     return rows
 
 
+def ensure_daily_score_policy_columns(conn: Any) -> None:
+    if not table_exists(conn, "med_device_daily_scores"):
+        return
+    existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(med_device_daily_scores)").fetchall()}
+    for column, ddl in OPTIONAL_DAILY_SCORE_COLUMNS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE med_device_daily_scores ADD COLUMN {quote_identifier(column)} {ddl}")
+
+
 def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
     if not rows:
         return 0
+    ensure_daily_score_policy_columns(conn)
     now = utc_now()
     columns = [
         "asof_date",
@@ -1162,6 +1700,8 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "composite_score",
         "raw_composite_score",
         "composite_percentile",
+        "calibration_cohort",
+        "cohort_percentile",
         "fundamental_quality_score",
         "durable_growth_score",
         "fda_product_score",
@@ -1176,6 +1716,22 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "unknown_reimbursement_flag",
         "valuation_score",
         "technical_entry_score",
+        "technical_trend_quality_score",
+        "technical_relative_strength_score",
+        "technical_liquidity_score",
+        "technical_volume_breakout_score",
+        "technical_volatility_risk_score",
+        "technical_setup_score",
+        "technical_core_score",
+        "technical_alpha_score",
+        "technical_pullback_score",
+        "technical_overextension_score",
+        "technical_breakdown_flag",
+        "technical_liquidity_gate_flag",
+        "technical_signal_mode",
+        "technical_signal_direction",
+        "technical_signal_reliability",
+        "technical_score_source",
         "sentiment_catalyst_score",
         "value_trap_score",
         "rank",
@@ -1187,6 +1743,14 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "classification",
         "decision_bucket",
         "entry_status",
+        "technical_gate_mode",
+        "technical_overlay_status",
+        "technical_policy_reason",
+        "technical_gate_excluded",
+        "technical_component_weight",
+        "pullback_candidate_tag",
+        "pullback_candidate_reason",
+        "pullback_candidate_template_id",
         "gate_status",
         "review_reason",
         "failed_gates",
@@ -1212,6 +1776,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "passed_reimbursement_gate",
         "passed_valuation_gate",
         "passed_technical_gate",
+        "passed_technical_breakdown_veto",
         "passed_value_trap_gate",
         "passed_data_quality_gate",
         "passed_liquidity_gate",
@@ -1246,6 +1811,8 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.composite_score,
                 row.raw_composite_score,
                 row.composite_percentile,
+                row.calibration_cohort,
+                row.cohort_percentile,
                 row.fundamental_quality_score,
                 row.durable_growth_score,
                 row.fda_product_score,
@@ -1260,6 +1827,22 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.unknown_reimbursement_flag,
                 row.valuation_score,
                 row.technical_entry_score,
+                row.technical_trend_quality_score,
+                row.technical_relative_strength_score,
+                row.technical_liquidity_score,
+                row.technical_volume_breakout_score,
+                row.technical_volatility_risk_score,
+                row.technical_setup_score,
+                row.technical_core_score,
+                row.technical_alpha_score,
+                row.technical_pullback_score,
+                row.technical_overextension_score,
+                row.technical_breakdown_flag,
+                row.technical_liquidity_gate_flag,
+                row.technical_signal_mode,
+                row.technical_signal_direction,
+                row.technical_signal_reliability,
+                row.technical_score_source,
                 row.sentiment_catalyst_score,
                 row.value_trap_score,
                 row.rank,
@@ -1271,6 +1854,14 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.classification,
                 row.decision_bucket,
                 row.entry_status,
+                row.technical_gate_mode,
+                row.technical_overlay_status,
+                row.technical_policy_reason,
+                row.technical_gate_excluded,
+                row.technical_component_weight,
+                row.pullback_candidate_tag,
+                row.pullback_candidate_reason,
+                row.pullback_candidate_template_id,
                 row.gate_status,
                 row.review_reason,
                 row.failed_gates,
@@ -1296,6 +1887,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.passed_reimbursement_gate,
                 row.passed_valuation_gate,
                 row.passed_technical_gate,
+                row.passed_technical_breakdown_veto,
                 row.passed_value_trap_gate,
                 row.passed_data_quality_gate,
                 row.passed_liquidity_gate,

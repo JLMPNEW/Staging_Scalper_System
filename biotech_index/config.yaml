@@ -487,32 +487,45 @@ financial_survival:
 biotech_scoring:
   output_dir: "../output/biotech_index_reports"
   output_csv: "biotech_daily_scores.csv"
+  taxonomy_overrides_csv: "data/biotech_taxonomy_overrides.csv"
   use_investment_score: true
   use_quality_adjusted_valuation_component: true
   use_quality_adjusted_guidance_component: true
   require_governance_features: false
+  cohort_policy:
+    enabled: true
+    min_cohort_specific_company_count: 8
+    sparse_valid_calibration_mode: "global_fallback"
+    non_investible_cohorts:
+      - "excluded_non_therapeutic_healthcare"
+      - "unclassified_review"
+      - "weak_or_historical_pipeline"
+    calibration_excluded_cohorts:
+      - "excluded_non_therapeutic_healthcare"
+      - "unclassified_review"
+      - "weak_or_historical_pipeline"
   production_baseline:
     enabled: true
     score_model: "biotech_opportunity_score"
-    candidate_id: "tier1_8820143dc910"
-    candidate_name: "current_clinical_mix_risk015_commercial_expected_return_quality"
+    candidate_id: "tier1_b4411d832d12"
+    candidate_name: "current_config_core_structural_veto"
     top_n: 10
-    selection_policy: "core_veto_event_soft_drag_quality_guardrail"
+    selection_policy: "core_structural_veto"
     primary_horizon_trading_days: 120
     alpha_multibagger_role: "context_only"
     # Historical artifact used to document the promoted PROD baseline; not an active output target.
-    calibration_output_dir: "../output/biotech_index_reports/calibration_tier1_20260515_final_v2_prod_parity"
+    calibration_output_dir: "../output/biotech_index_reports/calibration_tier1_120d_confirm"
     calibration_test_metrics:
-      test_lcb_return_pct: 6.835734
-      test_sortino_like: 1.021875
-      test_profit_factor: 2.893888
-      test_mean_return_pct: 10.56434
-      test_large_loss_20pct_rate_pct: 6.666667
+      test_lcb_return_pct: 3.514886
+      test_sortino_like: 0.498102
+      test_profit_factor: 2.156856
+      test_mean_return_pct: 5.557928
+      test_large_loss_20pct_rate_pct: 4.444444
       test_core_hard_weakness_exposure_pct: 0.0
-      test_event_hard_weakness_exposure_pct: 70.0
-      test_soft_weakness_exposure_pct: 8.888889
-      test_toxic_soft_weakness_exposure_pct: 8.888889
-      test_no_forward_guidance_exposure_pct: 0.0
+      test_event_hard_weakness_exposure_pct: 100.0
+      test_soft_weakness_exposure_pct: 23.333333
+      test_toxic_soft_weakness_exposure_pct: 14.444444
+      test_no_forward_guidance_exposure_pct: 13.333333
     shadow_research_pool:
       candidate_id: "tier1_b011ee62a2ea"
       candidate_name: "catalyst_credibility_risk015_commercial_quality_value_guarded"
@@ -526,9 +539,9 @@ biotech_scoring:
     runner_up_candidate_id: "tier1_b011ee62a2ea"
     notes:
       - "Tier-1 production ranking is calibrated for a 120-trading-day primary horizon."
-      - "Top-10 production selector uses the V2 expected-return quality guardrail for concentrated allocation risk control."
+      - "Top-10 production selector uses the core structural veto policy promoted from the 2026-05-29 restated 120-trading-day holdout."
       - "Shadow Top-20 research pool uses the challenger model for broader idea discovery; it is not the concentrated allocation selector."
-      - "Core structural weakness is vetoed for rank; event and configured soft weakness reduce the score under the selected guardrail policy."
+      - "Core structural weakness is vetoed for rank; event and configured soft weakness remain diagnostics under the selected production policy."
       - "Rank-quality cap veto keeps business-shock and severe-deterioration caps out of investable ranked lists when the cap is at or below the configured threshold."
       - "Alpha and multibagger scores remain secondary context until Phase 2 calibration proves orthogonal value."
   convex_risk_penalty_enabled: true
@@ -703,6 +716,7 @@ biotech_reports:
   top_candidates_csv: "biotech_top_candidates.csv"
   shadow_top_candidates_csv: "biotech_shadow_top20_candidates.csv"
   ranking_diagnostics_csv: "biotech_ranking_order_diagnostics.csv"
+  cohort_diagnostics_csv: "biotech_cohort_diagnostics.csv"
   action_tiers:
     high_confidence_score_min: 55.0
     allocation_rank_max: 10

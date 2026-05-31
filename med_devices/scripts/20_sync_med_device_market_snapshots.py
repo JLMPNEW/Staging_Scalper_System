@@ -27,7 +27,7 @@ from med_devices.core.config import cfg_get, expand_env_vars, load_yaml, resolve
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
-from med_devices.core.text_norm import normalize_ticker  # noqa: E402
+from med_devices.core.text_norm import as_bool, normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("sync_med_device_market_snapshots")
@@ -86,6 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tickers", type=str, default="")
     parser.add_argument("--max-tickers", type=int, default=0)
     parser.add_argument("--skip-ib", action="store_true", help="Skip IB and use Yahoo fallback directly.")
+    parser.add_argument("--use-ib", action="store_true", help="Opt in to deprecated IB fundamental snapshot lookup.")
     parser.add_argument("--skip-yahoo", action="store_true", help="Skip Yahoo fallback.")
     parser.add_argument("--allow-partial", action="store_true")
     return parser.parse_args()
@@ -559,9 +560,14 @@ def main() -> None:
         run_id = start_run(conn, run_type="sync_med_device_market_snapshots", input_path=config_path)
         rows: list[dict[str, Any]] = []
         snapshots: list[Snapshot] = []
+        finalized = False
         try:
             ib: Any = None
-            if not args.skip_ib:
+            ib_enabled = args.use_ib or (
+                not args.skip_ib
+                and as_bool(cfg_get(policy, "enable_ib_fundamentals", False), default=False)
+            )
+            if ib_enabled:
                 try:
                     from ib_insync import IB  # type: ignore[reportMissingModuleSource]
 
@@ -574,6 +580,8 @@ def main() -> None:
                 except Exception as exc:
                     LOGGER.warning("IB market snapshot source unavailable; falling back to Yahoo/SEC: %s", exc)
                     ib = None
+            else:
+                LOGGER.info("IB fundamental snapshots disabled; using Yahoo market snapshots for share counts.")
             pending_yahoo: list[Company] = []
             ib_consecutive_misses = 0
             ib_max_consecutive_misses = max(1, int(cfg_get(policy, "ib_max_consecutive_misses", 5)))
@@ -655,7 +663,7 @@ def main() -> None:
                                 "company_name": company.company_name,
                                 "asof_date": asof,
                                 "status": "fallback_to_sec",
-                                "review_reason": "ib_yahoo_missing",
+                                "review_reason": "ib_yahoo_missing" if ib_enabled else "yahoo_missing",
                             }
                         )
                         continue
@@ -671,7 +679,7 @@ def main() -> None:
                             "shares_outstanding": snapshot.shares_outstanding,
                             "market_cap": snapshot.market_cap,
                             "currency": snapshot.currency,
-                            "review_reason": "yahoo_fallback",
+                            "review_reason": "yahoo_fallback" if ib_enabled else "yahoo_market_data",
                         }
                     )
             elif pending_yahoo:
@@ -683,7 +691,7 @@ def main() -> None:
                             "company_name": company.company_name,
                             "asof_date": asof,
                             "status": "fallback_to_sec",
-                            "review_reason": "ib_missing_yahoo_skipped",
+                            "review_reason": "ib_missing_yahoo_skipped" if ib_enabled else "yahoo_skipped",
                         }
                     )
             upserted = upsert_snapshots(conn, snapshots)
@@ -692,11 +700,13 @@ def main() -> None:
             status = "success" if failures == 0 or args.allow_partial else "failed"
             message = f"asof={asof} rows={len(rows)} snapshots={upserted} failures={failures} output={output_csv}"
             finish_run(conn, run_id=run_id, status=status, row_count=upserted, message=message)
+            finalized = True
             if status == "failed":
                 raise RuntimeError(message)
             LOGGER.info("Market snapshot sync complete: %s", message)
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
+            if not finalized:
+                finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 
 

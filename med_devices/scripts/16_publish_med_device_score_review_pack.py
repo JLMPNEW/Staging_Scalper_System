@@ -16,16 +16,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, init_db  # noqa: E402
+from med_devices.core.fda_states import REGULATORY_RISK_STATES  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-REGULATORY_RISK_STATES = {
-    "confirmed_hard_red",
-    "regulatory_review_required",
-    "mapping_review_required",
-    "regulatory_watch",
-}
 SCORE_FIELDS = [
     "asof_date",
     "scoring_model_version",
@@ -33,9 +28,11 @@ SCORE_FIELDS = [
     "ticker",
     "company_name",
     "subsector",
+    "calibration_cohort",
     "composite_score",
     "raw_composite_score",
     "composite_percentile",
+    "cohort_percentile",
     "fundamental_quality_score",
     "durable_growth_score",
     "fda_product_score",
@@ -50,6 +47,22 @@ SCORE_FIELDS = [
     "unknown_reimbursement_flag",
     "valuation_score",
     "technical_entry_score",
+    "technical_trend_quality_score",
+    "technical_relative_strength_score",
+    "technical_liquidity_score",
+    "technical_volume_breakout_score",
+    "technical_volatility_risk_score",
+    "technical_setup_score",
+    "technical_core_score",
+    "technical_alpha_score",
+    "technical_pullback_score",
+    "technical_overextension_score",
+    "technical_breakdown_flag",
+    "technical_liquidity_gate_flag",
+    "technical_signal_mode",
+    "technical_signal_direction",
+    "technical_signal_reliability",
+    "technical_score_source",
     "sentiment_catalyst_score",
     "value_trap_score",
     "data_completeness_score",
@@ -57,6 +70,14 @@ SCORE_FIELDS = [
     "classification",
     "decision_bucket",
     "entry_status",
+    "technical_gate_mode",
+    "technical_overlay_status",
+    "technical_policy_reason",
+    "technical_gate_excluded",
+    "technical_component_weight",
+    "pullback_candidate_tag",
+    "pullback_candidate_reason",
+    "pullback_candidate_template_id",
     "gate_status",
     "review_reason",
     "failed_gates",
@@ -88,6 +109,7 @@ SCORE_FIELDS = [
     "passed_reimbursement_gate",
     "passed_valuation_gate",
     "passed_technical_gate",
+    "passed_technical_breakdown_veto",
     "passed_value_trap_gate",
     "passed_data_quality_gate",
     "passed_liquidity_gate",
@@ -95,7 +117,6 @@ SCORE_FIELDS = [
     "final_investability_gate",
     "hard_red_flag",
     "hard_red_flag_reasons",
-    "fda_state",
     "fda_data_available",
     "reimbursement_billing_category",
     "reimbursement_payment_rate_status",
@@ -157,7 +178,7 @@ def load_score_rows(conn: Any, *, asof: str) -> list[dict[str, Any]]:
             c.ticker,
             c.company_name,
             c.subsector,
-            COALESCE(latest_fda.review_adjusted_fda_state, '') AS fda_state,
+            COALESCE(latest_fda.review_adjusted_fda_state, '') AS latest_fda_review_state,
             COALESCE(latest_fda.fda_data_available, 0) AS fda_data_available,
             COALESCE(latest_fda.dedup_class_i_recall_count_36m, 0) AS dedup_class_i_recall_count_36m,
             COALESCE(latest_fda.open_class_i_recall_count_36m, 0) AS open_class_i_recall_count_36m,
@@ -203,6 +224,12 @@ def decode_driver_list(raw: object) -> str:
 
 def clean_row(row: dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
+    item["fda_review_state"] = (
+        item.get("fda_review_state")
+        or item.get("latest_fda_review_state")
+        or item.get("fda_state")
+        or ""
+    )
     item["top_positive_drivers"] = decode_driver_list(item.get("top_positive_drivers_json"))
     item["top_negative_drivers"] = decode_driver_list(item.get("top_negative_drivers_json"))
     return {field: item.get(field, "") for field in SCORE_FIELDS}
@@ -252,10 +279,11 @@ def write_markdown(
         row
         for row in rows
         if row.get("classification") in {"manual_review_regulatory_risk", "avoid_confirmed_regulatory_risk"}
-        or row.get("fda_review_state") in REGULATORY_RISK_STATES
+        or str(row.get("fda_review_state") or "").strip().lower() in REGULATORY_RISK_STATES
     ]
     top25 = rows[:25]
     bottom25 = list(reversed(rows[-25:]))
+    pullback_candidates = [row for row in rows if str(row.get("pullback_candidate_tag") or "").strip() in {"1", "true", "True"}]
 
     def line_items(items: list[dict[str, Any]], *, include_reason: bool = False) -> list[str]:
         out: list[str] = []
@@ -284,6 +312,27 @@ def write_markdown(
         "",
         "## Tier-1 Long Candidates",
         *(line_items(tier1) or ["- None"]),
+        "",
+        "## Technical Policy Snapshot",
+        *(
+            [
+                f"- {row.get('ticker')}: mode={row.get('technical_gate_mode') or 'legacy'} "
+                f"overlay={row.get('technical_overlay_status') or row.get('entry_status') or 'unknown'} "
+                f"weight={float(row.get('technical_component_weight') or 0.0):.2f}"
+                for row in tier1[:25]
+            ] or ["- None"]
+        ),
+        "",
+        "## Pullback Candidate Tags",
+        *(
+            [
+                f"- {row.get('rank')}. {row.get('ticker')} "
+                f"cohort={row.get('calibration_cohort') or 'unknown'} "
+                f"tech={float(row.get('technical_entry_score') or 0.0):.2f} "
+                f"template={row.get('pullback_candidate_template_id') or 'unknown'}"
+                for row in pullback_candidates[:25]
+            ] or ["- None"]
+        ),
         "",
         "## Regulatory Risk",
         *(line_items(regulatory_risk, include_reason=True) or ["- None"]),
@@ -331,7 +380,7 @@ def main() -> None:
             row
             for row in clean_rows
             if row["classification"] in {"manual_review_regulatory_risk", "avoid_confirmed_regulatory_risk"}
-            or row["fda_review_state"] in REGULATORY_RISK_STATES
+            or str(row["fda_review_state"] or "").strip().lower() in REGULATORY_RISK_STATES
         ]
         top25 = clean_rows[:25]
         bottom25 = list(reversed(clean_rows[-25:]))

@@ -315,12 +315,12 @@ def historical_restatement_steps(*, reuse_unchanged_historical: bool = True) -> 
     governance_args: tuple[str, ...] = ("--reuse-unchanged-historical",) if reuse_unchanged_historical else ()
     return [
         Step("financial_survival", "16_build_financial_survival_features.py"),
-        Step("commercial_value", "18_build_commercial_value_features.py", ("--allow-missing-market",)),
-        Step("forward_guidance", "19_parse_forward_guidance.py", ("--run-mode", "full_backfill")),
+        Step("commercial_value", "18_build_commercial_value_features.py", ("--allow-missing-market", "--allow-stale-market")),
+        Step("forward_guidance", "19_parse_forward_guidance.py", ("--run-mode", "weekly_reconcile")),
         Step("governance_events", "20_build_governance_event_features.py", governance_args),
         Step("biotech_features", "10_build_biotech_features.py"),
         Step("biotech_scores", "11_score_biotech_index.py"),
-        Step("multibagger_features", "21_build_multibagger_features.py", ("--allow-missing-market",)),
+        Step("multibagger_features", "21_build_multibagger_features.py", ("--allow-missing-market", "--allow-stale-market")),
         Step("multibagger_scores", "22_score_multibagger_candidates.py"),
     ]
 

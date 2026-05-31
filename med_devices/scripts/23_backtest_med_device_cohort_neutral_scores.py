@@ -1,0 +1,443 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import csv
+import math
+import sys
+from collections import defaultdict
+from pathlib import Path
+from statistics import mean, median
+from typing import Any
+
+
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = PACKAGE_ROOT.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from med_devices.core.db import connect, init_db  # noqa: E402
+from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
+
+
+DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+SCORE_FIELDS = [
+    "fundamental_quality_score",
+    "durable_growth_score",
+    "fda_product_score",
+    "reimbursement_score",
+    "reimbursement_status",
+    "direct_code_evidence",
+    "payment_rate_evidence",
+    "coverage_policy_evidence",
+    "procedure_bundled_flag",
+    "capital_equipment_flag",
+    "diagnostics_lab_flag",
+    "unknown_reimbursement_flag",
+    "valuation_score",
+    "technical_entry_score",
+    "technical_trend_quality_score",
+    "technical_relative_strength_score",
+    "technical_liquidity_score",
+    "technical_volume_breakout_score",
+    "technical_volatility_risk_score",
+    "technical_setup_score",
+    "technical_core_score",
+    "technical_alpha_score",
+    "technical_pullback_score",
+    "technical_overextension_score",
+    "technical_breakdown_flag",
+    "technical_liquidity_gate_flag",
+    "technical_signal_mode",
+    "technical_signal_direction",
+    "technical_signal_reliability",
+    "technical_score_source",
+    "sentiment_catalyst_score",
+    "value_trap_score",
+    "data_completeness_score",
+    "live_component_count",
+    "fda_review_state",
+    "hard_red_flag",
+    "hard_red_flag_reasons",
+    "avg_dollar_volume_60d",
+    "liquidity_score",
+    "capacity_bucket",
+    "market_cap",
+    "market_cap_validated_flag",
+    "failed_gates",
+    "classification_reason",
+    "passed_raw_score_gate",
+    "passed_fundamental_gate",
+    "passed_growth_gate",
+    "passed_fda_gate",
+    "passed_reimbursement_gate",
+    "passed_valuation_gate",
+    "passed_technical_gate",
+    "passed_value_trap_gate",
+    "passed_data_quality_gate",
+    "passed_liquidity_gate",
+    "passed_fda_manual_review_gate",
+    "final_investability_gate",
+]
+TAXONOMY_FIELDS = [
+    "calibration_cohort",
+    "reimbursement_model",
+    "regulatory_model",
+    "business_model",
+    "procedure_sensitivity",
+    "capital_equipment_flag",
+    "consumables_flag",
+    "diagnostics_flag",
+    "implantable_flag",
+    "single_product_risk_flag",
+    "taxonomy_confidence",
+    "taxonomy_source",
+]
+SUMMARY_FIELDS = [
+    "summary_type",
+    "segment",
+    "horizon_days",
+    "count",
+    "unique_tickers",
+    "mean_return",
+    "median_return",
+    "mean_excess_return",
+    "median_excess_return",
+    "hit_rate",
+    "excess_hit_rate",
+    "lcb_excess_return",
+    "sortino_excess",
+    "profit_factor_excess",
+]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build cohort-neutral med-device score backtest output.")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--input-csv", type=Path, default=None)
+    parser.add_argument("--output-csv", type=Path, default=None)
+    parser.add_argument("--summary-csv", type=Path, default=None)
+    return parser.parse_args()
+
+
+def to_float(raw: object) -> float | None:
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def first_float(*raw_values: object) -> float | None:
+    for raw in raw_values:
+        value = to_float(raw)
+        if value is not None:
+            return value
+    return None
+
+
+def to_int(raw: object) -> int | None:
+    value = to_float(raw)
+    return int(value) if value is not None else None
+
+
+def read_csv(path: Path) -> list[dict[str, str]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return [dict(row) for row in csv.DictReader(handle)]
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def return_horizons(rows: list[dict[str, Any]]) -> list[int]:
+    if not rows:
+        return []
+    out: list[int] = []
+    for key in rows[0]:
+        if key.startswith("forward_return_") and key.endswith("d"):
+            text = key[len("forward_return_") : -1]
+            if text.isdigit():
+                out.append(int(text))
+    return sorted(out)
+
+
+def load_taxonomy(conn: Any) -> dict[str, dict[str, Any]]:
+    row = conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'dim_company_model_taxonomy'
+        """
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("dim_company_model_taxonomy is missing; run script 22 first.")
+    rows = conn.execute(
+        """
+        SELECT t.*, c.company_name
+        FROM dim_company_model_taxonomy t
+        JOIN dim_company c ON c.company_id = t.company_id
+        """
+    ).fetchall()
+    return {str(row["ticker"] or "").upper(): dict(row) for row in rows}
+
+
+def load_scores(conn: Any, *, asofs: set[str]) -> dict[tuple[str, str], dict[str, Any]]:
+    if not asofs:
+        return {}
+    placeholders = ",".join("?" for _ in asofs)
+    rows = conn.execute(
+        f"""
+        SELECT s.*, c.ticker
+        FROM med_device_daily_scores s
+        JOIN dim_company c ON c.company_id = s.company_id
+        WHERE s.asof_date IN ({placeholders})
+        """,
+        sorted(asofs),
+    ).fetchall()
+    return {(str(row["asof_date"]), str(row["ticker"] or "").upper()): dict(row) for row in rows}
+
+
+def add_taxonomy_and_scores(rows: list[dict[str, Any]], taxonomy: dict[str, dict[str, Any]], scores: dict[tuple[str, str], dict[str, Any]]) -> None:
+    for row in rows:
+        ticker = str(row.get("ticker") or "").upper()
+        asof = str(row.get("asof_date") or "")
+        tax = taxonomy.get(ticker, {})
+        score = scores.get((asof, ticker), {})
+        for field in TAXONOMY_FIELDS:
+            row[field] = tax.get(field, "")
+        if not row.get("calibration_cohort"):
+            row["calibration_cohort"] = row.get("subsector") or "unknown"
+        for field in SCORE_FIELDS:
+            if field in score:
+                row[field] = score.get(field, "")
+
+
+def add_cohort_percentiles(rows: list[dict[str, Any]]) -> None:
+    grouped: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for idx, row in enumerate(rows):
+        grouped[(str(row.get("asof_date") or ""), str(row.get("calibration_cohort") or ""))].append(idx)
+    for indices in grouped.values():
+        sortable: list[tuple[int, float]] = []
+        for idx in indices:
+            raw = first_float(rows[idx].get("raw_composite_score"), rows[idx].get("composite_score"))
+            if raw is not None:
+                sortable.append((idx, raw))
+        if len(sortable) == 1:
+            rows[sortable[0][0]]["cohort_percentile"] = 50.0
+            rows[sortable[0][0]]["cohort_rank"] = 1
+            rows[sortable[0][0]]["cohort_size"] = 1
+            continue
+        sortable.sort(key=lambda item: item[1], reverse=True)
+        denom = max(1, len(sortable) - 1)
+        for pos, (idx, _) in enumerate(sortable):
+            rows[idx]["cohort_rank"] = pos + 1
+            rows[idx]["cohort_size"] = len(sortable)
+            rows[idx]["cohort_percentile"] = round(100.0 * (1.0 - (pos / denom)), 2)
+
+
+def add_cohort_excess_returns(rows: list[dict[str, Any]], *, horizons: list[int]) -> None:
+    for horizon in horizons:
+        grouped: dict[tuple[str, str], list[float]] = defaultdict(list)
+        field = f"forward_return_{horizon}d"
+        for row in rows:
+            value = to_float(row.get(field))
+            if value is not None:
+                grouped[(str(row.get("asof_date") or ""), str(row.get("calibration_cohort") or ""))].append(value)
+        medians = {key: median(values) for key, values in grouped.items() if values}
+        for row in rows:
+            value = to_float(row.get(field))
+            key = (str(row.get("asof_date") or ""), str(row.get("calibration_cohort") or ""))
+            cohort_median = medians.get(key)
+            row[f"cohort_median_return_{horizon}d"] = "" if cohort_median is None else round(cohort_median, 6)
+            if value is None or cohort_median is None:
+                row[f"cohort_excess_return_{horizon}d"] = ""
+                row[f"cohort_excess_hit_{horizon}d"] = ""
+            else:
+                excess = value - cohort_median
+                row[f"cohort_excess_return_{horizon}d"] = round(excess, 6)
+                row[f"cohort_excess_hit_{horizon}d"] = 1 if excess > 0 else 0
+
+
+def rank_bucket_from_cohort_percentile(row: dict[str, Any]) -> str:
+    value = to_float(row.get("cohort_percentile"))
+    if value is None:
+        return ""
+    if value >= 90.0:
+        return "cohort_top_decile"
+    if value >= 80.0:
+        return "cohort_top_quintile_ex_decile"
+    if value <= 20.0:
+        return "cohort_bottom_quintile"
+    return "cohort_middle"
+
+
+def downside_sortino(values: list[float]) -> str:
+    if not values:
+        return ""
+    avg = mean(values)
+    downside = [value for value in values if value < 0]
+    if not downside:
+        return "999.0000"
+    denom = math.sqrt(sum(value * value for value in downside) / len(downside))
+    if denom <= 1e-12:
+        return "999.0000"
+    return f"{avg / denom:.4f}"
+
+
+def profit_factor(values: list[float]) -> str:
+    gains = sum(value for value in values if value > 0)
+    losses = -sum(value for value in values if value < 0)
+    if losses <= 1e-12:
+        return "999.0000" if gains > 0 else ""
+    return f"{gains / losses:.4f}"
+
+
+def lcb(values: list[float]) -> str:
+    if not values:
+        return ""
+    if len(values) == 1:
+        return f"{values[0]:.6f}"
+    avg = mean(values)
+    variance = sum((value - avg) ** 2 for value in values) / (len(values) - 1)
+    return f"{avg - 1.64 * math.sqrt(variance) / math.sqrt(len(values)):.6f}"
+
+
+def metrics_for(rows: list[dict[str, Any]], *, horizon: int) -> dict[str, Any]:
+    returns: list[float] = []
+    excess: list[float] = []
+    tickers: set[str] = set()
+    for row in rows:
+        raw = to_float(row.get(f"forward_return_{horizon}d"))
+        ex = to_float(row.get(f"cohort_excess_return_{horizon}d"))
+        if raw is None or ex is None:
+            continue
+        returns.append(raw)
+        excess.append(ex)
+        tickers.add(str(row.get("ticker") or ""))
+    if not returns:
+        return {
+            "count": 0,
+            "unique_tickers": 0,
+            "mean_return": "",
+            "median_return": "",
+            "mean_excess_return": "",
+            "median_excess_return": "",
+            "hit_rate": "",
+            "excess_hit_rate": "",
+            "lcb_excess_return": "",
+            "sortino_excess": "",
+            "profit_factor_excess": "",
+        }
+    return {
+        "count": len(returns),
+        "unique_tickers": len(tickers),
+        "mean_return": f"{mean(returns):.6f}",
+        "median_return": f"{median(returns):.6f}",
+        "mean_excess_return": f"{mean(excess):.6f}",
+        "median_excess_return": f"{median(excess):.6f}",
+        "hit_rate": f"{sum(1 for value in returns if value > 0) / len(returns):.4f}",
+        "excess_hit_rate": f"{sum(1 for value in excess if value > 0) / len(excess):.4f}",
+        "lcb_excess_return": lcb(excess),
+        "sortino_excess": downside_sortino(excess),
+        "profit_factor_excess": profit_factor(excess),
+    }
+
+
+def summarize(rows: list[dict[str, Any]], *, horizons: list[int]) -> list[dict[str, Any]]:
+    for row in rows:
+        row["cohort_rank_bucket"] = rank_bucket_from_cohort_percentile(row)
+    specs = [
+        ("calibration_cohort", "calibration_cohort"),
+        ("calibration_cohort_rank_bucket", "calibration_cohort|cohort_rank_bucket"),
+        ("classification", "classification"),
+        ("entry_status", "entry_status"),
+        ("reimbursement_model", "reimbursement_model"),
+        ("regulatory_model", "regulatory_model"),
+    ]
+    out: list[dict[str, Any]] = []
+    for horizon in horizons:
+        for summary_type, field_expr in specs:
+            fields = field_expr.split("|")
+            segments = sorted({"|".join(str(row.get(field) or "") for field in fields) for row in rows})
+            for segment in segments:
+                subset = [row for row in rows if "|".join(str(row.get(field) or "") for field in fields) == segment]
+                item = {"summary_type": summary_type, "segment": segment, "horizon_days": horizon}
+                item.update(metrics_for(subset, horizon=horizon))
+                out.append(item)
+    return out
+
+
+def output_fields(rows: list[dict[str, Any]], *, horizons: list[int]) -> list[str]:
+    base = list(rows[0].keys()) if rows else []
+    appended = [
+        "calibration_cohort",
+        "cohort_rank",
+        "cohort_size",
+        "cohort_percentile",
+        "cohort_rank_bucket",
+        *TAXONOMY_FIELDS,
+        *SCORE_FIELDS,
+    ]
+    for horizon in horizons:
+        appended.extend(
+            [
+                f"cohort_median_return_{horizon}d",
+                f"cohort_excess_return_{horizon}d",
+                f"cohort_excess_hit_{horizon}d",
+            ]
+        )
+    fields: list[str] = []
+    for field in [*base, *appended]:
+        if field not in fields:
+            fields.append(field)
+    return fields
+
+
+def main() -> None:
+    configure_utc_logging()
+    args = parse_args()
+    config_path = args.config.expanduser().resolve()
+    config = load_yaml(config_path)
+    base_dir = config_path.parent
+    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    input_csv = (
+        args.input_csv.expanduser().resolve()
+        if args.input_csv
+        else resolve_path(cfg_get(config, "scoring.backtest_output_csv"), base_dir=base_dir)
+    )
+    output_csv = (
+        args.output_csv.expanduser().resolve()
+        if args.output_csv
+        else resolve_path(cfg_get(config, "calibration.cohort_neutral_backtest_csv"), base_dir=base_dir)
+    )
+    summary_csv = (
+        args.summary_csv.expanduser().resolve()
+        if args.summary_csv
+        else resolve_path(cfg_get(config, "calibration.cohort_neutral_summary_csv"), base_dir=base_dir)
+    )
+    rows: list[dict[str, Any]] = read_csv(input_csv)
+    horizons = return_horizons(rows)
+    asofs = {str(row.get("asof_date") or "") for row in rows if str(row.get("asof_date") or "").strip()}
+    with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
+        init_db(conn)
+        taxonomy = load_taxonomy(conn)
+        scores = load_scores(conn, asofs=asofs)
+    add_taxonomy_and_scores(rows, taxonomy, scores)
+    add_cohort_percentiles(rows)
+    add_cohort_excess_returns(rows, horizons=horizons)
+    summary_rows = summarize(rows, horizons=horizons)
+    write_csv(output_csv, rows, output_fields(rows, horizons=horizons))
+    write_csv(summary_csv, summary_rows, SUMMARY_FIELDS)
+    print(f"cohort_neutral_backtest_csv={output_csv} rows={len(rows)}")
+    print(f"cohort_neutral_summary_csv={summary_csv} rows={len(summary_rows)}")
+
+
+if __name__ == "__main__":
+    main()

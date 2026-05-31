@@ -706,6 +706,37 @@ def table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
+def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    if not table_exists(conn, table):
+        return set()
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def load_score_cohort_policy_rows(conn: sqlite3.Connection, asof_date: str) -> dict[int, dict[str, Any]]:
+    required = {
+        "company_id",
+        "biotech_primary_cohort",
+        "biotech_cohort_investible_flag",
+        "biotech_cohort_calibration_eligible_flag",
+        "biotech_cohort_calibration_mode",
+        "biotech_cohort_exclusion_reason",
+    }
+    if not required.issubset(table_columns(conn, "daily_scores")):
+        return {}
+    rows = conn.execute(
+        """
+        SELECT
+            company_id, biotech_primary_cohort, biotech_cohort_investible_flag,
+            biotech_cohort_calibration_eligible_flag, biotech_cohort_calibration_mode,
+            biotech_cohort_exclusion_reason
+        FROM daily_scores
+        WHERE asof_date = ?
+        """,
+        (asof_date,),
+    ).fetchall()
+    return {int(row["company_id"]): dict(row) for row in rows}
+
+
 def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
     stack = cfg_get(config, "calibration.tier1.recommended_stack", {}) or {}
     costs = cfg_get(config, "calibration.tier1.costs", {}) or {}
@@ -2222,6 +2253,7 @@ def load_observations(
             else {}
         )
         features = load_feature_rows(conn, asof_date, excluded_tickers)
+        score_cohort_policy_by_company = load_score_cohort_policy_rows(conn, asof_date)
         commercial_by_company = load_latest_table(
             conn,
             "commercial_value_features_daily",
@@ -2242,6 +2274,13 @@ def load_observations(
         )
         for row in features:
             company_id = int(row["company_id"])
+            score_cohort_policy = score_cohort_policy_by_company.get(company_id, {})
+            cohort_calibration_eligible = to_float(
+                score_cohort_policy.get("biotech_cohort_calibration_eligible_flag"),
+                1.0,
+            )
+            if cohort_calibration_eligible is not None and cohort_calibration_eligible <= 0.0:
+                continue
             payload = parse_json(row.get("feature_json"))
             raw_scores = payload.get("raw_scores", {}) if isinstance(payload, dict) else {}
             commercial = commercial_by_company.get(company_id, {})
@@ -2268,6 +2307,21 @@ def load_observations(
                 "ticker": normalize_ticker(row["ticker"]),
                 "company_name": str(row.get("company_name") or ""),
                 "profile_name": profile_name,
+                "biotech_primary_cohort": str(score_cohort_policy.get("biotech_primary_cohort") or ""),
+                "biotech_cohort_investible_flag": to_float(
+                    score_cohort_policy.get("biotech_cohort_investible_flag"),
+                    1.0,
+                )
+                or 0.0,
+                "biotech_cohort_calibration_eligible_flag": to_float(
+                    score_cohort_policy.get("biotech_cohort_calibration_eligible_flag"),
+                    1.0,
+                )
+                or 0.0,
+                "biotech_cohort_calibration_mode": str(
+                    score_cohort_policy.get("biotech_cohort_calibration_mode") or "unclassified"
+                ),
+                "biotech_cohort_exclusion_reason": str(score_cohort_policy.get("biotech_cohort_exclusion_reason") or ""),
                 "ctgov_evidence_type": str(ctgov_payload.get("ctgov_evidence_type") or ""),
                 "company_strategy_category": str(payload.get("company_strategy_category") or "") if isinstance(payload, dict) else "",
                 "ctgov_review_bucket": str(ctgov_payload.get("review_bucket") or ""),

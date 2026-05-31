@@ -51,6 +51,14 @@ def to_float(raw: object) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def first_float(*raw_values: object) -> float | None:
+    for raw in raw_values:
+        value = to_float(raw)
+        if value is not None:
+            return value
+    return None
+
+
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         return [dict(row) for row in csv.DictReader(handle)]
@@ -101,44 +109,34 @@ def calibrate(rows: list[dict[str, str]], *, thresholds: list[float]) -> list[di
     horizons = return_horizons(rows)
     out: list[dict[str, Any]] = []
     for horizon in horizons:
-        for classification in sorted({row.get("classification", "") for row in rows}):
-            segment_rows = [row for row in rows if row.get("classification", "") == classification]
-            count, avg, med, hit = stats_for(segment_rows, horizon=horizon)
-            out.append(
-                {
-                    "calibration_type": "classification",
-                    "segment": classification,
-                    "horizon_days": horizon,
-                    "count": count,
-                    "mean_forward_return": avg,
-                    "median_forward_return": med,
-                    "hit_rate": hit,
-                    "recommendation": recommendation(count, avg),
-                }
-            )
-        for entry_status in sorted({row.get("entry_status", "") for row in rows}):
-            segment_rows = [row for row in rows if row.get("entry_status", "") == entry_status]
-            count, avg, med, hit = stats_for(segment_rows, horizon=horizon)
-            out.append(
-                {
-                    "calibration_type": "entry_status",
-                    "segment": entry_status,
-                    "horizon_days": horizon,
-                    "count": count,
-                    "mean_forward_return": avg,
-                    "median_forward_return": med,
-                    "hit_rate": hit,
-                    "recommendation": recommendation(count, avg),
-                }
-            )
+        for field_name, calibration_type in (
+            ("classification", "classification"),
+            ("entry_status", "entry_status"),
+            ("rank_bucket", "rank_bucket"),
+            ("subsector", "subsector"),
+            ("scoring_model_version", "scoring_model_version"),
+        ):
+            for segment in sorted({row.get(field_name, "") for row in rows}):
+                segment_rows = [row for row in rows if row.get(field_name, "") == segment]
+                count, avg, med, hit = stats_for(segment_rows, horizon=horizon)
+                out.append(
+                    {
+                        "calibration_type": calibration_type,
+                        "segment": segment,
+                        "horizon_days": horizon,
+                        "count": count,
+                        "mean_forward_return": avg,
+                        "median_forward_return": med,
+                        "hit_rate": hit,
+                        "recommendation": recommendation(count, avg),
+                    }
+                )
         for threshold in thresholds:
             segment_rows = [
                 row
                 for row in rows
-                if (
-                    to_float(row.get("raw_composite_score") or row.get("composite_score")) is not None
-                    and float(row.get("raw_composite_score") or row["composite_score"]) >= threshold
-                )
+                if (score := first_float(row.get("raw_composite_score"), row.get("composite_score"))) is not None
+                and score >= threshold
             ]
             count, avg, med, hit = stats_for(segment_rows, horizon=horizon)
             out.append(

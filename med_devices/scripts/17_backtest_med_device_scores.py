@@ -36,6 +36,24 @@ BASE_FIELDS = [
     "composite_score",
     "raw_composite_score",
     "composite_percentile",
+    "technical_trend_quality_score",
+    "technical_relative_strength_score",
+    "technical_liquidity_score",
+    "technical_volume_breakout_score",
+    "technical_volatility_risk_score",
+    "technical_setup_score",
+    "technical_core_score",
+    "technical_alpha_score",
+    "technical_pullback_score",
+    "technical_overextension_score",
+    "technical_breakdown_flag",
+    "technical_liquidity_gate_flag",
+    "technical_signal_mode",
+    "technical_signal_direction",
+    "technical_signal_reliability",
+    "technical_score_source",
+    "pullback_candidate_tag",
+    "pullback_candidate_template_id",
     "rank_bucket",
     "entry_price_date",
     "entry_price",
@@ -47,7 +65,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backtest med-device daily score buckets against forward returns.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
-    parser.add_argument("--asof", type=str, default="")
+    parser.add_argument("--asof", type=str, default="", help="Single as-of date, or comma-separated as-of dates.")
+    parser.add_argument("--asof-start", type=str, default="", help="Inclusive start date for multi-as-of backtests.")
+    parser.add_argument("--asof-end", type=str, default="", help="Inclusive end date for multi-as-of backtests.")
+    parser.add_argument("--all-asofs", action="store_true", help="Backtest every saved med_device_daily_scores as-of date.")
     parser.add_argument("--horizons", type=str, default="30,60,120", help="Comma-separated trading-day forward horizons.")
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
@@ -71,12 +92,55 @@ def to_float(raw: object) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def value_present(raw: object) -> bool:
+    return raw is not None and str(raw).strip() != ""
+
+
+def first_float(*raw_values: object, default: float = 0.0) -> float:
+    for raw in raw_values:
+        value = to_float(raw)
+        if value is not None:
+            return value
+    return default
+
+
 def latest_score_asof(conn: Any) -> str:
     row = conn.execute("SELECT MAX(asof_date) AS asof_date FROM med_device_daily_scores").fetchone()
     asof = str(row["asof_date"] or "") if row is not None else ""
     if not asof:
         raise RuntimeError("No med_device_daily_scores rows found; run script 13 first.")
     return asof
+
+
+def score_asofs(conn: Any, *, start: str = "", end: str = "") -> list[str]:
+    clauses: list[str] = []
+    params: list[str] = []
+    if start:
+        clauses.append("asof_date >= ?")
+        params.append(start)
+    if end:
+        clauses.append("asof_date <= ?")
+        params.append(end)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT asof_date
+        FROM med_device_daily_scores
+        {where}
+        ORDER BY asof_date
+        """,
+        params,
+    ).fetchall()
+    return [str(row["asof_date"]) for row in rows if str(row["asof_date"] or "").strip()]
+
+
+def resolve_score_asofs(conn: Any, args: argparse.Namespace) -> list[str]:
+    requested = [item.strip() for item in str(args.asof or "").split(",") if item.strip()]
+    if requested:
+        return requested
+    if args.all_asofs or args.asof_start.strip() or args.asof_end.strip():
+        return score_asofs(conn, start=args.asof_start.strip(), end=args.asof_end.strip())
+    return [latest_score_asof(conn)]
 
 
 def load_scores(conn: Any, *, asof: str) -> list[dict[str, Any]]:
@@ -169,9 +233,9 @@ def build_backtest_rows(
         ticker = str(row["ticker"] or "").upper()
         source_id, series = price_series.get(ticker, ("", []))
         idx = entry_index(series, asof_date) if series else None
-        composite_score = float(row["composite_score"] or 0.0)
-        raw_composite_score = float(row.get("raw_composite_score") or composite_score)
-        composite_percentile = float(row.get("composite_percentile") or composite_score)
+        composite_score = first_float(row.get("composite_score"))
+        raw_composite_score = first_float(row.get("raw_composite_score"), default=composite_score)
+        composite_percentile = first_float(row.get("composite_percentile"), default=composite_score)
         item = {
             "asof_date": asof,
             "scoring_model_version": row.get("scoring_model_version") or "",
@@ -185,6 +249,24 @@ def build_backtest_rows(
             "composite_score": composite_score,
             "raw_composite_score": raw_composite_score,
             "composite_percentile": composite_percentile,
+            "technical_trend_quality_score": row.get("technical_trend_quality_score") or "",
+            "technical_relative_strength_score": row.get("technical_relative_strength_score") or "",
+            "technical_liquidity_score": row.get("technical_liquidity_score") or "",
+            "technical_volume_breakout_score": row.get("technical_volume_breakout_score") or "",
+            "technical_volatility_risk_score": row.get("technical_volatility_risk_score") or "",
+            "technical_setup_score": row.get("technical_setup_score") or "",
+            "technical_core_score": row.get("technical_core_score") or "",
+            "technical_alpha_score": row.get("technical_alpha_score") or "",
+            "technical_pullback_score": row.get("technical_pullback_score") or "",
+            "technical_overextension_score": row.get("technical_overextension_score") or "",
+            "technical_breakdown_flag": row.get("technical_breakdown_flag") or "",
+            "technical_liquidity_gate_flag": row.get("technical_liquidity_gate_flag") or "",
+            "technical_signal_mode": row.get("technical_signal_mode") or "",
+            "technical_signal_direction": row.get("technical_signal_direction") or "",
+            "technical_signal_reliability": row.get("technical_signal_reliability") or "",
+            "technical_score_source": row.get("technical_score_source") or "",
+            "pullback_candidate_tag": row.get("pullback_candidate_tag") or "",
+            "pullback_candidate_template_id": row.get("pullback_candidate_template_id") or "",
             "rank_bucket": rank_bucket(composite_percentile),
             "entry_price_date": "",
             "entry_price": "",
@@ -225,7 +307,7 @@ def summarize(rows: list[dict[str, Any]], *, horizons: list[int]) -> list[dict[s
                 values = [
                     float(row[f"forward_return_{horizon}d"])
                     for row in group_rows
-                    if str(row.get(f"forward_return_{horizon}d") or "").strip()
+                    if value_present(row.get(f"forward_return_{horizon}d"))
                 ]
                 summary.append(
                     {
@@ -266,26 +348,43 @@ def main() -> None:
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
-        asof = args.asof.strip() or latest_score_asof(conn)
-        output_csv = (
-            args.output_csv.expanduser().resolve()
-            if args.output_csv
-            else dated_output_dir(
-                resolve_path(
-                    cfg_get(config, "scoring.review_pack_dir", "../output/med_devices_reports/score_review_pack"),
-                    base_dir=base_dir,
-                ),
-                asof,
+        asofs = resolve_score_asofs(conn, args)
+        if not asofs:
+            raise RuntimeError("No med_device_daily_scores as-of dates matched the requested backtest range.")
+        single_asof = len(asofs) == 1
+        output_csv = args.output_csv.expanduser().resolve() if args.output_csv else None
+        if output_csv is None and single_asof:
+            output_csv = (
+                dated_output_dir(
+                    resolve_path(
+                        cfg_get(config, "scoring.review_pack_dir", "../output/med_devices_reports/score_review_pack"),
+                        base_dir=base_dir,
+                    ),
+                    asofs[0],
+                )
+                / "med_device_score_backtest.csv"
             )
-            / "med_device_score_backtest.csv"
-        )
-        score_rows = load_scores(conn, asof=asof)
-        if not score_rows:
-            raise RuntimeError(f"No score rows found for {asof}")
+        if output_csv is None:
+            output_csv = resolve_path(
+                cfg_get(config, "scoring.backtest_output_csv", "../output/med_devices_reports/med_device_score_backtest.csv"),
+                base_dir=base_dir,
+            )
+        score_rows_by_asof = {asof: load_scores(conn, asof=asof) for asof in asofs}
+        empty_asofs = [asof for asof, rows_for_asof in score_rows_by_asof.items() if not rows_for_asof]
+        if empty_asofs:
+            raise RuntimeError(f"No score rows found for requested as-of dates: {','.join(empty_asofs)}")
         source_priority = calibration_market_sources(config)
-        tickers = [str(row["ticker"] or "").upper() for row in score_rows]
+        tickers = sorted(
+            {
+                str(row["ticker"] or "").upper()
+                for rows_for_asof in score_rows_by_asof.values()
+                for row in rows_for_asof
+            }
+        )
         series = load_price_series(conn, tickers=tickers, source_priority=source_priority)
-        rows = build_backtest_rows(score_rows, series, asof=asof, horizons=horizons)
+        rows: list[dict[str, Any]] = []
+        for asof in asofs:
+            rows.extend(build_backtest_rows(score_rows_by_asof[asof], series, asof=asof, horizons=horizons))
         fieldnames = [
             *BASE_FIELDS,
             *[field for horizon in horizons for field in (f"forward_date_{horizon}d", f"forward_return_{horizon}d")],
@@ -298,10 +397,10 @@ def main() -> None:
             ["group_type", "group_value", "horizon_days", "count", "mean_forward_return", "median_forward_return", "hit_rate"],
         )
         available = {
-            horizon: sum(1 for row in rows if str(row.get(f"forward_return_{horizon}d") or "").strip())
+            horizon: sum(1 for row in rows if value_present(row.get(f"forward_return_{horizon}d")))
             for horizon in horizons
         }
-        print(f"backtest_csv={output_csv} asof={asof} rows={len(rows)} forward_counts={available}")
+        print(f"backtest_csv={output_csv} asofs={len(asofs)} rows={len(rows)} forward_counts={available}")
 
 
 if __name__ == "__main__":

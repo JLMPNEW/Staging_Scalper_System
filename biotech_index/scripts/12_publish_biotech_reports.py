@@ -50,6 +50,27 @@ TOP_SCORE_FIELDS = [
     "research_watchlist_flag",
     "investment_score",
     "investment_profile",
+    "biotech_primary_cohort",
+    "biotech_secondary_cohort",
+    "biotech_cohort_reason_codes",
+    "biotech_cohort_confidence",
+    "biotech_cohort_margin",
+    "biotech_cohort_source",
+    "biotech_cohort_overlays",
+    "biotech_cohort_data_quality",
+    "biotech_taxonomy_review_required",
+    "biotech_cohort_sparse_data_flag",
+    "biotech_cohort_size",
+    "biotech_cohort_rank",
+    "biotech_cohort_percentile",
+    "biotech_cohort_percentile_shrunk",
+    "biotech_cohort_reliability_score",
+    "biotech_cohort_calibration_weight",
+    "biotech_cohort_investible_flag",
+    "biotech_cohort_calibration_eligible_flag",
+    "biotech_cohort_calibration_mode",
+    "biotech_cohort_exclusion_reason",
+    "biotech_cohort_model_version",
     "clinical_opportunity_score",
     "tier1_selection_gate_score",
     "tier1_primary_horizon_trading_days",
@@ -162,6 +183,14 @@ SHADOW_SCORE_FIELDS = [
     "shadow_selection_policy",
     "shadow_top_n",
     "shadow_score",
+    "biotech_primary_cohort",
+    "biotech_secondary_cohort",
+    "biotech_cohort_investible_flag",
+    "biotech_cohort_calibration_eligible_flag",
+    "biotech_cohort_calibration_mode",
+    "biotech_cohort_exclusion_reason",
+    "biotech_cohort_confidence",
+    "biotech_cohort_sparse_data_flag",
     "action_tier",
     "action_tier_reason",
     "allocation_candidate_flag",
@@ -244,6 +273,25 @@ RANKING_DIAGNOSTIC_FIELDS = [
     "rank_quality_cap_vetoed",
     "production_policy_quality_penalty",
     "production_policy_quality_bonus",
+]
+
+COHORT_DIAGNOSTIC_FIELDS = [
+    "asof_date",
+    "biotech_primary_cohort",
+    "company_count",
+    "top10_count",
+    "top20_count",
+    "avg_rank",
+    "avg_opportunity_score",
+    "avg_investment_score",
+    "avg_taxonomy_confidence",
+    "avg_cohort_reliability_score",
+    "review_required_count",
+    "sparse_data_count",
+    "non_investible_count",
+    "global_fallback_count",
+    "cohort_specific_count",
+    "calibration_excluded_count",
 ]
 
 
@@ -363,7 +411,12 @@ def apply_action_tier(
     research_rank_max = int(settings["research_rank_max"])
     research_score_min = float(settings["research_score_min"])
 
-    if rank > 0 and rank <= allocation_rank_max and score >= high_confidence_score_min:
+    if to_float(out.get("biotech_cohort_investible_flag"), 1.0) <= 0.0:
+        tier = "low_priority"
+        reason = str(out.get("biotech_cohort_exclusion_reason") or "non_investible_cohort")
+        allocation_flag = 0
+        research_flag = 0
+    elif rank > 0 and rank <= allocation_rank_max and score >= high_confidence_score_min:
         tier = "high_confidence_allocation"
         reason = f"rank<={allocation_rank_max} and score>={high_confidence_score_min:g}"
         allocation_flag = 1
@@ -421,6 +474,15 @@ def load_scores(conn: sqlite3.Connection, asof_date: str) -> list[dict[str, Any]
             s.forward_guidance_score, s.upside_capacity_score, s.investment_score, s.opportunity_score,
             s.tier1_selection_gate_score, s.data_quality_confidence_multiplier,
             s.clinical_risk_drag, s.investment_risk_drag,
+            s.biotech_primary_cohort, s.biotech_secondary_cohort, s.biotech_cohort_reason_codes,
+            s.biotech_cohort_confidence, s.biotech_cohort_margin, s.biotech_cohort_source,
+            s.biotech_cohort_overlays, s.biotech_cohort_data_quality, s.biotech_taxonomy_review_required,
+            s.biotech_cohort_sparse_data_flag, s.biotech_cohort_size, s.biotech_cohort_rank,
+            s.biotech_cohort_percentile, s.biotech_cohort_percentile_shrunk,
+            s.biotech_cohort_reliability_score, s.biotech_cohort_calibration_weight,
+            s.biotech_cohort_investible_flag, s.biotech_cohort_calibration_eligible_flag,
+            s.biotech_cohort_calibration_mode, s.biotech_cohort_exclusion_reason,
+            s.biotech_cohort_model_version,
             s.rank, s.bucket, s.top_evidence_json,
             s.ctgov_evidence_type, s.company_strategy_category,
             s.ctgov_review_bucket, s.ctgov_manual_root_cause,
@@ -606,6 +668,7 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
     if primary_guidance is None:
         primary_guidance = next((item for item in guidance_records if isinstance(item, dict)), {})
     score_components = evidence.get("score_components", {}) if isinstance(evidence, dict) else {}
+    biotech_taxonomy = evidence.get("biotech_taxonomy", {}) if isinstance(evidence, dict) else {}
     core_veto = evidence.get("core_structural_veto", {}) if isinstance(evidence, dict) else {}
     production_baseline = evidence.get("production_baseline", {}) if isinstance(evidence, dict) else {}
     core_veto_flag = core_veto.get("flag", risk_flags.get("core_structural_veto_flag", "")) if isinstance(core_veto, dict) else ""
@@ -628,6 +691,27 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "opportunity_score": row.get("opportunity_score", ""),
         "investment_score": row.get("investment_score", score_components.get("investment_score", "") if isinstance(score_components, dict) else ""),
         "investment_profile": score_components.get("investment_profile", "") if isinstance(score_components, dict) else "",
+        "biotech_primary_cohort": row.get("biotech_primary_cohort", biotech_taxonomy.get("biotech_primary_cohort", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_secondary_cohort": row.get("biotech_secondary_cohort", biotech_taxonomy.get("biotech_secondary_cohort", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_reason_codes": row.get("biotech_cohort_reason_codes", biotech_taxonomy.get("biotech_cohort_reason_codes", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_confidence": row.get("biotech_cohort_confidence", biotech_taxonomy.get("biotech_cohort_confidence", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_margin": row.get("biotech_cohort_margin", biotech_taxonomy.get("biotech_cohort_margin", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_source": row.get("biotech_cohort_source", biotech_taxonomy.get("biotech_cohort_source", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_overlays": row.get("biotech_cohort_overlays", biotech_taxonomy.get("biotech_cohort_overlays", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_data_quality": row.get("biotech_cohort_data_quality", biotech_taxonomy.get("biotech_cohort_data_quality", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_taxonomy_review_required": row.get("biotech_taxonomy_review_required", biotech_taxonomy.get("biotech_taxonomy_review_required", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_sparse_data_flag": row.get("biotech_cohort_sparse_data_flag", biotech_taxonomy.get("biotech_cohort_sparse_data_flag", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_size": row.get("biotech_cohort_size", biotech_taxonomy.get("biotech_cohort_size", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_rank": row.get("biotech_cohort_rank", biotech_taxonomy.get("biotech_cohort_rank", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_percentile": row.get("biotech_cohort_percentile", biotech_taxonomy.get("biotech_cohort_percentile", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_percentile_shrunk": row.get("biotech_cohort_percentile_shrunk", biotech_taxonomy.get("biotech_cohort_percentile_shrunk", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_reliability_score": row.get("biotech_cohort_reliability_score", biotech_taxonomy.get("biotech_cohort_reliability_score", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_calibration_weight": row.get("biotech_cohort_calibration_weight", biotech_taxonomy.get("biotech_cohort_calibration_weight", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_investible_flag": row.get("biotech_cohort_investible_flag", biotech_taxonomy.get("biotech_cohort_investible_flag", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_calibration_eligible_flag": row.get("biotech_cohort_calibration_eligible_flag", biotech_taxonomy.get("biotech_cohort_calibration_eligible_flag", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_calibration_mode": row.get("biotech_cohort_calibration_mode", biotech_taxonomy.get("biotech_cohort_calibration_mode", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_exclusion_reason": row.get("biotech_cohort_exclusion_reason", biotech_taxonomy.get("biotech_cohort_exclusion_reason", "") if isinstance(biotech_taxonomy, dict) else ""),
+        "biotech_cohort_model_version": row.get("biotech_cohort_model_version", biotech_taxonomy.get("biotech_cohort_model_version", "") if isinstance(biotech_taxonomy, dict) else ""),
         "clinical_opportunity_score": row.get("clinical_opportunity_score", score_components.get("clinical_opportunity_score", "") if isinstance(score_components, dict) else ""),
         "tier1_selection_gate_score": row.get("tier1_selection_gate_score", score_components.get("tier1_selection_gate_score", "") if isinstance(score_components, dict) else ""),
         "tier1_primary_horizon_trading_days": production_baseline.get("primary_horizon_trading_days", score_components.get("primary_horizon_trading_days", "") if isinstance(score_components, dict) else "") if isinstance(production_baseline, dict) else "",
@@ -750,6 +834,57 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_cohort_diagnostics(rows: list[dict[str, Any]], *, asof_date: str) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        cohort = str(row.get("biotech_primary_cohort") or "unclassified_review")
+        grouped.setdefault(cohort, []).append(row)
+
+    def mean_numeric(items: list[dict[str, Any]], field: str) -> float:
+        values: list[float] = []
+        for item in items:
+            raw_value = item.get(field)
+            if raw_value is None:
+                continue
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                values.append(value)
+        return round(sum(values) / len(values), 4) if values else 0.0
+
+    def rank_leq(row: dict[str, Any], threshold: int) -> bool:
+        try:
+            return int(float(row.get("rank") or 999999)) <= threshold
+        except (TypeError, ValueError):
+            return False
+
+    out: list[dict[str, Any]] = []
+    for cohort, cohort_rows in sorted(grouped.items()):
+        out.append(
+            {
+                "asof_date": asof_date,
+                "biotech_primary_cohort": cohort,
+                "company_count": len(cohort_rows),
+                "top10_count": sum(1 for row in cohort_rows if rank_leq(row, 10)),
+                "top20_count": sum(1 for row in cohort_rows if rank_leq(row, 20)),
+                "avg_rank": mean_numeric(cohort_rows, "rank"),
+                "avg_opportunity_score": mean_numeric(cohort_rows, "opportunity_score"),
+                "avg_investment_score": mean_numeric(cohort_rows, "investment_score"),
+                "avg_taxonomy_confidence": mean_numeric(cohort_rows, "biotech_cohort_confidence"),
+                "avg_cohort_reliability_score": mean_numeric(cohort_rows, "biotech_cohort_reliability_score"),
+                "review_required_count": sum(1 for row in cohort_rows if str(row.get("biotech_taxonomy_review_required") or "").strip() in {"1", "1.0", "true", "True"}),
+                "sparse_data_count": sum(1 for row in cohort_rows if str(row.get("biotech_cohort_sparse_data_flag") or "").strip() in {"1", "1.0", "true", "True"}),
+                "non_investible_count": sum(1 for row in cohort_rows if to_float(row.get("biotech_cohort_investible_flag"), 1.0) <= 0.0),
+                "global_fallback_count": sum(1 for row in cohort_rows if str(row.get("biotech_cohort_calibration_mode") or "") == "global_fallback"),
+                "cohort_specific_count": sum(1 for row in cohort_rows if str(row.get("biotech_cohort_calibration_mode") or "") == "cohort_specific"),
+                "calibration_excluded_count": sum(1 for row in cohort_rows if to_float(row.get("biotech_cohort_calibration_eligible_flag"), 1.0) <= 0.0),
+            }
+        )
+    return out
+
+
 def load_calibration_module(config: dict[str, Any] | None = None) -> Any:
     module_path = (
         resolve_path(
@@ -815,9 +950,25 @@ def build_shadow_top_rows(
         top_n=top_n,
         params=params,
     )
+    taxonomy_rows = conn.execute(
+        """
+        SELECT
+            c.ticker, s.biotech_primary_cohort, s.biotech_secondary_cohort,
+            s.biotech_cohort_confidence, s.biotech_cohort_sparse_data_flag,
+            s.biotech_cohort_investible_flag, s.biotech_cohort_calibration_eligible_flag,
+            s.biotech_cohort_calibration_mode, s.biotech_cohort_exclusion_reason
+        FROM daily_scores s
+        JOIN companies c ON c.company_id = s.company_id
+        WHERE s.asof_date = ?
+        """,
+        (asof_date,),
+    ).fetchall()
+    taxonomy_by_ticker = {str(row["ticker"] or "").upper(): dict(row) for row in taxonomy_rows}
     out: list[dict[str, Any]] = []
     tier_settings = action_tier_settings(config)
     for rank, row in enumerate(selected, start=1):
+        ticker = str(row.get("ticker") or "").upper()
+        taxonomy = taxonomy_by_ticker.get(ticker, {})
         shadow_row = {
             "asof_date": asof_date,
             "rank": rank,
@@ -827,6 +978,14 @@ def build_shadow_top_rows(
             "shadow_selection_policy": policy_name,
             "shadow_top_n": top_n,
             "shadow_score": round(to_float(row.get("candidate_selection_score")), 4),
+            "biotech_primary_cohort": taxonomy.get("biotech_primary_cohort", ""),
+            "biotech_secondary_cohort": taxonomy.get("biotech_secondary_cohort", ""),
+            "biotech_cohort_investible_flag": taxonomy.get("biotech_cohort_investible_flag", ""),
+            "biotech_cohort_calibration_eligible_flag": taxonomy.get("biotech_cohort_calibration_eligible_flag", ""),
+            "biotech_cohort_calibration_mode": taxonomy.get("biotech_cohort_calibration_mode", ""),
+            "biotech_cohort_exclusion_reason": taxonomy.get("biotech_cohort_exclusion_reason", ""),
+            "biotech_cohort_confidence": taxonomy.get("biotech_cohort_confidence", ""),
+            "biotech_cohort_sparse_data_flag": taxonomy.get("biotech_cohort_sparse_data_flag", ""),
             "candidate_investment_score": row.get("candidate_investment_score", ""),
             "candidate_pre_rank_cap_selection_score": row.get("candidate_pre_rank_cap_selection_score", ""),
             "candidate_clinical_opportunity_score": row.get("candidate_clinical_opportunity_score", ""),
@@ -1363,6 +1522,9 @@ def main() -> None:
             ranking_diag_csv = output_dir / str(
                 cfg_get(config, "biotech_reports.ranking_diagnostics_csv", "biotech_ranking_order_diagnostics.csv")
             )
+            cohort_diag_csv = output_dir / str(
+                cfg_get(config, "biotech_reports.cohort_diagnostics_csv", "biotech_cohort_diagnostics.csv")
+            )
             alerts_csv = output_dir / str(cfg_get(config, "biotech_reports.alerts_csv", "biotech_alerts.csv"))
             evidence_json = output_dir / str(cfg_get(config, "biotech_reports.evidence_cards_json", "biotech_evidence_cards.json"))
             trial_validation_csv = output_dir / str(cfg_get(config, "biotech_reports.trial_validation_csv", "biotech_top_trial_validation.csv"))
@@ -1380,6 +1542,7 @@ def main() -> None:
                     top_csv,
                     shadow_top_csv,
                     ranking_diag_csv,
+                    cohort_diag_csv,
                     alerts_csv,
                     evidence_json,
                     trial_validation_csv,
@@ -1399,6 +1562,7 @@ def main() -> None:
                 for row in scores
             ]
             top_rows = flattened_rows[:top_n]
+            cohort_diagnostic_rows = build_cohort_diagnostics(flattened_rows, asof_date=asof_date)
             if top_rows:
                 validate_top_score_fields(top_rows[0])
             shadow_top_rows = build_shadow_top_rows(conn, config, asof_date)
@@ -1442,6 +1606,7 @@ def main() -> None:
             write_csv(top_csv, top_rows, TOP_SCORE_FIELDS)
             write_csv(shadow_top_csv, shadow_top_rows, SHADOW_SCORE_FIELDS)
             write_csv(ranking_diag_csv, ranking_diagnostic_rows, RANKING_DIAGNOSTIC_FIELDS)
+            write_csv(cohort_diag_csv, cohort_diagnostic_rows, COHORT_DIAGNOSTIC_FIELDS)
             write_csv(
                 alerts_csv,
                 alerts,
@@ -1493,11 +1658,12 @@ def main() -> None:
                 ],
             )
             LOGGER.info(
-                "Published biotech reports: rows=%d top_rows=%d shadow_rows=%d ranking_diag_rows=%d output_dir=%s",
+                "Published biotech reports: rows=%d top_rows=%d shadow_rows=%d ranking_diag_rows=%d cohort_diag_rows=%d output_dir=%s",
                 len(scores),
                 len(top_rows),
                 len(shadow_top_rows),
                 len(ranking_diagnostic_rows),
+                len(cohort_diagnostic_rows),
                 output_dir,
             )
             finish_run(

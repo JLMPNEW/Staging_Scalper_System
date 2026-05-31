@@ -35,3 +35,36 @@ fda_manufacturer_id,manufacturer_name,ticker,company_id,confidence,mapping_metho
 19,"B Braun Medical Inc",,,0,out_of_universe,Private B. Braun group; explicit exclusion from public med-device universe
 1278,"GET TESTED INTERNATIONAL AB",,,0,out_of_universe,Private Swedish direct-to-consumer diagnostics provider outside the public universe
 988,"Cook Incorporated",,,0,out_of_universe,Private Cook Medical parent; route only divested product-line rows via fda_product_line_overrides.csv and exclude core Cook rows
+721,"Alcon Laboratories, Inc.",,,0,out_of_universe,External public parent target ALC is outside the current med-device universe
+918,"Hologic, Inc",,,0,out_of_universe,External public parent target HOLX is outside the current med-device universe
+106,"Medacta International S.A.",,,0,out_of_universe,External public parent target MOVE/MEDAF is outside the current med-device universe
+358,"Smith & Nephew, Inc.",,,0,out_of_universe,External public parent target SNN is outside the current med-device universe
+830,"DiaSorin, Inc.",,,0,out_of_universe,External public parent target DIA/DSRLF is outside the current med-device universe
+884,"ABIOMED, INC.",,,0,out_of_universe,Johnson & Johnson subsidiary; parent target JNJ is outside the current med-device universe
+684,"Biosense Webster, Inc.",,,0,out_of_universe,Johnson & Johnson subsidiary; parent target JNJ is outside the current med-device universe
+876,"Depuy, Inc.",,,0,out_of_universe,Johnson & Johnson DePuy Synthes subsidiary; parent target JNJ is outside the current med-device universe
+436,"ETHICON, Inc.",,,0,out_of_universe,Johnson & Johnson Ethicon subsidiary; parent target JNJ is outside the current med-device universe
+914,"Johnson & Johnson Surgical Vision, Inc.",,,0,out_of_universe,Johnson & Johnson Surgical Vision subsidiary; parent target JNJ is outside the current med-device universe
+5,"Roche Molecular Systems, Inc.",,,0,out_of_universe,Roche diagnostics subsidiary; parent target RHHBY is outside the current med-device universe
+846,"Roche Diagnostics Corp.",,,0,out_of_universe,Roche diagnostics subsidiary; parent target RHHBY is outside the current med-device universe
+795,"Ventana Medical Systems, Inc.",,,0,out_of_universe,Roche tissue diagnostics subsidiary; parent target RHHBY is outside the current med-device universe
+155,"Siemens Medical Solutions USA, Inc",,,0,out_of_universe,Siemens Healthineers subsidiary; parent target SMMNY is outside the current med-device universe
+2546,"Siemens Healthcare Diagnostics",,,0,out_of_universe,Siemens Healthineers diagnostics subsidiary; parent target SMMNY is outside the current med-device universe
+640,"SIEMENS HEALTHCARE DIAGNOSTICS INC.",,,0,out_of_universe,Siemens Healthineers diagnostics subsidiary; parent target SMMNY is outside the current med-device universe
+7135,"Allergan",,,0,out_of_universe,AbbVie subsidiary; parent target ABBV is outside the current med-device universe
+843,"Cochlear Americas",,,0,out_of_universe,Cochlear Limited subsidiary; parent target CHENY/COH is outside the current med-device universe
+800,"Q-Med AB",,,0,out_of_universe,Galderma subsidiary; parent target GDMAY/GALD is outside the current med-device universe
+801,"Zoll Manufacturing Corporation",,,0,out_of_universe,Asahi Kasei/ZOLL subsidiary; parent target AHKSY is outside the current med-device universe
+803,"W. L. GORE & ASSOCIATES, INC.",,,0,out_of_universe,Private W. L. Gore entity; explicit exclusion from public med-device universe
+120,"Biotronik, Inc.",,,0,out_of_universe,Private Biotronik operating entity; explicit exclusion from public med-device universe
+869,"Biotronik AG",,,0,out_of_universe,Private Biotronik parent; explicit exclusion from public med-device universe
+78,"Arthrex, Inc.",,,0,out_of_universe,Private Arthrex entity; explicit exclusion from public med-device universe
+807,"Cordis US Corporation",,,0,out_of_universe,Private Cordis entity after divestiture from public parents; explicit exclusion from public med-device universe
+924,"Alcon Research, Ltd.",,,0,out_of_universe,External public parent target ALC is outside the current med-device universe
+834,"Physio-Control, Inc.",SYK,4,99,manual_override,Stryker EMS capital equipment subsidiary
+848,"DePuy Orthopaedics, Inc.",,,0,out_of_universe,Johnson & Johnson DePuy Synthes subsidiary; parent target JNJ is outside the current med-device universe
+839,"Vistakon, Division of Johnson & Johnson Vision Car",,,0,out_of_universe,Johnson & Johnson Vision Care subsidiary; parent target JNJ is outside the current med-device universe
+818,"Foundation Medicine, Inc.",,,0,out_of_universe,Roche precision oncology diagnostics subsidiary; parent target RHHBY is outside the current med-device universe
+850,"ZOLL Medical Corporation",,,0,out_of_universe,Asahi Kasei/ZOLL subsidiary; parent target AHKSY is outside the current med-device universe
+426,"Canon Medical Systems Corporation",,,0,out_of_universe,Canon Medical Systems subsidiary; parent target CAJPY/7751:TYO is outside the current med-device universe
+959,"MicroPort CRM USA, Inc.",,,0,out_of_universe,MicroPort Scientific CRM subsidiary; parent target MCRPY/0853:HKG is outside the current med-device universe

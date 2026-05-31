@@ -28,6 +28,10 @@ from biotech_index.core.constants import (  # noqa: E402
     SOFT_WEAKNESS_REASONS,
 )
 from biotech_index.core.commercial_risk import commercial_risk_overlay_fields  # noqa: E402
+from biotech_index.core.biotech_taxonomy import (  # noqa: E402
+    apply_manual_taxonomy_override,
+    classify_biotech_cohort,
+)
 from biotech_index.core.db import (  # noqa: E402
     DAILY_SCORES_OPTIONAL_COLUMNS,
     connect,
@@ -76,12 +80,43 @@ EXPECTED_COMMERCIAL_RISK_FIELDS = frozenset(
     }
 )
 
+
+@dataclass(frozen=True)
+class TaxonomyOverride:
+    ticker: str
+    effective_start_date: date | None
+    effective_end_date: date | None
+    primary_cohort: str
+    secondary_cohort: str
+    confidence: float | None
+    overlays_add: list[str]
+    reason_codes_add: list[str]
+    source: str
+    note: str
+
+    def applies_to(self, *, asof_date: date) -> bool:
+        if self.effective_start_date is not None and asof_date < self.effective_start_date:
+            return False
+        if self.effective_end_date is not None and asof_date > self.effective_end_date:
+            return False
+        return True
+
+
+@dataclass(frozen=True)
+class CohortPolicy:
+    enabled: bool
+    min_cohort_specific_company_count: int
+    sparse_valid_calibration_mode: str
+    non_investible_cohorts: set[str]
+    calibration_excluded_cohorts: set[str]
+
 PRODUCTION_SELECTION_POLICIES = frozenset(
     {
         "raw_legacy_score",
         "hard_weakness_veto",
         "hard_veto_soft_drag",
         "investable_core_risk_cap",
+        "core_structural_veto",
         "core_veto_event_drag",
         "core_veto_event_soft_drag",
         "core_veto_event_drag_quality_guardrail",
@@ -247,6 +282,72 @@ def parse_string_list(raw: object, default: list[str] | None = None) -> list[str
         parts = [str(raw)]
     values = [part.strip() for part in parts if part.strip()]
     return values or list(default or [])
+
+
+def load_taxonomy_overrides(path: Path | None) -> dict[str, list[TaxonomyOverride]]:
+    if path is None or not path.exists():
+        return {}
+    overrides: dict[str, list[TaxonomyOverride]] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError(f"Taxonomy overrides CSV has no header: {path}")
+        for line_no, row in enumerate(reader, start=2):
+            ticker = str(row.get("ticker") or "").strip().upper()
+            if not ticker:
+                raise ValueError(f"Taxonomy override row {line_no} missing ticker: {path}")
+            primary_cohort = str(row.get("primary_cohort") or "").strip()
+            if not primary_cohort:
+                raise ValueError(f"Taxonomy override row {line_no} missing primary_cohort for {ticker}: {path}")
+            confidence_text = str(row.get("confidence") or "").strip()
+            confidence_value = to_float(confidence_text, math.nan) if confidence_text else math.nan
+            overrides.setdefault(ticker, []).append(
+                TaxonomyOverride(
+                    ticker=ticker,
+                    effective_start_date=parse_date(row.get("effective_start_date")),
+                    effective_end_date=parse_date(row.get("effective_end_date")),
+                    primary_cohort=primary_cohort,
+                    secondary_cohort=str(row.get("secondary_cohort") or "").strip(),
+                    confidence=confidence_value if math.isfinite(confidence_value) else None,
+                    overlays_add=parse_string_list(row.get("overlays_add")),
+                    reason_codes_add=parse_string_list(row.get("reason_codes_add")),
+                    source=str(row.get("source") or "manual_taxonomy_override").strip() or "manual_taxonomy_override",
+                    note=str(row.get("note") or "").strip(),
+                )
+            )
+    return overrides
+
+
+def cohort_policy_settings(config: dict[str, Any]) -> CohortPolicy:
+    settings = cfg_get(config, "biotech_scoring.cohort_policy", {}) or {}
+    if not isinstance(settings, dict):
+        settings = {}
+    default_excluded = [
+        "excluded_non_therapeutic_healthcare",
+        "unclassified_review",
+        "weak_or_historical_pipeline",
+    ]
+    non_investible = {
+        str(item).strip()
+        for item in parse_string_list(settings.get("non_investible_cohorts"), default=default_excluded)
+        if str(item).strip()
+    }
+    calibration_excluded = {
+        str(item).strip()
+        for item in parse_string_list(settings.get("calibration_excluded_cohorts"), default=sorted(non_investible))
+        if str(item).strip()
+    }
+    min_size = int(float(settings.get("min_cohort_specific_company_count", 8)))
+    if min_size < 1:
+        raise ValueError("biotech_scoring.cohort_policy.min_cohort_specific_company_count must be >= 1")
+    return CohortPolicy(
+        enabled=as_bool(settings.get("enabled", True), True),
+        min_cohort_specific_company_count=min_size,
+        sparse_valid_calibration_mode=str(settings.get("sparse_valid_calibration_mode") or "global_fallback").strip()
+        or "global_fallback",
+        non_investible_cohorts=non_investible,
+        calibration_excluded_cohorts=calibration_excluded,
+    )
 
 
 def count_missing_fields(raw: object) -> int:
@@ -1127,14 +1228,85 @@ def validate_clinical_weights(weights: dict[str, Any]) -> None:
         raise ValueError(f"biotech_scoring.weights.risk_penalty must be in (0, 1], got {risk_penalty}")
 
 
+def enrich_biotech_cohort_rank_stats(rows: list[dict[str, Any]]) -> None:
+    cohorts: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        cohort = str(row.get("biotech_primary_cohort") or "unclassified_review")
+        cohorts.setdefault(cohort, []).append(row)
+    for cohort_rows in cohorts.values():
+        size = len(cohort_rows)
+        reliability = min(1.0, size / 12.0) if size > 0 else 0.0
+        sorted_rows = sorted(
+            cohort_rows,
+            key=lambda item: (
+                -clamp(to_float(item.get("opportunity_score"), 0.0)),
+                clamp(to_float(item.get("risk_score"), 100.0)),
+                str(item.get("ticker") or ""),
+            ),
+        )
+        for idx, row in enumerate(sorted_rows, start=1):
+            percentile = 50.0 if size <= 1 else 100.0 * (size - idx) / (size - 1)
+            shrunk = 50.0 + reliability * (percentile - 50.0)
+            row["biotech_cohort_size"] = float(size)
+            row["biotech_cohort_rank"] = float(idx)
+            row["biotech_cohort_percentile"] = round(percentile, 4)
+            row["biotech_cohort_percentile_shrunk"] = round(shrunk, 4)
+            row["biotech_cohort_reliability_score"] = round(reliability, 4)
+            row["biotech_cohort_sparse_data_flag"] = 1.0 if size < 8 else 0.0
+
+
+def apply_biotech_cohort_policy(rows: list[dict[str, Any]], policy: CohortPolicy) -> None:
+    if not policy.enabled:
+        for row in rows:
+            row["biotech_cohort_investible_flag"] = 1.0
+            row["biotech_cohort_calibration_eligible_flag"] = 1.0
+            row["biotech_cohort_calibration_mode"] = "policy_disabled"
+            row["biotech_cohort_exclusion_reason"] = ""
+        return
+    for row in rows:
+        cohort = str(row.get("biotech_primary_cohort") or "unclassified_review").strip()
+        cohort_size = int(to_float(row.get("biotech_cohort_size"), 0.0))
+        review_required = to_float(row.get("biotech_taxonomy_review_required"), 0.0) > 0.0
+        investible = cohort not in policy.non_investible_cohorts and not review_required
+        if not investible:
+            mode = "excluded"
+            calibration_eligible = 0.0
+            if review_required:
+                reason = "taxonomy_review_required"
+            elif cohort in policy.non_investible_cohorts:
+                reason = f"non_investible_cohort:{cohort}"
+            else:
+                reason = "non_investible_cohort_policy"
+        elif cohort in policy.calibration_excluded_cohorts:
+            mode = "excluded"
+            calibration_eligible = 0.0
+            reason = f"calibration_excluded_cohort:{cohort}"
+        elif cohort_size < policy.min_cohort_specific_company_count:
+            mode = policy.sparse_valid_calibration_mode
+            calibration_eligible = 1.0
+            reason = f"sparse_valid_cohort_size_lt_{policy.min_cohort_specific_company_count}"
+        else:
+            mode = "cohort_specific"
+            calibration_eligible = 1.0
+            reason = ""
+        row["biotech_cohort_investible_flag"] = 1.0 if investible else 0.0
+        row["biotech_cohort_calibration_eligible_flag"] = calibration_eligible
+        row["biotech_cohort_calibration_mode"] = mode
+        row["biotech_cohort_exclusion_reason"] = reason
+        if not investible:
+            row["bucket"] = "avoid"
+
+
 def score_rows(
     rows: list[dict[str, Any]],
     config: dict[str, Any],
     commercial_by_company: dict[int, dict[str, Any]],
     forward_by_company: dict[int, dict[str, Any]],
     governance_by_company: dict[int, dict[str, Any]] | None = None,
+    taxonomy_overrides_by_ticker: dict[str, list[TaxonomyOverride]] | None = None,
 ) -> list[dict[str, Any]]:
     governance_by_company = governance_by_company or {}
+    taxonomy_overrides_by_ticker = taxonomy_overrides_by_ticker or {}
     weights = cfg_get(config, "biotech_scoring.weights", {}) or {}
     validate_clinical_weights(weights)
     catalyst_w = float(weights.get("catalyst", 0.55))
@@ -1151,6 +1323,7 @@ def score_rows(
     commercial_risk_settings = commercial_risk_overlay_settings(config)
     rank_cap_settings = rank_quality_cap_settings(config)
     bucket_settings = bucket_params(config)
+    cohort_policy = cohort_policy_settings(config)
     selection_policy = str(production_baseline["selection_policy"])
     apply_core_veto_to_rank = bool(core_veto_settings["enabled"] and core_veto_settings["apply_to_rank"])
     force_core_veto_avoid = bool(core_veto_settings["enabled"] and core_veto_settings["force_avoid_bucket"])
@@ -1248,7 +1421,40 @@ def score_rows(
             "guidance_staleness_flag": guidance_flags_preview["guidance_staleness_flag"],
             "mature_defensive_score": mature_defensive,
             "expected_return_quality_score": expected_return_quality,
+            "commercial_deterioration_score": commercial_risk["commercial_deterioration_score"],
+            "valuation_growth_mismatch_score": commercial_risk["valuation_growth_mismatch_score"],
+            "commercial_business_shock_score": commercial_risk["commercial_business_shock_score"],
         }
+        biotech_taxonomy = classify_biotech_cohort(
+            payload=payload,
+            commercial=commercial,
+            forward_guidance=forward_guidance,
+            diagnostics=policy_diagnostics,
+        )
+        ticker = str(row.get("ticker") or "").strip().upper()
+        row_asof_date = parse_date(row.get("asof_date"))
+        if row_asof_date is None:
+            row_asof_date = date.min
+        matching_overrides = [
+            override
+            for override in taxonomy_overrides_by_ticker.get(ticker, [])
+            if override.applies_to(asof_date=row_asof_date)
+        ]
+        if len(matching_overrides) > 1:
+            raise ValueError(f"Multiple active biotech taxonomy overrides for ticker={ticker} asof_date={row_asof_date}")
+        if matching_overrides:
+            override = matching_overrides[0]
+            biotech_taxonomy = apply_manual_taxonomy_override(
+                biotech_taxonomy,
+                primary_cohort=override.primary_cohort,
+                secondary_cohort=override.secondary_cohort,
+                confidence=override.confidence,
+                overlays_add=override.overlays_add,
+                reason_codes_add=override.reason_codes_add,
+                source=override.source,
+                note=override.note,
+            )
+        biotech_taxonomy_payload = biotech_taxonomy.as_payload()
         use_quality_adjusted_valuation = as_bool(
             cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True),
             True,
@@ -1521,6 +1727,12 @@ def score_rows(
                 "configured_event_hard_reasons": sorted(policy_settings["event_hard_reasons"]),
                 "configured_soft_weakness_reasons": sorted(policy_settings["soft_weakness_reasons"]),
             },
+            "biotech_taxonomy": biotech_taxonomy_payload
+            | {
+                "reason_codes": biotech_taxonomy.reason_codes,
+                "overlays": biotech_taxonomy.overlays,
+                "evidence": biotech_taxonomy.evidence,
+            },
             "commercial_risk_overlay": commercial_risk | {
                 "enabled": as_bool(commercial_risk_settings.get("enabled", True), True),
                 "penalty": round(commercial_overlay_penalty, 4),
@@ -1665,11 +1877,15 @@ def score_rows(
                 "sec_regulatory_catalyst_count": sec_events.get("regulatory_catalyst_count", 0) if isinstance(sec_events, dict) else 0,
                 "sec_dilution_event_count": sec_events.get("dilution_event_count", 0) if isinstance(sec_events, dict) else 0,
                 "sec_negative_clinical_event_count": sec_events.get("negative_clinical_event_count", 0) if isinstance(sec_events, dict) else 0,
+                **biotech_taxonomy_payload,
                 "top_evidence_json": json.dumps(top_evidence, ensure_ascii=True, sort_keys=True),
             }
         )
+    enrich_biotech_cohort_rank_stats(scored)
+    apply_biotech_cohort_policy(scored, cohort_policy)
     scored.sort(
         key=lambda item: (
+            1 if to_float(item.get("biotech_cohort_investible_flag"), 1.0) <= 0.0 else 0,
             1 if apply_core_veto_to_rank and to_float(item.get("core_structural_veto_flag"), 0.0) > 0.0 else 0,
             -clamp(to_float(item.get("opportunity_score"), 0.0)),
             clamp(to_float(item.get("risk_score"), 100.0)),
@@ -1811,6 +2027,28 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "sec_regulatory_catalyst_count",
         "sec_dilution_event_count",
         "sec_negative_clinical_event_count",
+        "biotech_primary_cohort",
+        "biotech_secondary_cohort",
+        "biotech_cohort_reason_codes",
+        "biotech_cohort_confidence",
+        "biotech_cohort_margin",
+        "biotech_cohort_source",
+        "biotech_cohort_overlays",
+        "biotech_cohort_data_quality",
+        "biotech_taxonomy_review_required",
+        "biotech_cohort_sparse_data_flag",
+        "biotech_cohort_size",
+        "biotech_cohort_rank",
+        "biotech_cohort_percentile",
+        "biotech_cohort_percentile_shrunk",
+        "biotech_cohort_reliability_score",
+        "biotech_cohort_calibration_weight",
+        "biotech_cohort_investible_flag",
+        "biotech_cohort_calibration_eligible_flag",
+        "biotech_cohort_calibration_mode",
+        "biotech_cohort_exclusion_reason",
+        "biotech_cohort_model_version",
+        "biotech_cohort_evidence_json",
         "top_evidence_json",
     ]
     text_fields = {
@@ -1837,6 +2075,16 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "commercial_business_shock_reasons",
         "financial_data_quality",
         "going_concern_status",
+        "biotech_primary_cohort",
+        "biotech_secondary_cohort",
+        "biotech_cohort_reason_codes",
+        "biotech_cohort_source",
+        "biotech_cohort_overlays",
+        "biotech_cohort_data_quality",
+        "biotech_cohort_calibration_mode",
+        "biotech_cohort_exclusion_reason",
+        "biotech_cohort_model_version",
+        "biotech_cohort_evidence_json",
         "top_evidence_json",
     }
 
@@ -1875,6 +2123,27 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "bucket",
         "opportunity_score",
         "investment_score",
+        "biotech_primary_cohort",
+        "biotech_secondary_cohort",
+        "biotech_cohort_reason_codes",
+        "biotech_cohort_confidence",
+        "biotech_cohort_margin",
+        "biotech_cohort_source",
+        "biotech_cohort_overlays",
+        "biotech_cohort_data_quality",
+        "biotech_taxonomy_review_required",
+        "biotech_cohort_sparse_data_flag",
+        "biotech_cohort_size",
+        "biotech_cohort_rank",
+        "biotech_cohort_percentile",
+        "biotech_cohort_percentile_shrunk",
+        "biotech_cohort_reliability_score",
+        "biotech_cohort_calibration_weight",
+        "biotech_cohort_investible_flag",
+        "biotech_cohort_calibration_eligible_flag",
+        "biotech_cohort_calibration_mode",
+        "biotech_cohort_exclusion_reason",
+        "biotech_cohort_model_version",
         "clinical_opportunity_score",
         "tier1_selection_gate_score",
         "tier1_primary_horizon_trading_days",
@@ -1987,6 +2256,10 @@ def main() -> None:
         cfg_get(config, "biotech_features.final_scoring_universe_csv"),
         base_dir=base_dir,
     )
+    taxonomy_overrides_path = resolve_path(
+        cfg_get(config, "biotech_scoring.taxonomy_overrides_csv", "data/biotech_taxonomy_overrides.csv"),
+        base_dir=base_dir,
+    )
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
@@ -2085,7 +2358,21 @@ def main() -> None:
                 )
             else:
                 LOGGER.warning("Skipping optional governance freshness validation because no governance rows are available.")
-            scored = score_rows(features, config, commercial_by_company, forward_by_company, governance_by_company)
+            taxonomy_overrides_by_ticker = load_taxonomy_overrides(taxonomy_overrides_path)
+            if taxonomy_overrides_by_ticker:
+                LOGGER.info(
+                    "Loaded biotech taxonomy overrides: tickers=%d path=%s",
+                    len(taxonomy_overrides_by_ticker),
+                    taxonomy_overrides_path,
+                )
+            scored = score_rows(
+                features,
+                config,
+                commercial_by_company,
+                forward_by_company,
+                governance_by_company,
+                taxonomy_overrides_by_ticker,
+            )
             validate_full_universe_coverage(
                 expected_tickers=expected_tickers,
                 observed_tickers=[row["ticker"] for row in scored],
