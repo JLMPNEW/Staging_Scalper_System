@@ -57,6 +57,59 @@ FDA_GATE_MODES = {
     FDA_GATE_OVERLAY_ONLY,
     FDA_GATE_DISABLED,
 }
+DURABLE_GROWTH_MODE_POSITIVE_ALPHA = "positive_alpha"
+DURABLE_GROWTH_MODE_INVERSE_ALPHA = "inverse_alpha"
+DURABLE_GROWTH_MODE_NEUTRAL_OVERLAY = "neutral_overlay"
+DURABLE_GROWTH_MODE_REPAIR_DATA = "repair_data"
+DURABLE_GROWTH_MODE_LEGACY_PASSTHROUGH = "legacy_passthrough"
+DURABLE_GROWTH_MODE_DISABLED = "disabled"
+DURABLE_GROWTH_MODES = {
+    DURABLE_GROWTH_MODE_POSITIVE_ALPHA,
+    DURABLE_GROWTH_MODE_INVERSE_ALPHA,
+    DURABLE_GROWTH_MODE_NEUTRAL_OVERLAY,
+    DURABLE_GROWTH_MODE_REPAIR_DATA,
+    DURABLE_GROWTH_MODE_LEGACY_PASSTHROUGH,
+    DURABLE_GROWTH_MODE_DISABLED,
+}
+DURABLE_GROWTH_GATE_HARD_POSITIVE = "hard_positive"
+DURABLE_GROWTH_GATE_ALPHA_ONLY = "alpha_only"
+DURABLE_GROWTH_GATE_OVERLAY_ONLY = "overlay_only"
+DURABLE_GROWTH_GATE_REPAIR_DATA = "repair_data"
+DURABLE_GROWTH_GATE_DISABLED = "disabled"
+DURABLE_GROWTH_GATE_MODES = {
+    DURABLE_GROWTH_GATE_HARD_POSITIVE,
+    DURABLE_GROWTH_GATE_ALPHA_ONLY,
+    DURABLE_GROWTH_GATE_OVERLAY_ONLY,
+    DURABLE_GROWTH_GATE_REPAIR_DATA,
+    DURABLE_GROWTH_GATE_DISABLED,
+}
+DURABLE_GROWTH_PRODUCTION_PROMOTED = "promoted"
+DURABLE_GROWTH_PRODUCTION_RESEARCH_ONLY = "research_only"
+DURABLE_GROWTH_PRODUCTION_LEGACY_CHAMPION = "legacy_champion"
+DURABLE_GROWTH_PRODUCTION_DISABLED = "disabled"
+DURABLE_GROWTH_PRODUCTION_STATES = {
+    DURABLE_GROWTH_PRODUCTION_PROMOTED,
+    DURABLE_GROWTH_PRODUCTION_RESEARCH_ONLY,
+    DURABLE_GROWTH_PRODUCTION_LEGACY_CHAMPION,
+    DURABLE_GROWTH_PRODUCTION_DISABLED,
+}
+DURABLE_GROWTH_PROXY_INPUT_FIELDS = (
+    "revenue_yoy_growth",
+    "quarterly_revenue_surprise_yoy",
+    "gross_margin_trend_3y",
+    "gross_margin_ttm",
+    "operating_margin_ttm",
+    "fcf_margin_ttm",
+    "free_cash_flow_margin_ttm",
+    "rd_growth_yoy",
+    "rd_to_revenue_ttm",
+    "annualized_research_and_development",
+    "research_and_development_ttm",
+    "shares_yoy_growth",
+    "net_debt_to_revenue",
+    "financial_runway_years",
+    "data_confidence_score",
+)
 CALIBRATION_STATUS_PRODUCTION_ELIGIBLE = "production_eligible"
 CALIBRATION_STATUS_RESTRICTED_RESEARCH_ONLY = "restricted_research_only"
 CALIBRATION_STATUS_EXCLUDED_FROM_TIER1 = "excluded_from_tier1"
@@ -70,6 +123,27 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "calibration_status_reason": "TEXT DEFAULT ''",
     "cohort_score_template_id": "TEXT DEFAULT ''",
     "cohort_score_template_spec": "TEXT DEFAULT ''",
+    "durable_growth_score_legacy": "REAL DEFAULT 50.0",
+    "durable_growth_alpha_score": "REAL DEFAULT 50.0",
+    "durable_growth_growth_score": "REAL DEFAULT 50.0",
+    "durable_growth_quality_score": "REAL DEFAULT 50.0",
+    "durable_growth_efficiency_score": "REAL DEFAULT 50.0",
+    "durable_growth_capital_discipline_score": "REAL DEFAULT 50.0",
+    "durable_growth_evidence_quality_score": "REAL DEFAULT 0.0",
+    "durable_growth_component_count": "INTEGER DEFAULT 0",
+    "durable_growth_signal_mode": "TEXT DEFAULT ''",
+    "durable_growth_signal_direction": "TEXT DEFAULT ''",
+    "durable_growth_signal_reliability": "REAL DEFAULT 0.0",
+    "durable_growth_score_source": "TEXT DEFAULT ''",
+    "durable_growth_gate_mode": "TEXT DEFAULT ''",
+    "durable_growth_policy_reason": "TEXT DEFAULT ''",
+    "durable_growth_gate_excluded": "INTEGER DEFAULT 0",
+    "durable_growth_component_weight": "REAL DEFAULT 0.0",
+    "durable_growth_repair_flag": "INTEGER DEFAULT 0",
+    "durable_growth_repair_reason": "TEXT DEFAULT ''",
+    "durable_growth_validation_status": "TEXT DEFAULT ''",
+    "durable_growth_validation_reason": "TEXT DEFAULT ''",
+    "durable_growth_production_state": "TEXT DEFAULT ''",
     "fda_product_score_legacy": "REAL DEFAULT 0.0",
     "fda_alpha_score": "REAL DEFAULT 0.0",
     "fda_safety_score": "REAL DEFAULT 0.0",
@@ -139,6 +213,27 @@ FIELDNAMES = [
     "cohort_percentile",
     "fundamental_quality_score",
     "durable_growth_score",
+    "durable_growth_score_legacy",
+    "durable_growth_alpha_score",
+    "durable_growth_growth_score",
+    "durable_growth_quality_score",
+    "durable_growth_efficiency_score",
+    "durable_growth_capital_discipline_score",
+    "durable_growth_evidence_quality_score",
+    "durable_growth_component_count",
+    "durable_growth_signal_mode",
+    "durable_growth_signal_direction",
+    "durable_growth_signal_reliability",
+    "durable_growth_score_source",
+    "durable_growth_gate_mode",
+    "durable_growth_policy_reason",
+    "durable_growth_gate_excluded",
+    "durable_growth_component_weight",
+    "durable_growth_repair_flag",
+    "durable_growth_repair_reason",
+    "durable_growth_validation_status",
+    "durable_growth_validation_reason",
+    "durable_growth_production_state",
     "fda_product_score",
     "fda_product_score_legacy",
     "fda_alpha_score",
@@ -260,6 +355,27 @@ class ScoreRow:
     cohort_percentile: float = 50.0
     fundamental_quality_score: float = 0.0
     durable_growth_score: float = 50.0
+    durable_growth_score_legacy: float = 50.0
+    durable_growth_alpha_score: float = 50.0
+    durable_growth_growth_score: float = 50.0
+    durable_growth_quality_score: float = 50.0
+    durable_growth_efficiency_score: float = 50.0
+    durable_growth_capital_discipline_score: float = 50.0
+    durable_growth_evidence_quality_score: float = 0.0
+    durable_growth_component_count: int = 0
+    durable_growth_signal_mode: str = DURABLE_GROWTH_MODE_NEUTRAL_OVERLAY
+    durable_growth_signal_direction: str = "neutral"
+    durable_growth_signal_reliability: float = 0.0
+    durable_growth_score_source: str = "neutral"
+    durable_growth_gate_mode: str = DURABLE_GROWTH_GATE_OVERLAY_ONLY
+    durable_growth_policy_reason: str = ""
+    durable_growth_gate_excluded: int = 1
+    durable_growth_component_weight: float = DEFAULT_WEIGHTS["durable_growth"]
+    durable_growth_repair_flag: int = 0
+    durable_growth_repair_reason: str = ""
+    durable_growth_validation_status: str = DURABLE_GROWTH_PRODUCTION_PROMOTED
+    durable_growth_validation_reason: str = ""
+    durable_growth_production_state: str = DURABLE_GROWTH_PRODUCTION_PROMOTED
     fda_product_score: float = 50.0
     fda_product_score_legacy: float = 50.0
     fda_alpha_score: float = 50.0
@@ -303,7 +419,7 @@ class ScoreRow:
     technical_signal_direction: str = ""
     technical_signal_reliability: float = 0.0
     technical_score_source: str = "legacy_setup"
-    technical_entry_status_score: float = 50.0
+    technical_entry_status_score: float | None = None
     technical_entry_status_score_source: str = "legacy_setup"
     sentiment_catalyst_score: float = 50.0
     value_trap_score: float = 0.0
@@ -369,6 +485,40 @@ class SentimentProxy:
     score: float
     source: str
     input_name: str
+
+
+@dataclass(frozen=True)
+class DurableGrowthProxy:
+    legacy_score: float
+    growth_score: float
+    quality_score: float
+    efficiency_score: float
+    capital_discipline_score: float
+    evidence_quality_score: float
+    component_count: int
+    source: str
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class DurableGrowthSelection:
+    legacy_score: float
+    alpha_score: float
+    growth_score: float
+    quality_score: float
+    efficiency_score: float
+    capital_discipline_score: float
+    evidence_quality_score: float
+    component_count: int
+    signal_mode: str
+    signal_direction: str
+    signal_reliability: float
+    score_source: str
+    repair_flag: int
+    repair_reason: str
+    validation_status: str
+    validation_reason: str
+    production_state: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -658,49 +808,230 @@ def percentile(
     return out
 
 
-def durable_growth_proxy(financial_rows: list[dict[str, Any]]) -> dict[int, float]:
-    margin_trend_pairs: list[tuple[int, float]] = []
-    rd_growth_pairs: list[tuple[int, float]] = []
-    dilution_pairs: list[tuple[int, float]] = []
-    leverage_pairs: list[tuple[int, float]] = []
-    confidence_pairs: list[tuple[int, float]] = []
+def first_float(row: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = to_float(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def ratio_or_none(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator is None or abs(denominator) < 1e-12:
+        return None
+    value = numerator / denominator
+    return value if math.isfinite(value) else None
+
+
+def blend_rank_scores(components: list[tuple[float | None, float]], *, neutral: float) -> tuple[float, int]:
+    active = [(float(score), float(weight)) for score, weight in components if score is not None and weight > 0]
+    if not active:
+        return neutral, 0
+    total_weight = sum(weight for _, weight in active)
+    if total_weight <= 0:
+        return neutral, 0
+    return round(clamp(sum(score * weight for score, weight in active) / total_weight), 2), len(active)
+
+
+def percentile_by_cohort(
+    values: list[tuple[int, float]],
+    *,
+    taxonomy: dict[int, str],
+    min_cohort_n: int,
+    higher_is_better: bool,
+) -> dict[int, float]:
+    global_scores = percentile(values, higher_is_better=higher_is_better)
+    if not values:
+        return {}
+    out = dict(global_scores)
+    by_cohort: dict[str, list[tuple[int, float]]] = {}
+    for company_id, value in values:
+        cohort = taxonomy.get(company_id, "") or "unknown"
+        by_cohort.setdefault(cohort, []).append((company_id, value))
+    for cohort_values in by_cohort.values():
+        if len(cohort_values) >= max(2, min_cohort_n):
+            out.update(percentile(cohort_values, higher_is_better=higher_is_better))
+    return out
+
+
+def durable_growth_proxy(
+    financial_rows: list[dict[str, Any]],
+    *,
+    taxonomy: dict[int, str],
+    config: dict[str, Any],
+    neutral: float,
+) -> dict[int, DurableGrowthProxy]:
+    min_cohort_n = int(cfg_get(config, "scoring.durable_growth_proxy.cohort_rank_min_n", 5))
+    pairs: dict[str, list[tuple[int, float]]] = {
+        "revenue_growth": [],
+        "revenue_acceleration": [],
+        "margin_trend": [],
+        "gross_margin": [],
+        "operating_margin": [],
+        "fcf_margin": [],
+        "rd_growth": [],
+        "rd_intensity": [],
+        "dilution": [],
+        "leverage": [],
+        "runway": [],
+        "confidence": [],
+    }
+    raw_inputs: dict[int, dict[str, float]] = {}
     for row in financial_rows:
         company_id = int(row["company_id"])
-        margin_trend = to_float(row.get("gross_margin_trend_3y"))
-        rd_growth = to_float(row.get("rd_growth_yoy"))
-        dilution = to_float(row.get("shares_yoy_growth"))
-        leverage = to_float(row.get("net_debt_to_revenue"))
-        confidence = to_float(row.get("data_confidence_score"))
-        if margin_trend is not None:
-            margin_trend_pairs.append((company_id, margin_trend))
-        if rd_growth is not None:
-            rd_growth_pairs.append((company_id, rd_growth))
-        if dilution is not None:
-            dilution_pairs.append((company_id, dilution))
-        if leverage is not None:
-            leverage_pairs.append((company_id, leverage))
-        if confidence is not None:
-            confidence_pairs.append((company_id, confidence))
-    margin_scores = percentile(margin_trend_pairs, higher_is_better=True)
-    rd_scores = percentile(rd_growth_pairs, higher_is_better=True)
-    dilution_scores = percentile(dilution_pairs, higher_is_better=False)
-    leverage_scores = percentile(leverage_pairs, higher_is_better=False)
-    confidence_scores = percentile(confidence_pairs, higher_is_better=True)
-    out: dict[int, float] = {}
+        revenue = first_float(row, "revenue_ttm", "revenue_ltm")
+        rd_ttm = first_float(row, "annualized_research_and_development", "research_and_development_ttm")
+        rd_intensity = first_float(row, "rd_to_revenue_ttm", "rd_to_revenue", "research_and_development_to_revenue")
+        if rd_intensity is None:
+            rd_intensity = ratio_or_none(rd_ttm, revenue)
+        inputs = {
+            "revenue_growth": first_float(row, "revenue_yoy_growth", "revenue_growth_yoy", "sales_yoy_growth"),
+            "revenue_acceleration": first_float(
+                row,
+                "revenue_growth_acceleration",
+                "revenue_yoy_acceleration",
+                "quarterly_revenue_surprise_yoy",
+            ),
+            "margin_trend": first_float(row, "gross_margin_trend_3y", "gross_margin_change_3y"),
+            "gross_margin": first_float(row, "gross_margin_ttm", "gross_margin", "gross_margin_ltm"),
+            "operating_margin": first_float(row, "operating_margin_ttm", "operating_margin", "ebit_margin_ttm"),
+            "fcf_margin": first_float(row, "fcf_margin_ttm", "free_cash_flow_margin_ttm", "free_cash_flow_margin"),
+            "rd_growth": first_float(row, "rd_growth_yoy", "research_and_development_growth_yoy"),
+            "rd_intensity": rd_intensity,
+            "dilution": first_float(row, "shares_yoy_growth", "diluted_shares_yoy_growth"),
+            "leverage": first_float(row, "net_debt_to_revenue", "net_debt_to_sales"),
+            "runway": first_float(row, "financial_runway_years", "cash_runway_years"),
+            "confidence": first_float(row, "data_confidence_score"),
+        }
+        raw_inputs[company_id] = {key: value for key, value in inputs.items() if value is not None}
+        for key, value in inputs.items():
+            if value is not None:
+                pairs[key].append((company_id, value))
+
+    rank_maps = {
+        "revenue_growth": percentile_by_cohort(
+            pairs["revenue_growth"], taxonomy=taxonomy, min_cohort_n=min_cohort_n, higher_is_better=True
+        ),
+        "revenue_acceleration": percentile_by_cohort(
+            pairs["revenue_acceleration"], taxonomy=taxonomy, min_cohort_n=min_cohort_n, higher_is_better=True
+        ),
+        "margin_trend": percentile_by_cohort(
+            pairs["margin_trend"], taxonomy=taxonomy, min_cohort_n=min_cohort_n, higher_is_better=True
+        ),
+        "gross_margin": percentile_by_cohort(
+            pairs["gross_margin"], taxonomy=taxonomy, min_cohort_n=min_cohort_n, higher_is_better=True
+        ),
+        "operating_margin": percentile_by_cohort(
+            pairs["operating_margin"], taxonomy=taxonomy, min_cohort_n=min_cohort_n, higher_is_better=True
+        ),
+        "fcf_margin": percentile_by_cohort(
+            pairs["fcf_margin"], taxonomy=taxonomy, min_cohort_n=min_cohort_n, higher_is_better=True
+        ),
+        "rd_growth": percentile_by_cohort(
+            pairs["rd_growth"], taxonomy=taxonomy, min_cohort_n=min_cohort_n, higher_is_better=True
+        ),
+        "rd_intensity": percentile_by_cohort(
+            pairs["rd_intensity"], taxonomy=taxonomy, min_cohort_n=min_cohort_n, higher_is_better=True
+        ),
+        "dilution": percentile_by_cohort(
+            pairs["dilution"], taxonomy=taxonomy, min_cohort_n=min_cohort_n, higher_is_better=False
+        ),
+        "leverage": percentile_by_cohort(
+            pairs["leverage"], taxonomy=taxonomy, min_cohort_n=min_cohort_n, higher_is_better=False
+        ),
+        "runway": percentile_by_cohort(
+            pairs["runway"], taxonomy=taxonomy, min_cohort_n=min_cohort_n, higher_is_better=True
+        ),
+        "confidence": percentile_by_cohort(
+            pairs["confidence"], taxonomy=taxonomy, min_cohort_n=min_cohort_n, higher_is_better=True
+        ),
+    }
+
+    expected_component_count = int(cfg_get(config, "scoring.durable_growth_proxy.expected_component_count", 8))
+    out: dict[int, DurableGrowthProxy] = {}
     for row in financial_rows:
         company_id = int(row["company_id"])
-        available_scores = [
-            (margin_scores.get(company_id), 0.30),
-            (rd_scores.get(company_id), 0.20),
-            (dilution_scores.get(company_id), 0.20),
-            (leverage_scores.get(company_id), 0.15),
-            (confidence_scores.get(company_id), 0.15),
-        ]
-        active = [(score, weight) for score, weight in available_scores if score is not None]
-        if len(active) < 2:
+        ranks = {name: rank_map.get(company_id) for name, rank_map in rank_maps.items()}
+        component_count = sum(1 for value in ranks.values() if value is not None)
+        if component_count < 2:
             continue
-        total_weight = sum(weight for _, weight in active)
-        out[company_id] = round(sum(float(score) * weight for score, weight in active) / total_weight, 2)
+        growth_score, _ = blend_rank_scores(
+            [
+                (ranks["revenue_growth"], 0.45),
+                (ranks["revenue_acceleration"], 0.20),
+                (ranks["rd_growth"], 0.15),
+                (ranks["margin_trend"], 0.20),
+            ],
+            neutral=neutral,
+        )
+        quality_score, _ = blend_rank_scores(
+            [
+                (ranks["gross_margin"], 0.30),
+                (ranks["operating_margin"], 0.25),
+                (ranks["fcf_margin"], 0.25),
+                (ranks["confidence"], 0.20),
+            ],
+            neutral=neutral,
+        )
+        efficiency_score, _ = blend_rank_scores(
+            [
+                (ranks["margin_trend"], 0.30),
+                (ranks["fcf_margin"], 0.25),
+                (ranks["rd_intensity"], 0.20),
+                (ranks["revenue_growth"], 0.25),
+            ],
+            neutral=neutral,
+        )
+        capital_discipline_score, _ = blend_rank_scores(
+            [
+                (ranks["dilution"], 0.40),
+                (ranks["leverage"], 0.35),
+                (ranks["runway"], 0.25),
+            ],
+            neutral=neutral,
+        )
+        legacy_score, _ = blend_rank_scores(
+            [
+                (ranks["margin_trend"], 0.30),
+                (ranks["rd_growth"], 0.20),
+                (ranks["dilution"], 0.20),
+                (ranks["leverage"], 0.15),
+                (ranks["confidence"], 0.15),
+            ],
+            neutral=neutral,
+        )
+        diagnostic_composite_score, _ = blend_rank_scores(
+            [
+                (growth_score, 0.45),
+                (quality_score, 0.25),
+                (efficiency_score, 0.15),
+                (capital_discipline_score, 0.15),
+            ],
+            neutral=neutral,
+        )
+        confidence_score = ranks.get("confidence")
+        coverage_score = clamp(100.0 * component_count / max(1, expected_component_count))
+        evidence_quality_score = round(
+            clamp(0.70 * coverage_score + 0.30 * (confidence_score if confidence_score is not None else neutral)),
+            2,
+        )
+        out[company_id] = DurableGrowthProxy(
+            legacy_score=legacy_score,
+            growth_score=growth_score,
+            quality_score=quality_score,
+            efficiency_score=efficiency_score,
+            capital_discipline_score=capital_discipline_score,
+            evidence_quality_score=evidence_quality_score,
+            component_count=component_count,
+            source="daily_score_durable_proxy_v2",
+            payload={
+                "raw_inputs": raw_inputs.get(company_id, {}),
+                "rank_scores": {key: value for key, value in ranks.items() if value is not None},
+                "durable_growth_diagnostic_composite_score": diagnostic_composite_score,
+                "cohort_rank_min_n": min_cohort_n,
+                "expected_component_count": expected_component_count,
+            },
+        )
     return out
 
 
@@ -806,14 +1137,7 @@ def sentiment_catalyst_proxy(
 
 
 def durable_proxy_available(financial_item: dict[str, Any]) -> bool:
-    return (
-        sum(
-            1
-            for key in ("gross_margin_trend_3y", "rd_growth_yoy", "shares_yoy_growth", "net_debt_to_revenue", "data_confidence_score")
-            if to_float(financial_item.get(key)) is not None
-        )
-        >= 2
-    )
+    return sum(1 for key in DURABLE_GROWTH_PROXY_INPUT_FIELDS if to_float(financial_item.get(key)) is not None) >= 2
 
 
 def upsert_durable_growth_proxy_rows(conn: Any, rows: list[ScoreRow]) -> int:
@@ -822,17 +1146,25 @@ def upsert_durable_growth_proxy_rows(conn: Any, rows: list[ScoreRow]) -> int:
         (
             row.asof_date,
             row.company_id,
-            row.durable_growth_score,
+            row.durable_growth_score_legacy,
             json.dumps(
                 {
-                    "source": "daily_score_durable_proxy",
-                    "inputs": [
-                        "gross_margin_trend_3y",
-                        "rd_growth_yoy",
-                        "shares_yoy_growth",
-                        "net_debt_to_revenue",
-                        "data_confidence_score",
-                    ],
+                    "source": "daily_score_durable_proxy_v2_legacy",
+                    "note": "Stores descriptive legacy proxy, not cohort-transformed alpha.",
+                    "inputs": list(DURABLE_GROWTH_PROXY_INPUT_FIELDS),
+                    "scores": {
+                        "durable_growth_score_legacy": row.durable_growth_score_legacy,
+                        "durable_growth_alpha_score": row.durable_growth_alpha_score,
+                        "durable_growth_growth_score": row.durable_growth_growth_score,
+                        "durable_growth_quality_score": row.durable_growth_quality_score,
+                        "durable_growth_efficiency_score": row.durable_growth_efficiency_score,
+                        "durable_growth_capital_discipline_score": row.durable_growth_capital_discipline_score,
+                        "durable_growth_evidence_quality_score": row.durable_growth_evidence_quality_score,
+                        "durable_growth_component_count": row.durable_growth_component_count,
+                        "durable_growth_signal_mode": row.durable_growth_signal_mode,
+                        "durable_growth_signal_direction": row.durable_growth_signal_direction,
+                        "durable_growth_signal_reliability": row.durable_growth_signal_reliability,
+                    },
                 },
                 ensure_ascii=True,
                 sort_keys=True,
@@ -906,7 +1238,7 @@ def upsert_sentiment_proxy_rows(conn: Any, rows: list[ScoreRow]) -> int:
 def score_drivers(row: ScoreRow) -> tuple[list[str], list[str]]:
     items = [
         ("fundamental", row.fundamental_quality_score, 1.0),
-        ("durable_growth", row.durable_growth_score, 1.0),
+        ("durable_growth", row.durable_growth_score, row.durable_growth_component_weight),
         ("fda_product", row.fda_product_score, row.fda_component_weight),
         ("reimbursement", row.reimbursement_score, 1.0),
         ("valuation", row.valuation_score, 1.0),
@@ -917,6 +1249,10 @@ def score_drivers(row: ScoreRow) -> tuple[list[str], list[str]]:
     positives = [f"{name}:{score:.1f}" for name, score in sorted(active_items, key=lambda item: item[1], reverse=True)[:3]]
     below_neutral = [(name, score) for name, score in active_items if score < 50.0]
     negatives = [f"{name}:{score:.1f}" for name, score in sorted(below_neutral, key=lambda item: item[1])[:3]]
+    if row.durable_growth_component_weight <= WEIGHT_EPSILON and row.durable_growth_gate_excluded:
+        positives.append(f"durable_growth_overlay:{row.durable_growth_gate_mode}")
+    if row.durable_growth_repair_flag:
+        negatives.append(f"durable_growth_repair:{row.durable_growth_repair_reason or 'required'}")
     if row.fda_component_weight <= WEIGHT_EPSILON and row.fda_gate_excluded:
         positives.append(f"fda_overlay:{row.fda_gate_mode}")
     if row.technical_component_weight <= WEIGHT_EPSILON and row.technical_overlay_status:
@@ -1016,6 +1352,27 @@ class FdaGatePolicy:
     max_event_risk: float = 75.0
     block_classification: bool = True
     rationale: str = ""
+
+
+@dataclass(frozen=True)
+class DurableGrowthPolicy:
+    signal_mode: str = DURABLE_GROWTH_MODE_LEGACY_PASSTHROUGH
+    gate_mode: str = DURABLE_GROWTH_GATE_HARD_POSITIVE
+    entry_min: float | None = None
+    reliability: float = 1.0
+    min_component_count: int = 0
+    min_evidence_quality: float = 0.0
+    block_classification: bool = True
+    production_state: str = DURABLE_GROWTH_PRODUCTION_PROMOTED
+    latest_lcb_excess_delta: float | None = None
+    latest_tier1_lcb_excess_delta: float | None = None
+    latest_loss_rate: float | None = None
+    latest_tier1_loss_rate: float | None = None
+    min_lcb_excess_delta: float = 0.0
+    max_loss_rate: float = 0.45
+    require_positive_tier1_lcb_delta: bool = False
+    require_validation_for_nonlegacy: bool = True
+    rationale: str = "base_legacy_durable_growth_passthrough"
 
 
 @dataclass(frozen=True)
@@ -1233,6 +1590,12 @@ def parse_optional_float(raw: object, *, context: str) -> float | None:
     return value
 
 
+def normalize_loss_rate(raw: float | None) -> float | None:
+    if raw is None:
+        return None
+    return raw / 100.0 if raw > 1.0 else raw
+
+
 def parse_technical_policy(raw: object, *, default: TechnicalPolicy, context: str) -> TechnicalPolicy:
     if raw is None:
         return default
@@ -1380,6 +1743,197 @@ def fda_policy_for_row(row: ScoreRow, base_policy: FdaGatePolicy, profiles: dict
     return profiles.get(row.calibration_cohort, base_policy)
 
 
+def parse_durable_growth_policy(raw: object, *, default: DurableGrowthPolicy, context: str) -> DurableGrowthPolicy:
+    if raw is None:
+        return default
+    if not isinstance(raw, dict):
+        raise ValueError(f"{context} must be a mapping")
+    signal_mode = str(raw.get("signal_mode", raw.get("mode", default.signal_mode)) or default.signal_mode).strip().lower()
+    signal_mode = {
+        "positive": DURABLE_GROWTH_MODE_POSITIVE_ALPHA,
+        "trend": DURABLE_GROWTH_MODE_POSITIVE_ALPHA,
+        "inverse": DURABLE_GROWTH_MODE_INVERSE_ALPHA,
+        "contrarian": DURABLE_GROWTH_MODE_INVERSE_ALPHA,
+        "neutral": DURABLE_GROWTH_MODE_NEUTRAL_OVERLAY,
+        "overlay": DURABLE_GROWTH_MODE_NEUTRAL_OVERLAY,
+        "repair": DURABLE_GROWTH_MODE_REPAIR_DATA,
+        "legacy": DURABLE_GROWTH_MODE_LEGACY_PASSTHROUGH,
+        "passthrough": DURABLE_GROWTH_MODE_LEGACY_PASSTHROUGH,
+    }.get(signal_mode, signal_mode)
+    if signal_mode not in DURABLE_GROWTH_MODES:
+        raise ValueError(f"{context}.signal_mode must be one of {sorted(DURABLE_GROWTH_MODES)}, got {signal_mode!r}")
+    gate_mode = str(raw.get("gate_mode", default.gate_mode) or default.gate_mode).strip().lower()
+    gate_mode = {
+        "hard": DURABLE_GROWTH_GATE_HARD_POSITIVE,
+        "alpha": DURABLE_GROWTH_GATE_ALPHA_ONLY,
+        "overlay": DURABLE_GROWTH_GATE_OVERLAY_ONLY,
+        "neutral": DURABLE_GROWTH_GATE_OVERLAY_ONLY,
+        "repair": DURABLE_GROWTH_GATE_REPAIR_DATA,
+    }.get(gate_mode, gate_mode)
+    if gate_mode not in DURABLE_GROWTH_GATE_MODES:
+        raise ValueError(f"{context}.gate_mode must be one of {sorted(DURABLE_GROWTH_GATE_MODES)}, got {gate_mode!r}")
+    entry_min = (
+        parse_optional_float(raw.get("entry_min"), context=f"{context}.entry_min")
+        if "entry_min" in raw
+        else default.entry_min
+    )
+    reliability = (
+        parse_optional_float(raw.get("reliability"), context=f"{context}.reliability")
+        if "reliability" in raw
+        else default.reliability
+    )
+    if reliability is None:
+        reliability = default.reliability
+    raw_min_component_count = to_float(raw.get("min_component_count")) if "min_component_count" in raw else None
+    min_component_count = int(raw_min_component_count) if raw_min_component_count is not None else default.min_component_count
+    min_evidence_quality = (
+        parse_optional_float(raw.get("min_evidence_quality"), context=f"{context}.min_evidence_quality")
+        if "min_evidence_quality" in raw
+        else default.min_evidence_quality
+    )
+    if min_evidence_quality is None:
+        min_evidence_quality = default.min_evidence_quality
+    production_state = str(
+        raw.get("production_state", raw.get("validation_status", default.production_state)) or default.production_state
+    ).strip().lower()
+    production_state = {
+        "active": DURABLE_GROWTH_PRODUCTION_PROMOTED,
+        "production": DURABLE_GROWTH_PRODUCTION_PROMOTED,
+        "promote": DURABLE_GROWTH_PRODUCTION_PROMOTED,
+        "promoted": DURABLE_GROWTH_PRODUCTION_PROMOTED,
+        "research": DURABLE_GROWTH_PRODUCTION_RESEARCH_ONLY,
+        "research_only": DURABLE_GROWTH_PRODUCTION_RESEARCH_ONLY,
+        "shadow": DURABLE_GROWTH_PRODUCTION_RESEARCH_ONLY,
+        "legacy": DURABLE_GROWTH_PRODUCTION_LEGACY_CHAMPION,
+        "legacy_champion": DURABLE_GROWTH_PRODUCTION_LEGACY_CHAMPION,
+        "disabled": DURABLE_GROWTH_PRODUCTION_DISABLED,
+        "kill": DURABLE_GROWTH_PRODUCTION_DISABLED,
+        "off": DURABLE_GROWTH_PRODUCTION_DISABLED,
+    }.get(production_state, production_state)
+    if production_state not in DURABLE_GROWTH_PRODUCTION_STATES:
+        raise ValueError(
+            f"{context}.production_state must be one of {sorted(DURABLE_GROWTH_PRODUCTION_STATES)}, "
+            f"got {production_state!r}"
+        )
+    latest_lcb_excess_delta = (
+        parse_optional_float(raw.get("latest_lcb_excess_delta"), context=f"{context}.latest_lcb_excess_delta")
+        if "latest_lcb_excess_delta" in raw
+        else default.latest_lcb_excess_delta
+    )
+    latest_tier1_lcb_excess_delta = (
+        parse_optional_float(raw.get("latest_tier1_lcb_excess_delta"), context=f"{context}.latest_tier1_lcb_excess_delta")
+        if "latest_tier1_lcb_excess_delta" in raw
+        else default.latest_tier1_lcb_excess_delta
+    )
+    latest_loss_rate = (
+        parse_optional_float(raw.get("latest_loss_rate"), context=f"{context}.latest_loss_rate")
+        if "latest_loss_rate" in raw
+        else default.latest_loss_rate
+    )
+    latest_tier1_loss_rate = (
+        parse_optional_float(raw.get("latest_tier1_loss_rate"), context=f"{context}.latest_tier1_loss_rate")
+        if "latest_tier1_loss_rate" in raw
+        else default.latest_tier1_loss_rate
+    )
+    min_lcb_excess_delta = (
+        parse_optional_float(raw.get("min_lcb_excess_delta"), context=f"{context}.min_lcb_excess_delta")
+        if "min_lcb_excess_delta" in raw
+        else default.min_lcb_excess_delta
+    )
+    if min_lcb_excess_delta is None:
+        min_lcb_excess_delta = default.min_lcb_excess_delta
+    max_loss_rate = (
+        parse_optional_float(raw.get("max_loss_rate"), context=f"{context}.max_loss_rate")
+        if "max_loss_rate" in raw
+        else default.max_loss_rate
+    )
+    if max_loss_rate is None:
+        max_loss_rate = default.max_loss_rate
+    default_block = gate_mode in {DURABLE_GROWTH_GATE_HARD_POSITIVE, DURABLE_GROWTH_GATE_REPAIR_DATA}
+    return DurableGrowthPolicy(
+        signal_mode=signal_mode,
+        gate_mode=gate_mode,
+        entry_min=entry_min,
+        reliability=clamp(float(reliability), 0.0, 1.0),
+        min_component_count=max(0, min_component_count),
+        min_evidence_quality=clamp(float(min_evidence_quality)),
+        block_classification=bool_from_raw(raw.get("block_classification"), default_block),
+        production_state=production_state,
+        latest_lcb_excess_delta=latest_lcb_excess_delta,
+        latest_tier1_lcb_excess_delta=latest_tier1_lcb_excess_delta,
+        latest_loss_rate=normalize_loss_rate(latest_loss_rate),
+        latest_tier1_loss_rate=normalize_loss_rate(latest_tier1_loss_rate),
+        min_lcb_excess_delta=float(min_lcb_excess_delta),
+        max_loss_rate=clamp(float(normalize_loss_rate(max_loss_rate) or 0.0), 0.0, 1.0),
+        require_positive_tier1_lcb_delta=bool_from_raw(
+            raw.get("require_positive_tier1_lcb_delta"),
+            default.require_positive_tier1_lcb_delta,
+        ),
+        require_validation_for_nonlegacy=bool_from_raw(
+            raw.get("require_validation_for_nonlegacy"),
+            default.require_validation_for_nonlegacy,
+        ),
+        rationale=str(raw.get("rationale", default.rationale) or "").strip(),
+    )
+
+
+def base_durable_growth_policy(config: dict[str, Any], gates: dict[str, float]) -> DurableGrowthPolicy:
+    default = DurableGrowthPolicy(
+        signal_mode=DURABLE_GROWTH_MODE_LEGACY_PASSTHROUGH,
+        gate_mode=DURABLE_GROWTH_GATE_HARD_POSITIVE,
+        entry_min=None,
+        reliability=1.0,
+        min_component_count=0,
+        min_evidence_quality=0.0,
+        block_classification=True,
+        production_state=DURABLE_GROWTH_PRODUCTION_PROMOTED,
+        latest_lcb_excess_delta=None,
+        latest_tier1_lcb_excess_delta=None,
+        latest_loss_rate=None,
+        latest_tier1_loss_rate=None,
+        min_lcb_excess_delta=0.0,
+        max_loss_rate=0.45,
+        require_positive_tier1_lcb_delta=False,
+        require_validation_for_nonlegacy=True,
+        rationale="base_legacy_durable_growth_passthrough",
+    )
+    return parse_durable_growth_policy(
+        cfg_get(config, "scoring.durable_growth_policy", None),
+        default=default,
+        context="scoring.durable_growth_policy",
+    )
+
+
+def cohort_durable_growth_policy_profiles(config: dict[str, Any], base_policy: DurableGrowthPolicy) -> dict[str, DurableGrowthPolicy]:
+    if not cfg_bool(config, "scoring.durable_growth_policy_profiles_enabled", True):
+        return {}
+    raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
+    if not isinstance(raw_profiles, dict):
+        raise ValueError("scoring.cohort_profiles must be a mapping when provided")
+    out: dict[str, DurableGrowthPolicy] = {}
+    for cohort, raw_profile in raw_profiles.items():
+        if not isinstance(raw_profile, dict):
+            continue
+        if str(raw_profile.get("enabled", True)).strip().lower() in {"0", "false", "no", "off"}:
+            continue
+        if "durable_growth_policy" not in raw_profile:
+            continue
+        out[str(cohort)] = parse_durable_growth_policy(
+            raw_profile.get("durable_growth_policy"),
+            default=base_policy,
+            context=f"scoring.cohort_profiles.{cohort}.durable_growth_policy",
+        )
+    return out
+
+
+def durable_growth_policy_for_row(
+    row: ScoreRow,
+    base_policy: DurableGrowthPolicy,
+    profiles: dict[str, DurableGrowthPolicy],
+) -> DurableGrowthPolicy:
+    return profiles.get(row.calibration_cohort, base_policy)
+
+
 def cohort_component_weight_profiles(config: dict[str, Any], base_weights: dict[str, float]) -> dict[str, dict[str, float]]:
     raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
     if not isinstance(raw_profiles, dict):
@@ -1407,6 +1961,13 @@ def weights_for_cohort(cohort: str, base_weights: dict[str, float], profiles: di
 SCORE_TEMPLATE_FIELD_TO_ATTR = {
     "fundamental_quality_score": "fundamental_quality_score",
     "durable_growth_score": "durable_growth_score",
+    "durable_growth_score_legacy": "durable_growth_score_legacy",
+    "durable_growth_alpha_score": "durable_growth_alpha_score",
+    "durable_growth_growth_score": "durable_growth_growth_score",
+    "durable_growth_quality_score": "durable_growth_quality_score",
+    "durable_growth_efficiency_score": "durable_growth_efficiency_score",
+    "durable_growth_capital_discipline_score": "durable_growth_capital_discipline_score",
+    "durable_growth_evidence_quality_score": "durable_growth_evidence_quality_score",
     "fda_product_score": "fda_product_score",
     "fda_alpha_score": "fda_alpha_score",
     "fda_safety_score": "fda_safety_score",
@@ -1426,6 +1987,13 @@ SCORE_TEMPLATE_FIELD_TO_ATTR = {
 SCORE_TEMPLATE_FIELD_TO_COMPONENT = {
     "fundamental_quality_score": "fundamental_quality",
     "durable_growth_score": "durable_growth",
+    "durable_growth_score_legacy": "durable_growth",
+    "durable_growth_alpha_score": "durable_growth",
+    "durable_growth_growth_score": "durable_growth",
+    "durable_growth_quality_score": "durable_growth",
+    "durable_growth_efficiency_score": "durable_growth",
+    "durable_growth_capital_discipline_score": "durable_growth",
+    "durable_growth_evidence_quality_score": "durable_growth",
     "fda_product_score": "fda_product",
     "fda_alpha_score": "fda_product",
     "fda_safety_score": "fda_product",
@@ -1537,6 +2105,10 @@ def score_template_fda_weight(template: CohortScoreTemplate | None) -> float:
     return score_template_component_weight(template, "fda_product")
 
 
+def score_template_durable_growth_weight(template: CohortScoreTemplate | None) -> float:
+    return score_template_component_weight(template, "durable_growth")
+
+
 def score_template_value(
     row: ScoreRow,
     template: CohortScoreTemplate,
@@ -1590,6 +2162,304 @@ def fda_score_available(item: dict[str, Any], *, source: str) -> bool:
         if source == "alpha":
             return False
     return to_float(item.get("fda_product_score_legacy")) is not None or to_float(item.get("fda_product_score")) is not None
+
+
+def durable_growth_score_source(config: dict[str, Any]) -> str:
+    source = str(
+        cfg_get(config, "scoring.durable_growth_score_source", "alpha_when_available") or "alpha_when_available"
+    ).strip().lower()
+    allowed = {"legacy", "proxy", "alpha", "alpha_when_available"}
+    if source not in allowed:
+        raise ValueError(f"scoring.durable_growth_score_source must be one of {sorted(allowed)}, got {source!r}")
+    return source
+
+
+def durable_float_from_payload(item: dict[str, Any], key: str) -> float | None:
+    payload = item.get("payload_json") if item else None
+    if not payload:
+        return None
+    try:
+        parsed = json.loads(str(payload))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    for container in (parsed, parsed.get("scores"), parsed.get("component_scores")):
+        if isinstance(container, dict):
+            value = to_float(container.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def first_not_none(*values: float | None) -> float | None:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def durable_legacy_components_from_feature(
+    item: dict[str, Any],
+    *,
+    fallback_score: float,
+    neutral: float,
+) -> tuple[float, float, float, float, float, float, int]:
+    growth_score = first_not_none(
+        to_float(item.get("durable_growth_growth_score")),
+        durable_float_from_payload(item, "durable_growth_growth_score"),
+    )
+    quality_score = first_not_none(
+        to_float(item.get("durable_growth_quality_score")),
+        durable_float_from_payload(item, "durable_growth_quality_score"),
+    )
+    efficiency_score = first_not_none(
+        to_float(item.get("durable_growth_efficiency_score")),
+        durable_float_from_payload(item, "durable_growth_efficiency_score"),
+    )
+    capital_score = first_not_none(
+        to_float(item.get("durable_growth_capital_discipline_score")),
+        durable_float_from_payload(item, "durable_growth_capital_discipline_score"),
+    )
+    evidence_score = first_not_none(
+        to_float(item.get("durable_growth_evidence_quality_score")),
+        durable_float_from_payload(item, "durable_growth_evidence_quality_score"),
+    )
+    component_count_raw = first_not_none(
+        to_float(item.get("durable_growth_component_count")),
+        durable_float_from_payload(item, "durable_growth_component_count"),
+    )
+    component_count = int(component_count_raw) if component_count_raw is not None else 0
+    return (
+        fallback_score,
+        score_or(growth_score, fallback_score),
+        score_or(quality_score, fallback_score),
+        score_or(efficiency_score, neutral),
+        score_or(capital_score, neutral),
+        score_or(evidence_score, 50.0 if component_count else 0.0),
+        component_count,
+    )
+
+
+def selected_durable_growth_legacy(
+    item: dict[str, Any],
+    proxy: DurableGrowthProxy | None,
+    *,
+    neutral: float,
+    source: str,
+) -> tuple[float, float, float, float, float, float, int, str]:
+    if source in {"alpha", "alpha_when_available"} and item:
+        alpha = to_float(item.get("durable_growth_alpha_score"))
+        if alpha is not None:
+            return (*durable_legacy_components_from_feature(item, fallback_score=alpha, neutral=neutral), "durable_growth_alpha_score")
+        if source == "alpha":
+            return neutral, neutral, neutral, neutral, neutral, 0.0, 0, "durable_growth_alpha_score_missing"
+    if source in {"legacy", "alpha_when_available"} and item:
+        legacy = to_float(item.get("durable_growth_score_legacy"))
+        if legacy is None:
+            legacy = to_float(item.get("score"))
+        if legacy is not None:
+            feature_components = durable_legacy_components_from_feature(item, fallback_score=legacy, neutral=neutral)
+            if feature_components[-1] > 0 or proxy is None:
+                return (*feature_components, "feature_durable_growth_legacy")
+            return (
+                proxy.legacy_score,
+                proxy.growth_score,
+                proxy.quality_score,
+                proxy.efficiency_score,
+                proxy.capital_discipline_score,
+                proxy.evidence_quality_score,
+                proxy.component_count,
+                proxy.source,
+            )
+    if proxy is not None:
+        return (
+            proxy.legacy_score,
+            proxy.growth_score,
+            proxy.quality_score,
+            proxy.efficiency_score,
+            proxy.capital_discipline_score,
+            proxy.evidence_quality_score,
+            proxy.component_count,
+            proxy.source,
+        )
+    return neutral, neutral, neutral, neutral, neutral, 0.0, 0, "durable_growth_missing"
+
+
+def durable_growth_score_available(item: dict[str, Any], proxy: DurableGrowthProxy | None, *, source: str) -> bool:
+    if source in {"alpha", "alpha_when_available"} and item and to_float(item.get("durable_growth_alpha_score")) is not None:
+        return True
+    if source == "alpha":
+        return False
+    if item and (to_float(item.get("durable_growth_score_legacy")) is not None or to_float(item.get("score")) is not None):
+        return True
+    return proxy is not None
+
+
+def durable_growth_validation_status(policy: DurableGrowthPolicy) -> tuple[str, str]:
+    status = policy.production_state
+    reasons: list[str] = []
+    if status != DURABLE_GROWTH_PRODUCTION_PROMOTED:
+        reasons.append(f"production_state_{status}")
+    validation_required = (
+        status not in {DURABLE_GROWTH_PRODUCTION_LEGACY_CHAMPION, DURABLE_GROWTH_PRODUCTION_DISABLED}
+        and policy.signal_mode in {DURABLE_GROWTH_MODE_POSITIVE_ALPHA, DURABLE_GROWTH_MODE_INVERSE_ALPHA}
+        and policy.require_validation_for_nonlegacy
+    )
+    if validation_required:
+        if policy.latest_lcb_excess_delta is None:
+            status = DURABLE_GROWTH_PRODUCTION_RESEARCH_ONLY
+            reasons.append("missing_latest_lcb_excess_delta")
+        elif policy.latest_lcb_excess_delta < policy.min_lcb_excess_delta:
+            status = DURABLE_GROWTH_PRODUCTION_RESEARCH_ONLY
+            reasons.append(
+                f"lcb_delta_{policy.latest_lcb_excess_delta:.2f}_below_{policy.min_lcb_excess_delta:.2f}"
+            )
+        if policy.latest_loss_rate is None:
+            status = DURABLE_GROWTH_PRODUCTION_RESEARCH_ONLY
+            reasons.append("missing_latest_loss_rate")
+        elif policy.latest_loss_rate > policy.max_loss_rate:
+            status = DURABLE_GROWTH_PRODUCTION_RESEARCH_ONLY
+            reasons.append(f"loss_rate_{policy.latest_loss_rate:.2f}_above_{policy.max_loss_rate:.2f}")
+        if policy.require_positive_tier1_lcb_delta:
+            if policy.latest_tier1_lcb_excess_delta is None:
+                status = DURABLE_GROWTH_PRODUCTION_RESEARCH_ONLY
+                reasons.append("missing_latest_tier1_lcb_excess_delta")
+            elif policy.latest_tier1_lcb_excess_delta <= 0:
+                status = DURABLE_GROWTH_PRODUCTION_RESEARCH_ONLY
+                reasons.append(f"tier1_lcb_delta_{policy.latest_tier1_lcb_excess_delta:.2f}_not_positive")
+            if policy.latest_tier1_loss_rate is not None and policy.latest_tier1_loss_rate > policy.max_loss_rate:
+                status = DURABLE_GROWTH_PRODUCTION_RESEARCH_ONLY
+                reasons.append(f"tier1_loss_rate_{policy.latest_tier1_loss_rate:.2f}_above_{policy.max_loss_rate:.2f}")
+    if status == DURABLE_GROWTH_PRODUCTION_DISABLED:
+        reasons.append("durable_growth_disabled")
+    if not reasons and status == DURABLE_GROWTH_PRODUCTION_PROMOTED:
+        reasons.append("validation_promoted")
+    return status, ";".join(dict.fromkeys(reasons))
+
+
+def apply_durable_growth_policy(
+    *,
+    legacy_score: float,
+    growth_score: float,
+    quality_score: float,
+    efficiency_score: float,
+    capital_discipline_score: float,
+    evidence_quality_score: float,
+    component_count: int,
+    policy: DurableGrowthPolicy,
+    neutral: float,
+    source: str,
+) -> DurableGrowthSelection:
+    repair_reasons: list[str] = []
+    if component_count < policy.min_component_count:
+        repair_reasons.append("insufficient_durable_growth_components")
+    if evidence_quality_score < policy.min_evidence_quality:
+        repair_reasons.append("low_durable_growth_evidence_quality")
+    validation_status, validation_reason = durable_growth_validation_status(policy)
+    validation_promoted = validation_status == DURABLE_GROWTH_PRODUCTION_PROMOTED
+    if policy.signal_mode == DURABLE_GROWTH_MODE_DISABLED or validation_status == DURABLE_GROWTH_PRODUCTION_DISABLED:
+        oriented = neutral
+        direction = "disabled"
+        base_reliability = 0.0
+    elif policy.signal_mode == DURABLE_GROWTH_MODE_LEGACY_PASSTHROUGH:
+        oriented = legacy_score
+        direction = "legacy"
+        base_reliability = 1.0
+        repair_reasons = []
+    elif validation_status == DURABLE_GROWTH_PRODUCTION_LEGACY_CHAMPION:
+        oriented = legacy_score
+        direction = "legacy_champion"
+        base_reliability = 1.0
+        repair_reasons = []
+    elif not validation_promoted:
+        oriented = neutral
+        direction = f"{policy.signal_mode}_validation_blocked"
+        base_reliability = 0.0
+    elif policy.signal_mode == DURABLE_GROWTH_MODE_NEUTRAL_OVERLAY:
+        oriented = neutral
+        direction = "neutral"
+        base_reliability = 0.0
+    elif policy.signal_mode == DURABLE_GROWTH_MODE_INVERSE_ALPHA:
+        oriented = 100.0 - legacy_score
+        direction = "inverse"
+        base_reliability = policy.reliability
+    elif policy.signal_mode == DURABLE_GROWTH_MODE_REPAIR_DATA:
+        oriented = neutral
+        direction = "repair_data"
+        base_reliability = 0.0
+        if not repair_reasons:
+            repair_reasons.append("cohort_marked_repair_data")
+    else:
+        oriented = legacy_score
+        direction = "positive"
+        base_reliability = policy.reliability
+    if direction in {"legacy", "legacy_champion"}:
+        effective_reliability = 1.0
+        alpha_score = round(clamp(oriented), 2)
+    else:
+        evidence_multiplier = math.sqrt(clamp(evidence_quality_score) / 100.0) if evidence_quality_score > 0 else 0.0
+        effective_reliability = clamp(base_reliability * evidence_multiplier, 0.0, 1.0)
+        alpha_score = round(clamp(neutral + (oriented - neutral) * effective_reliability), 2)
+    if repair_reasons and policy.gate_mode == DURABLE_GROWTH_GATE_REPAIR_DATA:
+        alpha_score = neutral
+    return DurableGrowthSelection(
+        legacy_score=round(clamp(legacy_score), 2),
+        alpha_score=alpha_score,
+        growth_score=round(clamp(growth_score), 2),
+        quality_score=round(clamp(quality_score), 2),
+        efficiency_score=round(clamp(efficiency_score), 2),
+        capital_discipline_score=round(clamp(capital_discipline_score), 2),
+        evidence_quality_score=round(clamp(evidence_quality_score), 2),
+        component_count=component_count,
+        signal_mode=policy.signal_mode,
+        signal_direction=direction,
+        signal_reliability=round(effective_reliability, 4),
+        score_source=source,
+        repair_flag=1 if repair_reasons else 0,
+        repair_reason=";".join(dict.fromkeys(repair_reasons)),
+        validation_status=validation_status,
+        validation_reason=validation_reason,
+        production_state=policy.production_state,
+    )
+
+
+def durable_growth_is_active_for_composite(
+    policy: DurableGrowthPolicy,
+    selection: DurableGrowthSelection,
+) -> bool:
+    if selection.signal_direction in {"legacy", "legacy_champion"}:
+        return selection.validation_status in {
+            DURABLE_GROWTH_PRODUCTION_PROMOTED,
+            DURABLE_GROWTH_PRODUCTION_LEGACY_CHAMPION,
+        }
+    if selection.validation_status != DURABLE_GROWTH_PRODUCTION_PROMOTED:
+        return False
+    if policy.signal_mode in {
+        DURABLE_GROWTH_MODE_NEUTRAL_OVERLAY,
+        DURABLE_GROWTH_MODE_REPAIR_DATA,
+        DURABLE_GROWTH_MODE_DISABLED,
+    }:
+        return False
+    return selection.signal_reliability > WEIGHT_EPSILON
+
+
+def durable_growth_validation_excludes_gate(policy: DurableGrowthPolicy, row: ScoreRow) -> bool:
+    if policy.gate_mode == DURABLE_GROWTH_GATE_REPAIR_DATA:
+        return False
+    if row.durable_growth_signal_direction == "legacy_champion":
+        return False
+    if policy.signal_mode == DURABLE_GROWTH_MODE_LEGACY_PASSTHROUGH:
+        return row.durable_growth_validation_status not in {
+            "",
+            DURABLE_GROWTH_PRODUCTION_PROMOTED,
+            DURABLE_GROWTH_PRODUCTION_LEGACY_CHAMPION,
+        }
+    return row.durable_growth_validation_status not in {
+        "",
+        DURABLE_GROWTH_PRODUCTION_PROMOTED,
+        DURABLE_GROWTH_PRODUCTION_LEGACY_CHAMPION,
+    }
 
 
 def technical_score_source(config: dict[str, Any]) -> str:
@@ -1732,6 +2602,7 @@ def classify(
     gates: dict[str, float],
     technical_policy: TechnicalPolicy | None = None,
     fda_policy: FdaGatePolicy | None = None,
+    durable_policy: DurableGrowthPolicy | None = None,
 ) -> None:
     if technical_policy is None:
         technical_policy = TechnicalPolicy(
@@ -1749,6 +2620,26 @@ def classify(
             block_classification=True,
             rationale="legacy_default_hard_positive_fda_gate",
         )
+    if durable_policy is None:
+        durable_policy = DurableGrowthPolicy(
+            signal_mode=DURABLE_GROWTH_MODE_LEGACY_PASSTHROUGH,
+            gate_mode=DURABLE_GROWTH_GATE_HARD_POSITIVE,
+            entry_min=gates["durable_growth_min"],
+            reliability=1.0,
+            min_component_count=0,
+            min_evidence_quality=0.0,
+            block_classification=True,
+            production_state=DURABLE_GROWTH_PRODUCTION_PROMOTED,
+            latest_lcb_excess_delta=None,
+            latest_tier1_lcb_excess_delta=None,
+            latest_loss_rate=None,
+            latest_tier1_loss_rate=None,
+            min_lcb_excess_delta=0.0,
+            max_loss_rate=0.45,
+            require_positive_tier1_lcb_delta=False,
+            require_validation_for_nonlegacy=True,
+            rationale="legacy_default_hard_positive_durable_growth_gate",
+        )
     reasons: list[str] = []
     entry_score = row.technical_entry_status_score if row.technical_entry_status_score is not None else row.technical_entry_score
     row.entry_status = entry_status(entry_score)
@@ -1763,7 +2654,32 @@ def classify(
         and row.cohort_percentile >= gates.get("cohort_percentile_min", 0.0)
     )
     row.passed_fundamental_gate = int(row.fundamental_quality_score >= gates["fundamental_quality_min"])
-    row.passed_growth_gate = int(row.durable_growth_score >= gates["durable_growth_min"])
+    row.durable_growth_gate_mode = durable_policy.gate_mode
+    row.durable_growth_policy_reason = durable_policy.rationale
+    growth_min = durable_policy.entry_min if durable_policy.entry_min is not None else gates["durable_growth_min"]
+    base_growth_score_gate = int(row.durable_growth_score >= growth_min)
+    repair_required = bool(
+        durable_policy.gate_mode == DURABLE_GROWTH_GATE_REPAIR_DATA
+        or durable_policy.signal_mode == DURABLE_GROWTH_MODE_REPAIR_DATA
+        or (durable_policy.block_classification and row.durable_growth_repair_flag)
+    )
+    validation_excludes_gate = durable_growth_validation_excludes_gate(durable_policy, row)
+    if durable_policy.gate_mode == DURABLE_GROWTH_GATE_HARD_POSITIVE:
+        if validation_excludes_gate:
+            row.passed_growth_gate = 1
+            row.durable_growth_gate_excluded = 1
+        else:
+            row.passed_growth_gate = int(base_growth_score_gate and not repair_required)
+            row.durable_growth_gate_excluded = 0
+    elif durable_policy.gate_mode == DURABLE_GROWTH_GATE_ALPHA_ONLY:
+        row.passed_growth_gate = int(not repair_required)
+        row.durable_growth_gate_excluded = 1
+    elif durable_policy.gate_mode == DURABLE_GROWTH_GATE_REPAIR_DATA:
+        row.passed_growth_gate = 0
+        row.durable_growth_gate_excluded = 1
+    else:
+        row.passed_growth_gate = 1
+        row.durable_growth_gate_excluded = 1
     manual_regulatory_state = row.fda_review_state in MANUAL_FDA_REVIEW_STATES
     confirmed_hard_red = row.fda_review_state == "confirmed_hard_red"
     row.fda_gate_mode = fda_policy.gate_mode
@@ -1819,7 +2735,10 @@ def classify(
     if not row.passed_fundamental_gate:
         reasons.append("fundamental_below_gate")
     if not row.passed_growth_gate:
-        reasons.append("growth_below_gate")
+        if durable_policy.gate_mode == DURABLE_GROWTH_GATE_REPAIR_DATA or repair_required:
+            reasons.append("durable_growth_repair_required")
+        else:
+            reasons.append("growth_below_gate")
     if not row.passed_fda_gate:
         reasons.append("fda_risk_veto" if fda_policy.gate_mode == FDA_GATE_RISK_VETO_ONLY else "fda_below_gate")
     if not row.passed_reimbursement_gate and not reimbursement_live:
@@ -1857,6 +2776,7 @@ def classify(
     row.review_reason = ";".join(reasons)
     technical_classification_block = bool(technical_policy.block_classification and not row.passed_technical_gate)
     fda_classification_block = bool(fda_policy.block_classification and not row.passed_fda_gate)
+    durable_growth_classification_block = bool(durable_policy.block_classification and not row.passed_growth_gate)
     base_investability_gate = int(
         row.passed_raw_score_gate
         and row.passed_fundamental_gate
@@ -1871,6 +2791,7 @@ def classify(
         and row.passed_fda_manual_review_gate
         and not technical_classification_block
         and not fda_classification_block
+        and not durable_growth_classification_block
     )
     row.final_investability_gate = int(base_investability_gate and not tier1_restricted)
     row.gate_status = "pass" if row.final_investability_gate else "fail"
@@ -1883,6 +2804,12 @@ def classify(
     elif fda_classification_block:
         row.classification = "manual_review_regulatory_risk" if fda_policy.gate_mode == FDA_GATE_RISK_VETO_ONLY else "watchlist"
         row.classification_reason = "fda_risk_veto" if fda_policy.gate_mode == FDA_GATE_RISK_VETO_ONLY else "fda_below_gate"
+    elif durable_growth_classification_block and (repair_required or durable_policy.gate_mode == DURABLE_GROWTH_GATE_REPAIR_DATA):
+        row.classification = "data_review_required"
+        row.classification_reason = row.durable_growth_repair_reason or "durable_growth_repair_required"
+    elif durable_growth_classification_block:
+        row.classification = "watchlist"
+        row.classification_reason = "durable_growth_below_gate"
     elif not row.passed_data_quality_gate:
         row.classification = "data_review_required"
         row.classification_reason = "data_completeness_below_gate"
@@ -1907,10 +2834,17 @@ def classify(
         )
     elif row.final_investability_gate:
         row.classification = "tier_1_long_candidate"
+        overlay_reasons = []
+        if row.durable_growth_gate_excluded:
+            overlay_reasons.append(f"durable_growth_{row.durable_growth_gate_mode}")
+        if row.technical_gate_excluded:
+            overlay_reasons.append("technical_overlay_only")
+        if row.fda_gate_excluded:
+            overlay_reasons.append(f"fda_{row.fda_gate_mode}")
         row.classification_reason = (
             "all_tier1_gates_passed"
-            if not row.technical_gate_excluded
-            else "all_tier1_nontechnical_gates_passed;technical_overlay_only"
+            if not overlay_reasons
+            else "all_tier1_active_gates_passed;" + ";".join(overlay_reasons)
         )
     elif row.raw_composite_score >= gates["watchlist_min"]:
         row.classification = "watchlist"
@@ -1937,7 +2871,6 @@ def build_rows(
     durable_rows = load_latest_feature(conn, "feature_durable_growth", "score", asof=asof)
     sentiment_rows = load_latest_feature(conn, "feature_sentiment_catalyst", "score", asof=asof)
     taxonomy = load_company_model_taxonomy(conn)
-    durable_proxy = durable_growth_proxy(financial_rows)
     neutral_fundamental = component_neutral(config, "fundamental_quality", "scoring.neutral_fundamental_quality_score", 50.0)
     neutral_durable = component_neutral(config, "durable_growth", "scoring.neutral_durable_growth_score", 50.0)
     neutral_reimbursement = component_neutral(config, "reimbursement", "scoring.neutral_reimbursement_score", 50.0)
@@ -1946,6 +2879,7 @@ def build_rows(
     neutral_technical = component_neutral(config, "technical_entry", "scoring.neutral_technical_entry_score", 50.0)
     neutral_sentiment = component_neutral(config, "sentiment_catalyst", "scoring.neutral_sentiment_catalyst_score", 50.0)
     neutral_value_trap = cfg_float(config, "scoring.neutral_value_trap_score", 50.0)
+    durable_proxy = durable_growth_proxy(financial_rows, taxonomy=taxonomy, config=config, neutral=neutral_durable)
     sentiment_proxy = sentiment_catalyst_proxy(financial_rows, config=config, neutral=neutral_sentiment)
     gates = base_scoring_gates(config)
     gate_profiles = cohort_gate_profiles(config, gates)
@@ -1956,8 +2890,11 @@ def build_rows(
     technical_policy_profiles = cohort_technical_policy_profiles(config, default_technical_policy)
     default_fda_policy = base_fda_gate_policy(config, gates)
     fda_policy_profiles = cohort_fda_gate_policy_profiles(config, default_fda_policy)
+    default_durable_growth_policy = base_durable_growth_policy(config, gates)
+    durable_growth_policy_profiles = cohort_durable_growth_policy_profiles(config, default_durable_growth_policy)
     pullback_candidate_profiles = cohort_pullback_candidate_profiles(config)
     fda_source = fda_score_source(config)
+    durable_source = durable_growth_score_source(config)
     technical_source = technical_composite_score_source(config)
     technical_entry_source = technical_entry_status_score_source(config)
     rank_composite = cfg_bool(config, "scoring.cross_sectional_composite_rank", True)
@@ -1979,17 +2916,23 @@ def build_rows(
             if active_score_template is not None
             else active_weights.get("fda_product", 0.0)
         )
+        durable_component_weight = (
+            score_template_durable_growth_weight(active_score_template)
+            if active_score_template is not None
+            else active_weights.get("durable_growth", 0.0)
+        )
+        durable_policy = durable_growth_policy_profiles.get(cohort, default_durable_growth_policy)
         fda_item = fda_rows.get(company_id, {})
         reimbursement_item = reimbursement_rows.get(company_id, {})
         technical_item = technical_rows.get(company_id, {})
         durable_item = durable_rows.get(company_id, {})
         sentiment_item = sentiment_rows.get(company_id, {})
-        has_durable_proxy = company_id in durable_proxy
+        durable_proxy_item = durable_proxy.get(company_id)
+        has_durable_proxy = durable_proxy_item is not None
         sentiment_proxy_item = sentiment_proxy.get(company_id)
         has_sentiment_proxy = sentiment_proxy_item is not None
-        durable_table_score = to_float(durable_item.get("score")) if durable_item else None
         sentiment_table_score = to_float(sentiment_item.get("score")) if sentiment_item else None
-        has_durable_live_score = durable_table_score is not None or has_durable_proxy
+        has_durable_live_score = durable_growth_score_available(durable_item, durable_proxy_item, source=durable_source)
         has_sentiment_live_score = sentiment_table_score is not None or has_sentiment_proxy
         fda_hard_flag = int(fda_item.get("hard_red_flag") or 0) if fda_item else 0
         fda_data_available = int(fda_item.get("fda_data_available") or 0) if fda_item else 0
@@ -2016,11 +2959,34 @@ def build_rows(
         if fda_item and not fda_data_available and not fda_review_state.startswith("manual_fda_footprint_"):
             fda_score = neutral_fda_no_data
             active_fda_score_source = "neutral_no_mapped_fda_records"
-        durable_score = (
-            score_or(durable_item.get("score"), durable_proxy.get(company_id, neutral_durable))
-            if durable_item
-            else durable_proxy.get(company_id, neutral_durable)
+        (
+            durable_legacy_score,
+            durable_growth_growth_score,
+            durable_growth_quality_score,
+            durable_growth_efficiency_score,
+            durable_growth_capital_discipline_score,
+            durable_growth_evidence_quality_score,
+            durable_growth_component_count,
+            active_durable_growth_score_source,
+        ) = selected_durable_growth_legacy(
+            durable_item,
+            durable_proxy_item,
+            neutral=neutral_durable,
+            source=durable_source,
         )
+        durable_selection = apply_durable_growth_policy(
+            legacy_score=durable_legacy_score,
+            growth_score=durable_growth_growth_score,
+            quality_score=durable_growth_quality_score,
+            efficiency_score=durable_growth_efficiency_score,
+            capital_discipline_score=durable_growth_capital_discipline_score,
+            evidence_quality_score=durable_growth_evidence_quality_score,
+            component_count=durable_growth_component_count,
+            policy=durable_policy,
+            neutral=neutral_durable,
+            source=active_durable_growth_score_source,
+        )
+        durable_score = durable_selection.alpha_score
         sentiment_score = (
             score_or(
                 sentiment_item.get("score"),
@@ -2064,13 +3030,18 @@ def build_rows(
         avg_dollar_volume_60d = to_float(technical_item.get("avg_dollar_volume_60d")) if technical_item else None
         liquidity_score = to_float(technical_item.get("liquidity_score")) if technical_item else None
         market_cap = to_float(item.get("market_cap"))
+        durable_alpha_active = durable_growth_is_active_for_composite(durable_policy, durable_selection)
+        effective_weights = dict(active_weights)
+        if not durable_alpha_active:
+            effective_weights["durable_growth"] = 0.0
+            durable_component_weight = 0.0
         current_shares_outstanding = to_float(item.get("current_shares_outstanding"))
         diluted_weighted_average_shares = to_float(item.get("diluted_weighted_average_shares"))
         basic_weighted_average_shares = to_float(item.get("basic_weighted_average_shares"))
         market_cap_validated_flag = int(item.get("market_cap_validated_flag") or 0)
         component_available = {
             "fundamental_quality": to_float(item.get("fundamental_quality_score_v1")) is not None,
-            "durable_growth": has_durable_live_score,
+            "durable_growth": bool(has_durable_live_score and durable_alpha_active),
             "fda_product": fda_score_available(fda_item, source=fda_source),
             "reimbursement": has_reimbursement_live_score,
             "valuation": to_float(item.get("valuation_score_v1")) is not None,
@@ -2080,6 +3051,13 @@ def build_rows(
         score_field_available = {
             "fundamental_quality_score": component_available["fundamental_quality"],
             "durable_growth_score": component_available["durable_growth"],
+            "durable_growth_score_legacy": component_available["durable_growth"],
+            "durable_growth_alpha_score": component_available["durable_growth"],
+            "durable_growth_growth_score": component_available["durable_growth"],
+            "durable_growth_quality_score": component_available["durable_growth"],
+            "durable_growth_efficiency_score": component_available["durable_growth"],
+            "durable_growth_capital_discipline_score": component_available["durable_growth"],
+            "durable_growth_evidence_quality_score": component_available["durable_growth"],
             "fda_product_score": component_available["fda_product"],
             "fda_alpha_score": bool(fda_item) and to_float(fda_item.get("fda_alpha_score")) is not None,
             "fda_safety_score": bool(fda_item) and to_float(fda_item.get("fda_safety_score")) is not None,
@@ -2105,6 +3083,7 @@ def build_rows(
                 component.field
                 for component in active_score_template.components
                 if component.weight > WEIGHT_EPSILON
+                and (durable_alpha_active or SCORE_TEMPLATE_FIELD_TO_COMPONENT[component.field] != "durable_growth")
             ]
             active_live_count = sum(1 for field in active_template_fields if score_field_available.get(field, False))
             data_completeness = (
@@ -2113,7 +3092,7 @@ def build_rows(
                 else 0.0
             )
         else:
-            active_component_keys = [key for key, weight in active_weights.items() if weight > WEIGHT_EPSILON]
+            active_component_keys = [key for key, weight in effective_weights.items() if weight > WEIGHT_EPSILON]
             active_live_count = sum(1 for key in active_component_keys if component_available.get(key, False))
             data_completeness = round(100.0 * active_live_count / len(active_component_keys), 2) if active_component_keys else 0.0
         row = ScoreRow(
@@ -2131,6 +3110,31 @@ def build_rows(
             cohort_score_template_spec=score_template_spec(active_score_template),
             fundamental_quality_score=score_or(item.get("fundamental_quality_score_v1"), neutral_fundamental),
             durable_growth_score=durable_score,
+            durable_growth_score_legacy=durable_selection.legacy_score,
+            durable_growth_alpha_score=durable_selection.alpha_score,
+            durable_growth_growth_score=durable_selection.growth_score,
+            durable_growth_quality_score=durable_selection.quality_score,
+            durable_growth_efficiency_score=durable_selection.efficiency_score,
+            durable_growth_capital_discipline_score=durable_selection.capital_discipline_score,
+            durable_growth_evidence_quality_score=durable_selection.evidence_quality_score,
+            durable_growth_component_count=durable_selection.component_count,
+            durable_growth_signal_mode=durable_selection.signal_mode,
+            durable_growth_signal_direction=durable_selection.signal_direction,
+            durable_growth_signal_reliability=durable_selection.signal_reliability,
+            durable_growth_score_source=durable_selection.score_source,
+            durable_growth_gate_mode=durable_policy.gate_mode,
+            durable_growth_policy_reason=durable_policy.rationale,
+            durable_growth_gate_excluded=int(
+                durable_policy.gate_mode
+                in {DURABLE_GROWTH_GATE_ALPHA_ONLY, DURABLE_GROWTH_GATE_OVERLAY_ONLY, DURABLE_GROWTH_GATE_DISABLED}
+                or not durable_alpha_active
+            ),
+            durable_growth_component_weight=durable_component_weight,
+            durable_growth_repair_flag=durable_selection.repair_flag,
+            durable_growth_repair_reason=durable_selection.repair_reason,
+            durable_growth_validation_status=durable_selection.validation_status,
+            durable_growth_validation_reason=durable_selection.validation_reason,
+            durable_growth_production_state=durable_selection.production_state,
             fda_product_score=fda_score,
             fda_product_score_legacy=score_or(fda_item.get("fda_product_score_legacy"), fda_score) if fda_item else neutral_fda_no_data,
             fda_alpha_score=score_or(fda_item.get("fda_alpha_score"), fda_score) if fda_item else neutral_fda_no_data,
@@ -2209,6 +3213,16 @@ def build_rows(
         )
         row.fda_product_score = row.fda_product_score if row.fda_product_score is not None else 50.0
         row.durable_growth_score = row.durable_growth_score if row.durable_growth_score is not None else 50.0
+        row.durable_growth_score_legacy = (
+            row.durable_growth_score_legacy
+            if row.durable_growth_score_legacy is not None
+            else neutral_durable
+        )
+        row.durable_growth_alpha_score = (
+            row.durable_growth_alpha_score
+            if row.durable_growth_alpha_score is not None
+            else row.durable_growth_score
+        )
         row.reimbursement_score = row.reimbursement_score if row.reimbursement_score is not None else neutral_reimbursement
         row.technical_entry_score = row.technical_entry_score if row.technical_entry_score is not None else neutral_technical
         row.technical_entry_status_score = (
@@ -2229,7 +3243,7 @@ def build_rows(
         raw_composite = (
             score_template_value(row, active_score_template, score_field_available)
             if active_score_template is not None
-            else weighted_available_score(component_scores, component_available, active_weights)
+            else weighted_available_score(component_scores, component_available, effective_weights)
         )
         row.raw_composite_score = round(
             clamp(raw_composite * value_trap_discount(row.value_trap_score)),
@@ -2249,6 +3263,11 @@ def build_rows(
             gates=gates_for_row(row, gates, gate_profiles),
             technical_policy=technical_policy_for_row(row, default_technical_policy, technical_policy_profiles),
             fda_policy=fda_policy_for_row(row, default_fda_policy, fda_policy_profiles),
+            durable_policy=durable_growth_policy_for_row(
+                row,
+                default_durable_growth_policy,
+                durable_growth_policy_profiles,
+            ),
         )
         apply_pullback_candidate_tag(row, pullback_candidate_profiles.get(row.calibration_cohort))
         row.top_positive_drivers, row.top_negative_drivers = score_drivers(row)
@@ -2307,6 +3326,27 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "cohort_percentile",
         "fundamental_quality_score",
         "durable_growth_score",
+        "durable_growth_score_legacy",
+        "durable_growth_alpha_score",
+        "durable_growth_growth_score",
+        "durable_growth_quality_score",
+        "durable_growth_efficiency_score",
+        "durable_growth_capital_discipline_score",
+        "durable_growth_evidence_quality_score",
+        "durable_growth_component_count",
+        "durable_growth_signal_mode",
+        "durable_growth_signal_direction",
+        "durable_growth_signal_reliability",
+        "durable_growth_score_source",
+        "durable_growth_gate_mode",
+        "durable_growth_policy_reason",
+        "durable_growth_gate_excluded",
+        "durable_growth_component_weight",
+        "durable_growth_repair_flag",
+        "durable_growth_repair_reason",
+        "durable_growth_validation_status",
+        "durable_growth_validation_reason",
+        "durable_growth_production_state",
         "fda_product_score",
         "fda_product_score_legacy",
         "fda_alpha_score",
@@ -2438,6 +3478,27 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.cohort_percentile,
                 row.fundamental_quality_score,
                 row.durable_growth_score,
+                row.durable_growth_score_legacy,
+                row.durable_growth_alpha_score,
+                row.durable_growth_growth_score,
+                row.durable_growth_quality_score,
+                row.durable_growth_efficiency_score,
+                row.durable_growth_capital_discipline_score,
+                row.durable_growth_evidence_quality_score,
+                row.durable_growth_component_count,
+                row.durable_growth_signal_mode,
+                row.durable_growth_signal_direction,
+                row.durable_growth_signal_reliability,
+                row.durable_growth_score_source,
+                row.durable_growth_gate_mode,
+                row.durable_growth_policy_reason,
+                row.durable_growth_gate_excluded,
+                row.durable_growth_component_weight,
+                row.durable_growth_repair_flag,
+                row.durable_growth_repair_reason,
+                row.durable_growth_validation_status,
+                row.durable_growth_validation_reason,
+                row.durable_growth_production_state,
                 row.fda_product_score,
                 row.fda_product_score_legacy,
                 row.fda_alpha_score,

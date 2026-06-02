@@ -21,7 +21,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_optional_path, resolve_path  # noqa: E402
-from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from biotech_index.core.db import (  # noqa: E402
+    DAILY_FEATURES_OPTIONAL_COLUMNS,
+    connect,
+    ensure_table_optional_columns,
+    finish_run,
+    init_db,
+    start_run,
+    utc_now,
+)
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 from biotech_index.core.market_policy import scoring_market_sources, select_latest_rows_by_source_priority  # noqa: E402
 from biotech_index.core.pipeline_guards import (  # noqa: E402
@@ -29,6 +37,10 @@ from biotech_index.core.pipeline_guards import (  # noqa: E402
     validate_full_universe_coverage,
     validate_layer_freshness,
     validate_nonempty_selection,
+)
+from biotech_index.core.scoring_math import (  # noqa: E402
+    decomposed_risk_penalty_input,
+    weighted_predictive_risk_penalty_input,
 )
 
 
@@ -43,6 +55,18 @@ FEATURE_CSV_FIELDNAMES = [
     "credibility_score_raw",
     "financial_quality_score_raw",
     "risk_score_raw",
+    "legacy_risk_score_raw",
+    "risk_penalty_input_score_raw",
+    "predictive_risk_penalty_input_score_raw",
+    "uncompensated_risk_score_raw",
+    "compensated_risk_score_raw",
+    "liquidity_risk_score_raw",
+    "financing_survival_risk_score_raw",
+    "governance_filing_risk_score_raw",
+    "regulatory_setback_risk_score_raw",
+    "pipeline_anchor_risk_score_raw",
+    "collaborator_dependency_risk_score_raw",
+    "trial_staleness_risk_score_raw",
     "momentum_score_raw",
     "primary_nct",
     "primary_trial_title",
@@ -321,6 +345,91 @@ def bounded_float(raw: object, default: float, *, low: float | None = None, high
     if high is not None:
         value = min(high, value)
     return value
+
+
+DEFAULT_STRUCTURAL_RISK_WEIGHTS = {
+    "liquidity": 0.18,
+    "financing_survival": 0.28,
+    "governance_filing": 0.18,
+    "regulatory_setback": 0.18,
+    "pipeline_anchor": 0.12,
+    "data_quality": 0.06,
+}
+DEFAULT_COMPENSATED_RISK_WEIGHTS = {
+    "clinical_binary": 0.35,
+    "collaborator_dependency": 0.30,
+    "trial_staleness": 0.20,
+    "dilution_optional": 0.15,
+}
+DEFAULT_PREDICTIVE_RISK_PENALTY_WEIGHTS = {
+    "liquidity": 0.34,
+    "pipeline_anchor": 0.28,
+    "collaborator_dependency": 0.18,
+    "trial_staleness": 0.15,
+    "data_quality": 0.05,
+    "financing_survival": 0.0,
+    "governance_filing": 0.0,
+    "regulatory_setback": 0.0,
+    "clinical_binary": 0.0,
+    "dilution_optional": 0.0,
+}
+DEFAULT_PREDICTIVE_RISK_FREE_BANDS = {
+    "liquidity": 0.0,
+    "pipeline_anchor": 10.0,
+    "collaborator_dependency": 20.0,
+    "trial_staleness": 10.0,
+    "data_quality": 0.0,
+}
+
+
+def load_risk_decomposition_settings(config: dict[str, Any]) -> dict[str, Any]:
+    raw = cfg_get(config, "biotech_features.risk_decomposition", {}) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    weights_raw = raw.get("weights") if isinstance(raw.get("weights"), dict) else {}
+    compensated_weights_raw = (
+        raw.get("compensated_weights")
+        if isinstance(raw.get("compensated_weights"), dict)
+        else {}
+    )
+    penalty_weights_raw = raw.get("penalty_weights") if isinstance(raw.get("penalty_weights"), dict) else {}
+    free_bands_raw = raw.get("penalty_free_bands") if isinstance(raw.get("penalty_free_bands"), dict) else {}
+    caps_raw = raw.get("penalty_caps") if isinstance(raw.get("penalty_caps"), dict) else {}
+    return {
+        "compute_enabled": as_bool(raw.get("compute_enabled", raw.get("enabled", True))),
+        "use_for_penalty": as_bool(raw.get("use_for_penalty", False)),
+        "risk_penalty_mode": str(raw.get("risk_penalty_mode") or "legacy").strip().lower(),
+        "compensated_free_band": bounded_float(raw.get("compensated_free_band"), 60.0, low=0.0, high=100.0),
+        "compensated_penalty_weight": bounded_float(raw.get("compensated_penalty_weight"), 0.20, low=0.0, high=1.0),
+        "weights": {
+            key: bounded_float(weights_raw.get(key), default, low=0.0)
+            for key, default in DEFAULT_STRUCTURAL_RISK_WEIGHTS.items()
+        },
+        "compensated_weights": {
+            key: bounded_float(compensated_weights_raw.get(key), default, low=0.0)
+            for key, default in DEFAULT_COMPENSATED_RISK_WEIGHTS.items()
+        },
+        "penalty_weights": {
+            key: bounded_float(penalty_weights_raw.get(key), default, low=0.0)
+            for key, default in DEFAULT_PREDICTIVE_RISK_PENALTY_WEIGHTS.items()
+        },
+        "penalty_free_bands": {
+            key: bounded_float(free_bands_raw.get(key), default, low=0.0, high=100.0)
+            for key, default in DEFAULT_PREDICTIVE_RISK_FREE_BANDS.items()
+        },
+        "penalty_caps": {
+            key: bounded_float(caps_raw.get(key), 100.0, low=0.0, high=100.0)
+            for key in DEFAULT_PREDICTIVE_RISK_PENALTY_WEIGHTS
+        },
+    }
+
+
+def weighted_component_score(components: dict[str, float], weights: dict[str, float]) -> float:
+    total_weight = sum(max(0.0, value) for value in weights.values())
+    if total_weight <= 0.0:
+        return 0.0
+    weighted_sum = sum(max(0.0, weights.get(key, 0.0)) * clamp(value) for key, value in components.items())
+    return clamp(weighted_sum / total_weight)
 
 
 def load_pipeline_quality_settings(config: dict[str, Any]) -> dict[str, float]:
@@ -906,6 +1015,7 @@ def compute_feature_row(
     survival_score_blend_weight: float,
     core_pipeline_quality_multiplier: float,
     sec_catalyst_event_weights: dict[str, float],
+    risk_decomposition_settings: dict[str, Any],
     sec_catalyst_recency_decay_enabled: bool,
     sec_catalyst_half_life_days: float,
     market: dict[str, Any] | None,
@@ -1200,7 +1310,131 @@ def compute_feature_row(
         trial_risk += 20.0
     trial_risk += min(18.0, outcome_override_excluded * 9.0 + outcome_override_review * 2.0)
 
-    risk_raw = clamp(liquidity_risk + filing_risk + trial_risk)
+    legacy_risk_raw = clamp(liquidity_risk + filing_risk + trial_risk)
+
+    governance_filing_risk = 0.0
+    if confirmed_gc:
+        governance_filing_risk += 55.0
+    elif sec_gc_events > 0 and going_status != "resolved":
+        governance_filing_risk += 24.0
+    elif going_status == "possible" or "possible_going_concern" in source_reason_codes:
+        governance_filing_risk += 20.0
+    elif going_status == "resolved":
+        governance_filing_risk += 2.0
+    if google_reverse_confirmed:
+        governance_filing_risk += 45.0
+    elif reverse_2y > 0:
+        governance_filing_risk += min(40.0, 16.0 + reverse_2y * 8.0)
+    elif reverse_5y > 0 or reverse_soft_2y > 0:
+        governance_filing_risk += 8.0
+    if recent_nt > 0:
+        governance_filing_risk += min(18.0, recent_nt * 6.0)
+    if not recent_sec:
+        governance_filing_risk += 18.0
+
+    regulatory_setback_risk = 0.0
+    if critical_negative_events > 0:
+        regulatory_setback_risk += min(
+            55.0,
+            clinical_hold * 30.0
+            + partial_clinical_hold * 22.0
+            + endpoint_missed * 20.0
+            + safety_signal * 12.0,
+        )
+    elif clinical_update_negative > 0:
+        regulatory_setback_risk += min(10.0, clinical_update_negative * 2.5)
+
+    financing_survival_risk = 0.0
+    data_quality_risk = 0.0
+    dilution_optional_risk = 0.0
+    if survival:
+        if severe_runway_flag:
+            financing_survival_risk += 55.0
+        elif short_runway_flag:
+            financing_survival_risk += 32.0
+        elif math.isfinite(cash_runway_months) and 0 < cash_runway_months < 12:
+            financing_survival_risk += 18.0
+        if dilution_pressure_score > 0:
+            if (math.isfinite(cash_runway_months) and cash_runway_months >= 24) or survival_score_for_calc >= 80:
+                financing_survival_risk += min(8.0, dilution_pressure_score * 0.20)
+                dilution_optional_risk += min(20.0, dilution_pressure_score * 0.25)
+            else:
+                financing_survival_risk += min(30.0, dilution_pressure_score * 0.55)
+        if burn_acceleration_flag:
+            financing_survival_risk += 14.0
+        if survival_quality == "low":
+            data_quality_risk += 14.0
+    else:
+        data_quality_risk += 10.0
+
+    pipeline_anchor_risk = 0.0
+    if verified_active == 0:
+        pipeline_anchor_risk += 35.0
+    pipeline_anchor_risk += min(25.0, outcome_override_excluded * 12.0 + outcome_override_review * 3.0)
+
+    collaborator_dependency_risk = 0.0
+    if collaborator_heavy and active_lead == 0 and active_program == 0:
+        collaborator_dependency_risk += 60.0
+    elif collaborator_heavy:
+        collaborator_dependency_risk += 25.0
+
+    trial_staleness_risk = min(25.0, stale_active * 5.0)
+
+    clinical_binary_risk = 0.0
+    if active_pivotal_trials > 0 or pdufa_date > 0 or active_phase3_trials > 0:
+        clinical_binary_risk += 35.0
+    elif phase2_3 > 0:
+        clinical_binary_risk += 22.0
+    elif verified_active > 0:
+        clinical_binary_risk += 12.0
+
+    structural_risk_components = {
+        "liquidity": liquidity_risk,
+        "financing_survival": financing_survival_risk,
+        "governance_filing": governance_filing_risk,
+        "regulatory_setback": regulatory_setback_risk,
+        "pipeline_anchor": pipeline_anchor_risk,
+        "data_quality": data_quality_risk,
+    }
+    compensated_risk_components = {
+        "clinical_binary": clinical_binary_risk,
+        "collaborator_dependency": collaborator_dependency_risk,
+        "trial_staleness": trial_staleness_risk,
+        "dilution_optional": dilution_optional_risk,
+    }
+    all_risk_components = {
+        **structural_risk_components,
+        **compensated_risk_components,
+    }
+    if bool(risk_decomposition_settings.get("compute_enabled", True)):
+        uncompensated_risk_raw = weighted_component_score(
+            structural_risk_components,
+            cast(dict[str, float], risk_decomposition_settings["weights"]),
+        )
+        compensated_risk_raw = weighted_component_score(
+            compensated_risk_components,
+            cast(dict[str, float], risk_decomposition_settings["compensated_weights"]),
+        )
+        risk_penalty_input_score_raw = decomposed_risk_penalty_input(
+            structural_risk=uncompensated_risk_raw,
+            compensated_risk=compensated_risk_raw,
+            compensated_free_band=float(risk_decomposition_settings["compensated_free_band"]),
+            compensated_weight=float(risk_decomposition_settings["compensated_penalty_weight"]),
+        )
+        predictive_risk_penalty_input_score_raw = weighted_predictive_risk_penalty_input(
+            all_risk_components,
+            cast(dict[str, float], risk_decomposition_settings["penalty_weights"]),
+            free_bands=cast(dict[str, float], risk_decomposition_settings["penalty_free_bands"]),
+            caps=cast(dict[str, float], risk_decomposition_settings["penalty_caps"]),
+        )
+    else:
+        uncompensated_risk_raw = legacy_risk_raw
+        compensated_risk_raw = 50.0
+        risk_penalty_input_score_raw = legacy_risk_raw
+        predictive_risk_penalty_input_score_raw = legacy_risk_raw
+
+    risk_raw = legacy_risk_raw
+    risk_penalty_mode = str(risk_decomposition_settings.get("risk_penalty_mode") or "legacy").strip().lower()
 
     financial_quality_raw = 100.0
     financial_quality_raw -= liquidity_risk * 1.4
@@ -1337,6 +1571,34 @@ def compute_feature_row(
             "credibility_score_raw": round(credibility_raw, 4),
             "financial_quality_score_raw": round(financial_quality_raw, 4),
             "risk_score_raw": round(risk_raw, 4),
+            "legacy_risk_score_raw": round(legacy_risk_raw, 4),
+            "risk_penalty_input_score_raw": round(risk_penalty_input_score_raw, 4),
+            "predictive_risk_penalty_input_score_raw": round(predictive_risk_penalty_input_score_raw, 4),
+            "uncompensated_risk_score_raw": round(uncompensated_risk_raw, 4),
+            "compensated_risk_score_raw": round(compensated_risk_raw, 4),
+            "risk_decomposition_compute_enabled": bool(risk_decomposition_settings.get("compute_enabled", True)),
+            "risk_component_scores": {
+                "structural": {
+                    key: round(value, 4)
+                    for key, value in sorted(structural_risk_components.items())
+                },
+                "compensated": {
+                    key: round(value, 4)
+                    for key, value in sorted(compensated_risk_components.items())
+                },
+                "compensated_free_band": round(float(risk_decomposition_settings["compensated_free_band"]), 4),
+                "compensated_penalty_weight": round(float(risk_decomposition_settings["compensated_penalty_weight"]), 4),
+                "risk_penalty_mode": risk_penalty_mode,
+                "use_for_penalty": bool(risk_decomposition_settings.get("use_for_penalty", False)),
+                "predictive_penalty_weights": {
+                    key: round(value, 4)
+                    for key, value in sorted(cast(dict[str, float], risk_decomposition_settings["penalty_weights"]).items())
+                },
+                "predictive_penalty_free_bands": {
+                    key: round(value, 4)
+                    for key, value in sorted(cast(dict[str, float], risk_decomposition_settings["penalty_free_bands"]).items())
+                },
+            },
             "momentum_score_raw": round(momentum_raw, 4),
             "catalyst_component_scores": {
                 key: round(value, 4)
@@ -1371,6 +1633,18 @@ def compute_feature_row(
         "credibility_score_raw": round(credibility_raw, 4),
         "financial_quality_score_raw": round(financial_quality_raw, 4),
         "risk_score_raw": round(risk_raw, 4),
+        "legacy_risk_score_raw": round(legacy_risk_raw, 4),
+        "risk_penalty_input_score_raw": round(risk_penalty_input_score_raw, 4),
+        "predictive_risk_penalty_input_score_raw": round(predictive_risk_penalty_input_score_raw, 4),
+        "uncompensated_risk_score_raw": round(uncompensated_risk_raw, 4),
+        "compensated_risk_score_raw": round(compensated_risk_raw, 4),
+        "liquidity_risk_score_raw": round(liquidity_risk, 4),
+        "financing_survival_risk_score_raw": round(financing_survival_risk, 4),
+        "governance_filing_risk_score_raw": round(governance_filing_risk, 4),
+        "regulatory_setback_risk_score_raw": round(regulatory_setback_risk, 4),
+        "pipeline_anchor_risk_score_raw": round(pipeline_anchor_risk, 4),
+        "collaborator_dependency_risk_score_raw": round(collaborator_dependency_risk, 4),
+        "trial_staleness_risk_score_raw": round(trial_staleness_risk, 4),
         "momentum_score_raw": round(momentum_raw, 4),
         "primary_nct": feature_json["ctgov"]["primary_nct"],
         "primary_trial_title": feature_json["ctgov"]["primary_trial_title"],
@@ -1412,31 +1686,42 @@ def compute_feature_row(
 
 
 def upsert_features(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_date: str) -> None:
+    ensure_table_optional_columns(conn, "daily_features", DAILY_FEATURES_OPTIONAL_COLUMNS)
     now = utc_now()
+    fields = [
+        "asof_date",
+        "company_id",
+        "catalyst_score_raw",
+        "credibility_score_raw",
+        "financial_quality_score_raw",
+        "risk_score_raw",
+        "legacy_risk_score_raw",
+        "risk_penalty_input_score_raw",
+        "predictive_risk_penalty_input_score_raw",
+        "uncompensated_risk_score_raw",
+        "compensated_risk_score_raw",
+        "liquidity_risk_score_raw",
+        "financing_survival_risk_score_raw",
+        "governance_filing_risk_score_raw",
+        "regulatory_setback_risk_score_raw",
+        "pipeline_anchor_risk_score_raw",
+        "collaborator_dependency_risk_score_raw",
+        "trial_staleness_risk_score_raw",
+        "momentum_score_raw",
+        "feature_json",
+    ]
+    placeholders = ", ".join("?" for _ in [*fields, "created_at", "updated_at"])
     with conn:
         conn.execute("DELETE FROM daily_features WHERE asof_date = ?", (asof_date,))
         conn.executemany(
-            """
+            f"""
             INSERT INTO daily_features(
-                asof_date, company_id, catalyst_score_raw, credibility_score_raw,
-                financial_quality_score_raw, risk_score_raw, momentum_score_raw,
-                feature_json, created_at, updated_at
+                {", ".join(fields)}, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ({placeholders})
             """,
             [
-                (
-                    row["asof_date"],
-                    row["company_id"],
-                    row["catalyst_score_raw"],
-                    row["credibility_score_raw"],
-                    row["financial_quality_score_raw"],
-                    row["risk_score_raw"],
-                    row["momentum_score_raw"],
-                    row["feature_json"],
-                    now,
-                    now,
-                )
+                tuple(row.get(field) for field in fields) + (now, now)
                 for row in rows
             ],
         )
@@ -1480,6 +1765,7 @@ def main() -> None:
     sec_catalyst_half_life_days = max(1.0, float(sec_decay_cfg.get("half_life_days", 90.0)))
     pipeline_quality_settings = load_pipeline_quality_settings(config)
     sec_catalyst_event_weights = load_sec_catalyst_event_weights(config)
+    risk_decomposition_settings = load_risk_decomposition_settings(config)
     going_concern_source_priority = configured_source_priority(
         cfg_get(config, "financial_survival.going_concern_source_priority", ["db", "csv"]),
         ["db", "csv"],
@@ -1576,6 +1862,7 @@ def main() -> None:
                         survival_score_blend_weight=survival_score_blend_weight,
                         core_pipeline_quality_multiplier=pipeline_quality_settings["core_pipeline_quality_multiplier"],
                         sec_catalyst_event_weights=sec_catalyst_event_weights,
+                        risk_decomposition_settings=risk_decomposition_settings,
                         sec_catalyst_recency_decay_enabled=sec_catalyst_recency_decay_enabled,
                         sec_catalyst_half_life_days=sec_catalyst_half_life_days,
                         market=market,

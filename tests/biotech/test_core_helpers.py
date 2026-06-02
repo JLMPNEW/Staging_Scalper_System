@@ -6,6 +6,11 @@ from biotech_index.core.biotech_taxonomy import classify_biotech_cohort
 from biotech_index.core.config import normalize_string_list
 from biotech_index.core.http_cache import CachedHttpClient
 from biotech_index.core.market_policy import select_latest_rows_by_source_priority
+from biotech_index.core.scoring_math import (
+    score_commercial_entry_quality,
+    score_commercial_expected_return_overlay,
+    score_commercial_overextension,
+)
 
 
 def test_normalize_string_list_splits_cli_delimiters_and_drops_empty_values() -> None:
@@ -74,3 +79,93 @@ def test_cached_json_null_cache_is_refetched(tmp_path, monkeypatch) -> None:
         assert path.read_text(encoding="utf-8") == '{"ok": true}'
     finally:
         client.close()
+
+
+def test_commercial_entry_quality_rewards_investable_pullback() -> None:
+    pullback = score_commercial_entry_quality(
+        distance_from_52w_high_pct=-0.25,
+        price_vs_200d_pct=0.04,
+        return_3m_pct=0.10,
+        relative_strength_3m_vs_xbi=0.18,
+    )
+    chased_high = score_commercial_entry_quality(
+        distance_from_52w_high_pct=-0.01,
+        price_vs_200d_pct=0.48,
+        return_3m_pct=0.60,
+        relative_strength_3m_vs_xbi=0.75,
+    )
+
+    assert pullback > 75.0
+    assert chased_high < pullback
+
+
+def test_commercial_overextension_flags_stretched_mature_names() -> None:
+    stretched = score_commercial_overextension(
+        distance_from_52w_high_pct=-0.01,
+        price_vs_200d_pct=0.50,
+        return_3m_pct=0.60,
+        valuation_growth_mismatch_score=75.0,
+        mature_defensive_score=80.0,
+    )
+    normal = score_commercial_overextension(
+        distance_from_52w_high_pct=-0.25,
+        price_vs_200d_pct=0.05,
+        return_3m_pct=0.10,
+        valuation_growth_mismatch_score=10.0,
+        mature_defensive_score=15.0,
+    )
+
+    assert stretched > 70.0
+    assert normal < stretched
+
+
+def test_commercial_expected_return_overlay_penalizes_value_trap_setup() -> None:
+    attractive = score_commercial_expected_return_overlay(
+        commercial={
+            "distance_from_52w_high_pct": -0.25,
+            "price_vs_200d_pct": 0.04,
+            "return_3m_pct": 0.10,
+            "relative_strength_3m_vs_xbi": 0.18,
+            "quality_adjusted_valuation_score": 75.0,
+            "revenue_yoy_growth_pct": 0.18,
+            "institutional_upside_capacity_score": 80.0,
+            "commercial_value_score": 75.0,
+            "value_trap_score": 5.0,
+            "leverage_score": 80.0,
+        },
+        forward_guidance={
+            "forward_revenue_growth_pct": 0.20,
+            "forward_ebitda_margin_pct": 0.20,
+            "quality_adjusted_guidance_score": 75.0,
+        },
+        momentum_score=65.0,
+        risk_score=35.0,
+        mature_defensive_score=10.0,
+    )
+    value_trap = score_commercial_expected_return_overlay(
+        commercial={
+            "distance_from_52w_high_pct": -0.02,
+            "price_vs_200d_pct": 0.45,
+            "return_3m_pct": 0.55,
+            "relative_strength_3m_vs_xbi": 0.75,
+            "quality_adjusted_valuation_score": 35.0,
+            "revenue_yoy_growth_pct": -0.05,
+            "institutional_upside_capacity_score": 35.0,
+            "commercial_value_score": 35.0,
+            "value_trap_score": 80.0,
+            "leverage_score": 35.0,
+        },
+        forward_guidance={
+            "forward_revenue_growth_pct": -0.02,
+            "forward_ebitda_margin_pct": 0.03,
+            "quality_adjusted_guidance_score": 35.0,
+        },
+        momentum_score=45.0,
+        risk_score=55.0,
+        mature_defensive_score=80.0,
+    )
+
+    assert attractive["commercial_expected_return_overlay_score"] > 65.0
+    assert value_trap["commercial_expected_return_overlay_score"] < attractive[
+        "commercial_expected_return_overlay_score"
+    ]

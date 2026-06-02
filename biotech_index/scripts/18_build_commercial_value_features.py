@@ -76,6 +76,8 @@ COMMERCIAL_FIELDS = [
     "net_income_ttm", "net_margin_pct", "operating_cash_flow_ttm", "free_cash_flow_ttm",
     "rd_expense_ttm", "sgna_expense_ttm", "cash_and_investments", "total_debt", "net_cash",
     "shares_outstanding", "shares_yoy_growth_pct", "close_price", "market_cap", "enterprise_value",
+    "avg_dollar_volume_20d", "return_3m_pct", "price_vs_200d_pct", "distance_from_52w_high_pct",
+    "relative_strength_3m_vs_xbi",
     "price_to_sales", "ev_to_sales", "pe_ratio", "fcf_yield", "commercial_stage_flag", "profitable_flag",
     "revenue_scale_score", "revenue_growth_score", "margin_score", "profitability_score",
     "balance_sheet_score", "leverage_score", "dilution_score", "valuation_score",
@@ -739,6 +741,11 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
 
     close_price = to_float(market.get("close_price") if market else None)
     market_cap = to_float(market.get("market_cap") if market else None)
+    avg_dollar_volume_20d = to_float(market.get("avg_dollar_volume_20d") if market else None)
+    return_3m_pct = to_float(market.get("return_3m_pct") if market else None)
+    price_vs_200d_pct = to_float(market.get("price_vs_200d_pct") if market else None)
+    distance_from_52w_high_pct = to_float(market.get("distance_from_52w_high_pct") if market else None)
+    relative_strength_3m_vs_xbi = to_float(market.get("relative_strength_3m_vs_xbi") if market else None)
     if market_cap is None and close_price is not None and shares is not None and shares > 0:
         market_cap = close_price * shares
         proxies.append("market_cap_from_ib_price_x_sec_shares")
@@ -885,6 +892,13 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
             "institutional_upside_capacity_score": round(institutional_upside_capacity_score, 4),
             "value_trap_score": round(value_trap_score, 4),
         },
+        "entry_context": {
+            "avg_dollar_volume_20d": avg_dollar_volume_20d,
+            "return_3m_pct": return_3m_pct,
+            "price_vs_200d_pct": price_vs_200d_pct,
+            "distance_from_52w_high_pct": distance_from_52w_high_pct,
+            "relative_strength_3m_vs_xbi": relative_strength_3m_vs_xbi,
+        },
     }
     return {
         "asof_date": asof_date.isoformat(),
@@ -914,6 +928,11 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
         "close_price": close_price,
         "market_cap": market_cap,
         "enterprise_value": enterprise_value,
+        "avg_dollar_volume_20d": avg_dollar_volume_20d,
+        "return_3m_pct": return_3m_pct,
+        "price_vs_200d_pct": price_vs_200d_pct,
+        "distance_from_52w_high_pct": distance_from_52w_high_pct,
+        "relative_strength_3m_vs_xbi": relative_strength_3m_vs_xbi,
         "price_to_sales": price_to_sales,
         "ev_to_sales": ev_to_sales,
         "pe_ratio": pe_ratio,

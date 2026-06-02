@@ -135,6 +135,53 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
         writer.writerows(rows)
 
 
+def load_validation_candidate_templates(config: dict[str, Any], *, base_dir: Path) -> tuple[set[tuple[str, str]], set[str]]:
+    path = resolve_path(
+        cfg_get(
+            config,
+            "calibration.restricted_cohort_templates.output_csv",
+            "../output/med_devices_reports/calibration/med_device_restricted_cohort_template_results.csv",
+        ),
+        base_dir=base_dir,
+    )
+    if not path.exists():
+        return set(), set()
+    candidates: set[tuple[str, str]] = set()
+    evaluated_cohorts: set[str] = set()
+    for row in read_csv(path):
+        cohort = str(row.get("calibration_cohort") or "").strip()
+        template_id = str(row.get("template_id") or "").strip()
+        if not cohort or not template_id or template_id == "baseline_existing":
+            continue
+        if str(row.get("split") or "").strip().lower() != "validation":
+            continue
+        evaluated_cohorts.add(cohort)
+        if str(row.get("promotion_status") or "").strip().lower() == "candidate":
+            candidates.add((cohort, template_id))
+    return candidates, evaluated_cohorts
+
+
+def active_production_templates(config: dict[str, Any]) -> set[tuple[str, str]]:
+    raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
+    if not isinstance(raw_profiles, dict):
+        return set()
+    out: set[tuple[str, str]] = set()
+    for cohort, raw_profile in raw_profiles.items():
+        if not isinstance(raw_profile, dict):
+            continue
+        if str(raw_profile.get("enabled", True)).strip().lower() in {"0", "false", "no", "off"}:
+            continue
+        if str(raw_profile.get("calibration_status", "production_eligible")).strip().lower() != "production_eligible":
+            continue
+        raw_template = raw_profile.get("score_template")
+        if not isinstance(raw_template, dict):
+            continue
+        template_id = str(raw_template.get("template_id") or "").strip()
+        if template_id:
+            out.add((str(cohort), template_id))
+    return out
+
+
 def available_horizons(rows: list[dict[str, str]]) -> list[int]:
     if not rows:
         return []
@@ -259,7 +306,16 @@ def weights_spec(template: Any) -> str:
     return ";".join(f"{field}:{direction}:{weight:.2f}" for field, direction, weight in template.weights)
 
 
-def improve_row(row: dict[str, Any], baseline: dict[str, Any], ticker_rate: float, min_ticker_rate: float) -> None:
+def improve_row(
+    row: dict[str, Any],
+    baseline: dict[str, Any],
+    ticker_rate: float,
+    min_ticker_rate: float,
+    *,
+    validation_candidate: bool,
+    require_positive_median: bool,
+    require_positive_lcb: bool,
+) -> None:
     deltas = {
         "mean": float(row["mean_excess"]) - float(baseline["mean_excess"]),
         "median": float(row["median_excess"]) - float(baseline["median_excess"]),
@@ -273,8 +329,14 @@ def improve_row(row: dict[str, Any], baseline: dict[str, Any], ticker_rate: floa
     row["improved_metric_count"] = len(improved_metrics)
     row["improved_selected_ticker_rate"] = ticker_rate
     reasons: list[str] = []
+    if not validation_candidate:
+        reasons.append("validation_template_not_candidate")
     if not improved_metrics:
         reasons.append("no_holdout_metric_improved")
+    if require_positive_median and float(row["median_excess"]) <= 0:
+        reasons.append("holdout_median_excess_not_positive")
+    if require_positive_lcb and float(row["lcb_excess"]) <= 0:
+        reasons.append("holdout_lcb_excess_not_positive")
     if ticker_rate < min_ticker_rate:
         reasons.append("improved_selected_ticker_rate_below_min")
     row["improvement_status"] = "improved" if not reasons else "mixed_or_reject"
@@ -376,11 +438,22 @@ def main() -> None:
         )
     )
     rows = read_csv(input_csv)
+    validation_candidate_templates, validation_candidate_cohorts = load_validation_candidate_templates(
+        config,
+        base_dir=base_dir,
+    )
+    production_templates = active_production_templates(config)
     horizons = parse_int_list(args.horizons) or parse_int_list(
         cfg_get(config, "calibration.restricted_cohort_template_holdout.horizons", "30,60,120")
     )
     horizons = [horizon for horizon in horizons if horizon in available_horizons(rows)]
     min_ticker_rate = float(cfg_get(config, "calibration.restricted_cohort_template_holdout.min_improved_selected_ticker_rate", 0.34))
+    require_positive_median = str(
+        cfg_get(config, "calibration.restricted_cohort_template_holdout.require_positive_median_excess", True)
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    require_positive_lcb = str(
+        cfg_get(config, "calibration.restricted_cohort_template_holdout.require_positive_lcb_excess", True)
+    ).strip().lower() not in {"0", "false", "no", "off"}
     by_cohort: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         by_cohort[str(row.get("calibration_cohort") or "")].append(row)
@@ -461,7 +534,20 @@ def main() -> None:
                         template_module=template_module,
                     )
                 )
-                improve_row(item, baseline_item, ticker_rate, min_ticker_rate)
+                validation_candidate = (
+                    cohort not in validation_candidate_cohorts
+                    or (cohort, template.template_id) in validation_candidate_templates
+                    or (cohort, template.template_id) in production_templates
+                )
+                improve_row(
+                    item,
+                    baseline_item,
+                    ticker_rate,
+                    min_ticker_rate,
+                    validation_candidate=validation_candidate,
+                    require_positive_median=require_positive_median,
+                    require_positive_lcb=require_positive_lcb,
+                )
                 result_rows.append(item)
                 add_ticker_rows(
                     ticker_rows,

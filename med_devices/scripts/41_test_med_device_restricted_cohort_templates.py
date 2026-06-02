@@ -99,6 +99,47 @@ def templates() -> list[Template]:
             ),
         ),
         Template(
+            cohort="implantable_interventional_devices_direct_payment",
+            template_id="direct_payment_pullback_reimbursement_quality",
+            weights=(
+                ("technical_pullback_score", "positive", 0.35),
+                ("reimbursement_score", "positive", 0.25),
+                ("fda_product_score", "positive", 0.20),
+                ("fundamental_quality_score", "positive", 0.10),
+                ("value_trap_score", "inverse", 0.10),
+            ),
+        ),
+        Template(
+            cohort="implantable_interventional_devices_direct_payment",
+            template_id="direct_payment_pullback_fda_risk_only",
+            weights=(
+                ("technical_pullback_score", "positive", 0.45),
+                ("fda_product_score", "positive", 0.25),
+                ("reimbursement_score", "positive", 0.20),
+                ("value_trap_score", "inverse", 0.10),
+            ),
+        ),
+        Template(
+            cohort="implantable_interventional_devices_direct_payment",
+            template_id="direct_payment_quality_value_pullback",
+            weights=(
+                ("fundamental_quality_score", "positive", 0.30),
+                ("valuation_score", "positive", 0.25),
+                ("technical_pullback_score", "positive", 0.25),
+                ("reimbursement_score", "positive", 0.20),
+            ),
+        ),
+        Template(
+            cohort="implantable_interventional_devices_direct_payment",
+            template_id="direct_payment_technical_neutral_fda_reimbursement",
+            weights=(
+                ("fda_product_score", "positive", 0.35),
+                ("reimbursement_score", "positive", 0.35),
+                ("fundamental_quality_score", "positive", 0.20),
+                ("value_trap_score", "inverse", 0.10),
+            ),
+        ),
+        Template(
             cohort="orthopedics_spine_dental",
             template_id="ortho_quality_reimbursement_pullback",
             weights=(
@@ -135,6 +176,262 @@ def templates() -> list[Template]:
                 ("durable_growth_score", "positive", 0.55),
                 ("technical_pullback_score", "positive", 0.35),
                 ("sentiment_catalyst_score", "positive", 0.10),
+            ),
+        ),
+        Template(
+            cohort="diagnostics_clinical_tests",
+            template_id="diagnostics_growth_reimbursement_momentum",
+            weights=(
+                ("durable_growth_score", "positive", 0.30),
+                ("reimbursement_score", "positive", 0.25),
+                ("technical_alpha_score", "positive", 0.20),
+                ("sentiment_catalyst_score", "positive", 0.15),
+                ("valuation_score", "positive", 0.10),
+            ),
+        ),
+        Template(
+            cohort="diagnostics_clinical_tests",
+            template_id="diagnostics_reimbursement_quality_value",
+            weights=(
+                ("reimbursement_score", "positive", 0.35),
+                ("fundamental_quality_score", "positive", 0.25),
+                ("valuation_score", "positive", 0.20),
+                ("value_trap_score", "inverse", 0.10),
+                ("sentiment_catalyst_score", "positive", 0.10),
+            ),
+        ),
+        Template(
+            cohort="diagnostics_clinical_tests",
+            template_id="diagnostics_technical_alpha_growth",
+            weights=(
+                ("technical_alpha_score", "positive", 0.35),
+                ("durable_growth_score", "positive", 0.30),
+                ("sentiment_catalyst_score", "positive", 0.20),
+                ("valuation_score", "positive", 0.15),
+            ),
+        ),
+        Template(
+            cohort="diagnostics_clinical_tests",
+            template_id="diagnostics_quality_value_alpha_v2",
+            weights=(
+                ("fundamental_quality_score", "positive", 0.35),
+                ("durable_growth_score", "positive", 0.25),
+                ("valuation_score", "positive", 0.20),
+                ("technical_alpha_score", "positive", 0.10),
+                ("value_trap_score", "inverse", 0.10),
+            ),
+        ),
+        Template(
+            cohort="diagnostics_clinical_tests",
+            template_id="diagnostics_quality_value_pullback_v2",
+            weights=(
+                ("fundamental_quality_score", "positive", 0.35),
+                ("valuation_score", "positive", 0.25),
+                ("technical_pullback_score", "positive", 0.20),
+                ("durable_growth_score", "positive", 0.10),
+                ("value_trap_score", "inverse", 0.10),
+            ),
+        ),
+        Template(
+            cohort="diagnostics_clinical_tests",
+            template_id="diagnostics_quality_value_only_v2",
+            weights=(
+                ("fundamental_quality_score", "positive", 0.45),
+                ("valuation_score", "positive", 0.30),
+                ("durable_growth_score", "positive", 0.15),
+                ("value_trap_score", "inverse", 0.10),
+            ),
+        ),
+        Template(
+            cohort="life_science_tools_research_instruments",
+            template_id="life_science_quality_value_technical",
+            weights=(
+                ("fundamental_quality_score", "positive", 0.30),
+                ("valuation_score", "positive", 0.25),
+                ("technical_alpha_score", "positive", 0.20),
+                ("durable_growth_score", "positive", 0.15),
+                ("sentiment_catalyst_score", "positive", 0.10),
+            ),
+        ),
+        Template(
+            cohort="life_science_tools_research_instruments",
+            template_id="life_science_technical_sentiment_growth",
+            weights=(
+                ("technical_alpha_score", "positive", 0.30),
+                ("sentiment_catalyst_score", "positive", 0.25),
+                ("durable_growth_score", "positive", 0.25),
+                ("valuation_score", "positive", 0.20),
+            ),
+        ),
+        Template(
+            cohort="life_science_tools_research_instruments",
+            template_id="life_science_quality_value_only",
+            weights=(
+                ("fundamental_quality_score", "positive", 0.40),
+                ("valuation_score", "positive", 0.35),
+                ("value_trap_score", "inverse", 0.15),
+                ("sentiment_catalyst_score", "positive", 0.10),
+            ),
+        ),
+        Template(
+            cohort="life_science_tools_research_instruments",
+            template_id="life_science_reimbursement_value_v2",
+            weights=(
+                ("reimbursement_score", "positive", 0.55),
+                ("valuation_score", "positive", 0.30),
+                ("value_trap_score", "inverse", 0.15),
+            ),
+        ),
+        Template(
+            cohort="life_science_tools_research_instruments",
+            template_id="life_science_reimbursement_only_v2",
+            weights=(
+                ("reimbursement_score", "positive", 0.75),
+                ("value_trap_score", "inverse", 0.25),
+            ),
+        ),
+        Template(
+            cohort="life_science_tools_research_instruments",
+            template_id="life_science_value_reimbursement_v2",
+            weights=(
+                ("valuation_score", "positive", 0.50),
+                ("reimbursement_score", "positive", 0.35),
+                ("value_trap_score", "inverse", 0.15),
+            ),
+        ),
+        Template(
+            cohort="healthcare_services_cro_other",
+            template_id="services_quality_value_growth",
+            weights=(
+                ("fundamental_quality_score", "positive", 0.35),
+                ("valuation_score", "positive", 0.30),
+                ("durable_growth_score", "positive", 0.20),
+                ("sentiment_catalyst_score", "positive", 0.15),
+            ),
+        ),
+        Template(
+            cohort="healthcare_services_cro_other",
+            template_id="services_growth_sentiment_value",
+            weights=(
+                ("durable_growth_score", "positive", 0.35),
+                ("sentiment_catalyst_score", "positive", 0.25),
+                ("valuation_score", "positive", 0.25),
+                ("value_trap_score", "inverse", 0.15),
+            ),
+        ),
+        Template(
+            cohort="healthcare_services_cro_other",
+            template_id="services_pullback_fundamental_sentiment_v2",
+            weights=(
+                ("technical_pullback_score", "positive", 0.40),
+                ("fundamental_quality_score", "positive", 0.30),
+                ("sentiment_catalyst_score", "positive", 0.20),
+                ("value_trap_score", "inverse", 0.10),
+            ),
+        ),
+        Template(
+            cohort="healthcare_services_cro_other",
+            template_id="services_fundamental_sentiment_fda_inverse_v2",
+            weights=(
+                ("fundamental_quality_score", "positive", 0.35),
+                ("sentiment_catalyst_score", "positive", 0.25),
+                ("fda_product_score", "inverse", 0.25),
+                ("value_trap_score", "inverse", 0.15),
+            ),
+        ),
+        Template(
+            cohort="healthcare_services_cro_other",
+            template_id="services_technical_core_inverse_v2",
+            weights=(
+                ("technical_core_score", "inverse", 0.40),
+                ("fundamental_quality_score", "positive", 0.25),
+                ("sentiment_catalyst_score", "positive", 0.20),
+                ("value_trap_score", "inverse", 0.15),
+            ),
+        ),
+        Template(
+            cohort="diabetes_wearables_drug_delivery",
+            template_id="diabetes_growth_reimbursement_technical",
+            weights=(
+                ("durable_growth_score", "positive", 0.30),
+                ("reimbursement_score", "positive", 0.25),
+                ("technical_alpha_score", "positive", 0.25),
+                ("fda_product_score", "positive", 0.10),
+                ("valuation_score", "positive", 0.10),
+            ),
+        ),
+        Template(
+            cohort="diabetes_wearables_drug_delivery",
+            template_id="diabetes_reimbursement_quality_growth",
+            weights=(
+                ("reimbursement_score", "positive", 0.35),
+                ("fundamental_quality_score", "positive", 0.25),
+                ("durable_growth_score", "positive", 0.20),
+                ("technical_alpha_score", "positive", 0.10),
+                ("value_trap_score", "inverse", 0.10),
+            ),
+        ),
+        Template(
+            cohort="diabetes_wearables_drug_delivery",
+            template_id="diabetes_growth_fda_reimbursement_v2",
+            weights=(
+                ("durable_growth_score", "positive", 0.35),
+                ("fda_product_score", "positive", 0.25),
+                ("reimbursement_score", "positive", 0.20),
+                ("valuation_score", "positive", 0.15),
+                ("value_trap_score", "inverse", 0.05),
+            ),
+        ),
+        Template(
+            cohort="diabetes_wearables_drug_delivery",
+            template_id="diabetes_raw_signal_trimmed_v2",
+            weights=(
+                ("durable_growth_score", "positive", 0.30),
+                ("reimbursement_score", "positive", 0.25),
+                ("valuation_score", "positive", 0.20),
+                ("technical_alpha_score", "positive", 0.15),
+                ("fda_product_score", "positive", 0.10),
+            ),
+        ),
+        Template(
+            cohort="surgical_robotics_platforms",
+            template_id="robotics_growth_sentiment_technical",
+            weights=(
+                ("durable_growth_score", "positive", 0.35),
+                ("sentiment_catalyst_score", "positive", 0.25),
+                ("technical_alpha_score", "positive", 0.20),
+                ("valuation_score", "positive", 0.20),
+            ),
+        ),
+        Template(
+            cohort="surgical_robotics_platforms",
+            template_id="robotics_quality_value_growth",
+            weights=(
+                ("fundamental_quality_score", "positive", 0.35),
+                ("valuation_score", "positive", 0.30),
+                ("durable_growth_score", "positive", 0.20),
+                ("value_trap_score", "inverse", 0.15),
+            ),
+        ),
+        Template(
+            cohort="surgical_robotics_platforms",
+            template_id="robotics_quality_value_inverse_growth_v2",
+            weights=(
+                ("fundamental_quality_score", "positive", 0.30),
+                ("valuation_score", "positive", 0.25),
+                ("durable_growth_score", "inverse", 0.20),
+                ("technical_alpha_score", "inverse", 0.15),
+                ("value_trap_score", "inverse", 0.10),
+            ),
+        ),
+        Template(
+            cohort="surgical_robotics_platforms",
+            template_id="robotics_fda_reimbursement_quality_v2",
+            weights=(
+                ("fda_product_score", "positive", 0.30),
+                ("reimbursement_score", "positive", 0.30),
+                ("fundamental_quality_score", "positive", 0.25),
+                ("value_trap_score", "inverse", 0.15),
             ),
         ),
     ]

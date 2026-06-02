@@ -40,6 +40,27 @@ SCORE_FIELDS = [
     "cohort_percentile",
     "fundamental_quality_score",
     "durable_growth_score",
+    "durable_growth_score_legacy",
+    "durable_growth_alpha_score",
+    "durable_growth_growth_score",
+    "durable_growth_quality_score",
+    "durable_growth_efficiency_score",
+    "durable_growth_capital_discipline_score",
+    "durable_growth_evidence_quality_score",
+    "durable_growth_component_count",
+    "durable_growth_signal_mode",
+    "durable_growth_signal_direction",
+    "durable_growth_signal_reliability",
+    "durable_growth_score_source",
+    "durable_growth_gate_mode",
+    "durable_growth_policy_reason",
+    "durable_growth_gate_excluded",
+    "durable_growth_component_weight",
+    "durable_growth_repair_flag",
+    "durable_growth_repair_reason",
+    "durable_growth_validation_status",
+    "durable_growth_validation_reason",
+    "durable_growth_production_state",
     "fda_product_score",
     "fda_product_score_legacy",
     "fda_alpha_score",
@@ -375,6 +396,22 @@ def write_markdown(
                 f"overlay={row.get('technical_overlay_status') or row.get('entry_status') or 'unknown'} "
                 f"weight={first_float(row.get('technical_component_weight')):.2f}"
                 for row in tier1[:25]
+            ] or ["- None"]
+        ),
+        "",
+        "## Durable Growth Policy Snapshot",
+        *(
+            [
+                f"- {row.get('rank')}. {row.get('ticker')}: "
+                f"mode={row.get('durable_growth_signal_mode') or 'legacy'} "
+                f"gate={row.get('durable_growth_gate_mode') or 'legacy'} "
+                f"state={row.get('durable_growth_production_state') or 'unknown'} "
+                f"validation={row.get('durable_growth_validation_status') or 'unknown'} "
+                f"alpha={first_float(row.get('durable_growth_alpha_score'), row.get('durable_growth_score')):.2f} "
+                f"legacy={first_float(row.get('durable_growth_score_legacy'), row.get('durable_growth_score')):.2f} "
+                f"weight={first_float(row.get('durable_growth_component_weight')):.2f} "
+                f"reason={row.get('durable_growth_validation_reason') or row.get('durable_growth_repair_reason') or 'none'}"
+                for row in top25
             ] or ["- None"]
         ),
         "",

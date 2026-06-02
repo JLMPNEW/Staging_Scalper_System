@@ -242,6 +242,41 @@ biotech_features:
   company_strategy_overrides_csv: "data/company_strategy_overrides.csv"
   screen_results_csv: "../output/preload_biotech_screen/biotech_screen_results_all.csv"
   output_csv: "biotech_daily_features.csv"
+  risk_decomposition:
+    compute_enabled: true
+    use_for_penalty: false
+    risk_penalty_mode: "legacy"
+    compensated_free_band: 60.0
+    compensated_penalty_weight: 0.20
+    weights:
+      liquidity: 0.18
+      financing_survival: 0.28
+      governance_filing: 0.18
+      regulatory_setback: 0.18
+      pipeline_anchor: 0.12
+      data_quality: 0.06
+    compensated_weights:
+      clinical_binary: 0.35
+      collaborator_dependency: 0.30
+      trial_staleness: 0.20
+      dilution_optional: 0.15
+    penalty_weights:
+      liquidity: 0.34
+      pipeline_anchor: 0.28
+      collaborator_dependency: 0.18
+      trial_staleness: 0.15
+      data_quality: 0.05
+      financing_survival: 0.00
+      governance_filing: 0.00
+      regulatory_setback: 0.00
+      clinical_binary: 0.00
+      dilution_optional: 0.00
+    penalty_free_bands:
+      liquidity: 0.0
+      pipeline_anchor: 10.0
+      collaborator_dependency: 20.0
+      trial_staleness: 10.0
+      data_quality: 0.0
   min_liquidity_addv20: 1000000
   low_liquidity_addv20: 2000000
   strong_liquidity_addv20: 10000000
@@ -498,6 +533,82 @@ biotech_scoring:
   use_quality_adjusted_valuation_component: true
   use_quality_adjusted_guidance_component: true
   require_governance_features: false
+  risk_decomposition:
+    use_for_penalty: false
+    risk_penalty_mode: "legacy"
+  risk_mode_routing:
+    enabled: true
+    promotion_status: "operational_shadow_discovery"
+    decision_date: "2026-05-31"
+    decision_artifact: "../output/biotech_index_reports/risk_metric_promotion_decision_20260531.json"
+    robustness_status: "pass_relaxed_breadth_gate"
+    robustness_artifact: "../output/biotech_index_reports/risk_mode_routed_discovery_robustness_20260531.json"
+    allocation_decision: "promote_routed_discovery_rank_with_legacy_audit"
+    discovery_decision: "promote_top20_operational_shadow"
+    production_score_source: "routed_discovery"
+    robustness_gates:
+      # This gate is scoped to operational discovery Top20, not production Top10
+      # allocation. The original 60% ticker-breadth gate was too strict for a
+      # deliberately concentrated discovery list after the score passed return,
+      # loss-rate, bootstrap, Top3 concentration, and false-positive checks.
+      promotion_top_n: [20]
+      min_lcb_delta_pct: 0.0
+      min_profit_factor_delta: 0.0
+      max_loss20_delta_pct: 3.0
+      min_bootstrap_win_rate_pct: 60.0
+      min_bootstrap_lcb_p05_delta_pct: -0.50
+      min_improved_unique_ticker_rate_pct: 40.0
+      max_top3_gain_contribution_pct: 50.0
+      require_no_known_false_positive: true
+    notes:
+      - "Predictive and decomposed risk are not promoted as global production allocation penalties."
+      - "Routed discovery may use predictive risk only for cohorts with validation support; legacy opportunity_score remains persisted for audit and rollback."
+      - "Routed discovery is promoted as the production rank score by exception after all return, loss-rate, bootstrap, false-positive, and concentration gates passed; unique-ticker breadth gate is relaxed from 60% to 40%."
+    default_allocation_mode: "legacy"
+    default_discovery_mode: "legacy"
+    cohort_modes:
+      late_clinical_pivotal:
+        allocation_mode: "legacy"
+        discovery_mode: "predictive"
+      mid_clinical_phase2_poc:
+        allocation_mode: "legacy"
+        # Insufficient validation sample as of 2026-05-31; keep discovery risk on legacy.
+        discovery_mode: "legacy"
+      commercial_profitable_growth:
+        allocation_mode: "legacy"
+        discovery_mode: "legacy"
+      commercial_profitable_mature:
+        allocation_mode: "legacy"
+        discovery_mode: "legacy"
+      commercial_fragile_or_declining:
+        allocation_mode: "legacy"
+        discovery_mode: "legacy"
+  commercial_cohort_overlay:
+    enabled: true
+    status: "diagnostic_only"
+    apply_to_allocation: false
+    apply_to_discovery: false
+    target_cohorts:
+      - "commercial_profitable_growth"
+    min_bonus_score: 62.0
+    penalty_score_floor: 50.0
+    min_entry_quality: 45.0
+    overextension_threshold: 65.0
+    max_bonus: 4.0
+    max_penalty: 6.0
+    overextension_penalty: 4.0
+    low_entry_penalty: 3.0
+  commercial_profitable_growth_validation:
+    status: "shadow_candidate_unvalidated"
+    primary_horizon: 120
+    promotion_requires:
+      min_lcb_delta_pct: 1.0
+      max_loss20_delta_pct: 0.0
+      min_unique_ticker_improvement_rate_pct: 50.0
+      max_top3_gain_contribution_pct: 50.0
+      max_score_inflation_delta: 4.0
+      max_global_top10_lcb_degradation_pct: 0.75
+      max_global_top20_lcb_degradation_pct: 0.75
   cohort_policy:
     enabled: true
     min_cohort_specific_company_count: 8
@@ -530,6 +641,80 @@ biotech_scoring:
     next_bar_entry: true
     costs:
       long_round_trip_bps: 40.0
+  cohort_config_overrides:
+    enabled: false
+    sparse_fallback_mode: "global"
+    min_observations: 60
+    min_asof_dates: 8
+    min_unique_tickers: 5
+    min_comparable_unique_tickers: 5
+    min_current_investible_tickers: 5
+    min_recent_asof_coverage_pct: 60.0
+    reporting:
+      output_dir: "../output/biotech_index_reports/cohort_config_override_calibration"
+      horizons: [20, 60, 120]
+      top_n: [10, 20]
+      candidate_pool_rank_max: 60
+      train_fraction: 0.70
+      next_bar_entry: true
+      costs:
+        long_round_trip_bps: 40.0
+    batch:
+      output_dir: "../output/biotech_index_reports/cohort_config_override_batch"
+      target_count: 5
+      include_sparse_targets: false
+      candidate_limit: 0
+    shrinkage:
+      enabled: true
+      observation_k: 120
+      target_unique_tickers: 15
+      min_reliability_score: 0.70
+      max_override_strength: 0.75
+    allowed_override_keys:
+      first_pass:
+        - investment_weight_profiles
+        - risk_penalty
+        - risk_penalty_convexity
+        - risk_penalty_inflection
+      second_pass:
+        - rank_quality_caps
+        - production_policy
+        - commercial_risk_overlay
+    promotion_policy:
+      label_quality:
+        min_median_cohort_confidence: 80.0
+        min_calibration_weighted_confidence: 85.0
+        max_unclassified_or_review_pct: 10.0
+      within_cohort:
+        min_lcb_improvement_pct: 0.50
+        min_profit_factor_improvement: 0.10
+        min_unique_ticker_improvement_rate_pct: 60.0
+        min_median_unique_ticker_return_delta_pct: 0.00
+        max_unique_ticker_harm_rate_pct: 40.0
+        max_large_loss_20pct_rate_increase: 3.0
+        max_20d_lcb_degradation_pct: 2.0
+        max_60d_lcb_degradation_pct: 2.0
+      global_validation:
+        min_top10_lcb_delta_pct: 0.00
+        min_top20_lcb_delta_pct: 0.00
+        min_top10_profit_factor_delta: 0.00
+        min_top20_profit_factor_delta: 0.00
+        max_top10_large_loss_20pct_rate_increase: 3.0
+        max_top20_large_loss_20pct_rate_increase: 3.0
+      score_inflation:
+        max_cohort_avg_score_delta: 4.0
+        max_cohort_top20_exposure_delta_pct: 15.0
+        max_single_cohort_top10_share_pct: 40.0
+        max_single_cohort_top20_share_pct: 35.0
+      robustness:
+        min_bootstrap_win_rate_pct: 60.0
+        min_bootstrap_lcb_noninferiority_pct: -0.50
+        max_top3_gain_contribution_pct: 50.0
+      ranking_sanity:
+        max_rank_cap_vetoed_top20_count: 0
+        max_low_confidence_top20_count: 1
+        require_no_known_false_positive_top20: true
+    cohorts: {}
   production_baseline:
     enabled: true
     score_model: "biotech_opportunity_score"
@@ -740,6 +925,7 @@ biotech_reports:
     bucket_transition_enabled: true
   index_latest_csv: "biotech_index_latest.csv"
   top_candidates_csv: "biotech_top_candidates.csv"
+  discovery_top_candidates_csv: "biotech_discovery_top20_candidates.csv"
   shadow_top_candidates_csv: "biotech_shadow_top20_candidates.csv"
   ranking_diagnostics_csv: "biotech_ranking_order_diagnostics.csv"
   cohort_diagnostics_csv: "biotech_cohort_diagnostics.csv"
@@ -749,6 +935,15 @@ biotech_reports:
     allocation_score_min: 50.0
     research_rank_max: 20
     research_score_min: 45.0
+  discovery_operational_guardrails:
+    # Report-level guardrail only. This does not alter production allocation
+    # scoring; it prevents known validation false positives from entering the
+    # operational research-discovery list.
+    excluded_tickers:
+      - CNMD
+      - MDXG
+      - KROS
+      - OPK
   ranking_diagnostics:
     over_ranked_tickers:
       - BMRN
@@ -941,6 +1136,9 @@ calibration:
     next_bar_entry: true
     max_workers: 8
     selection_policies: []
+    risk_decomposition:
+      use_for_penalty: false
+      risk_penalty_mode: "legacy"
     convex_risk_penalty_enabled: true
     risk_penalty_convexity: 0.35
     risk_penalty_inflection: 50.0

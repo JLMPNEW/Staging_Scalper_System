@@ -50,6 +50,9 @@ from biotech_index.core.pipeline_guards import (  # noqa: E402
 from biotech_index.core.scoring_math import (  # noqa: E402
     convex_risk_drag as shared_convex_risk_drag,
     normalize_growth_drag_curve,
+    normalize_risk_penalty_mode,
+    risk_score_from_components,
+    score_commercial_expected_return_overlay,
     score_growth_drag as shared_growth_drag_score,
 )
 
@@ -633,6 +636,102 @@ def expected_return_quality_score(
         - 0.05 * mature_defensive
     )
     return clamp(score)
+
+
+def risk_decomposition_from_raw_scores(raw_scores: dict[str, Any], fallback_risk: float) -> dict[str, Any]:
+    components = raw_scores.get("risk_component_scores", {}) if isinstance(raw_scores, dict) else {}
+    structural_components = components.get("structural", {}) if isinstance(components, dict) else {}
+    compensated_components = components.get("compensated", {}) if isinstance(components, dict) else {}
+    if not isinstance(structural_components, dict):
+        structural_components = {}
+    if not isinstance(compensated_components, dict):
+        compensated_components = {}
+    legacy = clamp(to_float(raw_scores.get("legacy_risk_score_raw"), fallback_risk))
+    uncompensated = clamp(to_float(raw_scores.get("uncompensated_risk_score_raw"), legacy))
+    compensated = clamp(to_float(raw_scores.get("compensated_risk_score_raw"), 50.0))
+    penalty_input = clamp(to_float(raw_scores.get("risk_penalty_input_score_raw"), legacy))
+    predictive_penalty_input = clamp(to_float(raw_scores.get("predictive_risk_penalty_input_score_raw"), penalty_input))
+
+    def component_score(group: dict[str, Any], key: str) -> float | str:
+        value = to_float(group.get(key), math.nan)
+        return finite_value_or_blank(value)
+
+    return {
+        "legacy_risk_score": legacy,
+        "risk_penalty_input_score": penalty_input,
+        "predictive_risk_penalty_input_score": predictive_penalty_input,
+        "uncompensated_risk_score": uncompensated,
+        "compensated_risk_score": compensated,
+        "liquidity_risk_score": component_score(structural_components, "liquidity"),
+        "financing_survival_risk_score": component_score(structural_components, "financing_survival"),
+        "governance_filing_risk_score": component_score(structural_components, "governance_filing"),
+        "regulatory_setback_risk_score": component_score(structural_components, "regulatory_setback"),
+        "pipeline_anchor_risk_score": component_score(structural_components, "pipeline_anchor"),
+        "collaborator_dependency_risk_score": component_score(compensated_components, "collaborator_dependency"),
+        "trial_staleness_risk_score": component_score(compensated_components, "trial_staleness"),
+        "risk_component_json": json.dumps(components if isinstance(components, dict) else {}, ensure_ascii=True, sort_keys=True),
+        "risk_component_scores": components if isinstance(components, dict) else {},
+    }
+
+
+def configured_risk_penalty_score(
+    *,
+    config: dict[str, Any],
+    risk_components: dict[str, Any],
+    legacy_risk: float,
+    purpose: str = "allocation",
+    primary_cohort: str = "",
+) -> tuple[float, str]:
+    clean_purpose = str(purpose or "allocation").strip().lower()
+    if clean_purpose not in {"allocation", "discovery"}:
+        raise ValueError(f"Unsupported risk penalty purpose: {purpose!r}")
+    routing = cfg_get(config, "biotech_scoring.risk_mode_routing", {}) or {}
+    if isinstance(routing, dict) and as_bool(routing.get("enabled", False), False):
+        mode = normalize_risk_penalty_mode(routing.get(f"default_{clean_purpose}_mode", "legacy"))
+        cohort_modes = routing.get("cohort_modes", {})
+        if isinstance(cohort_modes, dict) and primary_cohort:
+            cohort_cfg = cohort_modes.get(primary_cohort, {})
+            if isinstance(cohort_cfg, dict):
+                mode = normalize_risk_penalty_mode(cohort_cfg.get(f"{clean_purpose}_mode", mode), default=mode)
+        return risk_score_from_components(risk_components, legacy_risk=legacy_risk, mode=mode), mode
+
+    risk_cfg = cfg_get(config, "biotech_scoring.risk_decomposition", {}) or {}
+    if not isinstance(risk_cfg, dict):
+        risk_cfg = {}
+    if not as_bool(risk_cfg.get("use_for_penalty", risk_cfg.get("enabled", False)), False):
+        return legacy_risk, "legacy"
+    mode = normalize_risk_penalty_mode(risk_cfg.get("risk_penalty_mode", "legacy"))
+    return risk_score_from_components(risk_components, legacy_risk=legacy_risk, mode=mode), mode
+
+
+def production_rank_score_field(config: dict[str, Any]) -> str:
+    """Return the score field used for production rank ordering."""
+    raw = str(
+        cfg_get(
+            config,
+            "biotech_scoring.risk_mode_routing.production_score_source",
+            "opportunity_score",
+        )
+        or "opportunity_score"
+    ).strip().lower()
+    aliases = {
+        "legacy": "opportunity_score",
+        "legacy_allocation": "opportunity_score",
+        "allocation": "opportunity_score",
+        "opportunity": "opportunity_score",
+        "opportunity_score": "opportunity_score",
+        "routed_discovery": "discovery_opportunity_score",
+        "discovery": "discovery_opportunity_score",
+        "discovery_score": "discovery_opportunity_score",
+        "discovery_opportunity_score": "discovery_opportunity_score",
+    }
+    field = aliases.get(raw)
+    if field is None:
+        raise ValueError(
+            "Unsupported biotech_scoring.risk_mode_routing.production_score_source="
+            f"{raw!r}; expected opportunity_score or discovery_opportunity_score"
+        )
+    return field
 
 
 def commercial_risk_overlay_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -1315,6 +1414,7 @@ def score_rows(
     selection_policy = str(production_baseline["selection_policy"])
     apply_core_veto_to_rank = bool(core_veto_settings["enabled"] and core_veto_settings["apply_to_rank"])
     force_core_veto_avoid = bool(core_veto_settings["enabled"] and core_veto_settings["force_avoid_bucket"])
+    production_score_field = production_rank_score_field(config)
 
     scored: list[dict[str, Any]] = []
     missing_catalyst_raw: list[str] = []
@@ -1361,7 +1461,15 @@ def score_rows(
         catalyst = clamp(catalyst_raw if catalyst_raw is not None else 0.0)
         credibility = clamp(credibility_raw if credibility_raw is not None else 0.0)
         financial_quality = clamp(financial_raw if financial_raw is not None else 0.0)
-        risk = clamp(risk_raw if risk_raw is not None else 0.0)
+        legacy_risk = clamp(risk_raw if risk_raw is not None else 0.0)
+        risk_components = risk_decomposition_from_raw_scores(raw_scores, legacy_risk)
+        risk, risk_penalty_mode_used = configured_risk_penalty_score(
+            config=config,
+            risk_components=risk_components,
+            legacy_risk=legacy_risk,
+        )
+        uncompensated_risk = clamp(to_float(risk_components["uncompensated_risk_score"], legacy_risk))
+        compensated_risk = clamp(to_float(risk_components["compensated_risk_score"], 50.0))
         momentum = clamp(momentum_raw if momentum_raw is not None else 0.0)
         clinical_positive = (
             catalyst_w * catalyst
@@ -1406,15 +1514,32 @@ def score_rows(
             risk=risk,
             mature_defensive=mature_defensive,
         )
+        commercial_overlay_context = dict(commercial)
+        commercial_overlay_context["valuation_growth_mismatch_score"] = commercial_risk[
+            "valuation_growth_mismatch_score"
+        ]
+        commercial_expected_return_overlay = score_commercial_expected_return_overlay(
+            commercial=commercial_overlay_context,
+            forward_guidance=forward_guidance,
+            momentum_score=momentum,
+            risk_score=risk,
+            mature_defensive_score=mature_defensive,
+        )
         policy_diagnostics = {
             "value_trap_score": value_trap_score,
             "leverage_fragility_score": clamp(100.0 - leverage_score),
             "guidance_staleness_flag": guidance_flags_preview["guidance_staleness_flag"],
             "mature_defensive_score": mature_defensive,
             "expected_return_quality_score": expected_return_quality,
+            **commercial_expected_return_overlay,
             "commercial_deterioration_score": commercial_risk["commercial_deterioration_score"],
             "valuation_growth_mismatch_score": commercial_risk["valuation_growth_mismatch_score"],
             "commercial_business_shock_score": commercial_risk["commercial_business_shock_score"],
+            "legacy_risk_score": legacy_risk,
+            "risk_penalty_input_score": risk_components["risk_penalty_input_score"],
+            "predictive_risk_penalty_input_score": risk_components["predictive_risk_penalty_input_score"],
+            "uncompensated_risk_score": uncompensated_risk,
+            "compensated_risk_score": compensated_risk,
         }
         biotech_taxonomy = classify_biotech_cohort(
             payload=payload,
@@ -1532,6 +1657,110 @@ def score_rows(
         if rank_cap_vetoed:
             opportunity = 0.0
         selection_gate = tier1_selection_gate_score(opportunity, risk)
+        primary_cohort = str(
+            biotech_taxonomy_payload.get("biotech_primary_cohort")
+            or biotech_taxonomy_payload.get("primary_cohort")
+            or ""
+        )
+        allocation_risk = risk
+        allocation_risk_penalty_mode = risk_penalty_mode_used
+        discovery_risk, discovery_risk_penalty_mode = configured_risk_penalty_score(
+            config=config,
+            risk_components=risk_components,
+            legacy_risk=legacy_risk,
+            purpose="discovery",
+            primary_cohort=primary_cohort,
+        )
+        discovery_clinical_risk_drag = convex_risk_drag(discovery_risk, risk_w, config, "biotech_scoring")
+        discovery_clinical_opportunity = clamp(clinical_positive - discovery_clinical_risk_drag)
+        discovery_investment_risk_drag = convex_risk_drag(
+            discovery_risk,
+            profile_weights["risk_penalty"],
+            config,
+            "biotech_scoring",
+        )
+        discovery_pre_confidence_investment_score = clamp(investment_positive - discovery_investment_risk_drag)
+        discovery_investment_score = clamp(discovery_pre_confidence_investment_score * confidence_multiplier)
+        discovery_raw_opportunity = discovery_investment_score if investment_enabled else discovery_clinical_opportunity
+        discovery_expected_return_quality = expected_return_quality_score(
+            commercial=commercial,
+            forward_guidance=forward_guidance,
+            momentum=momentum,
+            risk=discovery_risk,
+            mature_defensive=mature_defensive,
+        )
+        discovery_policy_diagnostics = {
+            **policy_diagnostics,
+            "expected_return_quality_score": discovery_expected_return_quality,
+        }
+        discovery_soft_reasons = soft_weakness_reasons(
+            payload,
+            commercial,
+            governance,
+            risk=discovery_risk,
+            settings=policy_settings,
+        )
+        (
+            discovery_opportunity,
+            discovery_event_penalty,
+            discovery_soft_penalty,
+            discovery_quality_penalty,
+            discovery_quality_bonus,
+        ) = apply_production_selection_policy(
+            discovery_raw_opportunity,
+            selection_policy=selection_policy,
+            event_reasons=event_reasons,
+            soft_reasons=discovery_soft_reasons,
+            settings=policy_settings,
+            diagnostics=discovery_policy_diagnostics,
+        )
+        discovery_opportunity = clamp(discovery_opportunity - commercial_overlay_penalty)
+        discovery_opportunity, discovery_rank_quality_cap, discovery_rank_quality_cap_reasons, _discovery_flags = (
+            apply_rank_quality_caps(
+                discovery_opportunity,
+                commercial=commercial,
+                forward_guidance=forward_guidance,
+                commercial_risk=commercial_risk,
+                settings=rank_cap_settings,
+            )
+        )
+        discovery_rank_cap_reason_set = set(discovery_rank_quality_cap_reasons)
+        discovery_rank_cap_vetoed = (
+            as_bool(rank_cap_settings.get("rank_cap_veto_enabled", True), True)
+            and discovery_rank_quality_cap is not None
+            and discovery_rank_quality_cap <= float(rank_cap_settings.get("rank_cap_veto_threshold", 49.0))
+            and bool(discovery_rank_cap_reason_set.intersection(rank_cap_settings.get("rank_cap_veto_reasons") or set()))
+        )
+        if discovery_rank_cap_vetoed:
+            discovery_opportunity = 0.0
+        discovery_selection_gate = tier1_selection_gate_score(discovery_opportunity, discovery_risk)
+        allocation_opportunity_score = opportunity
+        allocation_bucket = score_bucket(
+            allocation_opportunity_score,
+            risk,
+            bucket_settings,
+            payload,
+            commercial,
+            core_veto_reasons=core_veto_reasons,
+            force_core_veto_avoid=force_core_veto_avoid and bool(core_veto_reasons),
+        )
+        if production_score_field == "discovery_opportunity_score":
+            production_rank_score = discovery_opportunity
+            production_rank_risk_score = discovery_risk
+            production_score_source = "routed_discovery"
+        else:
+            production_rank_score = allocation_opportunity_score
+            production_rank_risk_score = risk
+            production_score_source = "legacy_allocation"
+        production_bucket = score_bucket(
+            production_rank_score,
+            production_rank_risk_score,
+            bucket_settings,
+            payload,
+            commercial,
+            core_veto_reasons=core_veto_reasons,
+            force_core_veto_avoid=force_core_veto_avoid and bool(core_veto_reasons),
+        )
         core_veto_flag = 1.0 if core_veto_reasons else 0.0
         rank_demoted_by_core_veto = bool(apply_core_veto_to_rank and core_veto_reasons)
 
@@ -1556,6 +1785,11 @@ def score_rows(
             "shares_yoy_growth_pct": commercial.get("shares_yoy_growth_pct", ""),
             "market_cap": commercial.get("market_cap", ""),
             "enterprise_value": commercial.get("enterprise_value", ""),
+            "avg_dollar_volume_20d": commercial.get("avg_dollar_volume_20d", ""),
+            "return_3m_pct": commercial.get("return_3m_pct", ""),
+            "price_vs_200d_pct": commercial.get("price_vs_200d_pct", ""),
+            "distance_from_52w_high_pct": commercial.get("distance_from_52w_high_pct", ""),
+            "relative_strength_3m_vs_xbi": commercial.get("relative_strength_3m_vs_xbi", ""),
             "price_to_sales": commercial.get("price_to_sales", ""),
             "ev_to_sales": commercial.get("ev_to_sales", ""),
             "pe_ratio": commercial.get("pe_ratio", ""),
@@ -1570,6 +1804,7 @@ def score_rows(
             "institutional_upside_capacity_score": institutional_upside_capacity_score,
             "leverage_score": leverage_score,
             "value_trap_score": value_trap_score,
+            **commercial_expected_return_overlay,
             "data_quality": commercial.get("data_quality", ""),
             "missing_fields": commercial.get("missing_fields", ""),
             "proxy_fields_used": commercial.get("proxy_fields_used", ""),
@@ -1628,19 +1863,37 @@ def score_rows(
                 "selection_policy": production_baseline["selection_policy"],
                 "alpha_multibagger_role": production_baseline["alpha_multibagger_role"],
                 "clinical_opportunity_score": round(clinical_opportunity, 4),
+                "discovery_clinical_opportunity_score": round(discovery_clinical_opportunity, 4),
                 "investment_score": round(investment_score, 4),
+                "discovery_investment_score": round(discovery_investment_score, 4),
                 "raw_opportunity_score_before_policy": round(raw_opportunity, 4),
                 "policy_adjusted_opportunity_score": round(opportunity, 4),
+                "allocation_opportunity_score": round(allocation_opportunity_score, 4),
+                "allocation_bucket": allocation_bucket,
+                "production_rank_score": round(production_rank_score, 4),
+                "production_rank_risk_score": round(production_rank_risk_score, 4),
+                "production_rank_score_field": production_score_field,
+                "production_score_source": production_score_source,
+                "discovery_opportunity_score": round(discovery_opportunity, 4),
                 "production_policy_event_hard_penalty": round(event_penalty, 4),
                 "production_policy_soft_weakness_penalty": round(soft_penalty, 4),
                 "production_policy_quality_penalty": round(quality_penalty, 4),
                 "production_policy_quality_bonus": round(quality_bonus, 4),
+                "discovery_policy_event_hard_penalty": round(discovery_event_penalty, 4),
+                "discovery_policy_soft_weakness_penalty": round(discovery_soft_penalty, 4),
+                "discovery_policy_quality_penalty": round(discovery_quality_penalty, 4),
+                "discovery_policy_quality_bonus": round(discovery_quality_bonus, 4),
                 "commercial_risk_overlay_penalty": round(commercial_overlay_penalty, 4),
                 "pre_rank_cap_opportunity_score": round(pre_rank_cap_opportunity, 4),
                 "rank_quality_cap": rank_quality_cap if rank_quality_cap is not None else "",
                 "rank_quality_cap_reasons": rank_quality_cap_reasons,
                 "rank_quality_cap_vetoed": 1.0 if rank_cap_vetoed else 0.0,
                 "rank_quality_cap_veto_reasons": rank_quality_cap_veto_reasons,
+                "discovery_rank_quality_cap": discovery_rank_quality_cap
+                if discovery_rank_quality_cap is not None
+                else "",
+                "discovery_rank_quality_cap_reasons": discovery_rank_quality_cap_reasons,
+                "discovery_rank_quality_cap_vetoed": 1.0 if discovery_rank_cap_vetoed else 0.0,
                 "production_policy_total_penalty": round(
                     event_penalty + soft_penalty + quality_penalty + commercial_overlay_penalty - quality_bonus,
                     4,
@@ -1654,11 +1907,32 @@ def score_rows(
                 "transient_revenue_anchor_score": commercial_risk["transient_revenue_anchor_score"],
                 "commercial_business_shock_score": commercial_risk["commercial_business_shock_score"],
                 "tier1_selection_gate_score": round(selection_gate, 4),
+                "discovery_selection_gate_score": round(discovery_selection_gate, 4),
                 "investment_profile": profile_name,
                 "investment_weights": profile_weights,
                 "growth_drag_curve": growth_drag_curve,
                 "clinical_risk_drag": round(clinical_risk_drag, 4),
                 "investment_risk_drag": round(investment_risk_drag, 4),
+                "discovery_clinical_risk_drag": round(discovery_clinical_risk_drag, 4),
+                "discovery_investment_risk_drag": round(discovery_investment_risk_drag, 4),
+                "risk_penalty_mode_used": risk_penalty_mode_used,
+                "allocation_risk_penalty_mode": allocation_risk_penalty_mode,
+                "discovery_risk_penalty_mode": discovery_risk_penalty_mode,
+                "legacy_risk_score": round(legacy_risk, 4),
+                "allocation_risk_score": round(allocation_risk, 4),
+                "discovery_risk_score": round(discovery_risk, 4),
+                "risk_penalty_input_score": round(
+                    to_float(risk_components["risk_penalty_input_score"], legacy_risk),
+                    4,
+                ),
+                "predictive_risk_penalty_input_score": round(
+                    to_float(risk_components["predictive_risk_penalty_input_score"], legacy_risk),
+                    4,
+                ),
+                "risk_score_used_for_penalty": round(risk, 4),
+                "uncompensated_risk_score": round(uncompensated_risk, 4),
+                "compensated_risk_score": round(compensated_risk, 4),
+                "risk_component_scores": risk_components["risk_component_scores"],
                 "effective_pre_confidence_risk_drag": round(effective_pre_confidence_risk_drag, 4),
                 "effective_post_confidence_risk_drag": round(effective_post_confidence_risk_drag, 4),
                 "effective_total_risk_drag": round(effective_total_risk_drag, 4),
@@ -1683,6 +1957,7 @@ def score_rows(
                 "leverage_fragility_score": round(policy_diagnostics["leverage_fragility_score"], 4),
                 "mature_defensive_score": round(mature_defensive, 4),
                 "expected_return_quality_score": round(expected_return_quality, 4),
+                **commercial_expected_return_overlay,
                 "quality_forward_valuation_score": round(quality_forward_valuation_score, 4),
                 "quality_adjusted_guidance_score": round(quality_adjusted_guidance_score, 4),
                 "forward_guidance_component_score": round(forward_guidance_component_score, 4),
@@ -1700,6 +1975,20 @@ def score_rows(
                 "selection_gate_score": round(selection_gate, 4),
                 "opportunity_score": round(opportunity, 4),
                 "risk_score": round(risk, 4),
+                "allocation_risk_score": round(allocation_risk, 4),
+                "allocation_risk_penalty_mode": allocation_risk_penalty_mode,
+                "discovery_risk_score": round(discovery_risk, 4),
+                "discovery_risk_penalty_mode": discovery_risk_penalty_mode,
+                "discovery_opportunity_score": round(discovery_opportunity, 4),
+                "discovery_selection_gate_score": round(discovery_selection_gate, 4),
+                "legacy_risk_score": round(legacy_risk, 4),
+                "risk_penalty_input_score": round(to_float(risk_components["risk_penalty_input_score"], legacy_risk), 4),
+                "predictive_risk_penalty_input_score": round(
+                    to_float(risk_components["predictive_risk_penalty_input_score"], legacy_risk),
+                    4,
+                ),
+                "uncompensated_risk_score": round(uncompensated_risk, 4),
+                "compensated_risk_score": round(compensated_risk, 4),
             },
             "production_baseline": production_baseline,
             "production_selection_policy": {
@@ -1748,6 +2037,18 @@ def score_rows(
                 "financial_data_quality": survival.get("data_quality", ""),
                 "sec_dilution_event_count": sec_events.get("dilution_event_count", 0) if isinstance(sec_events, dict) else 0,
                 "sec_negative_clinical_event_count": sec_events.get("negative_clinical_event_count", 0) if isinstance(sec_events, dict) else 0,
+                "legacy_risk_score": round(legacy_risk, 4),
+                "allocation_risk_score": round(allocation_risk, 4),
+                "allocation_risk_penalty_mode": allocation_risk_penalty_mode,
+                "discovery_risk_score": round(discovery_risk, 4),
+                "discovery_risk_penalty_mode": discovery_risk_penalty_mode,
+                "risk_penalty_input_score": round(to_float(risk_components["risk_penalty_input_score"], legacy_risk), 4),
+                "predictive_risk_penalty_input_score": round(
+                    to_float(risk_components["predictive_risk_penalty_input_score"], legacy_risk),
+                    4,
+                ),
+                "uncompensated_risk_score": round(uncompensated_risk, 4),
+                "compensated_risk_score": round(compensated_risk, 4),
                 "core_structural_veto_flag": bool(core_veto_reasons),
                 "core_structural_veto_reasons": "|".join(core_veto_reasons),
                 "event_hard_weakness_reasons": "|".join(event_reasons),
@@ -1769,6 +2070,26 @@ def score_rows(
                 "credibility_score": round(credibility, 4),
                 "financial_quality_score": round(financial_quality, 4),
                 "risk_score": round(risk, 4),
+                "legacy_risk_score": round(legacy_risk, 4),
+                "allocation_risk_score": round(allocation_risk, 4),
+                "allocation_risk_penalty_mode": allocation_risk_penalty_mode,
+                "discovery_risk_score": round(discovery_risk, 4),
+                "discovery_risk_penalty_mode": discovery_risk_penalty_mode,
+                "risk_penalty_input_score": round(to_float(risk_components["risk_penalty_input_score"], legacy_risk), 4),
+                "predictive_risk_penalty_input_score": round(
+                    to_float(risk_components["predictive_risk_penalty_input_score"], legacy_risk),
+                    4,
+                ),
+                "uncompensated_risk_score": round(uncompensated_risk, 4),
+                "compensated_risk_score": round(compensated_risk, 4),
+                "liquidity_risk_score": risk_components["liquidity_risk_score"],
+                "financing_survival_risk_score": risk_components["financing_survival_risk_score"],
+                "governance_filing_risk_score": risk_components["governance_filing_risk_score"],
+                "regulatory_setback_risk_score": risk_components["regulatory_setback_risk_score"],
+                "pipeline_anchor_risk_score": risk_components["pipeline_anchor_risk_score"],
+                "collaborator_dependency_risk_score": risk_components["collaborator_dependency_risk_score"],
+                "trial_staleness_risk_score": risk_components["trial_staleness_risk_score"],
+                "risk_component_json": risk_components["risk_component_json"],
                 "momentum_score": round(momentum, 4),
                 "clinical_opportunity_score": round(clinical_opportunity, 4),
                 "commercial_quality_score": round(commercial_quality, 4),
@@ -1782,6 +2103,16 @@ def score_rows(
                 "leverage_fragility_score": round(policy_diagnostics["leverage_fragility_score"], 4),
                 "mature_defensive_score": round(mature_defensive, 4),
                 "expected_return_quality_score": round(expected_return_quality, 4),
+                "commercial_entry_quality_score": commercial_expected_return_overlay[
+                    "commercial_entry_quality_score"
+                ],
+                "commercial_overextension_score": commercial_expected_return_overlay[
+                    "commercial_overextension_score"
+                ],
+                "valuation_growth_fit_score": commercial_expected_return_overlay["valuation_growth_fit_score"],
+                "commercial_expected_return_overlay_score": commercial_expected_return_overlay[
+                    "commercial_expected_return_overlay_score"
+                ],
                 "quality_adjusted_valuation_score": round(quality_adjusted_valuation_score, 4),
                 "used_quality_adjusted_valuation": used_quality_adjusted_valuation,
                 "valuation_quality_adjustment_delta": round(valuation_quality_adjustment_delta, 4),
@@ -1791,8 +2122,16 @@ def score_rows(
                 "guidance_quality_adjustment_delta": round(guidance_quality_adjustment_delta, 4),
                 "guidance_recency_penalty": round(guidance_recency_penalty, 4),
                 "investment_score": round(investment_score, 4),
+                "discovery_investment_score": round(discovery_investment_score, 4),
                 "opportunity_score": round(opportunity, 4),
+                "allocation_opportunity_score": round(allocation_opportunity_score, 4),
+                "production_rank_score": round(production_rank_score, 4),
+                "production_rank_risk_score": round(production_rank_risk_score, 4),
+                "production_rank_score_field": production_score_field,
+                "production_score_source": production_score_source,
+                "discovery_opportunity_score": round(discovery_opportunity, 4),
                 "tier1_selection_gate_score": round(selection_gate, 4),
+                "discovery_selection_gate_score": round(discovery_selection_gate, 4),
                 "tier1_primary_horizon_trading_days": production_baseline["primary_horizon_trading_days"],
                 "tier1_production_score_model": production_baseline["score_model"],
                 "tier1_selection_policy": production_baseline["selection_policy"],
@@ -1803,6 +2142,9 @@ def score_rows(
                 "data_quality_confidence_multiplier": round(confidence_multiplier, 4),
                 "clinical_risk_drag": round(clinical_risk_drag, 4),
                 "investment_risk_drag": round(investment_risk_drag, 4),
+                "discovery_clinical_opportunity_score": round(discovery_clinical_opportunity, 4),
+                "discovery_clinical_risk_drag": round(discovery_clinical_risk_drag, 4),
+                "discovery_investment_risk_drag": round(discovery_investment_risk_drag, 4),
                 "effective_pre_confidence_risk_drag": round(effective_pre_confidence_risk_drag, 4),
                 "effective_post_confidence_risk_drag": round(effective_post_confidence_risk_drag, 4),
                 "effective_total_risk_drag": round(effective_total_risk_drag, 4),
@@ -1813,11 +2155,20 @@ def score_rows(
                 "commercial_risk_overlay_penalty": round(commercial_overlay_penalty, 4),
                 "production_policy_quality_penalty": round(quality_penalty, 4),
                 "production_policy_quality_bonus": round(quality_bonus, 4),
+                "discovery_policy_event_hard_penalty": round(discovery_event_penalty, 4),
+                "discovery_policy_soft_weakness_penalty": round(discovery_soft_penalty, 4),
+                "discovery_policy_quality_penalty": round(discovery_quality_penalty, 4),
+                "discovery_policy_quality_bonus": round(discovery_quality_bonus, 4),
                 "pre_rank_cap_opportunity_score": round(pre_rank_cap_opportunity, 4),
                 "rank_quality_cap": rank_quality_cap if rank_quality_cap is not None else None,
                 "rank_quality_cap_reasons": "|".join(rank_quality_cap_reasons),
                 "rank_quality_cap_vetoed": 1.0 if rank_cap_vetoed else 0.0,
                 "rank_quality_cap_veto_reasons": "|".join(rank_quality_cap_veto_reasons),
+                "discovery_rank_quality_cap": discovery_rank_quality_cap
+                if discovery_rank_quality_cap is not None
+                else None,
+                "discovery_rank_quality_cap_reasons": "|".join(discovery_rank_quality_cap_reasons),
+                "discovery_rank_quality_cap_vetoed": 1.0 if discovery_rank_cap_vetoed else 0.0,
                 "commercial_deterioration_score": commercial_risk["commercial_deterioration_score"],
                 "commercial_deterioration_flag": commercial_risk["commercial_deterioration_flag"],
                 "commercial_deterioration_reasons": commercial_risk["commercial_deterioration_reasons"],
@@ -1834,15 +2185,8 @@ def score_rows(
                 "guidance_staleness_flag": guidance_flags["guidance_staleness_flag"],
                 "guidance_stale_flag": guidance_flags["guidance_stale_flag"],
                 "no_guidance_negative_growth_flag": guidance_flags["no_guidance_negative_growth_flag"],
-                "bucket": score_bucket(
-                    opportunity,
-                    risk,
-                    bucket_settings,
-                    payload,
-                    commercial,
-                    core_veto_reasons=core_veto_reasons,
-                    force_core_veto_avoid=force_core_veto_avoid and bool(core_veto_reasons),
-                ),
+                "bucket": production_bucket,
+                "allocation_bucket": allocation_bucket,
                 "primary_nct": ctgov.get("primary_nct", ""),
                 "primary_trial_title": ctgov.get("primary_trial_title", ""),
                 "ctgov_evidence_type": ctgov_evidence_type,
@@ -1878,8 +2222,8 @@ def score_rows(
         key=lambda item: (
             1 if to_float(item.get("biotech_cohort_investible_flag"), 1.0) <= 0.0 else 0,
             1 if apply_core_veto_to_rank and to_float(item.get("core_structural_veto_flag"), 0.0) > 0.0 else 0,
-            -clamp(to_float(item.get("opportunity_score"), 0.0)),
-            clamp(to_float(item.get("risk_score"), 100.0)),
+            -clamp(to_float(item.get("production_rank_score"), to_float(item.get("opportunity_score"), 0.0))),
+            clamp(to_float(item.get("production_rank_risk_score"), to_float(item.get("risk_score"), 100.0))),
             str(item["ticker"]),
         )
     )
@@ -1932,6 +2276,23 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "credibility_score",
         "financial_quality_score",
         "risk_score",
+        "legacy_risk_score",
+        "allocation_risk_score",
+        "allocation_risk_penalty_mode",
+        "discovery_risk_score",
+        "discovery_risk_penalty_mode",
+        "risk_penalty_input_score",
+        "predictive_risk_penalty_input_score",
+        "uncompensated_risk_score",
+        "compensated_risk_score",
+        "liquidity_risk_score",
+        "financing_survival_risk_score",
+        "governance_filing_risk_score",
+        "regulatory_setback_risk_score",
+        "pipeline_anchor_risk_score",
+        "collaborator_dependency_risk_score",
+        "trial_staleness_risk_score",
+        "risk_component_json",
         "momentum_score",
         "clinical_opportunity_score",
         "commercial_quality_score",
@@ -1945,6 +2306,10 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "leverage_fragility_score",
         "mature_defensive_score",
         "expected_return_quality_score",
+        "commercial_entry_quality_score",
+        "commercial_overextension_score",
+        "valuation_growth_fit_score",
+        "commercial_expected_return_overlay_score",
         "quality_adjusted_valuation_score",
         "used_quality_adjusted_valuation",
         "valuation_quality_adjustment_delta",
@@ -1954,8 +2319,17 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "guidance_quality_adjustment_delta",
         "guidance_recency_penalty",
         "investment_score",
+        "discovery_investment_score",
         "opportunity_score",
+        "allocation_opportunity_score",
+        "allocation_bucket",
+        "production_rank_score",
+        "production_rank_risk_score",
+        "production_rank_score_field",
+        "production_score_source",
+        "discovery_opportunity_score",
         "tier1_selection_gate_score",
+        "discovery_selection_gate_score",
         "tier1_primary_horizon_trading_days",
         "tier1_production_score_model",
         "tier1_selection_policy",
@@ -1966,6 +2340,9 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "data_quality_confidence_multiplier",
         "clinical_risk_drag",
         "investment_risk_drag",
+        "discovery_clinical_opportunity_score",
+        "discovery_clinical_risk_drag",
+        "discovery_investment_risk_drag",
         "effective_pre_confidence_risk_drag",
         "effective_post_confidence_risk_drag",
         "effective_total_risk_drag",
@@ -1976,11 +2353,18 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "commercial_risk_overlay_penalty",
         "production_policy_quality_penalty",
         "production_policy_quality_bonus",
+        "discovery_policy_event_hard_penalty",
+        "discovery_policy_soft_weakness_penalty",
+        "discovery_policy_quality_penalty",
+        "discovery_policy_quality_bonus",
         "pre_rank_cap_opportunity_score",
         "rank_quality_cap",
         "rank_quality_cap_reasons",
         "rank_quality_cap_vetoed",
         "rank_quality_cap_veto_reasons",
+        "discovery_rank_quality_cap",
+        "discovery_rank_quality_cap_reasons",
+        "discovery_rank_quality_cap_vetoed",
         "commercial_deterioration_score",
         "commercial_deterioration_flag",
         "commercial_deterioration_reasons",
@@ -2055,6 +2439,11 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "tier1_production_score_model",
         "tier1_selection_policy",
         "alpha_multibagger_role",
+        "allocation_risk_penalty_mode",
+        "discovery_risk_penalty_mode",
+        "allocation_bucket",
+        "production_rank_score_field",
+        "production_score_source",
         "core_structural_veto_reasons",
         "bucket",
         "primary_nct",
@@ -2066,6 +2455,7 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "commercial_risk_overlay_reasons",
         "rank_quality_cap_reasons",
         "rank_quality_cap_veto_reasons",
+        "discovery_rank_quality_cap_reasons",
         "commercial_deterioration_reasons",
         "valuation_growth_mismatch_reasons",
         "transient_revenue_anchor_reasons",
@@ -2082,6 +2472,7 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "biotech_cohort_exclusion_reason",
         "biotech_cohort_model_version",
         "biotech_cohort_evidence_json",
+        "risk_component_json",
         "top_evidence_json",
     }
 
@@ -2119,7 +2510,15 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "company_name",
         "bucket",
         "opportunity_score",
+        "allocation_opportunity_score",
+        "allocation_bucket",
+        "production_rank_score",
+        "production_rank_risk_score",
+        "production_rank_score_field",
+        "production_score_source",
+        "discovery_opportunity_score",
         "investment_score",
+        "discovery_investment_score",
         "biotech_primary_cohort",
         "biotech_secondary_cohort",
         "biotech_cohort_reason_codes",
@@ -2142,7 +2541,9 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "biotech_cohort_exclusion_reason",
         "biotech_cohort_model_version",
         "clinical_opportunity_score",
+        "discovery_clinical_opportunity_score",
         "tier1_selection_gate_score",
+        "discovery_selection_gate_score",
         "tier1_primary_horizon_trading_days",
         "tier1_production_score_model",
         "tier1_selection_policy",
@@ -2153,6 +2554,8 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "data_quality_confidence_multiplier",
         "clinical_risk_drag",
         "investment_risk_drag",
+        "discovery_clinical_risk_drag",
+        "discovery_investment_risk_drag",
         "effective_pre_confidence_risk_drag",
         "effective_post_confidence_risk_drag",
         "effective_total_risk_drag",
@@ -2163,11 +2566,18 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "commercial_risk_overlay_penalty",
         "production_policy_quality_penalty",
         "production_policy_quality_bonus",
+        "discovery_policy_event_hard_penalty",
+        "discovery_policy_soft_weakness_penalty",
+        "discovery_policy_quality_penalty",
+        "discovery_policy_quality_bonus",
         "pre_rank_cap_opportunity_score",
         "rank_quality_cap",
         "rank_quality_cap_reasons",
         "rank_quality_cap_vetoed",
         "rank_quality_cap_veto_reasons",
+        "discovery_rank_quality_cap",
+        "discovery_rank_quality_cap_reasons",
+        "discovery_rank_quality_cap_vetoed",
         "commercial_deterioration_score",
         "commercial_deterioration_flag",
         "commercial_deterioration_reasons",
@@ -2195,6 +2605,10 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "leverage_fragility_score",
         "mature_defensive_score",
         "expected_return_quality_score",
+        "commercial_entry_quality_score",
+        "commercial_overextension_score",
+        "valuation_growth_fit_score",
+        "commercial_expected_return_overlay_score",
         "quality_adjusted_valuation_score",
         "used_quality_adjusted_valuation",
         "valuation_quality_adjustment_delta",
@@ -2207,6 +2621,23 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "credibility_score",
         "financial_quality_score",
         "risk_score",
+        "legacy_risk_score",
+        "allocation_risk_score",
+        "allocation_risk_penalty_mode",
+        "discovery_risk_score",
+        "discovery_risk_penalty_mode",
+        "risk_penalty_input_score",
+        "predictive_risk_penalty_input_score",
+        "uncompensated_risk_score",
+        "compensated_risk_score",
+        "liquidity_risk_score",
+        "financing_survival_risk_score",
+        "governance_filing_risk_score",
+        "regulatory_setback_risk_score",
+        "pipeline_anchor_risk_score",
+        "collaborator_dependency_risk_score",
+        "trial_staleness_risk_score",
+        "risk_component_json",
         "momentum_score",
         "primary_nct",
         "primary_trial_title",

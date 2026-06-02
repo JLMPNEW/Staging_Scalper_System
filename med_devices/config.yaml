@@ -898,6 +898,25 @@ scoring:
   neutral_value_trap_score: 50.0
   max_feature_staleness_days: 7
   cross_sectional_composite_rank: true
+  durable_growth_score_source: "legacy"
+  durable_growth_proxy:
+    cohort_rank_min_n: 5
+    expected_component_count: 8
+  durable_growth_policy_profiles_enabled: false
+  durable_growth_policy:
+    signal_mode: "legacy_passthrough"
+    gate_mode: "hard_positive"
+    entry_min:
+    reliability: 1.0
+    min_component_count: 0
+    min_evidence_quality: 0.0
+    block_classification: true
+    production_state: "promoted"
+    min_lcb_excess_delta: 0.0
+    max_loss_rate: 0.45
+    require_positive_tier1_lcb_delta: false
+    require_validation_for_nonlegacy: true
+    rationale: "durable_growth_v2_not_promoted_after_validation_kept_legacy_passthrough_2026_05_31"
   fda_score_source: "alpha_when_available"
   fda_policy:
     gate_mode: "risk_veto_only"
@@ -982,6 +1001,14 @@ scoring:
       enabled: true
       source: "fda_component_quarantine_2026_05_31"
       validation_note: "FDA product footprint is not positive alpha for service/CRO-like names; use FDA as risk overlay only."
+      durable_growth_policy:
+        signal_mode: "repair_data"
+        gate_mode: "overlay_only"
+        reliability: 0.0
+        min_component_count: 5
+        min_evidence_quality: 50.0
+        block_classification: false
+        rationale: "durable_growth_repair_data_overlay_healthcare_services_2026_05_31"
       fda_policy:
         gate_mode: "risk_veto_only"
         max_event_risk: 75.0
@@ -999,6 +1026,12 @@ scoring:
       enabled: true
       source: "calibration_promoted_2026_05_30"
       validation_note: "Promoted after 120d validation selected 9/14 tickers, 64.29% ticker coverage, 66.67% improved selected ticker rate, 1.67% median cohort-excess, and positive LCB."
+      durable_growth_policy:
+        signal_mode: "neutral_overlay"
+        gate_mode: "overlay_only"
+        reliability: 0.0
+        block_classification: false
+        rationale: "durable_growth_neutralized_due_120d_horizon_mismatch_2026_05_31"
       gates:
         composite_min: 55
         cohort_percentile_min: 60
@@ -1014,12 +1047,24 @@ scoring:
       calibration_status: "restricted_research_only"
       calibration_status_reason: "restricted_after_phase1_direct_payment_template_validation_failed_2026_05_31;holdout_60d_improved_template_failed_validation_gate"
       validation_note: "Direct-payment repair templates did not pass the 120d validation gate versus the current baseline; keep out of Tier 1 until a template passes validation and holdout together."
+      durable_growth_policy:
+        signal_mode: "neutral_overlay"
+        gate_mode: "overlay_only"
+        reliability: 0.0
+        block_classification: false
+        rationale: "durable_growth_neutralized_direct_payment_unstable_2026_05_31"
     implantable_interventional_devices_procedure_bundled:
       enabled: true
       calibration_status: "production_eligible"
       calibration_status_reason: "promoted_after_holdout_template_validation_2026_05_30;best_60d_template;10_unique_tickers;45_45pct_ticker_coverage;100pct_improved_selected_ticker_rate"
       source: "restricted_cohort_template_holdout_promoted_2026_05_30"
       validation_note: "Template procedure_bundled_pullback_fda_risk_only improved holdout mean, median, hit rate, and LCB at 60d versus baseline."
+      durable_growth_policy:
+        signal_mode: "neutral_overlay"
+        gate_mode: "overlay_only"
+        reliability: 0.0
+        block_classification: false
+        rationale: "durable_growth_neutral_overlay_pending_inverse_template_validation_2026_05_31"
       score_template:
         template_id: "procedure_bundled_pullback_fda_risk_only"
         rationale: "holdout_60d_mean_excess_33_40pct_median_27_66pct_hit_87_18pct_lcb_24_28pct"
@@ -1054,12 +1099,28 @@ scoring:
       enabled: true
       calibration_status: "restricted_research_only"
       calibration_status_reason: "restricted_after_2026_05_30_component_diagnostics_showed_mixed_small_sample_signal"
+      durable_growth_policy:
+        signal_mode: "inverse_alpha"
+        gate_mode: "overlay_only"
+        reliability: 0.55
+        min_component_count: 4
+        min_evidence_quality: 45.0
+        block_classification: false
+        rationale: "durable_growth_inverse_alpha_candidate_orthopedics_120d_2026_05_31"
     capital_equipment_imaging_monitoring:
       enabled: true
       calibration_status: "production_eligible"
       calibration_status_reason: "promoted_after_holdout_template_validation_2026_05_30;best_30d_template;3_unique_tickers;33_33pct_ticker_coverage;100pct_improved_selected_ticker_rate"
       source: "restricted_cohort_template_holdout_promoted_2026_05_30"
       validation_note: "Template capital_growth_sentiment_pullback improved holdout mean, median, hit rate, and LCB at 30d versus baseline; smaller sample than procedure-bundled cohort."
+      durable_growth_policy:
+        signal_mode: "positive_alpha"
+        gate_mode: "overlay_only"
+        reliability: 0.35
+        min_component_count: 4
+        min_evidence_quality: 45.0
+        block_classification: false
+        rationale: "durable_growth_positive_but_data_repair_needed_capital_equipment_2026_05_31"
       score_template:
         template_id: "capital_growth_sentiment_pullback"
         rationale: "holdout_30d_mean_excess_23_91pct_median_30_05pct_hit_73_68pct_lcb_16_10pct"
@@ -1223,7 +1284,7 @@ calibration:
     min_coverage_pct: 0.80
     min_cross_sectional_obs: 5
     min_abs_cross_sectional_ic: 0.05
-    components: "raw_composite_score,cohort_percentile,fundamental_quality_score,durable_growth_score,fda_product_score,fda_alpha_score,fda_safety_score,fda_clearance_velocity_score,fda_evidence_quality_score,fda_event_risk_score,reimbursement_score,valuation_score,technical_entry_score,technical_setup_score,technical_core_score,technical_alpha_score,technical_pullback_score,sentiment_catalyst_score,value_trap_score,data_completeness_score,liquidity_score"
+    components: "raw_composite_score,cohort_percentile,fundamental_quality_score,durable_growth_score,durable_growth_score_legacy,durable_growth_alpha_score,durable_growth_growth_score,durable_growth_quality_score,durable_growth_efficiency_score,durable_growth_capital_discipline_score,durable_growth_evidence_quality_score,fda_product_score,fda_alpha_score,fda_safety_score,fda_clearance_velocity_score,fda_evidence_quality_score,fda_event_risk_score,reimbursement_score,valuation_score,technical_entry_score,technical_setup_score,technical_core_score,technical_alpha_score,technical_pullback_score,sentiment_catalyst_score,value_trap_score,data_completeness_score,liquidity_score"
   component_weight_optimizer:
     output_csv: "../output/med_devices_reports/calibration/med_device_component_weight_optimizer_results.csv"
     summary_csv: "../output/med_devices_reports/calibration/med_device_component_weight_optimizer_summary.csv"
@@ -1262,7 +1323,7 @@ calibration:
     output_csv: "../output/med_devices_reports/calibration/med_device_component_redesign_priority.csv"
     detail_csv: "../output/med_devices_reports/calibration/med_device_component_redesign_priority_detail.csv"
     include_control_components: false
-    scoring_components: "fundamental_quality_score,durable_growth_score,fda_product_score,fda_alpha_score,fda_safety_score,fda_clearance_velocity_score,fda_evidence_quality_score,fda_event_risk_score,reimbursement_score,valuation_score,technical_alpha_score,technical_pullback_score,sentiment_catalyst_score,value_trap_score"
+    scoring_components: "fundamental_quality_score,durable_growth_score,durable_growth_score_legacy,durable_growth_alpha_score,durable_growth_growth_score,durable_growth_quality_score,durable_growth_efficiency_score,durable_growth_capital_discipline_score,durable_growth_evidence_quality_score,fda_product_score,fda_alpha_score,fda_safety_score,fda_clearance_velocity_score,fda_evidence_quality_score,fda_event_risk_score,reimbursement_score,valuation_score,technical_alpha_score,technical_pullback_score,sentiment_catalyst_score,value_trap_score"
 
 stage_plan:
   stage_1:

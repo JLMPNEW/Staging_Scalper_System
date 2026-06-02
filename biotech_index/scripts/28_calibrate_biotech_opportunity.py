@@ -46,6 +46,7 @@ from biotech_index.core.market_policy import calibration_market_sources  # noqa:
 from biotech_index.core.scoring_math import (  # noqa: E402
     GROWTH_DRAG_CURVES,
     normalize_growth_drag_curve,
+    score_commercial_expected_return_overlay,
     score_growth_drag as shared_growth_drag_score,
 )
 from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
@@ -151,6 +152,16 @@ SPREAD_KEYS = [
     "rank_quality_cap_exposure_pct",
     "mature_defensive_exposure_pct",
     "expected_return_quality_exposure_pct",
+    "commercial_entry_quality_exposure_pct",
+    "commercial_overextension_exposure_pct",
+    "commercial_expected_return_overlay_exposure_pct",
+    "valuation_growth_fit_exposure_pct",
+    "uncompensated_risk_exposure_pct",
+    "compensated_risk_exposure_pct",
+    "high_compensated_low_structural_risk_exposure_pct",
+    "liquidity_risk_exposure_pct",
+    "financing_survival_risk_exposure_pct",
+    "regulatory_setback_risk_exposure_pct",
     "short_term_catalyst_timing_exposure_pct",
     "top3_gain_contribution_pct",
 ]
@@ -174,6 +185,10 @@ BOOTSTRAP_METRIC_KEYS = [
     "rank_quality_cap_exposure_pct",
     "mature_defensive_exposure_pct",
     "expected_return_quality_exposure_pct",
+    "commercial_entry_quality_exposure_pct",
+    "commercial_overextension_exposure_pct",
+    "commercial_expected_return_overlay_exposure_pct",
+    "valuation_growth_fit_exposure_pct",
     "short_term_catalyst_timing_exposure_pct",
     "illiquid_weakness_exposure_pct",
 ]
@@ -209,6 +224,8 @@ class CalibrationParams:
     convex_risk_penalty_enabled: bool = True
     risk_penalty_convexity: float = 0.35
     risk_penalty_inflection: float = 50.0
+    use_decomposed_risk_for_penalty: bool = False
+    risk_penalty_mode: str = "legacy"
     growth_drag_curve: str = "legacy"
     use_quality_adjusted_valuation_component: bool = True
     use_quality_adjusted_guidance_component: bool = True
@@ -281,6 +298,10 @@ class SelectionPolicy:
     guidance_staleness_penalty: float = 0.0
     mature_defensive_penalty: float = 0.0
     expected_return_quality_bonus: float = 0.0
+    commercial_cohort_expected_return_bonus: float = 0.0
+    commercial_cohort_entry_quality_penalty: float = 0.0
+    commercial_cohort_overextension_penalty: float = 0.0
+    commercial_cohort_target_cohorts: tuple[str, ...] = ("commercial_profitable_growth",)
     short_term_catalyst_timing_bonus: float = 0.0
     targeted_soft_weakness_penalty: float = 0.0
     hard_veto_reasons: tuple[str, ...] = ()
@@ -432,6 +453,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--risk-penalty-mode",
+        choices=["legacy", "decomposed", "predictive"],
+        default="",
+        help=(
+            "Risk score used by the calibration penalty. Defaults to config. "
+            "Non-legacy modes imply --use-risk-override unless explicitly disabled."
+        ),
+    )
+    parser.add_argument(
+        "--use-risk-override",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Allow calibration to use the configured/CLI risk penalty mode instead of legacy risk. "
+            "Defaults to calibration.tier1.risk_decomposition.use_for_penalty."
+        ),
+    )
+    parser.add_argument(
         "--medium-term-horizons",
         type=str,
         default="",
@@ -464,6 +503,44 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--exclude-tickers", type=str, default="")
     return parser.parse_args()
+
+
+def apply_risk_penalty_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> None:
+    risk_mode = str(args.risk_penalty_mode or "").strip().lower()
+    use_override = args.use_risk_override
+    if risk_mode and use_override is None:
+        use_override = risk_mode != "legacy"
+    if not risk_mode and use_override is None:
+        return
+
+    scoring_cfg = config.setdefault("biotech_scoring", {})
+    if not isinstance(scoring_cfg, dict):
+        scoring_cfg = {}
+        config["biotech_scoring"] = scoring_cfg
+    scoring_risk_cfg = scoring_cfg.setdefault("risk_decomposition", {})
+    if not isinstance(scoring_risk_cfg, dict):
+        scoring_risk_cfg = {}
+        scoring_cfg["risk_decomposition"] = scoring_risk_cfg
+
+    calibration_cfg = config.setdefault("calibration", {})
+    if not isinstance(calibration_cfg, dict):
+        calibration_cfg = {}
+        config["calibration"] = calibration_cfg
+    tier1_cfg = calibration_cfg.setdefault("tier1", {})
+    if not isinstance(tier1_cfg, dict):
+        tier1_cfg = {}
+        calibration_cfg["tier1"] = tier1_cfg
+    tier1_risk_cfg = tier1_cfg.setdefault("risk_decomposition", {})
+    if not isinstance(tier1_risk_cfg, dict):
+        tier1_risk_cfg = {}
+        tier1_cfg["risk_decomposition"] = tier1_risk_cfg
+
+    if risk_mode:
+        scoring_risk_cfg["risk_penalty_mode"] = risk_mode
+        tier1_risk_cfg["risk_penalty_mode"] = risk_mode
+    if use_override is not None:
+        scoring_risk_cfg["use_for_penalty"] = bool(use_override)
+        tier1_risk_cfg["use_for_penalty"] = bool(use_override)
 
 
 def configure_logging() -> None:
@@ -651,6 +728,24 @@ def as_bool(raw: object, default: bool = False) -> bool:
     return default
 
 
+def risk_score_for_mode(
+    *,
+    legacy: float,
+    decomposed: float,
+    predictive: float,
+    use_risk_override: bool,
+    mode: str,
+) -> float:
+    if not use_risk_override:
+        return legacy
+    clean_mode = str(mode or "legacy").strip().lower()
+    if clean_mode == "predictive":
+        return predictive
+    if clean_mode == "decomposed":
+        return decomposed
+    return legacy
+
+
 def parse_json(raw: object) -> dict[str, Any]:
     try:
         payload = json.loads(str(raw or "{}"))
@@ -818,6 +913,26 @@ def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
                 ),
             ),
         ),
+        use_decomposed_risk_for_penalty=as_bool(
+            cfg_get(
+                config,
+                "calibration.tier1.risk_decomposition.use_for_penalty",
+                cfg_get(
+                    config,
+                    "biotech_scoring.risk_decomposition.use_for_penalty",
+                    cfg_get(config, "biotech_scoring.risk_decomposition.enabled", False),
+                ),
+            ),
+            False,
+        ),
+        risk_penalty_mode=str(
+            cfg_get(
+                config,
+                "calibration.tier1.risk_decomposition.risk_penalty_mode",
+                cfg_get(config, "biotech_scoring.risk_decomposition.risk_penalty_mode", "legacy"),
+            )
+            or "legacy"
+        ).strip().lower(),
         growth_drag_curve=normalize_growth_drag_curve(
             cfg_get(
                 config,
@@ -1320,6 +1435,10 @@ def policy_signature(policy: SelectionPolicy) -> tuple[Any, ...]:
         round(float(policy.guidance_staleness_penalty), 6),
         round(float(policy.mature_defensive_penalty), 6),
         round(float(policy.expected_return_quality_bonus), 6),
+        round(float(policy.commercial_cohort_expected_return_bonus), 6),
+        round(float(policy.commercial_cohort_entry_quality_penalty), 6),
+        round(float(policy.commercial_cohort_overextension_penalty), 6),
+        tuple(sorted(policy.commercial_cohort_target_cohorts)),
         round(float(policy.short_term_catalyst_timing_bonus), 6),
         round(float(policy.targeted_soft_weakness_penalty), 6),
         tuple(policy.hard_veto_reasons),
@@ -1370,6 +1489,12 @@ def policy_from_dict(raw: dict[str, Any], *, fallback_name: str) -> SelectionPol
         guidance_staleness_penalty=float(raw.get("guidance_staleness_penalty", 0.0)),
         mature_defensive_penalty=float(raw.get("mature_defensive_penalty", 0.0)),
         expected_return_quality_bonus=float(raw.get("expected_return_quality_bonus", 0.0)),
+        commercial_cohort_expected_return_bonus=float(raw.get("commercial_cohort_expected_return_bonus", 0.0)),
+        commercial_cohort_entry_quality_penalty=float(raw.get("commercial_cohort_entry_quality_penalty", 0.0)),
+        commercial_cohort_overextension_penalty=float(raw.get("commercial_cohort_overextension_penalty", 0.0)),
+        commercial_cohort_target_cohorts=tuple(
+            normalize_string_list(raw.get("commercial_cohort_target_cohorts"), ["commercial_profitable_growth"])
+        ),
         short_term_catalyst_timing_bonus=float(raw.get("short_term_catalyst_timing_bonus", 0.0)),
         targeted_soft_weakness_penalty=float(raw.get("targeted_soft_weakness_penalty", 0.0)),
         hard_veto_reasons=reason_tuple(raw.get("hard_veto_reasons")),
@@ -1617,6 +1742,45 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
             hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
         ),
         SelectionPolicy(
+            policy_name="core_veto_event_soft_drag_quality_guardrail_commercial_er_tilt",
+            description=(
+                "Production guardrail policy with a commercial-profitable-growth expected-return and "
+                "entry-quality tilt."
+            ),
+            hard_veto=True,
+            hard_weakness_penalty=prod_event_penalty,
+            soft_weakness_penalty=prod_soft_penalty,
+            value_trap_penalty=prod_value_trap_penalty,
+            leverage_fragility_penalty=prod_leverage_penalty,
+            guidance_staleness_penalty=prod_guidance_penalty,
+            mature_defensive_penalty=prod_mature_penalty if prod_mature_penalty > 0.0 else 4.0,
+            expected_return_quality_bonus=prod_expected_return_bonus if prod_expected_return_bonus > 0.0 else 2.0,
+            commercial_cohort_expected_return_bonus=5.0,
+            commercial_cohort_entry_quality_penalty=3.0,
+            commercial_cohort_overextension_penalty=5.0,
+            commercial_cohort_target_cohorts=("commercial_profitable_growth",),
+            hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+            hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
+        ),
+        SelectionPolicy(
+            policy_name="core_veto_event_soft_drag_quality_guardrail_commercial_entry_guard",
+            description=(
+                "Production guardrail policy with commercial-profitable-growth entry and "
+                "overextension protection only."
+            ),
+            hard_veto=True,
+            hard_weakness_penalty=prod_event_penalty,
+            soft_weakness_penalty=prod_soft_penalty,
+            value_trap_penalty=prod_value_trap_penalty,
+            leverage_fragility_penalty=prod_leverage_penalty,
+            guidance_staleness_penalty=prod_guidance_penalty,
+            commercial_cohort_entry_quality_penalty=4.0,
+            commercial_cohort_overextension_penalty=6.0,
+            commercial_cohort_target_cohorts=("commercial_profitable_growth",),
+            hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+            hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
+        ),
+        SelectionPolicy(
             policy_name="core_veto_event_soft_drag_quality_guardrail_short_term_catalyst_timing",
             description=(
                 "Production guardrail policy with a small bonus for near-term PDUFA proximity or fresh "
@@ -1658,6 +1822,10 @@ def policy_fields(policy: SelectionPolicy) -> dict[str, Any]:
         "selection_policy_guidance_staleness_penalty": policy.guidance_staleness_penalty,
         "selection_policy_mature_defensive_penalty": policy.mature_defensive_penalty,
         "selection_policy_expected_return_quality_bonus": policy.expected_return_quality_bonus,
+        "selection_policy_commercial_cohort_expected_return_bonus": policy.commercial_cohort_expected_return_bonus,
+        "selection_policy_commercial_cohort_entry_quality_penalty": policy.commercial_cohort_entry_quality_penalty,
+        "selection_policy_commercial_cohort_overextension_penalty": policy.commercial_cohort_overextension_penalty,
+        "selection_policy_commercial_cohort_target_cohorts": "|".join(policy.commercial_cohort_target_cohorts),
         "selection_policy_short_term_catalyst_timing_bonus": policy.short_term_catalyst_timing_bonus,
         "selection_policy_targeted_soft_weakness_penalty": policy.targeted_soft_weakness_penalty,
         "selection_policy_hard_veto_reasons": "|".join(policy.hard_veto_reasons),
@@ -1688,6 +1856,10 @@ def policy_output_keys() -> list[str]:
         "selection_policy_guidance_staleness_penalty",
         "selection_policy_mature_defensive_penalty",
         "selection_policy_expected_return_quality_bonus",
+        "selection_policy_commercial_cohort_expected_return_bonus",
+        "selection_policy_commercial_cohort_entry_quality_penalty",
+        "selection_policy_commercial_cohort_overextension_penalty",
+        "selection_policy_commercial_cohort_target_cohorts",
         "selection_policy_short_term_catalyst_timing_bonus",
         "selection_policy_targeted_soft_weakness_penalty",
         "selection_policy_hard_veto_reasons",
@@ -1806,11 +1978,34 @@ def load_excluded_tickers(conn: sqlite3.Connection, *, exclude_current_removals:
 
 
 def load_feature_rows(conn: sqlite3.Connection, asof_date: str, excluded_tickers: set[str]) -> list[dict[str, Any]]:
+    feature_columns = table_columns(conn, "daily_features")
+
+    def feature_expr(column: str, fallback: str = "NULL") -> str:
+        if column in feature_columns:
+            return f"f.{column} AS {column}"
+        return f"{fallback} AS {column}"
+
+    optional_risk_columns = [
+        "legacy_risk_score_raw",
+        "risk_penalty_input_score_raw",
+        "predictive_risk_penalty_input_score_raw",
+        "uncompensated_risk_score_raw",
+        "compensated_risk_score_raw",
+        "liquidity_risk_score_raw",
+        "financing_survival_risk_score_raw",
+        "governance_filing_risk_score_raw",
+        "regulatory_setback_risk_score_raw",
+        "pipeline_anchor_risk_score_raw",
+        "collaborator_dependency_risk_score_raw",
+        "trial_staleness_risk_score_raw",
+    ]
+    optional_select = ",\n            ".join(feature_expr(column) for column in optional_risk_columns)
     rows = conn.execute(
-        """
+        f"""
         SELECT
             f.asof_date, f.company_id, f.catalyst_score_raw, f.credibility_score_raw,
             f.financial_quality_score_raw, f.risk_score_raw, f.momentum_score_raw,
+            {optional_select},
             f.feature_json, c.ticker, c.company_name
         FROM daily_features f
         INNER JOIN companies c ON c.company_id = f.company_id
@@ -2003,7 +2198,7 @@ def mature_defensive_score(observation: Mapping[str, Any], *, growth_drag_curve:
 
 
 def expected_return_quality_score(observation: Mapping[str, Any]) -> float:
-    risk = clamp(to_float(observation.get("risk_score_raw"), 100.0))
+    risk = clamp(to_float(observation.get("risk_for_penalty_score_raw"), observation.get("risk_score_raw")) or 100.0)
     value_trap = clamp(to_float(observation.get("diag_value_trap_score"), 0.0))
     mature_drag = clamp(to_float(observation.get("diag_mature_defensive_score"), 0.0))
     score = (
@@ -2070,6 +2265,17 @@ def short_term_catalyst_timing_fields(observation: Mapping[str, Any]) -> dict[st
 def raw_score_value(raw_scores: dict[str, Any], row: dict[str, Any], key: str) -> tuple[float, bool]:
     value = first_float(raw_scores.get(key), row.get(key))
     return clamp(value), value is None
+
+
+def optional_raw_score_value(
+    raw_scores: dict[str, Any],
+    row: dict[str, Any],
+    key: str,
+    *,
+    default: float,
+) -> float:
+    value = first_float(raw_scores.get(key), row.get(key))
+    return clamp(default if value is None else value)
 
 
 def build_binary_weakness_fields(
@@ -2218,6 +2424,7 @@ def load_observations(
     min_addv20: float,
     strict_feature_lag: bool,
     growth_drag_curve: str,
+    use_decomposed_risk_for_penalty: bool,
 ) -> list[dict[str, Any]]:
     observations: list[dict[str, Any]] = []
     revenue_min = float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000.0))
@@ -2304,6 +2511,55 @@ def load_observations(
                 raw_score_values[score_key] = value
                 if missing:
                     missing_raw_score_fields.append(score_key)
+            risk_component_payload = raw_scores.get("risk_component_scores", {}) if isinstance(raw_scores, dict) else {}
+            structural_risk_payload = (
+                risk_component_payload.get("structural", {})
+                if isinstance(risk_component_payload, dict)
+                else {}
+            )
+            if not isinstance(structural_risk_payload, dict):
+                structural_risk_payload = {}
+            compensated_risk_payload = (
+                risk_component_payload.get("compensated", {})
+                if isinstance(risk_component_payload, dict)
+                else {}
+            )
+            if not isinstance(compensated_risk_payload, dict):
+                compensated_risk_payload = {}
+
+            def component_risk_value(row_key: str, group: dict[str, Any], component_key: str) -> float:
+                return clamp(first_float(row.get(row_key), group.get(component_key), 0.0) or 0.0)
+
+            legacy_risk_score_raw = optional_raw_score_value(
+                raw_scores,
+                dict(row),
+                "legacy_risk_score_raw",
+                default=raw_score_values["risk_score_raw"],
+            )
+            risk_penalty_input_score_raw = optional_raw_score_value(
+                raw_scores,
+                dict(row),
+                "risk_penalty_input_score_raw",
+                default=legacy_risk_score_raw,
+            )
+            predictive_risk_penalty_input_score_raw = optional_raw_score_value(
+                raw_scores,
+                dict(row),
+                "predictive_risk_penalty_input_score_raw",
+                default=risk_penalty_input_score_raw,
+            )
+            uncompensated_risk_score_raw = optional_raw_score_value(
+                raw_scores,
+                dict(row),
+                "uncompensated_risk_score_raw",
+                default=legacy_risk_score_raw,
+            )
+            compensated_risk_score_raw = optional_raw_score_value(
+                raw_scores,
+                dict(row),
+                "compensated_risk_score_raw",
+                default=50.0,
+            )
             ctgov_payload = payload.get("ctgov", {}) if isinstance(payload, dict) else {}
             sec_event_payload = payload.get("sec_events", {}) if isinstance(payload, dict) else {}
             if not isinstance(sec_event_payload, dict):
@@ -2358,6 +2614,62 @@ def load_observations(
                 "latest_positive_sec_event_type": str(sec_event_payload.get("sec_catalyst_latest_event_type") or ""),
                 "confidence_multiplier": confidence,
                 **raw_score_values,
+                "legacy_risk_score_raw": legacy_risk_score_raw,
+                "risk_penalty_input_score_raw": risk_penalty_input_score_raw,
+                "predictive_risk_penalty_input_score_raw": predictive_risk_penalty_input_score_raw,
+                "uncompensated_risk_score_raw": uncompensated_risk_score_raw,
+                "compensated_risk_score_raw": compensated_risk_score_raw,
+                "risk_for_penalty_score_raw": (
+                    risk_score_for_mode(
+                        legacy=raw_score_values["risk_score_raw"],
+                        decomposed=risk_penalty_input_score_raw,
+                        predictive=predictive_risk_penalty_input_score_raw,
+                        use_risk_override=use_decomposed_risk_for_penalty,
+                        mode=str(
+                            cfg_get(
+                                config,
+                                "calibration.tier1.risk_decomposition.risk_penalty_mode",
+                                cfg_get(config, "biotech_scoring.risk_decomposition.risk_penalty_mode", "legacy"),
+                            )
+                            or "legacy"
+                        ),
+                    )
+                ),
+                "liquidity_risk_score_raw": component_risk_value(
+                    "liquidity_risk_score_raw",
+                    structural_risk_payload,
+                    "liquidity",
+                ),
+                "financing_survival_risk_score_raw": component_risk_value(
+                    "financing_survival_risk_score_raw",
+                    structural_risk_payload,
+                    "financing_survival",
+                ),
+                "governance_filing_risk_score_raw": component_risk_value(
+                    "governance_filing_risk_score_raw",
+                    structural_risk_payload,
+                    "governance_filing",
+                ),
+                "regulatory_setback_risk_score_raw": component_risk_value(
+                    "regulatory_setback_risk_score_raw",
+                    structural_risk_payload,
+                    "regulatory_setback",
+                ),
+                "pipeline_anchor_risk_score_raw": component_risk_value(
+                    "pipeline_anchor_risk_score_raw",
+                    structural_risk_payload,
+                    "pipeline_anchor",
+                ),
+                "collaborator_dependency_risk_score_raw": component_risk_value(
+                    "collaborator_dependency_risk_score_raw",
+                    compensated_risk_payload,
+                    "collaborator_dependency",
+                ),
+                "trial_staleness_risk_score_raw": component_risk_value(
+                    "trial_staleness_risk_score_raw",
+                    compensated_risk_payload,
+                    "trial_staleness",
+                ),
                 "diag_raw_score_missing_count": float(len(missing_raw_score_fields)),
                 "diag_raw_score_missing_flag": 1.0 if missing_raw_score_fields else 0.0,
                 "diag_raw_score_missing_fields": "|".join(missing_raw_score_fields),
@@ -2385,11 +2697,17 @@ def load_observations(
                 "leverage_score": clamp(to_float(commercial.get("leverage_score"), 50.0)),
                 "value_trap_score": clamp(to_float(commercial.get("value_trap_score"), 0.0)),
                 "market_cap": to_float(commercial.get("market_cap")),
+                "avg_dollar_volume_20d": to_float(commercial.get("avg_dollar_volume_20d")),
+                "return_3m_pct": to_float(commercial.get("return_3m_pct")),
+                "price_vs_200d_pct": to_float(commercial.get("price_vs_200d_pct")),
+                "distance_from_52w_high_pct": to_float(commercial.get("distance_from_52w_high_pct")),
+                "relative_strength_3m_vs_xbi": to_float(commercial.get("relative_strength_3m_vs_xbi")),
                 "ttm_revenue": to_float(commercial.get("ttm_revenue")),
                 "revenue_yoy_growth_pct": to_float(commercial.get("revenue_yoy_growth_pct")),
                 "commercial_stage_flag": to_float(commercial.get("commercial_stage_flag"), 0.0) or 0.0,
                 "profitable_flag": to_float(commercial.get("profitable_flag"), 0.0) or 0.0,
                 "forward_revenue_growth_pct": to_float(forward.get("forward_revenue_growth_pct")),
+                "forward_ebitda_margin_pct": to_float(forward.get("forward_ebitda_margin_pct")),
                 "quality_forward_valuation_score": clamp(
                     to_float(forward.get("quality_forward_valuation_score"), forward.get("forward_valuation_score"))
                 ),
@@ -2442,6 +2760,88 @@ def load_observations(
             expected_score = expected_return_quality_score(observation)
             observation["diag_expected_return_quality_score"] = expected_score
             observation["diag_expected_return_quality_flag"] = 1.0 if expected_score >= 60.0 else 0.0
+            commercial_risk_diag = commercial_risk_overlay_fields(
+                commercial,
+                governance,
+                commercial_risk_settings,
+            )
+            commercial_overlay_context = {
+                "distance_from_52w_high_pct": observation.get("distance_from_52w_high_pct"),
+                "price_vs_200d_pct": observation.get("price_vs_200d_pct"),
+                "return_3m_pct": observation.get("return_3m_pct"),
+                "relative_strength_3m_vs_xbi": observation.get("relative_strength_3m_vs_xbi"),
+                "quality_adjusted_valuation_score": observation.get("quality_adjusted_valuation_score"),
+                "valuation_score": observation.get("valuation_score"),
+                "revenue_yoy_growth_pct": observation.get("revenue_yoy_growth_pct"),
+                "valuation_growth_mismatch_score": commercial_risk_diag.get(
+                    "valuation_growth_mismatch_score",
+                    0.0,
+                ),
+                "value_trap_score": observation.get("value_trap_score"),
+                "leverage_score": observation.get("leverage_score"),
+                "institutional_upside_capacity_score": observation.get("institutional_upside_capacity_score"),
+                "upside_capacity_score": observation.get("upside_capacity_score"),
+                "commercial_value_score": observation.get("commercial_value_score"),
+            }
+            forward_overlay_context = {
+                "forward_revenue_growth_pct": observation.get("forward_revenue_growth_pct"),
+                "forward_ebitda_margin_pct": observation.get("forward_ebitda_margin_pct"),
+                "quality_adjusted_guidance_score": observation.get("quality_adjusted_guidance_score"),
+                "guidance_score": observation.get("forward_guidance_score"),
+                "guidance_recency_penalty": observation.get("guidance_recency_penalty"),
+            }
+            commercial_overlay_scores = score_commercial_expected_return_overlay(
+                commercial=commercial_overlay_context,
+                forward_guidance=forward_overlay_context,
+                momentum_score=raw_score_values.get("momentum_score_raw", 50.0),
+                risk_score=observation.get("risk_for_penalty_score_raw", observation.get("risk_score_raw", 100.0)),
+                mature_defensive_score=mature_score,
+            )
+            observation["diag_commercial_entry_quality_score"] = commercial_overlay_scores[
+                "commercial_entry_quality_score"
+            ]
+            observation["diag_commercial_entry_quality_flag"] = (
+                1.0 if commercial_overlay_scores["commercial_entry_quality_score"] >= 60.0 else 0.0
+            )
+            observation["diag_commercial_overextension_score"] = commercial_overlay_scores[
+                "commercial_overextension_score"
+            ]
+            observation["diag_commercial_overextension_flag"] = (
+                1.0 if commercial_overlay_scores["commercial_overextension_score"] >= 65.0 else 0.0
+            )
+            observation["diag_valuation_growth_fit_score"] = commercial_overlay_scores["valuation_growth_fit_score"]
+            observation["diag_valuation_growth_fit_flag"] = (
+                1.0 if commercial_overlay_scores["valuation_growth_fit_score"] >= 60.0 else 0.0
+            )
+            observation["diag_commercial_expected_return_overlay_score"] = commercial_overlay_scores[
+                "commercial_expected_return_overlay_score"
+            ]
+            observation["diag_commercial_expected_return_overlay_flag"] = (
+                1.0 if commercial_overlay_scores["commercial_expected_return_overlay_score"] >= 60.0 else 0.0
+            )
+            observation["diag_uncompensated_risk_score"] = float(observation["uncompensated_risk_score_raw"])
+            observation["diag_uncompensated_risk_flag"] = (
+                1.0 if float(observation["uncompensated_risk_score_raw"]) >= 60.0 else 0.0
+            )
+            observation["diag_compensated_risk_score"] = float(observation["compensated_risk_score_raw"])
+            observation["diag_compensated_risk_flag"] = (
+                1.0 if float(observation["compensated_risk_score_raw"]) >= 60.0 else 0.0
+            )
+            observation["diag_high_compensated_low_structural_risk_flag"] = (
+                1.0
+                if float(observation["compensated_risk_score_raw"]) >= 60.0
+                and float(observation["uncompensated_risk_score_raw"]) < 45.0
+                else 0.0
+            )
+            observation["diag_liquidity_risk_flag"] = (
+                1.0 if float(observation["liquidity_risk_score_raw"]) >= 35.0 else 0.0
+            )
+            observation["diag_financing_survival_risk_flag"] = (
+                1.0 if float(observation["financing_survival_risk_score_raw"]) >= 45.0 else 0.0
+            )
+            observation["diag_regulatory_setback_risk_flag"] = (
+                1.0 if float(observation["regulatory_setback_risk_score_raw"]) >= 35.0 else 0.0
+            )
             observation.update(
                 build_binary_weakness_fields(
                     payload,
@@ -2449,7 +2849,7 @@ def load_observations(
                     governance,
                     min_addv20=min_addv20,
                     revenue_min=revenue_min,
-                    risk_score=float(observation["risk_score_raw"]),
+                    risk_score=float(observation["risk_for_penalty_score_raw"]),
                     commercial_fragility_threshold=float(
                         commercial_risk_settings.get("commercial_fragility_threshold", 70.0)
                     ),
@@ -2459,11 +2859,7 @@ def load_observations(
             observation.update(
                 {
                     f"diag_{key}": value
-                    for key, value in commercial_risk_overlay_fields(
-                        commercial,
-                        governance,
-                        commercial_risk_settings,
-                    ).items()
+                    for key, value in commercial_risk_diag.items()
                 }
             )
             observations.append(observation)
@@ -2598,7 +2994,13 @@ def score_observation(row: dict[str, Any], spec: WeightSpec, params: Calibration
     catalyst = clamp(to_float(row.get("catalyst_score_raw")))
     credibility = clamp(to_float(row.get("credibility_score_raw")))
     financial_quality = clamp(to_float(row.get("financial_quality_score_raw")))
-    risk_raw = to_float(row.get("risk_score_raw"))
+    if params.use_decomposed_risk_for_penalty and params.risk_penalty_mode == "predictive":
+        risk_source_key = "predictive_risk_penalty_input_score_raw"
+    elif params.use_decomposed_risk_for_penalty and params.risk_penalty_mode == "decomposed":
+        risk_source_key = "risk_penalty_input_score_raw"
+    else:
+        risk_source_key = "risk_score_raw"
+    risk_raw = to_float(row.get(risk_source_key), to_float(row.get("risk_score_raw")))
     risk = clamp(risk_raw if risk_raw is not None else 100.0)
     momentum = clamp(to_float(row.get("momentum_score_raw")))
     clinical_positive = (
@@ -2967,6 +3369,22 @@ def selection_quality_summary(
             "rank_quality_cap_exposure_pct": pct_flag(rows, "rank_quality_cap_flag"),
             "mature_defensive_exposure_pct": pct_flag(rows, "diag_mature_defensive_flag"),
             "expected_return_quality_exposure_pct": pct_flag(rows, "diag_expected_return_quality_flag"),
+            "commercial_entry_quality_exposure_pct": pct_flag(rows, "diag_commercial_entry_quality_flag"),
+            "commercial_overextension_exposure_pct": pct_flag(rows, "diag_commercial_overextension_flag"),
+            "commercial_expected_return_overlay_exposure_pct": pct_flag(
+                rows,
+                "diag_commercial_expected_return_overlay_flag",
+            ),
+            "valuation_growth_fit_exposure_pct": pct_flag(rows, "diag_valuation_growth_fit_flag"),
+            "uncompensated_risk_exposure_pct": pct_flag(rows, "diag_uncompensated_risk_flag"),
+            "compensated_risk_exposure_pct": pct_flag(rows, "diag_compensated_risk_flag"),
+            "high_compensated_low_structural_risk_exposure_pct": pct_flag(
+                rows,
+                "diag_high_compensated_low_structural_risk_flag",
+            ),
+            "liquidity_risk_exposure_pct": pct_flag(rows, "diag_liquidity_risk_flag"),
+            "financing_survival_risk_exposure_pct": pct_flag(rows, "diag_financing_survival_risk_flag"),
+            "regulatory_setback_risk_exposure_pct": pct_flag(rows, "diag_regulatory_setback_risk_flag"),
             "short_term_catalyst_timing_exposure_pct": pct_flag(rows, "diag_short_term_catalyst_timing_flag"),
             "avg_binary_weakness_count": mean_numeric(rows, "diag_binary_weakness_count"),
             "avg_hard_weakness_count": mean_numeric(rows, "diag_hard_weakness_count"),
@@ -2982,6 +3400,15 @@ def selection_quality_summary(
             "avg_leverage_fragility_score": mean_numeric(rows, "diag_leverage_fragility_score"),
             "avg_mature_defensive_score": mean_numeric(rows, "diag_mature_defensive_score"),
             "avg_expected_return_quality_score": mean_numeric(rows, "diag_expected_return_quality_score"),
+            "avg_commercial_entry_quality_score": mean_numeric(rows, "diag_commercial_entry_quality_score"),
+            "avg_commercial_overextension_score": mean_numeric(rows, "diag_commercial_overextension_score"),
+            "avg_commercial_expected_return_overlay_score": mean_numeric(
+                rows,
+                "diag_commercial_expected_return_overlay_score",
+            ),
+            "avg_valuation_growth_fit_score": mean_numeric(rows, "diag_valuation_growth_fit_score"),
+            "mean_uncompensated_risk_score": mean_numeric(rows, "uncompensated_risk_score_raw"),
+            "mean_compensated_risk_score": mean_numeric(rows, "compensated_risk_score_raw"),
             "avg_short_term_catalyst_timing_score": mean_numeric(rows, "diag_short_term_catalyst_timing_score"),
             "mean_institutional_upside_capacity_score": mean_numeric(rows, "institutional_upside_capacity_score"),
             "mean_quality_adjusted_valuation_score": mean_numeric(rows, "quality_adjusted_valuation_score"),
@@ -3232,7 +3659,13 @@ def policy_adjusted_score(
     params: CalibrationParams,
 ) -> tuple[float | None, dict[str, Any]]:
     scores = score_observation(row, spec, params)
-    risk_raw = to_float(row.get("risk_score_raw"))
+    if params.use_decomposed_risk_for_penalty and params.risk_penalty_mode == "predictive":
+        risk_source_key = "predictive_risk_penalty_input_score_raw"
+    elif params.use_decomposed_risk_for_penalty and params.risk_penalty_mode == "decomposed":
+        risk_source_key = "risk_penalty_input_score_raw"
+    else:
+        risk_source_key = "risk_score_raw"
+    risk_raw = to_float(row.get(risk_source_key), to_float(row.get("risk_score_raw")))
     risk = clamp(risk_raw if risk_raw is not None else 100.0)
     if policy.max_risk_score is not None and risk > policy.max_risk_score:
         return None, scores
@@ -3264,6 +3697,9 @@ def policy_adjusted_score(
         return None, scores
     if policy.require_liquidity and liquidity_ok != 1.0:
         return None, scores
+    commercial_cohort_target = str(row.get("biotech_primary_cohort") or "") in set(
+        policy.commercial_cohort_target_cohorts
+    )
     adjusted = (
         scores["investment_score"]
         - policy.hard_weakness_penalty * (1.0 if hard_penalty_match else 0.0)
@@ -3297,6 +3733,33 @@ def policy_adjusted_score(
         + policy.expected_return_quality_bonus
         * max(0.0, min(100.0, to_float(row.get("diag_expected_return_quality_score"), 0.0) or 0.0))
         / 100.0
+        + (
+            policy.commercial_cohort_expected_return_bonus
+            * max(
+                0.0,
+                min(100.0, to_float(row.get("diag_commercial_expected_return_overlay_score"), 0.0) or 0.0),
+            )
+            / 100.0
+            if commercial_cohort_target
+            else 0.0
+        )
+        - (
+            policy.commercial_cohort_entry_quality_penalty
+            * max(
+                0.0,
+                50.0 - max(0.0, min(100.0, to_float(row.get("diag_commercial_entry_quality_score"), 50.0) or 50.0)),
+            )
+            / 50.0
+            if commercial_cohort_target
+            else 0.0
+        )
+        - (
+            policy.commercial_cohort_overextension_penalty
+            * max(0.0, min(100.0, to_float(row.get("diag_commercial_overextension_score"), 0.0) or 0.0))
+            / 100.0
+            if commercial_cohort_target
+            else 0.0
+        )
         + policy.short_term_catalyst_timing_bonus
         * max(0.0, min(100.0, to_float(row.get("diag_short_term_catalyst_timing_score"), 0.0) or 0.0))
         / 100.0
@@ -3817,6 +4280,10 @@ def build_holdout_rows(grid_rows: list[dict[str, Any]], *, limit: int = 25) -> l
         "selected_rank_quality_cap_exposure_pct",
         "selected_mature_defensive_exposure_pct",
         "selected_expected_return_quality_exposure_pct",
+        "selected_commercial_entry_quality_exposure_pct",
+        "selected_commercial_overextension_exposure_pct",
+        "selected_commercial_expected_return_overlay_exposure_pct",
+        "selected_valuation_growth_fit_exposure_pct",
         "selected_short_term_catalyst_timing_exposure_pct",
         "selected_avg_short_term_catalyst_timing_score",
         "selected_large_loss_20pct_rate_pct",
@@ -4175,6 +4642,20 @@ def selected_ticker_diagnostic_record(
         "mature_defensive_flag": row.get("diag_mature_defensive_flag", ""),
         "expected_return_quality_score": row.get("diag_expected_return_quality_score", ""),
         "expected_return_quality_flag": row.get("diag_expected_return_quality_flag", ""),
+        "commercial_entry_quality_score": row.get("diag_commercial_entry_quality_score", ""),
+        "commercial_entry_quality_flag": row.get("diag_commercial_entry_quality_flag", ""),
+        "commercial_overextension_score": row.get("diag_commercial_overextension_score", ""),
+        "commercial_overextension_flag": row.get("diag_commercial_overextension_flag", ""),
+        "valuation_growth_fit_score": row.get("diag_valuation_growth_fit_score", ""),
+        "valuation_growth_fit_flag": row.get("diag_valuation_growth_fit_flag", ""),
+        "commercial_expected_return_overlay_score": row.get(
+            "diag_commercial_expected_return_overlay_score",
+            "",
+        ),
+        "commercial_expected_return_overlay_flag": row.get(
+            "diag_commercial_expected_return_overlay_flag",
+            "",
+        ),
         "short_term_catalyst_timing_score": row.get("diag_short_term_catalyst_timing_score", ""),
         "short_term_catalyst_timing_flag": row.get("diag_short_term_catalyst_timing_flag", ""),
         "short_term_catalyst_timing_basis": row.get("diag_short_term_catalyst_timing_basis", ""),
@@ -4406,6 +4887,7 @@ def main() -> None:
     start_time = time.perf_counter()
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
+    apply_risk_penalty_cli_overrides(config, args)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_dir = (
@@ -4611,6 +5093,7 @@ def main() -> None:
             min_addv20=min_addv20,
             strict_feature_lag=strict_feature_lag,
             growth_drag_curve=params.growth_drag_curve,
+            use_decomposed_risk_for_penalty=params.use_decomposed_risk_for_penalty,
         )
         if not observations:
             raise ValueError("No Tier-1 feature observations remain after exclusions.")
@@ -4820,6 +5303,8 @@ def main() -> None:
             "convex_risk_penalty_enabled": params.convex_risk_penalty_enabled,
             "risk_penalty_convexity": params.risk_penalty_convexity,
             "risk_penalty_inflection": params.risk_penalty_inflection,
+            "use_decomposed_risk_for_penalty": params.use_decomposed_risk_for_penalty,
+            "risk_penalty_mode": params.risk_penalty_mode,
             "growth_drag_curve": params.growth_drag_curve,
         },
         "best_medium_term_rank1": best_medium_term,

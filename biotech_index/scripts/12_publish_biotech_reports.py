@@ -44,11 +44,19 @@ TOP_SCORE_FIELDS = [
     "company_name",
     "bucket",
     "opportunity_score",
+    "allocation_opportunity_score",
+    "allocation_bucket",
+    "production_rank_score",
+    "production_rank_risk_score",
+    "production_rank_score_field",
+    "production_score_source",
+    "discovery_opportunity_score",
     "action_tier",
     "action_tier_reason",
     "allocation_candidate_flag",
     "research_watchlist_flag",
     "investment_score",
+    "discovery_investment_score",
     "investment_profile",
     "biotech_primary_cohort",
     "biotech_secondary_cohort",
@@ -72,7 +80,9 @@ TOP_SCORE_FIELDS = [
     "biotech_cohort_exclusion_reason",
     "biotech_cohort_model_version",
     "clinical_opportunity_score",
+    "discovery_clinical_opportunity_score",
     "tier1_selection_gate_score",
+    "discovery_selection_gate_score",
     "tier1_primary_horizon_trading_days",
     "tier1_production_score_model",
     "tier1_selection_policy",
@@ -84,6 +94,8 @@ TOP_SCORE_FIELDS = [
     "data_quality_confidence_multiplier",
     "clinical_risk_drag",
     "investment_risk_drag",
+    "discovery_clinical_risk_drag",
+    "discovery_investment_risk_drag",
     "effective_total_risk_drag",
     "production_policy_quality_penalty",
     "production_policy_quality_bonus",
@@ -102,6 +114,10 @@ TOP_SCORE_FIELDS = [
     "value_trap_score",
     "mature_defensive_score",
     "expected_return_quality_score",
+    "commercial_entry_quality_score",
+    "commercial_overextension_score",
+    "valuation_growth_fit_score",
+    "commercial_expected_return_overlay_score",
     "no_forward_guidance_flag",
     "guidance_staleness_flag",
     "guidance_stale_flag",
@@ -110,6 +126,22 @@ TOP_SCORE_FIELDS = [
     "credibility_score",
     "financial_quality_score",
     "risk_score",
+    "legacy_risk_score",
+    "allocation_risk_score",
+    "allocation_risk_penalty_mode",
+    "discovery_risk_score",
+    "discovery_risk_penalty_mode",
+    "risk_penalty_input_score",
+    "predictive_risk_penalty_input_score",
+    "uncompensated_risk_score",
+    "compensated_risk_score",
+    "liquidity_risk_score",
+    "financing_survival_risk_score",
+    "governance_filing_risk_score",
+    "regulatory_setback_risk_score",
+    "pipeline_anchor_risk_score",
+    "collaborator_dependency_risk_score",
+    "trial_staleness_risk_score",
     "momentum_score",
     "primary_nct",
     "primary_trial_title",
@@ -210,6 +242,10 @@ SHADOW_SCORE_FIELDS = [
     "leverage_fragility_score",
     "mature_defensive_score",
     "expected_return_quality_score",
+    "commercial_entry_quality_score",
+    "commercial_overextension_score",
+    "valuation_growth_fit_score",
+    "commercial_expected_return_overlay_score",
     "rank_quality_cap",
     "rank_quality_cap_flag",
     "rank_quality_cap_reasons",
@@ -247,6 +283,70 @@ SHADOW_SCORE_FIELDS = [
     "latest_positive_sec_event_type",
 ]
 
+DISCOVERY_SCORE_FIELDS = [
+    "asof_date",
+    "discovery_rank",
+    "rank",
+    "allocation_rank",
+    "rank_gap_allocation_vs_discovery",
+    "ticker",
+    "company_name",
+    "bucket",
+    "biotech_primary_cohort",
+    "biotech_secondary_cohort",
+    "allocation_opportunity_score",
+    "allocation_bucket",
+    "production_rank_score",
+    "production_rank_risk_score",
+    "production_rank_score_field",
+    "production_score_source",
+    "opportunity_score",
+    "discovery_opportunity_score",
+    "investment_score",
+    "discovery_investment_score",
+    "tier1_selection_gate_score",
+    "discovery_selection_gate_score",
+    "risk_score",
+    "allocation_risk_score",
+    "allocation_risk_penalty_mode",
+    "discovery_risk_score",
+    "discovery_risk_penalty_mode",
+    "legacy_risk_score",
+    "risk_penalty_input_score",
+    "predictive_risk_penalty_input_score",
+    "allocation_action_tier",
+    "allocation_action_tier_reason",
+    "discovery_action_tier",
+    "discovery_action_tier_reason",
+    "discovery_candidate_flag",
+    "dual_consensus_tier",
+    "dual_consensus_reason",
+    "dual_confirmed_flag",
+    "action_tier",
+    "action_tier_reason",
+    "allocation_candidate_flag",
+    "research_watchlist_flag",
+    "clinical_opportunity_score",
+    "discovery_clinical_opportunity_score",
+    "commercial_value_score",
+    "forward_guidance_score",
+    "valuation_score",
+    "quality_adjusted_valuation_score",
+    "quality_adjusted_guidance_score",
+    "commercial_entry_quality_score",
+    "commercial_overextension_score",
+    "valuation_growth_fit_score",
+    "commercial_expected_return_overlay_score",
+    "core_structural_veto_flag",
+    "core_structural_veto_reasons",
+    "rank_quality_cap",
+    "rank_quality_cap_reasons",
+    "rank_quality_cap_vetoed",
+    "event_hard_weakness_reasons",
+    "median_addv20",
+    "cash_runway_months",
+]
+
 RANKING_DIAGNOSTIC_FIELDS = [
     "asof_date",
     "diagnostic_group",
@@ -266,6 +366,10 @@ RANKING_DIAGNOSTIC_FIELDS = [
     "institutional_upside_capacity_score",
     "mature_defensive_score",
     "expected_return_quality_score",
+    "commercial_entry_quality_score",
+    "commercial_overextension_score",
+    "valuation_growth_fit_score",
+    "commercial_expected_return_overlay_score",
     "risk_score",
     "event_hard_reasons",
     "rank_quality_cap",
@@ -382,6 +486,10 @@ def normalized_ticker_list(raw: object, default: list[str] | None = None) -> lis
     return [value.upper() for value in values if value.strip()]
 
 
+def normalized_ticker_set(raw: object, default: list[str] | None = None) -> set[str]:
+    return set(normalized_ticker_list(raw, default=default))
+
+
 def action_tier_settings(config: dict[str, Any]) -> dict[str, float]:
     settings = cfg_get(config, "biotech_reports.action_tiers", {}) or {}
     if not isinstance(settings, dict):
@@ -393,6 +501,13 @@ def action_tier_settings(config: dict[str, Any]) -> dict[str, float]:
         "research_rank_max": float(settings.get("research_rank_max", 20)),
         "research_score_min": float(settings.get("research_score_min", 45.0)),
     }
+
+
+def discovery_operational_excluded_tickers(config: dict[str, Any]) -> set[str]:
+    return normalized_ticker_set(
+        cfg_get(config, "biotech_reports.discovery_operational_guardrails.excluded_tickers", []),
+        default=[],
+    )
 
 
 def apply_action_tier(
@@ -444,6 +559,81 @@ def apply_action_tier(
     return out
 
 
+def apply_discovery_action_framework(row: dict[str, Any], settings: dict[str, float]) -> dict[str, Any]:
+    out = dict(row)
+    allocation_rank = int(to_float(out.get("rank"), 0.0))
+    discovery_rank = int(to_float(out.get("discovery_rank"), 0.0))
+    allocation_score = to_float(out.get("opportunity_score"), 0.0)
+    discovery_score = to_float(out.get("discovery_opportunity_score"), 0.0)
+    allocation_rank_max = int(settings["allocation_rank_max"])
+    high_confidence_score_min = float(settings["high_confidence_score_min"])
+    allocation_score_min = float(settings["allocation_score_min"])
+    research_rank_max = int(settings["research_rank_max"])
+    research_score_min = float(settings["research_score_min"])
+    rank_cap_vetoed = to_float(out.get("rank_quality_cap_vetoed"), 0.0) > 0.0
+
+    out["allocation_rank"] = allocation_rank if allocation_rank > 0 else ""
+    out["allocation_opportunity_score"] = allocation_score
+    out["rank_gap_allocation_vs_discovery"] = (
+        allocation_rank - discovery_rank if allocation_rank > 0 and discovery_rank > 0 else ""
+    )
+
+    allocation_candidate = (
+        allocation_rank > 0
+        and allocation_rank <= allocation_rank_max
+        and allocation_score >= allocation_score_min
+        and not rank_cap_vetoed
+    )
+    discovery_candidate = (
+        discovery_rank > 0
+        and discovery_rank <= research_rank_max
+        and discovery_score >= research_score_min
+        and not rank_cap_vetoed
+    )
+    if discovery_rank > 0 and discovery_rank <= allocation_rank_max and discovery_score >= high_confidence_score_min:
+        discovery_action_tier = "high_confidence_discovery"
+        discovery_action_reason = f"discovery_rank<={allocation_rank_max} and discovery_score>={high_confidence_score_min:g}"
+    elif discovery_candidate:
+        discovery_action_tier = "discovery_candidate"
+        discovery_action_reason = f"discovery_rank<={research_rank_max} and discovery_score>={research_score_min:g}"
+    elif rank_cap_vetoed:
+        discovery_action_tier = "blocked_by_rank_quality_cap"
+        discovery_action_reason = "rank_quality_cap_vetoed"
+    else:
+        discovery_action_tier = "low_priority"
+        discovery_action_reason = "does_not_meet_discovery_threshold"
+
+    if allocation_candidate and discovery_candidate:
+        tier = "dual_confirmed_candidate"
+        reason = (
+            f"allocation_rank<={allocation_rank_max}, discovery_rank<={research_rank_max}, "
+            f"allocation_score>={allocation_score_min:g}, discovery_score>={research_score_min:g}"
+        )
+    elif allocation_candidate:
+        tier = "allocation_candidate"
+        reason = f"allocation_rank<={allocation_rank_max} and allocation_score>={allocation_score_min:g}"
+    elif discovery_candidate:
+        tier = "discovery_candidate"
+        reason = f"discovery_rank<={research_rank_max} and discovery_score>={research_score_min:g}"
+    elif rank_cap_vetoed:
+        tier = "blocked_by_rank_quality_cap"
+        reason = "rank_quality_cap_vetoed"
+    else:
+        tier = "low_priority"
+        reason = "does_not_meet_allocation_or_discovery_threshold"
+    out["dual_consensus_tier"] = tier
+    out["dual_consensus_reason"] = reason
+    out["allocation_candidate_flag"] = 1 if allocation_candidate else 0
+    out["discovery_candidate_flag"] = 1 if discovery_candidate else 0
+    out["dual_confirmed_flag"] = 1 if allocation_candidate and discovery_candidate else 0
+    out["research_watchlist_flag"] = 1 if discovery_candidate and not allocation_candidate else 0
+    out["discovery_action_tier"] = discovery_action_tier
+    out["discovery_action_tier_reason"] = discovery_action_reason
+    out["action_tier"] = discovery_action_tier
+    out["action_tier_reason"] = discovery_action_reason
+    return out
+
+
 def latest_score_date(conn: sqlite3.Connection) -> str:
     null_count = int(conn.execute("SELECT COUNT(*) AS n FROM daily_scores WHERE asof_date IS NULL").fetchone()["n"] or 0)
     if null_count:
@@ -468,11 +658,27 @@ def load_scores(conn: sqlite3.Connection, asof_date: str) -> list[dict[str, Any]
         """
         SELECT
             s.asof_date, s.company_id, s.catalyst_score, s.credibility_score,
-            s.financial_quality_score, s.risk_score, s.momentum_score,
-            s.clinical_opportunity_score, s.commercial_quality_score,
+            s.financial_quality_score, s.risk_score, s.legacy_risk_score,
+            s.allocation_risk_score, s.allocation_risk_penalty_mode,
+            s.discovery_risk_score, s.discovery_risk_penalty_mode,
+            s.risk_penalty_input_score, s.predictive_risk_penalty_input_score,
+            s.uncompensated_risk_score, s.compensated_risk_score,
+            s.liquidity_risk_score, s.financing_survival_risk_score, s.governance_filing_risk_score,
+            s.regulatory_setback_risk_score, s.pipeline_anchor_risk_score,
+            s.collaborator_dependency_risk_score, s.trial_staleness_risk_score,
+            s.momentum_score,
+            s.clinical_opportunity_score, s.discovery_clinical_opportunity_score,
+            s.discovery_clinical_risk_drag, s.discovery_investment_risk_drag,
+            s.commercial_quality_score,
             s.commercial_value_score, s.valuation_score,
-            s.forward_guidance_score, s.upside_capacity_score, s.investment_score, s.opportunity_score,
-            s.tier1_selection_gate_score, s.data_quality_confidence_multiplier,
+            s.forward_guidance_score, s.upside_capacity_score, s.investment_score,
+            s.commercial_entry_quality_score, s.commercial_overextension_score,
+            s.valuation_growth_fit_score, s.commercial_expected_return_overlay_score,
+            s.discovery_investment_score, s.opportunity_score, s.allocation_opportunity_score,
+            s.allocation_bucket, s.production_rank_score, s.production_rank_risk_score,
+            s.production_rank_score_field, s.production_score_source,
+            s.discovery_opportunity_score,
+            s.tier1_selection_gate_score, s.discovery_selection_gate_score, s.data_quality_confidence_multiplier,
             s.clinical_risk_drag, s.investment_risk_drag,
             s.biotech_primary_cohort, s.biotech_secondary_cohort, s.biotech_cohort_reason_codes,
             s.biotech_cohort_confidence, s.biotech_cohort_margin, s.biotech_cohort_source,
@@ -689,7 +895,39 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "company_name": row.get("company_name", ""),
         "bucket": row.get("bucket", ""),
         "opportunity_score": row.get("opportunity_score", ""),
+        "allocation_opportunity_score": row.get(
+            "allocation_opportunity_score",
+            score_components.get("allocation_opportunity_score", "") if isinstance(score_components, dict) else "",
+        ),
+        "allocation_bucket": row.get(
+            "allocation_bucket",
+            score_components.get("allocation_bucket", "") if isinstance(score_components, dict) else "",
+        ),
+        "production_rank_score": row.get(
+            "production_rank_score",
+            score_components.get("production_rank_score", "") if isinstance(score_components, dict) else "",
+        ),
+        "production_rank_risk_score": row.get(
+            "production_rank_risk_score",
+            score_components.get("production_rank_risk_score", "") if isinstance(score_components, dict) else "",
+        ),
+        "production_rank_score_field": row.get(
+            "production_rank_score_field",
+            score_components.get("production_rank_score_field", "") if isinstance(score_components, dict) else "",
+        ),
+        "production_score_source": row.get(
+            "production_score_source",
+            score_components.get("production_score_source", "") if isinstance(score_components, dict) else "",
+        ),
+        "discovery_opportunity_score": row.get(
+            "discovery_opportunity_score",
+            score_components.get("discovery_opportunity_score", "") if isinstance(score_components, dict) else "",
+        ),
         "investment_score": row.get("investment_score", score_components.get("investment_score", "") if isinstance(score_components, dict) else ""),
+        "discovery_investment_score": row.get(
+            "discovery_investment_score",
+            score_components.get("discovery_investment_score", "") if isinstance(score_components, dict) else "",
+        ),
         "investment_profile": score_components.get("investment_profile", "") if isinstance(score_components, dict) else "",
         "biotech_primary_cohort": row.get("biotech_primary_cohort", biotech_taxonomy.get("biotech_primary_cohort", "") if isinstance(biotech_taxonomy, dict) else ""),
         "biotech_secondary_cohort": row.get("biotech_secondary_cohort", biotech_taxonomy.get("biotech_secondary_cohort", "") if isinstance(biotech_taxonomy, dict) else ""),
@@ -713,7 +951,15 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "biotech_cohort_exclusion_reason": row.get("biotech_cohort_exclusion_reason", biotech_taxonomy.get("biotech_cohort_exclusion_reason", "") if isinstance(biotech_taxonomy, dict) else ""),
         "biotech_cohort_model_version": row.get("biotech_cohort_model_version", biotech_taxonomy.get("biotech_cohort_model_version", "") if isinstance(biotech_taxonomy, dict) else ""),
         "clinical_opportunity_score": row.get("clinical_opportunity_score", score_components.get("clinical_opportunity_score", "") if isinstance(score_components, dict) else ""),
+        "discovery_clinical_opportunity_score": row.get(
+            "discovery_clinical_opportunity_score",
+            score_components.get("discovery_clinical_opportunity_score", "") if isinstance(score_components, dict) else "",
+        ),
         "tier1_selection_gate_score": row.get("tier1_selection_gate_score", score_components.get("tier1_selection_gate_score", "") if isinstance(score_components, dict) else ""),
+        "discovery_selection_gate_score": row.get(
+            "discovery_selection_gate_score",
+            score_components.get("discovery_selection_gate_score", "") if isinstance(score_components, dict) else "",
+        ),
         "tier1_primary_horizon_trading_days": production_baseline.get("primary_horizon_trading_days", score_components.get("primary_horizon_trading_days", "") if isinstance(score_components, dict) else "") if isinstance(production_baseline, dict) else "",
         "tier1_production_score_model": production_baseline.get("score_model", score_components.get("production_baseline_score_model", "") if isinstance(score_components, dict) else "") if isinstance(production_baseline, dict) else "",
         "tier1_selection_policy": production_baseline.get("selection_policy", score_components.get("selection_policy", "") if isinstance(score_components, dict) else "") if isinstance(production_baseline, dict) else "",
@@ -724,6 +970,14 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "data_quality_confidence_multiplier": row.get("data_quality_confidence_multiplier", score_components.get("data_quality_confidence_multiplier", "") if isinstance(score_components, dict) else ""),
         "clinical_risk_drag": row.get("clinical_risk_drag", score_components.get("clinical_risk_drag", "") if isinstance(score_components, dict) else ""),
         "investment_risk_drag": row.get("investment_risk_drag", score_components.get("investment_risk_drag", "") if isinstance(score_components, dict) else ""),
+        "discovery_clinical_risk_drag": row.get(
+            "discovery_clinical_risk_drag",
+            score_components.get("discovery_clinical_risk_drag", "") if isinstance(score_components, dict) else "",
+        ),
+        "discovery_investment_risk_drag": row.get(
+            "discovery_investment_risk_drag",
+            score_components.get("discovery_investment_risk_drag", "") if isinstance(score_components, dict) else "",
+        ),
         "effective_total_risk_drag": score_components.get("effective_total_risk_drag", "") if isinstance(score_components, dict) else "",
         "production_policy_quality_penalty": row.get("production_policy_quality_penalty", score_components.get("production_policy_quality_penalty", "") if isinstance(score_components, dict) else ""),
         "production_policy_quality_bonus": row.get("production_policy_quality_bonus", score_components.get("production_policy_quality_bonus", "") if isinstance(score_components, dict) else ""),
@@ -746,6 +1000,33 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "value_trap_score": row.get("value_trap_score", commercial_value.get("value_trap_score", "") if isinstance(commercial_value, dict) else ""),
         "mature_defensive_score": row.get("mature_defensive_score", score_components.get("mature_defensive_score", "") if isinstance(score_components, dict) else ""),
         "expected_return_quality_score": row.get("expected_return_quality_score", score_components.get("expected_return_quality_score", "") if isinstance(score_components, dict) else ""),
+        "commercial_entry_quality_score": row.get(
+            "commercial_entry_quality_score",
+            commercial_value.get("commercial_entry_quality_score", score_components.get("commercial_entry_quality_score", "") if isinstance(score_components, dict) else "")
+            if isinstance(commercial_value, dict)
+            else "",
+        ),
+        "commercial_overextension_score": row.get(
+            "commercial_overextension_score",
+            commercial_value.get("commercial_overextension_score", score_components.get("commercial_overextension_score", "") if isinstance(score_components, dict) else "")
+            if isinstance(commercial_value, dict)
+            else "",
+        ),
+        "valuation_growth_fit_score": row.get(
+            "valuation_growth_fit_score",
+            commercial_value.get("valuation_growth_fit_score", score_components.get("valuation_growth_fit_score", "") if isinstance(score_components, dict) else "")
+            if isinstance(commercial_value, dict)
+            else "",
+        ),
+        "commercial_expected_return_overlay_score": row.get(
+            "commercial_expected_return_overlay_score",
+            commercial_value.get(
+                "commercial_expected_return_overlay_score",
+                score_components.get("commercial_expected_return_overlay_score", "") if isinstance(score_components, dict) else "",
+            )
+            if isinstance(commercial_value, dict)
+            else "",
+        ),
         "no_forward_guidance_flag": row.get("no_forward_guidance_flag", score_components.get("no_forward_guidance_flag", "") if isinstance(score_components, dict) else ""),
         "guidance_staleness_flag": row.get("guidance_staleness_flag", score_components.get("guidance_staleness_flag", "") if isinstance(score_components, dict) else ""),
         "guidance_stale_flag": row.get("guidance_stale_flag", score_components.get("guidance_stale_flag", "") if isinstance(score_components, dict) else ""),
@@ -754,6 +1035,22 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "credibility_score": row.get("credibility_score", ""),
         "financial_quality_score": row.get("financial_quality_score", ""),
         "risk_score": row.get("risk_score", ""),
+        "legacy_risk_score": row.get("legacy_risk_score", score_components.get("legacy_risk_score", "") if isinstance(score_components, dict) else ""),
+        "allocation_risk_score": row.get("allocation_risk_score", score_components.get("allocation_risk_score", "") if isinstance(score_components, dict) else ""),
+        "allocation_risk_penalty_mode": row.get("allocation_risk_penalty_mode", score_components.get("allocation_risk_penalty_mode", "") if isinstance(score_components, dict) else ""),
+        "discovery_risk_score": row.get("discovery_risk_score", score_components.get("discovery_risk_score", "") if isinstance(score_components, dict) else ""),
+        "discovery_risk_penalty_mode": row.get("discovery_risk_penalty_mode", score_components.get("discovery_risk_penalty_mode", "") if isinstance(score_components, dict) else ""),
+        "risk_penalty_input_score": row.get("risk_penalty_input_score", score_components.get("risk_penalty_input_score", "") if isinstance(score_components, dict) else ""),
+        "predictive_risk_penalty_input_score": row.get("predictive_risk_penalty_input_score", score_components.get("predictive_risk_penalty_input_score", "") if isinstance(score_components, dict) else ""),
+        "uncompensated_risk_score": row.get("uncompensated_risk_score", score_components.get("uncompensated_risk_score", "") if isinstance(score_components, dict) else ""),
+        "compensated_risk_score": row.get("compensated_risk_score", score_components.get("compensated_risk_score", "") if isinstance(score_components, dict) else ""),
+        "liquidity_risk_score": row.get("liquidity_risk_score", ""),
+        "financing_survival_risk_score": row.get("financing_survival_risk_score", ""),
+        "governance_filing_risk_score": row.get("governance_filing_risk_score", ""),
+        "regulatory_setback_risk_score": row.get("regulatory_setback_risk_score", ""),
+        "pipeline_anchor_risk_score": row.get("pipeline_anchor_risk_score", ""),
+        "collaborator_dependency_risk_score": row.get("collaborator_dependency_risk_score", ""),
+        "trial_staleness_risk_score": row.get("trial_staleness_risk_score", ""),
         "momentum_score": row.get("momentum_score", ""),
         "primary_nct": evidence.get("primary_nct", "") if isinstance(evidence, dict) else "",
         "primary_trial_title": evidence.get("primary_trial_title", "") if isinstance(evidence, dict) else "",
@@ -936,6 +1233,7 @@ def build_shadow_top_rows(
         min_addv20=0.0,
         strict_feature_lag=strict_feature_lag,
         growth_drag_curve=params.growth_drag_curve,
+        use_decomposed_risk_for_penalty=params.use_decomposed_risk_for_penalty,
     )
     ret_key = "_shadow_report_return"
     if any(ret_key in row for row in observations):
@@ -1001,6 +1299,13 @@ def build_shadow_top_rows(
             "leverage_fragility_score": row.get("diag_leverage_fragility_score", ""),
             "mature_defensive_score": row.get("diag_mature_defensive_score", ""),
             "expected_return_quality_score": row.get("diag_expected_return_quality_score", ""),
+            "commercial_entry_quality_score": row.get("diag_commercial_entry_quality_score", ""),
+            "commercial_overextension_score": row.get("diag_commercial_overextension_score", ""),
+            "valuation_growth_fit_score": row.get("diag_valuation_growth_fit_score", ""),
+            "commercial_expected_return_overlay_score": row.get(
+                "diag_commercial_expected_return_overlay_score",
+                "",
+            ),
             "rank_quality_cap": row.get("rank_quality_cap", ""),
             "rank_quality_cap_flag": row.get("rank_quality_cap_flag", ""),
             "rank_quality_cap_reasons": row.get("rank_quality_cap_reasons", ""),
@@ -1117,6 +1422,13 @@ def build_ranking_order_diagnostics(
                     "institutional_upside_capacity_score": prod.get("institutional_upside_capacity_score", shadow.get("institutional_upside_capacity_score", "")),
                     "mature_defensive_score": prod.get("mature_defensive_score", shadow.get("mature_defensive_score", "")),
                     "expected_return_quality_score": prod.get("expected_return_quality_score", shadow.get("expected_return_quality_score", "")),
+                    "commercial_entry_quality_score": prod.get("commercial_entry_quality_score", shadow.get("commercial_entry_quality_score", "")),
+                    "commercial_overextension_score": prod.get("commercial_overextension_score", shadow.get("commercial_overextension_score", "")),
+                    "valuation_growth_fit_score": prod.get("valuation_growth_fit_score", shadow.get("valuation_growth_fit_score", "")),
+                    "commercial_expected_return_overlay_score": prod.get(
+                        "commercial_expected_return_overlay_score",
+                        shadow.get("commercial_expected_return_overlay_score", ""),
+                    ),
                     "risk_score": prod.get("risk_score", shadow.get("risk_score_raw", shadow.get("risk_score", ""))),
                     "event_hard_reasons": prod.get("event_hard_reasons", shadow.get("event_hard_weakness_reasons", "")),
                     "rank_quality_cap": prod.get("rank_quality_cap", shadow.get("rank_quality_cap", "")),
@@ -1502,6 +1814,7 @@ def main() -> None:
         cfg_get(config, "biotech_reports.alert_config.bucket_transition_enabled", True)
     ).strip().lower() not in {"0", "false", "no", "off"}
     tier_settings = action_tier_settings(config)
+    discovery_excluded_tickers = discovery_operational_excluded_tickers(config)
     index_weights = cfg_get(config, "biotech_reports.index_weights", {}) or {}
     configured_ctgov_evidence_csv = resolve_path(cfg_get(config, "biotech_features.ctgov_evidence_csv", "../output/biotech_index_reports/ctgov_trial_evidence.csv"), base_dir=base_dir)
     trial_status_overrides_csv = resolve_optional_path(cfg_get(config, "ctgov_audit.trial_status_overrides_csv"), base_dir=base_dir)
@@ -1519,6 +1832,9 @@ def main() -> None:
             output_dir = dated_output_dir(base_output_dir, asof_date)
             index_csv = output_dir / str(cfg_get(config, "biotech_reports.index_latest_csv", "biotech_index_latest.csv"))
             top_csv = output_dir / str(cfg_get(config, "biotech_reports.top_candidates_csv", "biotech_top_candidates.csv"))
+            discovery_top_csv = output_dir / str(
+                cfg_get(config, "biotech_reports.discovery_top_candidates_csv", "biotech_discovery_top20_candidates.csv")
+            )
             shadow_top_csv = output_dir / str(
                 cfg_get(config, "biotech_reports.shadow_top_candidates_csv", "biotech_shadow_top20_candidates.csv")
             )
@@ -1543,6 +1859,7 @@ def main() -> None:
                 [
                     index_csv,
                     top_csv,
+                    discovery_top_csv,
                     shadow_top_csv,
                     ranking_diag_csv,
                     cohort_diag_csv,
@@ -1561,10 +1878,33 @@ def main() -> None:
 
             summary = build_index_summary(scores, asof_date, top_n, weights=index_weights)
             flattened_rows = [
-                apply_action_tier(flatten_score_row(row), tier_settings, score_field="opportunity_score")
+                apply_action_tier(flatten_score_row(row), tier_settings, score_field="production_rank_score")
                 for row in scores
             ]
             top_rows = flattened_rows[:top_n]
+            discovery_top_rows = sorted(
+                (
+                    dict(row)
+                    for row in flattened_rows
+                    if str(row.get("ticker") or "").upper() not in discovery_excluded_tickers
+                ),
+                key=lambda row: (
+                    1 if to_float(row.get("biotech_cohort_investible_flag"), 1.0) <= 0.0 else 0,
+                    -to_float(row.get("discovery_opportunity_score"), -1.0),
+                    to_float(row.get("discovery_risk_score"), 100.0),
+                    str(row.get("ticker") or ""),
+                ),
+            )[:20]
+            for discovery_rank, row in enumerate(discovery_top_rows, start=1):
+                row["discovery_rank"] = discovery_rank
+                row["allocation_rank"] = row.get("rank", "")
+                row["allocation_opportunity_score"] = row.get("opportunity_score", "")
+                row["allocation_action_tier"] = row.get("action_tier", "")
+                row["allocation_action_tier_reason"] = row.get("action_tier_reason", "")
+            discovery_top_rows = [
+                apply_discovery_action_framework(row, tier_settings)
+                for row in discovery_top_rows
+            ]
             cohort_diagnostic_rows = build_cohort_diagnostics(flattened_rows, asof_date=asof_date)
             if top_rows:
                 validate_top_score_fields(top_rows[0])
@@ -1607,6 +1947,7 @@ def main() -> None:
 
             write_csv(index_csv, [summary], list(summary.keys()))
             write_csv(top_csv, top_rows, TOP_SCORE_FIELDS)
+            write_csv(discovery_top_csv, discovery_top_rows, DISCOVERY_SCORE_FIELDS)
             write_csv(shadow_top_csv, shadow_top_rows, SHADOW_SCORE_FIELDS)
             write_csv(ranking_diag_csv, ranking_diagnostic_rows, RANKING_DIAGNOSTIC_FIELDS)
             write_csv(cohort_diag_csv, cohort_diagnostic_rows, COHORT_DIAGNOSTIC_FIELDS)
