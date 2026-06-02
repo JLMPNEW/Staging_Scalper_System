@@ -246,6 +246,19 @@ def previous_business_day(day: date) -> date:
     return out
 
 
+def business_day_age(start: date, end: date) -> int:
+    """Return weekday-count age from start exclusive to end inclusive."""
+    if end < start:
+        return -business_day_age(end, start)
+    age = 0
+    current = start + timedelta(days=1)
+    while current <= end:
+        if current.weekday() < 5:
+            age += 1
+        current += timedelta(days=1)
+    return age
+
+
 def default_pipeline_asof(config: dict[str, Any]) -> date:
     market_timezone = str(cfg_get(config, "ib_market_data.market_timezone", "America/New_York"))
     market_close_time = parse_clock_time(cfg_get(config, "ib_market_data.market_close_time", "16:15"))
@@ -721,6 +734,12 @@ def validate_form4_preflight(
             cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2),
         )
     )
+    staleness_day_basis = str(cfg_get(config, "biotech_refresh.form4_preflight.staleness_day_basis", "calendar")).strip().lower()
+    if staleness_day_basis not in {"calendar", "business"}:
+        raise ValueError(
+            "biotech_refresh.form4_preflight.staleness_day_basis must be 'calendar' or 'business', "
+            f"got {staleness_day_basis!r}"
+        )
     required = as_bool(
         cfg_get(
             config,
@@ -753,16 +772,21 @@ def validate_form4_preflight(
         if snapshot_date is None:
             failures.append(f"Form 4 snapshot date is unavailable in {form4_db_path}")
         else:
-            age_days = (target_date - snapshot_date).days
+            age_days = (
+                business_day_age(snapshot_date, target_date)
+                if staleness_day_basis == "business"
+                else (target_date - snapshot_date).days
+            )
             if isinstance(age_days, int) and age_days < 0:
                 failures.append(
                     f"Form 4 snapshot is future-dated: snapshot_date={snapshot_date.isoformat()} "
-                    f"asof={target_date.isoformat()} age_days={age_days}"
+                    f"asof={target_date.isoformat()} age_days={age_days} basis={staleness_day_basis}"
                 )
             elif isinstance(age_days, int) and age_days > max_staleness_days:
                 failures.append(
                     f"Form 4 snapshot is stale: snapshot_date={snapshot_date.isoformat()} "
-                    f"asof={target_date.isoformat()} age_days={age_days} max_staleness_days={max_staleness_days}"
+                    f"asof={target_date.isoformat()} age_days={age_days} basis={staleness_day_basis} "
+                    f"max_staleness_days={max_staleness_days}"
                 )
 
     if failures and (required and not warn_only):

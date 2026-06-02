@@ -982,6 +982,7 @@ biotech_refresh:
     warn_only: false
     warning_is_fatal: true
     max_staleness_days: 2
+    staleness_day_basis: "business"
   max_snapshot_history: 30
   snapshot_outputs:
     enabled: true

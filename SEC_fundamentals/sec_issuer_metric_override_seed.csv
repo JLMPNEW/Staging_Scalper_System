@@ -1,3 +1,0 @@
-rule_id,enabled,metric_name,taxonomy,concept_name,priority,period_type,cik,ticker,sector,industry,industry_aggregate,auto_apply,confidence,source_kind,note
-example_biotech_collaboration_revenue,true,revenue,us-gaap,CollaborationRevenue,20,duration,0000000000,,Healthcare,,Biopharma & Research Tools,true,high,direct,Replace CIK and concept with an exact issuer-scoped revenue concept.
-example_reit_interest_income_review,true,revenue,us-gaap,InterestIncomeOperating,35,duration,0000000000,,,Mortgage REITs,,false,review,direct,Use review-first for mortgage REIT revenue-equivalent concepts.
