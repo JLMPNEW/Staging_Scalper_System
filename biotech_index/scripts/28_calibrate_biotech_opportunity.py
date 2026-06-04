@@ -162,6 +162,11 @@ SPREAD_KEYS = [
     "liquidity_risk_exposure_pct",
     "financing_survival_risk_exposure_pct",
     "regulatory_setback_risk_exposure_pct",
+    "indication_success_above_baseline_exposure_pct",
+    "forward_catalyst_calendar_exposure_pct",
+    "high_short_interest_exposure_pct",
+    "institutional_accumulation_exposure_pct",
+    "insider_accumulation_exposure_pct",
     "short_term_catalyst_timing_exposure_pct",
     "top3_gain_contribution_pct",
 ]
@@ -250,6 +255,9 @@ class CalibrationParams:
         "no_guidance_negative_growth_cap",
         "unprofitable_value_mismatch_cap",
     )
+    alpha_adjustment_enabled: bool = True
+    benchmark_ticker: str = "XBI"
+    return_objective: str = "benchmark_alpha"
 
 
 @dataclass(frozen=True)
@@ -845,6 +853,9 @@ def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
     stack = cfg_get(config, "calibration.tier1.recommended_stack", {}) or {}
     costs = cfg_get(config, "calibration.tier1.costs", {}) or {}
     rank_caps = cfg_get(config, "biotech_scoring.rank_quality_caps", {}) or {}
+    alpha_cfg = cfg_get(config, "calibration.tier1.alpha_adjustment", {}) or {}
+    if not isinstance(alpha_cfg, dict):
+        alpha_cfg = {}
     return CalibrationParams(
         round_trip_cost_bps=float(costs.get("long_round_trip_bps", DEFAULT_ROUND_TRIP_COST_BPS)),
         lcb_z=float(stack.get("lcb_z", DEFAULT_LCB_Z)),
@@ -988,6 +999,9 @@ def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
                 )
             )
         ),
+        alpha_adjustment_enabled=as_bool(alpha_cfg.get("enabled", True), True),
+        benchmark_ticker=normalize_ticker(alpha_cfg.get("benchmark_ticker", "XBI")) or "XBI",
+        return_objective=str(alpha_cfg.get("return_objective") or "benchmark_alpha").strip().lower(),
     )
 
 
@@ -1388,6 +1402,84 @@ def generate_weight_specs(config: dict[str, Any], *, candidate_limit: int = 0) -
     ]
 
     seen = {spec_signature(spec) for spec in specs}
+
+    def float_grid(config_key: str, default: list[float]) -> list[float]:
+        raw_values = cfg_get(config, f"calibration.tier1.weight_optimization.{config_key}", default)
+        values: list[float] = []
+        for item in normalize_string_list(raw_values, [str(value) for value in default]):
+            parsed = to_float(item)
+            if parsed is not None and parsed >= 0.0:
+                values.append(parsed)
+        return sorted(set(round(value, 6) for value in values)) or default
+
+    optimizer_cfg = cfg_get(config, "calibration.tier1.weight_optimization", {}) or {}
+    optimizer_enabled = isinstance(optimizer_cfg, dict) and as_bool(optimizer_cfg.get("enabled", False), False)
+    if optimizer_enabled:
+        catalyst_grid = float_grid("catalyst_grid", [max(0.05, base_catalyst - 0.10), base_catalyst, base_catalyst + 0.10])
+        credibility_grid = float_grid(
+            "credibility_grid",
+            [max(0.05, base_credibility - 0.10), base_credibility, base_credibility + 0.10],
+        )
+        financial_grid = float_grid(
+            "financial_quality_grid",
+            [max(0.05, base_financial - 0.05), base_financial, base_financial + 0.10],
+        )
+        momentum_grid = float_grid("momentum_grid", [max(0.0, base_momentum - 0.05), base_momentum, base_momentum + 0.05])
+        optimizer_risk_grid = float_grid("risk_penalty_grid", [max(0.05, base_risk - 0.05), base_risk, base_risk + 0.05])
+        max_generated = int(float(optimizer_cfg.get("max_generated_specs", 250)))
+        generated = 0
+        for catalyst in catalyst_grid:
+            for credibility in credibility_grid:
+                for financial in financial_grid:
+                    for momentum in momentum_grid:
+                        total = catalyst + credibility + financial + momentum
+                        if total <= 0.0:
+                            continue
+                        normalized = (
+                            catalyst / total,
+                            credibility / total,
+                            financial / total,
+                            momentum / total,
+                        )
+                        for risk_penalty in optimizer_risk_grid:
+                            spec = WeightSpec(
+                                candidate_name=(
+                                    "systematic_weight_grid_"
+                                    f"c{int(round(normalized[0] * 100)):02d}_"
+                                    f"cr{int(round(normalized[1] * 100)):02d}_"
+                                    f"f{int(round(normalized[2] * 100)):02d}_"
+                                    f"m{int(round(normalized[3] * 100)):02d}_"
+                                    f"r{int(round(risk_penalty * 100)):02d}"
+                                ),
+                                description=(
+                                    "Systematic constrained grid candidate generated from "
+                                    "calibration.tier1.weight_optimization."
+                                ),
+                                clinical_catalyst=normalized[0],
+                                clinical_credibility=normalized[1],
+                                clinical_financial_quality=normalized[2],
+                                clinical_momentum=normalized[3],
+                                clinical_risk_penalty=risk_penalty,
+                                clinical_stage_profile=base_clinical_profile,
+                                commercial_stage_profile=base_commercial_profile,
+                            )
+                            signature = spec_signature(spec)
+                            if signature in seen:
+                                continue
+                            seen.add(signature)
+                            specs.append(spec)
+                            generated += 1
+                            if generated >= max_generated:
+                                break
+                        if generated >= max_generated:
+                            break
+                    if generated >= max_generated:
+                        break
+                if generated >= max_generated:
+                    break
+            if generated >= max_generated:
+                break
+
     for clinical_name, catalyst, credibility, financial, momentum in clinical_positive_variants:
         for risk_penalty in clinical_risk_values:
             for profile_name, clinical_profile, commercial_profile in clinical_stage_variants:
@@ -1998,6 +2090,22 @@ def load_feature_rows(conn: sqlite3.Connection, asof_date: str, excluded_tickers
         "pipeline_anchor_risk_score_raw",
         "collaborator_dependency_risk_score_raw",
         "trial_staleness_risk_score_raw",
+        "indication_success_area",
+        "indication_success_probability",
+        "indication_success_multiplier",
+        "indication_weighted_phase2_3_component",
+        "forward_catalyst_nearest_days",
+        "forward_catalyst_event_type",
+        "forward_catalyst_score",
+        "short_interest_pct_float",
+        "short_interest_signal_score",
+        "institutional_ownership_delta_pct",
+        "institutional_accumulation_score",
+        "insider_buy_count_90d",
+        "insider_buy_value_90d",
+        "insider_buy_cluster_count_90d",
+        "insider_sell_value_90d",
+        "insider_accumulation_score",
     ]
     optional_select = ",\n            ".join(feature_expr(column) for column in optional_risk_columns)
     rows = conn.execute(
@@ -2566,6 +2674,80 @@ def load_observations(
                 sec_event_payload = {}
             if "sec_catalyst_score_used" not in sec_event_payload:
                 sec_event_payload = {**sec_event_payload, **sec_catalyst_timing_by_company.get(company_id, {})}
+            shadow_payload = payload.get("shadow_signals", {}) if isinstance(payload, dict) else {}
+            if not isinstance(shadow_payload, dict):
+                shadow_payload = {}
+            indication_shadow = shadow_payload.get("indication_success", {})
+            if not isinstance(indication_shadow, dict):
+                indication_shadow = {}
+            forward_catalyst_shadow = shadow_payload.get("forward_catalyst_calendar", {})
+            if not isinstance(forward_catalyst_shadow, dict):
+                forward_catalyst_shadow = {}
+            short_interest_shadow = shadow_payload.get("short_interest", {})
+            if not isinstance(short_interest_shadow, dict):
+                short_interest_shadow = {}
+            institutional_shadow = shadow_payload.get("institutional_ownership", {})
+            if not isinstance(institutional_shadow, dict):
+                institutional_shadow = {}
+            indication_success_probability = first_float(
+                row.get("indication_success_probability"),
+                raw_scores.get("indication_success_probability"),
+                indication_shadow.get("probability"),
+                0.0,
+            ) or 0.0
+            indication_success_multiplier = first_float(
+                row.get("indication_success_multiplier"),
+                raw_scores.get("indication_success_multiplier"),
+                indication_shadow.get("multiplier"),
+                1.0,
+            ) or 1.0
+            indication_weighted_phase2_3_component = first_float(
+                row.get("indication_weighted_phase2_3_component"),
+                raw_scores.get("indication_weighted_phase2_3_component"),
+                indication_shadow.get("weighted_phase2_3_component"),
+                0.0,
+            ) or 0.0
+            forward_catalyst_score = first_float(
+                row.get("forward_catalyst_score"),
+                raw_scores.get("forward_catalyst_score"),
+                forward_catalyst_shadow.get("forward_catalyst_score"),
+                0.0,
+            ) or 0.0
+            forward_catalyst_nearest_days = first_float(
+                row.get("forward_catalyst_nearest_days"),
+                forward_catalyst_shadow.get("forward_catalyst_nearest_days"),
+            )
+            short_interest_pct_float = first_float(
+                row.get("short_interest_pct_float"),
+                short_interest_shadow.get("short_interest_pct_float"),
+                0.0,
+            ) or 0.0
+            short_interest_signal_score = first_float(
+                row.get("short_interest_signal_score"),
+                raw_scores.get("short_interest_signal_score"),
+                short_interest_shadow.get("short_interest_signal_score"),
+                0.0,
+            ) or 0.0
+            institutional_ownership_delta_pct = first_float(
+                row.get("institutional_ownership_delta_pct"),
+                institutional_shadow.get("institutional_ownership_delta_pct"),
+                0.0,
+            ) or 0.0
+            institutional_accumulation_score = first_float(
+                row.get("institutional_accumulation_score"),
+                raw_scores.get("institutional_accumulation_score"),
+                institutional_shadow.get("institutional_accumulation_score"),
+                50.0,
+            ) or 50.0
+            insider_shadow = shadow_payload.get("insider_activity", {})
+            if not isinstance(insider_shadow, dict):
+                insider_shadow = {}
+            insider_accumulation_score = first_float(
+                row.get("insider_accumulation_score"),
+                raw_scores.get("insider_accumulation_score"),
+                insider_shadow.get("insider_accumulation_score"),
+                50.0,
+            ) or 50.0
             observation = {
                 "asof_date": str(row["asof_date"]),
                 "company_id": company_id,
@@ -2612,6 +2794,33 @@ def load_observations(
                 "sec_event_decay_delta": to_float(sec_event_payload.get("sec_catalyst_decay_delta"), 0.0) or 0.0,
                 "latest_positive_sec_event_age_days": sec_event_payload.get("sec_catalyst_recency_days", ""),
                 "latest_positive_sec_event_type": str(sec_event_payload.get("sec_catalyst_latest_event_type") or ""),
+                "indication_success_area": str(row.get("indication_success_area") or indication_shadow.get("area") or ""),
+                "indication_success_probability": indication_success_probability,
+                "indication_success_multiplier": indication_success_multiplier,
+                "indication_weighted_phase2_3_component": indication_weighted_phase2_3_component,
+                "forward_catalyst_nearest_days": (
+                    forward_catalyst_nearest_days if forward_catalyst_nearest_days is not None else ""
+                ),
+                "forward_catalyst_event_type": str(
+                    row.get("forward_catalyst_event_type")
+                    or forward_catalyst_shadow.get("forward_catalyst_event_type")
+                    or ""
+                ),
+                "forward_catalyst_score": forward_catalyst_score,
+                "short_interest_pct_float": short_interest_pct_float,
+                "short_interest_signal_score": short_interest_signal_score,
+                "institutional_ownership_delta_pct": institutional_ownership_delta_pct,
+                "institutional_accumulation_score": institutional_accumulation_score,
+                "insider_buy_count_90d": first_float(row.get("insider_buy_count_90d"), insider_shadow.get("insider_buy_count_90d"), 0.0) or 0.0,
+                "insider_buy_value_90d": first_float(row.get("insider_buy_value_90d"), insider_shadow.get("insider_buy_value_90d"), 0.0) or 0.0,
+                "insider_buy_cluster_count_90d": first_float(
+                    row.get("insider_buy_cluster_count_90d"),
+                    insider_shadow.get("insider_buy_cluster_count_90d"),
+                    0.0,
+                )
+                or 0.0,
+                "insider_sell_value_90d": first_float(row.get("insider_sell_value_90d"), insider_shadow.get("insider_sell_value_90d"), 0.0) or 0.0,
+                "insider_accumulation_score": insider_accumulation_score,
                 "confidence_multiplier": confidence,
                 **raw_score_values,
                 "legacy_risk_score_raw": legacy_risk_score_raw,
@@ -2819,6 +3028,38 @@ def load_observations(
             observation["diag_commercial_expected_return_overlay_flag"] = (
                 1.0 if commercial_overlay_scores["commercial_expected_return_overlay_score"] >= 60.0 else 0.0
             )
+            observation["diag_indication_success_probability"] = float(observation["indication_success_probability"])
+            observation["diag_indication_success_multiplier"] = float(observation["indication_success_multiplier"])
+            observation["diag_indication_success_above_baseline_flag"] = (
+                1.0 if float(observation["indication_success_multiplier"]) > 1.05 else 0.0
+            )
+            observation["diag_forward_catalyst_calendar_score"] = float(observation["forward_catalyst_score"])
+            observation["diag_forward_catalyst_calendar_flag"] = (
+                1.0 if float(observation["forward_catalyst_score"]) >= 40.0 else 0.0
+            )
+            observation["diag_short_interest_pct_float"] = float(observation["short_interest_pct_float"])
+            observation["diag_short_interest_signal_score"] = float(observation["short_interest_signal_score"])
+            observation["diag_high_short_interest_flag"] = (
+                1.0
+                if float(observation["short_interest_pct_float"]) >= 0.10
+                or float(observation["short_interest_signal_score"]) >= 60.0
+                else 0.0
+            )
+            observation["diag_institutional_ownership_delta_pct"] = float(observation["institutional_ownership_delta_pct"])
+            observation["diag_institutional_accumulation_score"] = float(observation["institutional_accumulation_score"])
+            observation["diag_institutional_accumulation_flag"] = (
+                1.0
+                if float(observation["institutional_ownership_delta_pct"]) >= 0.05
+                or float(observation["institutional_accumulation_score"]) >= 70.0
+                else 0.0
+            )
+            observation["diag_insider_accumulation_score"] = float(observation["insider_accumulation_score"])
+            observation["diag_insider_accumulation_flag"] = (
+                1.0
+                if float(observation["insider_accumulation_score"]) >= 70.0
+                or float(observation["insider_buy_cluster_count_90d"]) >= 2.0
+                else 0.0
+            )
             observation["diag_uncompensated_risk_score"] = float(observation["uncompensated_risk_score_raw"])
             observation["diag_uncompensated_risk_flag"] = (
                 1.0 if float(observation["uncompensated_risk_score_raw"]) >= 60.0 else 0.0
@@ -2939,6 +3180,24 @@ def forward_return(
     return (target.close / entry.close) - 1.0, entry.day.isoformat(), target.day.isoformat()
 
 
+def objective_return_key(horizon: int, params: CalibrationParams) -> str:
+    objective = str(params.return_objective or "raw").strip().lower()
+    if params.alpha_adjustment_enabled and objective in {"benchmark_alpha", "xbi_alpha", "sector_alpha"}:
+        return f"fwd_{horizon}d_net_benchmark_alpha_return"
+    if params.alpha_adjustment_enabled and objective in {"equal_weight_alpha", "universe_alpha", "ew_alpha"}:
+        return f"fwd_{horizon}d_net_equal_weight_alpha_return"
+    return f"fwd_{horizon}d_net_return"
+
+
+def return_objective_label(params: CalibrationParams) -> str:
+    objective = str(params.return_objective or "raw").strip().lower()
+    if params.alpha_adjustment_enabled and objective in {"benchmark_alpha", "xbi_alpha", "sector_alpha"}:
+        return f"benchmark_alpha:{params.benchmark_ticker}"
+    if params.alpha_adjustment_enabled and objective in {"equal_weight_alpha", "universe_alpha", "ew_alpha"}:
+        return "equal_weight_universe_alpha"
+    return "raw_net_return"
+
+
 def add_forward_returns(
     rows: list[dict[str, Any]],
     bars_by_ticker: dict[str, list[Bar]],
@@ -2946,9 +3205,13 @@ def add_forward_returns(
     *,
     round_trip_cost_bps: float,
     next_bar_entry: bool,
+    benchmark_ticker: str = "",
+    benchmark_bars: list[Bar] | None = None,
 ) -> None:
     cost = float(round_trip_cost_bps) / 10_000.0
     missing_return_counts: defaultdict[tuple[int, str], int] = defaultdict(int)
+    clean_benchmark_ticker = normalize_ticker(benchmark_ticker)
+    benchmark_bars = benchmark_bars or []
     for row in rows:
         ticker = normalize_ticker(row.get("ticker"))
         asof = parse_date(row.get("asof_date"))
@@ -2958,6 +3221,9 @@ def add_forward_returns(
             if asof is None:
                 row[f"{prefix}_return"] = ""
                 row[f"{prefix}_net_return"] = ""
+                row[f"{prefix}_benchmark_ticker"] = clean_benchmark_ticker
+                row[f"{prefix}_benchmark_return"] = ""
+                row[f"{prefix}_net_benchmark_alpha_return"] = ""
                 row[f"{prefix}_entry_date"] = ""
                 row[f"{prefix}_target_date"] = ""
                 missing_return_counts[(horizon, "invalid_asof_date")] += 1
@@ -2970,6 +3236,19 @@ def add_forward_returns(
             )
             row[f"{prefix}_return"] = ret if ret is not None else ""
             row[f"{prefix}_net_return"] = ret - cost if ret is not None else ""
+            bench_ret, bench_entry_date, bench_target_date = forward_return(
+                benchmark_bars,
+                asof,
+                horizon,
+                next_bar_entry=next_bar_entry,
+            )
+            row[f"{prefix}_benchmark_ticker"] = clean_benchmark_ticker
+            row[f"{prefix}_benchmark_return"] = bench_ret if bench_ret is not None else ""
+            row[f"{prefix}_benchmark_entry_date"] = bench_entry_date
+            row[f"{prefix}_benchmark_target_date"] = bench_target_date
+            row[f"{prefix}_net_benchmark_alpha_return"] = (
+                (ret - cost) - bench_ret if ret is not None and bench_ret is not None else ""
+            )
             row[f"{prefix}_entry_date"] = entry_date
             row[f"{prefix}_target_date"] = target_date
             if ret is None:
@@ -2982,6 +3261,31 @@ def add_forward_returns(
                 else:
                     reason = "invalid_entry_close"
                 missing_return_counts[(horizon, reason)] += 1
+            if ret is not None and benchmark_bars and bench_ret is None:
+                missing_return_counts[(horizon, "no_benchmark_return")] += 1
+    for horizon in horizons:
+        prefix = f"fwd_{horizon}d"
+        grouped_returns: defaultdict[str, list[float]] = defaultdict(list)
+        for row in rows:
+            asof_key = str(row.get("asof_date") or "")
+            net_return = to_float(row.get(f"{prefix}_net_return"))
+            if asof_key and net_return is not None:
+                grouped_returns[asof_key].append(net_return)
+        equal_weight_by_asof = {
+            asof_key: mean(values)
+            for asof_key, values in grouped_returns.items()
+            if values
+        }
+        for row in rows:
+            asof_key = str(row.get("asof_date") or "")
+            net_return = to_float(row.get(f"{prefix}_net_return"))
+            equal_weight_return = equal_weight_by_asof.get(asof_key)
+            row[f"{prefix}_equal_weight_net_return"] = equal_weight_return if equal_weight_return is not None else ""
+            row[f"{prefix}_net_equal_weight_alpha_return"] = (
+                net_return - equal_weight_return
+                if net_return is not None and equal_weight_return is not None
+                else ""
+            )
     if missing_return_counts:
         summary = ", ".join(
             f"{horizon}d:{reason}={count}"
@@ -3385,6 +3689,14 @@ def selection_quality_summary(
             "liquidity_risk_exposure_pct": pct_flag(rows, "diag_liquidity_risk_flag"),
             "financing_survival_risk_exposure_pct": pct_flag(rows, "diag_financing_survival_risk_flag"),
             "regulatory_setback_risk_exposure_pct": pct_flag(rows, "diag_regulatory_setback_risk_flag"),
+            "indication_success_above_baseline_exposure_pct": pct_flag(
+                rows,
+                "diag_indication_success_above_baseline_flag",
+            ),
+            "forward_catalyst_calendar_exposure_pct": pct_flag(rows, "diag_forward_catalyst_calendar_flag"),
+            "high_short_interest_exposure_pct": pct_flag(rows, "diag_high_short_interest_flag"),
+            "institutional_accumulation_exposure_pct": pct_flag(rows, "diag_institutional_accumulation_flag"),
+            "insider_accumulation_exposure_pct": pct_flag(rows, "diag_insider_accumulation_flag"),
             "short_term_catalyst_timing_exposure_pct": pct_flag(rows, "diag_short_term_catalyst_timing_flag"),
             "avg_binary_weakness_count": mean_numeric(rows, "diag_binary_weakness_count"),
             "avg_hard_weakness_count": mean_numeric(rows, "diag_hard_weakness_count"),
@@ -3407,6 +3719,12 @@ def selection_quality_summary(
                 "diag_commercial_expected_return_overlay_score",
             ),
             "avg_valuation_growth_fit_score": mean_numeric(rows, "diag_valuation_growth_fit_score"),
+            "avg_indication_success_probability": mean_numeric(rows, "diag_indication_success_probability"),
+            "avg_indication_success_multiplier": mean_numeric(rows, "diag_indication_success_multiplier"),
+            "avg_forward_catalyst_calendar_score": mean_numeric(rows, "diag_forward_catalyst_calendar_score"),
+            "avg_short_interest_signal_score": mean_numeric(rows, "diag_short_interest_signal_score"),
+            "avg_institutional_accumulation_score": mean_numeric(rows, "diag_institutional_accumulation_score"),
+            "avg_insider_accumulation_score": mean_numeric(rows, "diag_insider_accumulation_score"),
             "mean_uncompensated_risk_score": mean_numeric(rows, "uncompensated_risk_score_raw"),
             "mean_compensated_risk_score": mean_numeric(rows, "compensated_risk_score_raw"),
             "avg_short_term_catalyst_timing_score": mean_numeric(rows, "diag_short_term_catalyst_timing_score"),
@@ -3837,8 +4155,9 @@ def split_rows_by_completed_return_date(
     horizon: int,
     train_fraction: float,
     embargo_days: int = 0,
+    ret_key: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
-    ret_key = f"fwd_{horizon}d_net_return"
+    ret_key = ret_key or f"fwd_{horizon}d_net_return"
     eligible_dates = sorted(
         {
             str(row.get("asof_date") or "")
@@ -3911,7 +4230,10 @@ def build_candidate_grid_row(
     evaluation_split: str,
     params: CalibrationParams,
 ) -> dict[str, Any]:
-    ret_key = f"fwd_{job.horizon}d_net_return"
+    raw_ret_key = f"fwd_{job.horizon}d_net_return"
+    benchmark_alpha_ret_key = f"fwd_{job.horizon}d_net_benchmark_alpha_return"
+    equal_weight_alpha_ret_key = f"fwd_{job.horizon}d_net_equal_weight_alpha_return"
+    ret_key = objective_return_key(job.horizon, params)
     selected_rows: list[dict[str, Any]] = []
     baseline_rows: list[dict[str, Any]] = []
     raw_baseline_rows: list[dict[str, Any]] = []
@@ -3953,6 +4275,15 @@ def build_candidate_grid_row(
     selected_summary = selection_quality_summary(selected_rows, ret_key, params=params)
     universe_summary = selection_quality_summary(baseline_rows, ret_key, params=params)
     raw_universe_summary = selection_quality_summary(raw_baseline_rows, ret_key, params=params)
+    selected_raw_return_summary = summarize_return_risk(numeric_values(selected_rows, raw_ret_key), params=params)
+    selected_benchmark_alpha_summary = summarize_return_risk(
+        numeric_values(selected_rows, benchmark_alpha_ret_key),
+        params=params,
+    )
+    selected_equal_weight_alpha_summary = summarize_return_risk(
+        numeric_values(selected_rows, equal_weight_alpha_ret_key),
+        params=params,
+    )
     constraint_fields = calibration_constraint_fields(
         selected_summary,
         asof_dates=date_count,
@@ -3965,6 +4296,9 @@ def build_candidate_grid_row(
         "horizon_unit": "trading_bars",
         "top_n": job.top_n,
         "return_basis": "net_after_round_trip_costs",
+        "evaluation_return_key": ret_key,
+        "evaluation_return_basis": return_objective_label(params),
+        "benchmark_ticker": params.benchmark_ticker if params.alpha_adjustment_enabled else "",
         "round_trip_cost_bps": params.round_trip_cost_bps,
         "candidate_name": job.spec.candidate_name,
         "candidate_description": job.spec.description,
@@ -3980,6 +4314,9 @@ def build_candidate_grid_row(
         **constraint_fields,
         **spec_fields(job.spec, job.policy),
         **prefixed("selected_", selected_summary),
+        **prefixed("selected_raw_", selected_raw_return_summary),
+        **prefixed("selected_benchmark_alpha_", selected_benchmark_alpha_summary),
+        **prefixed("selected_equal_weight_alpha_", selected_equal_weight_alpha_summary),
         **prefixed("universe_", universe_summary),
         **prefixed("raw_universe_", raw_universe_summary),
         **{
@@ -4348,7 +4685,7 @@ def selected_returns_by_date(
     top_n: int,
     params: CalibrationParams,
 ) -> list[list[float]]:
-    ret_key = f"fwd_{horizon}d_net_return"
+    ret_key = objective_return_key(horizon, params)
     rows_by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         rows_by_date[str(row.get("asof_date") or "")].append(row)
@@ -4578,6 +4915,8 @@ def selected_ticker_diagnostic_record(
 ) -> dict[str, Any]:
     ret_key = f"fwd_{horizon}d_net_return"
     gross_key = f"fwd_{horizon}d_return"
+    benchmark_alpha_key = f"fwd_{horizon}d_net_benchmark_alpha_return"
+    equal_weight_alpha_key = f"fwd_{horizon}d_net_equal_weight_alpha_return"
     return {
         "sample": sample,
         "evaluation_split": evaluation_split,
@@ -4603,6 +4942,15 @@ def selected_ticker_diagnostic_record(
         "risk_score_raw": row.get("risk_score_raw", ""),
         "net_forward_return": to_float(row.get(ret_key)),
         "net_forward_return_pct": pct(to_float(row.get(ret_key))),
+        "benchmark_ticker": row.get(f"fwd_{horizon}d_benchmark_ticker", ""),
+        "benchmark_forward_return": to_float(row.get(f"fwd_{horizon}d_benchmark_return")),
+        "benchmark_forward_return_pct": pct(to_float(row.get(f"fwd_{horizon}d_benchmark_return"))),
+        "net_benchmark_alpha_return": to_float(row.get(benchmark_alpha_key)),
+        "net_benchmark_alpha_return_pct": pct(to_float(row.get(benchmark_alpha_key))),
+        "equal_weight_net_return": to_float(row.get(f"fwd_{horizon}d_equal_weight_net_return")),
+        "equal_weight_net_return_pct": pct(to_float(row.get(f"fwd_{horizon}d_equal_weight_net_return"))),
+        "net_equal_weight_alpha_return": to_float(row.get(equal_weight_alpha_key)),
+        "net_equal_weight_alpha_return_pct": pct(to_float(row.get(equal_weight_alpha_key))),
         "gross_forward_return": to_float(row.get(gross_key)),
         "gross_forward_return_pct": pct(to_float(row.get(gross_key))),
         "entry_date": row.get(f"fwd_{horizon}d_entry_date", ""),
@@ -4656,6 +5004,26 @@ def selected_ticker_diagnostic_record(
             "diag_commercial_expected_return_overlay_flag",
             "",
         ),
+        "indication_success_area": row.get("indication_success_area", ""),
+        "indication_success_probability": row.get("diag_indication_success_probability", ""),
+        "indication_success_multiplier": row.get("diag_indication_success_multiplier", ""),
+        "indication_success_above_baseline_flag": row.get("diag_indication_success_above_baseline_flag", ""),
+        "forward_catalyst_calendar_score": row.get("diag_forward_catalyst_calendar_score", ""),
+        "forward_catalyst_calendar_flag": row.get("diag_forward_catalyst_calendar_flag", ""),
+        "forward_catalyst_nearest_days": row.get("forward_catalyst_nearest_days", ""),
+        "forward_catalyst_event_type": row.get("forward_catalyst_event_type", ""),
+        "short_interest_pct_float": row.get("diag_short_interest_pct_float", ""),
+        "short_interest_signal_score": row.get("diag_short_interest_signal_score", ""),
+        "high_short_interest_flag": row.get("diag_high_short_interest_flag", ""),
+        "institutional_ownership_delta_pct": row.get("diag_institutional_ownership_delta_pct", ""),
+        "institutional_accumulation_score": row.get("diag_institutional_accumulation_score", ""),
+        "institutional_accumulation_flag": row.get("diag_institutional_accumulation_flag", ""),
+        "insider_buy_count_90d": row.get("insider_buy_count_90d", ""),
+        "insider_buy_value_90d": row.get("insider_buy_value_90d", ""),
+        "insider_buy_cluster_count_90d": row.get("insider_buy_cluster_count_90d", ""),
+        "insider_sell_value_90d": row.get("insider_sell_value_90d", ""),
+        "insider_accumulation_score": row.get("diag_insider_accumulation_score", ""),
+        "insider_accumulation_flag": row.get("diag_insider_accumulation_flag", ""),
         "short_term_catalyst_timing_score": row.get("diag_short_term_catalyst_timing_score", ""),
         "short_term_catalyst_timing_flag": row.get("diag_short_term_catalyst_timing_flag", ""),
         "short_term_catalyst_timing_basis": row.get("diag_short_term_catalyst_timing_basis", ""),
@@ -5098,10 +5466,14 @@ def main() -> None:
         if not observations:
             raise ValueError("No Tier-1 feature observations remain after exclusions.")
         tickers = {ticker for row in observations if (ticker := normalize_ticker(row["ticker"]))}
+        benchmark_ticker = params.benchmark_ticker if params.alpha_adjustment_enabled else ""
+        market_tickers = set(tickers)
+        if benchmark_ticker:
+            market_tickers.add(benchmark_ticker)
         asof_dates = [parsed for row in observations if (parsed := parse_date(row["asof_date"])) is not None]
         if not asof_dates:
             raise ValueError("Tier-1 feature observations do not contain valid as-of dates.")
-        bars_by_ticker = load_bars(conn, tickers=tickers, min_date=min(asof_dates), market_sources=market_sources)
+        bars_by_ticker = load_bars(conn, tickers=market_tickers, min_date=min(asof_dates), market_sources=market_sources)
 
     add_forward_returns(
         observations,
@@ -5109,6 +5481,8 @@ def main() -> None:
         horizons,
         round_trip_cost_bps=params.round_trip_cost_bps,
         next_bar_entry=next_bar_entry,
+        benchmark_ticker=params.benchmark_ticker if params.alpha_adjustment_enabled else "",
+        benchmark_bars=bars_by_ticker.get(params.benchmark_ticker, []) if params.alpha_adjustment_enabled else [],
     )
     candidate_rows: list[dict[str, Any]] = []
     split_manifest: dict[str, Any] = {}
@@ -5119,6 +5493,7 @@ def main() -> None:
             horizon=horizon,
             train_fraction=train_fraction,
             embargo_days=embargo_days,
+            ret_key=objective_return_key(horizon, params),
         )
         liquid_train_observations = liquidity_ok_rows(train_observations)
         liquid_test_observations = liquidity_ok_rows(test_observations)

@@ -69,6 +69,7 @@ FIELDNAMES = [
     "history_years",
     "latest_close",
     "avg_dollar_volume_60d",
+    "avg_dollar_volume_60d_source",
     "duration",
     "requested_asof_date",
     "effective_asof_date",
@@ -354,7 +355,7 @@ def bar_day(raw: object) -> date | None:
     return parse_date(str(raw or "")[:10])
 
 
-def summarize_bars(bars: list[Any], policy: IbPolicy, asof_date: date) -> tuple[dict[str, Any], list[str]]:
+def parsed_price_bars(bars: list[Any]) -> list[tuple[date, float, float]]:
     parsed: list[tuple[date, float, float]] = []
     for bar in bars:
         day = bar_day(getattr(bar, "date", None))
@@ -364,6 +365,19 @@ def summarize_bars(bars: list[Any], policy: IbPolicy, asof_date: date) -> tuple[
             continue
         parsed.append((day, close, volume or 0.0))
     parsed.sort(key=lambda item: item[0])
+    return parsed
+
+
+def summarize_bars(
+    bars: list[Any],
+    policy: IbPolicy,
+    asof_date: date,
+    *,
+    dollar_volume_bars: list[Any] | None = None,
+    dollar_volume_source: str = "",
+) -> tuple[dict[str, Any], list[str]]:
+    parsed = parsed_price_bars(bars)
+    dollar_volume_parsed = parsed_price_bars(dollar_volume_bars or bars)
 
     reasons: list[str] = []
     if not parsed:
@@ -375,6 +389,7 @@ def summarize_bars(bars: list[Any], policy: IbPolicy, asof_date: date) -> tuple[
                 "history_years": 0.0,
                 "latest_close": "",
                 "avg_dollar_volume_60d": "",
+                "avg_dollar_volume_60d_source": dollar_volume_source,
             },
             ["no_usable_bars"],
         )
@@ -383,7 +398,7 @@ def summarize_bars(bars: list[Any], policy: IbPolicy, asof_date: date) -> tuple[
     last_day = parsed[-1][0]
     history_years = round((last_day - first_day).days / 365.25, 2)
     latest_close = parsed[-1][1]
-    recent = parsed[-60:]
+    recent = (dollar_volume_parsed or parsed)[-60:]
     avg_dollar_volume = sum(close * volume for _, close, volume in recent) / max(1, len(recent))
 
     if (asof_date - last_day).days > policy.max_bar_staleness_days:
@@ -405,6 +420,7 @@ def summarize_bars(bars: list[Any], policy: IbPolicy, asof_date: date) -> tuple[
             "history_years": history_years,
             "latest_close": round(latest_close, 6),
             "avg_dollar_volume_60d": round(avg_dollar_volume, 2),
+            "avg_dollar_volume_60d_source": dollar_volume_source,
         },
         reasons,
     )
@@ -498,7 +514,34 @@ def validate_one(ib: Any, stock_cls: Any, row: dict[str, str], *, decision: Asof
         out["review_reason"] = ";".join(reasons)
         return out
 
-    summary, price_reasons = summarize_bars(bars, policy, decision.effective_asof)
+    dollar_volume_bars = bars
+    dollar_volume_source = used_what_to_show
+    if is_adjusted and fallback and fallback not in policy.adjusted_what_to_show_values:
+        try:
+            raw_bars = request_bars(
+                ib,
+                q,
+                asof_date=decision.effective_asof,
+                duration=policy.duration,
+                what_to_show=fallback,
+                policy=policy,
+            )
+            if raw_bars:
+                dollar_volume_bars = raw_bars
+                dollar_volume_source = fallback
+            else:
+                reasons.append(f"raw_liquidity_bars_unavailable:{fallback}")
+        except Exception as exc:
+            reasons.append(f"raw_liquidity_bars_unavailable:{fallback}:{exc}")
+        finally:
+            ib.sleep(policy.sleep_sec)
+    summary, price_reasons = summarize_bars(
+        bars,
+        policy,
+        decision.effective_asof,
+        dollar_volume_bars=dollar_volume_bars,
+        dollar_volume_source=dollar_volume_source,
+    )
     reasons.extend(price_reasons)
     out.update(summary)
     out["price_status"] = "pass" if not price_reasons else "fail" if classify(price_reasons, policy) == "fail" else "review"

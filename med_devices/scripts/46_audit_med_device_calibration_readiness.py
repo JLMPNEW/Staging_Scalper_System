@@ -63,6 +63,12 @@ OUTPUT_FIELDS = [
     "feature_risk_gate_count",
     "feature_neutralize_count",
     "feature_repair_data_count",
+    "component_ic_t_stat_threshold",
+    "component_ic_ready_count",
+    "best_component_ic_component",
+    "best_component_ic_horizon_days",
+    "best_component_ic_min_abs_t_stat",
+    "best_component_ic_recommendation",
     "blocker_flags",
     "recommended_next_action",
     "recommendation_reason",
@@ -213,6 +219,51 @@ def feature_counts(rows: list[dict[str, str]], cohort: str) -> Counter[str]:
     )
 
 
+def min_abs_component_t_stat(row: dict[str, str]) -> float:
+    values = [
+        to_float(row.get("spearman_ic_excess_t_stat")),
+        to_float(row.get("net_spearman_ic_excess_t_stat")),
+        to_float(row.get("factor_neutral_spearman_ic_excess_t_stat")),
+    ]
+    clean = [abs(value) for value in values if value is not None and math.isfinite(value)]
+    return min(clean) if clean else 0.0
+
+
+def component_ic_readiness(rows: list[dict[str, str]], cohort: str, *, min_t_stat: float) -> dict[str, Any]:
+    cohort_rows = [row for row in rows if row.get("calibration_cohort") == cohort]
+    candidates: list[dict[str, Any]] = []
+    for row in cohort_rows:
+        recommendation = str(row.get("production_recommendation") or "").strip()
+        if recommendation not in {"positive_candidate_factor", "negative_or_inverse_factor"}:
+            continue
+        min_t = min_abs_component_t_stat(row)
+        candidates.append(
+            {
+                "component": row.get("component", ""),
+                "horizon_days": row.get("horizon_days", ""),
+                "recommendation": recommendation,
+                "min_abs_t_stat": min_t,
+                "passed": min_t >= min_t_stat,
+            }
+        )
+    candidates.sort(
+        key=lambda item: (
+            int(bool(item["passed"])),
+            float(item["min_abs_t_stat"]),
+        ),
+        reverse=True,
+    )
+    best = candidates[0] if candidates else {}
+    return {
+        "component_ic_available": int(bool(cohort_rows)),
+        "component_ic_ready_count": sum(1 for item in candidates if item["passed"]),
+        "best_component_ic_component": best.get("component", ""),
+        "best_component_ic_horizon_days": best.get("horizon_days", ""),
+        "best_component_ic_min_abs_t_stat": best.get("min_abs_t_stat", 0.0),
+        "best_component_ic_recommendation": best.get("recommendation", ""),
+    }
+
+
 def blockers(
     *,
     stats: dict[str, Any],
@@ -245,6 +296,10 @@ def blockers(
         out.append("optimizer_walk_forward_not_stable")
     if stats.get("best_template_min_lcb_excess", 0.0) <= 0 and stats.get("best_optimizer_min_lcb_excess", 0.0) <= 0:
         out.append("nonpositive_walk_forward_lcb")
+    if not stats.get("component_ic_available", 0):
+        out.append("component_ic_missing")
+    elif stats.get("component_ic_ready_count", 0) <= 0:
+        out.append("component_ic_t_stat_below_threshold")
     if stats["feature_repair_data_count"] > max(stats["feature_positive_alpha_count"], stats["feature_inverse_alpha_count"]):
         out.append("feature_repair_needed")
     return out
@@ -260,6 +315,10 @@ def recommended_action(status: str, flags: list[str]) -> tuple[str, str]:
         return "collect_more_labels", "near-horizon forward-return coverage is below readiness threshold"
     if "feature_repair_needed" in flag_set:
         return "repair_feature_sleeves", "feature diagnostics show repair-data issues dominate alpha-ready features"
+    if "component_ic_missing" in flag_set:
+        return "run_component_ic", "component IC diagnostics are missing from readiness evidence"
+    if "component_ic_t_stat_below_threshold" in flag_set:
+        return "hold_component_promotion", "no component candidate clears the configured IC t-stat threshold"
     if "template_walk_forward_not_stable" in flag_set and "optimizer_walk_forward_not_stable" in flag_set:
         if status in {"production_eligible", "production_template", "custom_gates"}:
             return "keep_current_production_monitor_only", "current promoted profile should not be expanded until walk-forward evidence improves"
@@ -279,6 +338,8 @@ def action_rows(cohort: str, flags: list[str], stats: dict[str, Any]) -> list[di
         "optimizer_walk_forward_not_stable": "high",
         "nonpositive_walk_forward_lcb": "high",
         "feature_repair_needed": "medium",
+        "component_ic_missing": "high",
+        "component_ic_t_stat_below_threshold": "high",
     }
     action = {
         "too_few_tickers": "merge cohort or exclude from cohort-specific calibration",
@@ -289,6 +350,8 @@ def action_rows(cohort: str, flags: list[str], stats: dict[str, Any]) -> list[di
         "optimizer_walk_forward_not_stable": "do not promote optimized weights",
         "nonpositive_walk_forward_lcb": "require more folds/history or repair features before promotion",
         "feature_repair_needed": "inspect components marked repair_data in feature-stability output",
+        "component_ic_missing": "run component IC diagnostics before calibration promotion",
+        "component_ic_t_stat_below_threshold": "keep candidate components shadow-only until IC t-stat clears threshold",
     }
     rows: list[dict[str, Any]] = []
     for flag in flags:
@@ -317,6 +380,13 @@ def action_rows(cohort: str, flags: list[str], stats: dict[str, Any]) -> list[di
             details = (
                 f"template_min_lcb={stats['best_template_min_lcb_excess']:.4f};"
                 f"optimizer_min_lcb={stats['best_optimizer_min_lcb_excess']:.4f}"
+            )
+        elif flag in {"component_ic_missing", "component_ic_t_stat_below_threshold"}:
+            details = (
+                f"threshold={stats.get('component_ic_t_stat_threshold', 0.0):.2f};"
+                f"ready_count={stats.get('component_ic_ready_count', 0)};"
+                f"best_component={stats.get('best_component_ic_component', '')};"
+                f"best_min_abs_t={stats.get('best_component_ic_min_abs_t_stat', 0.0):.2f}"
             )
         rows.append(
             {
@@ -385,6 +455,15 @@ def main() -> None:
             base_dir=base_dir,
         )
     )
+    component_ic = read_csv(
+        path_from_config(
+            config,
+            "calibration.component_ic_csv",
+            "../output/med_devices_reports/calibration/med_device_component_ic_by_cohort.csv",
+            base_dir=base_dir,
+        )
+    )
+    min_component_ic_t_stat = float(cfg_get(config, "calibration.component_ic.min_ic_t_stat", 2.0))
     rows = read_csv(input_csv)
     horizons = parse_int_list(cfg_get(config, "calibration.calibration_readiness.horizons", "30,60,120"))
     cohorts = sorted({str(row.get("calibration_cohort") or "") for row in rows if row.get("calibration_cohort")})
@@ -441,6 +520,8 @@ def main() -> None:
         stats["feature_risk_gate_count"] = counts["risk_gate_only"]
         stats["feature_neutralize_count"] = counts["neutralize"]
         stats["feature_repair_data_count"] = counts["repair_data"]
+        stats["component_ic_t_stat_threshold"] = min_component_ic_t_stat
+        stats.update(component_ic_readiness(component_ic, cohort, min_t_stat=min_component_ic_t_stat))
         flag_values = blockers(stats=stats, config=config)
         action, reason = recommended_action(str(stats["production_status"]), flag_values)
         stats["blocker_flags"] = ";".join(flag_values)
@@ -461,6 +542,8 @@ def main() -> None:
                 "best_template_reason",
                 "best_optimizer_id",
                 "best_optimizer_reason",
+                "best_component_ic_component",
+                "best_component_ic_recommendation",
                 "blocker_flags",
                 "recommended_next_action",
                 "recommendation_reason",

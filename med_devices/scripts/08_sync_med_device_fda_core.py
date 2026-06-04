@@ -46,6 +46,26 @@ FIELDNAMES = [
     "canonical_rows_upserted",
     "review_reason",
 ]
+FDA_RECALL_LOOKUP_SQL = """
+    SELECT fda_recall_id
+    FROM fact_fda_recall
+    WHERE recall_key IS NOT NULL
+      AND recall_key != ''
+      AND recall_key = ?
+      AND source_id = ?
+      AND COALESCE(endpoint_name, '') = ?
+"""
+FDA_RECALL_LEGACY_ENDPOINT_LOOKUP_SQL = """
+    SELECT fda_recall_id
+    FROM fact_fda_recall
+    WHERE recall_key IS NOT NULL
+      AND recall_key != ''
+      AND recall_key = ?
+      AND source_id = ?
+      AND COALESCE(endpoint_name, '') = ''
+    ORDER BY fda_recall_id
+    LIMIT 1
+"""
 
 
 @dataclass(frozen=True)
@@ -678,6 +698,13 @@ def recall_key(payload: dict[str, Any], *, endpoint_name: str) -> str:
     return f"hash:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
 
 
+def find_existing_recall_row(conn: Any, *, key: str, source_id: str, endpoint_name: str) -> Any:
+    row = conn.execute(FDA_RECALL_LOOKUP_SQL, (key, source_id, endpoint_name)).fetchone()
+    if row is not None:
+        return row
+    return conn.execute(FDA_RECALL_LEGACY_ENDPOINT_LOOKUP_SQL, (key, source_id)).fetchone()
+
+
 def upsert_recall(conn: Any, payload: dict[str, Any], *, endpoint_name: str, source_id: str) -> int:
     firm = field(payload, "recalling_firm", "firm_name")
     manufacturer_id = upsert_manufacturer(conn, firm)
@@ -686,29 +713,7 @@ def upsert_recall(conn: Any, payload: dict[str, Any], *, endpoint_name: str, sou
         upsert_product_code(conn, product_code=product_code, device_name=field(payload, "product_description"), source_id=source_id)
     key = recall_key(payload, endpoint_name=endpoint_name)
     classification = field(payload, "classification")
-    row = conn.execute(
-        """
-        SELECT fda_recall_id
-        FROM fact_fda_recall
-        WHERE recall_key = ?
-          AND source_id = ?
-          AND COALESCE(endpoint_name, '') = ?
-        """,
-        (key, source_id, endpoint_name),
-    ).fetchone()
-    if row is None:
-        row = conn.execute(
-            """
-            SELECT fda_recall_id
-            FROM fact_fda_recall
-            WHERE recall_key = ?
-              AND source_id = ?
-              AND COALESCE(endpoint_name, '') = ''
-            ORDER BY fda_recall_id
-            LIMIT 1
-            """,
-            (key, source_id),
-        ).fetchone()
+    row = find_existing_recall_row(conn, key=key, source_id=source_id, endpoint_name=endpoint_name)
     now = utc_now()
     values = (
         key,

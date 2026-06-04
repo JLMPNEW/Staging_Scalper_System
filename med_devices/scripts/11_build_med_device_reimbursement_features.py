@@ -797,7 +797,10 @@ def apply_company_classification(
     row.primary_payment_file = classification.primary_payment_file
     status = classification.payment_rate_status.strip().lower()
     review_reason = adjusted_classification_review_reason(row, classification)
-    missing_rate_reason = row.review_reason in RATE_EVIDENCE_RESOLVED_REVIEW_REASONS
+    missing_rate_reason = any(
+        reason.strip() in RATE_EVIDENCE_RESOLVED_REVIEW_REASONS
+        for reason in row.review_reason.split(";")
+    )
     valid_no_rate_status = status in policy.valid_no_rate_statuses
     if status in RECOGNIZED_BUNDLED_PAYMENT_STATUSES and row.rate_row_count <= 0:
         if classification.coverage_score is not None:

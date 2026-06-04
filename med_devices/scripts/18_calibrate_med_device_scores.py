@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 import math
 import re
 import sys
@@ -21,6 +22,7 @@ from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+LOGGER = logging.getLogger("calibrate_med_device_scores")
 OUTPUT_FIELDS = [
     "calibration_type",
     "segment",
@@ -205,7 +207,7 @@ def main() -> None:
     rows = read_csv(input_csv)
     calibration_rows = calibrate(rows, thresholds=thresholds)
     write_csv(output_csv, calibration_rows)
-    print(f"calibration_csv={output_csv} rows={len(calibration_rows)} source={input_csv}")
+    LOGGER.info("Calibration complete: output=%s rows=%d source=%s", output_csv, len(calibration_rows), input_csv)
 
 
 if __name__ == "__main__":

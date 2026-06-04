@@ -7,9 +7,9 @@ from typing import Any, Mapping
 
 from biotech_index.core.constants import GOING_CONCERN_HARD_STATUSES, GOING_CONCERN_SOFT_STATUSES
 
-MODEL_VERSION = "biotech_cohort_v1"
+MODEL_VERSION = "biotech_cohort_v3_commercial_driver_first"
 
-NON_THERAPEUTIC_CATEGORIES = frozenset(
+SERVICES_DIAGNOSTICS_TOOLS_CATEGORIES = frozenset(
     {
         "clinical_research_services",
         "diagnostics_services",
@@ -18,12 +18,22 @@ NON_THERAPEUTIC_CATEGORIES = frozenset(
         "precision_medicine_diagnostics",
         "life_science_tools_services",
         "sterilization_services",
+    }
+)
+
+MEDTECH_DEVICE_CATEGORIES = frozenset(
+    {
         "diabetes_device",
         "medical_device_infrastructure",
         "medical_device_therapeutic_platform",
         "post_market_device_services",
         "surgical_regenerative_devices",
         "surgical_robotics_device",
+    }
+)
+
+NON_THERAPEUTIC_CATEGORIES = SERVICES_DIAGNOSTICS_TOOLS_CATEGORIES | MEDTECH_DEVICE_CATEGORIES | frozenset(
+    {
         "non_therapeutic_device_removed",
     }
 )
@@ -211,7 +221,9 @@ def classify_biotech_cohort(
     guidance_recency_penalty = _to_float(forward_guidance.get("guidance_recency_penalty"), 0.0)
     no_forward_guidance = not str(forward_guidance.get("latest_guidance_filing_date") or "").strip()
 
-    non_therapeutic_score = 95.0 if strategy_category in NON_THERAPEUTIC_CATEGORIES else 0.0
+    services_tools_score = 95.0 if strategy_category in SERVICES_DIAGNOSTICS_TOOLS_CATEGORIES else 0.0
+    medtech_device_score = 95.0 if strategy_category in MEDTECH_DEVICE_CATEGORIES else 0.0
+    non_therapeutic_score = 95.0 if strategy_category == "non_therapeutic_device_removed" else 0.0
     late_score = _clamp(active_pivotal * 35.0 + active_phase3 * 25.0 + pdufa_count * 35.0 + nda_bla_count * 30.0 + regulatory_count * 12.0)
     phase2_score = _clamp((lead_phase23 + program_phase23) * 22.0 + active_phase2 * 12.0)
     early_score = _clamp(verified_active * 18.0 - (lead_phase23 + program_phase23 + active_phase3 + active_pivotal) * 10.0)
@@ -259,17 +271,63 @@ def classify_biotech_cohort(
 
     candidates = {
         "excluded_non_therapeutic_healthcare": non_therapeutic_score,
+        "healthcare_services_diagnostics_tools": services_tools_score,
+        "medtech_growth_or_device": medtech_device_score,
         "commercial_profitable_growth": commercial_profit_growth_score if profitable and commercial_profit_growth_score >= 55.0 else 0.0,
         "commercial_profitable_mature": commercial_profit_mature_score if profitable and commercial_profit_mature_score >= 55.0 else 0.0,
         "commercial_unprofitable_growth": commercial_unprof_growth_score if commercial_stage and not profitable else 0.0,
         "commercial_fragile_or_declining": commercial_fragile_score if commercial_stage and commercial_fragility >= 45.0 else 0.0,
-        "therapeutic_royalty_or_partnered_economics": partnered_score if partnered_score >= 55.0 and not commercial_stage else 0.0,
+        "therapeutic_royalty_or_partnered_economics": partnered_score if partnered_score >= 55.0 else 0.0,
         "late_clinical_pivotal": late_score,
         "mid_clinical_phase2_poc": phase2_score if late_score < 55.0 else 0.0,
         "early_clinical": early_score if late_score < 55.0 and phase2_score < 55.0 else 0.0,
         "platform_pipeline": platform_score if late_score < 55.0 and phase2_score < 55.0 else 0.0,
         "weak_or_historical_pipeline": weak_pipeline_score,
     }
+    raw_candidates = dict(candidates)
+    commercial_candidate_keys = (
+        "commercial_profitable_growth",
+        "commercial_profitable_mature",
+        "commercial_unprofitable_growth",
+        "commercial_fragile_or_declining",
+    )
+    best_commercial_key, best_commercial_score = max(
+        ((key, candidates.get(key, 0.0)) for key in commercial_candidate_keys),
+        key=lambda item: item[1],
+    )
+    # Primary cohort should reflect the dominant economic return driver.  For a
+    # company with meaningful commercial revenue, active Phase 3/PDUFA evidence
+    # is usually an overlay unless the pipeline asset clearly dominates value.
+    has_material_commercial_anchor = commercial_stage and (
+        best_commercial_score >= 55.0
+        or ttm_revenue >= 50_000_000.0
+        or profitable
+        or forward_profitability
+    )
+    has_pipeline_catalyst = late_score >= 55.0 or phase2_score >= 55.0
+    commercial_anchor_is_dominant = (
+        has_material_commercial_anchor
+        and (profitable or forward_profitability or ttm_revenue >= 100_000_000.0)
+        and commercial_fragility < 75.0
+    )
+    pipeline_clearly_dominates = (
+        has_pipeline_catalyst
+        and late_score >= best_commercial_score + 35.0
+        and not (profitable or forward_profitability)
+        and (ttm_revenue < 150_000_000.0 or commercial_fragility >= 75.0)
+    )
+    if commercial_anchor_is_dominant and not pipeline_clearly_dominates:
+        # Primary cohort should describe the dominant economic return driver.
+        # Commercial companies can still carry late-clinical overlays, but a
+        # catalyst should not automatically outrank a real commercial anchor.
+        cap = max(0.0, best_commercial_score - 1.0)
+        candidates["late_clinical_pivotal"] = min(candidates["late_clinical_pivotal"], cap)
+        candidates["mid_clinical_phase2_poc"] = min(candidates["mid_clinical_phase2_poc"], cap)
+        candidates["therapeutic_royalty_or_partnered_economics"] = min(
+            candidates["therapeutic_royalty_or_partnered_economics"],
+            max(0.0, best_commercial_score - 2.0),
+        )
+
     ordered = sorted(candidates.items(), key=lambda item: item[1], reverse=True)
     primary, top_score = ordered[0]
     secondary, second_score = ordered[1] if len(ordered) > 1 else ("", 0.0)
@@ -282,6 +340,12 @@ def classify_biotech_cohort(
         reason_codes.append(f"strategy_category:{strategy_category}")
     if commercial_stage:
         reason_codes.append("commercial_stage_or_revenue_anchor")
+    if commercial_anchor_is_dominant and has_pipeline_catalyst and not pipeline_clearly_dominates:
+        reason_codes.append("commercial_anchor_primary_pipeline_overlay")
+    if strategy_category in SERVICES_DIAGNOSTICS_TOOLS_CATEGORIES:
+        reason_codes.append("services_diagnostics_tools_strategy_category")
+    if strategy_category in MEDTECH_DEVICE_CATEGORIES:
+        reason_codes.append("medtech_device_strategy_category")
     if profitable:
         reason_codes.append("profitable_flag")
     if math.isfinite(revenue_growth):
@@ -316,6 +380,8 @@ def classify_biotech_cohort(
         overlays.append("royalty_or_partnered_economics")
     if commercial_stage and (late_score >= 55.0 or phase2_score >= 55.0):
         overlays.append("commercial_with_major_pipeline_catalyst")
+    if commercial_anchor_is_dominant and has_pipeline_catalyst and not pipeline_clearly_dominates:
+        overlays.append("late_clinical_overlay")
     if (late_score >= 55.0 or phase2_score >= 55.0) and not commercial_stage:
         overlays.append("pipeline_catalyst_dominant")
     if verified_active <= 1.0 and not commercial_stage and primary not in {"weak_or_historical_pipeline", "unclassified_review"}:
@@ -348,6 +414,10 @@ def classify_biotech_cohort(
     conflict_penalty = 10.0 if margin < 12.0 and secondary else 0.0
     data_quality_bonus = 5.0 if survival_quality not in {"low", "poor", "stale"} else -8.0
     confidence = _clamp(top_score + margin * 0.15 + data_quality_bonus - conflict_penalty)
+    if commercial_anchor_is_dominant and has_pipeline_catalyst:
+        confidence = min(confidence, 88.0)
+    if primary in {"healthcare_services_diagnostics_tools", "medtech_growth_or_device"} and has_pipeline_catalyst:
+        confidence = min(confidence, 86.0)
     if primary == "unclassified_review":
         confidence = min(confidence, 60.0)
     data_quality = "review" if confidence < 75.0 else "medium" if confidence < 85.0 else "high"
@@ -356,6 +426,7 @@ def classify_biotech_cohort(
 
     evidence = {
         "cohort_scores": {key: round(value, 4) for key, value in sorted(candidates.items())},
+        "raw_cohort_scores": {key: round(value, 4) for key, value in sorted(raw_candidates.items())},
         "commercial_stage": commercial_stage,
         "profitable": profitable,
         "ttm_revenue": ttm_revenue,
@@ -373,6 +444,10 @@ def classify_biotech_cohort(
         "collaborator_dependency_ratio": collaborator_ratio,
         "ctgov_evidence_type": evidence_type,
         "strategy_category": strategy_category,
+        "commercial_anchor_is_dominant": commercial_anchor_is_dominant,
+        "pipeline_clearly_dominates": pipeline_clearly_dominates,
+        "best_commercial_cohort": best_commercial_key,
+        "best_commercial_score": round(best_commercial_score, 4),
     }
     return CohortClassification(
         primary_cohort=primary,

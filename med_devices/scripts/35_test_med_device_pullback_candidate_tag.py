@@ -42,6 +42,7 @@ GRID_FIELDS = [
     "objective_score",
     "pass_fail",
     "rejection_reason",
+    "reference_horizon_days",
     "validation_cohort_unique_tickers_120d",
     "validation_selected_ticker_coverage_120d",
     "validation_improved_selected_ticker_rate_120d",
@@ -49,6 +50,7 @@ GRID_FIELDS = [
 ]
 SUMMARY_FIELDS = [
     "calibration_cohort",
+    "reference_horizon_days",
     "validation_cohort_unique_tickers_120d",
     "full_cohort_median_120d",
     "full_cohort_lcb_120d",
@@ -69,6 +71,7 @@ TICKER_FIELDS = [
     "tag_template_id",
     "ticker",
     "company_name",
+    "reference_horizon_days",
     "improved_flag",
     "selected_rows",
     "mean_excess_120d",
@@ -401,6 +404,7 @@ def evaluate_template(
         "objective_score": f"{score_objective(metrics_validation, objective_weights):.6f}",
         "pass_fail": "fail" if rejection else "pass",
         "rejection_reason": ";".join(rejection),
+        "reference_horizon_days": ref_horizon,
         "validation_cohort_unique_tickers_120d": len(validation_cohort_tickers),
         "validation_selected_ticker_coverage_120d": f"{selected_coverage:.4f}",
         "validation_improved_selected_ticker_rate_120d": "" if improved_rate is None else f"{improved_rate:.4f}",
@@ -424,6 +428,7 @@ def ticker_rows_for_best(
     *,
     validation_start_asof: str,
     validation_end_asof: str,
+    reference_horizon: int,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for best in best_rows:
@@ -449,14 +454,15 @@ def ticker_rows_for_best(
             if ticker:
                 grouped.setdefault(ticker, []).append(row)
         for ticker, ticker_rows in sorted(grouped.items()):
-            payload = row_metrics(ticker_rows, horizon=120)
-            values, _ = selected_values(ticker_rows, horizon=120)
+            payload = row_metrics(ticker_rows, horizon=reference_horizon)
+            values, _ = selected_values(ticker_rows, horizon=reference_horizon)
             out.append(
                 {
                     "calibration_cohort": cohort,
                     "tag_template_id": best["tag_template_id"],
                     "ticker": ticker,
                     "company_name": ticker_rows[0].get("company_name", ""),
+                    "reference_horizon_days": reference_horizon,
                     "improved_flag": int(bool(values) and median(values) > 0),
                     "selected_rows": payload["count"],
                     "mean_excess_120d": payload["mean"],
@@ -479,6 +485,7 @@ def summary_rows(
     *,
     validation_start_asof: str,
     validation_end_asof: str,
+    reference_horizon: int,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     by_cohort: dict[str, list[dict[str, Any]]] = {}
@@ -492,7 +499,7 @@ def summary_rows(
             if str(row.get("calibration_cohort") or "") == cohort
             and validation_start_asof <= str(row.get("asof_date") or "") <= validation_end_asof
         ]
-        full_metrics = row_metrics(validation_rows, horizon=120)
+        full_metrics = row_metrics(validation_rows, horizon=reference_horizon)
         reason = str(best.get("rejection_reason") or "")
         if best["pass_fail"] == "pass":
             next_step = "Review economics; eligible for a recommendation-only pullback tag, not automatic promotion."
@@ -505,6 +512,7 @@ def summary_rows(
         out.append(
             {
                 "calibration_cohort": cohort,
+                "reference_horizon_days": reference_horizon,
                 "validation_cohort_unique_tickers_120d": best["validation_cohort_unique_tickers_120d"],
                 "full_cohort_median_120d": full_metrics["median"],
                 "full_cohort_lcb_120d": full_metrics["lcb"],
@@ -513,10 +521,10 @@ def summary_rows(
                 "best_rejection_reason": reason,
                 "best_selected_ticker_coverage_120d": best["validation_selected_ticker_coverage_120d"],
                 "best_improved_selected_ticker_rate_120d": best["validation_improved_selected_ticker_rate_120d"],
-                "best_median_120d": best.get("validation_median_120d", ""),
-                "best_lcb_120d": best.get("validation_lcb_120d", ""),
-                "best_hit_rate_120d": best.get("validation_hit_rate_120d", ""),
-                "best_profit_factor_120d": best.get("validation_profit_factor_120d", ""),
+                "best_median_120d": best.get(f"validation_median_{reference_horizon}d", ""),
+                "best_lcb_120d": best.get(f"validation_lcb_{reference_horizon}d", ""),
+                "best_hit_rate_120d": best.get(f"validation_hit_rate_{reference_horizon}d", ""),
+                "best_profit_factor_120d": best.get(f"validation_profit_factor_{reference_horizon}d", ""),
                 "selected_tickers_validation": best["selected_tickers_validation"],
                 "recommended_next_step": next_step,
             }
@@ -548,6 +556,12 @@ def main() -> None:
 
     rows = read_csv(input_csv)
     horizons = return_horizons(rows)
+    if not horizons:
+        raise ValueError(
+            f"{input_csv} does not contain cohort_excess_return_<horizon>d columns; "
+            "run the score backtest and cohort-neutral backtest first."
+        )
+    reference_horizon = 120 if 120 in horizons else max(horizons)
     validation_start = str(cfg_get(config, "calibration.validation_start_asof", "2025-06-06"))
     validation_end = str(cfg_get(config, "calibration.validation_end_asof", "2025-11-28"))
     effective_train = effective_train_end(
@@ -598,9 +612,21 @@ def main() -> None:
         ),
         reverse=True,
     )
-    summaries = summary_rows(rows, grid_rows, validation_start_asof=validation_start, validation_end_asof=validation_end)
+    summaries = summary_rows(
+        rows,
+        grid_rows,
+        validation_start_asof=validation_start,
+        validation_end_asof=validation_end,
+        reference_horizon=reference_horizon,
+    )
     best_rows = [row for row in grid_rows if row["tag_template_id"] in {summary["best_tag_template_id"] for summary in summaries}]
-    tickers = ticker_rows_for_best(rows, best_rows, validation_start_asof=validation_start, validation_end_asof=validation_end)
+    tickers = ticker_rows_for_best(
+        rows,
+        best_rows,
+        validation_start_asof=validation_start,
+        validation_end_asof=validation_end,
+        reference_horizon=reference_horizon,
+    )
 
     write_csv(output_csv, grid_rows, output_fields(horizons))
     write_csv(summary_csv, summaries, SUMMARY_FIELDS)

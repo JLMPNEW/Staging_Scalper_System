@@ -258,7 +258,7 @@ def upsert_company(conn: Any, company: ScreenCompany, *, active_decisions: set[s
             notes = excluded.notes,
             universe_status = excluded.universe_status,
             is_active = excluded.is_active,
-            source_screen_decision = excluded.source_screen_decision,
+            source_screen_decision = COALESCE(NULLIF(companies.source_screen_decision, ''), excluded.source_screen_decision),
             reason_codes = excluded.reason_codes,
             updated_at = excluded.updated_at
         RETURNING company_id
@@ -355,7 +355,7 @@ def deactivate_absent_companies(
     asof_date = datetime.now(timezone.utc).date().isoformat()
     reason_codes = "absent_from_latest_screen"
     update_params = [
-        ("remove", "absent_from_latest_screen", reason_codes, now, int(row["company_id"]))
+        ("remove", reason_codes, now, int(row["company_id"]))
         for row in rows
     ]
     history_params = [
@@ -376,7 +376,6 @@ def deactivate_absent_companies(
         UPDATE companies
         SET is_active = 0,
             universe_status = ?,
-            source_screen_decision = ?,
             reason_codes = ?,
             updated_at = ?
         WHERE company_id = ?

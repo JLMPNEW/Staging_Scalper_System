@@ -93,6 +93,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-ctgov", action="store_true", help="Skip CTGov sync/link/audit upstream steps.")
     parser.add_argument("--skip-ib", action="store_true", help="Skip the IB market-data step.")
     parser.add_argument("--skip-yahoo", action="store_true", help="Skip the Yahoo adjusted market-data step.")
+    parser.add_argument("--skip-market-positioning", action="store_true", help="Skip FINRA short-interest and SEC 13F positioning refresh/export.")
     parser.add_argument("--skip-analyze", action="store_true", help="Skip SQLite ANALYZE at the end.")
     parser.add_argument("--skip-final-validation", action="store_true", help="Skip final as-of/coverage validation after a full pipeline run.")
     parser.add_argument("--skip-form4-preflight", action="store_true", help="Skip the staging Form 4 database freshness preflight.")
@@ -270,7 +271,15 @@ def default_pipeline_asof(config: dict[str, Any]) -> date:
     return local_today
 
 
-def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bool, reuse_unchanged_historical: bool = False) -> list[Step]:
+def pipeline_steps(
+    mode: str,
+    *,
+    skip_ctgov: bool,
+    skip_ib: bool,
+    skip_yahoo: bool,
+    skip_market_positioning: bool,
+    reuse_unchanged_historical: bool = False,
+) -> list[Step]:
     sec_event_args: tuple[str, ...] = ("--full-rescan",) if mode in {"weekly_reconcile", "full_backfill"} else ()
     companyfacts_args: tuple[str, ...] = ("--full-refresh",) if mode == "full_backfill" else ()
     forward_args: tuple[str, ...] = ("--run-mode", mode)
@@ -311,6 +320,12 @@ def pipeline_steps(mode: str, *, skip_ctgov: bool, skip_ib: bool, skip_yahoo: bo
             Step("commercial_value", "18_build_commercial_value_features.py", commercial_args),
             Step("forward_guidance", "19_parse_forward_guidance.py", forward_args),
             Step("governance_events", "20_build_governance_event_features.py", governance_args),
+        ]
+    )
+    if not skip_market_positioning:
+        steps.append(Step("market_positioning", "25_update_market_positioning.py"))
+    steps.extend(
+        [
             Step("biotech_features", "10_build_biotech_features.py"),
             Step("biotech_scores", "11_score_biotech_index.py"),
             Step("biotech_reports", "12_publish_biotech_reports.py"),
@@ -876,6 +891,7 @@ def validate_table_coverage(
     if failures:
         raise RuntimeError(f"{label} coverage failed for asof={asof}: " + " | ".join(failures))
 
+
 def is_blank(raw: object) -> bool:
     return raw is None or str(raw).strip() == ""
 
@@ -1191,6 +1207,7 @@ def main() -> None:
             skip_ctgov=args.skip_ctgov,
             skip_ib=args.skip_ib,
             skip_yahoo=args.skip_yahoo,
+            skip_market_positioning=args.skip_market_positioning,
             reuse_unchanged_historical=args.reuse_unchanged_historical,
         )
     )

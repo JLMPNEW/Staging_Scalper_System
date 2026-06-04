@@ -34,6 +34,23 @@ SCORE_FIELDS = [
     "calibration_status_reason",
     "cohort_score_template_id",
     "cohort_score_template_spec",
+    "cohort_score_template_tier1_role",
+    "cohort_score_template_tier1_eligible",
+    "single_product_risk_flag",
+    "binary_event_risk_flag",
+    "tier1_safety_status",
+    "tier1_safety_reason",
+    "passed_tier1_safety_gate",
+    "safe_core_score",
+    "safe_core_percentile",
+    "safe_core_cohort_percentile",
+    "safe_core_rank",
+    "safe_core_status",
+    "safe_core_reason",
+    "passed_safe_core_gate",
+    "safe_core_model_version",
+    "legacy_all_gates_gate",
+    "legacy_gate_misses",
     "composite_score",
     "raw_composite_score",
     "composite_percentile",
@@ -65,7 +82,10 @@ SCORE_FIELDS = [
     "fda_product_score_legacy",
     "fda_alpha_score",
     "fda_safety_score",
+    "fda_clearance_velocity_raw",
     "fda_clearance_velocity_score",
+    "fda_clearance_acceleration_raw",
+    "fda_clearance_acceleration_score",
     "fda_evidence_quality_score",
     "fda_event_risk_score",
     "fda_signal_mode",
@@ -76,6 +96,8 @@ SCORE_FIELDS = [
     "fda_policy_reason",
     "fda_gate_excluded",
     "fda_component_weight",
+    "quality_value_interaction_score",
+    "fda_technical_interaction_score",
     "reimbursement_score",
     "reimbursement_status",
     "direct_code_evidence",
@@ -126,6 +148,7 @@ SCORE_FIELDS = [
     "classification_reason",
     "fda_review_state",
     "dedup_class_i_recall_count_36m",
+    "class_i_multi_source_recall_count_36m",
     "open_class_i_recall_count_36m",
     "terminated_class_i_recall_count_36m",
     "canonical_recall_duplicate_source_count",
@@ -188,46 +211,131 @@ def latest_score_asof(conn: Any) -> str:
     return asof
 
 
+def table_columns(conn: Any, table: str) -> set[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except Exception:
+        return set()
+    return {str(row["name"]) for row in rows}
+
+
+def optional_column_expr(
+    columns: set[str],
+    *,
+    alias: str,
+    column: str,
+    default_sql: str,
+    output_name: str | None = None,
+) -> str:
+    output = output_name or column
+    if column in columns:
+        return f"COALESCE({alias}.{column}, {default_sql}) AS {output}"
+    return f"{default_sql} AS {output}"
+
+
 def load_score_rows(conn: Any, *, asof: str) -> list[dict[str, Any]]:
+    fda_columns = table_columns(conn, "feature_fda_product_risk")
+    latest_fda_review_state_expr = optional_column_expr(
+        fda_columns,
+        alias="latest_fda",
+        column="review_adjusted_fda_state",
+        default_sql="''",
+        output_name="latest_fda_review_state",
+    )
+    fda_data_available_expr = optional_column_expr(
+        fda_columns,
+        alias="latest_fda",
+        column="fda_data_available",
+        default_sql="0",
+    )
+    dedup_class_i_expr = optional_column_expr(
+        fda_columns,
+        alias="latest_fda",
+        column="dedup_class_i_recall_count_36m",
+        default_sql="0",
+    )
+    multi_source_class_i_expr = optional_column_expr(
+        fda_columns,
+        alias="latest_fda",
+        column=(
+            "class_i_multi_source_recall_count_36m"
+            if "class_i_multi_source_recall_count_36m" in fda_columns
+            else "dedup_class_i_recall_count_36m"
+        ),
+        default_sql="0",
+        output_name="class_i_multi_source_recall_count_36m",
+    )
+    open_class_i_expr = optional_column_expr(
+        fda_columns,
+        alias="latest_fda",
+        column="open_class_i_recall_count_36m",
+        default_sql="0",
+    )
+    terminated_class_i_expr = optional_column_expr(
+        fda_columns,
+        alias="latest_fda",
+        column="terminated_class_i_recall_count_36m",
+        default_sql="0",
+    )
+    duplicate_source_expr = optional_column_expr(
+        fda_columns,
+        alias="latest_fda",
+        column="canonical_recall_duplicate_source_count",
+        default_sql="0",
+    )
+    avg_mapping_expr = optional_column_expr(
+        fda_columns,
+        alias="latest_fda",
+        column="avg_mapping_confidence",
+        default_sql="NULL",
+        output_name="avg_fda_mapping_confidence",
+    )
+    risk_mapping_expr = optional_column_expr(
+        fda_columns,
+        alias="latest_fda",
+        column="risk_mapping_confidence_min",
+        default_sql="NULL",
+    )
     rows = conn.execute(
-        """
+        f"""
         WITH latest_fda AS (
             SELECT f.*
             FROM feature_fda_product_risk f
-            JOIN (
-                SELECT company_id, MAX(asof_date) AS asof_date
-                FROM feature_fda_product_risk
-                WHERE asof_date <= ?
-                GROUP BY company_id
-            ) latest
-              ON latest.company_id = f.company_id
-             AND latest.asof_date = f.asof_date
+            WHERE f.rowid = (
+                SELECT f2.rowid
+                FROM feature_fda_product_risk f2
+                WHERE f2.company_id = f.company_id
+                  AND f2.asof_date <= ?
+                ORDER BY f2.asof_date DESC, f2.rowid DESC
+                LIMIT 1
+            )
         ),
         latest_reimbursement AS (
             SELECT r.*
             FROM feature_reimbursement r
-            JOIN (
-                SELECT company_id, MAX(asof_date) AS asof_date
-                FROM feature_reimbursement
-                WHERE asof_date <= ?
-                GROUP BY company_id
-            ) latest
-              ON latest.company_id = r.company_id
-             AND latest.asof_date = r.asof_date
+            WHERE r.rowid = (
+                SELECT r2.rowid
+                FROM feature_reimbursement r2
+                WHERE r2.company_id = r.company_id
+                  AND r2.asof_date <= ?
+                ORDER BY r2.asof_date DESC, r2.rowid DESC
+                LIMIT 1
+            )
         )
         SELECT
             s.*,
             c.ticker,
             c.company_name,
             c.subsector,
-            COALESCE(latest_fda.review_adjusted_fda_state, '') AS latest_fda_review_state,
-            COALESCE(latest_fda.fda_data_available, 0) AS fda_data_available,
-            COALESCE(latest_fda.dedup_class_i_recall_count_36m, 0) AS dedup_class_i_recall_count_36m,
-            COALESCE(latest_fda.open_class_i_recall_count_36m, 0) AS open_class_i_recall_count_36m,
-            COALESCE(latest_fda.terminated_class_i_recall_count_36m, 0) AS terminated_class_i_recall_count_36m,
-            COALESCE(latest_fda.canonical_recall_duplicate_source_count, 0) AS canonical_recall_duplicate_source_count,
-            latest_fda.avg_mapping_confidence AS avg_fda_mapping_confidence,
-            latest_fda.risk_mapping_confidence_min AS risk_mapping_confidence_min,
+            {latest_fda_review_state_expr},
+            {fda_data_available_expr},
+            {dedup_class_i_expr},
+            {multi_source_class_i_expr},
+            {open_class_i_expr},
+            {terminated_class_i_expr},
+            {duplicate_source_expr},
+            {avg_mapping_expr},
+            {risk_mapping_expr},
             COALESCE(latest_reimbursement.billing_category, '') AS reimbursement_billing_category,
             COALESCE(latest_reimbursement.payment_rate_status, '') AS reimbursement_payment_rate_status,
             COALESCE(latest_reimbursement.primary_payment_file, '') AS reimbursement_primary_payment_file,
@@ -333,6 +441,20 @@ def write_markdown(
 ) -> None:
     model_version = str(rows[0].get("scoring_model_version") or "") if rows else ""
     tier1 = [row for row in rows if row.get("classification") == "tier_1_long_candidate"]
+    safe_core = sorted(
+        [row for row in rows if int(row.get("passed_safe_core_gate") or 0) == 1],
+        key=lambda item: (int(item.get("safe_core_rank") or 999999), -first_float(item.get("safe_core_score"))),
+    )
+    safe_core_watchlist = sorted(
+        [row for row in rows if str(row.get("safe_core_status") or "").strip().lower() == "watchlist"],
+        key=lambda item: -first_float(item.get("safe_core_score")),
+    )
+    special_situations = [
+        row
+        for row in rows
+        if row.get("classification") == "special_situation_or_binary_risk_watchlist"
+        or str(row.get("tier1_safety_status") or "").strip().lower() == "fail"
+    ]
     restricted = [
         row for row in rows
         if str(row.get("calibration_status") or "").strip().lower()
@@ -360,7 +482,24 @@ def write_markdown(
                 f"({row.get('classification')})"
             )
             if include_reason:
-                base += f" - {row.get('review_reason') or row.get('hard_red_flag_reasons') or 'no reason'}"
+                reason = row.get("tier1_safety_reason") or row.get("review_reason")
+                reason = reason or row.get("hard_red_flag_reasons") or "no reason"
+                base += f" - {reason}"
+            out.append(base)
+        return out
+
+    def safe_core_line_items(items: list[dict[str, Any]], *, include_reason: bool = False) -> list[str]:
+        out: list[str] = []
+        for row in items:
+            base = (
+                f"- safe#{int(row.get('safe_core_rank') or 0)} {row.get('ticker')} "
+                f"safe={first_float(row.get('safe_core_score')):.2f} "
+                f"pct={first_float(row.get('safe_core_percentile')):.2f} "
+                f"cohort_pct={first_float(row.get('safe_core_cohort_percentile')):.2f} "
+                f"legacy_gate={int(row.get('legacy_all_gates_gate') or 0)}"
+            )
+            if include_reason:
+                base += f" - {row.get('safe_core_reason') or row.get('legacy_gate_misses') or 'no reason'}"
             out.append(base)
         return out
 
@@ -377,6 +516,15 @@ def write_markdown(
         "",
         "## Tier-1 Long Candidates",
         *(line_items(tier1) or ["- None"]),
+        "",
+        "## Shadow Safe-Core Candidates",
+        *(safe_core_line_items(safe_core[:25], include_reason=True) or ["- None"]),
+        "",
+        "## Shadow Safe-Core Watchlist",
+        *(safe_core_line_items(safe_core_watchlist[:25], include_reason=True) or ["- None"]),
+        "",
+        "## Special Situation / Binary Risk Watchlist",
+        *(line_items(special_situations[:25], include_reason=True) or ["- None"]),
         "",
         "## Restricted Research Cohorts",
         *(
@@ -481,6 +629,20 @@ def main() -> None:
         clean_rows = [clean_row(row) for row in rows]
         reimbursement_counts = reimbursement_status_counts(clean_rows)
         tier1 = [row for row in clean_rows if row["classification"] == "tier_1_long_candidate"]
+        safe_core = sorted(
+            [row for row in clean_rows if int(row.get("passed_safe_core_gate") or 0) == 1],
+            key=lambda item: (int(item.get("safe_core_rank") or 999999), -first_float(item.get("safe_core_score"))),
+        )
+        safe_core_watchlist = sorted(
+            [row for row in clean_rows if str(row.get("safe_core_status") or "").strip().lower() == "watchlist"],
+            key=lambda item: -first_float(item.get("safe_core_score")),
+        )
+        special_situations = [
+            row
+            for row in clean_rows
+            if row["classification"] == "special_situation_or_binary_risk_watchlist"
+            or str(row.get("tier1_safety_status") or "").strip().lower() == "fail"
+        ]
         manual = [row for row in clean_rows if row["classification"] == "manual_review_regulatory_risk"]
         restricted = [
             row for row in clean_rows
@@ -496,8 +658,16 @@ def main() -> None:
         top25 = clean_rows[:25]
         bottom25 = list(reversed(clean_rows[-25:]))
 
+        write_csv(output_dir / "med_device_daily_composite_scores.csv", clean_rows, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_all.csv", clean_rows, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_tier1.csv", tier1, SCORE_FIELDS)
+        write_csv(output_dir / "med_device_score_review_safe_core.csv", safe_core, SCORE_FIELDS)
+        write_csv(output_dir / "med_device_score_review_safe_core_watchlist.csv", safe_core_watchlist, SCORE_FIELDS)
+        write_csv(
+            output_dir / "med_device_score_review_special_situation_binary_risk.csv",
+            special_situations,
+            SCORE_FIELDS,
+        )
         write_csv(output_dir / "med_device_score_review_manual_regulatory.csv", manual, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_restricted_cohorts.csv", restricted, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_regulatory_risk.csv", regulatory_risk, SCORE_FIELDS)
@@ -518,7 +688,10 @@ def main() -> None:
         )
         print(
             f"review_pack_dir={output_dir} asof={asof} rows={len(rows)} "
-            f"tier1={len(tier1)} manual_regulatory={len(manual)} "
+            f"tier1={len(tier1)} safe_core={len(safe_core)} "
+            f"safe_core_watchlist={len(safe_core_watchlist)} "
+            f"special_situation_binary_risk={len(special_situations)} "
+            f"manual_regulatory={len(manual)} "
             f"restricted_cohort={len(restricted)} regulatory_risk={len(regulatory_risk)}"
         )
 

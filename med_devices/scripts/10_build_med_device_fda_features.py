@@ -66,13 +66,17 @@ OPTIONAL_FDA_FEATURE_COLUMNS = {
     "fda_product_score_legacy": "REAL DEFAULT 0.0",
     "fda_alpha_score": "REAL DEFAULT 0.0",
     "fda_safety_score": "REAL DEFAULT 0.0",
-    "fda_clearance_velocity_score": "REAL DEFAULT 0.0",
+    "fda_clearance_velocity_raw": "REAL DEFAULT 0.0",
+    "fda_clearance_velocity_score": "REAL DEFAULT 50.0",
+    "fda_clearance_acceleration_raw": "REAL DEFAULT 0.0",
+    "fda_clearance_acceleration_score": "REAL DEFAULT 50.0",
     "fda_evidence_quality_score": "REAL DEFAULT 0.0",
     "fda_event_risk_score": "REAL DEFAULT 0.0",
     "fda_signal_mode": "TEXT DEFAULT ''",
     "fda_signal_direction": "TEXT DEFAULT ''",
     "fda_signal_reliability": "REAL DEFAULT 0.0",
     "fda_policy_reason": "TEXT DEFAULT ''",
+    "class_i_multi_source_recall_count_36m": "INTEGER DEFAULT 0",
 }
 FIELDNAMES = [
     "asof_date",
@@ -89,6 +93,7 @@ FIELDNAMES = [
     "recall_count_36m",
     "class_i_recall_count_36m",
     "dedup_class_i_recall_count_36m",
+    "class_i_multi_source_recall_count_36m",
     "open_class_i_recall_count_12m",
     "open_class_i_recall_count_36m",
     "terminated_class_i_recall_count_36m",
@@ -112,7 +117,10 @@ FIELDNAMES = [
     "fda_product_score_legacy",
     "fda_alpha_score",
     "fda_safety_score",
+    "fda_clearance_velocity_raw",
     "fda_clearance_velocity_score",
+    "fda_clearance_acceleration_raw",
+    "fda_clearance_acceleration_score",
     "fda_evidence_quality_score",
     "fda_event_risk_score",
     "fda_signal_mode",
@@ -200,6 +208,7 @@ class FdaFeatureRow:
     recall_count_36m: int = 0
     class_i_recall_count_36m: int = 0
     dedup_class_i_recall_count_36m: int = 0
+    class_i_multi_source_recall_count_36m: int = 0
     open_class_i_recall_count_12m: int = 0
     open_class_i_recall_count_36m: int = 0
     terminated_class_i_recall_count_36m: int = 0
@@ -225,7 +234,10 @@ class FdaFeatureRow:
     fda_product_score_legacy: float = 0.0
     fda_alpha_score: float = 0.0
     fda_safety_score: float = 0.0
-    fda_clearance_velocity_score: float = 0.0
+    fda_clearance_velocity_raw: float | None = None
+    fda_clearance_velocity_score: float = 50.0
+    fda_clearance_acceleration_raw: float | None = None
+    fda_clearance_acceleration_score: float = 50.0
     fda_evidence_quality_score: float = 0.0
     fda_event_risk_score: float = 0.0
     fda_signal_mode: str = FDA_SIGNAL_LEGACY_BROAD
@@ -845,7 +857,7 @@ def refresh_canonical_recalls(conn: Any) -> int:
         ranked = sorted(
             items,
             key=lambda item: (
-                1 if is_terminated_status(item["status"], item["termination_date"]) else 0,
+                0 if is_terminated_status(item["status"], item["termination_date"]) else 1,
                 source_rank(source_endpoint_from_row(item)),
                 str(item["termination_date"] or item["center_classification_date"] or item["recall_initiation_date"] or ""),
                 float(item["mapping_confidence"] or 0.0),
@@ -1025,7 +1037,9 @@ def count_recalls(conn: Any, row: FdaFeatureRow, *, asof: date, policy: FdaFeatu
         row.recall_severity_36m += float(item["severity_weight"] or 1.0) * decay * status_multiplier
         if is_class_i(item["classification"]):
             row.class_i_recall_count_36m += 1
-            row.dedup_class_i_recall_count_36m += max(0, int(item["source_count"] or 1) - 1)
+            if int(item["source_count"] or 1) >= 2:
+                row.dedup_class_i_recall_count_36m += 1
+                row.class_i_multi_source_recall_count_36m += 1
             update_risk_mapping_confidence(row, item["mapping_confidence"])
             if int(item["is_open"] or 0):
                 row.open_class_i_recall_count_36m += 1
@@ -1122,9 +1136,17 @@ def percentile_from_pairs(pairs: list[tuple[int, float]], *, higher_is_better: b
     sorted_pairs = sorted(pairs, key=lambda item: item[1])
     denominator = len(sorted_pairs) - 1
     out: dict[int, float] = {}
-    for rank, (idx, _) in enumerate(sorted_pairs):
-        pct = 100.0 * rank / denominator
-        out[idx] = pct if higher_is_better else 100.0 - pct
+    pos = 0
+    while pos < len(sorted_pairs):
+        end = pos + 1
+        while end < len(sorted_pairs) and sorted_pairs[end][1] == sorted_pairs[pos][1]:
+            end += 1
+        avg_rank = (pos + end - 1) / 2.0
+        pct = 100.0 * avg_rank / denominator
+        score = pct if higher_is_better else 100.0 - pct
+        for idx, _ in sorted_pairs[pos:end]:
+            out[idx] = score
+        pos = end
     return out
 
 
@@ -1151,6 +1173,33 @@ def cohort_percentile_maps(
         else:
             out.update({idx: global_scores.get(idx, 50.0) for idx, _ in pairs})
     return out
+
+
+def apply_fda_velocity_scores(rows: list[FdaFeatureRow], *, min_cohort_n: int) -> None:
+    velocity_rank = cohort_percentile_maps(
+        rows,
+        field_name="fda_clearance_velocity_raw",
+        higher_is_better=True,
+        min_cohort_n=min_cohort_n,
+    )
+    acceleration_rank = cohort_percentile_maps(
+        rows,
+        field_name="fda_clearance_acceleration_raw",
+        higher_is_better=True,
+        min_cohort_n=min_cohort_n,
+    )
+    for idx, row in enumerate(rows):
+        if row.clearance_metrics_suppressed:
+            row.fda_clearance_velocity_raw = None
+            row.fda_clearance_acceleration_raw = None
+        if row.fda_clearance_velocity_raw is None:
+            row.fda_clearance_velocity_score = 50.0
+        else:
+            row.fda_clearance_velocity_score = round(clamp(velocity_rank.get(idx, 50.0)), 2)
+        if row.fda_clearance_acceleration_raw is None:
+            row.fda_clearance_acceleration_score = 50.0
+        else:
+            row.fda_clearance_acceleration_score = round(clamp(acceleration_rank.get(idx, 50.0)), 2)
 
 
 def fda_evidence_quality_score(
@@ -1217,7 +1266,7 @@ def apply_fda_alpha_scores(
 ) -> None:
     innovation_rank = cohort_percentile_maps(
         rows,
-        field_name="fda_clearance_velocity_score",
+        field_name="regulatory_innovation_score",
         higher_is_better=True,
         min_cohort_n=min_cohort_n,
     )
@@ -1278,7 +1327,10 @@ def apply_fda_alpha_scores(
                 "fda_product_score_legacy": row.fda_product_score_legacy,
                 "fda_alpha_score": row.fda_alpha_score,
                 "fda_safety_score": row.fda_safety_score,
+                "fda_clearance_velocity_raw": row.fda_clearance_velocity_raw,
                 "fda_clearance_velocity_score": row.fda_clearance_velocity_score,
+                "fda_clearance_acceleration_raw": row.fda_clearance_acceleration_raw,
+                "fda_clearance_acceleration_score": row.fda_clearance_acceleration_score,
                 "fda_evidence_quality_score": row.fda_evidence_quality_score,
                 "fda_event_risk_score": row.fda_event_risk_score,
                 "fda_signal_mode": row.fda_signal_mode,
@@ -1298,6 +1350,11 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
         ]
     )
     row.fda_data_available = 1 if has_fda_records else 0
+    prior_12m_count = max(0, row.approval_count_24m - row.approval_count_12m)
+    month_25_36_count = max(0, row.approval_count_36m - row.approval_count_24m)
+    row.fda_clearance_velocity_raw = float(row.approval_count_12m - prior_12m_count)
+    prior_velocity = prior_12m_count - month_25_36_count
+    row.fda_clearance_acceleration_raw = float(row.fda_clearance_velocity_raw - prior_velocity)
     if has_fda_records:
         revenue_base = revenue_normalizer(row, policy=policy)
         recall_severity_rate = round(row.recall_severity_36m / revenue_base, 4)
@@ -1326,6 +1383,8 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
         row.regulatory_innovation_score = round(clamp(raw_innovation * recency_multiplier), 2)
         if row.clearance_metrics_suppressed:
             row.regulatory_innovation_score = 0.0
+            row.fda_clearance_velocity_raw = None
+            row.fda_clearance_acceleration_raw = None
         row.regulatory_risk_score = round(
             clamp(
                 100.0
@@ -1342,6 +1401,8 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
         row.regulatory_innovation_score = policy.no_data_innovation_score
         row.regulatory_risk_score = policy.no_data_risk_score
         row.review_reason = "no_mapped_fda_records"
+        row.fda_clearance_velocity_raw = None
+        row.fda_clearance_acceleration_raw = None
 
     raw_hard_reasons: list[str] = []
     review_reasons: list[str] = []
@@ -1407,7 +1468,8 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
         2,
     )
     row.fda_safety_score = round(clamp(row.regulatory_risk_score), 2)
-    row.fda_clearance_velocity_score = round(clamp(row.regulatory_innovation_score), 2)
+    row.fda_clearance_velocity_score = 50.0
+    row.fda_clearance_acceleration_score = 50.0
     row.fda_event_risk_score = round(clamp(100.0 - row.regulatory_risk_score), 2)
     row.fda_evidence_quality_score = fda_evidence_quality_score(
         row,
@@ -1432,6 +1494,7 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
             "recall_36m": row.recall_count_36m,
             "class_i_recall_36m": row.class_i_recall_count_36m,
             "dedup_class_i_recall_36m": row.dedup_class_i_recall_count_36m,
+            "class_i_multi_source_recall_36m": row.class_i_multi_source_recall_count_36m,
             "open_class_i_recall_12m": row.open_class_i_recall_count_12m,
             "open_class_i_recall_36m": row.open_class_i_recall_count_36m,
             "terminated_class_i_recall_36m": row.terminated_class_i_recall_count_36m,
@@ -1442,6 +1505,10 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
             "malfunction_24m": row.malfunction_count_24m,
             "current_adverse_24m": row.current_adverse_event_count_24m,
             "previous_adverse_24m": row.prev_adverse_event_count_24m,
+            "approval_prior_12m": prior_12m_count,
+            "approval_month_25_36": month_25_36_count,
+            "fda_clearance_velocity_raw": row.fda_clearance_velocity_raw,
+            "fda_clearance_acceleration_raw": row.fda_clearance_acceleration_raw,
             "recall_severity_per_billion_revenue": row.recall_severity_per_billion_revenue,
             "adverse_event_rate_per_billion_revenue": row.adverse_event_rate_per_billion_revenue,
         },
@@ -1483,7 +1550,10 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
             "fda_product_score_legacy": row.fda_product_score_legacy,
             "fda_alpha_score": row.fda_alpha_score,
             "fda_safety_score": row.fda_safety_score,
+            "fda_clearance_velocity_raw": row.fda_clearance_velocity_raw,
             "fda_clearance_velocity_score": row.fda_clearance_velocity_score,
+            "fda_clearance_acceleration_raw": row.fda_clearance_acceleration_raw,
+            "fda_clearance_acceleration_score": row.fda_clearance_acceleration_score,
             "fda_evidence_quality_score": row.fda_evidence_quality_score,
             "fda_event_risk_score": row.fda_event_risk_score,
             "fda_signal_mode": row.fda_signal_mode,
@@ -1697,6 +1767,7 @@ def build_rows(
         if override:
             apply_review_override(row, override)
         rows.append(row)
+    apply_fda_velocity_scores(rows, min_cohort_n=min_cohort_rank_n)
     apply_fda_alpha_scores(
         rows,
         policy=policy,
@@ -1733,7 +1804,10 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
         "fda_product_score_legacy",
         "fda_alpha_score",
         "fda_safety_score",
+        "fda_clearance_velocity_raw",
         "fda_clearance_velocity_score",
+        "fda_clearance_acceleration_raw",
+        "fda_clearance_acceleration_score",
         "fda_evidence_quality_score",
         "fda_event_risk_score",
         "fda_signal_mode",
@@ -1752,6 +1826,7 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
         "confirmed_hard_red_flag",
         "review_adjusted_fda_state",
         "dedup_class_i_recall_count_36m",
+        "class_i_multi_source_recall_count_36m",
         "open_class_i_recall_count_12m",
         "open_class_i_recall_count_36m",
         "terminated_class_i_recall_count_36m",
@@ -1788,7 +1863,10 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
             "fda_product_score_legacy": row.fda_product_score_legacy,
             "fda_alpha_score": row.fda_alpha_score,
             "fda_safety_score": row.fda_safety_score,
+            "fda_clearance_velocity_raw": row.fda_clearance_velocity_raw,
             "fda_clearance_velocity_score": row.fda_clearance_velocity_score,
+            "fda_clearance_acceleration_raw": row.fda_clearance_acceleration_raw,
+            "fda_clearance_acceleration_score": row.fda_clearance_acceleration_score,
             "fda_evidence_quality_score": row.fda_evidence_quality_score,
             "fda_event_risk_score": row.fda_event_risk_score,
             "fda_signal_mode": row.fda_signal_mode,
@@ -1807,6 +1885,7 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
             "confirmed_hard_red_flag": row.confirmed_hard_red_flag,
             "review_adjusted_fda_state": row.review_adjusted_fda_state,
             "dedup_class_i_recall_count_36m": row.dedup_class_i_recall_count_36m,
+            "class_i_multi_source_recall_count_36m": row.class_i_multi_source_recall_count_36m,
             "open_class_i_recall_count_12m": row.open_class_i_recall_count_12m,
             "open_class_i_recall_count_36m": row.open_class_i_recall_count_36m,
             "terminated_class_i_recall_count_36m": row.terminated_class_i_recall_count_36m,

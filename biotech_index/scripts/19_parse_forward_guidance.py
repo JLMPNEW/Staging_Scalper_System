@@ -1547,7 +1547,7 @@ def parse_guidance_records(
                 filing_records = future.result()
             except BaseException as exc:
                 pending_raise = exc
-                if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                if isinstance(exc, (SystemExit, KeyboardInterrupt, GeneratorExit)):
                     LOGGER.warning(
                         "Forward guidance worker interrupted for accession=%s ticker=%s",
                         filing.accession_nodash,

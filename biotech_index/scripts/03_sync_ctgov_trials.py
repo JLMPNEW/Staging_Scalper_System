@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import sqlite3
 import sys
@@ -25,6 +26,7 @@ from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_n
 from biotech_index.core.http_cache import CachedHttpClient, HostThrottle
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import validate_nonempty_selection, validate_requested_tickers
+from biotech_index.core.text_norm import normalize_ticker
 
 
 LOGGER = logging.getLogger("sync_ctgov_trials")
@@ -35,6 +37,37 @@ SQLITE_PARAM_CHUNK_SIZE = 800
 def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
     step = max(1, int(size))
     return [list(values[start : start + step]) for start in range(0, len(values), step)]
+
+
+def study_signature(study: dict[str, Any]) -> str:
+    return json.dumps(study, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def merge_unique_studies(results: Iterable[SyncResult]) -> dict[str, dict[str, Any]]:
+    unique_studies: dict[str, dict[str, Any]] = {}
+    signatures: dict[str, str] = {}
+    owners: dict[str, str] = {}
+    collision_count = 0
+    for result in results:
+        for nct_id, study in result.studies.items():
+            signature = study_signature(study)
+            if nct_id not in unique_studies:
+                unique_studies[nct_id] = study
+                signatures[nct_id] = signature
+                owners[nct_id] = result.ticker
+                continue
+            if signatures[nct_id] == signature:
+                continue
+            collision_count += 1
+            LOGGER.warning(
+                "CTGov shared NCT collision kept first payload nct_id=%s first_ticker=%s conflicting_ticker=%s",
+                nct_id,
+                owners.get(nct_id, ""),
+                result.ticker,
+            )
+    if collision_count:
+        LOGGER.warning("CTGov shared NCT payload collision count=%d; first payload kept deterministically", collision_count)
+    return unique_studies
 
 
 @dataclass(frozen=True)
@@ -588,7 +621,7 @@ def main() -> None:
     timeout_sec = float(cfg_get(config, "ctgov.timeout_sec", 45.0))
     max_retries = int(cfg_get(config, "ctgov.max_retries", 3))
     max_workers = int(args.max_workers if args.max_workers is not None else cfg_get(config, "ctgov.max_workers", 4))
-    ticker_filter = {value.strip().upper().replace(".", "-") for value in args.tickers.split(",") if value.strip()}
+    ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if normalize_ticker(value)}
     asof_obj = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
     if asof_obj is None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
@@ -701,10 +734,8 @@ def main() -> None:
                             result.error,
                         )
 
-            unique_studies: dict[str, dict[str, Any]] = {}
             error_count = sum(1 for result in results if result.error)
-            for result in results:
-                unique_studies.update(result.studies)
+            unique_studies = merge_unique_studies(results)
             written = 0
             query_hit_count = 0
             with conn:

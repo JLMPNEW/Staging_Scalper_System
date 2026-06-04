@@ -240,14 +240,15 @@ def latest_feature_rows(conn: Any, table: str) -> dict[int, dict[str, Any]]:
     table_name = quote_identifier(table)
     rows = conn.execute(
         f"""
-        WITH latest AS (
-            SELECT company_id, MAX(asof_date) AS asof_date
-            FROM {table_name}
-            GROUP BY company_id
-        )
         SELECT f.*
         FROM {table_name} f
-        JOIN latest l ON l.company_id = f.company_id AND l.asof_date = f.asof_date
+        WHERE f.rowid = (
+            SELECT f2.rowid
+            FROM {table_name} f2
+            WHERE f2.company_id = f.company_id
+            ORDER BY f2.asof_date DESC, f2.rowid DESC
+            LIMIT 1
+        )
         """
     ).fetchall()
     return {int(row["company_id"]): dict(row) for row in rows}

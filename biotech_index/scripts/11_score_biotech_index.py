@@ -706,6 +706,10 @@ def configured_risk_penalty_score(
 
 def production_rank_score_field(config: dict[str, Any]) -> str:
     """Return the score field used for production rank ordering."""
+    allow_discovery_rank = as_bool(
+        cfg_get(config, "biotech_scoring.risk_mode_routing.allow_discovery_as_production_rank", False),
+        False,
+    )
     raw = str(
         cfg_get(
             config,
@@ -720,18 +724,35 @@ def production_rank_score_field(config: dict[str, Any]) -> str:
         "allocation": "opportunity_score",
         "opportunity": "opportunity_score",
         "opportunity_score": "opportunity_score",
-        "routed_discovery": "discovery_opportunity_score",
-        "discovery": "discovery_opportunity_score",
-        "discovery_score": "discovery_opportunity_score",
-        "discovery_opportunity_score": "discovery_opportunity_score",
     }
+    if allow_discovery_rank:
+        aliases |= {
+            "routed_discovery": "discovery_opportunity_score",
+            "discovery": "discovery_opportunity_score",
+            "discovery_score": "discovery_opportunity_score",
+            "discovery_opportunity_score": "discovery_opportunity_score",
+        }
     field = aliases.get(raw)
     if field is None:
+        expected = "opportunity_score"
+        if allow_discovery_rank:
+            expected += " or discovery_opportunity_score"
         raise ValueError(
             "Unsupported biotech_scoring.risk_mode_routing.production_score_source="
-            f"{raw!r}; expected opportunity_score or discovery_opportunity_score"
+            f"{raw!r}; expected {expected}"
         )
     return field
+
+
+def production_rank_blocked(row: dict[str, Any], *, apply_core_veto_to_rank: bool) -> bool:
+    """True when a row is not eligible for production capital-allocation rank."""
+    allocation_bucket = str(row.get("allocation_bucket") or row.get("bucket") or "").strip().lower()
+    return (
+        to_float(row.get("biotech_cohort_investible_flag"), 1.0) <= 0.0
+        or allocation_bucket == "avoid"
+        or to_float(row.get("rank_quality_cap_vetoed"), 0.0) > 0.0
+        or (apply_core_veto_to_rank and to_float(row.get("core_structural_veto_flag"), 0.0) > 0.0)
+    )
 
 
 def commercial_risk_overlay_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -1752,6 +1773,9 @@ def score_rows(
             production_rank_score = allocation_opportunity_score
             production_rank_risk_score = risk
             production_score_source = "legacy_allocation"
+        if allocation_bucket == "avoid" or rank_cap_vetoed or (force_core_veto_avoid and bool(core_veto_reasons)):
+            production_rank_score = 0.0
+            production_rank_risk_score = 100.0
         production_bucket = score_bucket(
             production_rank_score,
             production_rank_risk_score,
@@ -2220,10 +2244,9 @@ def score_rows(
     apply_biotech_cohort_policy(scored, cohort_policy)
     scored.sort(
         key=lambda item: (
-            1 if to_float(item.get("biotech_cohort_investible_flag"), 1.0) <= 0.0 else 0,
-            1 if apply_core_veto_to_rank and to_float(item.get("core_structural_veto_flag"), 0.0) > 0.0 else 0,
-            -clamp(to_float(item.get("production_rank_score"), to_float(item.get("opportunity_score"), 0.0))),
-            clamp(to_float(item.get("production_rank_risk_score"), to_float(item.get("risk_score"), 100.0))),
+            1 if production_rank_blocked(item, apply_core_veto_to_rank=apply_core_veto_to_rank) else 0,
+            -clamp(to_float(item.get("allocation_opportunity_score"), to_float(item.get("opportunity_score"), 0.0))),
+            clamp(to_float(item.get("allocation_risk_score"), to_float(item.get("risk_score"), 100.0))),
             str(item["ticker"]),
         )
     )

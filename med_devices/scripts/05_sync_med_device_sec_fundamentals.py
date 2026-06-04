@@ -746,6 +746,16 @@ def flatten_metric_observations(
     return out
 
 
+def sortable_filed_date(raw: object) -> str:
+    text = str(raw or "").strip()[:10]
+    if not text:
+        return ""
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return ""
+
+
 def observation_sort_key(obs: FactObservation) -> tuple[int, str, int]:
     # Lower concept_rank is preferred, then latest filing date, then longer duration when available.
     duration = 0
@@ -756,7 +766,7 @@ def observation_sort_key(obs: FactObservation) -> tuple[int, str, int]:
             duration = max(0, (end - start).days)
     except ValueError:
         duration = 0
-    return (obs.concept_rank, obs.filed_date, duration)
+    return (obs.concept_rank, sortable_filed_date(obs.filed_date), duration)
 
 
 def build_metric_map(

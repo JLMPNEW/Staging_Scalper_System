@@ -100,7 +100,6 @@ DURABLE_GROWTH_PROXY_INPUT_FIELDS = (
     "gross_margin_ttm",
     "operating_margin_ttm",
     "fcf_margin_ttm",
-    "free_cash_flow_margin_ttm",
     "rd_growth_yoy",
     "rd_to_revenue_ttm",
     "annualized_research_and_development",
@@ -118,11 +117,38 @@ CALIBRATION_STATUSES = {
     CALIBRATION_STATUS_RESTRICTED_RESEARCH_ONLY,
     CALIBRATION_STATUS_EXCLUDED_FROM_TIER1,
 }
+TIER1_SAFETY_STATUS_PASS = "pass"
+TIER1_SAFETY_STATUS_FAIL = "fail"
+TIER1_TEMPLATE_ROLE_SAFE_CORE = "safe_core"
+TIER1_TEMPLATE_ROLE_SPECIAL_SITUATION = "special_situation"
+TIER1_TEMPLATE_ROLE_RESEARCH = "research"
+TIER1_TEMPLATE_ROLES = {
+    TIER1_TEMPLATE_ROLE_SAFE_CORE,
+    TIER1_TEMPLATE_ROLE_SPECIAL_SITUATION,
+    TIER1_TEMPLATE_ROLE_RESEARCH,
+}
 OPTIONAL_DAILY_SCORE_COLUMNS = {
     "calibration_status": "TEXT DEFAULT 'production_eligible'",
     "calibration_status_reason": "TEXT DEFAULT ''",
     "cohort_score_template_id": "TEXT DEFAULT ''",
     "cohort_score_template_spec": "TEXT DEFAULT ''",
+    "cohort_score_template_tier1_role": "TEXT DEFAULT ''",
+    "cohort_score_template_tier1_eligible": "INTEGER DEFAULT 0",
+    "single_product_risk_flag": "INTEGER DEFAULT 0",
+    "binary_event_risk_flag": "INTEGER DEFAULT 0",
+    "tier1_safety_status": "TEXT DEFAULT ''",
+    "tier1_safety_reason": "TEXT DEFAULT ''",
+    "passed_tier1_safety_gate": "INTEGER DEFAULT 1",
+    "safe_core_score": "REAL DEFAULT 0.0",
+    "safe_core_percentile": "REAL DEFAULT 0.0",
+    "safe_core_cohort_percentile": "REAL DEFAULT 0.0",
+    "safe_core_rank": "INTEGER DEFAULT 0",
+    "safe_core_status": "TEXT DEFAULT ''",
+    "safe_core_reason": "TEXT DEFAULT ''",
+    "passed_safe_core_gate": "INTEGER DEFAULT 0",
+    "safe_core_model_version": "TEXT DEFAULT ''",
+    "legacy_all_gates_gate": "INTEGER DEFAULT 0",
+    "legacy_gate_misses": "TEXT DEFAULT ''",
     "durable_growth_score_legacy": "REAL DEFAULT 50.0",
     "durable_growth_alpha_score": "REAL DEFAULT 50.0",
     "durable_growth_growth_score": "REAL DEFAULT 50.0",
@@ -147,7 +173,10 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "fda_product_score_legacy": "REAL DEFAULT 0.0",
     "fda_alpha_score": "REAL DEFAULT 0.0",
     "fda_safety_score": "REAL DEFAULT 0.0",
-    "fda_clearance_velocity_score": "REAL DEFAULT 0.0",
+    "fda_clearance_velocity_raw": "REAL DEFAULT 0.0",
+    "fda_clearance_velocity_score": "REAL DEFAULT 50.0",
+    "fda_clearance_acceleration_raw": "REAL DEFAULT 0.0",
+    "fda_clearance_acceleration_score": "REAL DEFAULT 50.0",
     "fda_evidence_quality_score": "REAL DEFAULT 0.0",
     "fda_event_risk_score": "REAL DEFAULT 0.0",
     "fda_signal_mode": "TEXT DEFAULT ''",
@@ -158,6 +187,9 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "fda_policy_reason": "TEXT DEFAULT ''",
     "fda_gate_excluded": "INTEGER DEFAULT 0",
     "fda_component_weight": "REAL DEFAULT 0.0",
+    "fda_data_available": "INTEGER DEFAULT 0",
+    "quality_value_interaction_score": "REAL DEFAULT 50.0",
+    "fda_technical_interaction_score": "REAL DEFAULT 50.0",
     "technical_gate_mode": "TEXT DEFAULT ''",
     "technical_overlay_status": "TEXT DEFAULT ''",
     "technical_policy_reason": "TEXT DEFAULT ''",
@@ -210,6 +242,23 @@ FIELDNAMES = [
     "calibration_status_reason",
     "cohort_score_template_id",
     "cohort_score_template_spec",
+    "cohort_score_template_tier1_role",
+    "cohort_score_template_tier1_eligible",
+    "single_product_risk_flag",
+    "binary_event_risk_flag",
+    "tier1_safety_status",
+    "tier1_safety_reason",
+    "passed_tier1_safety_gate",
+    "safe_core_score",
+    "safe_core_percentile",
+    "safe_core_cohort_percentile",
+    "safe_core_rank",
+    "safe_core_status",
+    "safe_core_reason",
+    "passed_safe_core_gate",
+    "safe_core_model_version",
+    "legacy_all_gates_gate",
+    "legacy_gate_misses",
     "cohort_percentile",
     "fundamental_quality_score",
     "durable_growth_score",
@@ -238,7 +287,10 @@ FIELDNAMES = [
     "fda_product_score_legacy",
     "fda_alpha_score",
     "fda_safety_score",
+    "fda_clearance_velocity_raw",
     "fda_clearance_velocity_score",
+    "fda_clearance_acceleration_raw",
+    "fda_clearance_acceleration_score",
     "fda_evidence_quality_score",
     "fda_event_risk_score",
     "fda_signal_mode",
@@ -250,6 +302,8 @@ FIELDNAMES = [
     "fda_gate_excluded",
     "fda_component_weight",
     "fda_data_available",
+    "quality_value_interaction_score",
+    "fda_technical_interaction_score",
     "reimbursement_score",
     "reimbursement_status",
     "direct_code_evidence",
@@ -352,6 +406,23 @@ class ScoreRow:
     calibration_status_reason: str = ""
     cohort_score_template_id: str = ""
     cohort_score_template_spec: str = ""
+    cohort_score_template_tier1_role: str = ""
+    cohort_score_template_tier1_eligible: int = 0
+    single_product_risk_flag: int = 0
+    binary_event_risk_flag: int = 0
+    tier1_safety_status: str = TIER1_SAFETY_STATUS_PASS
+    tier1_safety_reason: str = ""
+    passed_tier1_safety_gate: int = 1
+    safe_core_score: float = 0.0
+    safe_core_percentile: float = 0.0
+    safe_core_cohort_percentile: float = 0.0
+    safe_core_rank: int = 0
+    safe_core_status: str = ""
+    safe_core_reason: str = ""
+    passed_safe_core_gate: int = 0
+    safe_core_model_version: str = "safe_core_v1_shadow"
+    legacy_all_gates_gate: int = 0
+    legacy_gate_misses: str = ""
     cohort_percentile: float = 50.0
     fundamental_quality_score: float = 0.0
     durable_growth_score: float = 50.0
@@ -373,14 +444,17 @@ class ScoreRow:
     durable_growth_component_weight: float = DEFAULT_WEIGHTS["durable_growth"]
     durable_growth_repair_flag: int = 0
     durable_growth_repair_reason: str = ""
-    durable_growth_validation_status: str = DURABLE_GROWTH_PRODUCTION_PROMOTED
+    durable_growth_validation_status: str = DURABLE_GROWTH_PRODUCTION_DISABLED
     durable_growth_validation_reason: str = ""
-    durable_growth_production_state: str = DURABLE_GROWTH_PRODUCTION_PROMOTED
+    durable_growth_production_state: str = DURABLE_GROWTH_PRODUCTION_DISABLED
     fda_product_score: float = 50.0
     fda_product_score_legacy: float = 50.0
     fda_alpha_score: float = 50.0
     fda_safety_score: float = 50.0
+    fda_clearance_velocity_raw: float | None = None
     fda_clearance_velocity_score: float = 50.0
+    fda_clearance_acceleration_raw: float | None = None
+    fda_clearance_acceleration_score: float = 50.0
     fda_evidence_quality_score: float = 50.0
     fda_event_risk_score: float = 0.0
     fda_signal_mode: str = ""
@@ -392,6 +466,8 @@ class ScoreRow:
     fda_gate_excluded: int = 0
     fda_component_weight: float = DEFAULT_WEIGHTS["fda_product"]
     fda_data_available: int = 0
+    quality_value_interaction_score: float = 50.0
+    fda_technical_interaction_score: float = 50.0
     reimbursement_score: float = 50.0
     reimbursement_status: str = "unknown"
     direct_code_evidence: int = 0
@@ -563,6 +639,33 @@ def cfg_bool(config: dict[str, Any], dotted_key: str, default: bool) -> bool:
     return default
 
 
+def warn_liquidity_gate_threshold_mismatch(config: dict[str, Any]) -> None:
+    scoring_min = cfg_float(config, "scoring.gates.min_avg_dollar_volume_60d", 1_000_000.0)
+    default_profile = cfg_get(config, "technical_features.default_signal_profile", {})
+    default_min = 1_000_000.0
+    if isinstance(default_profile, dict) and "min_avg_dollar_volume_60d" in default_profile:
+        parsed_default = to_float(default_profile.get("min_avg_dollar_volume_60d"))
+        if parsed_default is not None:
+            default_min = parsed_default
+    profile_mins: dict[str, float] = {"technical_features.default_signal_profile": default_min}
+    raw_profiles = cfg_get(config, "technical_features.cohort_signal_profiles", {})
+    if isinstance(raw_profiles, dict):
+        for cohort, raw_profile in raw_profiles.items():
+            if isinstance(raw_profile, dict) and "min_avg_dollar_volume_60d" in raw_profile:
+                profile_value = to_float(raw_profile.get("min_avg_dollar_volume_60d"))
+                if profile_value is not None:
+                    profile_mins[str(cohort)] = profile_value
+    mismatches = {name: value for name, value in profile_mins.items() if abs(value - scoring_min) > 1e-9}
+    if mismatches:
+        LOGGER.warning(
+            "Configured liquidity thresholds diverge: scoring.gates.min_avg_dollar_volume_60d=%s "
+            "technical_profile_mins=%s. Daily score investability uses the scoring gate; "
+            "technical_liquidity_gate_flag uses script 12 profiles.",
+            scoring_min,
+            mismatches,
+        )
+
+
 def component_neutral(config: dict[str, Any], component: str, legacy_key: str, default: float) -> float:
     nested_key = f"scoring.component_neutral_defaults.{component}"
     raw = cfg_get(config, nested_key, None)
@@ -577,6 +680,10 @@ def component_neutral(config: dict[str, Any], component: str, legacy_key: str, d
 def score_or(raw: object, default: float) -> float:
     value = to_float(raw)
     return default if value is None else value
+
+
+def interaction_score(score_a: float, score_b: float) -> float:
+    return round(clamp(math.sqrt(max(0.0, clamp(score_a)) * max(0.0, clamp(score_b)))), 2)
 
 
 def parse_date(raw: object) -> datetime | None:
@@ -680,12 +787,14 @@ def load_latest_feature(conn: Any, table: str, score_col: str, *, asof: str) -> 
         f"""
         SELECT t.*
         FROM {table_sql} t
-        JOIN (
-            SELECT company_id, MAX(asof_date) AS asof_date
-            FROM {table_sql}
-            WHERE asof_date <= ?
-            GROUP BY company_id
-        ) latest ON latest.company_id = t.company_id AND latest.asof_date = t.asof_date
+        WHERE t.rowid = (
+            SELECT t2.rowid
+            FROM {table_sql} t2
+            WHERE t2.company_id = t.company_id
+              AND t2.asof_date <= ?
+            ORDER BY t2.asof_date DESC, t2.rowid DESC
+            LIMIT 1
+        )
         """,
         (asof,),
     ).fetchall()
@@ -721,6 +830,58 @@ def load_company_model_taxonomy(conn: Any) -> dict[int, str]:
         for row in rows
         if str(row["calibration_cohort"] or "").strip()
     }
+
+
+def load_company_model_risk_flags(conn: Any) -> dict[int, dict[str, Any]]:
+    if not table_exists(conn, "dim_company_model_taxonomy"):
+        return {}
+    columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(dim_company_model_taxonomy)").fetchall()}
+    wanted = [
+        "company_id",
+        "single_product_risk_flag",
+        "regulatory_model",
+        "business_model",
+        "procedure_sensitivity",
+        "taxonomy_confidence",
+    ]
+    select_cols = [column for column in wanted if column in columns]
+    if "company_id" not in select_cols:
+        return {}
+    rows = conn.execute(
+        f"SELECT {', '.join(quote_identifier(column) for column in select_cols)} FROM dim_company_model_taxonomy"
+    ).fetchall()
+    out: dict[int, dict[str, Any]] = {}
+    binary_terms = (
+        "single_product",
+        "single product",
+        "binary",
+        "trial",
+        "pivotal",
+        "approval",
+        "clearance",
+        "pma",
+        "ide",
+        "fda_event",
+        "fda event",
+        "regulatory_event",
+        "regulatory event",
+    )
+    for row in rows:
+        item = dict(row)
+        company_id = int(item.get("company_id"))
+        single_product = int_flag(item.get("single_product_risk_flag"))
+        descriptor = " ".join(
+            str(item.get(key) or "").strip().lower()
+            for key in ("regulatory_model", "business_model", "procedure_sensitivity")
+        )
+        binary_like = bool(single_product or any(term in descriptor for term in binary_terms))
+        out[company_id] = {
+            "single_product_risk_flag": 1 if single_product else 0,
+            "binary_event_risk_flag": 1 if binary_like else 0,
+            "taxonomy_confidence": to_float(item.get("taxonomy_confidence")),
+            "risk_descriptor": descriptor,
+        }
+    return out
 
 
 def feature_row_count(conn: Any, table: str, *, asof: str) -> int:
@@ -1273,6 +1434,8 @@ def weighted_available_score(scores: dict[str, float], available: dict[str, bool
 def value_trap_discount(value_trap_score: float, *, start: float = 40.0) -> float:
     if value_trap_score <= start:
         return 1.0
+    if start >= 100.0:
+        return 0.50
     return max(0.50, 1.0 - ((value_trap_score - start) / (2.0 * (100.0 - start))))
 
 
@@ -1334,6 +1497,14 @@ def load_previous_scores(conn: Any, *, asof: str) -> dict[int, dict[str, Any]]:
 
 
 NON_LIVE_REIMBURSEMENT_STATUSES = {"", "unknown", "cms_data_not_loaded"}
+LIVE_REIMBURSEMENT_STATUSES = {
+    "direct_payment_evidence",
+    "procedure_bundled_or_indirect",
+    "capital_equipment_indirect",
+    "diagnostics_lab_pathway",
+    "direct_code_no_payment_rate",
+    "coverage_policy_only",
+}
 
 
 @dataclass(frozen=True)
@@ -1389,6 +1560,32 @@ class PullbackCandidatePolicy:
 
 
 @dataclass(frozen=True)
+class Tier1SafetyPolicy:
+    enabled: bool = True
+    min_fundamental_quality: float = 65.0
+    min_valuation: float = 55.0
+    min_durable_growth: float = 45.0
+    max_value_trap: float = 35.0
+    max_fda_event_risk: float = 40.0
+    min_market_cap: float = 500_000_000.0
+    min_avg_dollar_volume_60d: float = 2_000_000.0
+    min_safe_core_score: float = 62.0
+    min_safe_core_percentile: float = 80.0
+    min_safe_core_cohort_percentile: float = 50.0
+    safe_core_watchlist_min_score: float = 58.0
+    allow_safe_core_gate_substitution: bool = False
+    require_explicit_template_tier1_eligibility: bool = True
+    disallow_pullback_templates: bool = True
+    disallow_inverse_core_templates: bool = True
+    disallow_single_product_risk: bool = True
+    disallow_binary_event_risk: bool = True
+    disallowed_template_terms: tuple[str, ...] = ("pullback", "risk_only", "binary", "special_situation")
+    ticker_denylist: tuple[str, ...] = ()
+    cohort_denylist: tuple[str, ...] = ()
+    template_denylist: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ScoreTemplateComponent:
     field: str
     direction: str
@@ -1400,6 +1597,8 @@ class CohortScoreTemplate:
     template_id: str
     components: tuple[ScoreTemplateComponent, ...]
     rationale: str = ""
+    tier1_eligible: bool = False
+    tier1_role: str = TIER1_TEMPLATE_ROLE_RESEARCH
 
 
 def int_flag(raw: object) -> int:
@@ -1412,6 +1611,8 @@ def reimbursement_component_is_live(item: dict[str, Any], score: float | None) -
     status = str(item.get("reimbursement_status") or "").strip().lower()
     if int_flag(item.get("unknown_reimbursement_flag")) or status in NON_LIVE_REIMBURSEMENT_STATUSES:
         return False
+    if status in LIVE_REIMBURSEMENT_STATUSES:
+        return True
     return bool(
         int_flag(item.get("direct_code_evidence"))
         or int_flag(item.get("payment_rate_evidence"))
@@ -1420,6 +1621,36 @@ def reimbursement_component_is_live(item: dict[str, Any], score: float | None) -
         or int_flag(item.get("capital_equipment_flag"))
         or int_flag(item.get("diagnostics_lab_flag"))
     )
+
+
+def fda_feature_data_available(item: dict[str, Any] | None) -> int:
+    if not item:
+        return 0
+    raw = item.get("fda_data_available")
+    if raw is not None:
+        return int_flag(raw)
+    state = str(item.get("review_adjusted_fda_state") or "").strip().lower()
+    if state == "no_mapped_fda_records":
+        return 0
+    if state.startswith("manual_fda_footprint_"):
+        return 0
+    evidence_fields = (
+        "approval_count_12m",
+        "approval_count_24m",
+        "approval_count_36m",
+        "pma_count_36m",
+        "product_code_count_36m",
+        "recall_count_24m",
+        "recall_count_36m",
+        "class_i_recall_count_36m",
+        "death_count_24m",
+        "injury_count_24m",
+        "malfunction_count_24m",
+        "fda_product_score_legacy",
+        "fda_alpha_score",
+        "fda_safety_score",
+    )
+    return int(any((to_float(item.get(field)) or 0.0) > 0.0 for field in evidence_fields))
 
 
 def entry_status(technical_score: float) -> str:
@@ -1906,6 +2137,14 @@ def base_durable_growth_policy(config: dict[str, Any], gates: dict[str, float]) 
 
 def cohort_durable_growth_policy_profiles(config: dict[str, Any], base_policy: DurableGrowthPolicy) -> dict[str, DurableGrowthPolicy]:
     if not cfg_bool(config, "scoring.durable_growth_policy_profiles_enabled", True):
+        raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
+        if isinstance(raw_profiles, dict) and any(
+            isinstance(profile, dict) and "durable_growth_policy" in profile
+            for profile in raw_profiles.values()
+        ):
+            LOGGER.warning(
+                "durable_growth_policy_profiles_enabled=false; cohort durable-growth profiles are present but ignored"
+            )
         return {}
     raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
     if not isinstance(raw_profiles, dict):
@@ -1971,7 +2210,10 @@ SCORE_TEMPLATE_FIELD_TO_ATTR = {
     "fda_product_score": "fda_product_score",
     "fda_alpha_score": "fda_alpha_score",
     "fda_safety_score": "fda_safety_score",
+    "fda_clearance_velocity_raw": "fda_clearance_velocity_raw",
     "fda_clearance_velocity_score": "fda_clearance_velocity_score",
+    "fda_clearance_acceleration_raw": "fda_clearance_acceleration_raw",
+    "fda_clearance_acceleration_score": "fda_clearance_acceleration_score",
     "fda_evidence_quality_score": "fda_evidence_quality_score",
     "fda_event_risk_score": "fda_event_risk_score",
     "reimbursement_score": "reimbursement_score",
@@ -1980,6 +2222,7 @@ SCORE_TEMPLATE_FIELD_TO_ATTR = {
     "technical_setup_score": "technical_setup_score",
     "technical_core_score": "technical_core_score",
     "technical_alpha_score": "technical_alpha_score",
+    "technical_liquidity_score": "technical_liquidity_score",
     "technical_pullback_score": "technical_pullback_score",
     "sentiment_catalyst_score": "sentiment_catalyst_score",
     "value_trap_score": "value_trap_score",
@@ -1997,7 +2240,10 @@ SCORE_TEMPLATE_FIELD_TO_COMPONENT = {
     "fda_product_score": "fda_product",
     "fda_alpha_score": "fda_product",
     "fda_safety_score": "fda_product",
+    "fda_clearance_velocity_raw": "fda_product",
     "fda_clearance_velocity_score": "fda_product",
+    "fda_clearance_acceleration_raw": "fda_product",
+    "fda_clearance_acceleration_score": "fda_product",
     "fda_evidence_quality_score": "fda_product",
     "fda_event_risk_score": "fda_product",
     "reimbursement_score": "reimbursement",
@@ -2006,6 +2252,7 @@ SCORE_TEMPLATE_FIELD_TO_COMPONENT = {
     "technical_setup_score": "technical_entry",
     "technical_core_score": "technical_entry",
     "technical_alpha_score": "technical_entry",
+    "technical_liquidity_score": "technical_entry",
     "technical_pullback_score": "technical_entry",
     "sentiment_catalyst_score": "sentiment_catalyst",
     "value_trap_score": "valuation",
@@ -2052,7 +2299,35 @@ def parse_score_template(raw: object, *, context: str) -> CohortScoreTemplate:
     if total <= 0:
         raise ValueError(f"{context}.components must have positive total weight")
     rationale = str(raw.get("rationale") or "").strip()
-    return CohortScoreTemplate(template_id=template_id, components=components, rationale=rationale)
+    tier1_role = str(raw.get("tier1_role") or TIER1_TEMPLATE_ROLE_RESEARCH).strip().lower()
+    role_aliases = {
+        "core": TIER1_TEMPLATE_ROLE_SAFE_CORE,
+        "safe": TIER1_TEMPLATE_ROLE_SAFE_CORE,
+        "safe_core": TIER1_TEMPLATE_ROLE_SAFE_CORE,
+        "tier1": TIER1_TEMPLATE_ROLE_SAFE_CORE,
+        "tier_1": TIER1_TEMPLATE_ROLE_SAFE_CORE,
+        "opportunistic": TIER1_TEMPLATE_ROLE_SPECIAL_SITUATION,
+        "special": TIER1_TEMPLATE_ROLE_SPECIAL_SITUATION,
+        "special_situation": TIER1_TEMPLATE_ROLE_SPECIAL_SITUATION,
+        "trade": TIER1_TEMPLATE_ROLE_SPECIAL_SITUATION,
+        "research": TIER1_TEMPLATE_ROLE_RESEARCH,
+        "shadow": TIER1_TEMPLATE_ROLE_RESEARCH,
+    }
+    tier1_role = role_aliases.get(tier1_role, tier1_role)
+    if tier1_role not in TIER1_TEMPLATE_ROLES:
+        raise ValueError(
+            f"{context}.tier1_role must be one of {sorted(TIER1_TEMPLATE_ROLES)}, got {tier1_role!r}"
+        )
+    tier1_eligible = bool_from_raw(raw.get("tier1_eligible"), False)
+    if tier1_role != TIER1_TEMPLATE_ROLE_SAFE_CORE:
+        tier1_eligible = False
+    return CohortScoreTemplate(
+        template_id=template_id,
+        components=components,
+        rationale=rationale,
+        tier1_eligible=tier1_eligible,
+        tier1_role=tier1_role,
+    )
 
 
 def cohort_score_template_profiles(config: dict[str, Any]) -> dict[str, CohortScoreTemplate]:
@@ -2077,10 +2352,11 @@ def cohort_score_template_profiles(config: dict[str, Any]) -> dict[str, CohortSc
 def score_template_spec(template: CohortScoreTemplate | None) -> str:
     if template is None:
         return ""
-    return ";".join(
+    components = ";".join(
         f"{component.field}:{component.direction}:{component.weight:.2f}"
         for component in template.components
     )
+    return f"role={template.tier1_role};tier1_eligible={int(template.tier1_eligible)};{components}"
 
 
 def score_template_component_weight(template: CohortScoreTemplate | None, component_name: str) -> float:
@@ -2166,7 +2442,7 @@ def fda_score_available(item: dict[str, Any], *, source: str) -> bool:
 
 def durable_growth_score_source(config: dict[str, Any]) -> str:
     source = str(
-        cfg_get(config, "scoring.durable_growth_score_source", "alpha_when_available") or "alpha_when_available"
+        cfg_get(config, "scoring.durable_growth_score_source", "legacy") or "legacy"
     ).strip().lower()
     allowed = {"legacy", "proxy", "alpha", "alpha_when_available"}
     if source not in allowed:
@@ -2596,6 +2872,305 @@ def apply_pullback_candidate_tag(row: ScoreRow, policy: PullbackCandidatePolicy 
     row.pullback_candidate_template_id = policy.template_id
 
 
+def _tuple_from_config(raw: object) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if isinstance(raw, (list, tuple, set)):
+        return tuple(str(item).strip().lower() for item in raw if str(item).strip())
+    return tuple(item.strip().lower() for item in str(raw).split(",") if item.strip())
+
+
+def _policy_float(raw: object, default: float, *, context: str) -> float:
+    value = parse_optional_float(raw, context=context)
+    return default if value is None else value
+
+
+def parse_tier1_safety_policy(raw: object, *, default: Tier1SafetyPolicy, context: str) -> Tier1SafetyPolicy:
+    if raw is None:
+        return default
+    if not isinstance(raw, dict):
+        raise ValueError(f"{context} must be a mapping")
+    return Tier1SafetyPolicy(
+        enabled=bool_from_raw(raw.get("enabled"), default.enabled),
+        min_fundamental_quality=_policy_float(
+            raw.get("min_fundamental_quality"),
+            default.min_fundamental_quality,
+            context=f"{context}.min_fundamental_quality",
+        ),
+        min_valuation=_policy_float(
+            raw.get("min_valuation"),
+            default.min_valuation,
+            context=f"{context}.min_valuation",
+        ),
+        min_durable_growth=_policy_float(
+            raw.get("min_durable_growth"),
+            default.min_durable_growth,
+            context=f"{context}.min_durable_growth",
+        ),
+        max_value_trap=_policy_float(
+            raw.get("max_value_trap"),
+            default.max_value_trap,
+            context=f"{context}.max_value_trap",
+        ),
+        max_fda_event_risk=_policy_float(
+            raw.get("max_fda_event_risk"),
+            default.max_fda_event_risk,
+            context=f"{context}.max_fda_event_risk",
+        ),
+        min_market_cap=_policy_float(
+            raw.get("min_market_cap"),
+            default.min_market_cap,
+            context=f"{context}.min_market_cap",
+        ),
+        min_avg_dollar_volume_60d=_policy_float(
+            raw.get("min_avg_dollar_volume_60d"),
+            default.min_avg_dollar_volume_60d,
+            context=f"{context}.min_avg_dollar_volume_60d",
+        ),
+        min_safe_core_score=_policy_float(
+            raw.get("min_safe_core_score"),
+            default.min_safe_core_score,
+            context=f"{context}.min_safe_core_score",
+        ),
+        min_safe_core_percentile=_policy_float(
+            raw.get("min_safe_core_percentile"),
+            default.min_safe_core_percentile,
+            context=f"{context}.min_safe_core_percentile",
+        ),
+        min_safe_core_cohort_percentile=_policy_float(
+            raw.get("min_safe_core_cohort_percentile"),
+            default.min_safe_core_cohort_percentile,
+            context=f"{context}.min_safe_core_cohort_percentile",
+        ),
+        safe_core_watchlist_min_score=_policy_float(
+            raw.get("safe_core_watchlist_min_score"),
+            default.safe_core_watchlist_min_score,
+            context=f"{context}.safe_core_watchlist_min_score",
+        ),
+        allow_safe_core_gate_substitution=bool_from_raw(
+            raw.get("allow_safe_core_gate_substitution"),
+            default.allow_safe_core_gate_substitution,
+        ),
+        require_explicit_template_tier1_eligibility=bool_from_raw(
+            raw.get("require_explicit_template_tier1_eligibility"),
+            default.require_explicit_template_tier1_eligibility,
+        ),
+        disallow_pullback_templates=bool_from_raw(
+            raw.get("disallow_pullback_templates"),
+            default.disallow_pullback_templates,
+        ),
+        disallow_inverse_core_templates=bool_from_raw(
+            raw.get("disallow_inverse_core_templates"),
+            default.disallow_inverse_core_templates,
+        ),
+        disallow_single_product_risk=bool_from_raw(
+            raw.get("disallow_single_product_risk"),
+            default.disallow_single_product_risk,
+        ),
+        disallow_binary_event_risk=bool_from_raw(
+            raw.get("disallow_binary_event_risk"),
+            default.disallow_binary_event_risk,
+        ),
+        disallowed_template_terms=_tuple_from_config(
+            raw.get("disallowed_template_terms", default.disallowed_template_terms)
+        ),
+        ticker_denylist=_tuple_from_config(raw.get("ticker_denylist", default.ticker_denylist)),
+        cohort_denylist=_tuple_from_config(raw.get("cohort_denylist", default.cohort_denylist)),
+        template_denylist=_tuple_from_config(raw.get("template_denylist", default.template_denylist)),
+    )
+
+
+def tier1_safety_policy(config: dict[str, Any]) -> Tier1SafetyPolicy:
+    return parse_tier1_safety_policy(
+        cfg_get(config, "scoring.tier1_safety_policy", {}) or {},
+        default=Tier1SafetyPolicy(),
+        context="scoring.tier1_safety_policy",
+    )
+
+
+def cohort_tier1_safety_policy_profiles(config: dict[str, Any], base_policy: Tier1SafetyPolicy) -> dict[str, Tier1SafetyPolicy]:
+    raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
+    if not isinstance(raw_profiles, dict):
+        raise ValueError("scoring.cohort_profiles must be a mapping when provided")
+    out: dict[str, Tier1SafetyPolicy] = {}
+    for cohort, raw_profile in raw_profiles.items():
+        if not isinstance(raw_profile, dict):
+            continue
+        if str(raw_profile.get("enabled", True)).strip().lower() in {"0", "false", "no", "off"}:
+            continue
+        if "tier1_safety_policy" not in raw_profile:
+            continue
+        out[str(cohort)] = parse_tier1_safety_policy(
+            raw_profile.get("tier1_safety_policy"),
+            default=base_policy,
+            context=f"scoring.cohort_profiles.{cohort}.tier1_safety_policy",
+        )
+    return out
+
+
+def tier1_safety_policy_for_row(
+    row: ScoreRow,
+    base_policy: Tier1SafetyPolicy,
+    profiles: dict[str, Tier1SafetyPolicy],
+) -> Tier1SafetyPolicy:
+    return profiles.get(row.calibration_cohort, base_policy)
+
+
+def log_scaled_liquidity_score(avg_dollar_volume_60d: float | None) -> float:
+    if avg_dollar_volume_60d is None or avg_dollar_volume_60d <= 0:
+        return 0.0
+    return round(clamp(12.0 + 20.0 * math.log10(max(1.0, avg_dollar_volume_60d) / 50_000.0)), 2)
+
+
+def safe_core_risk_adjusted_score(row: ScoreRow) -> float:
+    fda_safety = (
+        row.fda_safety_score
+        if row.fda_data_available and row.fda_safety_score > 0
+        else clamp(100.0 - row.fda_event_risk_score)
+    )
+    reimbursement_quality = row.reimbursement_score if not row.unknown_reimbursement_flag else 50.0
+    liquidity_quality = (
+        row.liquidity_score
+        if row.liquidity_score is not None
+        else log_scaled_liquidity_score(row.avg_dollar_volume_60d)
+    )
+    value_safety = clamp(100.0 - row.value_trap_score)
+    durable_quality = clamp(
+        0.45 * row.durable_growth_quality_score
+        + 0.35 * row.durable_growth_capital_discipline_score
+        + 0.20 * row.durable_growth_score
+    )
+    score = (
+        0.28 * clamp(row.fundamental_quality_score)
+        + 0.22 * clamp(row.valuation_score)
+        + 0.14 * durable_quality
+        + 0.12 * clamp(fda_safety)
+        + 0.08 * clamp(reimbursement_quality)
+        + 0.06 * clamp(liquidity_quality)
+        + 0.06 * value_safety
+        + 0.04 * clamp(row.data_completeness_score)
+    )
+    if row.binary_event_risk_flag:
+        score -= 30.0
+    if row.single_product_risk_flag:
+        score -= 20.0
+    if row.cohort_score_template_id and row.cohort_score_template_tier1_role != TIER1_TEMPLATE_ROLE_SAFE_CORE:
+        score -= 25.0
+    if row.fda_event_risk_score > 20.0:
+        score -= 0.35 * (row.fda_event_risk_score - 20.0)
+    if row.value_trap_score > 20.0:
+        score -= 0.45 * (row.value_trap_score - 20.0)
+    if row.data_completeness_score < 90.0:
+        score -= 0.30 * (90.0 - row.data_completeness_score)
+    if row.technical_breakdown_flag:
+        score -= 15.0
+    return round(clamp(score), 2)
+
+
+def safe_core_percentile_rank(rows: list[ScoreRow]) -> None:
+    pairs = [
+        (idx, row.safe_core_score)
+        for idx, row in enumerate(rows)
+        if row.safe_core_score is not None and math.isfinite(row.safe_core_score)
+    ]
+    if len(pairs) <= 1:
+        for row in rows:
+            row.safe_core_percentile = 50.0
+            row.safe_core_cohort_percentile = 50.0
+            row.safe_core_rank = 1 if pairs else 0
+        return
+    pairs.sort(key=lambda item: item[1], reverse=True)
+    denominator = len(pairs) - 1
+    for rank, (idx, _) in enumerate(pairs, start=1):
+        rows[idx].safe_core_rank = rank
+        rows[idx].safe_core_percentile = round(100.0 * (denominator - (rank - 1)) / denominator, 2)
+
+    by_cohort: dict[str, list[tuple[int, float]]] = {}
+    for idx, row in enumerate(rows):
+        by_cohort.setdefault(row.calibration_cohort or row.subsector or "unknown", []).append(
+            (idx, row.safe_core_score)
+        )
+    for cohort_pairs in by_cohort.values():
+        if len(cohort_pairs) <= 1:
+            for idx, _ in cohort_pairs:
+                rows[idx].safe_core_cohort_percentile = 50.0
+            continue
+        cohort_pairs.sort(key=lambda item: item[1], reverse=True)
+        denominator = len(cohort_pairs) - 1
+        for rank, (idx, _) in enumerate(cohort_pairs, start=1):
+            rows[idx].safe_core_cohort_percentile = round(
+                100.0 * (denominator - (rank - 1)) / denominator,
+                2,
+            )
+
+
+def tier1_safety_reasons(row: ScoreRow, policy: Tier1SafetyPolicy) -> list[str]:
+    if not policy.enabled:
+        return []
+    reasons: list[str] = []
+    ticker = row.ticker.strip().lower()
+    cohort = row.calibration_cohort.strip().lower()
+    template_id = row.cohort_score_template_id.strip().lower()
+    template_spec = row.cohort_score_template_spec.strip().lower()
+    template_role = row.cohort_score_template_tier1_role.strip().lower()
+    template_text = " ".join(part for part in (template_id, template_spec, template_role) if part)
+
+    if ticker in policy.ticker_denylist:
+        reasons.append("ticker_denylist")
+    if cohort in policy.cohort_denylist:
+        reasons.append("cohort_denylist")
+    if template_id and template_id in policy.template_denylist:
+        reasons.append("template_denylist")
+    if template_id and template_role and template_role != TIER1_TEMPLATE_ROLE_SAFE_CORE:
+        reasons.append("template_not_safe_core")
+    if (
+        template_id
+        and policy.require_explicit_template_tier1_eligibility
+        and not row.cohort_score_template_tier1_eligible
+    ):
+        reasons.append("template_not_tier1_eligible")
+    if policy.disallow_pullback_templates and template_text:
+        for term in policy.disallowed_template_terms:
+            if term and term in template_text:
+                reasons.append(f"template_term_{term}")
+                break
+    if policy.disallow_inverse_core_templates and template_spec:
+        inverse_core_fields = {
+            "durable_growth_score",
+            "fundamental_quality_score",
+            "fda_product_score",
+            "fda_alpha_score",
+            "fda_safety_score",
+            "reimbursement_score",
+            "sentiment_catalyst_score",
+            "valuation_score",
+        }
+        if any(f"{field}:inverse" in template_spec for field in inverse_core_fields):
+            reasons.append("inverse_core_template")
+    if policy.disallow_single_product_risk and row.single_product_risk_flag:
+        reasons.append("single_product_risk")
+    if policy.disallow_binary_event_risk and row.binary_event_risk_flag:
+        reasons.append("binary_event_risk")
+    if row.fundamental_quality_score < policy.min_fundamental_quality:
+        reasons.append("fundamental_below_tier1_safety_min")
+    if row.valuation_score < policy.min_valuation:
+        reasons.append("valuation_below_tier1_safety_min")
+    if row.durable_growth_score < policy.min_durable_growth:
+        reasons.append("durable_growth_below_tier1_safety_min")
+    if row.value_trap_score > policy.max_value_trap:
+        reasons.append("value_trap_above_tier1_safety_max")
+    if row.fda_event_risk_score > policy.max_fda_event_risk:
+        reasons.append("fda_event_risk_above_tier1_safety_max")
+    if row.market_cap is None or row.market_cap < policy.min_market_cap:
+        reasons.append("market_cap_missing_or_below_tier1_min")
+    if row.avg_dollar_volume_60d is None or row.avg_dollar_volume_60d < policy.min_avg_dollar_volume_60d:
+        reasons.append("liquidity_missing_or_below_tier1_min")
+    if row.technical_breakdown_flag:
+        reasons.append("technical_breakdown")
+
+    return list(dict.fromkeys(reasons))
+
+
 def classify(
     row: ScoreRow,
     *,
@@ -2603,6 +3178,7 @@ def classify(
     technical_policy: TechnicalPolicy | None = None,
     fda_policy: FdaGatePolicy | None = None,
     durable_policy: DurableGrowthPolicy | None = None,
+    tier1_policy: Tier1SafetyPolicy | None = None,
 ) -> None:
     if technical_policy is None:
         technical_policy = TechnicalPolicy(
@@ -2640,6 +3216,8 @@ def classify(
             require_validation_for_nonlegacy=True,
             rationale="legacy_default_hard_positive_durable_growth_gate",
         )
+    if tier1_policy is None:
+        tier1_policy = Tier1SafetyPolicy(enabled=False)
     reasons: list[str] = []
     entry_score = row.technical_entry_status_score if row.technical_entry_status_score is not None else row.technical_entry_score
     row.entry_status = entry_status(entry_score)
@@ -2702,7 +3280,19 @@ def classify(
     else:
         row.passed_fda_gate = 1
         row.fda_gate_excluded = 1
-    reimbursement_live = row.unknown_reimbursement_flag == 0 and row.reimbursement_status not in NON_LIVE_REIMBURSEMENT_STATUSES
+    reimbursement_live = reimbursement_component_is_live(
+        {
+            "reimbursement_status": row.reimbursement_status,
+            "unknown_reimbursement_flag": row.unknown_reimbursement_flag,
+            "direct_code_evidence": row.direct_code_evidence,
+            "payment_rate_evidence": row.payment_rate_evidence,
+            "coverage_policy_evidence": row.coverage_policy_evidence,
+            "procedure_bundled_flag": row.procedure_bundled_flag,
+            "capital_equipment_flag": row.capital_equipment_flag,
+            "diagnostics_lab_flag": row.diagnostics_lab_flag,
+        },
+        row.reimbursement_score,
+    )
     row.passed_reimbursement_gate = int(reimbursement_live and row.reimbursement_score >= gates["reimbursement_min"])
     row.passed_valuation_gate = int(row.valuation_score >= gates["valuation_min"])
     entry_min = technical_policy.entry_min if technical_policy.entry_min is not None else gates["technical_entry_min"]
@@ -2771,6 +3361,50 @@ def classify(
     }
     if tier1_restricted:
         reasons.append(row.calibration_status)
+    tier1_safety = tier1_safety_reasons(row, tier1_policy)
+    row.passed_tier1_safety_gate = int(not tier1_safety)
+    row.tier1_safety_status = TIER1_SAFETY_STATUS_PASS if row.passed_tier1_safety_gate else TIER1_SAFETY_STATUS_FAIL
+    row.tier1_safety_reason = ";".join(tier1_safety)
+    reasons.extend(f"tier1_safety_{reason}" for reason in tier1_safety)
+
+    safe_core_reasons: list[str] = []
+    if tier1_restricted:
+        safe_core_reasons.append(row.calibration_status)
+    if not row.passed_tier1_safety_gate:
+        safe_core_reasons.append("tier1_safety_failed")
+    if row.safe_core_score < tier1_policy.min_safe_core_score:
+        safe_core_reasons.append("safe_core_score_below_min")
+    if row.safe_core_percentile < tier1_policy.min_safe_core_percentile:
+        safe_core_reasons.append("safe_core_percentile_below_min")
+    if row.safe_core_cohort_percentile < tier1_policy.min_safe_core_cohort_percentile:
+        safe_core_reasons.append("safe_core_cohort_percentile_below_min")
+    if not row.passed_data_quality_gate:
+        safe_core_reasons.append("data_quality_below_gate")
+    if not row.passed_liquidity_gate:
+        safe_core_reasons.append("liquidity_below_gate")
+    if not row.passed_fda_manual_review_gate:
+        safe_core_reasons.append("fda_manual_review_required")
+    if row.hard_red_flag:
+        safe_core_reasons.append("hard_red_flag")
+    if row.value_trap_score >= gates["value_trap_hard_max"]:
+        safe_core_reasons.append("value_trap_hard_gate")
+    row.passed_safe_core_gate = int(not safe_core_reasons)
+    hard_safe_core_block = bool(
+        tier1_restricted
+        or not row.passed_tier1_safety_gate
+        or not row.passed_data_quality_gate
+        or not row.passed_liquidity_gate
+        or not row.passed_fda_manual_review_gate
+        or row.hard_red_flag
+        or row.value_trap_score >= gates["value_trap_hard_max"]
+    )
+    if row.passed_safe_core_gate:
+        row.safe_core_status = "pass"
+    elif not hard_safe_core_block and row.safe_core_score >= tier1_policy.safe_core_watchlist_min_score:
+        row.safe_core_status = "watchlist"
+    else:
+        row.safe_core_status = "fail"
+    row.safe_core_reason = ";".join(dict.fromkeys(safe_core_reasons))
 
     row.failed_gates = ";".join(reasons)
     row.review_reason = ";".join(reasons)
@@ -2793,7 +3427,40 @@ def classify(
         and not fda_classification_block
         and not durable_growth_classification_block
     )
-    row.final_investability_gate = int(base_investability_gate and not tier1_restricted)
+    row.legacy_all_gates_gate = int(base_investability_gate and not tier1_restricted)
+    legacy_misses: list[str] = []
+    if not row.passed_raw_score_gate:
+        legacy_misses.append("raw_or_cohort_score")
+    if not row.passed_fundamental_gate:
+        legacy_misses.append("fundamental")
+    if not row.passed_growth_gate:
+        legacy_misses.append("durable_growth")
+    if not row.passed_fda_gate:
+        legacy_misses.append("fda")
+    if not row.passed_reimbursement_gate:
+        legacy_misses.append("reimbursement")
+    if not row.passed_valuation_gate:
+        legacy_misses.append("valuation")
+    if not row.passed_technical_gate:
+        legacy_misses.append("technical")
+    if not row.passed_value_trap_gate:
+        legacy_misses.append("value_trap")
+    if not row.passed_data_quality_gate:
+        legacy_misses.append("data_quality")
+    if not row.passed_liquidity_gate:
+        legacy_misses.append("liquidity")
+    if not row.passed_fda_manual_review_gate:
+        legacy_misses.append("fda_manual_review")
+    if tier1_restricted:
+        legacy_misses.append("restricted_cohort")
+    row.legacy_gate_misses = ";".join(dict.fromkeys(legacy_misses))
+    safe_core_investability_gate = bool(
+        tier1_policy.allow_safe_core_gate_substitution and row.passed_safe_core_gate
+    )
+    row.final_investability_gate = int(
+        (row.legacy_all_gates_gate and row.passed_tier1_safety_gate)
+        or safe_core_investability_gate
+    )
     row.gate_status = "pass" if row.final_investability_gate else "fail"
     if confirmed_hard_red:
         row.classification = "avoid_confirmed_regulatory_risk"
@@ -2832,20 +3499,28 @@ def classify(
             if row.calibration_status_reason
             else row.calibration_status
         )
+    elif base_investability_gate and not row.passed_tier1_safety_gate:
+        row.classification = "special_situation_or_binary_risk_watchlist"
+        row.classification_reason = row.tier1_safety_reason or "failed_tier1_safe_core_policy"
     elif row.final_investability_gate:
         row.classification = "tier_1_long_candidate"
-        overlay_reasons = []
-        if row.durable_growth_gate_excluded:
-            overlay_reasons.append(f"durable_growth_{row.durable_growth_gate_mode}")
-        if row.technical_gate_excluded:
-            overlay_reasons.append("technical_overlay_only")
-        if row.fda_gate_excluded:
-            overlay_reasons.append(f"fda_{row.fda_gate_mode}")
-        row.classification_reason = (
-            "all_tier1_gates_passed"
-            if not overlay_reasons
-            else "all_tier1_active_gates_passed;" + ";".join(overlay_reasons)
-        )
+        if safe_core_investability_gate and not row.legacy_all_gates_gate:
+            row.classification_reason = (
+                f"safe_core_gate_passed;legacy_misses={row.legacy_gate_misses or 'none'}"
+            )
+        else:
+            overlay_reasons = []
+            if row.durable_growth_gate_excluded:
+                overlay_reasons.append(f"durable_growth_{row.durable_growth_gate_mode}")
+            if row.technical_gate_excluded:
+                overlay_reasons.append("technical_overlay_only")
+            if row.fda_gate_excluded:
+                overlay_reasons.append(f"fda_{row.fda_gate_mode}")
+            row.classification_reason = (
+                "all_tier1_gates_passed"
+                if not overlay_reasons
+                else "all_tier1_active_gates_passed;" + ";".join(overlay_reasons)
+            )
     elif row.raw_composite_score >= gates["watchlist_min"]:
         row.classification = "watchlist"
         row.classification_reason = "raw_score_above_watchlist_floor"
@@ -2871,6 +3546,7 @@ def build_rows(
     durable_rows = load_latest_feature(conn, "feature_durable_growth", "score", asof=asof)
     sentiment_rows = load_latest_feature(conn, "feature_sentiment_catalyst", "score", asof=asof)
     taxonomy = load_company_model_taxonomy(conn)
+    taxonomy_risk_flags = load_company_model_risk_flags(conn)
     neutral_fundamental = component_neutral(config, "fundamental_quality", "scoring.neutral_fundamental_quality_score", 50.0)
     neutral_durable = component_neutral(config, "durable_growth", "scoring.neutral_durable_growth_score", 50.0)
     neutral_reimbursement = component_neutral(config, "reimbursement", "scoring.neutral_reimbursement_score", 50.0)
@@ -2893,6 +3569,8 @@ def build_rows(
     default_durable_growth_policy = base_durable_growth_policy(config, gates)
     durable_growth_policy_profiles = cohort_durable_growth_policy_profiles(config, default_durable_growth_policy)
     pullback_candidate_profiles = cohort_pullback_candidate_profiles(config)
+    default_tier1_safety_policy = tier1_safety_policy(config)
+    tier1_safety_policy_profiles = cohort_tier1_safety_policy_profiles(config, default_tier1_safety_policy)
     fda_source = fda_score_source(config)
     durable_source = durable_growth_score_source(config)
     technical_source = technical_composite_score_source(config)
@@ -2903,6 +3581,7 @@ def build_rows(
     for item in financial_rows:
         company_id = int(item["company_id"])
         cohort = taxonomy.get(company_id, "")
+        risk_flags = taxonomy_risk_flags.get(company_id, {})
         calibration_status, calibration_status_reason = calibration_status_for_cohort(cohort, calibration_status_profiles)
         active_weights = weights_for_cohort(cohort, weights, weight_profiles)
         active_score_template = score_template_profiles.get(cohort)
@@ -2935,7 +3614,7 @@ def build_rows(
         has_durable_live_score = durable_growth_score_available(durable_item, durable_proxy_item, source=durable_source)
         has_sentiment_live_score = sentiment_table_score is not None or has_sentiment_proxy
         fda_hard_flag = int(fda_item.get("hard_red_flag") or 0) if fda_item else 0
-        fda_data_available = int(fda_item.get("fda_data_available") or 0) if fda_item else 0
+        fda_data_available = fda_feature_data_available(fda_item)
         reimbursement_hard_flag = int(reimbursement_item.get("hard_red_flag") or 0) if reimbursement_item else 0
         reimbursement_table_score = to_float(reimbursement_item.get("score")) if reimbursement_item else None
         reimbursement_status = str(reimbursement_item.get("reimbursement_status") or "unknown").strip().lower() if reimbursement_item else "unknown"
@@ -3061,7 +3740,10 @@ def build_rows(
             "fda_product_score": component_available["fda_product"],
             "fda_alpha_score": bool(fda_item) and to_float(fda_item.get("fda_alpha_score")) is not None,
             "fda_safety_score": bool(fda_item) and to_float(fda_item.get("fda_safety_score")) is not None,
+            "fda_clearance_velocity_raw": bool(fda_item) and to_float(fda_item.get("fda_clearance_velocity_raw")) is not None,
             "fda_clearance_velocity_score": bool(fda_item) and to_float(fda_item.get("fda_clearance_velocity_score")) is not None,
+            "fda_clearance_acceleration_raw": bool(fda_item) and to_float(fda_item.get("fda_clearance_acceleration_raw")) is not None,
+            "fda_clearance_acceleration_score": bool(fda_item) and to_float(fda_item.get("fda_clearance_acceleration_score")) is not None,
             "fda_evidence_quality_score": bool(fda_item) and to_float(fda_item.get("fda_evidence_quality_score")) is not None,
             "fda_event_risk_score": bool(fda_item) and to_float(fda_item.get("fda_event_risk_score")) is not None,
             "reimbursement_score": component_available["reimbursement"],
@@ -3074,6 +3756,7 @@ def build_rows(
             ),
             "technical_core_score": bool(technical_item) and to_float(technical_item.get("technical_core_score")) is not None,
             "technical_alpha_score": bool(technical_item) and to_float(technical_item.get("technical_alpha_score")) is not None,
+            "technical_liquidity_score": bool(technical_item) and to_float(technical_item.get("liquidity_score")) is not None,
             "technical_pullback_score": bool(technical_item) and to_float(technical_item.get("technical_pullback_score")) is not None,
             "sentiment_catalyst_score": component_available["sentiment_catalyst"],
             "value_trap_score": to_float(item.get("value_trap_score")) is not None,
@@ -3108,6 +3791,14 @@ def build_rows(
             calibration_status_reason=calibration_status_reason,
             cohort_score_template_id=active_score_template.template_id if active_score_template is not None else "",
             cohort_score_template_spec=score_template_spec(active_score_template),
+            cohort_score_template_tier1_role=(
+                active_score_template.tier1_role if active_score_template is not None else ""
+            ),
+            cohort_score_template_tier1_eligible=(
+                int(active_score_template.tier1_eligible) if active_score_template is not None else 0
+            ),
+            single_product_risk_flag=int(risk_flags.get("single_product_risk_flag") or 0),
+            binary_event_risk_flag=int(risk_flags.get("binary_event_risk_flag") or 0),
             fundamental_quality_score=score_or(item.get("fundamental_quality_score_v1"), neutral_fundamental),
             durable_growth_score=durable_score,
             durable_growth_score_legacy=durable_selection.legacy_score,
@@ -3139,7 +3830,10 @@ def build_rows(
             fda_product_score_legacy=score_or(fda_item.get("fda_product_score_legacy"), fda_score) if fda_item else neutral_fda_no_data,
             fda_alpha_score=score_or(fda_item.get("fda_alpha_score"), fda_score) if fda_item else neutral_fda_no_data,
             fda_safety_score=score_or(fda_item.get("fda_safety_score"), 50.0) if fda_item else 50.0,
+            fda_clearance_velocity_raw=to_float(fda_item.get("fda_clearance_velocity_raw")) if fda_item else None,
             fda_clearance_velocity_score=score_or(fda_item.get("fda_clearance_velocity_score"), 50.0) if fda_item else 50.0,
+            fda_clearance_acceleration_raw=to_float(fda_item.get("fda_clearance_acceleration_raw")) if fda_item else None,
+            fda_clearance_acceleration_score=score_or(fda_item.get("fda_clearance_acceleration_score"), 50.0) if fda_item else 50.0,
             fda_evidence_quality_score=score_or(fda_item.get("fda_evidence_quality_score"), 50.0) if fda_item else 50.0,
             fda_event_risk_score=score_or(fda_item.get("fda_event_risk_score"), 0.0) if fda_item else 0.0,
             fda_signal_mode=str(fda_item.get("fda_signal_mode") or "") if fda_item else "",
@@ -3152,6 +3846,14 @@ def build_rows(
             fda_score_source=active_fda_score_source,
             fda_component_weight=fda_component_weight,
             fda_data_available=fda_data_available,
+            quality_value_interaction_score=interaction_score(
+                score_or(item.get("fundamental_quality_score_v1"), neutral_fundamental),
+                score_or(item.get("valuation_score_v1"), neutral_valuation),
+            ),
+            fda_technical_interaction_score=interaction_score(
+                score_or(fda_item.get("fda_alpha_score"), fda_score) if fda_item else neutral_fda_no_data,
+                technical_entry_status_score,
+            ),
             reimbursement_score=score_or(reimbursement_table_score, neutral_reimbursement) if reimbursement_item else neutral_reimbursement,
             reimbursement_status=reimbursement_status,
             direct_code_evidence=direct_code_evidence,
@@ -3258,6 +3960,10 @@ def build_rows(
             row.composite_percentile = row.raw_composite_score
     cohort_percentile_rank(rows)
     for row in rows:
+        row.safe_core_score = safe_core_risk_adjusted_score(row)
+        row.safe_core_model_version = "safe_core_v1_quality_value_risk_shadow"
+    safe_core_percentile_rank(rows)
+    for row in rows:
         classify(
             row,
             gates=gates_for_row(row, gates, gate_profiles),
@@ -3267,6 +3973,11 @@ def build_rows(
                 row,
                 default_durable_growth_policy,
                 durable_growth_policy_profiles,
+            ),
+            tier1_policy=tier1_safety_policy_for_row(
+                row,
+                default_tier1_safety_policy,
+                tier1_safety_policy_profiles,
             ),
         )
         apply_pullback_candidate_tag(row, pullback_candidate_profiles.get(row.calibration_cohort))
@@ -3323,6 +4034,23 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "calibration_status_reason",
         "cohort_score_template_id",
         "cohort_score_template_spec",
+        "cohort_score_template_tier1_role",
+        "cohort_score_template_tier1_eligible",
+        "single_product_risk_flag",
+        "binary_event_risk_flag",
+        "tier1_safety_status",
+        "tier1_safety_reason",
+        "passed_tier1_safety_gate",
+        "safe_core_score",
+        "safe_core_percentile",
+        "safe_core_cohort_percentile",
+        "safe_core_rank",
+        "safe_core_status",
+        "safe_core_reason",
+        "passed_safe_core_gate",
+        "safe_core_model_version",
+        "legacy_all_gates_gate",
+        "legacy_gate_misses",
         "cohort_percentile",
         "fundamental_quality_score",
         "durable_growth_score",
@@ -3351,7 +4079,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "fda_product_score_legacy",
         "fda_alpha_score",
         "fda_safety_score",
+        "fda_clearance_velocity_raw",
         "fda_clearance_velocity_score",
+        "fda_clearance_acceleration_raw",
+        "fda_clearance_acceleration_score",
         "fda_evidence_quality_score",
         "fda_event_risk_score",
         "fda_signal_mode",
@@ -3362,6 +4093,9 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "fda_policy_reason",
         "fda_gate_excluded",
         "fda_component_weight",
+        "fda_data_available",
+        "quality_value_interaction_score",
+        "fda_technical_interaction_score",
         "reimbursement_score",
         "reimbursement_status",
         "direct_code_evidence",
@@ -3475,6 +4209,23 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.calibration_status_reason,
                 row.cohort_score_template_id,
                 row.cohort_score_template_spec,
+                row.cohort_score_template_tier1_role,
+                row.cohort_score_template_tier1_eligible,
+                row.single_product_risk_flag,
+                row.binary_event_risk_flag,
+                row.tier1_safety_status,
+                row.tier1_safety_reason,
+                row.passed_tier1_safety_gate,
+                row.safe_core_score,
+                row.safe_core_percentile,
+                row.safe_core_cohort_percentile,
+                row.safe_core_rank,
+                row.safe_core_status,
+                row.safe_core_reason,
+                row.passed_safe_core_gate,
+                row.safe_core_model_version,
+                row.legacy_all_gates_gate,
+                row.legacy_gate_misses,
                 row.cohort_percentile,
                 row.fundamental_quality_score,
                 row.durable_growth_score,
@@ -3503,7 +4254,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.fda_product_score_legacy,
                 row.fda_alpha_score,
                 row.fda_safety_score,
+                row.fda_clearance_velocity_raw,
                 row.fda_clearance_velocity_score,
+                row.fda_clearance_acceleration_raw,
+                row.fda_clearance_acceleration_score,
                 row.fda_evidence_quality_score,
                 row.fda_event_risk_score,
                 row.fda_signal_mode,
@@ -3514,6 +4268,9 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.fda_policy_reason,
                 row.fda_gate_excluded,
                 row.fda_component_weight,
+                row.fda_data_available,
+                row.quality_value_interaction_score,
+                row.fda_technical_interaction_score,
                 row.reimbursement_score,
                 row.reimbursement_status,
                 row.direct_code_evidence,
@@ -3626,6 +4383,7 @@ def main() -> None:
     args = parse_args()
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
+    warn_liquidity_gate_threshold_mismatch(config)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_csv = (

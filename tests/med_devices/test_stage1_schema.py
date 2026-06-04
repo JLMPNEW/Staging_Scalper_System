@@ -188,8 +188,9 @@ def test_yahoo_adjusted_parser_builds_adjusted_price_rows() -> None:
 
     assert len(bars) == 2
     assert bars[0].ticker == "AAA"
-    assert bars[0].close == 5.0
-    assert bars[0].open == 5.0
+    assert bars[0].close == 10.0
+    assert bars[0].adj_close == 5.0
+    assert bars[0].open == 10.0
     assert bars[0].price_adjustment == "adjusted"
     assert bars[0].is_adjusted == 1
     assert bars[0].split_factor == 2.0
@@ -292,6 +293,43 @@ def test_sec_ingestion_parses_filings_and_companyfacts() -> None:
     assert rows[0]["cash_and_investments"] == 300
 
 
+def test_sec_metric_sort_ignores_malformed_filed_dates() -> None:
+    module = load_script_module("05_sync_med_device_sec_fundamentals.py", "med_device_sec_sort_test")
+    valid = module.FactObservation(
+        metric="revenue",
+        concept="Revenue",
+        unit="USD",
+        value=100.0,
+        period_start="2025-01-01",
+        period_end="2025-12-31",
+        fiscal_year=2025,
+        fiscal_period="FY",
+        form="10-K",
+        filed_date="2026-02-15",
+        accession_nodash="valid",
+        frame="",
+        concept_rank=0,
+    )
+    malformed = module.FactObservation(
+        metric="revenue",
+        concept="Revenue",
+        unit="USD",
+        value=200.0,
+        period_start="2025-01-01",
+        period_end="2025-12-31",
+        fiscal_year=2025,
+        fiscal_period="FY",
+        form="10-K",
+        filed_date="not-a-date",
+        accession_nodash="malformed",
+        frame="",
+        concept_rank=0,
+    )
+
+    assert module.sortable_filed_date("not-a-date") == ""
+    assert module.observation_sort_key(valid) > module.observation_sort_key(malformed)
+
+
 def test_financial_feature_builder_computes_ttm_and_valuation(tmp_path: Path) -> None:
     module = load_script_module("06_build_med_device_financial_features.py", "med_device_financial_features_test")
     db_path = tmp_path / "med_devices.sqlite"
@@ -348,6 +386,9 @@ def test_financial_feature_builder_computes_ttm_and_valuation(tmp_path: Path) ->
         companies = [module.Company(company_id=1, ticker="AAA", company_name="AAA Medical", subsector="medical_devices")]
         policy = module.FinancialFeaturePolicy(
             market_sources=["yahoo_finance_backup"],
+            share_count_sources=["yahoo_finance_backup", "sec_companyfacts"],
+            share_count_max_staleness_days=30,
+            allow_sec_weighted_average_share_fallback=True,
             max_staleness_days=7,
             require_adjusted=True,
             core_min_years=1.0,
@@ -389,6 +430,19 @@ def test_financial_feature_builder_computes_ttm_and_valuation(tmp_path: Path) ->
     assert quality_row["score"] is not None
 
 
+def test_financial_read_csv_flexible_reports_decode_failure(tmp_path: Path) -> None:
+    module = load_script_module("06_build_med_device_financial_features.py", "med_device_financial_csv_test")
+    bad_csv = tmp_path / "bad.csv"
+    bad_csv.write_bytes(b"ticker,shares\nAAA,\x81\n")
+
+    try:
+        module.read_csv_flexible(bad_csv)
+    except ValueError as exc:
+        assert "Could not decode CSV" in str(exc)
+    else:
+        raise AssertionError("Expected read_csv_flexible to raise ValueError for undecodable CSV")
+
+
 def test_fda_core_parser_populates_canonical_tables(tmp_path: Path) -> None:
     module = load_script_module("08_sync_med_device_fda_core.py", "med_device_fda_core_sync_test")
     key_file = tmp_path / "secrets.local.yaml"
@@ -401,6 +455,7 @@ def test_fda_core_parser_populates_canonical_tables(tmp_path: Path) -> None:
         api_key_file_field="openfda_api_key",
         timeout_sec=30.0,
         max_retries=3,
+        parallel_workers=1,
         sleep_sec=0.15,
         page_limit=1000,
         commit_every_pages=10,
@@ -482,6 +537,88 @@ def test_fda_core_parser_populates_canonical_tables(tmp_path: Path) -> None:
     assert event_row["injury_count"] == 1
 
 
+def test_raw_api_responses_are_run_scoped_after_legacy_migration(tmp_path: Path) -> None:
+    module = load_script_module("08_sync_med_device_fda_core.py", "med_device_fda_raw_response_test")
+    db_path = tmp_path / "med_devices.sqlite"
+    legacy_conn = sqlite3.connect(db_path)
+    legacy_conn.execute(
+        """
+        CREATE TABLE raw_api_responses (
+            raw_response_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            query_params_json TEXT,
+            request_time_utc TEXT NOT NULL,
+            response_status INTEGER,
+            response_hash TEXT NOT NULL,
+            asof_date TEXT,
+            payload_text TEXT,
+            ingestion_run_id INTEGER,
+            created_at TEXT NOT NULL,
+            UNIQUE(source_id, endpoint, response_hash)
+        )
+        """
+    )
+    legacy_conn.commit()
+    legacy_conn.close()
+
+    with connect(db_path) as conn:
+        init_db(conn)
+        table_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'raw_api_responses'"
+        ).fetchone()
+        index_names = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA index_list(raw_api_responses)").fetchall()
+        }
+        upsert_source_registry(conn, load_source_registry(SOURCE_REGISTRY))
+        run_1 = module.start_ingestion_run(conn, "openfda_device")
+        run_2 = module.start_ingestion_run(conn, "openfda_device")
+        for run_id in (run_1, run_2):
+            module.store_raw_response(
+                conn,
+                source_id="openfda_device",
+                endpoint="https://api.fda.gov/device/recall.json",
+                query_params={"limit": 1000, "skip": 0},
+                response_status=200,
+                payload_text='{"results":[{"recall_number":"Z-0001-2026"}]}',
+                ingestion_run_id=run_id,
+            )
+        rows = conn.execute(
+            """
+            SELECT ingestion_run_id, response_hash
+            FROM raw_api_responses
+            WHERE source_id = 'openfda_device'
+            ORDER BY ingestion_run_id
+            """
+        ).fetchall()
+
+    assert table_sql is not None
+    assert "UNIQUE(source_id, endpoint, response_hash)" not in str(table_sql["sql"])
+    assert "idx_raw_api_responses_run_query" in index_names
+    assert [int(row["ingestion_run_id"]) for row in rows] == [run_1, run_2]
+    assert len({str(row["response_hash"]) for row in rows}) == 1
+
+
+def test_fda_recall_lookup_uses_partial_index(tmp_path: Path) -> None:
+    module = load_script_module("08_sync_med_device_fda_core.py", "med_device_fda_recall_plan_test")
+    db_path = tmp_path / "med_devices.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        exact_plan = conn.execute(
+            "EXPLAIN QUERY PLAN " + module.FDA_RECALL_LOOKUP_SQL,
+            ("recall_number:Z00012026", "openfda_device", "recall"),
+        ).fetchall()
+        legacy_plan = conn.execute(
+            "EXPLAIN QUERY PLAN " + module.FDA_RECALL_LEGACY_ENDPOINT_LOOKUP_SQL,
+            ("recall_number:Z00012026", "openfda_device"),
+        ).fetchall()
+
+    details = " ".join(str(row["detail"]) for row in [*exact_plan, *legacy_plan])
+    assert "idx_fact_fda_recall_key_endpoint" in details
+    assert "SCAN fact_fda_recall" not in details
+
+
 def test_fda_linker_and_feature_builder_scores_mapped_records(tmp_path: Path) -> None:
     fda_module = load_script_module("08_sync_med_device_fda_core.py", "med_device_fda_core_for_features_test")
     link_module = load_script_module("09_link_med_device_fda_to_companies.py", "med_device_fda_link_test")
@@ -532,6 +669,8 @@ def test_fda_linker_and_feature_builder_scores_mapped_records(tmp_path: Path) ->
                 aliases,
                 token_score_weight=100.0,
                 min_confidence=75.0,
+                edit_distance_max_normalized=0.20,
+                edit_distance_score=70.0,
             )
             conn.execute(
                 """
@@ -542,6 +681,7 @@ def test_fda_linker_and_feature_builder_scores_mapped_records(tmp_path: Path) ->
                 (match.company_id, match.confidence, match.method, int(manufacturer["fda_manufacturer_id"])),
             )
         link_module.update_fact_company_ids(conn, min_confidence=75.0)
+        feature_module.refresh_canonical_recalls(conn)
         companies = [feature_module.Company(company_id=1, ticker="EXMD", company_name="Example Devices Inc.")]
         policy = feature_module.FdaFeaturePolicy(
             source_id="openfda_device",
@@ -551,10 +691,26 @@ def test_fda_linker_and_feature_builder_scores_mapped_records(tmp_path: Path) ->
             no_data_innovation_score=20.0,
             no_data_risk_score=65.0,
             revenue_floor=100000000.0,
+            recall_decay_half_life_days=730.0,
+            innovation_base_score=25.0,
+            innovation_approval_log_weight=18.0,
+            innovation_pma_log_weight=16.0,
+            innovation_product_code_log_weight=12.0,
+            risk_recall_severity_weight=4.0,
+            risk_class_i_recall_weight=20.0,
+            risk_death_per_billion_weight=5.0,
+            risk_injury_per_billion_weight=0.5,
+            risk_malfunction_per_billion_weight=0.1,
+            risk_adverse_acceleration_per_billion_weight=0.5,
             min_mapping_confidence=75.0,
             class_i_lookback_months=36,
             death_lookback_months=24,
             death_event_min_count=1,
+            class_i_hard_min_count=5,
+            class_i_hard_min_severity_per_billion=10.0,
+            death_event_hard_min_count=3,
+            death_event_min_rate_per_billion=1.0,
+            low_mapping_confidence_is_hard_red=False,
             regulatory_risk_weight=0.60,
             regulatory_innovation_weight=0.40,
         )
@@ -592,7 +748,13 @@ def test_reimbursement_feature_builder_is_conservative_without_cms_data(tmp_path
             company_mention_score=45.0,
             policy_evidence_score=60.0,
             rate_evidence_score=65.0,
+            coverage_weight=0.50,
+            payment_weight=0.50,
+            mention_count_boost_per_hit=2.0,
+            mention_count_boost_cap=10.0,
             low_confidence_hard_flag=False,
+            use_fallback_policy_scan_when_unmapped=True,
+            valid_no_rate_statuses={"not_applicable", "bundled", "unknown"},
         )
         rows = module.build_rows(
             conn,
@@ -604,3 +766,166 @@ def test_reimbursement_feature_builder_is_conservative_without_cms_data(tmp_path
     assert len(rows) == 1
     assert rows[0].score == 25.0
     assert rows[0].review_reason == "cms_reimbursement_data_not_loaded"
+
+
+def test_daily_scores_durable_proxy_uses_canonical_fcf_margin_field() -> None:
+    module = load_script_module("13_build_med_device_daily_scores.py", "med_device_daily_scores_proxy_test")
+    assert "fcf_margin_ttm" in module.DURABLE_GROWTH_PROXY_INPUT_FIELDS
+    assert "free_cash_flow_margin_ttm" not in module.DURABLE_GROWTH_PROXY_INPUT_FIELDS
+    assert module.durable_proxy_available({"fcf_margin_ttm": "10", "gross_margin_ttm": "55"})
+    row = module.ScoreRow(
+        asof_date="2026-06-01",
+        scoring_model_version="test",
+        rank=0,
+        company_id=1,
+        ticker="AAA",
+        company_name="AAA Medical",
+        subsector="medical_devices",
+    )
+    assert row.durable_growth_validation_status == module.DURABLE_GROWTH_PRODUCTION_DISABLED
+    assert row.durable_growth_production_state == module.DURABLE_GROWTH_PRODUCTION_DISABLED
+
+
+def test_cohort_neutral_backtest_loads_fda_mapping_confidence_alias(tmp_path: Path) -> None:
+    module = load_script_module(
+        "23_backtest_med_device_cohort_neutral_scores.py",
+        "med_device_cohort_neutral_scores_test",
+    )
+    db_path = tmp_path / "med_devices.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO dim_company(
+                company_id, ticker, cik, company_name, exchange, subsector, country, currency,
+                universe_status, is_active, first_seen_at, updated_at
+            )
+            VALUES (1, 'AAA', '0000000001', 'AAA Medical', 'NYSE', 'medical_devices',
+                    'United States', 'USD', 'active', 1, '2026-01-01', '2026-01-01')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO med_device_daily_scores(
+                asof_date, company_id, scoring_model_version, composite_score, raw_composite_score,
+                composite_percentile, created_at, updated_at
+            )
+            VALUES ('2026-06-01', 1, 'test', 55, 55, 50, '2026-06-01', '2026-06-01')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO feature_fda_product_risk(
+                asof_date, company_id, avg_mapping_confidence, created_at, updated_at
+            )
+            VALUES ('2026-06-01', 1, 91.5, '2026-06-01', '2026-06-01')
+            """
+        )
+        scores = module.load_scores(conn, asofs={"2026-06-01"})
+
+    assert scores[("2026-06-01", "AAA")]["avg_fda_mapping_confidence"] == 91.5
+
+
+def test_daily_score_template_tier1_metadata_is_explicit() -> None:
+    module = load_script_module("13_build_med_device_daily_scores.py", "med_device_daily_scores_tier1_template_test")
+
+    safe_template = module.parse_score_template(
+        {
+            "template_id": "safe_quality_value",
+            "tier1_role": "safe_core",
+            "tier1_eligible": True,
+            "components": [
+                {"field": "fundamental_quality_score", "direction": "positive", "weight": 0.6},
+                {"field": "valuation_score", "direction": "positive", "weight": 0.4},
+            ],
+        },
+        context="test.safe_template",
+    )
+    special_template = module.parse_score_template(
+        {
+            "template_id": "pullback_research",
+            "tier1_role": "special_situation",
+            "tier1_eligible": True,
+            "components": [
+                {"field": "technical_pullback_score", "direction": "positive", "weight": 1.0},
+            ],
+        },
+        context="test.special_template",
+    )
+
+    assert safe_template.tier1_role == module.TIER1_TEMPLATE_ROLE_SAFE_CORE
+    assert safe_template.tier1_eligible is True
+    assert "role=safe_core;tier1_eligible=1" in module.score_template_spec(safe_template)
+    assert special_template.tier1_role == module.TIER1_TEMPLATE_ROLE_SPECIAL_SITUATION
+    assert special_template.tier1_eligible is False
+
+
+def test_daily_score_tier1_safety_gate_routes_special_situations() -> None:
+    module = load_script_module("13_build_med_device_daily_scores.py", "med_device_daily_scores_tier1_safety_test")
+    row = module.ScoreRow(
+        asof_date="2026-06-01",
+        scoring_model_version="test",
+        rank=0,
+        company_id=1,
+        ticker="TLSI",
+        company_name="TriSalus Life Sciences",
+        subsector="medical_devices",
+        raw_composite_score=85.0,
+        composite_percentile=95.0,
+        cohort_percentile=95.0,
+        calibration_cohort="implantable_interventional_devices_procedure_bundled",
+        cohort_score_template_id="procedure_bundled_pullback_fda_risk_only",
+        cohort_score_template_spec=(
+            "role=special_situation;tier1_eligible=0;"
+            "technical_pullback_score:positive:0.45;valuation_score:inverse:0.20"
+        ),
+        cohort_score_template_tier1_role=module.TIER1_TEMPLATE_ROLE_SPECIAL_SITUATION,
+        cohort_score_template_tier1_eligible=0,
+        single_product_risk_flag=1,
+        binary_event_risk_flag=1,
+        fundamental_quality_score=80.0,
+        durable_growth_score=70.0,
+        fda_product_score=80.0,
+        fda_event_risk_score=10.0,
+        reimbursement_score=70.0,
+        reimbursement_status="direct_payment_evidence",
+        unknown_reimbursement_flag=0,
+        valuation_score=80.0,
+        technical_entry_score=70.0,
+        technical_entry_status_score=70.0,
+        value_trap_score=5.0,
+        data_completeness_score=100.0,
+        avg_dollar_volume_60d=10_000_000.0,
+        market_cap=2_000_000_000.0,
+        fda_data_available=1,
+    )
+    gates = {
+        "composite_min": 75.0,
+        "cohort_percentile_min": 0.0,
+        "fundamental_quality_min": 70.0,
+        "durable_growth_min": 60.0,
+        "fda_product_min": 60.0,
+        "reimbursement_min": 45.0,
+        "valuation_min": 60.0,
+        "technical_entry_min": 55.0,
+        "data_completeness_min": 90.0,
+        "min_avg_dollar_volume_60d": 1_000_000.0,
+        "watchlist_min": 60.0,
+        "value_trap_max": 20.0,
+        "value_trap_hard_max": 85.0,
+    }
+    policy = module.Tier1SafetyPolicy(
+        min_market_cap=500_000_000.0,
+        min_avg_dollar_volume_60d=2_000_000.0,
+        ticker_denylist=("tlsi",),
+    )
+
+    module.classify(row, gates=gates, tier1_policy=policy)
+
+    assert row.passed_tier1_safety_gate == 0
+    assert row.tier1_safety_status == module.TIER1_SAFETY_STATUS_FAIL
+    assert row.final_investability_gate == 0
+    assert row.classification == "special_situation_or_binary_risk_watchlist"
+    assert "template_not_safe_core" in row.tier1_safety_reason
+    assert "single_product_risk" in row.tier1_safety_reason
+    assert "ticker_denylist" in row.tier1_safety_reason

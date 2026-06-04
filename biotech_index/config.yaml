@@ -4,6 +4,35 @@ paths:
   company_status_overrides_csv: "data/company_status_overrides.csv"
   database_path: "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/biotech_index.sqlite"
 
+market_positioning:
+  enabled: true
+  database_path: "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/market_positioning.sqlite"
+  history_start_date: "2019-01-01"
+  fail_on_error: true
+  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  timeout_sec: 120.0
+  short_interest:
+    enabled: true
+    source: "finra_equity_short_interest_files"
+    files_base_url: "https://cdn.finra.org/equity/otcmarket/biweekly"
+    cache_dir: "../output/market_positioning_cache/finra_short_interest"
+    # Conservative point-in-time availability lag from FINRA settlement date to
+    # public publication date. The official schedule varies around 9-12 calendar
+    # days; use 12 by default to avoid look-ahead.
+    publication_lag_days: 12
+    sleep_sec: 0.05
+    max_files_per_run: 0
+  institutional_13f:
+    enabled: true
+    source: "sec_form_13f_data_sets"
+    data_sets_url: "https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets"
+    cache_dir: "../output/market_positioning_cache/sec_13f"
+    cusip_ticker_map_csv: ""
+    sleep_sec: 0.2
+    max_archives_per_run: 0
+  exports:
+    biotech_output_dir: "../output/biotech_index_reports"
+
 company_master:
   active_decisions:
     - keep
@@ -310,6 +339,46 @@ biotech_features:
   sec_event_recency_decay:
     enabled: true
     half_life_days: 90
+  indication_success_weighting:
+    enabled: true
+    # Diagnostic-only by default. Set apply_to_catalyst=true only after
+    # alpha-adjusted holdout validation shows the prior improves forward alpha.
+    apply_to_catalyst: false
+    default_area: "general"
+    min_multiplier: 0.70
+    max_multiplier: 1.30
+    phase_success_rates:
+      oncology:
+        phase2: 0.22
+        phase3: 0.48
+      cns:
+        phase2: 0.14
+        phase3: 0.42
+      autoimmune_inflammatory:
+        phase2: 0.28
+        phase3: 0.58
+      rare_genetic:
+        phase2: 0.24
+        phase3: 0.55
+      cardiometabolic:
+        phase2: 0.30
+        phase3: 0.62
+      infectious_disease:
+        phase2: 0.32
+        phase3: 0.64
+      ophthalmology:
+        phase2: 0.27
+        phase3: 0.57
+      device_diagnostics:
+        phase2: 0.35
+        phase3: 0.70
+      general:
+        phase2: 0.25
+        phase3: 0.55
+  forward_catalyst_calendar_csv: ""
+  forward_catalyst_calendar_lookahead_days: 365
+  short_interest_csv: "../output/biotech_index_reports/short_interest_features.csv"
+  institutional_ownership_csv: "../output/biotech_index_reports/institutional_ownership_features.csv"
 
 sec_filings:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
@@ -543,9 +612,10 @@ biotech_scoring:
     decision_artifact: "../output/biotech_index_reports/risk_metric_promotion_decision_20260531.json"
     robustness_status: "pass_relaxed_breadth_gate"
     robustness_artifact: "../output/biotech_index_reports/risk_mode_routed_discovery_robustness_20260531.json"
-    allocation_decision: "promote_routed_discovery_rank_with_legacy_audit"
+    allocation_decision: "keep_legacy_allocation_rank_with_routed_discovery_report"
     discovery_decision: "promote_top20_operational_shadow"
-    production_score_source: "routed_discovery"
+    production_score_source: "opportunity_score"
+    allow_discovery_as_production_rank: false
     robustness_gates:
       # This gate is scoped to operational discovery Top20, not production Top10
       # allocation. The original 60% ticker-breadth gate was too strict for a
@@ -563,7 +633,7 @@ biotech_scoring:
     notes:
       - "Predictive and decomposed risk are not promoted as global production allocation penalties."
       - "Routed discovery may use predictive risk only for cohorts with validation support; legacy opportunity_score remains persisted for audit and rollback."
-      - "Routed discovery is promoted as the production rank score by exception after all return, loss-rate, bootstrap, false-positive, and concentration gates passed; unique-ticker breadth gate is relaxed from 60% to 40%."
+      - "Routed discovery remains operational for research/discovery reports; allocation ranking uses legacy opportunity_score to avoid mixing discovery candidates into capital-deployment lists."
     default_allocation_mode: "legacy"
     default_discovery_mode: "legacy"
     cohort_modes:
@@ -583,6 +653,9 @@ biotech_scoring:
       commercial_fragile_or_declining:
         allocation_mode: "legacy"
         discovery_mode: "legacy"
+  ranking_validation:
+    fail_on_error: true
+    max_commercial_late_clinical_top20: 2
   commercial_cohort_overlay:
     enabled: true
     status: "diagnostic_only"
@@ -617,6 +690,16 @@ biotech_scoring:
       - "excluded_non_therapeutic_healthcare"
       - "unclassified_review"
       - "weak_or_historical_pipeline"
+    investible_healthcare_cohorts:
+      - "healthcare_services_diagnostics_tools"
+      - "medtech_growth_or_device"
+      - "commercial_profitable_growth"
+      - "commercial_profitable_mature"
+      - "commercial_unprofitable_growth"
+      - "commercial_fragile_or_declining"
+      - "therapeutic_royalty_or_partnered_economics"
+      - "late_clinical_pivotal"
+      - "mid_clinical_phase2_poc"
     calibration_excluded_cohorts:
       - "excluded_non_therapeutic_healthcare"
       - "unclassified_review"
@@ -1140,6 +1223,33 @@ calibration:
     risk_decomposition:
       use_for_penalty: false
       risk_penalty_mode: "legacy"
+    alpha_adjustment:
+      enabled: true
+      benchmark_ticker: "XBI"
+      # Calibration optimizes forward benchmark alpha by default so broad beta
+      # moves do not look like stock-selection skill.
+      return_objective: "benchmark_alpha"
+    weight_optimization:
+      enabled: true
+      max_generated_specs: 250
+      catalyst_grid:
+        - 0.26
+        - 0.30
+        - 0.34
+      credibility_grid:
+        - 0.22
+        - 0.26
+        - 0.30
+      financial_quality_grid:
+        - 0.14
+        - 0.18
+        - 0.22
+      momentum_grid:
+        - 0.06
+        - 0.10
+      risk_penalty_grid:
+        - 0.12
+        - 0.16
     convex_risk_penalty_enabled: true
     risk_penalty_convexity: 0.35
     risk_penalty_inflection: 50.0

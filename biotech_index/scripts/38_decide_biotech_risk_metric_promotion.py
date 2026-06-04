@@ -342,13 +342,13 @@ def main() -> int:
         "promote_routed_discovery_rank_with_legacy_audit"
         if production_score_source in {"routed_discovery", "discovery", "discovery_opportunity_score"}
         and routed_robustness["status"] == "operational_shadow_discovery"
-        else "keep_legacy_risk"
+        else "keep_legacy_allocation_rank_with_routed_discovery_report"
     )
     routed_discovery_status = routed_robustness["status"]
     routed_discovery_blockers = routed_robustness["blocking_issues"]
     routed_discovery_warnings = routed_robustness["warnings"]
     if routed_discovery_status == "operational_shadow_discovery":
-        if production_allocation_decision != "keep_legacy_risk":
+        if production_allocation_decision == "promote_routed_discovery_rank_with_legacy_audit":
             routed_discovery_next_action = (
                 "use production_rank_score for production rank; keep legacy opportunity_score for audit"
             )
@@ -390,7 +390,7 @@ def main() -> int:
             "area": "routed_discovery_score",
             "status": routed_discovery_status,
             "scope": "production_rank_and_shadow_discovery_top20"
-            if production_allocation_decision != "keep_legacy_risk"
+            if production_allocation_decision == "promote_routed_discovery_rank_with_legacy_audit"
             else "shadow_discovery_top20",
             "primary_reason": routed_discovery_reason,
             "blocking_issues": "; ".join(routed_discovery_blockers),

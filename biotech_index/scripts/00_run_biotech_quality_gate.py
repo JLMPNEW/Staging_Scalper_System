@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,7 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PACKAGE_ROOT.parent
-DEFAULT_TEMP_ROOT = Path("C:/tmp") if Path("C:/tmp").exists() else PROJECT_ROOT
+DEFAULT_TEMP_ROOT = Path(os.environ.get("BIOTECH_QUALITY_GATE_TMP_ROOT", tempfile.gettempdir()))
 PYTEST_TEMP_DIR = Path(os.environ.get("BIOTECH_PYTEST_TMP", str(DEFAULT_TEMP_ROOT / "biotech_pytest_tmp")))
 LOGGER = logging.getLogger("run_biotech_quality_gate")
 

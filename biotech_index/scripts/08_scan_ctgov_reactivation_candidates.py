@@ -27,6 +27,7 @@ from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_n
 from biotech_index.core.http_cache import HostThrottle
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import validate_nonempty_selection, validate_requested_tickers
+from biotech_index.core.text_norm import normalize_ticker
 
 
 LOGGER = logging.getLogger("scan_ctgov_reactivation_candidates")
@@ -589,7 +590,7 @@ def main() -> None:
         value.lower()
         for value in normalize_string_list(cfg_get(config, "ctgov_reactivation.status_filter"), ["remove"])
     }
-    ticker_filter = {value.strip().upper().replace(".", "-") for value in args.tickers.split(",") if value.strip()}
+    ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if normalize_ticker(value)}
     if (ticker_filter or int(args.max_companies) > 0 or args.all_removed) and args.output_dir is None:
         raise ValueError(
             "--tickers, --max-companies, and --all-removed are subset/broad-review modes and must be paired with --output-dir "

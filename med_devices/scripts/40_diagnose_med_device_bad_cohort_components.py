@@ -41,6 +41,7 @@ COMPONENT_FIELDS = [
     "sentiment_catalyst_score",
     "value_trap_score",
 ]
+INVERSE_COMPONENT_FIELDS = {"value_trap_score"}
 OUTPUT_FIELDS = [
     "calibration_cohort",
     "split",
@@ -216,6 +217,7 @@ def component_percentile_rows(
     component: str,
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    higher_is_better = component not in INVERSE_COMPONENT_FIELDS
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         if str(row.get("calibration_cohort") or "") != cohort:
@@ -235,6 +237,7 @@ def component_percentile_rows(
                 to_float(item.get(component)) if to_float(item.get(component)) is not None else -math.inf,
                 str(item.get("ticker") or ""),
             ),
+            reverse=not higher_is_better,
         )
         if len(sortable) == 1:
             item = sortable[0]

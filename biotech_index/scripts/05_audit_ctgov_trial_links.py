@@ -26,6 +26,7 @@ from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list,
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import validate_nonempty_selection, validate_requested_tickers
+from biotech_index.core.text_norm import normalize_ticker
 
 
 LOGGER = logging.getLogger("audit_ctgov_trial_links")
@@ -1057,7 +1058,7 @@ def main() -> None:
         value.lower()
         for value in normalize_string_list(cfg_get(config, "ctgov_audit.status_filter"), ["keep", "review"])
     }
-    ticker_filter = {value.strip().upper().replace(".", "-") for value in args.tickers.split(",") if value.strip()}
+    ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if normalize_ticker(value)}
     if ticker_filter and args.output_dir is None:
         raise ValueError(
             "--tickers is a subset/smoke-test mode and must be paired with --output-dir so canonical CTGov outputs are not overwritten."
@@ -1101,6 +1102,7 @@ def main() -> None:
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         init_db(conn)
         run_id = start_run(conn, run_type="audit_ctgov_trial_links", input_path=db_path)
+        _RUN_CONTEXT["run_id"] = run_id
         _RUN_CONTEXT.update({"db_path": db_path, "timeout_sec": sqlite_timeout_sec, "run_id": run_id, "finished": False})
         companies = load_companies(conn, status_filter=status_filter, ticker_filter=ticker_filter)
         validate_nonempty_selection(

@@ -21,7 +21,7 @@ from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list,
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import validate_nonempty_selection, validate_requested_tickers
-from biotech_index.core.text_norm import alias_token_sets, meaningful_org_tokens, normalize_org_name, strip_corporate_suffixes
+from biotech_index.core.text_norm import alias_token_sets, meaningful_org_tokens, normalize_org_name, normalize_ticker, strip_corporate_suffixes
 
 
 LOGGER = logging.getLogger("link_trials_to_companies")
@@ -470,7 +470,7 @@ def main() -> None:
         cfg_get(config, "trial_linking.allow_single_token_prefix_match", True)
     ).strip().lower() in {"1", "true", "yes", "y"}
     single_token_prefix_min_length = int(cfg_get(config, "trial_linking.single_token_prefix_min_length", 7))
-    ticker_filter = {value.strip().upper().replace(".", "-") for value in args.tickers.split(",") if value.strip()}
+    ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if normalize_ticker(value)}
     run_id: int | None = None
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:

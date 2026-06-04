@@ -234,17 +234,18 @@ def weekly_asofs(market_dates: list[date], *, start: date, end: date, weekday: s
     return out
 
 
-def existing_score_count(conn: Any, asof: date) -> int:
+def existing_score_status(conn: Any, asof: date) -> tuple[int, int]:
     row = conn.execute(
-        "SELECT COUNT(*) AS n FROM med_device_daily_scores WHERE asof_date = ?",
+        """
+        SELECT COUNT(*) AS n, COUNT(DISTINCT company_id) AS distinct_company_count
+        FROM med_device_daily_scores
+        WHERE asof_date = ?
+        """,
         (asof.isoformat(),),
     ).fetchone()
-    return int(row["n"] or 0) if row is not None else 0
-
-
-def active_company_count(conn: Any) -> int:
-    row = conn.execute("SELECT COUNT(*) AS n FROM dim_company WHERE is_active = 1").fetchone()
-    return int(row["n"] or 0) if row is not None else 0
+    if row is None:
+        return 0, 0
+    return int(row["n"] or 0), int(row["distinct_company_count"] or 0)
 
 
 def run_command(command: list[str]) -> None:
@@ -327,8 +328,6 @@ def main() -> None:
         asofs = weekly_asofs(market_dates, start=policy.start_asof, end=end_asof, weekday=policy.weekday)
         if args.max_asofs > 0:
             asofs = asofs[: args.max_asofs]
-        expected_rows = active_company_count(conn)
-
     manifest_rows: list[dict[str, Any]] = []
     if args.dry_run:
         for asof in asofs:
@@ -351,8 +350,8 @@ def main() -> None:
         try:
             if policy.skip_existing:
                 with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
-                    existing_rows = existing_score_count(conn, asof)
-                if existing_rows >= expected_rows:
+                    existing_rows, distinct_company_count = existing_score_status(conn, asof)
+                if distinct_company_count > 0 and existing_rows >= distinct_company_count:
                     manifest_rows.append(
                         {
                             "asof_date": asof.isoformat(),
@@ -360,7 +359,10 @@ def main() -> None:
                             "started_at": started_at,
                             "ended_at": utc_now(),
                             "stages": ",".join(policy.stages),
-                            "message": f"existing_score_rows={existing_rows}",
+                            "message": (
+                                f"existing_score_rows={existing_rows};"
+                                f"distinct_companies={distinct_company_count}"
+                            ),
                         }
                     )
                     continue

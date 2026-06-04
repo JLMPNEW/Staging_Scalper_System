@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 import math
 import sys
 from datetime import date, datetime
@@ -23,6 +24,7 @@ from med_devices.core.market_policy import calibration_market_sources  # noqa: E
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+LOGGER = logging.getLogger("backtest_med_device_scores")
 BASE_FIELDS = [
     "asof_date",
     "scoring_model_version",
@@ -36,6 +38,19 @@ BASE_FIELDS = [
     "composite_score",
     "raw_composite_score",
     "composite_percentile",
+    "safe_core_score",
+    "safe_core_percentile",
+    "safe_core_cohort_percentile",
+    "safe_core_rank",
+    "safe_core_status",
+    "safe_core_reason",
+    "passed_safe_core_gate",
+    "safe_core_model_version",
+    "legacy_all_gates_gate",
+    "legacy_gate_misses",
+    "tier1_safety_status",
+    "tier1_safety_reason",
+    "passed_tier1_safety_gate",
     "technical_trend_quality_score",
     "technical_relative_strength_score",
     "technical_liquidity_score",
@@ -48,6 +63,9 @@ BASE_FIELDS = [
     "technical_overextension_score",
     "technical_breakdown_flag",
     "technical_liquidity_gate_flag",
+    "momentum_12_1",
+    "realized_vol_60d",
+    "round_trip_cost_estimate",
     "technical_signal_mode",
     "technical_signal_direction",
     "technical_signal_reliability",
@@ -104,6 +122,11 @@ def first_float(*raw_values: object, default: float = 0.0) -> float:
     return default
 
 
+def value_or_blank(row: dict[str, Any], key: str) -> object:
+    value = row.get(key)
+    return "" if value is None else value
+
+
 def latest_score_asof(conn: Any) -> str:
     row = conn.execute("SELECT MAX(asof_date) AS asof_date FROM med_device_daily_scores").fetchone()
     asof = str(row["asof_date"] or "") if row is not None else ""
@@ -146,9 +169,14 @@ def resolve_score_asofs(conn: Any, args: argparse.Namespace) -> list[str]:
 def load_scores(conn: Any, *, asof: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT s.*, c.ticker, c.company_name, c.subsector
+        SELECT s.*, c.ticker, c.company_name, c.subsector,
+               t.momentum_12_1,
+               t.realized_vol_60d
         FROM med_device_daily_scores s
         JOIN dim_company c ON c.company_id = s.company_id
+        LEFT JOIN feature_technical_entry t
+          ON t.company_id = s.company_id
+         AND t.asof_date = s.asof_date
         WHERE s.asof_date = ?
         ORDER BY s.rank
         """,
@@ -208,6 +236,16 @@ def load_price_series(
     return selected
 
 
+def estimate_round_trip_cost(position_usd: float, adv_usd: float | None, annual_vol: float | None) -> float:
+    if adv_usd is None or adv_usd <= 0:
+        return 0.02
+    daily_vol = max(0.0, (annual_vol or 0.0) / math.sqrt(252.0))
+    participation = min(max(position_usd, 0.0) / adv_usd, 0.30)
+    temp_impact = 0.142 * daily_vol * math.sqrt(participation)
+    spread_cost = 0.002 if adv_usd > 2_000_000 else 0.004
+    return max(0.0, min(0.20, 2.0 * (temp_impact + spread_cost)))
+
+
 def entry_index(series: list[tuple[date, float]], asof_date: date) -> int | None:
     idx: int | None = None
     for pos, (bar_date, _) in enumerate(series):
@@ -224,6 +262,7 @@ def build_backtest_rows(
     *,
     asof: str,
     horizons: list[int],
+    position_usd: float,
 ) -> list[dict[str, Any]]:
     asof_date = parse_date(asof)
     if asof_date is None:
@@ -236,36 +275,57 @@ def build_backtest_rows(
         composite_score = first_float(row.get("composite_score"))
         raw_composite_score = first_float(row.get("raw_composite_score"), default=composite_score)
         composite_percentile = first_float(row.get("composite_percentile"), default=composite_score)
+        round_trip_cost = estimate_round_trip_cost(
+            position_usd,
+            to_float(row.get("avg_dollar_volume_60d")),
+            to_float(row.get("realized_vol_60d")),
+        )
         item = {
             "asof_date": asof,
             "scoring_model_version": row.get("scoring_model_version") or "",
             "ticker": ticker,
             "company_name": row.get("company_name") or "",
             "subsector": row.get("subsector") or "",
-            "rank": row.get("rank") or "",
+            "rank": value_or_blank(row, "rank"),
             "classification": row.get("classification") or "",
             "decision_bucket": row.get("decision_bucket") or "",
             "entry_status": row.get("entry_status") or "",
             "composite_score": composite_score,
             "raw_composite_score": raw_composite_score,
             "composite_percentile": composite_percentile,
-            "technical_trend_quality_score": row.get("technical_trend_quality_score") or "",
-            "technical_relative_strength_score": row.get("technical_relative_strength_score") or "",
-            "technical_liquidity_score": row.get("technical_liquidity_score") or "",
-            "technical_volume_breakout_score": row.get("technical_volume_breakout_score") or "",
-            "technical_volatility_risk_score": row.get("technical_volatility_risk_score") or "",
-            "technical_setup_score": row.get("technical_setup_score") or "",
-            "technical_core_score": row.get("technical_core_score") or "",
-            "technical_alpha_score": row.get("technical_alpha_score") or "",
-            "technical_pullback_score": row.get("technical_pullback_score") or "",
-            "technical_overextension_score": row.get("technical_overextension_score") or "",
-            "technical_breakdown_flag": row.get("technical_breakdown_flag") or "",
-            "technical_liquidity_gate_flag": row.get("technical_liquidity_gate_flag") or "",
+            "safe_core_score": value_or_blank(row, "safe_core_score"),
+            "safe_core_percentile": value_or_blank(row, "safe_core_percentile"),
+            "safe_core_cohort_percentile": value_or_blank(row, "safe_core_cohort_percentile"),
+            "safe_core_rank": value_or_blank(row, "safe_core_rank"),
+            "safe_core_status": row.get("safe_core_status") or "",
+            "safe_core_reason": row.get("safe_core_reason") or "",
+            "passed_safe_core_gate": value_or_blank(row, "passed_safe_core_gate"),
+            "safe_core_model_version": row.get("safe_core_model_version") or "",
+            "legacy_all_gates_gate": value_or_blank(row, "legacy_all_gates_gate"),
+            "legacy_gate_misses": row.get("legacy_gate_misses") or "",
+            "tier1_safety_status": row.get("tier1_safety_status") or "",
+            "tier1_safety_reason": row.get("tier1_safety_reason") or "",
+            "passed_tier1_safety_gate": value_or_blank(row, "passed_tier1_safety_gate"),
+            "technical_trend_quality_score": value_or_blank(row, "technical_trend_quality_score"),
+            "technical_relative_strength_score": value_or_blank(row, "technical_relative_strength_score"),
+            "technical_liquidity_score": value_or_blank(row, "technical_liquidity_score"),
+            "technical_volume_breakout_score": value_or_blank(row, "technical_volume_breakout_score"),
+            "technical_volatility_risk_score": value_or_blank(row, "technical_volatility_risk_score"),
+            "technical_setup_score": value_or_blank(row, "technical_setup_score"),
+            "technical_core_score": value_or_blank(row, "technical_core_score"),
+            "technical_alpha_score": value_or_blank(row, "technical_alpha_score"),
+            "technical_pullback_score": value_or_blank(row, "technical_pullback_score"),
+            "technical_overextension_score": value_or_blank(row, "technical_overextension_score"),
+            "technical_breakdown_flag": value_or_blank(row, "technical_breakdown_flag"),
+            "technical_liquidity_gate_flag": value_or_blank(row, "technical_liquidity_gate_flag"),
+            "momentum_12_1": value_or_blank(row, "momentum_12_1"),
+            "realized_vol_60d": value_or_blank(row, "realized_vol_60d"),
+            "round_trip_cost_estimate": round(round_trip_cost, 6),
             "technical_signal_mode": row.get("technical_signal_mode") or "",
             "technical_signal_direction": row.get("technical_signal_direction") or "",
-            "technical_signal_reliability": row.get("technical_signal_reliability") or "",
+            "technical_signal_reliability": value_or_blank(row, "technical_signal_reliability"),
             "technical_score_source": row.get("technical_score_source") or "",
-            "pullback_candidate_tag": row.get("pullback_candidate_tag") or "",
+            "pullback_candidate_tag": value_or_blank(row, "pullback_candidate_tag"),
             "pullback_candidate_template_id": row.get("pullback_candidate_template_id") or "",
             "rank_bucket": rank_bucket(composite_percentile),
             "entry_price_date": "",
@@ -280,15 +340,19 @@ def build_backtest_rows(
                 target_idx = idx + horizon
                 if target_idx < len(series):
                     target_date, target_price = series[target_idx]
+                    forward_return = (target_price - entry_price) / entry_price
                     item[f"forward_date_{horizon}d"] = target_date.isoformat()
-                    item[f"forward_return_{horizon}d"] = round((target_price - entry_price) / entry_price, 6)
+                    item[f"forward_return_{horizon}d"] = round(forward_return, 6)
+                    item[f"net_forward_return_{horizon}d"] = round(forward_return - round_trip_cost, 6)
                 else:
                     item[f"forward_date_{horizon}d"] = ""
                     item[f"forward_return_{horizon}d"] = ""
+                    item[f"net_forward_return_{horizon}d"] = ""
         else:
             for horizon in horizons:
                 item[f"forward_date_{horizon}d"] = ""
                 item[f"forward_return_{horizon}d"] = ""
+                item[f"net_forward_return_{horizon}d"] = ""
         out.append(item)
     return out
 
@@ -345,6 +409,7 @@ def main() -> None:
     horizons = [int(item.strip()) for item in str(args.horizons or "30,60,120").split(",") if item.strip()]
     if not horizons or any(horizon <= 0 for horizon in horizons):
         raise ValueError("--horizons must contain positive integers")
+    position_usd = float(cfg_get(config, "calibration.transaction_cost.position_usd", 50_000.0))
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
@@ -384,10 +449,22 @@ def main() -> None:
         series = load_price_series(conn, tickers=tickers, source_priority=source_priority)
         rows: list[dict[str, Any]] = []
         for asof in asofs:
-            rows.extend(build_backtest_rows(score_rows_by_asof[asof], series, asof=asof, horizons=horizons))
+            rows.extend(
+                build_backtest_rows(
+                    score_rows_by_asof[asof],
+                    series,
+                    asof=asof,
+                    horizons=horizons,
+                    position_usd=position_usd,
+                )
+            )
         fieldnames = [
             *BASE_FIELDS,
-            *[field for horizon in horizons for field in (f"forward_date_{horizon}d", f"forward_return_{horizon}d")],
+            *[
+                field
+                for horizon in horizons
+                for field in (f"forward_date_{horizon}d", f"forward_return_{horizon}d", f"net_forward_return_{horizon}d")
+            ],
         ]
         write_csv(output_csv, rows, fieldnames)
         summary_rows = summarize(rows, horizons=horizons)
@@ -400,7 +477,13 @@ def main() -> None:
             horizon: sum(1 for row in rows if value_present(row.get(f"forward_return_{horizon}d")))
             for horizon in horizons
         }
-        print(f"backtest_csv={output_csv} asofs={len(asofs)} rows={len(rows)} forward_counts={available}")
+        LOGGER.info(
+            "Backtest complete: output=%s asofs=%d rows=%d forward_counts=%s",
+            output_csv,
+            len(asofs),
+            len(rows),
+            available,
+        )
 
 
 if __name__ == "__main__":

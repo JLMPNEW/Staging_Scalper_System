@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 import math
 import sys
 from collections import defaultdict
@@ -22,6 +23,7 @@ from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+LOGGER = logging.getLogger("backtest_med_device_cohort_neutral_scores")
 SCORE_FIELDS = [
     "scoring_model_version",
     "rank",
@@ -31,6 +33,19 @@ SCORE_FIELDS = [
     "composite_score",
     "raw_composite_score",
     "composite_percentile",
+    "safe_core_score",
+    "safe_core_percentile",
+    "safe_core_cohort_percentile",
+    "safe_core_rank",
+    "safe_core_status",
+    "safe_core_reason",
+    "passed_safe_core_gate",
+    "safe_core_model_version",
+    "legacy_all_gates_gate",
+    "legacy_gate_misses",
+    "tier1_safety_status",
+    "tier1_safety_reason",
+    "passed_tier1_safety_gate",
     "calibration_status",
     "calibration_status_reason",
     "cohort_score_template_id",
@@ -59,7 +74,10 @@ SCORE_FIELDS = [
     "fda_product_score_legacy",
     "fda_alpha_score",
     "fda_safety_score",
+    "fda_clearance_velocity_raw",
     "fda_clearance_velocity_score",
+    "fda_clearance_acceleration_raw",
+    "fda_clearance_acceleration_score",
     "fda_evidence_quality_score",
     "fda_event_risk_score",
     "fda_signal_mode",
@@ -72,6 +90,8 @@ SCORE_FIELDS = [
     "fda_component_weight",
     "fda_data_available",
     "avg_fda_mapping_confidence",
+    "quality_value_interaction_score",
+    "fda_technical_interaction_score",
     "reimbursement_score",
     "reimbursement_status",
     "direct_code_evidence",
@@ -234,15 +254,34 @@ def load_taxonomy(conn: Any) -> dict[str, dict[str, Any]]:
     return {str(row["ticker"] or "").upper(): dict(row) for row in rows}
 
 
+def table_columns(conn: Any, table: str) -> set[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except Exception:
+        return set()
+    return {str(row["name"]) for row in rows}
+
+
 def load_scores(conn: Any, *, asofs: set[str]) -> dict[tuple[str, str], dict[str, Any]]:
     if not asofs:
         return {}
     placeholders = ",".join("?" for _ in asofs)
+    fda_columns = table_columns(conn, "feature_fda_product_risk")
+    avg_mapping_expr = (
+        "f.avg_mapping_confidence AS avg_fda_mapping_confidence"
+        if "avg_mapping_confidence" in fda_columns
+        else "NULL AS avg_fda_mapping_confidence"
+    )
     rows = conn.execute(
         f"""
-        SELECT s.*, c.ticker
+        SELECT s.*,
+               c.ticker,
+               {avg_mapping_expr}
         FROM med_device_daily_scores s
         JOIN dim_company c ON c.company_id = s.company_id
+        LEFT JOIN feature_fda_product_risk f
+          ON f.company_id = s.company_id
+         AND f.asof_date = s.asof_date
         WHERE s.asof_date IN ({placeholders})
         """,
         sorted(asofs),
@@ -290,25 +329,30 @@ def add_cohort_percentiles(rows: list[dict[str, Any]]) -> None:
 
 def add_cohort_excess_returns(rows: list[dict[str, Any]], *, horizons: list[int]) -> None:
     for horizon in horizons:
-        grouped: dict[tuple[str, str], list[float]] = defaultdict(list)
-        field = f"forward_return_{horizon}d"
-        for row in rows:
-            value = to_float(row.get(field))
-            if value is not None:
-                grouped[(str(row.get("asof_date") or ""), str(row.get("calibration_cohort") or ""))].append(value)
-        medians = {key: median(values) for key, values in grouped.items() if values}
-        for row in rows:
-            value = to_float(row.get(field))
-            key = (str(row.get("asof_date") or ""), str(row.get("calibration_cohort") or ""))
-            cohort_median = medians.get(key)
-            row[f"cohort_median_return_{horizon}d"] = "" if cohort_median is None else round(cohort_median, 6)
-            if value is None or cohort_median is None:
-                row[f"cohort_excess_return_{horizon}d"] = ""
-                row[f"cohort_excess_hit_{horizon}d"] = ""
-            else:
-                excess = value - cohort_median
-                row[f"cohort_excess_return_{horizon}d"] = round(excess, 6)
-                row[f"cohort_excess_hit_{horizon}d"] = 1 if excess > 0 else 0
+        for prefix, output_prefix in (("", ""), ("net_", "net_")):
+            field = f"{prefix}forward_return_{horizon}d"
+            if not any(field in row for row in rows):
+                continue
+            grouped: dict[tuple[str, str], list[float]] = defaultdict(list)
+            for row in rows:
+                value = to_float(row.get(field))
+                if value is not None:
+                    grouped[(str(row.get("asof_date") or ""), str(row.get("calibration_cohort") or ""))].append(value)
+            medians = {key: median(values) for key, values in grouped.items() if values}
+            for row in rows:
+                value = to_float(row.get(field))
+                key = (str(row.get("asof_date") or ""), str(row.get("calibration_cohort") or ""))
+                cohort_median = medians.get(key)
+                row[f"{output_prefix}cohort_median_return_{horizon}d"] = (
+                    "" if cohort_median is None else round(cohort_median, 6)
+                )
+                if value is None or cohort_median is None:
+                    row[f"{output_prefix}cohort_excess_return_{horizon}d"] = ""
+                    row[f"{output_prefix}cohort_excess_hit_{horizon}d"] = ""
+                else:
+                    excess = value - cohort_median
+                    row[f"{output_prefix}cohort_excess_return_{horizon}d"] = round(excess, 6)
+                    row[f"{output_prefix}cohort_excess_hit_{horizon}d"] = 1 if excess > 0 else 0
 
 
 def rank_bucket_from_cohort_percentile(row: dict[str, Any]) -> str:
@@ -403,6 +447,10 @@ def summarize(rows: list[dict[str, Any]], *, horizons: list[int]) -> list[dict[s
         ("calibration_cohort", "calibration_cohort"),
         ("calibration_cohort_rank_bucket", "calibration_cohort|cohort_rank_bucket"),
         ("classification", "classification"),
+        ("safe_core_status", "safe_core_status"),
+        ("passed_safe_core_gate", "passed_safe_core_gate"),
+        ("tier1_safety_status", "tier1_safety_status"),
+        ("legacy_all_gates_gate", "legacy_all_gates_gate"),
         ("entry_status", "entry_status"),
         ("reimbursement_model", "reimbursement_model"),
         ("regulatory_model", "regulatory_model"),
@@ -437,6 +485,9 @@ def output_fields(rows: list[dict[str, Any]], *, horizons: list[int]) -> list[st
                 f"cohort_median_return_{horizon}d",
                 f"cohort_excess_return_{horizon}d",
                 f"cohort_excess_hit_{horizon}d",
+                f"net_cohort_median_return_{horizon}d",
+                f"net_cohort_excess_return_{horizon}d",
+                f"net_cohort_excess_hit_{horizon}d",
             ]
         )
     fields: list[str] = []
@@ -481,8 +532,8 @@ def main() -> None:
     summary_rows = summarize(rows, horizons=horizons)
     write_csv(output_csv, rows, output_fields(rows, horizons=horizons))
     write_csv(summary_csv, summary_rows, SUMMARY_FIELDS)
-    print(f"cohort_neutral_backtest_csv={output_csv} rows={len(rows)}")
-    print(f"cohort_neutral_summary_csv={summary_csv} rows={len(summary_rows)}")
+    LOGGER.info("Cohort-neutral backtest complete: output=%s rows=%d", output_csv, len(rows))
+    LOGGER.info("Cohort-neutral summary complete: output=%s rows=%d", summary_csv, len(summary_rows))
 
 
 if __name__ == "__main__":

@@ -697,6 +697,8 @@ def main() -> None:
             asof=asof,
             allowed_forms=allowed_forms,
         )
+        # Shared by worker fetches and DB persistence so duplicate document fetches
+        # cannot race when the same accession is reachable through multiple forms.
         existing_documents_lock = Lock()
         LOGGER.info("Loaded %d existing SEC filing documents for resume", len(existing_documents))
         try:
@@ -747,8 +749,6 @@ def main() -> None:
                         result.text_errors,
                     )
             else:
-                if sync_kwargs.get("existing_documents_lock") is None:
-                    raise RuntimeError("SEC filing document cache lock is required when max_workers > 1")
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = {
                         executor.submit(sync_company, company, **sync_kwargs): (idx, company)

@@ -58,6 +58,89 @@ def test_taxonomy_going_concern_overlay_uses_shared_status_sets() -> None:
         assert "going_concern" in classification.overlays
 
 
+def test_taxonomy_commercial_anchor_wins_primary_over_pipeline_overlay() -> None:
+    classification = classify_biotech_cohort(
+        payload={
+            "ctgov": {
+                "verified_qualifying_active_trial_count": 4,
+                "active_phase3_trials": 1,
+                "active_pivotal_trials": 1,
+                "lead_phase2_3_active_trials": 1,
+            },
+            "sec_events": {"counts": {"pdufa_date": 1}},
+            "financial_survival": {"data_quality": "high"},
+            "sec_and_liquidity": {},
+        },
+        commercial={
+            "commercial_stage_flag": 1,
+            "profitable_flag": 1,
+            "ttm_revenue": 1_000_000_000.0,
+            "revenue_yoy_growth_pct": 0.20,
+            "value_trap_score": 5.0,
+        },
+        forward_guidance={"latest_guidance_filing_date": "2026-05-08"},
+        diagnostics={},
+    )
+
+    assert classification.primary_cohort == "commercial_profitable_growth"
+    assert classification.secondary_cohort == "late_clinical_pivotal"
+    assert "commercial_with_major_pipeline_catalyst" in classification.overlays
+    assert "late_clinical_overlay" in classification.overlays
+    assert classification.confidence <= 88.0
+
+
+def test_taxonomy_forward_profitable_commercial_anchor_beats_late_pipeline() -> None:
+    classification = classify_biotech_cohort(
+        payload={
+            "ctgov": {
+                "verified_qualifying_active_trial_count": 4,
+                "active_phase3_trials": 2,
+                "active_pivotal_trials": 1,
+                "lead_phase2_3_active_trials": 1,
+            },
+            "sec_events": {"counts": {"pdufa_date": 1, "regulatory_submission": 1}},
+            "financial_survival": {"data_quality": "high"},
+            "sec_and_liquidity": {},
+        },
+        commercial={
+            "commercial_stage_flag": 1,
+            "profitable_flag": 0,
+            "ttm_revenue": 125_000_000.0,
+            "revenue_yoy_growth_pct": 0.28,
+            "value_trap_score": 5.0,
+        },
+        forward_guidance={"forward_profitability_flag": 1, "latest_guidance_filing_date": "2026-05-08"},
+        diagnostics={},
+    )
+
+    assert classification.primary_cohort == "commercial_unprofitable_growth"
+    assert classification.secondary_cohort == "late_clinical_pivotal"
+    assert "late_clinical_overlay" in classification.overlays
+    assert classification.evidence["pipeline_clearly_dominates"] is False
+
+
+def test_taxonomy_medtech_device_is_investible_primary_with_pipeline_overlay_cap() -> None:
+    classification = classify_biotech_cohort(
+        payload={
+            "company_strategy_category": "diabetes_device",
+            "ctgov": {
+                "verified_qualifying_active_trial_count": 2,
+                "active_phase3_trials": 1,
+                "active_pivotal_trials": 1,
+            },
+            "financial_survival": {"data_quality": "high"},
+            "sec_and_liquidity": {},
+        },
+        commercial={},
+        forward_guidance={},
+        diagnostics={},
+    )
+
+    assert classification.primary_cohort == "medtech_growth_or_device"
+    assert "medtech_device_strategy_category" in classification.reason_codes
+    assert classification.confidence <= 86.0
+
+
 def test_cached_json_null_cache_is_refetched(tmp_path, monkeypatch) -> None:
     client = CachedHttpClient(cache_dir=tmp_path, sleep_sec=0.0, timeout_sec=1.0, max_retries=1)
     url = "https://example.test/data"

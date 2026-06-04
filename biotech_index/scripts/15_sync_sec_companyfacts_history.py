@@ -1355,7 +1355,7 @@ def main() -> None:
                                 results.append(future.result())
                             except BaseException as exc:
                                 pending_raise = exc
-                                if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                                if isinstance(exc, (SystemExit, KeyboardInterrupt, GeneratorExit)):
                                     LOGGER.warning("SEC companyfacts worker interrupted for %s", company.ticker)
                                 else:
                                     LOGGER.exception("SEC companyfacts worker failed for %s", company.ticker)

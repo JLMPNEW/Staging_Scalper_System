@@ -98,14 +98,14 @@ def load_rows(conn: Any, *, asof: str) -> list[dict[str, Any]]:
         WITH latest_financial AS (
             SELECT fv.*
             FROM feature_financial_valuation fv
-            JOIN (
-                SELECT company_id, MAX(asof_date) AS asof_date
-                FROM feature_financial_valuation
-                WHERE asof_date <= ?
-                GROUP BY company_id
-            ) latest
-              ON latest.company_id = fv.company_id
-             AND latest.asof_date = fv.asof_date
+            WHERE fv.rowid = (
+                SELECT fv2.rowid
+                FROM feature_financial_valuation fv2
+                WHERE fv2.company_id = fv.company_id
+                  AND fv2.asof_date <= ?
+                ORDER BY fv2.asof_date DESC, fv2.rowid DESC
+                LIMIT 1
+            )
         )
         SELECT
             s.asof_date,

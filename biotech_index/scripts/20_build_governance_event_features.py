@@ -1461,7 +1461,7 @@ def main() -> None:
                             rows_by_company[int(company["company_id"])] = future.result()
                         except BaseException as exc:
                             pending_raise = exc
-                            if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                            if isinstance(exc, (SystemExit, KeyboardInterrupt, GeneratorExit)):
                                 LOGGER.warning("Governance row worker interrupted for ticker=%s", company.get("ticker"))
                             else:
                                 LOGGER.exception("Governance row worker failed for ticker=%s", company.get("ticker"))

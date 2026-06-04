@@ -77,8 +77,7 @@ CREATE TABLE IF NOT EXISTS raw_api_responses (
     ingestion_run_id INTEGER,
     created_at TEXT NOT NULL,
     FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT,
-    FOREIGN KEY (ingestion_run_id) REFERENCES ingestion_runs(ingestion_run_id) ON DELETE SET NULL,
-    UNIQUE(source_id, endpoint, response_hash)
+    FOREIGN KEY (ingestion_run_id) REFERENCES ingestion_runs(ingestion_run_id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS dim_company (
@@ -650,7 +649,10 @@ CREATE TABLE IF NOT EXISTS feature_fda_product_risk (
     fda_product_score_legacy REAL,
     fda_alpha_score REAL,
     fda_safety_score REAL,
+    fda_clearance_velocity_raw REAL,
     fda_clearance_velocity_score REAL,
+    fda_clearance_acceleration_raw REAL,
+    fda_clearance_acceleration_score REAL,
     fda_evidence_quality_score REAL,
     fda_event_risk_score REAL,
     fda_signal_mode TEXT,
@@ -860,6 +862,23 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     calibration_status_reason TEXT DEFAULT '',
     cohort_score_template_id TEXT DEFAULT '',
     cohort_score_template_spec TEXT DEFAULT '',
+    cohort_score_template_tier1_role TEXT DEFAULT '',
+    cohort_score_template_tier1_eligible INTEGER DEFAULT 0,
+    single_product_risk_flag INTEGER DEFAULT 0,
+    binary_event_risk_flag INTEGER DEFAULT 0,
+    tier1_safety_status TEXT DEFAULT '',
+    tier1_safety_reason TEXT DEFAULT '',
+    passed_tier1_safety_gate INTEGER DEFAULT 1,
+    safe_core_score REAL DEFAULT 0.0,
+    safe_core_percentile REAL DEFAULT 0.0,
+    safe_core_cohort_percentile REAL DEFAULT 0.0,
+    safe_core_rank INTEGER DEFAULT 0,
+    safe_core_status TEXT DEFAULT '',
+    safe_core_reason TEXT DEFAULT '',
+    passed_safe_core_gate INTEGER DEFAULT 0,
+    safe_core_model_version TEXT DEFAULT '',
+    legacy_all_gates_gate INTEGER DEFAULT 0,
+    legacy_gate_misses TEXT DEFAULT '',
     cohort_percentile REAL,
     fundamental_quality_score REAL,
     durable_growth_score REAL,
@@ -888,7 +907,10 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     fda_product_score_legacy REAL DEFAULT 0.0,
     fda_alpha_score REAL DEFAULT 0.0,
     fda_safety_score REAL DEFAULT 0.0,
-    fda_clearance_velocity_score REAL DEFAULT 0.0,
+    fda_clearance_velocity_raw REAL DEFAULT 0.0,
+    fda_clearance_velocity_score REAL DEFAULT 50.0,
+    fda_clearance_acceleration_raw REAL DEFAULT 0.0,
+    fda_clearance_acceleration_score REAL DEFAULT 50.0,
     fda_evidence_quality_score REAL DEFAULT 0.0,
     fda_event_risk_score REAL DEFAULT 0.0,
     fda_signal_mode TEXT DEFAULT '',
@@ -899,6 +921,9 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     fda_policy_reason TEXT DEFAULT '',
     fda_gate_excluded INTEGER DEFAULT 0,
     fda_component_weight REAL DEFAULT 0.0,
+    fda_data_available INTEGER DEFAULT 0,
+    quality_value_interaction_score REAL DEFAULT 50.0,
+    fda_technical_interaction_score REAL DEFAULT 50.0,
     reimbursement_score REAL,
     reimbursement_status TEXT,
     direct_code_evidence INTEGER,
@@ -1005,6 +1030,8 @@ CREATE TABLE IF NOT EXISTS data_quality_issues (
 
 CREATE INDEX IF NOT EXISTS idx_source_registry_stage ON source_registry(stage, priority);
 CREATE INDEX IF NOT EXISTS idx_raw_api_responses_source ON raw_api_responses(source_id, request_time_utc);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_api_responses_run_query
+ON raw_api_responses(source_id, endpoint, COALESCE(query_params_json, ''), COALESCE(ingestion_run_id, -1));
 CREATE INDEX IF NOT EXISTS idx_dim_company_cik ON dim_company(cik);
 CREATE INDEX IF NOT EXISTS idx_dim_company_subsector ON dim_company(subsector);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dim_company_alias_unique
@@ -1104,6 +1131,14 @@ def connect(db_path: Path, *, timeout_sec: float = 30.0) -> ManagedConnection:
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
     conn.execute("PRAGMA foreign_keys = ON")
+    _migrate_raw_api_responses_unique(conn)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_api_responses_source ON raw_api_responses(source_id, request_time_utc)")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_api_responses_run_query
+        ON raw_api_responses(source_id, endpoint, COALESCE(query_params_json, ''), COALESCE(ingestion_run_id, -1))
+        """
+    )
     _ensure_table_optional_columns(conn, "fact_price_ohlcv", {"price_adjustment": "TEXT"})
     _ensure_table_optional_columns(
         conn,
@@ -1218,7 +1253,10 @@ def init_db(conn: sqlite3.Connection) -> None:
             "fda_product_score_legacy": "REAL",
             "fda_alpha_score": "REAL",
             "fda_safety_score": "REAL",
+            "fda_clearance_velocity_raw": "REAL",
             "fda_clearance_velocity_score": "REAL",
+            "fda_clearance_acceleration_raw": "REAL",
+            "fda_clearance_acceleration_score": "REAL",
             "fda_evidence_quality_score": "REAL",
             "fda_event_risk_score": "REAL",
             "fda_signal_mode": "TEXT",
@@ -1234,6 +1272,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             "confirmed_hard_red_flag": "INTEGER",
             "review_adjusted_fda_state": "TEXT",
             "dedup_class_i_recall_count_36m": "INTEGER",
+            "class_i_multi_source_recall_count_36m": "INTEGER",
             "open_class_i_recall_count_12m": "INTEGER",
             "open_class_i_recall_count_36m": "INTEGER",
             "terminated_class_i_recall_count_36m": "INTEGER",
@@ -1312,7 +1351,42 @@ def init_db(conn: sqlite3.Connection) -> None:
             "calibration_status_reason": "TEXT",
             "cohort_score_template_id": "TEXT",
             "cohort_score_template_spec": "TEXT",
+            "cohort_score_template_tier1_role": "TEXT",
+            "cohort_score_template_tier1_eligible": "INTEGER",
+            "single_product_risk_flag": "INTEGER",
+            "binary_event_risk_flag": "INTEGER",
+            "tier1_safety_status": "TEXT",
+            "tier1_safety_reason": "TEXT",
+            "passed_tier1_safety_gate": "INTEGER",
+            "safe_core_score": "REAL",
+            "safe_core_percentile": "REAL",
+            "safe_core_cohort_percentile": "REAL",
+            "safe_core_rank": "INTEGER",
+            "safe_core_status": "TEXT",
+            "safe_core_reason": "TEXT",
+            "passed_safe_core_gate": "INTEGER",
+            "safe_core_model_version": "TEXT",
+            "legacy_all_gates_gate": "INTEGER",
+            "legacy_gate_misses": "TEXT",
             "cohort_percentile": "REAL",
+            "durable_growth_score_legacy": "REAL",
+            "durable_growth_alpha_score": "REAL",
+            "durable_growth_growth_score": "REAL",
+            "durable_growth_quality_score": "REAL",
+            "durable_growth_efficiency_score": "REAL",
+            "durable_growth_capital_discipline_score": "REAL",
+            "durable_growth_evidence_quality_score": "REAL",
+            "durable_growth_component_count": "INTEGER",
+            "durable_growth_signal_mode": "TEXT",
+            "durable_growth_signal_direction": "TEXT",
+            "durable_growth_signal_reliability": "REAL",
+            "durable_growth_score_source": "TEXT",
+            "durable_growth_gate_mode": "TEXT",
+            "durable_growth_policy_reason": "TEXT",
+            "durable_growth_gate_excluded": "INTEGER",
+            "durable_growth_component_weight": "REAL",
+            "durable_growth_repair_flag": "INTEGER",
+            "durable_growth_repair_reason": "TEXT",
             "durable_growth_validation_status": "TEXT",
             "durable_growth_validation_reason": "TEXT",
             "durable_growth_production_state": "TEXT",
@@ -1327,7 +1401,10 @@ def init_db(conn: sqlite3.Connection) -> None:
             "fda_product_score_legacy": "REAL",
             "fda_alpha_score": "REAL",
             "fda_safety_score": "REAL",
+            "fda_clearance_velocity_raw": "REAL",
             "fda_clearance_velocity_score": "REAL",
+            "fda_clearance_acceleration_raw": "REAL",
+            "fda_clearance_acceleration_score": "REAL",
             "fda_evidence_quality_score": "REAL",
             "fda_event_risk_score": "REAL",
             "fda_signal_mode": "TEXT",
@@ -1338,6 +1415,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             "fda_policy_reason": "TEXT",
             "fda_gate_excluded": "INTEGER",
             "fda_component_weight": "REAL",
+            "fda_data_available": "INTEGER",
+            "quality_value_interaction_score": "REAL",
+            "fda_technical_interaction_score": "REAL",
             "technical_gate_mode": "TEXT",
             "technical_overlay_status": "TEXT",
             "technical_policy_reason": "TEXT",
@@ -1416,6 +1496,59 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute("PRAGMA user_version = 1")
     conn.commit()
+
+
+def _migrate_raw_api_responses_unique(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = 'raw_api_responses'
+        """
+    ).fetchone()
+    table_sql = str(row["sql"] if isinstance(row, sqlite3.Row) else row[0]) if row is not None else ""
+    if "UNIQUE(source_id, endpoint, response_hash)" not in table_sql:
+        return
+
+    conn.execute("ALTER TABLE raw_api_responses RENAME TO raw_api_responses_legacy_unique")
+    conn.execute(
+        """
+        CREATE TABLE raw_api_responses (
+            raw_response_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            query_params_json TEXT,
+            request_time_utc TEXT NOT NULL,
+            response_status INTEGER,
+            response_hash TEXT NOT NULL,
+            asof_date TEXT,
+            payload_text TEXT,
+            ingestion_run_id INTEGER,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT,
+            FOREIGN KEY (ingestion_run_id) REFERENCES ingestion_runs(ingestion_run_id) ON DELETE SET NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO raw_api_responses(
+            raw_response_id, source_id, endpoint, query_params_json, request_time_utc,
+            response_status, response_hash, asof_date, payload_text, ingestion_run_id, created_at
+        )
+        SELECT
+            raw_response_id, source_id, endpoint, query_params_json, request_time_utc,
+            response_status, response_hash, asof_date, payload_text, ingestion_run_id, created_at
+        FROM raw_api_responses_legacy_unique
+        WHERE raw_response_id IN (
+            SELECT MIN(raw_response_id)
+            FROM raw_api_responses_legacy_unique
+            GROUP BY source_id, endpoint, COALESCE(query_params_json, ''), COALESCE(ingestion_run_id, -1)
+        )
+        """
+    )
+    conn.execute("DROP TABLE raw_api_responses_legacy_unique")
 
 
 def _table_column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:

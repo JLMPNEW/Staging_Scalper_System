@@ -11,7 +11,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -126,7 +126,7 @@ def to_float(raw: object) -> float | None:
 def latest_market_asof(conn: Any) -> str:
     row = conn.execute("SELECT MAX(bar_date) AS asof_date FROM fact_price_ohlcv").fetchone()
     value = str(row["asof_date"] or "") if row is not None else ""
-    return value or date.today().isoformat()
+    return value or datetime.now(timezone.utc).date().isoformat()
 
 
 def load_companies(conn: Any, *, ticker_filter: set[str], max_tickers: int) -> list[Company]:
@@ -340,7 +340,7 @@ def fetch_yfinance_snapshots(
     source_id = str(cfg_get(policy, "fallback_source_id", "yahoo_finance_backup") or "yahoo_finance_backup")
     sleep_sec = float(cfg_get(policy, "request_sleep_sec", 0.20))
     share_history_days = max(30, int(cfg_get(policy, "yfinance_share_history_days", 370)))
-    asof_date = parse_date(asof) or date.today()
+    asof_date = parse_date(asof) or datetime.now(timezone.utc).date()
     start_date = asof_date - timedelta(days=share_history_days)
     end_date = asof_date + timedelta(days=1)
     out: dict[str, Snapshot] = {}

@@ -473,7 +473,10 @@ def sortino(values: list[float]) -> float:
     if not values:
         return 0.0
     downside = [min(0.0, value) for value in values]
-    downside_dev = math.sqrt(sum(value * value for value in downside) / len(values))
+    negative_count = sum(1 for value in values if value < 0)
+    if negative_count <= 0:
+        return 0.0
+    downside_dev = math.sqrt(sum(value * value for value in downside) / negative_count)
     return mean(values) / downside_dev if downside_dev > 0 else 0.0
 
 
@@ -729,6 +732,13 @@ def main() -> None:
     rows = read_csv(input_csv)
     if not rows:
         raise RuntimeError(f"No rows found in {input_csv}")
+    required_columns = {"forward_return_120d", "cohort_excess_return_120d"}
+    missing_columns = sorted(required_columns - set(rows[0]))
+    if missing_columns:
+        raise ValueError(
+            f"{input_csv} is missing required 120d columns for technical alpha policy testing: "
+            f"{','.join(missing_columns)}"
+        )
     latest_asof = max(str(row.get("asof_date") or "")[:10] for row in rows)
     all_summary_rows: list[dict[str, Any]] = []
     all_top25_rows: list[dict[str, Any]] = []

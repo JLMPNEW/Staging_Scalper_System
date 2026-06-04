@@ -102,6 +102,22 @@ FEATURE_CSV_FIELDNAMES = [
     "sec_catalyst_recency_days",
     "sec_catalyst_recency_basis",
     "sec_catalyst_event_types",
+    "indication_success_area",
+    "indication_success_probability",
+    "indication_success_multiplier",
+    "indication_weighted_phase2_3_component",
+    "forward_catalyst_nearest_days",
+    "forward_catalyst_event_type",
+    "forward_catalyst_score",
+    "short_interest_pct_float",
+    "short_interest_signal_score",
+    "institutional_ownership_delta_pct",
+    "institutional_accumulation_score",
+    "insider_buy_count_90d",
+    "insider_buy_value_90d",
+    "insider_buy_cluster_count_90d",
+    "insider_sell_value_90d",
+    "insider_accumulation_score",
     "manual_verdict",
     "feature_json",
 ]
@@ -380,6 +396,246 @@ DEFAULT_PREDICTIVE_RISK_FREE_BANDS = {
     "trial_staleness": 10.0,
     "data_quality": 0.0,
 }
+DEFAULT_INDICATION_SUCCESS_RATES = {
+    "oncology": {"phase2": 0.22, "phase3": 0.48},
+    "cns": {"phase2": 0.14, "phase3": 0.42},
+    "autoimmune_inflammatory": {"phase2": 0.28, "phase3": 0.58},
+    "rare_genetic": {"phase2": 0.24, "phase3": 0.55},
+    "cardiometabolic": {"phase2": 0.30, "phase3": 0.62},
+    "infectious_disease": {"phase2": 0.32, "phase3": 0.64},
+    "ophthalmology": {"phase2": 0.27, "phase3": 0.57},
+    "device_diagnostics": {"phase2": 0.35, "phase3": 0.70},
+    "general": {"phase2": 0.25, "phase3": 0.55},
+}
+
+
+def load_indication_success_settings(config: dict[str, Any]) -> dict[str, Any]:
+    raw = cfg_get(config, "biotech_features.indication_success_weighting", {}) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    configured_rates = raw.get("phase_success_rates") if isinstance(raw.get("phase_success_rates"), dict) else {}
+    rates: dict[str, dict[str, float]] = {}
+    for area, defaults in DEFAULT_INDICATION_SUCCESS_RATES.items():
+        area_raw = configured_rates.get(area, {}) if isinstance(configured_rates.get(area), dict) else {}
+        rates[area] = {
+            "phase2": bounded_float(area_raw.get("phase2"), defaults["phase2"], low=0.01, high=0.99),
+            "phase3": bounded_float(area_raw.get("phase3"), defaults["phase3"], low=0.01, high=0.99),
+        }
+    return {
+        "enabled": as_bool(raw.get("enabled", True)),
+        "apply_to_catalyst": as_bool(raw.get("apply_to_catalyst", False)),
+        "default_area": str(raw.get("default_area") or "general").strip().lower() or "general",
+        "min_multiplier": bounded_float(raw.get("min_multiplier"), 0.70, low=0.10, high=5.0),
+        "max_multiplier": bounded_float(raw.get("max_multiplier"), 1.30, low=0.10, high=5.0),
+        "phase_success_rates": rates,
+    }
+
+
+def normalize_pct_decimal(raw: object, default: float | None = None) -> float | None:
+    text = str(raw if raw is not None else "").strip()
+    if not text or text.lower() in {"nan", "none", "null"}:
+        return default
+    try:
+        value = float(text)
+    except ValueError:
+        return default
+    if not math.isfinite(value):
+        return default
+    return value / 100.0 if abs(value) > 2.0 else value
+
+
+def linear_score(value: float, points: list[tuple[float, float]]) -> float:
+    ordered = sorted(points)
+    if value <= ordered[0][0]:
+        return clamp(ordered[0][1])
+    if value >= ordered[-1][0]:
+        return clamp(ordered[-1][1])
+    for (left_x, left_y), (right_x, right_y) in zip(ordered, ordered[1:]):
+        if left_x <= value <= right_x:
+            span = max(1e-12, right_x - left_x)
+            return clamp(left_y + (right_y - left_y) * (value - left_x) / span)
+    return clamp(ordered[-1][1])
+
+
+def infer_indication_success_area(
+    *,
+    universe_row: Any,
+    evidence: dict[str, Any],
+    strategy_category: str,
+    default_area: str,
+) -> str:
+    if strategy_category in DEVICE_CATEGORIES or strategy_category in DIAGNOSTICS_SERVICE_CATEGORIES:
+        return "device_diagnostics"
+    text_parts = [
+        strategy_category,
+        str(universe_row.get("company_name") or ""),
+        str(universe_row.get("primary_trial_title") or ""),
+        str(universe_row.get("manual_root_cause") or universe_row.get("root_cause_category") or ""),
+    ]
+    top_ncts = evidence.get("top_ncts", [])
+    if isinstance(top_ncts, list):
+        text_parts.extend(str(item.get("title") or "") for item in top_ncts if isinstance(item, dict))
+    haystack = " ".join(text_parts).lower()
+    keyword_map = [
+        ("oncology", ["cancer", "oncolog", "tumor", "carcinoma", "lymphoma", "leukemia", "myeloma"]),
+        ("cns", ["alzheimer", "parkinson", "cns", "depression", "epilepsy", "schizophrenia", "neuro"]),
+        ("autoimmune_inflammatory", ["autoimmune", "inflamm", "arthritis", "psoriasis", "crohn", "ulcerative", "ibd"]),
+        ("rare_genetic", ["rare", "orphan", "genetic", "duchenne", "hemophilia", "sickle", "thalassemia"]),
+        ("cardiometabolic", ["diabetes", "obesity", "cardio", "heart", "renal", "kidney", "nash", "mash"]),
+        ("infectious_disease", ["infection", "infectious", "antibiotic", "antiviral", "vaccine", "covid", "influenza"]),
+        ("ophthalmology", ["ophthalm", "retina", "macular", "glaucoma"]),
+    ]
+    for area, keywords in keyword_map:
+        if any(keyword in haystack for keyword in keywords):
+            return area
+    return default_area if default_area in DEFAULT_INDICATION_SUCCESS_RATES else "general"
+
+
+def indication_success_probability(
+    *,
+    area: str,
+    active_phase3_trials: int,
+    active_pivotal_trials: int,
+    active_phase2_trials: int,
+    phase2_3_trials: int,
+    settings: dict[str, Any],
+) -> tuple[float, float, float]:
+    rates = settings.get("phase_success_rates", DEFAULT_INDICATION_SUCCESS_RATES)
+    if not isinstance(rates, dict):
+        rates = DEFAULT_INDICATION_SUCCESS_RATES
+    area_rates = rates.get(area) if isinstance(rates.get(area), dict) else rates.get("general", {})
+    general_rates = rates.get("general", DEFAULT_INDICATION_SUCCESS_RATES["general"])
+    phase3_rate = bounded_float(area_rates.get("phase3"), general_rates["phase3"], low=0.01, high=0.99)
+    phase2_rate = bounded_float(area_rates.get("phase2"), general_rates["phase2"], low=0.01, high=0.99)
+    general_phase3 = bounded_float(general_rates.get("phase3"), DEFAULT_INDICATION_SUCCESS_RATES["general"]["phase3"], low=0.01, high=0.99)
+    general_phase2 = bounded_float(general_rates.get("phase2"), DEFAULT_INDICATION_SUCCESS_RATES["general"]["phase2"], low=0.01, high=0.99)
+    phase3_count = max(0, active_phase3_trials + active_pivotal_trials)
+    phase2_count = max(0, active_phase2_trials, phase2_3_trials - phase3_count)
+    total = phase2_count + phase3_count
+    if total <= 0:
+        return phase2_rate, general_phase2, 1.0
+    probability = (phase3_count * phase3_rate + phase2_count * phase2_rate) / total
+    baseline = (phase3_count * general_phase3 + phase2_count * general_phase2) / total
+    multiplier = probability / max(0.01, baseline)
+    return probability, baseline, multiplier
+
+
+def load_ticker_feature_csv(path: Path | None) -> dict[str, dict[str, Any]]:
+    df = read_optional_csv(path)
+    if df.empty:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for record in cast(list[dict[str, Any]], cast(Any, df).to_dict("records")):
+        ticker = normalize_ticker(record.get("ticker") or record.get("symbol"))
+        if ticker:
+            out[ticker] = record
+    return out
+
+
+def load_forward_catalyst_calendar(path: Path | None, asof_date: date, *, lookahead_days: int) -> dict[str, dict[str, Any]]:
+    df = read_optional_csv(path)
+    if df.empty:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for record in cast(list[dict[str, Any]], cast(Any, df).to_dict("records")):
+        ticker = normalize_ticker(record.get("ticker") or record.get("symbol"))
+        event_date = parse_date(record.get("event_date") or record.get("catalyst_date") or record.get("date"))
+        if not ticker or event_date is None:
+            continue
+        days_until = (event_date - asof_date).days
+        if days_until < 0 or days_until > lookahead_days:
+            continue
+        candidate = {**record, "event_date": event_date.isoformat(), "days_until": days_until}
+        current = out.get(ticker)
+        if current is None or days_until < to_int(current.get("days_until"), 999999):
+            out[ticker] = candidate
+    return out
+
+
+def forward_catalyst_signal(row: dict[str, Any] | None, *, lookahead_days: int) -> dict[str, Any]:
+    if not row:
+        return {
+            "forward_catalyst_nearest_days": "",
+            "forward_catalyst_event_type": "",
+            "forward_catalyst_score": 0.0,
+        }
+    days_until = to_int(row.get("days_until"), 999999)
+    event_type = str(row.get("event_type") or row.get("catalyst_type") or "catalyst").strip().lower()
+    confidence = normalize_pct_decimal(row.get("confidence") or row.get("confidence_pct"), 0.65) or 0.65
+    proximity = max(0.0, 1.0 - min(days_until, lookahead_days) / max(1.0, float(lookahead_days)))
+    type_multiplier = 1.0
+    if any(token in event_type for token in ["pdufa", "approval", "phase 3", "phase3", "pivotal", "topline"]):
+        type_multiplier = 1.15
+    elif any(token in event_type for token in ["phase 1", "phase1", "preclinical"]):
+        type_multiplier = 0.75
+    return {
+        "forward_catalyst_nearest_days": days_until,
+        "forward_catalyst_event_type": event_type,
+        "forward_catalyst_score": round(clamp(100.0 * proximity * clamp(confidence, 0.0, 1.0) * type_multiplier), 4),
+    }
+
+
+def short_interest_signal(row: dict[str, Any] | None) -> dict[str, float]:
+    if not row:
+        return {"short_interest_pct_float": 0.0, "short_interest_signal_score": 0.0}
+    short_pct = normalize_pct_decimal(
+        row.get("short_interest_pct_float")
+        or row.get("short_percent_float")
+        or row.get("short_interest_pct")
+        or row.get("short_interest_percent_float"),
+        0.0,
+    ) or 0.0
+    days_to_cover = to_float(row.get("days_to_cover") or row.get("short_ratio"), 0.0)
+    pct_score = linear_score(short_pct, [(0.0, 0.0), (0.05, 20.0), (0.10, 50.0), (0.20, 78.0), (0.35, 100.0)])
+    cover_score = linear_score(days_to_cover, [(0.0, 0.0), (2.0, 25.0), (5.0, 60.0), (10.0, 100.0)])
+    return {
+        "short_interest_pct_float": round(short_pct, 6),
+        "short_interest_signal_score": round(clamp(0.75 * pct_score + 0.25 * cover_score), 4),
+    }
+
+
+def institutional_ownership_signal(row: dict[str, Any] | None) -> dict[str, float]:
+    if not row:
+        return {"institutional_ownership_delta_pct": 0.0, "institutional_accumulation_score": 50.0}
+    delta = normalize_pct_decimal(
+        row.get("institutional_ownership_delta_pct")
+        or row.get("ownership_delta_pct")
+        or row.get("thirteen_f_ownership_delta_pct")
+        or row.get("13f_ownership_delta_pct"),
+        0.0,
+    ) or 0.0
+    score = linear_score(delta, [(-0.20, 0.0), (-0.10, 20.0), (0.0, 50.0), (0.05, 70.0), (0.15, 92.0), (0.30, 100.0)])
+    return {
+        "institutional_ownership_delta_pct": round(delta, 6),
+        "institutional_accumulation_score": round(score, 4),
+    }
+
+
+def insider_activity_signal(row: dict[str, Any] | None) -> dict[str, float]:
+    if not row:
+        return {
+            "insider_buy_count_90d": 0.0,
+            "insider_buy_value_90d": 0.0,
+            "insider_buy_cluster_count_90d": 0.0,
+            "insider_sell_value_90d": 0.0,
+            "insider_accumulation_score": 50.0,
+        }
+    buy_count = to_float(row.get("insider_buy_count_90d"), 0.0)
+    buy_value = to_float(row.get("insider_buy_value_90d"), 0.0)
+    cluster_count = to_float(row.get("insider_buy_cluster_count_90d"), 0.0)
+    sell_value = to_float(row.get("insider_sell_value_90d"), 0.0)
+    buy_count_score = linear_score(buy_count, [(0.0, 0.0), (1.0, 35.0), (3.0, 75.0), (6.0, 100.0)])
+    buy_value_score = linear_score(math.log10(max(1.0, buy_value)), [(0.0, 0.0), (5.0, 35.0), (6.0, 65.0), (7.0, 100.0)])
+    cluster_score = linear_score(cluster_count, [(0.0, 0.0), (1.0, 55.0), (2.0, 85.0), (4.0, 100.0)])
+    sell_penalty = linear_score(math.log10(max(1.0, sell_value)), [(0.0, 0.0), (5.0, 10.0), (6.0, 25.0), (7.0, 45.0)])
+    score = 50.0 + 0.18 * buy_count_score + 0.18 * buy_value_score + 0.22 * cluster_score - sell_penalty
+    return {
+        "insider_buy_count_90d": round(buy_count, 4),
+        "insider_buy_value_90d": round(buy_value, 2),
+        "insider_buy_cluster_count_90d": round(cluster_count, 4),
+        "insider_sell_value_90d": round(sell_value, 2),
+        "insider_accumulation_score": round(clamp(score), 4),
+    }
 
 
 def load_risk_decomposition_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -608,6 +864,24 @@ def load_latest_market_features(
         source_priority=source_priority,
         max_staleness_days=max_staleness_days,
     )
+
+
+def load_latest_governance_features(conn: sqlite3.Connection, asof_date: date) -> dict[int, dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT f.*
+        FROM governance_event_features_daily f
+        JOIN (
+            SELECT company_id, MAX(asof_date) AS max_asof
+            FROM governance_event_features_daily
+            WHERE asof_date <= ?
+            GROUP BY company_id
+        ) latest
+          ON latest.company_id = f.company_id AND latest.max_asof = f.asof_date
+        """,
+        (asof_date.isoformat(),),
+    ).fetchall()
+    return {int(row["company_id"]): dict(row) for row in rows}
 
 
 def load_recent_sec_filing_summary(conn: sqlite3.Connection, asof_date: date, *, lookback_days: int = 730) -> dict[int, dict[str, int]]:
@@ -1021,6 +1295,11 @@ def compute_feature_row(
     market: dict[str, Any] | None,
     survival: dict[str, Any] | None,
     sec_events: dict[str, Any] | None,
+    indication_success_settings: dict[str, Any] | None = None,
+    forward_catalyst: dict[str, Any] | None = None,
+    short_interest: dict[str, Any] | None = None,
+    institutional_ownership: dict[str, Any] | None = None,
+    governance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ticker = str(universe_row["ticker"]).upper()
     verified_active = to_int(universe_row.get("verified_qualifying_active_trial_count"))
@@ -1060,7 +1339,9 @@ def compute_feature_row(
     stale_active = to_int(universe_row.get("stale_active_trials"))
     manual_keep = str(universe_row.get("manual_verdict") or "").strip().lower() == "manual_keep"
     primary_trial_score = to_float(universe_row.get("primary_trial_score"))
-    days_since_update = to_int(universe_row.get("days_since_last_update"), 9999)
+    raw_days_since_update = universe_row.get("days_since_last_update")
+    days_since_update = to_int(raw_days_since_update, 9999)
+    has_trial_update_age = str(raw_days_since_update if raw_days_since_update is not None else "").strip() != ""
 
     screen = screen_row if screen_row is not None else pd.Series(dtype=str)
     median_addv20 = to_float(screen.get("median_addv20"), 0.0)
@@ -1171,16 +1452,57 @@ def compute_feature_row(
         if str(sec_catalyst_recency_days_raw if sec_catalyst_recency_days_raw is not None else "").strip()
         else ""
     )
+    indication_settings = indication_success_settings or load_indication_success_settings({})
+    indication_area = ""
+    indication_success_prob = 0.0
+    indication_success_baseline = 0.0
+    indication_success_multiplier = 1.0
+    base_phase2_3_component = min(
+        CATALYST_COMPONENT_MAX["effective_phase2_3_trials"],
+        math.log1p(max(effective_phase2_3, 0.0)) * 10.0,
+    )
+    if bool(indication_settings.get("enabled", True)):
+        indication_area = infer_indication_success_area(
+            universe_row=universe_row,
+            evidence=evidence,
+            strategy_category=strategy_category,
+            default_area=str(indication_settings.get("default_area") or "general"),
+        )
+        indication_success_prob, indication_success_baseline, raw_indication_multiplier = indication_success_probability(
+            area=indication_area,
+            active_phase3_trials=active_phase3_trials,
+            active_pivotal_trials=active_pivotal_trials,
+            active_phase2_trials=active_phase2_trials,
+            phase2_3_trials=phase2_3,
+            settings=indication_settings,
+        )
+        indication_success_multiplier = max(
+            float(indication_settings.get("min_multiplier", 0.70)),
+            min(float(indication_settings.get("max_multiplier", 1.30)), raw_indication_multiplier),
+        )
+    indication_weighted_phase2_3_component = min(
+        CATALYST_COMPONENT_MAX["effective_phase2_3_trials"],
+        math.log1p(max(effective_phase2_3, 0.0) * max(0.0, indication_success_multiplier)) * 10.0,
+    )
+    phase2_3_component_used = (
+        indication_weighted_phase2_3_component
+        if bool(indication_settings.get("enabled", True)) and bool(indication_settings.get("apply_to_catalyst", False))
+        else base_phase2_3_component
+    )
+    forward_catalyst_signals = forward_catalyst_signal(
+        forward_catalyst,
+        lookahead_days=to_int(indication_settings.get("forward_catalyst_lookahead_days"), 365),
+    )
+    short_interest_signals = short_interest_signal(short_interest)
+    institutional_ownership_signals = institutional_ownership_signal(institutional_ownership)
+    insider_activity_signals = insider_activity_signal(governance)
 
     catalyst_components = {
         "verified_active_trials": min(
             CATALYST_COMPONENT_MAX["verified_active_trials"],
             math.log1p(max(verified_active, 0)) * 5.0,
         ),
-        "effective_phase2_3_trials": min(
-            CATALYST_COMPONENT_MAX["effective_phase2_3_trials"],
-            math.log1p(max(effective_phase2_3, 0.0)) * 10.0,
-        ),
+        "effective_phase2_3_trials": phase2_3_component_used,
         "active_pivotal_trials": min(
             CATALYST_COMPONENT_MAX["active_pivotal_trials"],
             math.log1p(max(active_pivotal_trials, 0)) * 8.0,
@@ -1204,11 +1526,11 @@ def compute_feature_row(
     catalyst_penalty = 0.0
     if collaborator_heavy:
         catalyst_penalty += min(15.0, max(0.0, collaborator_dependency_ratio - 0.50) * 30.0)
-    if days_since_update <= 90:
+    if has_trial_update_age and days_since_update <= 90:
         catalyst_components["recent_trial_update"] = 8.0
-    elif days_since_update <= 180:
+    elif has_trial_update_age and days_since_update <= 180:
         catalyst_components["recent_trial_update"] = 4.0
-    elif days_since_update >= 365 and verified_active > 0:
+    elif has_trial_update_age and days_since_update >= 365 and verified_active > 0:
         catalyst_penalty += 6.0
     catalyst_components["regulatory_or_positive_clinical_event"] = min(
         CATALYST_COMPONENT_MAX["regulatory_or_positive_clinical_event"],
@@ -1453,7 +1775,13 @@ def compute_feature_row(
     financial_quality_raw = clamp(financial_quality_raw)
 
     momentum_raw = 0.0
-    momentum_raw += 30.0 if days_since_update <= 90 else 15.0 if days_since_update <= 180 else 0.0
+    momentum_raw += (
+        30.0
+        if has_trial_update_age and days_since_update <= 90
+        else 15.0
+        if has_trial_update_age and days_since_update <= 180
+        else 0.0
+    )
     momentum_raw += min(25.0, recent_current_reports * 2.5)
     momentum_raw += 15.0 if median_addv20 >= strong_liquidity_addv20 else 8.0 if median_addv20 >= low_liquidity_addv20 else 0.0
     momentum_raw += min(20.0, primary_trial_score * 2.0)
@@ -1491,6 +1819,7 @@ def compute_feature_row(
             "active_qualifying_device_trials": active_qualifying_device_trials,
             "pipeline_density": pipeline_density,
             "days_since_last_update": days_since_update,
+            "has_trial_update_age": has_trial_update_age,
             "top_ncts": top_ncts,
         },
         "sec_and_liquidity": {
@@ -1566,6 +1895,21 @@ def compute_feature_row(
             "sec_catalyst_future_pdufa_event_count": sec_catalyst_recency.get("future_pdufa_event_count", 0),
             "recent_events": list(sec_events.get("recent_events", []) if sec_events else []),
         },
+        "shadow_signals": {
+            "indication_success": {
+                "area": indication_area,
+                "probability": round(indication_success_prob, 6),
+                "baseline_probability": round(indication_success_baseline, 6),
+                "multiplier": round(indication_success_multiplier, 6),
+                "base_phase2_3_component": round(base_phase2_3_component, 4),
+                "weighted_phase2_3_component": round(indication_weighted_phase2_3_component, 4),
+                "applied_to_catalyst": bool(indication_settings.get("apply_to_catalyst", False)),
+            },
+            "forward_catalyst_calendar": forward_catalyst_signals,
+            "short_interest": short_interest_signals,
+            "institutional_ownership": institutional_ownership_signals,
+            "insider_activity": insider_activity_signals,
+        },
         "raw_scores": {
             "catalyst_score_raw": round(catalyst_raw, 4),
             "credibility_score_raw": round(credibility_raw, 4),
@@ -1618,6 +1962,13 @@ def compute_feature_row(
             "sec_catalyst_recency_decay_enabled": sec_catalyst_recency_decay_enabled,
             "sec_catalyst_recency_basis": sec_catalyst_recency_basis,
             "sec_catalyst_event_types": sec_catalyst_event_types,
+            "indication_success_probability": round(indication_success_prob, 6),
+            "indication_success_multiplier": round(indication_success_multiplier, 6),
+            "indication_weighted_phase2_3_component": round(indication_weighted_phase2_3_component, 4),
+            "forward_catalyst_score": forward_catalyst_signals["forward_catalyst_score"],
+            "short_interest_signal_score": short_interest_signals["short_interest_signal_score"],
+            "institutional_accumulation_score": institutional_ownership_signals["institutional_accumulation_score"],
+            "insider_accumulation_score": insider_activity_signals["insider_accumulation_score"],
         },
         "manual": {
             "manual_verdict": str(universe_row.get("manual_verdict") or ""),
@@ -1680,6 +2031,22 @@ def compute_feature_row(
         "sec_catalyst_recency_days": sec_catalyst_recency_days,
         "sec_catalyst_recency_basis": sec_catalyst_recency_basis,
         "sec_catalyst_event_types": sec_catalyst_event_types,
+        "indication_success_area": indication_area,
+        "indication_success_probability": round(indication_success_prob, 6),
+        "indication_success_multiplier": round(indication_success_multiplier, 6),
+        "indication_weighted_phase2_3_component": round(indication_weighted_phase2_3_component, 4),
+        "forward_catalyst_nearest_days": forward_catalyst_signals["forward_catalyst_nearest_days"],
+        "forward_catalyst_event_type": forward_catalyst_signals["forward_catalyst_event_type"],
+        "forward_catalyst_score": forward_catalyst_signals["forward_catalyst_score"],
+        "short_interest_pct_float": short_interest_signals["short_interest_pct_float"],
+        "short_interest_signal_score": short_interest_signals["short_interest_signal_score"],
+        "institutional_ownership_delta_pct": institutional_ownership_signals["institutional_ownership_delta_pct"],
+        "institutional_accumulation_score": institutional_ownership_signals["institutional_accumulation_score"],
+        "insider_buy_count_90d": insider_activity_signals["insider_buy_count_90d"],
+        "insider_buy_value_90d": insider_activity_signals["insider_buy_value_90d"],
+        "insider_buy_cluster_count_90d": insider_activity_signals["insider_buy_cluster_count_90d"],
+        "insider_sell_value_90d": insider_activity_signals["insider_sell_value_90d"],
+        "insider_accumulation_score": insider_activity_signals["insider_accumulation_score"],
         "manual_verdict": str(universe_row.get("manual_verdict") or ""),
         "feature_json": json.dumps(feature_json, ensure_ascii=True, sort_keys=True),
     }
@@ -1707,6 +2074,22 @@ def upsert_features(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_d
         "pipeline_anchor_risk_score_raw",
         "collaborator_dependency_risk_score_raw",
         "trial_staleness_risk_score_raw",
+        "indication_success_area",
+        "indication_success_probability",
+        "indication_success_multiplier",
+        "indication_weighted_phase2_3_component",
+        "forward_catalyst_nearest_days",
+        "forward_catalyst_event_type",
+        "forward_catalyst_score",
+        "short_interest_pct_float",
+        "short_interest_signal_score",
+        "institutional_ownership_delta_pct",
+        "institutional_accumulation_score",
+        "insider_buy_count_90d",
+        "insider_buy_value_90d",
+        "insider_buy_cluster_count_90d",
+        "insider_sell_value_90d",
+        "insider_accumulation_score",
         "momentum_score_raw",
         "feature_json",
     ]
@@ -1753,6 +2136,18 @@ def main() -> None:
         cfg_get(config, "biotech_features.company_strategy_overrides_csv"),
         base_dir=base_dir,
     )
+    forward_catalyst_calendar_csv = resolve_optional_path(
+        cfg_get(config, "biotech_features.forward_catalyst_calendar_csv"),
+        base_dir=base_dir,
+    )
+    short_interest_csv = resolve_optional_path(
+        cfg_get(config, "biotech_features.short_interest_csv"),
+        base_dir=base_dir,
+    )
+    institutional_ownership_csv = resolve_optional_path(
+        cfg_get(config, "biotech_features.institutional_ownership_csv"),
+        base_dir=base_dir,
+    )
     screen_csv = resolve_path(cfg_get(config, "biotech_features.screen_results_csv"), base_dir=base_dir)
     output_csv = output_dir / str(cfg_get(config, "biotech_features.output_csv", "biotech_daily_features.csv"))
     min_liquidity = float(cfg_get(config, "biotech_features.min_liquidity_addv20", 1_000_000))
@@ -1766,6 +2161,10 @@ def main() -> None:
     pipeline_quality_settings = load_pipeline_quality_settings(config)
     sec_catalyst_event_weights = load_sec_catalyst_event_weights(config)
     risk_decomposition_settings = load_risk_decomposition_settings(config)
+    indication_success_settings = load_indication_success_settings(config)
+    forward_catalyst_lookahead_days = int(
+        cfg_get(config, "biotech_features.forward_catalyst_calendar_lookahead_days", 365)
+    )
     going_concern_source_priority = configured_source_priority(
         cfg_get(config, "financial_survival.going_concern_source_priority", ["db", "csv"]),
         ["db", "csv"],
@@ -1787,7 +2186,12 @@ def main() -> None:
     universe = read_csv(universe_csv)
     evidence_df = read_csv(evidence_csv)
     evidence_df = apply_trial_status_overrides(evidence_df, read_optional_csv(trial_status_overrides_csv))
-    screen = read_csv(screen_csv)
+    screen = read_optional_csv(screen_csv)
+    if screen.empty:
+        LOGGER.warning(
+            "Screen results CSV missing or empty; using market/SEC fallback fields for biotech features: %s",
+            screen_csv,
+        )
     category_overrides = load_company_strategy_overrides(category_overrides_csv)
     universe = universe[universe["scoring_include"].map(as_bool)].copy()
     universe_records = cast(list[dict[str, Any]], cast(Any, universe).to_dict("records"))
@@ -1804,6 +2208,13 @@ def main() -> None:
         if ticker
     }
     evidence_by_ticker = build_evidence_summary_index(evidence_df, pipeline_quality_settings)
+    forward_catalysts_by_ticker = load_forward_catalyst_calendar(
+        forward_catalyst_calendar_csv,
+        asof_date,
+        lookahead_days=forward_catalyst_lookahead_days,
+    )
+    short_interest_by_ticker = load_ticker_feature_csv(short_interest_csv)
+    institutional_ownership_by_ticker = load_ticker_feature_csv(institutional_ownership_csv)
 
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     run_id: int | None = None
@@ -1820,6 +2231,7 @@ def main() -> None:
                 source_priority=market_source_priority,
                 max_staleness_days=int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2)),
             )
+            governance_features = load_latest_governance_features(conn, asof_date)
             LOGGER.info("Biotech feature market source priority: %s", ",".join(market_source_priority))
             sec_filing_summary = load_recent_sec_filing_summary(
                 conn,
@@ -1868,6 +2280,14 @@ def main() -> None:
                         market=market,
                         survival=survival_features.get(company_id),
                         sec_events=sec_event_summary.get(company_id),
+                        indication_success_settings={
+                            **indication_success_settings,
+                            "forward_catalyst_lookahead_days": forward_catalyst_lookahead_days,
+                        },
+                        forward_catalyst=forward_catalysts_by_ticker.get(ticker),
+                        short_interest=short_interest_by_ticker.get(ticker),
+                        institutional_ownership=institutional_ownership_by_ticker.get(ticker),
+                        governance=governance_features.get(company_id),
                     )
                 )
             validate_nonempty_selection(count=len(rows), context="biotech feature build")

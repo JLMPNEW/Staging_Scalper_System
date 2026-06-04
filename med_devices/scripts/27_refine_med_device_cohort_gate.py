@@ -42,6 +42,7 @@ GRID_FIELDS = [
     "objective_score",
     "pass_fail",
     "rejection_reason",
+    "validation_cohort_obs_120d",
     "validation_cohort_unique_tickers_120d",
     "validation_selected_ticker_coverage_120d",
     "validation_improved_selected_ticker_rate_120d",
@@ -344,13 +345,17 @@ def evaluate(
     ]
     metrics_train: dict[int, dict[str, Any]] = {}
     metrics_validation: dict[int, dict[str, Any]] = {}
+    metrics_validation_all: dict[int, dict[str, Any]] = {}
     for horizon in horizons:
         values, tickers = selected_values(train, horizon=horizon)
         metrics_train[horizon] = metrics(values, tickers)
         values, tickers = selected_values(validation, horizon=horizon)
         metrics_validation[horizon] = metrics(values, tickers)
+        values, tickers = selected_values(validation_all, horizon=horizon)
+        metrics_validation_all[horizon] = metrics(values, tickers)
     ref_horizon = max(horizons)
     validation_ref = metrics_validation[ref_horizon]
+    validation_all_ref = metrics_validation_all[ref_horizon]
     train_ref = metrics_train[ref_horizon]
     validation_cohort_tickers = unique_tickers_with_returns(validation_all, horizon=ref_horizon)
     selected_tickers = unique_tickers_with_returns(validation, horizon=ref_horizon)
@@ -359,7 +364,7 @@ def evaluate(
     rejection: list[str] = []
     if int(train_ref["count"]) < min_train_obs:
         rejection.append("insufficient_train_obs")
-    if int(validation_ref["count"]) < min_validation_obs:
+    if int(validation_all_ref["count"]) < min_validation_obs:
         rejection.append("insufficient_validation_obs")
     if int(validation_ref["count"]) < min_selected_validation:
         rejection.append("insufficient_selected_validation")
@@ -400,6 +405,7 @@ def evaluate(
         "objective_score": f"{score_objective(metrics_validation, objective_weights):.6f}",
         "pass_fail": "fail" if rejection else "pass",
         "rejection_reason": ";".join(rejection),
+        "validation_cohort_obs_120d": int(validation_all_ref["count"]),
         "validation_cohort_unique_tickers_120d": len(validation_cohort_tickers),
         "validation_selected_ticker_coverage_120d": f"{selected_coverage:.4f}",
         "validation_improved_selected_ticker_rate_120d": "" if improved_rate is None else f"{improved_rate:.4f}",

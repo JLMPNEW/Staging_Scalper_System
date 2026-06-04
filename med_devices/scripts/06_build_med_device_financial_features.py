@@ -480,8 +480,8 @@ def financial_feature_policy(config: dict[str, Any]) -> FinancialFeaturePolicy:
             DEFAULT_VALUATION_COMPONENT_WEIGHTS,
         ),
         subsector_blend_weight=cfg_float(config, "financial_features.subsector_percentile_blend_weight", 0.60),
-        winsor_low_pct=cfg_float(config, "financial_features.winsor_low_pct", 0.05),
-        winsor_high_pct=cfg_float(config, "financial_features.winsor_high_pct", 0.95),
+        winsor_low_pct=cfg_float(config, "financial_features.winsor_low_pct", 0.10),
+        winsor_high_pct=cfg_float(config, "financial_features.winsor_high_pct", 0.90),
         ttm_sanity_min_annual_ratio=cfg_float(config, "financial_features.ttm_sanity_min_annual_ratio", 0.20),
         ttm_sanity_max_annual_ratio=cfg_float(config, "financial_features.ttm_sanity_max_annual_ratio", 3.00),
     )
@@ -747,14 +747,15 @@ def select_shares(rows: list[FinancialRow], *, allow_weighted_average_fallback: 
 
 def read_csv_flexible(path: Path) -> list[dict[str, str]]:
     encodings = ("utf-8-sig", "utf-8", "cp1252")
+    last_error: UnicodeDecodeError | None = None
     for encoding in encodings:
         try:
             with path.open("r", encoding=encoding, newline="") as handle:
                 return [dict(row) for row in csv.DictReader(handle)]
-        except UnicodeDecodeError:
+        except UnicodeDecodeError as exc:
+            last_error = exc
             continue
-    with path.open("r", encoding=encodings[-1], newline="") as handle:
-        return [dict(row) for row in csv.DictReader(handle)]
+    raise ValueError(f"Could not decode CSV {path}: {last_error}")
 
 
 def load_share_count_overrides(path: Path | None, *, asof: date) -> dict[str, ShareCountOverride]:
@@ -1116,7 +1117,7 @@ def build_raw_feature_row(
     feature.free_cash_flow_ttm = computed_fcf if computed_fcf is not None else ttm_values["free_cash_flow"]
     feature.ttm_method = methods.get("revenue", "unavailable")
     latest_quarter_rd = latest_quarter_flow_value(financial_rows, interim, "research_and_development")
-    if latest_quarter_rd is not None and latest_quarter_rd > 0:
+    if latest_quarter_rd is not None:
         feature.annualized_research_and_development = latest_quarter_rd * 4.0
     else:
         interim_rd = interim.values.get("research_and_development") if interim is not None else None
@@ -1336,8 +1337,8 @@ def percentile_from_pairs(
     values: list[tuple[int, float]],
     *,
     higher_is_better: bool,
-    winsor_low_pct: float = 0.05,
-    winsor_high_pct: float = 0.95,
+    winsor_low_pct: float = 0.10,
+    winsor_high_pct: float = 0.90,
 ) -> dict[int, float]:
     if not values:
         return {}
@@ -1359,8 +1360,8 @@ def percentile_scores(
     *,
     higher_is_better: bool,
     exclude_nonpositive: bool = False,
-    winsor_low_pct: float = 0.05,
-    winsor_high_pct: float = 0.95,
+    winsor_low_pct: float = 0.10,
+    winsor_high_pct: float = 0.90,
 ) -> dict[int, float]:
     values: list[tuple[int, float]] = []
     for idx, row in enumerate(rows):
