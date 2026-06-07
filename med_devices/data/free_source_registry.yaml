@@ -131,6 +131,106 @@ sources:
     status: planned
     notes: "Live validation and fallback market-data source. Use adjusted daily bars where available; record fallback_what_to_show when raw bars are used."
 
+  - source_id: ibkr_borrow
+    stage: stage_1
+    source_name: "Interactive Brokers shortable shares and borrow fee"
+    source_owner: "Interactive Brokers"
+    source_type: broker_api
+    base_url: "127.0.0.1:7497"
+    documentation_url: "https://interactivebrokers.github.io/tws-api/"
+    authentication_required: true
+    free_key_required: false
+    rate_limit_notes: "Requires TWS or IB Gateway, short stock market-data permissions, and pacing-aware snapshot requests."
+    refresh_frequency: daily
+    terms_url: "https://www.interactivebrokers.com/en/general/terms-and-conditions.php"
+    data_owner: Interactive Brokers
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - fact_ibkr_borrow_snapshot
+    canonical_tables:
+      - fact_ibkr_borrow_snapshot
+    feature_stages:
+      - borrow_risk
+    priority: 61
+    status: planned
+    notes: "Shadow-only borrow availability and fee-risk source; not used in production ranking until validated."
+
+  - source_id: finra_regsho_short_volume
+    stage: stage_1
+    source_name: "FINRA Reg SHO daily short volume"
+    source_owner: "Financial Industry Regulatory Authority"
+    source_type: txt
+    base_url: "https://cdn.finra.org/equity/regsho/daily/"
+    documentation_url: "https://www.finra.org/finra-data/browse-catalog/short-sale-volume-data"
+    authentication_required: false
+    free_key_required: false
+    rate_limit_notes: "Download daily files with caching and modest request pacing."
+    refresh_frequency: daily
+    terms_url: "https://www.finra.org/terms-of-use"
+    data_owner: FINRA
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - fact_finra_short_volume
+    canonical_tables:
+      - fact_finra_short_volume
+    feature_stages:
+      - short_interest
+    priority: 62
+    status: planned
+    notes: "Daily short-volume pressure source; paired with exchange short-interest facts for velocity features."
+
+  - source_id: sec_13f_edgar
+    stage: stage_1
+    source_name: "SEC Form 13F institutional holdings"
+    source_owner: "U.S. Securities and Exchange Commission"
+    source_type: csv_or_edgar
+    base_url: "https://www.sec.gov/edgar/search/"
+    documentation_url: "https://www.sec.gov/search-filings/edgar-application-programming-interfaces"
+    authentication_required: false
+    free_key_required: false
+    rate_limit_notes: "Use an identifying User-Agent and cache filings or normalized exports."
+    refresh_frequency: quarterly
+    terms_url: "https://www.sec.gov/os/accessing-edgar-data"
+    data_owner: SEC
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - fact_sec_13f_holding
+    canonical_tables:
+      - fact_sec_13f_holding
+    feature_stages:
+      - institutional_flow
+    priority: 63
+    status: planned
+    notes: "Shadow-only institutional accumulation, breadth, and crowding source."
+
+  - source_id: sec_form4_edgar
+    stage: stage_1
+    source_name: "SEC Form 4 insider transactions"
+    source_owner: "U.S. Securities and Exchange Commission"
+    source_type: csv_or_edgar
+    base_url: "https://www.sec.gov/edgar/search/"
+    documentation_url: "https://www.sec.gov/search-filings/edgar-application-programming-interfaces"
+    authentication_required: false
+    free_key_required: false
+    rate_limit_notes: "Use an identifying User-Agent and cache filings or normalized exports."
+    refresh_frequency: daily
+    terms_url: "https://www.sec.gov/os/accessing-edgar-data"
+    data_owner: SEC
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - fact_sec_form4_transaction
+    canonical_tables:
+      - fact_sec_form4_transaction
+    feature_stages:
+      - insider_activity
+    priority: 64
+    status: planned
+    notes: "Shadow-only insider open-market buy/sell and cluster activity source."
+
   - source_id: yahoo_finance_backup
     stage: stage_1
     source_name: "Yahoo Finance adjusted market data"

@@ -24,6 +24,8 @@ OUTPUT_FIELDS = [
     "parameter_set_id",
     "objective_score",
     "pass_fail",
+    "selected_row_type",
+    "production_candidate",
     "rejection_reason",
     "raw_score_min",
     "cohort_percentile_min",
@@ -62,6 +64,30 @@ def read_csv(path: Path) -> list[dict[str, str]]:
         return [dict(row) for row in csv.DictReader(handle)]
 
 
+def parse_csv_set(raw: object) -> set[str]:
+    return {item.strip() for item in str(raw or "").split(",") if item.strip()}
+
+
+def parse_int_list(raw: object, default: str) -> list[int]:
+    text = str(raw if raw is not None else default)
+    return [int(item.strip()) for item in text.split(",") if item.strip()]
+
+
+def to_float(raw: object) -> float | None:
+    try:
+        text = str(raw).strip()
+        if not text:
+            return None
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def to_int(raw: object) -> int:
+    value = to_float(raw)
+    return int(value) if value is not None else 0
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -85,7 +111,65 @@ def best_components(ic_rows: list[dict[str, str]], cohort: str) -> tuple[str, st
     return ";".join(positive[:5]), ";".join(weak_or_negative[:5])
 
 
-def choose_recommendations(grid_rows: list[dict[str, str]], ic_rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+def production_guardrail_reasons(
+    selected: dict[str, str],
+    *,
+    cohort: str,
+    min_selected_validation: int,
+    min_unique_tickers: int,
+    concentration_override_cohorts: set[str],
+    min_validation_lcb_excess: float,
+    required_positive_lcb_horizons: list[int],
+) -> tuple[list[str], bool]:
+    reasons: list[str] = []
+    validation_count = to_int(selected.get("validation_count_120d"))
+    unique_tickers = to_int(selected.get("validation_unique_tickers_120d"))
+    concentration_override = cohort in concentration_override_cohorts
+    concentration_override_used = False
+    if validation_count < min_selected_validation:
+        reasons.append("insufficient_selected_validation_for_production")
+    if unique_tickers < min_unique_tickers:
+        if concentration_override:
+            concentration_override_used = True
+        else:
+            reasons.append("insufficient_unique_tickers_for_production")
+    for horizon in required_positive_lcb_horizons:
+        lcb = to_float(selected.get(f"validation_lcb_{horizon}d"))
+        if lcb is None or lcb < min_validation_lcb_excess:
+            reasons.append(f"{horizon}d_lcb_below_min_for_production")
+    return list(dict.fromkeys(reasons)), concentration_override_used
+
+
+def choose_recommendations(
+    grid_rows: list[dict[str, str]],
+    ic_rows: list[dict[str, str]],
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    min_selected_validation_for_production = int(
+        cfg_get(
+            config,
+            "calibration.min_selected_validation_for_production",
+            cfg_get(config, "calibration.min_selected_validation", 20),
+        )
+    )
+    min_unique_tickers_for_production = int(
+        cfg_get(
+            config,
+            "calibration.min_unique_tickers_for_production",
+            cfg_get(config, "calibration.min_unique_tickers", 5),
+        )
+    )
+    concentration_override_cohorts = parse_csv_set(
+        cfg_get(config, "calibration.production_candidate_override_cohorts", "")
+    )
+    production_seed_cohorts = parse_csv_set(
+        cfg_get(config, "calibration.calibrated_baseline.production_seed_cohorts", "")
+    )
+    min_validation_lcb_excess = float(cfg_get(config, "calibration.min_validation_lcb_excess", 0.0))
+    required_positive_lcb_horizons = parse_int_list(
+        cfg_get(config, "calibration.require_positive_lcb_horizons", "120"),
+        "120",
+    )
     cohorts = sorted({str(row.get("calibration_cohort") or "") for row in grid_rows if str(row.get("calibration_cohort") or "")})
     out: list[dict[str, Any]] = []
     for cohort in cohorts:
@@ -94,11 +178,43 @@ def choose_recommendations(grid_rows: list[dict[str, str]], ic_rows: list[dict[s
         selected = passing[0] if passing else (rows[0] if rows else {})
         positive, weak = best_components(ic_rows, cohort)
         if passing:
-            action = "review_for_manual_promotion"
-            notes = "Gate set passed validation constraints; review sample names before production config change."
+            guardrail_reasons, concentration_override_used = production_guardrail_reasons(
+                selected,
+                cohort=cohort,
+                min_selected_validation=min_selected_validation_for_production,
+                min_unique_tickers=min_unique_tickers_for_production,
+                concentration_override_cohorts=concentration_override_cohorts,
+                min_validation_lcb_excess=min_validation_lcb_excess,
+                required_positive_lcb_horizons=required_positive_lcb_horizons,
+            )
+            if guardrail_reasons:
+                action = "review_for_manual_promotion"
+                selected_row_type = "passed_validation_watchlist"
+                production_candidate = 0
+                notes = (
+                    "Gate set passed diagnostic constraints but did not clear production support guardrails: "
+                    + ";".join(guardrail_reasons)
+                )
+            elif production_seed_cohorts and cohort not in production_seed_cohorts:
+                action = "review_for_manual_promotion"
+                selected_row_type = "passed_validation_watchlist"
+                production_candidate = 0
+                notes = "Gate set passed production guardrails but is not in the explicit production seed cohort list."
+            else:
+                action = "promote_to_calibrated_baseline"
+                selected_row_type = "passed_validation_production_candidate"
+                production_candidate = 1
+                notes = "Gate set passed validation and production support guardrails."
+                if concentration_override_used:
+                    notes += " Manual concentration override accepted for this cohort."
         else:
             action = "do_not_promote_collect_more_data"
-            notes = "No gate set passed constraints; use current global gates and continue data collection."
+            selected_row_type = "best_failed_diagnostic"
+            production_candidate = 0
+            notes = (
+                "No gate set passed constraints; shown parameter set is the best failed diagnostic row, "
+                "not a calibrated production candidate."
+            )
         out.append(
             {
                 "calibration_cohort": cohort,
@@ -106,6 +222,8 @@ def choose_recommendations(grid_rows: list[dict[str, str]], ic_rows: list[dict[s
                 "parameter_set_id": selected.get("parameter_set_id", ""),
                 "objective_score": selected.get("objective_score", ""),
                 "pass_fail": selected.get("pass_fail", ""),
+                "selected_row_type": selected_row_type,
+                "production_candidate": production_candidate,
                 "rejection_reason": selected.get("rejection_reason", ""),
                 "raw_score_min": selected.get("raw_score_min", ""),
                 "cohort_percentile_min": selected.get("cohort_percentile_min", ""),
@@ -145,7 +263,10 @@ def write_yaml_fragment(path: Path, recommendations: list[dict[str, Any]]) -> No
             [
                 f"    {cohort}:",
                 f"      recommended_action: {row['recommended_action']}",
+                f"      selected_row_type: {row['selected_row_type']}",
+                f"      production_candidate: {str(bool(row['production_candidate'])).lower()}",
                 f"      parameter_set_id: {row['parameter_set_id']}",
+                f"      note: {row['notes']}",
                 "      gates:",
                 f"        raw_composite_min: {row['raw_score_min']}",
                 f"        cohort_percentile_min: {row['cohort_percentile_min']}",
@@ -186,7 +307,7 @@ def main() -> None:
         if args.output_yaml
         else resolve_path(cfg_get(config, "calibration.recommended_config_yaml"), base_dir=base_dir)
     )
-    recommendations = choose_recommendations(read_csv(grid_csv), read_csv(ic_csv))
+    recommendations = choose_recommendations(read_csv(grid_csv), read_csv(ic_csv), config)
     write_csv(output_csv, recommendations)
     write_yaml_fragment(output_yaml, recommendations)
     print(f"recommendations_csv={output_csv} rows={len(recommendations)}")

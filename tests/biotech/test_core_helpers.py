@@ -82,8 +82,8 @@ def test_taxonomy_commercial_anchor_wins_primary_over_pipeline_overlay() -> None
         diagnostics={},
     )
 
-    assert classification.primary_cohort == "commercial_profitable_growth"
-    assert classification.secondary_cohort == "late_clinical_pivotal"
+    assert classification.primary_cohort == "commercial_profitable_quality_or_mature"
+    assert classification.secondary_cohort == "late_clinical_pivotal_or_registrational"
     assert "commercial_with_major_pipeline_catalyst" in classification.overlays
     assert "late_clinical_overlay" in classification.overlays
     assert classification.confidence <= 88.0
@@ -113,8 +113,8 @@ def test_taxonomy_forward_profitable_commercial_anchor_beats_late_pipeline() -> 
         diagnostics={},
     )
 
-    assert classification.primary_cohort == "commercial_unprofitable_growth"
-    assert classification.secondary_cohort == "late_clinical_pivotal"
+    assert classification.primary_cohort == "commercial_turnaround_or_unprofitable_growth"
+    assert classification.secondary_cohort == "late_clinical_pivotal_or_registrational"
     assert "late_clinical_overlay" in classification.overlays
     assert classification.evidence["pipeline_clearly_dominates"] is False
 
@@ -136,7 +136,7 @@ def test_taxonomy_medtech_device_is_investible_primary_with_pipeline_overlay_cap
         diagnostics={},
     )
 
-    assert classification.primary_cohort == "medtech_growth_or_device"
+    assert classification.primary_cohort == "commercial_profitable_quality_or_mature"
     assert "medtech_device_strategy_category" in classification.reason_codes
     assert classification.confidence <= 86.0
 

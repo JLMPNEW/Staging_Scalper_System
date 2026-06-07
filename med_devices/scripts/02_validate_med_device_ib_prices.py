@@ -305,7 +305,13 @@ def resolve_paths(config: dict[str, Any], config_path: Path, args: argparse.Name
 
 
 def ib_end_datetime(asof_date: date, policy: IbPolicy) -> str:
-    return f"{asof_date.strftime('%Y%m%d')} 23:59:59 {policy.market_timezone}"
+    ib_timezone = {
+        "America/New_York": "US/Eastern",
+        "America/Chicago": "US/Central",
+        "America/Denver": "US/Mountain",
+        "America/Los_Angeles": "US/Pacific",
+    }.get(policy.market_timezone, policy.market_timezone)
+    return f"{asof_date.strftime('%Y%m%d')} 23:59:59 {ib_timezone}"
 
 
 def request_bars(
@@ -334,8 +340,10 @@ def request_bars(
 
 def row_base(row: dict[str, str], decision: AsofDecision, policy: IbPolicy) -> dict[str, Any]:
     return {
-        "ticker": normalize_ticker(row.get("Name") or row.get("Ticker")),
-        "company_name": str(row.get("Company_Name") or row.get("CompanyName") or "").strip(),
+        "ticker": normalize_ticker(row.get("Name") or row.get("Ticker") or row.get("ticker")),
+        "company_name": str(
+            row.get("Company_Name") or row.get("CompanyName") or row.get("company_name") or ""
+        ).strip(),
         "cik": normalize_cik(row.get("CIK")),
         "source_id": policy.source_id or DEFAULT_SOURCE,
         "price_adjustment": "",
@@ -556,7 +564,7 @@ def selected_rows(rows: list[dict[str, str]], args: argparse.Namespace) -> list[
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     for row in rows:
-        ticker = normalize_ticker(row.get("Name") or row.get("Ticker"))
+        ticker = normalize_ticker(row.get("Name") or row.get("Ticker") or row.get("ticker"))
         if not ticker or ticker in seen:
             continue
         if ticker_filter and ticker not in ticker_filter:

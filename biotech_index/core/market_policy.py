@@ -90,12 +90,12 @@ def select_latest_rows_by_source_priority(
         row_asof = row_date(row_dict.get("asof_date"))
         if row_asof is None or row_asof > asof_date:
             continue
-        age_days = (asof_date - row_asof).days if row_asof is not None else 999_999
+        age_days = (asof_date - row_asof).days
         stale_rank = 1 if age_days > max_age else 0
         source = str(row_dict.get("source") or "").strip().lower()
         priority_rank = priority.get(source, 999)
         # Negative ordinal makes a newer row sort before an older row once source/staleness are equal.
-        recency_rank = -(row_asof.toordinal() if row_asof is not None else 0)
+        recency_rank = -row_asof.toordinal()
         candidates.append(((company_id, stale_rank, priority_rank, recency_rank), company_id, row_dict))
     candidates.sort(key=lambda item: item[0])
     selected: dict[int, dict[str, Any]] = {}

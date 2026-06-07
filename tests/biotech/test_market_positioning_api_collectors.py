@@ -8,6 +8,7 @@ from datetime import date
 from market_positioning import api_collectors
 from market_positioning.api_collectors import (
     finra_short_interest_records,
+    normalize_ibkr_fee_rate,
     sync_finra_equity_short_interest_files,
     sync_sec_13f_data_sets,
 )
@@ -19,6 +20,21 @@ def write_csv(path, fieldnames: list[str], rows: list[dict[str, object]]) -> Non
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def test_normalize_ibkr_fee_rate_empty_unit_defaults_to_decimal() -> None:
+    assert normalize_ibkr_fee_rate(0.003, unit="") == 0.003
+    assert normalize_ibkr_fee_rate(0.003, unit="decimal") == 0.003
+    assert normalize_ibkr_fee_rate(0.3, unit="percent") == 0.003
+
+
+def test_normalize_ibkr_fee_rate_rejects_unknown_unit() -> None:
+    try:
+        normalize_ibkr_fee_rate(0.003, unit="basis_points")
+    except ValueError as exc:
+        assert "Unsupported IBKR fee-rate unit" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for unsupported IBKR fee-rate unit")
 
 
 def test_finra_short_interest_records_maps_current_short_position(monkeypatch) -> None:

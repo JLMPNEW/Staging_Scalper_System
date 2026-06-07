@@ -21,6 +21,7 @@ from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_COMPONENTS = (
+    "ic_tilted_composite_score",
     "fundamental_quality_score",
     "durable_growth_score",
     "durable_growth_score_legacy",
@@ -37,6 +38,23 @@ DEFAULT_COMPONENTS = (
     "technical_liquidity_score",
     "technical_alpha_score",
     "technical_pullback_score",
+    "borrow_availability_score",
+    "borrow_fee_score",
+    "borrow_squeeze_risk_score",
+    "borrow_pressure_score",
+    "short_interest_score",
+    "short_pressure_score",
+    "short_squeeze_score",
+    "short_volume_score",
+    "short_interest_velocity_score",
+    "days_to_cover_score",
+    "institutional_accumulation_score",
+    "institutional_crowding_score",
+    "institutional_breadth_score",
+    "insider_net_buy_score",
+    "insider_cluster_buy_score",
+    "insider_selling_pressure_score",
+    "insider_activity_score",
     "sentiment_catalyst_score",
     "value_trap_score",
 )

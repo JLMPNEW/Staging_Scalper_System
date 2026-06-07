@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 from biotech_index.core.constants import GOING_CONCERN_HARD_STATUSES, GOING_CONCERN_SOFT_STATUSES
 
-MODEL_VERSION = "biotech_cohort_v3_commercial_driver_first"
+MODEL_VERSION = "biotech_cohort_v4_official_five_bucket"
 
 SERVICES_DIAGNOSTICS_TOOLS_CATEGORIES = frozenset(
     {
@@ -96,7 +96,7 @@ def apply_manual_taxonomy_override(
     overlays = sorted(set(classification.overlays + (overlays_add or [])))
     data_quality = "review" if final_confidence < 75.0 else "medium" if final_confidence < 85.0 else "high"
     calibration_weight = 1.0 if final_confidence >= 85.0 else 0.5 if final_confidence >= 75.0 else 0.0
-    taxonomy_review_required = final_confidence < 75.0 or final_primary == "unclassified_review"
+    taxonomy_review_required = final_confidence < 75.0 or final_primary == "unmapped_calibration_cohort"
     evidence = dict(classification.evidence)
     evidence["manual_override"] = {
         "primary_cohort": primary_cohort or "",
@@ -269,27 +269,38 @@ def classify_biotech_cohort(
         else 0.0
     )
 
+    commercial_quality_score = max(
+        commercial_profit_growth_score if profitable and commercial_profit_growth_score >= 55.0 else 0.0,
+        commercial_profit_mature_score if profitable and commercial_profit_mature_score >= 55.0 else 0.0,
+        services_tools_score,
+        medtech_device_score,
+        non_therapeutic_score,
+    )
+    commercial_turnaround_score = max(
+        commercial_unprof_growth_score if commercial_stage and not profitable else 0.0,
+        commercial_fragile_score if commercial_stage and commercial_fragility >= 45.0 else 0.0,
+    )
+    late_registrational_score = late_score
+    platform_partnered_score = max(
+        partnered_score if partnered_score >= 55.0 else 0.0,
+        platform_score if late_score < 55.0 and phase2_score < 55.0 else 0.0,
+    )
+    early_speculative_score = max(
+        phase2_score if late_score < 55.0 else 0.0,
+        early_score if late_score < 55.0 and phase2_score < 55.0 else 0.0,
+        weak_pipeline_score,
+    )
     candidates = {
-        "excluded_non_therapeutic_healthcare": non_therapeutic_score,
-        "healthcare_services_diagnostics_tools": services_tools_score,
-        "medtech_growth_or_device": medtech_device_score,
-        "commercial_profitable_growth": commercial_profit_growth_score if profitable and commercial_profit_growth_score >= 55.0 else 0.0,
-        "commercial_profitable_mature": commercial_profit_mature_score if profitable and commercial_profit_mature_score >= 55.0 else 0.0,
-        "commercial_unprofitable_growth": commercial_unprof_growth_score if commercial_stage and not profitable else 0.0,
-        "commercial_fragile_or_declining": commercial_fragile_score if commercial_stage and commercial_fragility >= 45.0 else 0.0,
-        "therapeutic_royalty_or_partnered_economics": partnered_score if partnered_score >= 55.0 else 0.0,
-        "late_clinical_pivotal": late_score,
-        "mid_clinical_phase2_poc": phase2_score if late_score < 55.0 else 0.0,
-        "early_clinical": early_score if late_score < 55.0 and phase2_score < 55.0 else 0.0,
-        "platform_pipeline": platform_score if late_score < 55.0 and phase2_score < 55.0 else 0.0,
-        "weak_or_historical_pipeline": weak_pipeline_score,
+        "commercial_profitable_quality_or_mature": commercial_quality_score,
+        "commercial_turnaround_or_unprofitable_growth": commercial_turnaround_score,
+        "late_clinical_pivotal_or_registrational": late_registrational_score,
+        "platform_partnered_modality_pipeline": platform_partnered_score,
+        "early_clinical_speculative_or_single_asset_pipeline": early_speculative_score,
     }
     raw_candidates = dict(candidates)
     commercial_candidate_keys = (
-        "commercial_profitable_growth",
-        "commercial_profitable_mature",
-        "commercial_unprofitable_growth",
-        "commercial_fragile_or_declining",
+        "commercial_profitable_quality_or_mature",
+        "commercial_turnaround_or_unprofitable_growth",
     )
     best_commercial_key, best_commercial_score = max(
         ((key, candidates.get(key, 0.0)) for key in commercial_candidate_keys),
@@ -321,10 +332,12 @@ def classify_biotech_cohort(
         # Commercial companies can still carry late-clinical overlays, but a
         # catalyst should not automatically outrank a real commercial anchor.
         cap = max(0.0, best_commercial_score - 1.0)
-        candidates["late_clinical_pivotal"] = min(candidates["late_clinical_pivotal"], cap)
-        candidates["mid_clinical_phase2_poc"] = min(candidates["mid_clinical_phase2_poc"], cap)
-        candidates["therapeutic_royalty_or_partnered_economics"] = min(
-            candidates["therapeutic_royalty_or_partnered_economics"],
+        candidates["late_clinical_pivotal_or_registrational"] = min(
+            candidates["late_clinical_pivotal_or_registrational"],
+            cap,
+        )
+        candidates["platform_partnered_modality_pipeline"] = min(
+            candidates["platform_partnered_modality_pipeline"],
             max(0.0, best_commercial_score - 2.0),
         )
 
@@ -332,7 +345,7 @@ def classify_biotech_cohort(
     primary, top_score = ordered[0]
     secondary, second_score = ordered[1] if len(ordered) > 1 else ("", 0.0)
     if top_score < 55.0:
-        primary, top_score = "unclassified_review", 50.0
+        primary, top_score = "unmapped_calibration_cohort", 50.0
     margin = max(0.0, top_score - second_score)
 
     reason_codes: list[str] = []
@@ -384,7 +397,7 @@ def classify_biotech_cohort(
         overlays.append("late_clinical_overlay")
     if (late_score >= 55.0 or phase2_score >= 55.0) and not commercial_stage:
         overlays.append("pipeline_catalyst_dominant")
-    if verified_active <= 1.0 and not commercial_stage and primary not in {"weak_or_historical_pipeline", "unclassified_review"}:
+    if verified_active <= 1.0 and not commercial_stage and primary != "unmapped_calibration_cohort":
         overlays.append("single_asset_risk")
     if pdufa_count > 0 or (latest_event_type == "pdufa_date" and math.isfinite(latest_event_days) and latest_event_days <= 180):
         overlays.append("pdufa_within_180d")
@@ -416,13 +429,13 @@ def classify_biotech_cohort(
     confidence = _clamp(top_score + margin * 0.15 + data_quality_bonus - conflict_penalty)
     if commercial_anchor_is_dominant and has_pipeline_catalyst:
         confidence = min(confidence, 88.0)
-    if primary in {"healthcare_services_diagnostics_tools", "medtech_growth_or_device"} and has_pipeline_catalyst:
+    if primary == "commercial_profitable_quality_or_mature" and has_pipeline_catalyst:
         confidence = min(confidence, 86.0)
-    if primary == "unclassified_review":
+    if primary == "unmapped_calibration_cohort":
         confidence = min(confidence, 60.0)
     data_quality = "review" if confidence < 75.0 else "medium" if confidence < 85.0 else "high"
     calibration_weight = 1.0 if confidence >= 85.0 else 0.5 if confidence >= 75.0 else 0.0
-    taxonomy_review_required = confidence < 75.0 or primary == "unclassified_review"
+    taxonomy_review_required = confidence < 75.0 or primary == "unmapped_calibration_cohort"
 
     evidence = {
         "cohort_scores": {key: round(value, 4) for key, value in sorted(candidates.items())},

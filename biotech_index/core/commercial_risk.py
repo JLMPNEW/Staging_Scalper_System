@@ -40,16 +40,17 @@ def _decline_score(value: float | None, *, moderate: float, severe: float) -> fl
         return 0.0
     if value <= severe:
         return 100.0
-    denominator = max(1e-9, moderate - severe)
-    return _clamp(100.0 * (moderate - value) / denominator)
+    return _clamp(100.0 * (moderate - value) / (moderate - severe))
 
 
 def _scale_above(value: float | None, *, threshold: float, severe: float) -> float:
+    if severe <= threshold:
+        raise ValueError(f"Scale-above thresholds must satisfy severe > threshold, got {threshold=} {severe=}")
     if value is None or value <= threshold:
         return 0.0
     if value >= severe:
         return 100.0
-    return _clamp(100.0 * (value - threshold) / max(1e-9, severe - threshold))
+    return _clamp(100.0 * (value - threshold) / (severe - threshold))
 
 
 def commercial_risk_overlay_fields(

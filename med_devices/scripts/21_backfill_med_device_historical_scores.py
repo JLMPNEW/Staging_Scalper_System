@@ -38,6 +38,10 @@ STAGE_SCRIPTS = {
     "fda": "10_build_med_device_fda_features.py",
     "reimbursement": "11_build_med_device_reimbursement_features.py",
     "technical": "12_build_med_device_technical_features.py",
+    "borrow": "54_build_med_device_borrow_features.py",
+    "short_interest": "56_build_med_device_short_interest_features.py",
+    "institutional_flow": "58_build_med_device_institutional_flow_features.py",
+    "insider_activity": "60_build_med_device_insider_activity_features.py",
     "scores": "13_build_med_device_daily_scores.py",
     "review_pack": "16_publish_med_device_score_review_pack.py",
 }

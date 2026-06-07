@@ -21,14 +21,20 @@ from market_positioning.api_collectors import (  # noqa: E402
     DEFAULT_SEC_13F_DATASETS_URL,
     DEFAULT_USER_AGENT,
     sync_finra_equity_short_interest_files,
+    sync_ibkr_borrow_availability,
     sync_sec_13f_data_sets,
 )
 from market_positioning.core import (  # noqa: E402
     DEFAULT_DB_PATH,
     DEFAULT_HISTORY_START_DATE,
+    backfill_short_interest_float_shares,
     connect,
     export_positioning_features,
+    ingest_float_shares_csv,
+    ingest_company_fact_share_proxies,
+    ingest_sec_public_float_proxies,
     init_db,
+    load_tickers,
     parse_history_start,
     parse_date,
 )
@@ -46,6 +52,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-download", action="store_true", help="Only initialize DB and export already-loaded features.")
     parser.add_argument("--finra-only", action="store_true", help="Only run FINRA short-interest refresh and export.")
     parser.add_argument("--sec13f-only", action="store_true", help="Only run SEC 13F refresh and export.")
+    parser.add_argument("--ibkr-only", action="store_true", help="Only run IBKR borrow availability refresh and export.")
+    parser.add_argument("--public-float-only", action="store_true", help="Only run SEC public-float proxy extraction and export.")
+    parser.add_argument(
+        "--ibkr-borrow-backfill",
+        action="store_true",
+        help="Use the configured long IBKR FEE_RATE backfill duration instead of the daily initial-load duration.",
+    )
+    parser.add_argument("--skip-ibkr", action="store_true", help="Skip IBKR borrow availability even when enabled in config.")
     return parser.parse_args()
 
 
@@ -121,7 +135,94 @@ def main() -> None:
     with connect(db_path) as conn:
         init_db(conn)
         if not args.skip_download:
-            if not args.sec13f_only and as_bool(cfg_get(config, "market_positioning.short_interest.enabled", True), True):
+            if (
+                not args.sec13f_only
+                and not args.ibkr_only
+                and as_bool(
+                    cfg_get(config, "market_positioning.float_shares.sec_public_float_proxy.enabled", True),
+                    True,
+                )
+            ):
+                try:
+                    biotech_db_path = resolve_path(
+                        cfg_get(config, "paths.database_path"),
+                        base_dir=base_dir,
+                    )
+                    rows = ingest_sec_public_float_proxies(
+                        conn,
+                        biotech_db_path,
+                        history_start_date=history_start,
+                        end_date=asof,
+                        tickers=load_tickers(tickers_csv),
+                        max_filings_per_ticker=to_int(
+                            cfg_get(config, "market_positioning.float_shares.sec_public_float_proxy.max_filings_per_ticker", 9),
+                            9,
+                        ),
+                    )
+                    enriched = backfill_short_interest_float_shares(conn)
+                    results.append(f"sec_public_float_proxy rows={rows} short_interest_enriched={enriched}")
+                    if as_bool(
+                        cfg_get(config, "market_positioning.float_shares.company_fact_shares_proxy.enabled", True),
+                        True,
+                    ):
+                        share_proxy_rows = ingest_company_fact_share_proxies(
+                            conn,
+                            biotech_db_path=biotech_db_path,
+                            history_start_date=history_start,
+                            end_date=asof,
+                            tickers=load_tickers(tickers_csv),
+                        )
+                        enriched = backfill_short_interest_float_shares(conn)
+                        results.append(
+                            f"company_fact_share_proxy rows={share_proxy_rows} short_interest_enriched={enriched}"
+                        )
+                except Exception as exc:
+                    if fail_on_error and as_bool(
+                        cfg_get(config, "market_positioning.float_shares.sec_public_float_proxy.required", False),
+                        False,
+                    ):
+                        raise
+                    LOGGER.exception("SEC public-float proxy update failed but required=false: %s", exc)
+                    results.append(f"sec_public_float_proxy failed={type(exc).__name__}")
+            if (
+                not args.public_float_only
+                and
+                not args.finra_only
+                and
+                not args.sec13f_only
+                and not args.ibkr_only
+                and as_bool(cfg_get(config, "market_positioning.float_shares.enabled", False), False)
+            ):
+                try:
+                    csv_path = config_path_or_default(
+                        config,
+                        "market_positioning.float_shares.csv_path",
+                        base_dir=base_dir,
+                    )
+                    if csv_path is None or not csv_path.exists():
+                        raise FileNotFoundError(
+                            f"Configured market_positioning.float_shares.csv_path is missing: {csv_path}"
+                        )
+                    rows = ingest_float_shares_csv(
+                        conn,
+                        csv_path,
+                        history_start_date=history_start,
+                        source=str(cfg_get(config, "market_positioning.float_shares.source", "csv")),
+                    )
+                    enriched = backfill_short_interest_float_shares(conn)
+                    results.append(f"float_shares rows={rows} short_interest_enriched={enriched}")
+                except Exception as exc:
+                    if fail_on_error and as_bool(cfg_get(config, "market_positioning.float_shares.required", False), False):
+                        raise
+                    LOGGER.exception("Float-shares update failed but required=false: %s", exc)
+                    results.append(f"float_shares failed={type(exc).__name__}")
+            if (
+                not args.public_float_only
+                and
+                not args.sec13f_only
+                and not args.ibkr_only
+                and as_bool(cfg_get(config, "market_positioning.short_interest.enabled", True), True)
+            ):
                 try:
                     cache_dir = resolve_path(
                         cfg_get(config, "market_positioning.short_interest.cache_dir", "../output/market_positioning_cache/finra_short_interest"),
@@ -152,7 +253,13 @@ def main() -> None:
                         raise
                     LOGGER.exception("FINRA short-interest update failed but fail_on_error=false: %s", exc)
                     results.append(f"short_interest failed={type(exc).__name__}")
-            if not args.finra_only and as_bool(cfg_get(config, "market_positioning.institutional_13f.enabled", True), True):
+            if (
+                not args.public_float_only
+                and
+                not args.finra_only
+                and not args.ibkr_only
+                and as_bool(cfg_get(config, "market_positioning.institutional_13f.enabled", True), True)
+            ):
                 try:
                     cache_dir = resolve_path(
                         cfg_get(config, "market_positioning.institutional_13f.cache_dir", "../output/market_positioning_cache/sec_13f"),
@@ -187,14 +294,88 @@ def main() -> None:
                         raise
                     LOGGER.exception("SEC 13F update failed but fail_on_error=false: %s", exc)
                     results.append(f"institutional_13f failed={type(exc).__name__}")
-        short_path, institutional_path, short_count, institutional_count = export_positioning_features(
+            if (
+                not args.public_float_only
+                and
+                not args.finra_only
+                and not args.sec13f_only
+                and not args.skip_ibkr
+                and as_bool(cfg_get(config, "market_positioning.ibkr_borrow.enabled", False), False)
+            ):
+                try:
+                    fee_rate_initial_duration = str(
+                        cfg_get(
+                            config,
+                            "market_positioning.ibkr_borrow.fee_rate_backfill_duration"
+                            if args.ibkr_borrow_backfill
+                            else "market_positioning.ibkr_borrow.fee_rate_initial_duration",
+                            "7 Y" if args.ibkr_borrow_backfill else "2 Y",
+                        )
+                    )
+                    max_tickers_key = (
+                        "market_positioning.ibkr_borrow.backfill_max_tickers_per_run"
+                        if args.ibkr_borrow_backfill
+                        else "market_positioning.ibkr_borrow.max_tickers_per_run"
+                    )
+                    result = sync_ibkr_borrow_availability(
+                        conn,
+                        tickers_csv=tickers_csv,
+                        history_start_date=history_start,
+                        end_date=asof,
+                        host=str(cfg_get(config, "market_positioning.ibkr_borrow.host", "127.0.0.1")),
+                        port=to_int(cfg_get(config, "market_positioning.ibkr_borrow.port", 7497), 7497),
+                        client_id=to_int(cfg_get(config, "market_positioning.ibkr_borrow.client_id", 7822), 7822),
+                        market_data_type=to_int(cfg_get(config, "market_positioning.ibkr_borrow.market_data_type", 1), 1),
+                        fee_rate_unit=str(cfg_get(config, "market_positioning.ibkr_borrow.fee_rate_unit", "decimal")),
+                        fee_rate_initial_duration=fee_rate_initial_duration,
+                        fee_rate_incremental_duration=str(
+                            cfg_get(config, "market_positioning.ibkr_borrow.fee_rate_incremental_duration", "45 D")
+                        ),
+                        snapshot_wait_sec=to_float(
+                            cfg_get(config, "market_positioning.ibkr_borrow.snapshot_wait_sec", 4.0),
+                            4.0,
+                        ),
+                        shortable_snapshot=as_bool(
+                            cfg_get(config, "market_positioning.ibkr_borrow.shortable_snapshot", True),
+                            True,
+                        ),
+                        shortable_coverage_warn_min=to_float(
+                            cfg_get(config, "market_positioning.ibkr_borrow.shortable_coverage_warn_min", 50.0),
+                            50.0,
+                        ),
+                        batch_size=to_int(cfg_get(config, "market_positioning.ibkr_borrow.batch_size", 50), 50),
+                        sleep_sec=to_float(cfg_get(config, "market_positioning.ibkr_borrow.sleep_sec", 0.2), 0.2),
+                        max_tickers=to_int(cfg_get(config, max_tickers_key, 0), 0),
+                    )
+                    results.append(f"{result.feed_name} rows={result.rows}")
+                except Exception as exc:
+                    if fail_on_error:
+                        raise
+                    LOGGER.exception("IBKR borrow availability update failed but fail_on_error=false: %s", exc)
+                    results.append(f"ibkr_borrow_availability failed={type(exc).__name__}")
+        enriched = backfill_short_interest_float_shares(conn)
+        if enriched:
+            results.append(f"short_interest_float_backfill rows={enriched}")
+        short_path, institutional_path, borrow_path, short_count, institutional_count, borrow_count = export_positioning_features(
             conn,
             asof_date=asof,
             output_dir=output_dir,
             tickers_csv=tickers_csv,
+            max_borrow_fee_staleness_days=to_int(
+                cfg_get(config, "market_positioning.ibkr_borrow.max_fee_staleness_days", 10),
+                10,
+            ),
+            max_borrow_snapshot_staleness_days=to_int(
+                cfg_get(config, "market_positioning.ibkr_borrow.max_snapshot_staleness_days", 7),
+                7,
+            ),
+            hard_to_borrow_shares=to_float(
+                cfg_get(config, "market_positioning.ibkr_borrow.hard_to_borrow_shares", 50_000.0),
+                50_000.0,
+            ),
         )
     LOGGER.info(
-        "Market positioning update complete: asof=%s db=%s %s exports short=%s rows=%d institutional=%s rows=%d",
+        "Market positioning update complete: asof=%s db=%s %s exports short=%s rows=%d institutional=%s rows=%d borrow=%s rows=%d",
         asof.isoformat(),
         db_path,
         "; ".join(results) if results else "download=skipped",
@@ -202,6 +383,8 @@ def main() -> None:
         short_count,
         institutional_path,
         institutional_count,
+        borrow_path,
+        borrow_count,
     )
 
 

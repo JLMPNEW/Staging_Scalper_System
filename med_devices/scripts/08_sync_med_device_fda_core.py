@@ -960,7 +960,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=FIELDNAMES, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
-        writer.writerows([{field: row.get(field, "") for field in FIELDNAMES} for row in rows])
+        writer.writerows([{column: row.get(column, "") for column in FIELDNAMES} for row in rows])
 
 
 def process_fda_page(

@@ -1,0 +1,60 @@
+sec_form4_orchestrator:
+  sec:
+    config_path: "fundamental_data/config_sec_fundamentals.yaml"
+    pipeline_script: "fundamental_data/run_sec_fundamentals_pipeline.py"
+    snapshot_history_script: "fundamental_data/run_sec_fundamental_snapshot_history.py"
+
+  form4:
+    config_path: "SEC_FORM4_Runner/config_sec_form4_staging.yaml"
+    update_script: "helper_scripts/update_sec_form4_daily.py"
+    snapshot_history_script: "helper_scripts/run_sec_form4_snapshot_history.py"
+    quarterly_ingest_script: "helper_scripts/ingest_sec_insider_quarterly.py"
+    snapshot_table: "stock_signal_snapshot_tier1"
+    refresh_legacy_buy_table: true
+    latest_filing_date_candidates:
+      - table: "sec_ownership_submission"
+        column: "filing_date"
+      - table: "sec_form4_daily_ingest_log"
+        column: "filing_date"
+
+  run:
+    target: "form4"
+    profile: "daily"
+    as_of_date: null
+    business_day_adjust_as_of_date: true
+    incremental_from_latest_filing: true
+    dry_run: false
+    step_timeout_seconds: 14400
+    report_output_path: "../output/sec_form4_orchestrator_report_staging.json"
+
+  profiles:
+    daily:
+      sec_fetch_mode: "daily"
+      form4_fetch_mode: "daily"
+      reconciliation_cadence: "daily"
+      fallback_lookback_days_if_empty:
+        sec: 7
+        form4: 7
+      form4_reconcile_current_quarter: false
+      run_form4_quarterly_backfill: false
+      run_form4_reports: true
+
+    weekly:
+      sec_fetch_mode: "weekly"
+      form4_fetch_mode: "weekly"
+      reconciliation_cadence: "weekly"
+      fallback_lookback_days_if_empty:
+        sec: 30
+        form4: 30
+      form4_reconcile_current_quarter: true
+      run_form4_quarterly_backfill: false
+      run_form4_reports: true
+
+  alignment:
+    enabled: true
+    auto_fix_missing_dates: true
+    fail_on_misalignment: true
+    include_only_business_days: true
+    lookback_days: 120
+    start_date: null
+    skip_existing_snapshots: true

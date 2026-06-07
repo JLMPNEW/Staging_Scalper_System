@@ -235,7 +235,7 @@ def test_biotech_ranking_validation_accepts_clean_split_outputs() -> None:
             "rank_source": "allocation_opportunity_score",
             "rank_quality_cap_vetoed": 0.0,
             "biotech_cohort_investible_flag": 1.0,
-            "biotech_primary_cohort": "commercial_profitable_growth",
+            "biotech_primary_cohort": "commercial_profitable_quality_or_mature",
             "ttm_revenue": 1_000_000_000.0,
             "profitable_flag": 1.0,
         }
@@ -273,7 +273,7 @@ def test_biotech_ranking_validation_flags_allocation_and_discovery_leakage() -> 
             "rank_source": "allocation_opportunity_score",
             "rank_quality_cap_vetoed": 0.0,
             "biotech_cohort_investible_flag": 1.0,
-            "biotech_primary_cohort": "late_clinical_pivotal",
+            "biotech_primary_cohort": "late_clinical_pivotal_or_registrational",
             "ttm_revenue": 500_000_000.0,
             "profitable_flag": 1.0,
         },

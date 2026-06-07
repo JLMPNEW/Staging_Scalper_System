@@ -211,7 +211,12 @@ def normalize_pct(raw: object, default: float | None = None) -> float | None:
 
 
 def _linear_score(value: float, points: list[tuple[float, float]]) -> float:
+    if not points:
+        raise ValueError("linear score requires at least one breakpoint")
     ordered = sorted(points)
+    for (left_x, _), (right_x, _) in zip(ordered, ordered[1:]):
+        if abs(right_x - left_x) <= 1e-12:
+            raise ValueError(f"linear score breakpoints must have unique x-values: {left_x!r}")
     if value <= ordered[0][0]:
         return clamp(ordered[0][1])
     if value >= ordered[-1][0]:
@@ -400,6 +405,9 @@ def _interpolate_piecewise(value: float, points: list[tuple[float, float]]) -> f
     if not points:
         raise ValueError("interpolate_piecewise requires at least one point")
     ordered = sorted(points)
+    for (left_x, _), (right_x, _) in zip(ordered, ordered[1:]):
+        if abs(right_x - left_x) <= 1e-12:
+            raise ValueError(f"piecewise interpolation breakpoints must have unique x-values: {left_x!r}")
     if value <= ordered[0][0]:
         return ordered[0][1]
     if value >= ordered[-1][0]:

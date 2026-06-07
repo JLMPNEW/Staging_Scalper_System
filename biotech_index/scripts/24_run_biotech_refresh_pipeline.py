@@ -26,7 +26,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from biotech_index.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
 from biotech_index.core.db import connect, quote_identifier  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 from biotech_index.core.market_policy import scoring_market_sources  # noqa: E402
@@ -93,9 +93,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-ctgov", action="store_true", help="Skip CTGov sync/link/audit upstream steps.")
     parser.add_argument("--skip-ib", action="store_true", help="Skip the IB market-data step.")
     parser.add_argument("--skip-yahoo", action="store_true", help="Skip the Yahoo adjusted market-data step.")
-    parser.add_argument("--skip-market-positioning", action="store_true", help="Skip FINRA short-interest and SEC 13F positioning refresh/export.")
+    parser.add_argument(
+        "--skip-market-positioning",
+        action="store_true",
+        help="Skip FINRA short-interest, SEC 13F, and IBKR borrow positioning refresh/export.",
+    )
     parser.add_argument("--skip-analyze", action="store_true", help="Skip SQLite ANALYZE at the end.")
     parser.add_argument("--skip-final-validation", action="store_true", help="Skip final as-of/coverage validation after a full pipeline run.")
+    parser.add_argument("--skip-form4-refresh", action="store_true", help="Skip the staging Form 4 refresh step before preflight.")
     parser.add_argument("--skip-form4-preflight", action="store_true", help="Skip the staging Form 4 database freshness preflight.")
     parser.add_argument("--reuse-unchanged-historical", action="store_true", help="Reuse exact-signature governance rows for historical snapshot runs.")
     parser.add_argument(
@@ -181,6 +186,76 @@ def parse_string_list(raw: object, default: list[str] | None = None) -> list[str
     return values or list(default or [])
 
 
+def resolved_path_text(path: Path) -> str:
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
+
+def path_has_forbidden_marker(path: Path, forbidden_markers: list[str]) -> bool:
+    text = resolved_path_text(path).replace("\\", "/").lower()
+    for marker in forbidden_markers:
+        clean = str(marker or "").strip()
+        if clean and clean.replace("\\", "/").lower() in text:
+            return True
+    return False
+
+
+def same_path(left: Path, right: Path) -> bool:
+    return resolved_path_text(left).lower() == resolved_path_text(right).lower()
+
+
+def form4_forbidden_path_markers(config: dict[str, Any]) -> list[str]:
+    return parse_string_list(
+        cfg_get(
+            config,
+            "biotech_refresh.form4_refresh.forbid_path_markers",
+            ["PROD_Scalper_System", "/PROD/", "\\PROD\\"],
+        ),
+        ["PROD_Scalper_System", "/PROD/", "\\PROD\\"],
+    )
+
+
+def validate_form4_staging_boundary(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+    db_path: Path | None = None,
+    extra_paths: list[tuple[str, Path | None]] | None = None,
+) -> Path:
+    """Validate that Form 4 refresh/read paths stay inside the staging boundary."""
+    governance_db_path = resolve_path(cfg_get(config, "governance_events.form4_db_path"), base_dir=base_dir)
+    expected_raw = cfg_get(config, "biotech_refresh.form4_refresh.expected_db_path", None)
+    expected_db_path = resolve_path(expected_raw, base_dir=base_dir) if expected_raw else governance_db_path
+    active_db_path = db_path or governance_db_path
+    forbidden = form4_forbidden_path_markers(config)
+
+    for label, path in [
+        ("governance_events.form4_db_path", governance_db_path),
+        ("biotech_refresh.form4_refresh.expected_db_path", expected_db_path),
+        ("active_form4_db_path", active_db_path),
+    ]:
+        if path_has_forbidden_marker(path, forbidden):
+            raise RuntimeError(f"Form 4 {label} is outside the staging boundary: {path}")
+
+    if not same_path(governance_db_path, expected_db_path):
+        raise RuntimeError(
+            "Form 4 staging boundary mismatch: governance_events.form4_db_path="
+            f"{governance_db_path} expected_db_path={expected_db_path}"
+        )
+    if not same_path(active_db_path, governance_db_path):
+        raise RuntimeError(
+            f"Form 4 refresh DB path must match governance_events.form4_db_path: "
+            f"refresh_db={active_db_path} governance_db={governance_db_path}"
+        )
+
+    for label, path in extra_paths or []:
+        if path is not None and path_has_forbidden_marker(path, forbidden):
+            raise RuntimeError(f"Form 4 {label} points outside staging boundary: {path}")
+    return governance_db_path
+
+
 def validate_config(config: dict[str, Any]) -> None:
     optional_defaults = {
         "governance_events.form4_required": True,
@@ -228,6 +303,62 @@ def validate_config(config: dict[str, Any]) -> None:
                 avoid,
                 max_spec,
             )
+
+
+def table_row_count(db_path: Path, table: str) -> int:
+    if not db_path.exists():
+        return 0
+    try:
+        with connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not row or int(row["n"]) <= 0:
+                return 0
+            count_row = conn.execute(f"SELECT COUNT(*) AS n FROM {quote_identifier(table)}").fetchone()
+            return int(count_row["n"] if count_row else 0)
+    except sqlite3.Error as exc:
+        LOGGER.warning("Could not count table %s in %s: %s", table, db_path, exc)
+        return 0
+
+
+def maybe_skip_company_master(
+    steps: list[Step],
+    *,
+    config: dict[str, Any],
+    base_dir: Path,
+    db_path: Path,
+    mode: str,
+    selected_steps: set[str],
+) -> list[Step]:
+    if selected_steps or not any(step.name == "company_master" for step in steps):
+        return steps
+    if mode != "daily_delta":
+        return steps
+    enabled = as_bool(
+        cfg_get(config, "biotech_refresh.company_master.reuse_existing_if_screen_missing", True),
+        True,
+    )
+    if not enabled:
+        return steps
+    screen_path = resolve_path(cfg_get(config, "paths.screen_results_csv"), base_dir=base_dir)
+    if screen_path.exists():
+        return steps
+    company_rows = table_row_count(db_path, "companies")
+    min_existing = int(cfg_get(config, "biotech_refresh.company_master.min_existing_companies", 100))
+    if company_rows < min_existing:
+        raise FileNotFoundError(
+            f"Screen results CSV not found and existing companies table is too small to reuse: "
+            f"screen={screen_path} companies={company_rows} min_existing={min_existing}"
+        )
+    LOGGER.warning(
+        "Skipping company_master in daily_delta because screen CSV is missing but existing companies table is populated: "
+        "screen=%s companies=%d",
+        screen_path,
+        company_rows,
+    )
+    return [step for step in steps if step.name != "company_master"]
 
 
 def parse_clock_time(raw: object, default: str = "16:15") -> dt_time:
@@ -281,6 +412,7 @@ def pipeline_steps(
     reuse_unchanged_historical: bool = False,
 ) -> list[Step]:
     sec_event_args: tuple[str, ...] = ("--full-rescan",) if mode in {"weekly_reconcile", "full_backfill"} else ()
+    sec_filings_args: tuple[str, ...] = ("--allow-partial",) if mode == "daily_delta" else ()
     companyfacts_args: tuple[str, ...] = ("--full-refresh",) if mode == "full_backfill" else ()
     forward_args: tuple[str, ...] = ("--run-mode", mode)
     governance_reuse = reuse_unchanged_historical or mode == "weekly_reconcile"
@@ -298,13 +430,14 @@ def pipeline_steps(
             [
                 Step("ctgov_trials", "03_sync_ctgov_trials.py"),
                 Step("trial_links", "04_link_trials_to_companies.py", supports_asof=False),
-                Step("ctgov_audit", "05_audit_ctgov_trial_links.py"),
+            Step("ctgov_audit", "05_audit_ctgov_trial_links.py"),
             ]
         )
     steps.extend(
         [
-            Step("sec_filings", "06_sync_sec_filings.py"),
+            Step("sec_filings", "06_sync_sec_filings.py", sec_filings_args),
             Step("sec_events", "07_parse_sec_biotech_events.py", sec_event_args),
+            Step("forward_catalyst_calendar", "09_build_forward_catalyst_calendar.py"),
             Step("sec_companyfacts", "15_sync_sec_companyfacts_history.py", companyfacts_args),
             Step("financial_survival", "16_build_financial_survival_features.py"),
         ]
@@ -342,6 +475,8 @@ def historical_restatement_steps(*, reuse_unchanged_historical: bool = True) -> 
     """Derived layers that can be safely restated from already-synced source tables."""
     governance_args: tuple[str, ...] = ("--reuse-unchanged-historical",) if reuse_unchanged_historical else ()
     return [
+        Step("market_positioning_export", "25_update_market_positioning.py", ("--skip-download",)),
+        Step("forward_catalyst_calendar", "09_build_forward_catalyst_calendar.py"),
         Step("financial_survival", "16_build_financial_survival_features.py"),
         Step("commercial_value", "18_build_commercial_value_features.py", ("--allow-missing-market", "--allow-stale-market")),
         Step("forward_guidance", "19_parse_forward_guidance.py", ("--run-mode", "weekly_reconcile")),
@@ -422,10 +557,23 @@ def load_history_date_grid(
 def write_timing_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = ["run_started_at", "mode", "step", "status", "elapsed_sec", "returncode", "command", "stdout_tail", "stderr_tail"]
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
-        writer.writeheader()
-        writer.writerows([{field: row.get(field, "") for field in fieldnames} for row in rows])
+    payload = [{field: row.get(field, "") for field in fieldnames} for row in rows]
+
+    def write_path(target: Path) -> None:
+        with target.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(payload)
+
+    try:
+        write_path(path)
+    except PermissionError as exc:
+        fallback = path.with_name(f"{path.stem}_unlocked{path.suffix}")
+        LOGGER.warning("Timing CSV is locked; writing fallback timing file instead: %s error=%s", fallback, exc)
+        try:
+            write_path(fallback)
+        except OSError as fallback_exc:
+            LOGGER.warning("Unable to write fallback timing CSV %s: %s", fallback, fallback_exc)
 
 
 def text_tail(raw: str, limit: int = 4000) -> str:
@@ -695,6 +843,159 @@ def run_step(
     }
 
 
+def maybe_load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists() or not path.is_file():
+        return {}
+    try:
+        return load_yaml(path)
+    except Exception as exc:
+        LOGGER.warning("Could not parse optional YAML for path validation: path=%s error=%s", path, exc)
+        return {}
+
+
+def nested_cfg(raw: dict[str, Any], dotted_key: str, default: Any = None) -> Any:
+    cur: Any = raw
+    for part in dotted_key.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return default
+        cur = cur[part]
+    return cur
+
+
+def validate_form4_refresh_config_paths(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+    script_path: Path,
+    refresh_config_path: Path | None,
+    expected_db_path: Path,
+) -> None:
+    """Reject updater configs that would write to PROD or any DB besides staging."""
+    validate_form4_staging_boundary(
+        config,
+        base_dir=base_dir,
+        db_path=expected_db_path,
+        extra_paths=[("refresh_script_path", script_path), ("refresh_config_path", refresh_config_path)],
+    )
+    if refresh_config_path is None or not refresh_config_path.exists():
+        return
+
+    refresh_cfg = maybe_load_yaml(refresh_config_path)
+    if not refresh_cfg:
+        return
+
+    candidate_db_values: list[tuple[str, Any, Path]] = []
+    direct_form4_db = nested_cfg(refresh_cfg, "sec_form4.db_path")
+    if direct_form4_db:
+        candidate_db_values.append(("sec_form4.db_path", direct_form4_db, refresh_config_path.parent))
+
+    orchestrator_root = refresh_cfg.get("sec_form4_orchestrator", refresh_cfg)
+    if isinstance(orchestrator_root, dict):
+        form4_config_raw = nested_cfg(orchestrator_root, "form4.config_path")
+        if form4_config_raw:
+            repo_root = script_path.resolve().parent.parent
+            form4_config_path = Path(str(form4_config_raw)).expanduser()
+            if not form4_config_path.is_absolute():
+                form4_config_path = (repo_root / form4_config_path).resolve()
+            validate_form4_staging_boundary(
+                config,
+                base_dir=base_dir,
+                db_path=expected_db_path,
+                extra_paths=[("nested_form4_config_path", form4_config_path)],
+            )
+            nested_form4_cfg = maybe_load_yaml(form4_config_path)
+            nested_db = nested_cfg(nested_form4_cfg, "sec_form4.db_path")
+            if nested_db:
+                candidate_db_values.append(("nested sec_form4.db_path", nested_db, form4_config_path.parent))
+
+    for label, raw_db, relative_base in candidate_db_values:
+        resolved = Path(expand_env_vars(raw_db)).expanduser()
+        if not resolved.is_absolute():
+            resolved = (relative_base / resolved).resolve()
+        validate_form4_staging_boundary(config, base_dir=base_dir, db_path=resolved)
+        if not same_path(resolved, expected_db_path):
+            raise RuntimeError(f"Form 4 refresh config {label} must write to staging DB {expected_db_path}, got {resolved}")
+
+
+def build_form4_refresh_command(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+    asof: str,
+) -> tuple[list[str], Path, Path | None]:
+    refresh_cfg = cfg_get(config, "biotech_refresh.form4_refresh", {}) or {}
+    if not isinstance(refresh_cfg, dict):
+        raise ValueError("biotech_refresh.form4_refresh must be a mapping when enabled")
+    python_executable = str(expand_env_vars(refresh_cfg.get("python_executable") or sys.executable)).strip() or sys.executable
+    script_raw = refresh_cfg.get("script_path")
+    if not script_raw:
+        raise ValueError("biotech_refresh.form4_refresh.script_path is required when Form 4 refresh is enabled")
+    script_path = resolve_path(script_raw, base_dir=base_dir)
+    config_raw = refresh_cfg.get("config_path")
+    refresh_config_path = resolve_path(config_raw, base_dir=base_dir) if config_raw else None
+    expected_db_path = validate_form4_staging_boundary(config, base_dir=base_dir)
+    validate_form4_refresh_config_paths(
+        config,
+        base_dir=base_dir,
+        script_path=script_path,
+        refresh_config_path=refresh_config_path,
+        expected_db_path=expected_db_path,
+    )
+    if not script_path.is_file():
+        raise FileNotFoundError(
+            "Configured staging Form 4 refresh script is missing. "
+            f"Expected a staging-local script, not PROD: {script_path}"
+        )
+    if refresh_config_path is not None and not refresh_config_path.is_file():
+        raise FileNotFoundError(f"Configured staging Form 4 refresh config is missing: {refresh_config_path}")
+
+    command = [python_executable, str(script_path)]
+    if refresh_config_path is not None:
+        command.extend(["--config", str(refresh_config_path)])
+    target = str(refresh_cfg.get("target") or "form4").strip()
+    profile = str(refresh_cfg.get("profile") or "daily").strip()
+    asof_arg = str(refresh_cfg.get("asof_arg") or "--as-of-date").strip()
+    if target:
+        command.extend(["--target", target])
+    if profile:
+        command.extend(["--profile", profile])
+    if asof_arg:
+        command.extend([asof_arg, asof])
+    extra_args = parse_string_list(refresh_cfg.get("extra_args"), [])
+    command.extend(extra_args)
+    return command, script_path, refresh_config_path
+
+
+def run_form4_refresh(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+    asof: str,
+    run_started_at: str,
+    mode: str,
+) -> dict[str, Any]:
+    start = time.monotonic()
+    command, script_path, refresh_config_path = build_form4_refresh_command(config, base_dir=base_dir, asof=asof)
+    refresh_cfg = cfg_get(config, "biotech_refresh.form4_refresh", {}) or {}
+    timeout_raw = refresh_cfg.get("timeout_sec", refresh_cfg.get("max_runtime_sec", cfg_get(config, "biotech_refresh.step_timeout_sec", 14400.0)))
+    try:
+        timeout_sec = float(timeout_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid biotech_refresh.form4_refresh.timeout_sec value: {timeout_raw!r}") from exc
+    timeout_value = timeout_sec if timeout_sec > 0 else None
+    step = Step("form4_refresh", str(script_path), tuple(command[2:]), supports_asof=False)
+    LOGGER.info(
+        "Starting form4_refresh staging_db=%s script=%s config=%s",
+        resolve_path(cfg_get(config, "governance_events.form4_db_path"), base_dir=base_dir),
+        script_path,
+        refresh_config_path or "",
+    )
+    row = run_step(step, command=command, mode=mode, run_started_at=run_started_at, timeout_sec=timeout_value)
+    row["step"] = "form4_refresh"
+    row["elapsed_sec"] = round(time.monotonic() - start, 3)
+    return row
+
+
 def connect_form4_readonly(path: Path) -> sqlite3.Connection:
     uri = path.resolve().as_uri() + "?mode=ro&immutable=1"
     conn = sqlite3.connect(uri, uri=True, timeout=30.0)
@@ -707,12 +1008,18 @@ def read_form4_snapshot_date(conn: sqlite3.Connection, snapshot_table: str) -> t
     sources: list[tuple[str, str]] = []
     if snapshot_table:
         sources.append((snapshot_table, "last_index_date"))
+        sources.append((snapshot_table, "as_of_date"))
     sources.extend(
         [
+            ("stock_signal_snapshot_tier1", "as_of_date"),
+            ("sec_form4_daily_state", "last_index_date"),
             ("form4_events_tier1", "filing_date"),
             ("form4_buy_events_v1", "filing_date"),
         ]
     )
+    best_raw = ""
+    best_source = ""
+    best_date: date | None = None
     for table, field in sources:
         try:
             table_sql = quote_identifier(table)
@@ -722,8 +1029,13 @@ def read_form4_snapshot_date(conn: sqlite3.Connection, snapshot_table: str) -> t
             LOGGER.debug("Form 4 snapshot probe skipped source=%s.%s error=%s", table, field, exc)
             continue
         if row and row["snapshot_date"]:
-            return str(row["snapshot_date"]), f"{table}.{field}"
-    return "", ""
+            raw = str(row["snapshot_date"])
+            parsed = parse_date(raw)
+            if parsed is not None and (best_date is None or parsed > best_date):
+                best_raw = raw
+                best_source = f"{table}.{field}"
+                best_date = parsed
+    return best_raw, best_source
 
 
 def validate_form4_preflight(
@@ -741,6 +1053,7 @@ def validate_form4_preflight(
         raise ValueError(f"Invalid pipeline as-of date for Form 4 preflight: {asof}")
 
     form4_db_path = resolve_path(cfg_get(config, "governance_events.form4_db_path"), base_dir=base_dir)
+    validate_form4_staging_boundary(config, base_dir=base_dir, db_path=form4_db_path)
     snapshot_table = str(cfg_get(config, "governance_events.form4_snapshot_table", "sec_form4_daily_state") or "")
     max_staleness_days = int(
         cfg_get(
@@ -946,14 +1259,20 @@ def validate_table_required_columns(
         raise RuntimeError(f"{table} required column validation failed for asof={asof}: " + " | ".join(failures))
 
 
-def validate_paired_score_dates(conn: sqlite3.Connection) -> None:
+def validate_paired_score_dates(conn: sqlite3.Connection, *, asof: str) -> None:
     daily_dates = {
         str(row["asof_date"] or "")
-        for row in conn.execute("SELECT DISTINCT asof_date FROM daily_scores WHERE asof_date IS NOT NULL").fetchall()
+        for row in conn.execute(
+            "SELECT DISTINCT asof_date FROM daily_scores WHERE asof_date = ?",
+            (asof,),
+        ).fetchall()
     }
     multibagger_dates = {
         str(row["asof_date"] or "")
-        for row in conn.execute("SELECT DISTINCT asof_date FROM multibagger_scores_daily WHERE asof_date IS NOT NULL").fetchall()
+        for row in conn.execute(
+            "SELECT DISTINCT asof_date FROM multibagger_scores_daily WHERE asof_date = ?",
+            (asof,),
+        ).fetchall()
     }
     daily_only = sorted(daily_dates - multibagger_dates)
     multibagger_only = sorted(multibagger_dates - daily_dates)
@@ -965,7 +1284,7 @@ def validate_paired_score_dates(conn: sqlite3.Connection) -> None:
         sample = ",".join(multibagger_only[:10])
         failures.append(f"multibagger_scores_daily only {len(multibagger_only)} date(s): {sample}")
     if failures:
-        raise RuntimeError("Paired score date validation failed: " + " | ".join(failures))
+        raise RuntimeError(f"Paired score date validation failed for asof={asof}: " + " | ".join(failures))
 
 
 def validate_score_csv(
@@ -1133,7 +1452,7 @@ def validate_final_outputs(
             asof=asof,
             required_columns=multibagger_required_columns,
         )
-        validate_paired_score_dates(conn)
+        validate_paired_score_dates(conn, asof=asof)
     validate_score_csv(
         biotech_scores_csv,
         asof=asof,
@@ -1217,6 +1536,14 @@ def main() -> None:
         if unknown:
             raise ValueError(f"Unknown pipeline step(s): {', '.join(unknown)}")
     steps = [step for step in all_steps if not selected_steps or step.name in selected_steps]
+    steps = maybe_skip_company_master(
+        steps,
+        config=config,
+        base_dir=base_dir,
+        db_path=db_path,
+        mode=args.mode,
+        selected_steps=selected_steps,
+    )
     history_dates: list[str] = []
     if args.history_restatement:
         with connect(db_path) as conn:
@@ -1239,12 +1566,64 @@ def main() -> None:
     final_validation_enabled = as_bool(cfg_get(config, "biotech_refresh.validate_final_outputs", True))
     snapshot_outputs_enabled = as_bool(cfg_get(config, "biotech_refresh.snapshot_outputs.enabled", True))
     form4_preflight_enabled = as_bool(cfg_get(config, "biotech_refresh.form4_preflight.enabled", True), True)
+    form4_refresh_enabled = as_bool(cfg_get(config, "biotech_refresh.form4_refresh.enabled", False), False)
+    form4_refresh_required = as_bool(cfg_get(config, "biotech_refresh.form4_refresh.required", True), True)
     form4_warning_is_fatal = as_bool(cfg_get(config, "biotech_refresh.form4_preflight.warning_is_fatal", True), True)
     form4_preflight_needed = any(step.name == "governance_events" for step in steps)
 
     run_started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     timing_rows: list[dict[str, Any]] = []
     try:
+        if (
+            form4_preflight_needed
+            and form4_refresh_enabled
+            and not args.skip_form4_refresh
+            and not args.history_restatement
+        ):
+            timing_rows.append(
+                {
+                    "run_started_at": run_started_at,
+                    "mode": args.mode,
+                    "step": "form4_refresh",
+                    "status": "running",
+                    "elapsed_sec": "",
+                    "returncode": "",
+                    "command": f"refresh staging Form 4 db asof={asof}",
+                }
+            )
+            write_timing_csv(timing_csv, timing_rows)
+            try:
+                timing_rows[-1] = run_form4_refresh(
+                    config,
+                    base_dir=base_dir,
+                    asof=asof,
+                    run_started_at=run_started_at,
+                    mode=args.mode,
+                )
+            except Exception as exc:
+                timing_rows[-1] = {
+                    "run_started_at": run_started_at,
+                    "mode": args.mode,
+                    "step": "form4_refresh",
+                    "status": "failed",
+                    "elapsed_sec": "",
+                    "returncode": 1,
+                    "command": f"refresh staging Form 4 db asof={asof}: {type(exc).__name__}: {exc}",
+                }
+                write_timing_csv(timing_csv, timing_rows)
+                if form4_refresh_required:
+                    raise
+                LOGGER.warning("Form 4 refresh failed but required=false: %s", exc)
+            write_timing_csv(timing_csv, timing_rows)
+            if timing_rows[-1]["status"] != "success" and form4_refresh_required:
+                raise SystemExit(int(timing_rows[-1].get("returncode") or 1))
+        elif form4_preflight_needed and args.skip_form4_refresh:
+            LOGGER.warning("Form 4 refresh skipped via --skip-form4-refresh.")
+        elif form4_preflight_needed and args.history_restatement:
+            LOGGER.info("Form 4 refresh skipped for historical restatement; source DB freshness is validated separately.")
+        elif form4_preflight_needed and not form4_refresh_enabled:
+            LOGGER.warning("Form 4 refresh skipped because biotech_refresh.form4_refresh.enabled=false.")
+
         if form4_preflight_needed and form4_preflight_enabled and not args.skip_form4_preflight:
             preflight_start = time.monotonic()
             timing_rows.append(

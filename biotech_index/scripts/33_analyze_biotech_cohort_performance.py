@@ -146,7 +146,7 @@ def load_selected_daily_scores(
         select_expr(columns, "opportunity_score", "NULL"),
         select_expr(columns, "investment_score", "NULL"),
         select_expr(columns, "bucket"),
-        select_expr(columns, "biotech_primary_cohort", "'unclassified_review'"),
+        select_expr(columns, "biotech_primary_cohort", "'unmapped_calibration_cohort'"),
         select_expr(columns, "biotech_cohort_calibration_mode", "'unclassified'"),
         select_expr(columns, "biotech_cohort_investible_flag", "1.0"),
         select_expr(columns, "biotech_cohort_calibration_eligible_flag", "1.0"),
@@ -466,7 +466,7 @@ def analyze(
             for evaluation_split, eligible in sample_sets.items():
                 grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
                 for obs in eligible:
-                    cohort = str(obs.get("biotech_primary_cohort") or "unclassified_review")
+                    cohort = str(obs.get("biotech_primary_cohort") or "unmapped_calibration_cohort")
                     mode = str(obs.get("biotech_cohort_calibration_mode") or "unclassified")
                     grouped[(cohort, mode)].append(obs)
 

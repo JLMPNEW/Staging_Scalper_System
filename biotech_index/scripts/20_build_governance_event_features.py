@@ -55,6 +55,7 @@ GOVERNANCE_FIELDS = [
     "form4_source_db",
     "form4_snapshot_date",
     "insider_buy_count_90d",
+    "open_market_buy_count_90d",
     "insider_buy_value_90d",
     "insider_buy_cluster_count_90d",
     "ceo_cfo_buy_count_180d",
@@ -284,21 +285,31 @@ def connect_form4_readonly(path: Path) -> sqlite3.Connection:
 
 
 def form4_snapshot_date(conn: sqlite3.Connection, snapshot_table: str) -> str:
-    try:
-        if snapshot_table:
-            row = conn.execute(f"SELECT MAX(last_index_date) AS snapshot_date FROM {quote_identifier(snapshot_table)}").fetchone()
-            if row and row["snapshot_date"]:
-                return str(row["snapshot_date"])
-    except (sqlite3.Error, ValueError):
-        pass
-    for table, field in [("form4_events_tier1", "filing_date"), ("form4_buy_events_v1", "filing_date")]:
+    sources: list[tuple[str, str]] = []
+    if snapshot_table:
+        sources.extend([(snapshot_table, "last_index_date"), (snapshot_table, "as_of_date")])
+    sources.extend(
+        [
+            ("stock_signal_snapshot_tier1", "as_of_date"),
+            ("sec_form4_daily_state", "last_index_date"),
+            ("form4_events_tier1", "filing_date"),
+            ("form4_buy_events_v1", "filing_date"),
+        ]
+    )
+    best = ""
+    best_key = ""
+    for table, field in sources:
         try:
             row = conn.execute(f"SELECT MAX({quote_identifier(field)}) AS snapshot_date FROM {quote_identifier(table)}").fetchone()
-            if row and row["snapshot_date"]:
-                return str(row["snapshot_date"])
         except (sqlite3.Error, ValueError):
             continue
-    return ""
+        if row and row["snapshot_date"]:
+            raw = str(row["snapshot_date"])
+            key = raw[:10] if len(raw) >= 10 and raw[4:5] == "-" and raw[7:8] == "-" else ""
+            if key and key > best_key:
+                best = raw
+                best_key = key
+    return best
 
 
 def contains_any(text: str, terms: list[str]) -> bool:
@@ -407,11 +418,12 @@ def load_form4_rows_bulk(
 
 def score_governance(row: dict[str, Any]) -> tuple[float, float]:
     buy_count = to_int(row.get("insider_buy_count_90d"))
+    planned_buys = to_int(row.get("planned_10b5_1_buy_count"))
+    open_market_buys = to_int(row.get("open_market_buy_count_90d"), max(0, buy_count - planned_buys))
     buy_value = to_float(row.get("insider_buy_value_90d"), 0.0) or 0.0
     clusters = to_int(row.get("insider_buy_cluster_count_90d"))
     exec_buys = to_int(row.get("ceo_cfo_buy_count_180d"))
     director_buys = to_int(row.get("director_buy_count_180d"))
-    planned_buys = to_int(row.get("planned_10b5_1_buy_count"))
     buybacks = to_int(row.get("buyback_event_count_365d"))
     asr = to_int(row.get("asr_event_count_365d"))
     activism = to_int(row.get("activist_13d_count_365d"))
@@ -425,7 +437,7 @@ def score_governance(row: dict[str, Any]) -> tuple[float, float]:
     if buy_value > 0:
         buy_value_score = min(18.0, math.log10(max(buy_value, 1.0)) * 2.5)
     event_score = 15.0
-    event_score += min(18.0, buy_count * 4.0)
+    event_score += min(18.0, open_market_buys * 4.0 + planned_buys * 1.0)
     event_score += buy_value_score
     event_score += min(20.0, clusters * 10.0)
     event_score += min(18.0, exec_buys * 9.0)
@@ -433,7 +445,7 @@ def score_governance(row: dict[str, Any]) -> tuple[float, float]:
     event_score += min(18.0, buybacks * 7.0 + asr * 14.0)
     event_score += min(12.0, activism * 10.0)
     event_score += min(5.0, leadership * 2.0)
-    event_score -= min(8.0, planned_buys * 2.0)
+    event_score -= min(5.0, planned_buys * 1.0)
 
     risk_score = 0.0
     if sell_value > 0 and buy_value <= 0:
@@ -557,8 +569,10 @@ def form4_metrics(
                 cluster_dates.add(event_date.isoformat())
 
     ratio = sell_value_180 / buy_value_180 if sell_value_180 > 0 and buy_value_180 > 0 else None if sell_value_180 > 0 else 0.0
+    open_market_buy_count = max(0, buy_count - planned_buy_count)
     return {
         "insider_buy_count_90d": buy_count,
+        "open_market_buy_count_90d": open_market_buy_count,
         "insider_buy_value_90d": round(buy_value, 2),
         "insider_buy_cluster_count_90d": len(cluster_dates),
         "ceo_cfo_buy_count_180d": exec_buy_count,
@@ -1157,6 +1171,7 @@ def build_row(
         )
     form4 = form4_metrics(form4_rows, asof_date=asof_date, config=config) if form4_rows else {
         "insider_buy_count_90d": 0,
+        "open_market_buy_count_90d": 0,
         "insider_buy_value_90d": 0.0,
         "insider_buy_cluster_count_90d": 0,
         "ceo_cfo_buy_count_180d": 0,

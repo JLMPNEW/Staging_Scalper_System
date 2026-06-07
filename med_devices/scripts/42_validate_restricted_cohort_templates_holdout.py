@@ -22,6 +22,7 @@ from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+RESTRICTED_TEMPLATE_SCRIPT = PACKAGE_ROOT / "scripts" / "41_test_med_device_restricted_cohort_templates.py"
 RESULT_FIELDS = [
     "calibration_cohort",
     "template_id",
@@ -90,7 +91,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_template_module() -> Any:
-    path = PACKAGE_ROOT / "scripts" / "41_test_med_device_restricted_cohort_templates.py"
+    path = RESTRICTED_TEMPLATE_SCRIPT
+    if not path.exists():
+        raise RuntimeError(
+            "Restricted cohort template dependency is missing. "
+            f"Expected script 41 at: {path}"
+        )
     spec = importlib.util.spec_from_file_location("restricted_cohort_templates", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to import restricted template module: {path}")

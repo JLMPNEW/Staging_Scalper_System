@@ -30,7 +30,7 @@ from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
 LOGGER = logging.getLogger("calibrate_biotech_commercial_growth_policy")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 SQLITE_PARAM_CHUNK_SIZE = 800
-DEFAULT_TARGET_COHORT = "commercial_profitable_growth"
+DEFAULT_TARGET_COHORT = "commercial_profitable_quality_or_mature"
 TARGET_COHORT = DEFAULT_TARGET_COHORT
 DEFAULT_HORIZONS = [20, 60, 120]
 DEFAULT_TOP_N = [10, 20]
@@ -625,7 +625,11 @@ def summarize_candidate_rows(
         comparable_dates = sorted(set(date_means) & set(baseline_means))
         deltas = [date_means[d] - baseline_means[d] for d in comparable_dates]
         improvement_rate = (sum(1 for delta in deltas if delta > 0.0) / len(deltas) * 100.0) if deltas else 0.0
-        target_rows = [row for row in rows if str(row.get("biotech_primary_cohort") or "") == TARGET_COHORT]
+        target_rows = [
+            row
+            for row in rows
+            if str(row.get("biotech_primary_cohort") or "") == TARGET_COHORT
+        ]
         unique_tickers = {str(row.get("ticker") or "") for row in rows}
         summary = {
             "candidate_id": candidate_id,

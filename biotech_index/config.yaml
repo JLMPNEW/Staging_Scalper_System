@@ -22,6 +22,29 @@ market_positioning:
     publication_lag_days: 12
     sleep_sec: 0.05
     max_files_per_run: 0
+  float_shares:
+    # Optional point-in-time float/share snapshots used to compute
+    # short_interest_pct_float = short_interest_shares / float_shares. FINRA
+    # short-interest files do not include float shares. This CSV currently
+    # carries dated manual shares-outstanding proxies for foreign/20-F issuers
+    # whose company-facts share counts are unavailable.
+    enabled: true
+    required: false
+    csv_path: "data/manual_float_share_proxies.csv"
+    source: "manual_shares_outstanding_proxy"
+    sec_public_float_proxy:
+      # Internal fallback using SEC 10-K public-float disclosure converted to
+      # estimated float shares with the closest prior point-in-time close. This
+      # is source-tagged as a proxy and should be validated separately from any
+      # direct float-share feed.
+      enabled: true
+      required: false
+      max_filings_per_ticker: 9
+    company_fact_shares_proxy:
+      # Quarterly SEC company-facts shares outstanding is not true free float,
+      # but it is a point-in-time denominator that prevents FINRA short interest
+      # from being permanently capped when annual public-float text is stale.
+      enabled: true
   institutional_13f:
     enabled: true
     source: "sec_form_13f_data_sets"
@@ -30,6 +53,28 @@ market_positioning:
     cusip_ticker_map_csv: ""
     sleep_sec: 0.2
     max_archives_per_run: 0
+  ibkr_borrow:
+    enabled: true
+    host: "127.0.0.1"
+    port: 7497
+    client_id: 7822
+    market_data_type: 1
+    # IBKR FEE_RATE historical bars tested in this account arrive as decimal
+    # annualized rates: 0.003 means 0.3%.
+    fee_rate_unit: "decimal"
+    fee_rate_initial_duration: "2 Y"
+    fee_rate_backfill_duration: "7 Y"
+    fee_rate_incremental_duration: "45 D"
+    snapshot_wait_sec: 4.0
+    shortable_snapshot: true
+    shortable_coverage_warn_min: 50.0
+    max_fee_staleness_days: 10
+    max_snapshot_staleness_days: 7
+    hard_to_borrow_shares: 50000.0
+    batch_size: 50
+    sleep_sec: 0.2
+    max_tickers_per_run: 0
+    backfill_max_tickers_per_run: 50
   exports:
     biotech_output_dir: "../output/biotech_index_reports"
 
@@ -375,10 +420,33 @@ biotech_features:
       general:
         phase2: 0.25
         phase3: 0.55
-  forward_catalyst_calendar_csv: ""
+  forward_catalyst_calendar_csv: "../output/biotech_index_reports/forward_catalyst_calendar.csv"
+  forward_catalyst_overrides_csv: "data/forward_catalyst_overrides.csv"
   forward_catalyst_calendar_lookahead_days: 365
+  forward_catalyst_manual_default_confidence: 0.80
+  forward_catalyst_ctgov:
+    enabled: true
+    # CTGov primary-completion dates are timing proxies, not guaranteed readout
+    # dates. Keep confidence below SEC/manual sources until IC validation.
+    default_confidence: 0.38
+    phase2_confidence: 0.45
+    phase3_confidence: 0.55
+    collaborator_confidence_multiplier: 0.85
+    min_link_confidence: 0.60
+    # Validation on the 2025-05-09..2026-05-29 Friday restatement showed CTGov
+    # coverage is useful for discovery diagnostics but not yet ready for the
+    # primary catalyst score. Keep CTGov as unfiltered/shadow evidence until
+    # source-aware IC and 60/120d holdout evidence improve.
+    include_in_primary_score: false
+    primary_score_min: 60.0
+    active_statuses:
+      - RECRUITING
+      - ACTIVE_NOT_RECRUITING
+      - ENROLLING_BY_INVITATION
+      - NOT_YET_RECRUITING
   short_interest_csv: "../output/biotech_index_reports/short_interest_features.csv"
   institutional_ownership_csv: "../output/biotech_index_reports/institutional_ownership_features.csv"
+  borrow_availability_csv: "../output/biotech_index_reports/borrow_availability_features.csv"
 
 sec_filings:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
@@ -598,6 +666,15 @@ biotech_scoring:
   output_dir: "../output/biotech_index_reports"
   output_csv: "biotech_daily_scores.csv"
   taxonomy_overrides_csv: "data/biotech_taxonomy_overrides.csv"
+  calibration_cohorts:
+    enabled: true
+    version: "calibration_cohort_v1_robust_5bucket_20260606"
+    csv: "data/biotech_calibration_cohorts.csv"
+    fallback_to_primary: false
+    require_all_tickers: true
+    notes:
+      - "The five-bucket cohort map is the official operational cohort system."
+      - "biotech_primary_cohort is overwritten with the five-bucket assignment; old taxonomy cohorts must not drive scoring or reports."
   use_investment_score: true
   use_quality_adjusted_valuation_component: true
   use_quality_adjusted_guidance_component: true
@@ -637,20 +714,19 @@ biotech_scoring:
     default_allocation_mode: "legacy"
     default_discovery_mode: "legacy"
     cohort_modes:
-      late_clinical_pivotal:
+      late_clinical_pivotal_or_registrational:
         allocation_mode: "legacy"
         discovery_mode: "predictive"
-      mid_clinical_phase2_poc:
-        allocation_mode: "legacy"
-        # Insufficient validation sample as of 2026-05-31; keep discovery risk on legacy.
-        discovery_mode: "legacy"
-      commercial_profitable_growth:
+      commercial_profitable_quality_or_mature:
         allocation_mode: "legacy"
         discovery_mode: "legacy"
-      commercial_profitable_mature:
+      commercial_turnaround_or_unprofitable_growth:
         allocation_mode: "legacy"
         discovery_mode: "legacy"
-      commercial_fragile_or_declining:
+      platform_partnered_modality_pipeline:
+        allocation_mode: "legacy"
+        discovery_mode: "legacy"
+      early_clinical_speculative_or_single_asset_pipeline:
         allocation_mode: "legacy"
         discovery_mode: "legacy"
   ranking_validation:
@@ -662,7 +738,7 @@ biotech_scoring:
     apply_to_allocation: false
     apply_to_discovery: false
     target_cohorts:
-      - "commercial_profitable_growth"
+      - "commercial_profitable_quality_or_mature"
     min_bonus_score: 62.0
     penalty_score_floor: 50.0
     min_entry_quality: 45.0
@@ -671,7 +747,7 @@ biotech_scoring:
     max_penalty: 6.0
     overextension_penalty: 4.0
     low_entry_penalty: 3.0
-  commercial_profitable_growth_validation:
+  commercial_profitable_quality_or_mature_validation:
     status: "shadow_candidate_unvalidated"
     primary_horizon: 120
     promotion_requires:
@@ -687,23 +763,15 @@ biotech_scoring:
     min_cohort_specific_company_count: 8
     sparse_valid_calibration_mode: "global_fallback"
     non_investible_cohorts:
-      - "excluded_non_therapeutic_healthcare"
-      - "unclassified_review"
-      - "weak_or_historical_pipeline"
+      - "unmapped_calibration_cohort"
     investible_healthcare_cohorts:
-      - "healthcare_services_diagnostics_tools"
-      - "medtech_growth_or_device"
-      - "commercial_profitable_growth"
-      - "commercial_profitable_mature"
-      - "commercial_unprofitable_growth"
-      - "commercial_fragile_or_declining"
-      - "therapeutic_royalty_or_partnered_economics"
-      - "late_clinical_pivotal"
-      - "mid_clinical_phase2_poc"
+      - "commercial_profitable_quality_or_mature"
+      - "commercial_turnaround_or_unprofitable_growth"
+      - "late_clinical_pivotal_or_registrational"
+      - "platform_partnered_modality_pipeline"
+      - "early_clinical_speculative_or_single_asset_pipeline"
     calibration_excluded_cohorts:
-      - "excluded_non_therapeutic_healthcare"
-      - "unclassified_review"
-      - "weak_or_historical_pipeline"
+      - "unmapped_calibration_cohort"
   cohort_performance_attribution:
     output_dir: "../output/biotech_index_reports/cohort_performance_attribution"
     horizons: [20, 60, 120]
@@ -716,7 +784,7 @@ biotech_scoring:
       long_round_trip_bps: 40.0
   commercial_growth_policy_calibration:
     output_dir: "../output/biotech_index_reports/commercial_growth_policy_calibration"
-    target_cohort: "commercial_profitable_growth"
+    target_cohort: "commercial_profitable_quality_or_mature"
     horizons: [20, 60, 120]
     top_n: [10, 20]
     candidate_pool_rank_max: 60
@@ -997,6 +1065,53 @@ biotech_scoring:
 biotech_reports:
   output_dir: "../output/biotech_index_reports"
   calibration_shadow_module: "scripts/28_calibrate_biotech_opportunity.py"
+  borrow_availability_validation:
+    output_dir: "../output/biotech_index_reports/borrow_availability_validation"
+    horizons:
+      - 20
+      - 60
+      - 120
+    max_snapshots: 0
+    train_fraction: 0.70
+    # Borrow validation is a shadow diagnostic by point-in-time feature date.
+    # Keep the default holdout split usable for the currently available snapshot
+    # history; stricter embargo can be supplied on the command line.
+    embargo_days: 0
+    high_borrow_pressure_min: 60.0
+    elevated_borrow_pressure_min: 30.0
+    high_borrow_rate_min: 0.15
+    squeeze_short_interest_min: 60.0
+    squeeze_catalyst_min: 40.0
+    hard_to_borrow_shares: 50000.0
+    max_fee_staleness_days: 10
+    # IBKR shortable-share snapshots are point-in-time going forward; historical
+    # borrow validation should rely primarily on fee-rate history.
+    max_snapshot_staleness_days: 7
+    # REGIME DEPENDENCY: borrow_rate_high_flag shows sign flip between train and test.
+    # Train/120d: high-borrow group LCB +14.4% vs low-borrow +18.2% (delta -3.8%).
+    # Test/120d:  high-borrow group LCB +31.0% vs low-borrow +5.4% (delta +25.6%).
+    # The recent test period captures a squeeze regime; the training history reflects
+    # fundamental-weakness dominance. Do NOT promote until signal is stable across regimes.
+    promotion_status: "shadow_only_pending_validation"
+  forward_catalyst_validation:
+    output_dir: "../output/biotech_index_reports/forward_catalyst_validation"
+    horizons:
+      - 20
+      - 60
+      - 120
+    max_snapshots: 0
+    train_fraction: 0.70
+    # Validation is report-only. CTGov is intentionally broader/noisier than
+    # SEC/manual catalyst evidence, so the default recommendation layer tests a
+    # stricter high-score guardrail before any promotion decision.
+    embargo_days: 0
+    high_score_min: 40.0
+    ctgov_guardrail_score_min: 60.0
+    ctgov_confidence_min: 0.50
+    source_min_n: 30
+    lcb_degradation_tolerance_pct: 0.75
+    loss20_degradation_tolerance_pct: 5.0
+    promotion_status: "shadow_only_pending_source_validation"
   top_n: 10
   index_weights:
     top_n_avg_score: 0.70
@@ -1059,12 +1174,35 @@ biotech_refresh:
   step_timeout_sec: 14400
   max_upstream_staleness_days: 2
   validate_final_outputs: true
+  company_master:
+    # The full screen is a slow universe-rebuild input, not a required daily
+    # refresh dependency once the companies table is already seeded.
+    reuse_existing_if_screen_missing: true
+    min_existing_companies: 100
+  form4_refresh:
+    enabled: true
+    required: true
+    # This must be a staging-local Form 4 updater. The biotech orchestrator
+    # refuses PROD paths and refuses updater configs whose sec_form4.db_path does
+    # not match governance_events.form4_db_path.
+    python_executable: "${PYTHON:-C:/Users/josel/miniconda3/python.exe}"
+    script_path: "../SEC_FORM4_Runner/run_sec_form4_orchestrator.py"
+    config_path: "../SEC_FORM4_Runner/config_sec_form4_orchestrator_staging.yaml"
+    target: "form4"
+    profile: "daily"
+    asof_arg: "--as-of-date"
+    timeout_sec: 14400
+    expected_db_path: "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/sec_insider.sqlite"
+    forbid_path_markers:
+      - "PROD_Scalper_System"
+      - "/PROD/"
+      - "\\PROD\\"
   form4_preflight:
     enabled: true
     required: true
     warn_only: false
     warning_is_fatal: true
-    max_staleness_days: 2
+    max_staleness_days: 0
     staleness_day_basis: "business"
   max_snapshot_history: 30
   snapshot_outputs:

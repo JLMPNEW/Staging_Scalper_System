@@ -53,6 +53,10 @@ SCORE_FIELDS = [
     "legacy_gate_misses",
     "composite_score",
     "raw_composite_score",
+    "ic_tilted_composite_score",
+    "ic_tilted_composite_delta",
+    "ic_tilted_composite_mode",
+    "ic_tilted_component_ics_json",
     "composite_percentile",
     "cohort_percentile",
     "fundamental_quality_score",
@@ -127,6 +131,27 @@ SCORE_FIELDS = [
     "technical_score_source",
     "technical_entry_status_score",
     "technical_entry_status_score_source",
+    "borrow_availability_score",
+    "borrow_fee_score",
+    "borrow_squeeze_risk_score",
+    "borrow_pressure_score",
+    "borrow_data_quality_score",
+    "short_interest_score",
+    "short_pressure_score",
+    "short_squeeze_score",
+    "short_volume_score",
+    "short_interest_velocity_score",
+    "days_to_cover_score",
+    "short_data_quality_score",
+    "institutional_accumulation_score",
+    "institutional_crowding_score",
+    "institutional_breadth_score",
+    "institutional_flow_data_quality_score",
+    "insider_net_buy_score",
+    "insider_cluster_buy_score",
+    "insider_selling_pressure_score",
+    "insider_activity_score",
+    "insider_data_quality_score",
     "sentiment_catalyst_score",
     "value_trap_score",
     "data_completeness_score",
@@ -191,6 +216,11 @@ SCORE_FIELDS = [
     "reimbursement_rate_row_count",
     "top_positive_drivers",
     "top_negative_drivers",
+]
+CALIBRATED_BASELINE_FIELDS = [
+    "calibrated_baseline_status",
+    "calibrated_baseline_reason",
+    *SCORE_FIELDS,
 ]
 
 
@@ -388,6 +418,82 @@ def first_float(*raw_values: object, default: float = 0.0) -> float:
     return default
 
 
+def parse_csv_set(raw: object) -> set[str]:
+    return {item.strip() for item in str(raw or "").split(",") if item.strip()}
+
+
+def configured_gate_value(config: dict[str, Any], cohort: str, key: str) -> float | None:
+    raw = cfg_get(config, f"scoring.cohort_profiles.{cohort}.gates.{key}", None)
+    if raw is None:
+        raw = cfg_get(config, f"scoring.gates.{key}", None)
+    return to_float(raw)
+
+
+def passes_min_gate(row: dict[str, Any], field: str, threshold: float | None) -> bool:
+    if threshold is None:
+        return True
+    value = to_float(row.get(field))
+    return value is not None and value >= threshold
+
+
+def passes_max_gate(row: dict[str, Any], field: str, threshold: float | None) -> bool:
+    if threshold is None:
+        return True
+    value = to_float(row.get(field))
+    return value is not None and value <= threshold
+
+
+def calibrated_baseline_candidate_status(row: dict[str, Any], config: dict[str, Any]) -> tuple[str, str] | None:
+    cohort = str(row.get("calibration_cohort") or "")
+    production_cohorts = parse_csv_set(cfg_get(config, "calibration.calibrated_baseline.production_seed_cohorts", ""))
+    watchlist_cohorts = parse_csv_set(cfg_get(config, "calibration.calibrated_baseline.watchlist_seed_cohorts", ""))
+    if cohort not in production_cohorts and cohort not in watchlist_cohorts:
+        return None
+    if str(row.get("classification") or "") in {"manual_review_regulatory_risk", "avoid_confirmed_regulatory_risk", "data_review_required"}:
+        return None
+    if int(row.get("passed_fda_manual_review_gate") or 0) != 1 or int(row.get("hard_red_flag") or 0) == 1:
+        return None
+    checks = [
+        ("raw_composite_score", "composite_min"),
+        ("cohort_percentile", "cohort_percentile_min"),
+        ("fundamental_quality_score", "fundamental_quality_min"),
+        ("durable_growth_score", "durable_growth_min"),
+        ("fda_product_score", "fda_product_min"),
+        ("reimbursement_score", "reimbursement_min"),
+        ("valuation_score", "valuation_min"),
+        ("technical_entry_score", "technical_entry_min"),
+        ("data_completeness_score", "data_completeness_min"),
+    ]
+    for field, gate_key in checks:
+        if not passes_min_gate(row, field, configured_gate_value(config, cohort, gate_key)):
+            return None
+    if not passes_max_gate(row, "value_trap_score", configured_gate_value(config, cohort, "value_trap_max")):
+        return None
+    status = "production_baseline_candidate" if cohort in production_cohorts else "watchlist_baseline_candidate"
+    reason = "final_investability_pass" if int(row.get("final_investability_gate") or 0) == 1 else "baseline_gate_pass_not_tier1"
+    return status, reason
+
+
+def calibrated_baseline_candidates(rows: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        status = calibrated_baseline_candidate_status(row, config)
+        if status is None:
+            continue
+        baseline_status, reason = status
+        item = dict(row)
+        item["calibrated_baseline_status"] = baseline_status
+        item["calibrated_baseline_reason"] = reason
+        out.append(item)
+    return sorted(
+        out,
+        key=lambda item: (
+            0 if item["calibrated_baseline_status"] == "production_baseline_candidate" else 1,
+            int(item.get("rank") or 999999),
+        ),
+    )
+
+
 def clean_row(row: dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
     item["fda_review_state"] = (
@@ -437,6 +543,7 @@ def write_markdown(
     rows: list[dict[str, Any]],
     counts: list[dict[str, Any]],
     reimbursement_counts: list[dict[str, Any]],
+    baseline_candidates: list[dict[str, Any]],
     asof: str,
 ) -> None:
     model_version = str(rows[0].get("scoring_model_version") or "") if rows else ""
@@ -516,6 +623,20 @@ def write_markdown(
         "",
         "## Tier-1 Long Candidates",
         *(line_items(tier1) or ["- None"]),
+        "",
+        "## Calibrated Baseline Candidates",
+        *(
+            [
+                f"- {row.get('rank')}. {row.get('ticker')} "
+                f"status={row.get('calibrated_baseline_status')} "
+                f"cohort={row.get('calibration_cohort') or 'unknown'} "
+                f"raw={first_float(row.get('raw_composite_score'), row.get('composite_score')):.2f} "
+                f"cohort_pct={first_float(row.get('cohort_percentile')):.2f} "
+                f"class={row.get('classification')} "
+                f"reason={row.get('calibrated_baseline_reason')}"
+                for row in baseline_candidates[:30]
+            ] or ["- None"]
+        ),
         "",
         "## Shadow Safe-Core Candidates",
         *(safe_core_line_items(safe_core[:25], include_reason=True) or ["- None"]),
@@ -657,10 +778,16 @@ def main() -> None:
         ]
         top25 = clean_rows[:25]
         bottom25 = list(reversed(clean_rows[-25:]))
+        baseline_candidates = calibrated_baseline_candidates(clean_rows, config)
 
         write_csv(output_dir / "med_device_daily_composite_scores.csv", clean_rows, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_all.csv", clean_rows, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_tier1.csv", tier1, SCORE_FIELDS)
+        write_csv(
+            output_dir / "med_device_score_review_calibrated_baseline.csv",
+            baseline_candidates,
+            CALIBRATED_BASELINE_FIELDS,
+        )
         write_csv(output_dir / "med_device_score_review_safe_core.csv", safe_core, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_safe_core_watchlist.csv", safe_core_watchlist, SCORE_FIELDS)
         write_csv(
@@ -684,11 +811,13 @@ def main() -> None:
             rows=clean_rows,
             counts=counts,
             reimbursement_counts=reimbursement_counts,
+            baseline_candidates=baseline_candidates,
             asof=asof,
         )
         print(
             f"review_pack_dir={output_dir} asof={asof} rows={len(rows)} "
             f"tier1={len(tier1)} safe_core={len(safe_core)} "
+            f"calibrated_baseline={len(baseline_candidates)} "
             f"safe_core_watchlist={len(safe_core_watchlist)} "
             f"special_situation_binary_risk={len(special_situations)} "
             f"manual_regulatory={len(manual)} "

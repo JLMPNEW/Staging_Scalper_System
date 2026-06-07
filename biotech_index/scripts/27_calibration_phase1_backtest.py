@@ -478,7 +478,7 @@ def add_percentile_by_date(rows: list[dict[str, Any]], source_key: str, output_k
         scored.sort(key=lambda item: (item[0], item[1]))
         n = len(scored)
         if n == 1:
-            scored[0][2][output_key] = ""
+            scored[0][2][output_key] = 50.0
             continue
         i = 0
         while i < n:

@@ -563,12 +563,107 @@ CREATE TABLE IF NOT EXISTS fact_short_interest (
     ticker TEXT NOT NULL,
     settlement_date TEXT NOT NULL,
     source_id TEXT NOT NULL,
+    company_id INTEGER,
     short_interest REAL,
     avg_daily_volume REAL,
     days_to_cover REAL,
+    float_shares REAL,
+    short_interest_pct_float REAL,
+    publication_date TEXT,
+    payload_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY(ticker, settlement_date, source_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_finra_short_volume (
+    ticker TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    company_id INTEGER,
+    short_volume REAL,
+    short_exempt_volume REAL,
+    total_volume REAL,
+    short_volume_ratio REAL,
+    market TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, trade_date, source_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_ibkr_borrow_snapshot (
+    ticker TEXT NOT NULL,
+    asof_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    company_id INTEGER,
+    shortable_status REAL,
+    shortable_shares REAL,
+    borrow_fee_rate REAL,
+    source_timestamp TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, asof_date, source_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_sec_13f_holding (
+    holding_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    accession_nodash TEXT NOT NULL,
+    report_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    manager_cik TEXT,
+    manager_name TEXT,
+    ticker TEXT NOT NULL,
+    company_id INTEGER,
+    cusip TEXT,
+    shares REAL,
+    market_value_usd REAL,
+    manager_count REAL,
+    institutional_ownership_pct REAL,
+    institutional_ownership_delta_pct REAL,
+    put_call TEXT,
+    investment_discretion TEXT,
+    voting_authority_json TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_sec_form4_transaction (
+    accession_nodash TEXT NOT NULL,
+    transaction_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    company_id INTEGER,
+    ticker TEXT NOT NULL,
+    issuer_cik TEXT,
+    reporting_owner_cik TEXT,
+    reporting_owner_name TEXT,
+    officer_title TEXT,
+    is_director INTEGER DEFAULT 0,
+    is_officer INTEGER DEFAULT 0,
+    is_ten_percent_owner INTEGER DEFAULT 0,
+    transaction_date TEXT,
+    transaction_code TEXT,
+    transaction_shares REAL,
+    transaction_price REAL,
+    transaction_value_usd REAL,
+    direct_or_indirect TEXT,
+    post_transaction_shares REAL,
+    derivative_flag INTEGER DEFAULT 0,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(accession_nodash, transaction_id, source_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE SET NULL,
     FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
 );
 
@@ -850,6 +945,88 @@ CREATE TABLE IF NOT EXISTS feature_sentiment_catalyst (
     FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS feature_borrow_risk (
+    asof_date TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    ticker TEXT,
+    borrow_availability_score REAL DEFAULT 50.0,
+    borrow_fee_score REAL DEFAULT 50.0,
+    borrow_squeeze_risk_score REAL DEFAULT 50.0,
+    borrow_pressure_score REAL DEFAULT 50.0,
+    shortable_status REAL,
+    shortable_shares REAL,
+    borrow_fee_rate REAL,
+    data_quality_score REAL DEFAULT 0.0,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, company_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS feature_short_interest (
+    asof_date TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    ticker TEXT,
+    short_interest_score REAL DEFAULT 50.0,
+    short_pressure_score REAL DEFAULT 50.0,
+    short_squeeze_score REAL DEFAULT 50.0,
+    short_volume_score REAL DEFAULT 50.0,
+    short_interest_velocity_score REAL DEFAULT 50.0,
+    days_to_cover_score REAL DEFAULT 50.0,
+    short_interest REAL,
+    short_interest_pct_float REAL,
+    days_to_cover REAL,
+    short_volume_ratio_20d REAL,
+    short_volume_ratio_delta_20d REAL,
+    data_quality_score REAL DEFAULT 0.0,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, company_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS feature_institutional_flow (
+    asof_date TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    ticker TEXT,
+    institutional_ownership_delta_pct REAL DEFAULT 0.0,
+    institutional_accumulation_score REAL DEFAULT 50.0,
+    institutional_crowding_score REAL DEFAULT 50.0,
+    institutional_breadth_score REAL DEFAULT 50.0,
+    institutional_manager_count REAL,
+    institutional_share_count REAL,
+    institutional_market_value_usd REAL,
+    data_quality_score REAL DEFAULT 0.0,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, company_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS feature_insider_activity (
+    asof_date TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    ticker TEXT,
+    insider_net_buy_score REAL DEFAULT 50.0,
+    insider_cluster_buy_score REAL DEFAULT 50.0,
+    insider_selling_pressure_score REAL DEFAULT 50.0,
+    insider_activity_score REAL DEFAULT 50.0,
+    net_purchase_value_90d REAL,
+    open_market_buy_count_90d INTEGER DEFAULT 0,
+    open_market_sell_count_90d INTEGER DEFAULT 0,
+    unique_buyer_count_90d INTEGER DEFAULT 0,
+    unique_seller_count_90d INTEGER DEFAULT 0,
+    data_quality_score REAL DEFAULT 0.0,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, company_id),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     asof_date TEXT NOT NULL,
     company_id INTEGER NOT NULL,
@@ -879,6 +1056,10 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     safe_core_model_version TEXT DEFAULT '',
     legacy_all_gates_gate INTEGER DEFAULT 0,
     legacy_gate_misses TEXT DEFAULT '',
+    ic_tilted_composite_score REAL DEFAULT 0.0,
+    ic_tilted_composite_delta REAL DEFAULT 0.0,
+    ic_tilted_composite_mode TEXT DEFAULT '',
+    ic_tilted_component_ics_json TEXT DEFAULT '{}',
     cohort_percentile REAL,
     fundamental_quality_score REAL,
     durable_growth_score REAL,
@@ -953,6 +1134,27 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     technical_score_source TEXT DEFAULT '',
     technical_entry_status_score REAL DEFAULT 0.0,
     technical_entry_status_score_source TEXT DEFAULT '',
+    borrow_availability_score REAL DEFAULT 50.0,
+    borrow_fee_score REAL DEFAULT 50.0,
+    borrow_squeeze_risk_score REAL DEFAULT 50.0,
+    borrow_pressure_score REAL DEFAULT 50.0,
+    borrow_data_quality_score REAL DEFAULT 0.0,
+    short_interest_score REAL DEFAULT 50.0,
+    short_pressure_score REAL DEFAULT 50.0,
+    short_squeeze_score REAL DEFAULT 50.0,
+    short_volume_score REAL DEFAULT 50.0,
+    short_interest_velocity_score REAL DEFAULT 50.0,
+    days_to_cover_score REAL DEFAULT 50.0,
+    short_data_quality_score REAL DEFAULT 0.0,
+    institutional_accumulation_score REAL DEFAULT 50.0,
+    institutional_crowding_score REAL DEFAULT 50.0,
+    institutional_breadth_score REAL DEFAULT 50.0,
+    institutional_flow_data_quality_score REAL DEFAULT 0.0,
+    insider_net_buy_score REAL DEFAULT 50.0,
+    insider_cluster_buy_score REAL DEFAULT 50.0,
+    insider_selling_pressure_score REAL DEFAULT 50.0,
+    insider_activity_score REAL DEFAULT 50.0,
+    insider_data_quality_score REAL DEFAULT 0.0,
     sentiment_catalyst_score REAL,
     value_trap_score REAL,
     data_completeness_score REAL,
@@ -1140,6 +1342,26 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     _ensure_table_optional_columns(conn, "fact_price_ohlcv", {"price_adjustment": "TEXT"})
+    _ensure_table_optional_columns(
+        conn,
+        "fact_short_interest",
+        {
+            "company_id": "INTEGER",
+            "float_shares": "REAL",
+            "short_interest_pct_float": "REAL",
+            "publication_date": "TEXT",
+            "payload_json": "TEXT",
+        },
+    )
+    _ensure_table_optional_columns(
+        conn,
+        "fact_sec_13f_holding",
+        {
+            "manager_count": "REAL",
+            "institutional_ownership_pct": "REAL",
+            "institutional_ownership_delta_pct": "REAL",
+        },
+    )
     _ensure_table_optional_columns(
         conn,
         "fact_financial_statement",
@@ -1368,6 +1590,10 @@ def init_db(conn: sqlite3.Connection) -> None:
             "safe_core_model_version": "TEXT",
             "legacy_all_gates_gate": "INTEGER",
             "legacy_gate_misses": "TEXT",
+            "ic_tilted_composite_score": "REAL",
+            "ic_tilted_composite_delta": "REAL",
+            "ic_tilted_composite_mode": "TEXT",
+            "ic_tilted_component_ics_json": "TEXT",
             "cohort_percentile": "REAL",
             "durable_growth_score_legacy": "REAL",
             "durable_growth_alpha_score": "REAL",
@@ -1441,6 +1667,27 @@ def init_db(conn: sqlite3.Connection) -> None:
             "technical_score_source": "TEXT",
             "technical_entry_status_score": "REAL",
             "technical_entry_status_score_source": "TEXT",
+            "borrow_availability_score": "REAL",
+            "borrow_fee_score": "REAL",
+            "borrow_squeeze_risk_score": "REAL",
+            "borrow_pressure_score": "REAL",
+            "borrow_data_quality_score": "REAL",
+            "short_interest_score": "REAL",
+            "short_pressure_score": "REAL",
+            "short_squeeze_score": "REAL",
+            "short_volume_score": "REAL",
+            "short_interest_velocity_score": "REAL",
+            "days_to_cover_score": "REAL",
+            "short_data_quality_score": "REAL",
+            "institutional_accumulation_score": "REAL",
+            "institutional_crowding_score": "REAL",
+            "institutional_breadth_score": "REAL",
+            "institutional_flow_data_quality_score": "REAL",
+            "insider_net_buy_score": "REAL",
+            "insider_cluster_buy_score": "REAL",
+            "insider_selling_pressure_score": "REAL",
+            "insider_activity_score": "REAL",
+            "insider_data_quality_score": "REAL",
             "pullback_candidate_tag": "INTEGER",
             "pullback_candidate_reason": "TEXT",
             "pullback_candidate_template_id": "TEXT",
@@ -1493,6 +1740,28 @@ def init_db(conn: sqlite3.Connection) -> None:
         ON fact_fda_recall(recall_key, source_id, COALESCE(endpoint_name, ''))
         WHERE recall_key IS NOT NULL AND recall_key != ''
         """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_sec_13f_holding_identity
+        ON fact_sec_13f_holding(
+            accession_nodash,
+            ticker,
+            COALESCE(cusip, ''),
+            COALESCE(put_call, ''),
+            source_id
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fact_finra_short_volume_company_date ON fact_finra_short_volume(company_id, trade_date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fact_ibkr_borrow_company_date ON fact_ibkr_borrow_snapshot(company_id, asof_date)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_13f_holding_company_date ON fact_sec_13f_holding(company_id, report_date)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fact_form4_transaction_company_date ON fact_sec_form4_transaction(company_id, transaction_date)"
     )
     conn.execute("PRAGMA user_version = 1")
     conn.commit()

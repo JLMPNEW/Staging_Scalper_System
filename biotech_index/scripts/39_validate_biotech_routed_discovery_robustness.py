@@ -101,7 +101,10 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
 def load_cohorts(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
     rows = conn.execute(
         """
-        SELECT asof_date, ticker, biotech_primary_cohort
+        SELECT
+            asof_date,
+            ticker,
+            biotech_primary_cohort
         FROM daily_scores
         WHERE ticker IS NOT NULL
           AND biotech_primary_cohort IS NOT NULL
@@ -303,7 +306,7 @@ def summarize(rows: list[SelectedRow]) -> dict[str, float | int]:
         "loss40_rate_pct": 100.0 * sum(1 for value in values if value <= -0.40) / len(values) if values else math.nan,
         "top3_gain_contribution_pct": top3_gain_contribution(values),
         "late_clinical_share_pct": 100.0
-        * sum(1 for row in rows if row.cohort == "late_clinical_pivotal")
+        * sum(1 for row in rows if row.cohort == "late_clinical_pivotal_or_registrational")
         / len(rows)
         if rows
         else math.nan,

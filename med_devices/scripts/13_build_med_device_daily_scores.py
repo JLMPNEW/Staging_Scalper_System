@@ -22,6 +22,7 @@ from med_devices.core.config import DEFAULT_NEUTRAL_SCORE, cfg_get, load_yaml, r
 from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.fda_states import MANUAL_FDA_REVIEW_STATES  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
+from med_devices.core.scoring_enhancements import blended_score as ic_blended_score  # noqa: E402
 from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 
 
@@ -36,6 +37,16 @@ DEFAULT_WEIGHTS = {
     "technical_entry": 0.10,
     "sentiment_catalyst": 0.05,
 }
+IC_COMPONENT_FIELD_MAP = {
+    "fundamental_quality_score": "fundamental_quality",
+    "durable_growth_score": "durable_growth",
+    "fda_product_score": "fda_product",
+    "reimbursement_score": "reimbursement",
+    "valuation_score": "valuation",
+    "technical_entry_score": "technical_entry",
+    "sentiment_catalyst_score": "sentiment_catalyst",
+}
+IC_COMPONENT_KEYS = set(IC_COMPONENT_FIELD_MAP.values())
 WEIGHT_EPSILON = 1e-9
 TECHNICAL_GATE_HARD_POSITIVE = "hard_positive"
 TECHNICAL_GATE_OVERLAY_ONLY = "overlay_only"
@@ -149,6 +160,10 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "safe_core_model_version": "TEXT DEFAULT ''",
     "legacy_all_gates_gate": "INTEGER DEFAULT 0",
     "legacy_gate_misses": "TEXT DEFAULT ''",
+    "ic_tilted_composite_score": "REAL DEFAULT 0.0",
+    "ic_tilted_composite_delta": "REAL DEFAULT 0.0",
+    "ic_tilted_composite_mode": "TEXT DEFAULT ''",
+    "ic_tilted_component_ics_json": "TEXT DEFAULT '{}'",
     "durable_growth_score_legacy": "REAL DEFAULT 50.0",
     "durable_growth_alpha_score": "REAL DEFAULT 50.0",
     "durable_growth_growth_score": "REAL DEFAULT 50.0",
@@ -217,6 +232,27 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "technical_score_source": "TEXT DEFAULT ''",
     "technical_entry_status_score": "REAL DEFAULT 0.0",
     "technical_entry_status_score_source": "TEXT DEFAULT ''",
+    "borrow_availability_score": "REAL DEFAULT 50.0",
+    "borrow_fee_score": "REAL DEFAULT 50.0",
+    "borrow_squeeze_risk_score": "REAL DEFAULT 50.0",
+    "borrow_pressure_score": "REAL DEFAULT 50.0",
+    "borrow_data_quality_score": "REAL DEFAULT 0.0",
+    "short_interest_score": "REAL DEFAULT 50.0",
+    "short_pressure_score": "REAL DEFAULT 50.0",
+    "short_squeeze_score": "REAL DEFAULT 50.0",
+    "short_volume_score": "REAL DEFAULT 50.0",
+    "short_interest_velocity_score": "REAL DEFAULT 50.0",
+    "days_to_cover_score": "REAL DEFAULT 50.0",
+    "short_data_quality_score": "REAL DEFAULT 0.0",
+    "institutional_accumulation_score": "REAL DEFAULT 50.0",
+    "institutional_crowding_score": "REAL DEFAULT 50.0",
+    "institutional_breadth_score": "REAL DEFAULT 50.0",
+    "institutional_flow_data_quality_score": "REAL DEFAULT 0.0",
+    "insider_net_buy_score": "REAL DEFAULT 50.0",
+    "insider_cluster_buy_score": "REAL DEFAULT 50.0",
+    "insider_selling_pressure_score": "REAL DEFAULT 50.0",
+    "insider_activity_score": "REAL DEFAULT 50.0",
+    "insider_data_quality_score": "REAL DEFAULT 0.0",
 }
 ALLOWED_FEATURE_TABLES = {
     "feature_financial_valuation",
@@ -225,6 +261,10 @@ ALLOWED_FEATURE_TABLES = {
     "feature_technical_entry",
     "feature_durable_growth",
     "feature_sentiment_catalyst",
+    "feature_borrow_risk",
+    "feature_short_interest",
+    "feature_institutional_flow",
+    "feature_insider_activity",
 }
 FIELDNAMES = [
     "asof_date",
@@ -259,6 +299,10 @@ FIELDNAMES = [
     "safe_core_model_version",
     "legacy_all_gates_gate",
     "legacy_gate_misses",
+    "ic_tilted_composite_score",
+    "ic_tilted_composite_delta",
+    "ic_tilted_composite_mode",
+    "ic_tilted_component_ics_json",
     "cohort_percentile",
     "fundamental_quality_score",
     "durable_growth_score",
@@ -333,6 +377,27 @@ FIELDNAMES = [
     "technical_score_source",
     "technical_entry_status_score",
     "technical_entry_status_score_source",
+    "borrow_availability_score",
+    "borrow_fee_score",
+    "borrow_squeeze_risk_score",
+    "borrow_pressure_score",
+    "borrow_data_quality_score",
+    "short_interest_score",
+    "short_pressure_score",
+    "short_squeeze_score",
+    "short_volume_score",
+    "short_interest_velocity_score",
+    "days_to_cover_score",
+    "short_data_quality_score",
+    "institutional_accumulation_score",
+    "institutional_crowding_score",
+    "institutional_breadth_score",
+    "institutional_flow_data_quality_score",
+    "insider_net_buy_score",
+    "insider_cluster_buy_score",
+    "insider_selling_pressure_score",
+    "insider_activity_score",
+    "insider_data_quality_score",
     "sentiment_catalyst_score",
     "value_trap_score",
     "data_completeness_score",
@@ -423,6 +488,10 @@ class ScoreRow:
     safe_core_model_version: str = "safe_core_v1_shadow"
     legacy_all_gates_gate: int = 0
     legacy_gate_misses: str = ""
+    ic_tilted_composite_score: float = 0.0
+    ic_tilted_composite_delta: float = 0.0
+    ic_tilted_composite_mode: str = "disabled"
+    ic_tilted_component_ics_json: str = "{}"
     cohort_percentile: float = 50.0
     fundamental_quality_score: float = 0.0
     durable_growth_score: float = 50.0
@@ -497,6 +566,27 @@ class ScoreRow:
     technical_score_source: str = "legacy_setup"
     technical_entry_status_score: float | None = None
     technical_entry_status_score_source: str = "legacy_setup"
+    borrow_availability_score: float = 50.0
+    borrow_fee_score: float = 50.0
+    borrow_squeeze_risk_score: float = 50.0
+    borrow_pressure_score: float = 50.0
+    borrow_data_quality_score: float = 0.0
+    short_interest_score: float = 50.0
+    short_pressure_score: float = 50.0
+    short_squeeze_score: float = 50.0
+    short_volume_score: float = 50.0
+    short_interest_velocity_score: float = 50.0
+    days_to_cover_score: float = 50.0
+    short_data_quality_score: float = 0.0
+    institutional_accumulation_score: float = 50.0
+    institutional_crowding_score: float = 50.0
+    institutional_breadth_score: float = 50.0
+    institutional_flow_data_quality_score: float = 0.0
+    insider_net_buy_score: float = 50.0
+    insider_cluster_buy_score: float = 50.0
+    insider_selling_pressure_score: float = 50.0
+    insider_activity_score: float = 50.0
+    insider_data_quality_score: float = 0.0
     sentiment_catalyst_score: float = 50.0
     value_trap_score: float = 0.0
     data_completeness_score: float = 0.0
@@ -746,6 +836,76 @@ def load_weights(config: dict[str, Any]) -> dict[str, float]:
         default_weights=DEFAULT_WEIGHTS,
         context="scoring.composite_weights",
     )
+
+
+def load_ic_tilted_composite_policy(config: dict[str, Any], *, base_dir: Path) -> dict[str, Any]:
+    raw_policy = cfg_get(config, "scoring.ic_tilted_composite", {}) or {}
+    enabled = bool_from_raw(raw_policy.get("enabled"), False)
+    mode = str(raw_policy.get("mode", "shadow") or "shadow").strip().lower()
+    if mode not in {"shadow", "replace_raw"}:
+        raise ValueError("scoring.ic_tilted_composite.mode must be 'shadow' or 'replace_raw'")
+    allow_replace = bool_from_raw(raw_policy.get("allow_production_replace"), False)
+    return {
+        "enabled": enabled,
+        "mode": mode,
+        "allow_replace": allow_replace,
+        "source_csv": resolve_path(
+            raw_policy.get(
+                "source_csv",
+                cfg_get(config, "calibration.component_ic_csv", "../output/med_devices_reports/calibration/med_device_component_ic_by_cohort.csv"),
+            ),
+            base_dir=base_dir,
+        ),
+        "horizon_days": int(raw_policy.get("horizon_days", 120) or 120),
+        "ic_metric": str(raw_policy.get("ic_metric", "net_spearman_ic_excess") or "net_spearman_ic_excess"),
+        "t_stat_field": str(raw_policy.get("t_stat_field", "net_spearman_ic_excess_t_stat") or "net_spearman_ic_excess_t_stat"),
+        "accepted_field": str(raw_policy.get("accepted_field", "net_spearman_ic_excess_bh_accepted") or "net_spearman_ic_excess_bh_accepted"),
+        "recommendation_field": str(raw_policy.get("recommendation_field", "net_recommendation") or "net_recommendation"),
+        "require_bh_accepted": bool_from_raw(raw_policy.get("require_bh_accepted"), True),
+        "require_positive_recommendation": bool_from_raw(raw_policy.get("require_positive_recommendation"), True),
+        "min_abs_ic": float(raw_policy.get("min_abs_ic", cfg_get(config, "calibration.component_ic.min_abs_spearman_ic", 0.05)) or 0.05),
+        "min_t_stat": float(raw_policy.get("min_t_stat", cfg_get(config, "calibration.component_ic.min_ic_t_stat", 2.0)) or 2.0),
+        "min_obs": int(raw_policy.get("min_obs", cfg_get(config, "calibration.component_ic.min_obs", 50)) or 50),
+        "min_unique_tickers": int(raw_policy.get("min_unique_tickers", 3) or 3),
+        "ic_blend_fraction": float(raw_policy.get("ic_blend_fraction", 0.35) or 0.35),
+    }
+
+
+def load_ic_tilted_component_ics(policy: dict[str, Any]) -> dict[str, dict[str, float]]:
+    if not policy.get("enabled"):
+        return {}
+    source_csv = Path(policy["source_csv"])
+    if not source_csv.exists():
+        LOGGER.warning("IC tilted composite enabled but source CSV is missing: %s", source_csv)
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    with source_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if int(to_float(row.get("horizon_days")) or 0) != int(policy["horizon_days"]):
+                continue
+            component_key = IC_COMPONENT_FIELD_MAP.get(str(row.get("component") or ""))
+            if component_key not in IC_COMPONENT_KEYS:
+                continue
+            if int(to_float(row.get("count")) or 0) < int(policy["min_obs"]):
+                continue
+            if int(to_float(row.get("unique_tickers")) or 0) < int(policy["min_unique_tickers"]):
+                continue
+            ic = to_float(row.get(str(policy["ic_metric"])))
+            t_stat = to_float(row.get(str(policy["t_stat_field"])))
+            if ic is None or t_stat is None:
+                continue
+            if ic <= 0 or abs(ic) < float(policy["min_abs_ic"]) or abs(t_stat) < float(policy["min_t_stat"]):
+                continue
+            if policy.get("require_bh_accepted") and str(row.get(str(policy["accepted_field"])) or "0") != "1":
+                continue
+            recommendation = str(row.get(str(policy["recommendation_field"])) or "")
+            if policy.get("require_positive_recommendation") and recommendation != "positive_candidate_factor":
+                continue
+            cohort = str(row.get("calibration_cohort") or "")
+            if not cohort:
+                continue
+            out.setdefault(cohort, {})[component_key] = ic
+    return out
 
 
 def load_financial_rows(conn: Any, *, asof: str, ticker_filter: set[str], max_tickers: int) -> list[dict[str, Any]]:
@@ -1705,6 +1865,96 @@ GATE_KEYS = {
     "value_trap_hard_max",
 }
 
+DEFAULT_COHORT_PROFILE_ALIASES = {
+    "capital_equipment_imaging_monitoring": "capital_equipment_procedure_platforms",
+    "capital_equipment_procedure_platforms": "capital_equipment_imaging_monitoring",
+    "diabetes_wearables_drug_delivery": "home_chronic_care_devices_dme_drug_delivery",
+    "home_chronic_care_devices_dme_drug_delivery": "diabetes_wearables_drug_delivery",
+    "healthcare_services_cro_other": "healthcare_services_cro_lab_services",
+    "healthcare_services_cro_lab_services": "healthcare_services_cro_other",
+    "hospital_supplies_consumables_dme": "hospital_supplies_surgical_consumables_oem",
+    "hospital_supplies_surgical_consumables_oem": "hospital_supplies_consumables_dme",
+    "implantable_interventional_devices_other": "emerging_single_product_therapeutic_platforms",
+    "emerging_single_product_therapeutic_platforms": "implantable_interventional_devices_other",
+    "orthopedics_spine_dental": "orthopedics_spine_sports_implants",
+    "orthopedics_spine_sports_implants": "orthopedics_spine_dental",
+    "surgical_robotics_platforms": "capital_equipment_procedure_platforms",
+}
+
+
+def cohort_profile_aliases(config: dict[str, Any]) -> dict[str, str]:
+    aliases = dict(DEFAULT_COHORT_PROFILE_ALIASES)
+    raw_aliases = cfg_get(config, "scoring.cohort_profile_aliases", {}) or {}
+    if not isinstance(raw_aliases, dict):
+        raise ValueError("scoring.cohort_profile_aliases must be a mapping when provided")
+    for source, target in raw_aliases.items():
+        source_text = str(source or "").strip()
+        target_text = str(target or "").strip()
+        if source_text and target_text:
+            aliases[source_text] = target_text
+    return aliases
+
+
+def cohort_profile_key(
+    cohort: str,
+    profiles: dict[str, Any],
+    aliases: dict[str, str],
+) -> str | None:
+    cohort_text = str(cohort or "").strip()
+    if cohort_text in profiles:
+        return cohort_text
+    seen = {cohort_text}
+    current = cohort_text
+    for _ in range(8):
+        current = aliases.get(current, "")
+        if not current or current in seen:
+            return None
+        if current in profiles:
+            return current
+        seen.add(current)
+    return None
+
+
+def profile_for_cohort(
+    cohort: str,
+    profiles: dict[str, Any],
+    aliases: dict[str, str],
+    default: Any = None,
+) -> Any:
+    key = cohort_profile_key(cohort, profiles, aliases)
+    return profiles[key] if key is not None else default
+
+
+def warn_unmatched_active_cohort_profiles(
+    config: dict[str, Any],
+    active_cohorts: set[str],
+    aliases: dict[str, str],
+) -> None:
+    raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
+    if not isinstance(raw_profiles, dict):
+        return
+    enabled_profiles = {
+        str(cohort)
+        for cohort, raw_profile in raw_profiles.items()
+        if isinstance(raw_profile, dict)
+        and str(raw_profile.get("enabled", True)).strip().lower() not in {"0", "false", "no", "off"}
+    }
+    profile_lookup = {cohort: True for cohort in enabled_profiles}
+    missing = sorted(
+        cohort
+        for cohort in active_cohorts
+        if cohort and cohort_profile_key(cohort, profile_lookup, aliases) is None
+    )
+    if not missing:
+        return
+    message = (
+        "Active calibration cohorts have no scoring.cohort_profiles entry or alias: "
+        + ", ".join(missing)
+    )
+    if cfg_bool(config, "scoring.require_cohort_profiles_for_active_cohorts", False):
+        raise ValueError(message)
+    LOGGER.warning(message)
+
 
 def base_scoring_gates(config: dict[str, Any]) -> dict[str, float]:
     return {
@@ -1753,8 +2003,13 @@ def cohort_gate_profiles(config: dict[str, Any], base_gates: dict[str, float]) -
     return profiles
 
 
-def gates_for_row(row: ScoreRow, base_gates: dict[str, float], profiles: dict[str, dict[str, float]]) -> dict[str, float]:
-    return profiles.get(row.calibration_cohort, base_gates)
+def gates_for_row(
+    row: ScoreRow,
+    base_gates: dict[str, float],
+    profiles: dict[str, dict[str, float]],
+    aliases: dict[str, str],
+) -> dict[str, float]:
+    return profile_for_cohort(row.calibration_cohort, profiles, aliases, base_gates)
 
 
 def normalize_calibration_status(raw: object, *, context: str) -> str:
@@ -1797,8 +2052,12 @@ def cohort_calibration_status_profiles(config: dict[str, Any]) -> dict[str, tupl
     return out
 
 
-def calibration_status_for_cohort(cohort: str, profiles: dict[str, tuple[str, str]]) -> tuple[str, str]:
-    return profiles.get(cohort, (CALIBRATION_STATUS_PRODUCTION_ELIGIBLE, ""))
+def calibration_status_for_cohort(
+    cohort: str,
+    profiles: dict[str, tuple[str, str]],
+    aliases: dict[str, str],
+) -> tuple[str, str]:
+    return profile_for_cohort(cohort, profiles, aliases, (CALIBRATION_STATUS_PRODUCTION_ELIGIBLE, ""))
 
 
 def bool_from_raw(raw: object, default: bool) -> bool:
@@ -1894,8 +2153,13 @@ def cohort_technical_policy_profiles(config: dict[str, Any], base_policy: Techni
     return out
 
 
-def technical_policy_for_row(row: ScoreRow, base_policy: TechnicalPolicy, profiles: dict[str, TechnicalPolicy]) -> TechnicalPolicy:
-    return profiles.get(row.calibration_cohort, base_policy)
+def technical_policy_for_row(
+    row: ScoreRow,
+    base_policy: TechnicalPolicy,
+    profiles: dict[str, TechnicalPolicy],
+    aliases: dict[str, str],
+) -> TechnicalPolicy:
+    return profile_for_cohort(row.calibration_cohort, profiles, aliases, base_policy)
 
 
 def parse_fda_gate_policy(raw: object, *, default: FdaGatePolicy, context: str) -> FdaGatePolicy:
@@ -1970,8 +2234,13 @@ def cohort_fda_gate_policy_profiles(config: dict[str, Any], base_policy: FdaGate
     return out
 
 
-def fda_policy_for_row(row: ScoreRow, base_policy: FdaGatePolicy, profiles: dict[str, FdaGatePolicy]) -> FdaGatePolicy:
-    return profiles.get(row.calibration_cohort, base_policy)
+def fda_policy_for_row(
+    row: ScoreRow,
+    base_policy: FdaGatePolicy,
+    profiles: dict[str, FdaGatePolicy],
+    aliases: dict[str, str],
+) -> FdaGatePolicy:
+    return profile_for_cohort(row.calibration_cohort, profiles, aliases, base_policy)
 
 
 def parse_durable_growth_policy(raw: object, *, default: DurableGrowthPolicy, context: str) -> DurableGrowthPolicy:
@@ -2169,8 +2438,9 @@ def durable_growth_policy_for_row(
     row: ScoreRow,
     base_policy: DurableGrowthPolicy,
     profiles: dict[str, DurableGrowthPolicy],
+    aliases: dict[str, str],
 ) -> DurableGrowthPolicy:
-    return profiles.get(row.calibration_cohort, base_policy)
+    return profile_for_cohort(row.calibration_cohort, profiles, aliases, base_policy)
 
 
 def cohort_component_weight_profiles(config: dict[str, Any], base_weights: dict[str, float]) -> dict[str, dict[str, float]]:
@@ -2193,8 +2463,13 @@ def cohort_component_weight_profiles(config: dict[str, Any], base_weights: dict[
     return out
 
 
-def weights_for_cohort(cohort: str, base_weights: dict[str, float], profiles: dict[str, dict[str, float]]) -> dict[str, float]:
-    return profiles.get(cohort, base_weights)
+def weights_for_cohort(
+    cohort: str,
+    base_weights: dict[str, float],
+    profiles: dict[str, dict[str, float]],
+    aliases: dict[str, str],
+) -> dict[str, float]:
+    return profile_for_cohort(cohort, profiles, aliases, base_weights)
 
 
 SCORE_TEMPLATE_FIELD_TO_ATTR = {
@@ -3012,8 +3287,9 @@ def tier1_safety_policy_for_row(
     row: ScoreRow,
     base_policy: Tier1SafetyPolicy,
     profiles: dict[str, Tier1SafetyPolicy],
+    aliases: dict[str, str],
 ) -> Tier1SafetyPolicy:
-    return profiles.get(row.calibration_cohort, base_policy)
+    return profile_for_cohort(row.calibration_cohort, profiles, aliases, base_policy)
 
 
 def log_scaled_liquidity_score(avg_dollar_volume_60d: float | None) -> float:
@@ -3536,6 +3812,7 @@ def build_rows(
     asof: str,
     weights: dict[str, float],
     config: dict[str, Any],
+    config_base_dir: Path,
     ticker_filter: set[str],
     max_tickers: int,
 ) -> list[ScoreRow]:
@@ -3545,8 +3822,24 @@ def build_rows(
     technical_rows = load_latest_feature(conn, "feature_technical_entry", "technical_score", asof=asof)
     durable_rows = load_latest_feature(conn, "feature_durable_growth", "score", asof=asof)
     sentiment_rows = load_latest_feature(conn, "feature_sentiment_catalyst", "score", asof=asof)
+    borrow_rows = load_latest_feature(conn, "feature_borrow_risk", "borrow_pressure_score", asof=asof)
+    short_rows = load_latest_feature(conn, "feature_short_interest", "short_pressure_score", asof=asof)
+    institutional_rows = load_latest_feature(
+        conn,
+        "feature_institutional_flow",
+        "institutional_crowding_score",
+        asof=asof,
+    )
+    insider_rows = load_latest_feature(conn, "feature_insider_activity", "insider_activity_score", asof=asof)
     taxonomy = load_company_model_taxonomy(conn)
     taxonomy_risk_flags = load_company_model_risk_flags(conn)
+    cohort_profile_alias_map = cohort_profile_aliases(config)
+    active_cohorts = {
+        str(taxonomy.get(int(item["company_id"]), "") or "").strip()
+        for item in financial_rows
+        if item.get("company_id") is not None
+    }
+    warn_unmatched_active_cohort_profiles(config, active_cohorts, cohort_profile_alias_map)
     neutral_fundamental = component_neutral(config, "fundamental_quality", "scoring.neutral_fundamental_quality_score", 50.0)
     neutral_durable = component_neutral(config, "durable_growth", "scoring.neutral_durable_growth_score", 50.0)
     neutral_reimbursement = component_neutral(config, "reimbursement", "scoring.neutral_reimbursement_score", 50.0)
@@ -3561,6 +3854,8 @@ def build_rows(
     gate_profiles = cohort_gate_profiles(config, gates)
     calibration_status_profiles = cohort_calibration_status_profiles(config)
     weight_profiles = cohort_component_weight_profiles(config, weights)
+    ic_tilt_policy = load_ic_tilted_composite_policy(config, base_dir=config_base_dir)
+    ic_tilt_component_ics = load_ic_tilted_component_ics(ic_tilt_policy)
     score_template_profiles = cohort_score_template_profiles(config)
     default_technical_policy = base_technical_policy(config, gates)
     technical_policy_profiles = cohort_technical_policy_profiles(config, default_technical_policy)
@@ -3582,9 +3877,13 @@ def build_rows(
         company_id = int(item["company_id"])
         cohort = taxonomy.get(company_id, "")
         risk_flags = taxonomy_risk_flags.get(company_id, {})
-        calibration_status, calibration_status_reason = calibration_status_for_cohort(cohort, calibration_status_profiles)
-        active_weights = weights_for_cohort(cohort, weights, weight_profiles)
-        active_score_template = score_template_profiles.get(cohort)
+        calibration_status, calibration_status_reason = calibration_status_for_cohort(
+            cohort,
+            calibration_status_profiles,
+            cohort_profile_alias_map,
+        )
+        active_weights = weights_for_cohort(cohort, weights, weight_profiles, cohort_profile_alias_map)
+        active_score_template = profile_for_cohort(cohort, score_template_profiles, cohort_profile_alias_map)
         technical_component_weight = (
             score_template_technical_weight(active_score_template)
             if active_score_template is not None
@@ -3600,12 +3899,21 @@ def build_rows(
             if active_score_template is not None
             else active_weights.get("durable_growth", 0.0)
         )
-        durable_policy = durable_growth_policy_profiles.get(cohort, default_durable_growth_policy)
+        durable_policy = profile_for_cohort(
+            cohort,
+            durable_growth_policy_profiles,
+            cohort_profile_alias_map,
+            default_durable_growth_policy,
+        )
         fda_item = fda_rows.get(company_id, {})
         reimbursement_item = reimbursement_rows.get(company_id, {})
         technical_item = technical_rows.get(company_id, {})
         durable_item = durable_rows.get(company_id, {})
         sentiment_item = sentiment_rows.get(company_id, {})
+        borrow_item = borrow_rows.get(company_id, {})
+        short_item = short_rows.get(company_id, {})
+        institutional_item = institutional_rows.get(company_id, {})
+        insider_item = insider_rows.get(company_id, {})
         durable_proxy_item = durable_proxy.get(company_id)
         has_durable_proxy = durable_proxy_item is not None
         sentiment_proxy_item = sentiment_proxy.get(company_id)
@@ -3883,6 +4191,53 @@ def build_rows(
             technical_score_source=active_technical_score_source,
             technical_entry_status_score=technical_entry_status_score,
             technical_entry_status_score_source=active_technical_entry_status_score_source,
+            borrow_availability_score=(
+                score_or(borrow_item.get("borrow_availability_score"), 50.0) if borrow_item else 50.0
+            ),
+            borrow_fee_score=score_or(borrow_item.get("borrow_fee_score"), 50.0) if borrow_item else 50.0,
+            borrow_squeeze_risk_score=(
+                score_or(borrow_item.get("borrow_squeeze_risk_score"), 50.0) if borrow_item else 50.0
+            ),
+            borrow_pressure_score=score_or(borrow_item.get("borrow_pressure_score"), 50.0) if borrow_item else 50.0,
+            borrow_data_quality_score=score_or(borrow_item.get("data_quality_score"), 0.0) if borrow_item else 0.0,
+            short_interest_score=score_or(short_item.get("short_interest_score"), 50.0) if short_item else 50.0,
+            short_pressure_score=score_or(short_item.get("short_pressure_score"), 50.0) if short_item else 50.0,
+            short_squeeze_score=score_or(short_item.get("short_squeeze_score"), 50.0) if short_item else 50.0,
+            short_volume_score=score_or(short_item.get("short_volume_score"), 50.0) if short_item else 50.0,
+            short_interest_velocity_score=(
+                score_or(short_item.get("short_interest_velocity_score"), 50.0) if short_item else 50.0
+            ),
+            days_to_cover_score=score_or(short_item.get("days_to_cover_score"), 50.0) if short_item else 50.0,
+            short_data_quality_score=score_or(short_item.get("data_quality_score"), 0.0) if short_item else 0.0,
+            institutional_accumulation_score=(
+                score_or(institutional_item.get("institutional_accumulation_score"), 50.0)
+                if institutional_item
+                else 50.0
+            ),
+            institutional_crowding_score=(
+                score_or(institutional_item.get("institutional_crowding_score"), 50.0)
+                if institutional_item
+                else 50.0
+            ),
+            institutional_breadth_score=(
+                score_or(institutional_item.get("institutional_breadth_score"), 50.0)
+                if institutional_item
+                else 50.0
+            ),
+            institutional_flow_data_quality_score=(
+                score_or(institutional_item.get("data_quality_score"), 0.0) if institutional_item else 0.0
+            ),
+            insider_net_buy_score=score_or(insider_item.get("insider_net_buy_score"), 50.0) if insider_item else 50.0,
+            insider_cluster_buy_score=(
+                score_or(insider_item.get("insider_cluster_buy_score"), 50.0) if insider_item else 50.0
+            ),
+            insider_selling_pressure_score=(
+                score_or(insider_item.get("insider_selling_pressure_score"), 50.0) if insider_item else 50.0
+            ),
+            insider_activity_score=(
+                score_or(insider_item.get("insider_activity_score"), 50.0) if insider_item else 50.0
+            ),
+            insider_data_quality_score=score_or(insider_item.get("data_quality_score"), 0.0) if insider_item else 0.0,
             sentiment_catalyst_score=sentiment_score,
             value_trap_score=score_or(item.get("value_trap_score"), neutral_value_trap),
             live_component_count=active_live_count,
@@ -3942,13 +4297,45 @@ def build_rows(
             "technical_entry": row.technical_entry_score,
             "sentiment_catalyst": row.sentiment_catalyst_score,
         }
+        fixed_weight_composite = weighted_available_score(component_scores, component_available, effective_weights)
         raw_composite = (
             score_template_value(row, active_score_template, score_field_available)
             if active_score_template is not None
-            else weighted_available_score(component_scores, component_available, effective_weights)
+            else fixed_weight_composite
         )
+        raw_composite_discounted = round(clamp(raw_composite * value_trap_discount(row.value_trap_score)), 2)
+        component_ics = profile_for_cohort(row.calibration_cohort, ic_tilt_component_ics, cohort_profile_alias_map, {})
+        if ic_tilt_policy.get("enabled") and component_ics:
+            ic_tilted_raw = ic_blended_score(
+                component_scores,
+                component_available,
+                config_weights=effective_weights,
+                historical_ics=component_ics,
+                ic_min_absolute=float(ic_tilt_policy["min_abs_ic"]),
+                ic_blend_fraction=float(ic_tilt_policy["ic_blend_fraction"]),
+                neutral=DEFAULT_NEUTRAL_SCORE,
+            )
+            row.ic_tilted_composite_score = round(
+                clamp(ic_tilted_raw * value_trap_discount(row.value_trap_score)),
+                2,
+            )
+            row.ic_tilted_composite_delta = round(row.ic_tilted_composite_score - raw_composite_discounted, 2)
+            row.ic_tilted_composite_mode = str(ic_tilt_policy["mode"])
+            row.ic_tilted_component_ics_json = json.dumps(component_ics, sort_keys=True, ensure_ascii=True)
+            if (
+                ic_tilt_policy["mode"] == "replace_raw"
+                and ic_tilt_policy.get("allow_replace")
+                and active_score_template is None
+            ):
+                raw_composite_discounted = row.ic_tilted_composite_score
+                row.ic_tilted_composite_mode = "replace_raw"
+        else:
+            row.ic_tilted_composite_score = raw_composite_discounted
+            row.ic_tilted_composite_delta = 0.0
+            row.ic_tilted_composite_mode = "disabled" if not ic_tilt_policy.get("enabled") else "fallback_no_valid_ic"
+            row.ic_tilted_component_ics_json = "{}"
         row.raw_composite_score = round(
-            clamp(raw_composite * value_trap_discount(row.value_trap_score)),
+            clamp(raw_composite_discounted),
             2,
         )
         row.composite_score = row.raw_composite_score
@@ -3966,21 +4353,31 @@ def build_rows(
     for row in rows:
         classify(
             row,
-            gates=gates_for_row(row, gates, gate_profiles),
-            technical_policy=technical_policy_for_row(row, default_technical_policy, technical_policy_profiles),
-            fda_policy=fda_policy_for_row(row, default_fda_policy, fda_policy_profiles),
+            gates=gates_for_row(row, gates, gate_profiles, cohort_profile_alias_map),
+            technical_policy=technical_policy_for_row(
+                row,
+                default_technical_policy,
+                technical_policy_profiles,
+                cohort_profile_alias_map,
+            ),
+            fda_policy=fda_policy_for_row(row, default_fda_policy, fda_policy_profiles, cohort_profile_alias_map),
             durable_policy=durable_growth_policy_for_row(
                 row,
                 default_durable_growth_policy,
                 durable_growth_policy_profiles,
+                cohort_profile_alias_map,
             ),
             tier1_policy=tier1_safety_policy_for_row(
                 row,
                 default_tier1_safety_policy,
                 tier1_safety_policy_profiles,
+                cohort_profile_alias_map,
             ),
         )
-        apply_pullback_candidate_tag(row, pullback_candidate_profiles.get(row.calibration_cohort))
+        apply_pullback_candidate_tag(
+            row,
+            profile_for_cohort(row.calibration_cohort, pullback_candidate_profiles, cohort_profile_alias_map),
+        )
         row.top_positive_drivers, row.top_negative_drivers = score_drivers(row)
     rows.sort(
         key=lambda item: (
@@ -4051,6 +4448,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "safe_core_model_version",
         "legacy_all_gates_gate",
         "legacy_gate_misses",
+        "ic_tilted_composite_score",
+        "ic_tilted_composite_delta",
+        "ic_tilted_composite_mode",
+        "ic_tilted_component_ics_json",
         "cohort_percentile",
         "fundamental_quality_score",
         "durable_growth_score",
@@ -4125,6 +4526,27 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "technical_score_source",
         "technical_entry_status_score",
         "technical_entry_status_score_source",
+        "borrow_availability_score",
+        "borrow_fee_score",
+        "borrow_squeeze_risk_score",
+        "borrow_pressure_score",
+        "borrow_data_quality_score",
+        "short_interest_score",
+        "short_pressure_score",
+        "short_squeeze_score",
+        "short_volume_score",
+        "short_interest_velocity_score",
+        "days_to_cover_score",
+        "short_data_quality_score",
+        "institutional_accumulation_score",
+        "institutional_crowding_score",
+        "institutional_breadth_score",
+        "institutional_flow_data_quality_score",
+        "insider_net_buy_score",
+        "insider_cluster_buy_score",
+        "insider_selling_pressure_score",
+        "insider_activity_score",
+        "insider_data_quality_score",
         "sentiment_catalyst_score",
         "value_trap_score",
         "rank",
@@ -4226,6 +4648,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.safe_core_model_version,
                 row.legacy_all_gates_gate,
                 row.legacy_gate_misses,
+                row.ic_tilted_composite_score,
+                row.ic_tilted_composite_delta,
+                row.ic_tilted_composite_mode,
+                row.ic_tilted_component_ics_json,
                 row.cohort_percentile,
                 row.fundamental_quality_score,
                 row.durable_growth_score,
@@ -4300,6 +4726,27 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.technical_score_source,
                 row.technical_entry_status_score,
                 row.technical_entry_status_score_source,
+                row.borrow_availability_score,
+                row.borrow_fee_score,
+                row.borrow_squeeze_risk_score,
+                row.borrow_pressure_score,
+                row.borrow_data_quality_score,
+                row.short_interest_score,
+                row.short_pressure_score,
+                row.short_squeeze_score,
+                row.short_volume_score,
+                row.short_interest_velocity_score,
+                row.days_to_cover_score,
+                row.short_data_quality_score,
+                row.institutional_accumulation_score,
+                row.institutional_crowding_score,
+                row.institutional_breadth_score,
+                row.institutional_flow_data_quality_score,
+                row.insider_net_buy_score,
+                row.insider_cluster_buy_score,
+                row.insider_selling_pressure_score,
+                row.insider_activity_score,
+                row.insider_data_quality_score,
                 row.sentiment_catalyst_score,
                 row.value_trap_score,
                 row.rank,
@@ -4412,6 +4859,7 @@ def main() -> None:
                 asof=asof,
                 weights=weights,
                 config=config,
+                config_base_dir=base_dir,
                 ticker_filter=ticker_filter,
                 max_tickers=int(args.max_tickers),
             )

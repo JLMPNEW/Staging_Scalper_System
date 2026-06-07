@@ -42,6 +42,7 @@ from biotech_index.core.scoring_math import (  # noqa: E402
     decomposed_risk_penalty_input,
     weighted_predictive_risk_penalty_input,
 )
+from market_positioning.core import borrow_cost_pressure_score  # noqa: E402
 
 
 LOGGER = logging.getLogger("build_biotech_features")
@@ -108,12 +109,62 @@ FEATURE_CSV_FIELDNAMES = [
     "indication_weighted_phase2_3_component",
     "forward_catalyst_nearest_days",
     "forward_catalyst_event_type",
+    "forward_catalyst_source",
+    "forward_catalyst_source_url",
+    "forward_catalyst_confidence",
     "forward_catalyst_score",
+    "forward_catalyst_unfiltered_score",
+    "ctgov_forward_catalyst_score",
+    "ctgov_forward_catalyst_guardrail_pass",
+    "short_interest_shares",
+    "float_shares",
     "short_interest_pct_float",
+    "days_to_cover",
+    "float_shares_source",
+    "float_shares_asof_date",
+    "float_shares_source_asof_date",
+    "float_shares_staleness_days",
+    "float_shares_measurement_staleness_days",
+    "float_shares_proxy_flag",
+    "public_float_usd",
+    "public_float_price_date",
+    "public_float_close_price",
+    "short_interest_pct_float_available_flag",
+    "short_interest_pct_score",
+    "short_interest_days_to_cover_score",
+    "short_interest_signal_basis",
+    "short_interest_signal_max_possible_score",
     "short_interest_signal_score",
+    "borrow_rate_current",
+    "borrow_fee_data_available_flag",
+    "shortable_data_available_flag",
+    "borrow_fee_stale_flag",
+    "shortable_stale_flag",
+    "borrow_fee_staleness_days",
+    "shortable_staleness_days",
+    "borrow_fee_history_count_30d",
+    "borrow_fee_history_count_90d",
+    "borrow_rate_30d_avg",
+    "borrow_rate_90d_avg",
+    "borrow_rate_spike_flag",
+    "borrow_rate_declining_flag",
+    "shortable_shares",
+    "shares_shortable_k",
+    "hard_to_borrow_flag",
+    "borrow_pressure_score",
+    "high_borrow_pressure_flag",
+    "elevated_borrow_pressure_flag",
+    "borrow_rate_high_flag",
+    "borrow_squeeze_setup_flag",
+    "borrow_distress_flag",
     "institutional_ownership_delta_pct",
     "institutional_accumulation_score",
+    "new_institutional_buyer_count",
+    "exiting_institutional_holder_count",
+    "net_institutional_buyer_count",
     "insider_buy_count_90d",
+    "open_market_buy_count_90d",
+    "planned_10b5_1_buy_count",
     "insider_buy_value_90d",
     "insider_buy_cluster_count_90d",
     "insider_sell_value_90d",
@@ -552,15 +603,30 @@ def load_forward_catalyst_calendar(path: Path | None, asof_date: date, *, lookah
     return out
 
 
-def forward_catalyst_signal(row: dict[str, Any] | None, *, lookahead_days: int) -> dict[str, Any]:
+def forward_catalyst_signal(
+    row: dict[str, Any] | None,
+    *,
+    lookahead_days: int,
+    ctgov_include_in_primary_score: bool = False,
+    ctgov_primary_score_min: float = 60.0,
+) -> dict[str, Any]:
     if not row:
         return {
             "forward_catalyst_nearest_days": "",
             "forward_catalyst_event_type": "",
+            "forward_catalyst_source": "",
+            "forward_catalyst_source_url": "",
+            "forward_catalyst_confidence": "",
             "forward_catalyst_score": 0.0,
+            "forward_catalyst_unfiltered_score": 0.0,
+            "ctgov_forward_catalyst_score": 0.0,
+            "ctgov_forward_catalyst_guardrail_pass": 0.0,
         }
     days_until = to_int(row.get("days_until"), 999999)
     event_type = str(row.get("event_type") or row.get("catalyst_type") or "catalyst").strip().lower()
+    source = str(row.get("source") or row.get("source_name") or "").strip()
+    source_key = source.lower().replace("-", "_").replace(" ", "_")
+    is_ctgov = "ctgov" in source_key or "clinicaltrials" in source_key
     confidence = normalize_pct_decimal(row.get("confidence") or row.get("confidence_pct"), 0.65) or 0.65
     proximity = max(0.0, 1.0 - min(days_until, lookahead_days) / max(1.0, float(lookahead_days)))
     type_multiplier = 1.0
@@ -568,16 +634,47 @@ def forward_catalyst_signal(row: dict[str, Any] | None, *, lookahead_days: int) 
         type_multiplier = 1.15
     elif any(token in event_type for token in ["phase 1", "phase1", "preclinical"]):
         type_multiplier = 0.75
+    unfiltered_score = clamp(100.0 * proximity * clamp(confidence, 0.0, 1.0) * type_multiplier)
+    ctgov_guardrail_pass = bool(ctgov_include_in_primary_score) and unfiltered_score >= clamp(ctgov_primary_score_min)
+    primary_score = 0.0 if is_ctgov and not ctgov_guardrail_pass else unfiltered_score
     return {
         "forward_catalyst_nearest_days": days_until,
         "forward_catalyst_event_type": event_type,
-        "forward_catalyst_score": round(clamp(100.0 * proximity * clamp(confidence, 0.0, 1.0) * type_multiplier), 4),
+        "forward_catalyst_source": source,
+        "forward_catalyst_source_url": str(row.get("source_url") or row.get("document_url") or row.get("url") or ""),
+        "forward_catalyst_confidence": round(clamp(confidence, 0.0, 1.0), 6),
+        "forward_catalyst_score": round(primary_score, 4),
+        "forward_catalyst_unfiltered_score": round(unfiltered_score, 4),
+        "ctgov_forward_catalyst_score": round(unfiltered_score if is_ctgov else 0.0, 4),
+        "ctgov_forward_catalyst_guardrail_pass": 1.0 if is_ctgov and ctgov_guardrail_pass else 0.0,
     }
 
 
-def short_interest_signal(row: dict[str, Any] | None) -> dict[str, float]:
+def short_interest_signal(row: dict[str, Any] | None) -> dict[str, Any]:
     if not row:
-        return {"short_interest_pct_float": 0.0, "short_interest_signal_score": 0.0}
+        return {
+            "short_interest_shares": 0.0,
+            "float_shares": 0.0,
+            "short_interest_pct_float": 0.0,
+            "days_to_cover": 0.0,
+            "float_shares_source": "",
+            "float_shares_asof_date": "",
+            "float_shares_source_asof_date": "",
+            "float_shares_staleness_days": "",
+            "float_shares_measurement_staleness_days": "",
+            "float_shares_proxy_flag": 0.0,
+            "public_float_usd": 0.0,
+            "public_float_price_date": "",
+            "public_float_close_price": 0.0,
+            "short_interest_pct_float_available_flag": 0.0,
+            "short_interest_pct_score": 0.0,
+            "short_interest_days_to_cover_score": 0.0,
+            "short_interest_signal_basis": "no_short_interest_data",
+            "short_interest_signal_max_possible_score": 0.0,
+            "short_interest_signal_score": 0.0,
+        }
+    short_shares = to_float(row.get("short_interest_shares") or row.get("short_shares"), 0.0)
+    float_shares = to_float(row.get("float_shares") or row.get("shares_float"), 0.0)
     short_pct = normalize_pct_decimal(
         row.get("short_interest_pct_float")
         or row.get("short_percent_float")
@@ -585,18 +682,190 @@ def short_interest_signal(row: dict[str, Any] | None) -> dict[str, float]:
         or row.get("short_interest_percent_float"),
         0.0,
     ) or 0.0
+    if short_pct <= 0.0 and short_shares > 0.0 and float_shares > 0.0:
+        short_pct = short_shares / float_shares
     days_to_cover = to_float(row.get("days_to_cover") or row.get("short_ratio"), 0.0)
     pct_score = linear_score(short_pct, [(0.0, 0.0), (0.05, 20.0), (0.10, 50.0), (0.20, 78.0), (0.35, 100.0)])
     cover_score = linear_score(days_to_cover, [(0.0, 0.0), (2.0, 25.0), (5.0, 60.0), (10.0, 100.0)])
+    pct_available = short_pct > 0.0 and float_shares > 0.0
+    cover_available = days_to_cover > 0.0
+    if pct_available and cover_available:
+        basis = "pct_float_and_days_to_cover"
+        max_possible = 100.0
+    elif pct_available:
+        basis = "pct_float_only"
+        max_possible = 75.0
+    elif cover_available:
+        basis = "days_to_cover_only"
+        max_possible = 25.0
+    else:
+        basis = "no_usable_short_interest_components"
+        max_possible = 0.0
     return {
+        "short_interest_shares": round(short_shares, 4),
+        "float_shares": round(float_shares, 4),
         "short_interest_pct_float": round(short_pct, 6),
+        "days_to_cover": round(days_to_cover, 4),
+        "float_shares_source": str(row.get("float_shares_source") or ""),
+        "float_shares_asof_date": str(row.get("float_shares_asof_date") or ""),
+        "float_shares_source_asof_date": str(row.get("float_shares_source_asof_date") or ""),
+        "float_shares_staleness_days": to_float(row.get("float_shares_staleness_days"), 0.0) or 0.0,
+        "float_shares_measurement_staleness_days": to_float(row.get("float_shares_measurement_staleness_days"), 0.0) or 0.0,
+        "float_shares_proxy_flag": 1.0 if to_float(row.get("float_shares_proxy_flag"), 0.0) > 0.0 else 0.0,
+        "public_float_usd": to_float(row.get("public_float_usd"), 0.0) or 0.0,
+        "public_float_price_date": str(row.get("public_float_price_date") or ""),
+        "public_float_close_price": to_float(row.get("public_float_close_price"), 0.0) or 0.0,
+        "short_interest_pct_float_available_flag": 1.0 if pct_available else 0.0,
+        "short_interest_pct_score": round(clamp(pct_score), 4),
+        "short_interest_days_to_cover_score": round(clamp(cover_score), 4),
+        "short_interest_signal_basis": basis,
+        "short_interest_signal_max_possible_score": max_possible,
         "short_interest_signal_score": round(clamp(0.75 * pct_score + 0.25 * cover_score), 4),
+    }
+
+
+def borrow_availability_signal(row: dict[str, Any] | None) -> dict[str, float]:
+    if not row:
+        return {
+            "borrow_rate_current": 0.0,
+            "borrow_fee_data_available_flag": 0.0,
+            "shortable_data_available_flag": 0.0,
+            "borrow_fee_stale_flag": 1.0,
+            "shortable_stale_flag": 1.0,
+            "borrow_fee_staleness_days": "",
+            "shortable_staleness_days": "",
+            "borrow_fee_history_count_30d": 0.0,
+            "borrow_fee_history_count_90d": 0.0,
+            "borrow_rate_30d_avg": 0.0,
+            "borrow_rate_90d_avg": 0.0,
+            "borrow_rate_spike_flag": 0.0,
+            "borrow_rate_declining_flag": 0.0,
+            "shortable_shares": 0.0,
+            "shares_shortable_k": 0.0,
+            "hard_to_borrow_flag": 0.0,
+            "borrow_pressure_score": 0.0,
+        }
+    current_rate = normalize_pct_decimal(row.get("borrow_rate_current"), 0.0) or 0.0
+    rate_30d = normalize_pct_decimal(row.get("borrow_rate_30d_avg"), 0.0) or 0.0
+    rate_90d = normalize_pct_decimal(row.get("borrow_rate_90d_avg"), 0.0) or 0.0
+    shortable_shares = to_float(row.get("shortable_shares"), 0.0)
+    shares_shortable_k = to_float(row.get("shares_shortable_k"), shortable_shares / 1000.0 if shortable_shares > 0.0 else 0.0)
+    hard_to_borrow = 1.0 if to_float(row.get("hard_to_borrow_flag"), 0.0) > 0.0 else 0.0
+    fallback_pressure = borrow_cost_pressure_score(current_rate, hard_to_borrow=hard_to_borrow > 0.0)
+    pressure_score = to_float(row.get("borrow_pressure_score"), fallback_pressure)
+    return {
+        "borrow_rate_current": round(current_rate, 8),
+        "borrow_fee_data_available_flag": 1.0 if to_float(row.get("borrow_fee_data_available_flag"), 0.0) > 0.0 else 0.0,
+        "shortable_data_available_flag": 1.0 if to_float(row.get("shortable_data_available_flag"), 0.0) > 0.0 else 0.0,
+        "borrow_fee_stale_flag": 1.0 if to_float(row.get("borrow_fee_stale_flag"), 0.0) > 0.0 else 0.0,
+        "shortable_stale_flag": 1.0 if to_float(row.get("shortable_stale_flag"), 0.0) > 0.0 else 0.0,
+        "borrow_fee_staleness_days": to_float(row.get("borrow_fee_staleness_days"), 0.0) or 0.0,
+        "shortable_staleness_days": to_float(row.get("shortable_staleness_days"), 0.0) or 0.0,
+        "borrow_fee_history_count_30d": to_float(row.get("borrow_fee_history_count_30d"), 0.0) or 0.0,
+        "borrow_fee_history_count_90d": to_float(row.get("borrow_fee_history_count_90d"), 0.0) or 0.0,
+        "borrow_rate_30d_avg": round(rate_30d, 8),
+        "borrow_rate_90d_avg": round(rate_90d, 8),
+        "borrow_rate_spike_flag": 1.0 if to_float(row.get("borrow_rate_spike_flag"), 0.0) > 0.0 else 0.0,
+        "borrow_rate_declining_flag": 1.0 if to_float(row.get("borrow_rate_declining_flag"), 0.0) > 0.0 else 0.0,
+        "shortable_shares": round(shortable_shares, 4),
+        "shares_shortable_k": round(shares_shortable_k, 4),
+        "hard_to_borrow_flag": hard_to_borrow,
+        "borrow_pressure_score": round(clamp(pressure_score), 4),
+    }
+
+
+def load_borrow_interpretation_settings(config: dict[str, Any]) -> dict[str, float]:
+    raw = cfg_get(config, "biotech_reports.borrow_availability_validation", {}) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "high_borrow_pressure_min": bounded_float(raw.get("high_borrow_pressure_min"), 60.0, low=0.0, high=100.0),
+        "elevated_borrow_pressure_min": bounded_float(raw.get("elevated_borrow_pressure_min"), 30.0, low=0.0, high=100.0),
+        "high_borrow_rate_min": bounded_float(raw.get("high_borrow_rate_min"), 0.15, low=0.0),
+        "squeeze_short_interest_min": bounded_float(raw.get("squeeze_short_interest_min"), 60.0, low=0.0, high=100.0),
+        "squeeze_short_interest_pct_float_min": bounded_float(
+            raw.get("squeeze_short_interest_pct_float_min"),
+            0.10,
+            low=0.0,
+        ),
+        "squeeze_catalyst_min": bounded_float(raw.get("squeeze_catalyst_min"), 40.0, low=0.0, high=100.0),
+        "risk_distress_min": bounded_float(raw.get("risk_distress_min"), 65.0, low=0.0, high=100.0),
+        "financial_quality_distress_max": bounded_float(
+            raw.get("financial_quality_distress_max"),
+            40.0,
+            low=0.0,
+            high=100.0,
+        ),
+        "uncompensated_risk_distress_min": bounded_float(
+            raw.get("uncompensated_risk_distress_min"),
+            60.0,
+            low=0.0,
+            high=100.0,
+        ),
+        "sec_catalyst_min": bounded_float(raw.get("squeeze_sec_catalyst_min"), 10.0, low=0.0, high=100.0),
+        "indication_success_multiplier_min": bounded_float(
+            raw.get("squeeze_indication_success_multiplier_min"),
+            1.05,
+            low=0.0,
+        ),
+    }
+
+
+def borrow_interpretation_signal(
+    *,
+    borrow_availability: dict[str, float],
+    short_interest: dict[str, Any],
+    forward_catalyst: dict[str, Any],
+    sec_catalyst_score_used: float,
+    indication_success_multiplier: float,
+    risk_for_penalty_score_raw: float,
+    financial_quality_score_raw: float,
+    uncompensated_risk_score_raw: float,
+    settings: dict[str, float],
+) -> dict[str, float]:
+    pressure = clamp(to_float(borrow_availability.get("borrow_pressure_score"), 0.0))
+    current_rate = normalize_pct_decimal(borrow_availability.get("borrow_rate_current"), 0.0) or 0.0
+    high_borrow_pressure = pressure >= float(settings["high_borrow_pressure_min"])
+    elevated_borrow_pressure = pressure >= float(settings["elevated_borrow_pressure_min"])
+    borrow_rate_high = current_rate >= float(settings["high_borrow_rate_min"])
+    short_interest_high = (
+        (to_float(short_interest.get("short_interest_pct_float"), 0.0) or 0.0)
+        >= float(settings["squeeze_short_interest_pct_float_min"])
+        or clamp(to_float(short_interest.get("short_interest_signal_score"), 0.0))
+        >= float(settings["squeeze_short_interest_min"])
+    )
+    catalyst_or_quality = (
+        clamp(to_float(forward_catalyst.get("forward_catalyst_score"), 0.0))
+        >= float(settings["squeeze_catalyst_min"])
+        or clamp(sec_catalyst_score_used) >= float(settings["sec_catalyst_min"])
+        or float(indication_success_multiplier or 0.0) > float(settings["indication_success_multiplier_min"])
+    )
+    weak_or_distressed = (
+        clamp(risk_for_penalty_score_raw) >= float(settings["risk_distress_min"])
+        or clamp(financial_quality_score_raw) < float(settings["financial_quality_distress_max"])
+        or clamp(uncompensated_risk_score_raw) >= float(settings["uncompensated_risk_distress_min"])
+    )
+    elevated_or_high_rate = elevated_borrow_pressure or borrow_rate_high
+    return {
+        "high_borrow_pressure_flag": 1.0 if high_borrow_pressure else 0.0,
+        "elevated_borrow_pressure_flag": 1.0 if elevated_borrow_pressure else 0.0,
+        "borrow_rate_high_flag": 1.0 if borrow_rate_high else 0.0,
+        "borrow_squeeze_setup_flag": (
+            1.0 if elevated_or_high_rate and short_interest_high and catalyst_or_quality and not weak_or_distressed else 0.0
+        ),
+        "borrow_distress_flag": 1.0 if high_borrow_pressure and weak_or_distressed else 0.0,
     }
 
 
 def institutional_ownership_signal(row: dict[str, Any] | None) -> dict[str, float]:
     if not row:
-        return {"institutional_ownership_delta_pct": 0.0, "institutional_accumulation_score": 50.0}
+        return {
+            "institutional_ownership_delta_pct": 0.0,
+            "institutional_accumulation_score": 50.0,
+            "new_institutional_buyer_count": 0.0,
+            "exiting_institutional_holder_count": 0.0,
+            "net_institutional_buyer_count": 0.0,
+        }
     delta = normalize_pct_decimal(
         row.get("institutional_ownership_delta_pct")
         or row.get("ownership_delta_pct")
@@ -608,6 +877,9 @@ def institutional_ownership_signal(row: dict[str, Any] | None) -> dict[str, floa
     return {
         "institutional_ownership_delta_pct": round(delta, 6),
         "institutional_accumulation_score": round(score, 4),
+        "new_institutional_buyer_count": to_float(row.get("new_buyer_count"), 0.0),
+        "exiting_institutional_holder_count": to_float(row.get("exiting_holder_count"), 0.0),
+        "net_institutional_buyer_count": to_float(row.get("net_buyer_count"), 0.0),
     }
 
 
@@ -615,22 +887,32 @@ def insider_activity_signal(row: dict[str, Any] | None) -> dict[str, float]:
     if not row:
         return {
             "insider_buy_count_90d": 0.0,
+            "open_market_buy_count_90d": 0.0,
+            "planned_10b5_1_buy_count": 0.0,
             "insider_buy_value_90d": 0.0,
             "insider_buy_cluster_count_90d": 0.0,
             "insider_sell_value_90d": 0.0,
             "insider_accumulation_score": 50.0,
         }
     buy_count = to_float(row.get("insider_buy_count_90d"), 0.0)
+    planned_buy_count = to_float(row.get("planned_10b5_1_buy_count"), 0.0)
+    open_market_buy_count = to_float(
+        row.get("open_market_buy_count_90d"),
+        max(0.0, buy_count - planned_buy_count),
+    )
+    effective_buy_count = max(0.0, open_market_buy_count) + 0.25 * max(0.0, planned_buy_count)
     buy_value = to_float(row.get("insider_buy_value_90d"), 0.0)
     cluster_count = to_float(row.get("insider_buy_cluster_count_90d"), 0.0)
     sell_value = to_float(row.get("insider_sell_value_90d"), 0.0)
-    buy_count_score = linear_score(buy_count, [(0.0, 0.0), (1.0, 35.0), (3.0, 75.0), (6.0, 100.0)])
+    buy_count_score = linear_score(effective_buy_count, [(0.0, 0.0), (1.0, 35.0), (3.0, 75.0), (6.0, 100.0)])
     buy_value_score = linear_score(math.log10(max(1.0, buy_value)), [(0.0, 0.0), (5.0, 35.0), (6.0, 65.0), (7.0, 100.0)])
     cluster_score = linear_score(cluster_count, [(0.0, 0.0), (1.0, 55.0), (2.0, 85.0), (4.0, 100.0)])
     sell_penalty = linear_score(math.log10(max(1.0, sell_value)), [(0.0, 0.0), (5.0, 10.0), (6.0, 25.0), (7.0, 45.0)])
     score = 50.0 + 0.18 * buy_count_score + 0.18 * buy_value_score + 0.22 * cluster_score - sell_penalty
     return {
         "insider_buy_count_90d": round(buy_count, 4),
+        "open_market_buy_count_90d": round(open_market_buy_count, 4),
+        "planned_10b5_1_buy_count": round(planned_buy_count, 4),
         "insider_buy_value_90d": round(buy_value, 2),
         "insider_buy_cluster_count_90d": round(cluster_count, 4),
         "insider_sell_value_90d": round(sell_value, 2),
@@ -1290,17 +1572,22 @@ def compute_feature_row(
     core_pipeline_quality_multiplier: float,
     sec_catalyst_event_weights: dict[str, float],
     risk_decomposition_settings: dict[str, Any],
+    borrow_interpretation_settings: dict[str, float] | None = None,
     sec_catalyst_recency_decay_enabled: bool,
     sec_catalyst_half_life_days: float,
     market: dict[str, Any] | None,
     survival: dict[str, Any] | None,
     sec_events: dict[str, Any] | None,
     indication_success_settings: dict[str, Any] | None = None,
+    forward_catalyst_ctgov_settings: dict[str, Any] | None = None,
     forward_catalyst: dict[str, Any] | None = None,
     short_interest: dict[str, Any] | None = None,
+    borrow_availability: dict[str, Any] | None = None,
     institutional_ownership: dict[str, Any] | None = None,
     governance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if borrow_interpretation_settings is None:
+        borrow_interpretation_settings = load_borrow_interpretation_settings({})
     ticker = str(universe_row["ticker"]).upper()
     verified_active = to_int(universe_row.get("verified_qualifying_active_trial_count"))
     active_lead = to_int(universe_row.get("active_lead_sponsor_trials"))
@@ -1492,8 +1779,18 @@ def compute_feature_row(
     forward_catalyst_signals = forward_catalyst_signal(
         forward_catalyst,
         lookahead_days=to_int(indication_settings.get("forward_catalyst_lookahead_days"), 365),
+        ctgov_include_in_primary_score=as_bool(
+            (forward_catalyst_ctgov_settings or {}).get("include_in_primary_score")
+        ),
+        ctgov_primary_score_min=bounded_float(
+            (forward_catalyst_ctgov_settings or {}).get("primary_score_min"),
+            60.0,
+            low=0.0,
+            high=100.0,
+        ),
     )
     short_interest_signals = short_interest_signal(short_interest)
+    borrow_availability_signals = borrow_availability_signal(borrow_availability)
     institutional_ownership_signals = institutional_ownership_signal(institutional_ownership)
     insider_activity_signals = insider_activity_signal(governance)
 
@@ -1773,6 +2070,21 @@ def compute_feature_row(
     else:
         financial_quality_raw -= 8.0
     financial_quality_raw = clamp(financial_quality_raw)
+    borrow_interpretation_signals = borrow_interpretation_signal(
+        borrow_availability=borrow_availability_signals,
+        short_interest=short_interest_signals,
+        forward_catalyst=forward_catalyst_signals,
+        sec_catalyst_score_used=sec_catalyst_score_used,
+        indication_success_multiplier=indication_success_multiplier,
+        risk_for_penalty_score_raw=risk_raw,
+        financial_quality_score_raw=financial_quality_raw,
+        uncompensated_risk_score_raw=uncompensated_risk_raw,
+        settings=borrow_interpretation_settings,
+    )
+    borrow_shadow_signals = {
+        **borrow_availability_signals,
+        **borrow_interpretation_signals,
+    }
 
     momentum_raw = 0.0
     momentum_raw += (
@@ -1907,6 +2219,7 @@ def compute_feature_row(
             },
             "forward_catalyst_calendar": forward_catalyst_signals,
             "short_interest": short_interest_signals,
+            "borrow_availability": borrow_shadow_signals,
             "institutional_ownership": institutional_ownership_signals,
             "insider_activity": insider_activity_signals,
         },
@@ -1966,8 +2279,42 @@ def compute_feature_row(
             "indication_success_multiplier": round(indication_success_multiplier, 6),
             "indication_weighted_phase2_3_component": round(indication_weighted_phase2_3_component, 4),
             "forward_catalyst_score": forward_catalyst_signals["forward_catalyst_score"],
+            "forward_catalyst_unfiltered_score": forward_catalyst_signals["forward_catalyst_unfiltered_score"],
+            "ctgov_forward_catalyst_score": forward_catalyst_signals["ctgov_forward_catalyst_score"],
+            "ctgov_forward_catalyst_guardrail_pass": forward_catalyst_signals["ctgov_forward_catalyst_guardrail_pass"],
+            "forward_catalyst_source": forward_catalyst_signals["forward_catalyst_source"],
+            "forward_catalyst_confidence": forward_catalyst_signals["forward_catalyst_confidence"],
+            "short_interest_shares": short_interest_signals["short_interest_shares"],
+            "float_shares": short_interest_signals["float_shares"],
+            "short_interest_pct_float": short_interest_signals["short_interest_pct_float"],
+            "days_to_cover": short_interest_signals["days_to_cover"],
+            "float_shares_source": short_interest_signals["float_shares_source"],
+            "float_shares_asof_date": short_interest_signals["float_shares_asof_date"],
+            "float_shares_source_asof_date": short_interest_signals["float_shares_source_asof_date"],
+            "float_shares_staleness_days": short_interest_signals["float_shares_staleness_days"],
+            "float_shares_measurement_staleness_days": short_interest_signals["float_shares_measurement_staleness_days"],
+            "float_shares_proxy_flag": short_interest_signals["float_shares_proxy_flag"],
+            "public_float_usd": short_interest_signals["public_float_usd"],
+            "public_float_price_date": short_interest_signals["public_float_price_date"],
+            "public_float_close_price": short_interest_signals["public_float_close_price"],
+            "short_interest_pct_float_available_flag": short_interest_signals["short_interest_pct_float_available_flag"],
+            "short_interest_pct_score": short_interest_signals["short_interest_pct_score"],
+            "short_interest_days_to_cover_score": short_interest_signals["short_interest_days_to_cover_score"],
+            "short_interest_signal_basis": short_interest_signals["short_interest_signal_basis"],
+            "short_interest_signal_max_possible_score": short_interest_signals["short_interest_signal_max_possible_score"],
             "short_interest_signal_score": short_interest_signals["short_interest_signal_score"],
+            "borrow_pressure_score": borrow_availability_signals["borrow_pressure_score"],
+            "high_borrow_pressure_flag": borrow_interpretation_signals["high_borrow_pressure_flag"],
+            "elevated_borrow_pressure_flag": borrow_interpretation_signals["elevated_borrow_pressure_flag"],
+            "borrow_rate_high_flag": borrow_interpretation_signals["borrow_rate_high_flag"],
+            "borrow_squeeze_setup_flag": borrow_interpretation_signals["borrow_squeeze_setup_flag"],
+            "borrow_distress_flag": borrow_interpretation_signals["borrow_distress_flag"],
             "institutional_accumulation_score": institutional_ownership_signals["institutional_accumulation_score"],
+            "new_institutional_buyer_count": institutional_ownership_signals["new_institutional_buyer_count"],
+            "exiting_institutional_holder_count": institutional_ownership_signals["exiting_institutional_holder_count"],
+            "net_institutional_buyer_count": institutional_ownership_signals["net_institutional_buyer_count"],
+            "open_market_buy_count_90d": insider_activity_signals["open_market_buy_count_90d"],
+            "planned_10b5_1_buy_count": insider_activity_signals["planned_10b5_1_buy_count"],
             "insider_accumulation_score": insider_activity_signals["insider_accumulation_score"],
         },
         "manual": {
@@ -2037,12 +2384,62 @@ def compute_feature_row(
         "indication_weighted_phase2_3_component": round(indication_weighted_phase2_3_component, 4),
         "forward_catalyst_nearest_days": forward_catalyst_signals["forward_catalyst_nearest_days"],
         "forward_catalyst_event_type": forward_catalyst_signals["forward_catalyst_event_type"],
+        "forward_catalyst_source": forward_catalyst_signals["forward_catalyst_source"],
+        "forward_catalyst_source_url": forward_catalyst_signals["forward_catalyst_source_url"],
+        "forward_catalyst_confidence": forward_catalyst_signals["forward_catalyst_confidence"],
         "forward_catalyst_score": forward_catalyst_signals["forward_catalyst_score"],
+        "forward_catalyst_unfiltered_score": forward_catalyst_signals["forward_catalyst_unfiltered_score"],
+        "ctgov_forward_catalyst_score": forward_catalyst_signals["ctgov_forward_catalyst_score"],
+        "ctgov_forward_catalyst_guardrail_pass": forward_catalyst_signals["ctgov_forward_catalyst_guardrail_pass"],
+        "short_interest_shares": short_interest_signals["short_interest_shares"],
+        "float_shares": short_interest_signals["float_shares"],
         "short_interest_pct_float": short_interest_signals["short_interest_pct_float"],
+        "days_to_cover": short_interest_signals["days_to_cover"],
+        "float_shares_source": short_interest_signals["float_shares_source"],
+        "float_shares_asof_date": short_interest_signals["float_shares_asof_date"],
+        "float_shares_source_asof_date": short_interest_signals["float_shares_source_asof_date"],
+        "float_shares_staleness_days": short_interest_signals["float_shares_staleness_days"],
+        "float_shares_measurement_staleness_days": short_interest_signals["float_shares_measurement_staleness_days"],
+        "float_shares_proxy_flag": short_interest_signals["float_shares_proxy_flag"],
+        "public_float_usd": short_interest_signals["public_float_usd"],
+        "public_float_price_date": short_interest_signals["public_float_price_date"],
+        "public_float_close_price": short_interest_signals["public_float_close_price"],
+        "short_interest_pct_float_available_flag": short_interest_signals["short_interest_pct_float_available_flag"],
+        "short_interest_pct_score": short_interest_signals["short_interest_pct_score"],
+        "short_interest_days_to_cover_score": short_interest_signals["short_interest_days_to_cover_score"],
+        "short_interest_signal_basis": short_interest_signals["short_interest_signal_basis"],
+        "short_interest_signal_max_possible_score": short_interest_signals["short_interest_signal_max_possible_score"],
         "short_interest_signal_score": short_interest_signals["short_interest_signal_score"],
+        "borrow_rate_current": borrow_availability_signals["borrow_rate_current"],
+        "borrow_fee_data_available_flag": borrow_availability_signals["borrow_fee_data_available_flag"],
+        "shortable_data_available_flag": borrow_availability_signals["shortable_data_available_flag"],
+        "borrow_fee_stale_flag": borrow_availability_signals["borrow_fee_stale_flag"],
+        "shortable_stale_flag": borrow_availability_signals["shortable_stale_flag"],
+        "borrow_fee_staleness_days": borrow_availability_signals["borrow_fee_staleness_days"],
+        "shortable_staleness_days": borrow_availability_signals["shortable_staleness_days"],
+        "borrow_fee_history_count_30d": borrow_availability_signals["borrow_fee_history_count_30d"],
+        "borrow_fee_history_count_90d": borrow_availability_signals["borrow_fee_history_count_90d"],
+        "borrow_rate_30d_avg": borrow_availability_signals["borrow_rate_30d_avg"],
+        "borrow_rate_90d_avg": borrow_availability_signals["borrow_rate_90d_avg"],
+        "borrow_rate_spike_flag": borrow_availability_signals["borrow_rate_spike_flag"],
+        "borrow_rate_declining_flag": borrow_availability_signals["borrow_rate_declining_flag"],
+        "shortable_shares": borrow_availability_signals["shortable_shares"],
+        "shares_shortable_k": borrow_availability_signals["shares_shortable_k"],
+        "hard_to_borrow_flag": borrow_availability_signals["hard_to_borrow_flag"],
+        "borrow_pressure_score": borrow_availability_signals["borrow_pressure_score"],
+        "high_borrow_pressure_flag": borrow_interpretation_signals["high_borrow_pressure_flag"],
+        "elevated_borrow_pressure_flag": borrow_interpretation_signals["elevated_borrow_pressure_flag"],
+        "borrow_rate_high_flag": borrow_interpretation_signals["borrow_rate_high_flag"],
+        "borrow_squeeze_setup_flag": borrow_interpretation_signals["borrow_squeeze_setup_flag"],
+        "borrow_distress_flag": borrow_interpretation_signals["borrow_distress_flag"],
         "institutional_ownership_delta_pct": institutional_ownership_signals["institutional_ownership_delta_pct"],
         "institutional_accumulation_score": institutional_ownership_signals["institutional_accumulation_score"],
+        "new_institutional_buyer_count": institutional_ownership_signals["new_institutional_buyer_count"],
+        "exiting_institutional_holder_count": institutional_ownership_signals["exiting_institutional_holder_count"],
+        "net_institutional_buyer_count": institutional_ownership_signals["net_institutional_buyer_count"],
         "insider_buy_count_90d": insider_activity_signals["insider_buy_count_90d"],
+        "open_market_buy_count_90d": insider_activity_signals["open_market_buy_count_90d"],
+        "planned_10b5_1_buy_count": insider_activity_signals["planned_10b5_1_buy_count"],
         "insider_buy_value_90d": insider_activity_signals["insider_buy_value_90d"],
         "insider_buy_cluster_count_90d": insider_activity_signals["insider_buy_cluster_count_90d"],
         "insider_sell_value_90d": insider_activity_signals["insider_sell_value_90d"],
@@ -2080,12 +2477,62 @@ def upsert_features(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_d
         "indication_weighted_phase2_3_component",
         "forward_catalyst_nearest_days",
         "forward_catalyst_event_type",
+        "forward_catalyst_source",
+        "forward_catalyst_source_url",
+        "forward_catalyst_confidence",
         "forward_catalyst_score",
+        "forward_catalyst_unfiltered_score",
+        "ctgov_forward_catalyst_score",
+        "ctgov_forward_catalyst_guardrail_pass",
+        "short_interest_shares",
+        "float_shares",
         "short_interest_pct_float",
+        "days_to_cover",
+        "float_shares_source",
+        "float_shares_asof_date",
+        "float_shares_source_asof_date",
+        "float_shares_staleness_days",
+        "float_shares_measurement_staleness_days",
+        "float_shares_proxy_flag",
+        "public_float_usd",
+        "public_float_price_date",
+        "public_float_close_price",
+        "short_interest_pct_float_available_flag",
+        "short_interest_pct_score",
+        "short_interest_days_to_cover_score",
+        "short_interest_signal_basis",
+        "short_interest_signal_max_possible_score",
         "short_interest_signal_score",
+        "borrow_rate_current",
+        "borrow_fee_data_available_flag",
+        "shortable_data_available_flag",
+        "borrow_fee_stale_flag",
+        "shortable_stale_flag",
+        "borrow_fee_staleness_days",
+        "shortable_staleness_days",
+        "borrow_fee_history_count_30d",
+        "borrow_fee_history_count_90d",
+        "borrow_rate_30d_avg",
+        "borrow_rate_90d_avg",
+        "borrow_rate_spike_flag",
+        "borrow_rate_declining_flag",
+        "shortable_shares",
+        "shares_shortable_k",
+        "hard_to_borrow_flag",
+        "borrow_pressure_score",
+        "high_borrow_pressure_flag",
+        "elevated_borrow_pressure_flag",
+        "borrow_rate_high_flag",
+        "borrow_squeeze_setup_flag",
+        "borrow_distress_flag",
         "institutional_ownership_delta_pct",
         "institutional_accumulation_score",
+        "new_institutional_buyer_count",
+        "exiting_institutional_holder_count",
+        "net_institutional_buyer_count",
         "insider_buy_count_90d",
+        "open_market_buy_count_90d",
+        "planned_10b5_1_buy_count",
         "insider_buy_value_90d",
         "insider_buy_cluster_count_90d",
         "insider_sell_value_90d",
@@ -2144,6 +2591,10 @@ def main() -> None:
         cfg_get(config, "biotech_features.short_interest_csv"),
         base_dir=base_dir,
     )
+    borrow_availability_csv = resolve_optional_path(
+        cfg_get(config, "biotech_features.borrow_availability_csv"),
+        base_dir=base_dir,
+    )
     institutional_ownership_csv = resolve_optional_path(
         cfg_get(config, "biotech_features.institutional_ownership_csv"),
         base_dir=base_dir,
@@ -2161,7 +2612,11 @@ def main() -> None:
     pipeline_quality_settings = load_pipeline_quality_settings(config)
     sec_catalyst_event_weights = load_sec_catalyst_event_weights(config)
     risk_decomposition_settings = load_risk_decomposition_settings(config)
+    borrow_interpretation_settings = load_borrow_interpretation_settings(config)
     indication_success_settings = load_indication_success_settings(config)
+    forward_catalyst_ctgov_settings = cfg_get(config, "biotech_features.forward_catalyst_ctgov", {}) or {}
+    if not isinstance(forward_catalyst_ctgov_settings, dict):
+        forward_catalyst_ctgov_settings = {}
     forward_catalyst_lookahead_days = int(
         cfg_get(config, "biotech_features.forward_catalyst_calendar_lookahead_days", 365)
     )
@@ -2214,6 +2669,7 @@ def main() -> None:
         lookahead_days=forward_catalyst_lookahead_days,
     )
     short_interest_by_ticker = load_ticker_feature_csv(short_interest_csv)
+    borrow_availability_by_ticker = load_ticker_feature_csv(borrow_availability_csv)
     institutional_ownership_by_ticker = load_ticker_feature_csv(institutional_ownership_csv)
 
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
@@ -2275,6 +2731,7 @@ def main() -> None:
                         core_pipeline_quality_multiplier=pipeline_quality_settings["core_pipeline_quality_multiplier"],
                         sec_catalyst_event_weights=sec_catalyst_event_weights,
                         risk_decomposition_settings=risk_decomposition_settings,
+                        borrow_interpretation_settings=borrow_interpretation_settings,
                         sec_catalyst_recency_decay_enabled=sec_catalyst_recency_decay_enabled,
                         sec_catalyst_half_life_days=sec_catalyst_half_life_days,
                         market=market,
@@ -2284,8 +2741,10 @@ def main() -> None:
                             **indication_success_settings,
                             "forward_catalyst_lookahead_days": forward_catalyst_lookahead_days,
                         },
+                        forward_catalyst_ctgov_settings=forward_catalyst_ctgov_settings,
                         forward_catalyst=forward_catalysts_by_ticker.get(ticker),
                         short_interest=short_interest_by_ticker.get(ticker),
+                        borrow_availability=borrow_availability_by_ticker.get(ticker),
                         institutional_ownership=institutional_ownership_by_ticker.get(ticker),
                         governance=governance_features.get(company_id),
                     )

@@ -1,0 +1,5 @@
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint.per-file-ignores]
+"biotech_index/scripts/*.py" = ["E402"]

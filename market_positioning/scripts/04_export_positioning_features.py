@@ -15,12 +15,15 @@ from market_positioning.core import DEFAULT_DB_PATH, connect, export_positioning
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Export point-in-time short-interest and 13F ownership feature CSVs from market_positioning.sqlite."
+        description="Export point-in-time short-interest, 13F ownership, and IBKR borrow feature CSVs from market_positioning.sqlite."
     )
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     parser.add_argument("--asof", type=str, required=True)
     parser.add_argument("--output-dir", type=Path, default=Path("output/biotech_index_reports"))
     parser.add_argument("--tickers-csv", type=Path, default=None)
+    parser.add_argument("--max-borrow-fee-staleness-days", type=int, default=10)
+    parser.add_argument("--max-borrow-snapshot-staleness-days", type=int, default=7)
+    parser.add_argument("--hard-to-borrow-shares", type=float, default=50_000.0)
     return parser.parse_args()
 
 
@@ -31,19 +34,21 @@ def main() -> None:
         raise ValueError(f"Invalid --asof date: {args.asof!r}")
     with connect(args.db) as conn:
         init_db(conn)
-        short_path, institutional_path, short_count, institutional_count = export_positioning_features(
+        short_path, institutional_path, borrow_path, short_count, institutional_count, borrow_count = export_positioning_features(
             conn,
             asof_date=asof,
             output_dir=args.output_dir,
             tickers_csv=args.tickers_csv,
+            max_borrow_fee_staleness_days=args.max_borrow_fee_staleness_days,
+            max_borrow_snapshot_staleness_days=args.max_borrow_snapshot_staleness_days,
+            hard_to_borrow_shares=args.hard_to_borrow_shares,
         )
     print(
         "Exported positioning features "
-        f"short_rows={short_count} institutional_rows={institutional_count} "
-        f"short_csv={short_path} institutional_csv={institutional_path}"
+        f"short_rows={short_count} institutional_rows={institutional_count} borrow_rows={borrow_count} "
+        f"short_csv={short_path} institutional_csv={institutional_path} borrow_csv={borrow_path}"
     )
 
 
 if __name__ == "__main__":
     main()
-

@@ -321,15 +321,147 @@ def load_taxonomy_overrides(path: Path | None) -> dict[str, list[TaxonomyOverrid
     return overrides
 
 
+def load_calibration_cohort_overrides(path: Path | None) -> dict[str, dict[str, str]]:
+    if path is None:
+        return {}
+    if not path.exists():
+        raise FileNotFoundError(f"Calibration cohort CSV not found: {path}")
+    overrides: dict[str, dict[str, str]] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError(f"Calibration cohort CSV has no header: {path}")
+        fields = {str(field or "").strip() for field in reader.fieldnames}
+        cohort_field = (
+            "biotech_calibration_cohort"
+            if "biotech_calibration_cohort" in fields
+            else "official_cohort"
+            if "official_cohort" in fields
+            else "biotech_primary_cohort"
+            if "biotech_primary_cohort" in fields
+            else ""
+        )
+        if "ticker" not in fields or not cohort_field:
+            raise ValueError(
+                "Calibration cohort CSV must include ticker plus one of "
+                f"biotech_calibration_cohort, official_cohort, or biotech_primary_cohort: {path}"
+            )
+        for line_no, row in enumerate(reader, start=2):
+            ticker = str(row.get("ticker") or "").strip().upper()
+            cohort = str(row.get(cohort_field) or "").strip()
+            if not ticker:
+                raise ValueError(f"Calibration cohort row {line_no} missing ticker: {path}")
+            if not cohort:
+                raise ValueError(f"Calibration cohort row {line_no} missing official cohort for {ticker}: {path}")
+            if ticker in overrides:
+                previous = overrides[ticker]["biotech_calibration_cohort"]
+                raise ValueError(
+                    f"Duplicate calibration cohort assignment for {ticker}: {previous!r} and {cohort!r} in {path}"
+                )
+            overrides[ticker] = {
+                "biotech_calibration_cohort": cohort,
+                "biotech_calibration_cohort_source": str(
+                    row.get("source") or "manual_calibration_cohort_csv"
+                ).strip()
+                or "manual_calibration_cohort_csv",
+                "biotech_calibration_cohort_reason": str(row.get("reason") or "").strip(),
+            }
+    return overrides
+
+
+def calibration_cohort_fields(
+    *,
+    ticker: str,
+    primary_cohort: str,
+    calibration_cohorts_by_ticker: dict[str, dict[str, str]],
+    enabled: bool,
+    fallback_to_primary: bool,
+    version: str,
+) -> dict[str, str]:
+    clean_ticker = str(ticker or "").strip().upper()
+    clean_primary = str(primary_cohort or "unmapped_calibration_cohort").strip() or "unmapped_calibration_cohort"
+    if enabled and clean_ticker in calibration_cohorts_by_ticker:
+        row = calibration_cohorts_by_ticker[clean_ticker]
+        return {
+            "biotech_calibration_cohort": row["biotech_calibration_cohort"],
+            "biotech_calibration_cohort_source": row["biotech_calibration_cohort_source"],
+            "biotech_calibration_cohort_reason": row["biotech_calibration_cohort_reason"],
+            "biotech_calibration_cohort_version": version,
+        }
+    if fallback_to_primary:
+        return {
+            "biotech_calibration_cohort": clean_primary,
+            "biotech_calibration_cohort_source": "primary_cohort_fallback",
+            "biotech_calibration_cohort_reason": f"no calibration override; primary_cohort={clean_primary}",
+            "biotech_calibration_cohort_version": version,
+        }
+    return {
+        "biotech_calibration_cohort": "unmapped_calibration_cohort",
+        "biotech_calibration_cohort_source": "unmapped",
+        "biotech_calibration_cohort_reason": f"no calibration override; primary_cohort={clean_primary}",
+        "biotech_calibration_cohort_version": version,
+    }
+
+
+def row_calibration_cohort(row: dict[str, Any]) -> str:
+    return (
+        str(row.get("biotech_calibration_cohort") or row.get("biotech_primary_cohort") or "unmapped_calibration_cohort").strip()
+        or "unmapped_calibration_cohort"
+    )
+
+
+def apply_official_operational_cohort_payload(
+    *,
+    ticker: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    cohort = (
+        str(payload.get("biotech_calibration_cohort") or payload.get("biotech_primary_cohort") or "").strip()
+        or "unmapped_calibration_cohort"
+    )
+    source = str(payload.get("biotech_calibration_cohort_source") or "manual_calibration_cohort_csv").strip()
+    reason = str(payload.get("biotech_calibration_cohort_reason") or "").strip()
+    version = str(payload.get("biotech_calibration_cohort_version") or "calibration_cohort_unversioned").strip()
+    out = dict(payload)
+    out["biotech_primary_cohort"] = cohort
+    out["biotech_secondary_cohort"] = ""
+    out["biotech_calibration_cohort"] = cohort
+    out["biotech_cohort_reason_codes"] = "official_five_bucket_operational_cohort"
+    out["biotech_cohort_confidence"] = 100.0 if cohort != "unmapped_calibration_cohort" else 0.0
+    out["biotech_cohort_margin"] = 100.0 if cohort != "unmapped_calibration_cohort" else 0.0
+    out["biotech_cohort_source"] = source
+    out["biotech_cohort_overlays"] = ""
+    out["biotech_cohort_data_quality"] = "high" if cohort != "unmapped_calibration_cohort" else "review"
+    out["biotech_taxonomy_review_required"] = 0.0 if cohort != "unmapped_calibration_cohort" else 1.0
+    out["biotech_cohort_calibration_weight"] = 1.0 if cohort != "unmapped_calibration_cohort" else 0.0
+    out["biotech_cohort_model_version"] = version
+    out["biotech_cohort_evidence_json"] = json.dumps(
+        {
+            "ticker": str(ticker or "").strip().upper(),
+            "official_cohort": cohort,
+            "source": source,
+            "reason": reason,
+            "version": version,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    return out
+
+
+def public_biotech_taxonomy_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in payload.items()
+        if not key.startswith("biotech_calibration_") and key != "biotech_secondary_cohort"
+    }
+
+
 def cohort_policy_settings(config: dict[str, Any]) -> CohortPolicy:
     settings = cfg_get(config, "biotech_scoring.cohort_policy", {}) or {}
     if not isinstance(settings, dict):
         settings = {}
-    default_excluded = [
-        "excluded_non_therapeutic_healthcare",
-        "unclassified_review",
-        "weak_or_historical_pipeline",
-    ]
+    default_excluded = ["unmapped_calibration_cohort"]
     non_investible = {
         str(item).strip()
         for item in parse_string_list(settings.get("non_investible_cohorts"), default=default_excluded)
@@ -1339,7 +1471,7 @@ def validate_clinical_weights(weights: dict[str, Any]) -> None:
 def enrich_biotech_cohort_rank_stats(rows: list[dict[str, Any]]) -> None:
     cohorts: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        cohort = str(row.get("biotech_primary_cohort") or "unclassified_review")
+        cohort = row_calibration_cohort(row)
         cohorts.setdefault(cohort, []).append(row)
     for cohort_rows in cohorts.values():
         size = len(cohort_rows)
@@ -1372,7 +1504,7 @@ def apply_biotech_cohort_policy(rows: list[dict[str, Any]], policy: CohortPolicy
             row["biotech_cohort_exclusion_reason"] = ""
         return
     for row in rows:
-        cohort = str(row.get("biotech_primary_cohort") or "unclassified_review").strip()
+        cohort = row_calibration_cohort(row)
         cohort_size = int(to_float(row.get("biotech_cohort_size"), 0.0))
         review_required = to_float(row.get("biotech_taxonomy_review_required"), 0.0) > 0.0
         investible = cohort not in policy.non_investible_cohorts and not review_required
@@ -1412,9 +1544,27 @@ def score_rows(
     forward_by_company: dict[int, dict[str, Any]],
     governance_by_company: dict[int, dict[str, Any]] | None = None,
     taxonomy_overrides_by_ticker: dict[str, list[TaxonomyOverride]] | None = None,
+    calibration_cohorts_by_ticker: dict[str, dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     governance_by_company = governance_by_company or {}
     taxonomy_overrides_by_ticker = taxonomy_overrides_by_ticker or {}
+    calibration_cohorts_by_ticker = calibration_cohorts_by_ticker or {}
+    calibration_cohort_settings = cfg_get(config, "biotech_scoring.calibration_cohorts", {}) or {}
+    if not isinstance(calibration_cohort_settings, dict):
+        calibration_cohort_settings = {}
+    calibration_cohorts_enabled = as_bool(calibration_cohort_settings.get("enabled", False), False)
+    calibration_cohorts_fallback_to_primary = as_bool(
+        calibration_cohort_settings.get("fallback_to_primary", False),
+        False,
+    )
+    calibration_cohorts_require_all = as_bool(
+        calibration_cohort_settings.get("require_all_tickers", True),
+        True,
+    )
+    calibration_cohort_version = (
+        str(calibration_cohort_settings.get("version") or "calibration_cohort_unversioned").strip()
+        or "calibration_cohort_unversioned"
+    )
     weights = cfg_get(config, "biotech_scoring.weights", {}) or {}
     validate_clinical_weights(weights)
     catalyst_w = float(weights.get("catalyst", 0.55))
@@ -1450,6 +1600,42 @@ def score_rows(
             context=f"company_id={company_id} ticker={row.get('ticker') or ''} source=daily_features",
         )
         raw_scores = payload.get("raw_scores", {}) if isinstance(payload, dict) else {}
+        shadow_signals = payload.get("shadow_signals", {}) if isinstance(payload, dict) else {}
+        forward_catalyst_calendar = (
+            shadow_signals.get("forward_catalyst_calendar", {})
+            if isinstance(shadow_signals, dict)
+            else {}
+        )
+        if not isinstance(forward_catalyst_calendar, dict):
+            forward_catalyst_calendar = {}
+        short_interest = (
+            shadow_signals.get("short_interest", {})
+            if isinstance(shadow_signals, dict)
+            else {}
+        )
+        if not isinstance(short_interest, dict):
+            short_interest = {}
+        borrow_availability = (
+            shadow_signals.get("borrow_availability", {})
+            if isinstance(shadow_signals, dict)
+            else {}
+        )
+        if not isinstance(borrow_availability, dict):
+            borrow_availability = {}
+        institutional_ownership = (
+            shadow_signals.get("institutional_ownership", {})
+            if isinstance(shadow_signals, dict)
+            else {}
+        )
+        if not isinstance(institutional_ownership, dict):
+            institutional_ownership = {}
+        insider_activity = (
+            shadow_signals.get("insider_activity", {})
+            if isinstance(shadow_signals, dict)
+            else {}
+        )
+        if not isinstance(insider_activity, dict):
+            insider_activity = {}
         commercial = commercial_by_company.get(company_id, {})
         forward_guidance = forward_by_company.get(company_id, {})
         governance = governance_by_company.get(company_id, {})
@@ -1491,6 +1677,106 @@ def score_rows(
         )
         uncompensated_risk = clamp(to_float(risk_components["uncompensated_risk_score"], legacy_risk))
         compensated_risk = clamp(to_float(risk_components["compensated_risk_score"], 50.0))
+        forward_catalyst_nearest_days = finite_value_or_blank(
+            forward_catalyst_calendar.get("forward_catalyst_nearest_days")
+        )
+        forward_catalyst_event_type = str(forward_catalyst_calendar.get("forward_catalyst_event_type") or "")
+        forward_catalyst_source = str(forward_catalyst_calendar.get("forward_catalyst_source") or "")
+        forward_catalyst_source_url = str(forward_catalyst_calendar.get("forward_catalyst_source_url") or "")
+        forward_catalyst_confidence = finite_value_or_blank(
+            forward_catalyst_calendar.get("forward_catalyst_confidence")
+        )
+        forward_catalyst_score = clamp(to_float(forward_catalyst_calendar.get("forward_catalyst_score"), 0.0))
+        forward_catalyst_unfiltered_score = clamp(
+            to_float(
+                forward_catalyst_calendar.get("forward_catalyst_unfiltered_score"),
+                forward_catalyst_score,
+            )
+        )
+        ctgov_forward_catalyst_score = clamp(
+            to_float(forward_catalyst_calendar.get("ctgov_forward_catalyst_score"), 0.0)
+        )
+        ctgov_forward_catalyst_guardrail_pass = (
+            1.0
+            if to_float(forward_catalyst_calendar.get("ctgov_forward_catalyst_guardrail_pass"), 0.0) > 0.0
+            else 0.0
+        )
+        short_interest_shares = to_float(short_interest.get("short_interest_shares"), 0.0)
+        float_shares = to_float(short_interest.get("float_shares"), 0.0)
+        short_interest_pct_float = to_float(short_interest.get("short_interest_pct_float"), 0.0)
+        days_to_cover = to_float(short_interest.get("days_to_cover"), 0.0)
+        float_shares_source = str(short_interest.get("float_shares_source") or "")
+        float_shares_asof_date = str(short_interest.get("float_shares_asof_date") or "")
+        float_shares_source_asof_date = str(short_interest.get("float_shares_source_asof_date") or "")
+        float_shares_staleness_days = to_float(short_interest.get("float_shares_staleness_days"), 0.0)
+        float_shares_measurement_staleness_days = to_float(
+            short_interest.get("float_shares_measurement_staleness_days"),
+            0.0,
+        )
+        float_shares_proxy_flag = 1.0 if to_float(short_interest.get("float_shares_proxy_flag"), 0.0) > 0.0 else 0.0
+        public_float_usd = to_float(short_interest.get("public_float_usd"), 0.0)
+        public_float_price_date = str(short_interest.get("public_float_price_date") or "")
+        public_float_close_price = to_float(short_interest.get("public_float_close_price"), 0.0)
+        short_interest_pct_float_available_flag = (
+            1.0 if to_float(short_interest.get("short_interest_pct_float_available_flag"), 0.0) > 0.0 else 0.0
+        )
+        short_interest_pct_score = clamp(to_float(short_interest.get("short_interest_pct_score"), 0.0))
+        short_interest_days_to_cover_score = clamp(
+            to_float(short_interest.get("short_interest_days_to_cover_score"), 0.0)
+        )
+        short_interest_signal_basis = str(short_interest.get("short_interest_signal_basis") or "")
+        short_interest_signal_max_possible_score = clamp(
+            to_float(short_interest.get("short_interest_signal_max_possible_score"), 0.0)
+        )
+        short_interest_signal_score = clamp(to_float(short_interest.get("short_interest_signal_score"), 0.0))
+        borrow_rate_current = to_float(borrow_availability.get("borrow_rate_current"), 0.0)
+        borrow_fee_data_available_flag = (
+            1.0 if to_float(borrow_availability.get("borrow_fee_data_available_flag"), 0.0) > 0.0 else 0.0
+        )
+        shortable_data_available_flag = (
+            1.0 if to_float(borrow_availability.get("shortable_data_available_flag"), 0.0) > 0.0 else 0.0
+        )
+        borrow_fee_stale_flag = 1.0 if to_float(borrow_availability.get("borrow_fee_stale_flag"), 0.0) > 0.0 else 0.0
+        shortable_stale_flag = 1.0 if to_float(borrow_availability.get("shortable_stale_flag"), 0.0) > 0.0 else 0.0
+        borrow_fee_staleness_days = to_float(borrow_availability.get("borrow_fee_staleness_days"), 0.0)
+        shortable_staleness_days = to_float(borrow_availability.get("shortable_staleness_days"), 0.0)
+        borrow_fee_history_count_30d = to_float(borrow_availability.get("borrow_fee_history_count_30d"), 0.0)
+        borrow_fee_history_count_90d = to_float(borrow_availability.get("borrow_fee_history_count_90d"), 0.0)
+        borrow_rate_30d_avg = to_float(borrow_availability.get("borrow_rate_30d_avg"), 0.0)
+        borrow_rate_90d_avg = to_float(borrow_availability.get("borrow_rate_90d_avg"), 0.0)
+        borrow_rate_spike_flag = 1.0 if to_float(borrow_availability.get("borrow_rate_spike_flag"), 0.0) > 0.0 else 0.0
+        borrow_rate_declining_flag = 1.0 if to_float(borrow_availability.get("borrow_rate_declining_flag"), 0.0) > 0.0 else 0.0
+        shortable_shares = to_float(borrow_availability.get("shortable_shares"), 0.0)
+        shares_shortable_k = to_float(borrow_availability.get("shares_shortable_k"), 0.0)
+        hard_to_borrow_flag = 1.0 if to_float(borrow_availability.get("hard_to_borrow_flag"), 0.0) > 0.0 else 0.0
+        borrow_pressure_score = clamp(to_float(borrow_availability.get("borrow_pressure_score"), 0.0))
+        high_borrow_pressure_flag = (
+            1.0 if to_float(borrow_availability.get("high_borrow_pressure_flag"), 0.0) > 0.0 else 0.0
+        )
+        elevated_borrow_pressure_flag = (
+            1.0 if to_float(borrow_availability.get("elevated_borrow_pressure_flag"), 0.0) > 0.0 else 0.0
+        )
+        borrow_rate_high_flag = (
+            1.0 if to_float(borrow_availability.get("borrow_rate_high_flag"), 0.0) > 0.0 else 0.0
+        )
+        borrow_squeeze_setup_flag = (
+            1.0 if to_float(borrow_availability.get("borrow_squeeze_setup_flag"), 0.0) > 0.0 else 0.0
+        )
+        borrow_distress_flag = (
+            1.0 if to_float(borrow_availability.get("borrow_distress_flag"), 0.0) > 0.0 else 0.0
+        )
+        institutional_ownership_delta_pct = to_float(institutional_ownership.get("institutional_ownership_delta_pct"), 0.0)
+        institutional_accumulation_score = clamp(to_float(institutional_ownership.get("institutional_accumulation_score"), 50.0))
+        new_institutional_buyer_count = to_float(institutional_ownership.get("new_institutional_buyer_count"), 0.0)
+        exiting_institutional_holder_count = to_float(institutional_ownership.get("exiting_institutional_holder_count"), 0.0)
+        net_institutional_buyer_count = to_float(institutional_ownership.get("net_institutional_buyer_count"), 0.0)
+        insider_buy_count_90d = to_float(insider_activity.get("insider_buy_count_90d"), 0.0)
+        open_market_buy_count_90d = to_float(insider_activity.get("open_market_buy_count_90d"), 0.0)
+        planned_10b5_1_buy_count = to_float(insider_activity.get("planned_10b5_1_buy_count"), 0.0)
+        insider_buy_value_90d = to_float(insider_activity.get("insider_buy_value_90d"), 0.0)
+        insider_buy_cluster_count_90d = to_float(insider_activity.get("insider_buy_cluster_count_90d"), 0.0)
+        insider_sell_value_90d = to_float(insider_activity.get("insider_sell_value_90d"), 0.0)
+        insider_accumulation_score = clamp(to_float(insider_activity.get("insider_accumulation_score"), 50.0))
         momentum = clamp(momentum_raw if momentum_raw is not None else 0.0)
         clinical_positive = (
             catalyst_w * catalyst
@@ -1592,6 +1878,28 @@ def score_rows(
                 note=override.note,
             )
         biotech_taxonomy_payload = biotech_taxonomy.as_payload()
+        primary_cohort_for_calibration = str(
+            biotech_taxonomy_payload.get("biotech_primary_cohort")
+            or biotech_taxonomy_payload.get("primary_cohort")
+            or "unmapped_calibration_cohort"
+        )
+        if calibration_cohorts_enabled and calibration_cohorts_require_all and ticker not in calibration_cohorts_by_ticker:
+            raise ValueError(
+                f"Ticker {ticker} is missing from the official biotech calibration cohort map; "
+                "old taxonomy-cohort fallback is disabled."
+            )
+        biotech_taxonomy_payload |= calibration_cohort_fields(
+            ticker=ticker,
+            primary_cohort=primary_cohort_for_calibration,
+            calibration_cohorts_by_ticker=calibration_cohorts_by_ticker,
+            enabled=calibration_cohorts_enabled,
+            fallback_to_primary=calibration_cohorts_fallback_to_primary,
+            version=calibration_cohort_version,
+        )
+        biotech_taxonomy_payload = apply_official_operational_cohort_payload(
+            ticker=ticker,
+            payload=biotech_taxonomy_payload,
+        )
         use_quality_adjusted_valuation = as_bool(
             cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True),
             True,
@@ -1683,6 +1991,11 @@ def score_rows(
             or biotech_taxonomy_payload.get("primary_cohort")
             or ""
         )
+        operational_cohort = str(
+            biotech_taxonomy_payload.get("biotech_calibration_cohort")
+            or primary_cohort
+            or ""
+        )
         allocation_risk = risk
         allocation_risk_penalty_mode = risk_penalty_mode_used
         discovery_risk, discovery_risk_penalty_mode = configured_risk_penalty_score(
@@ -1690,7 +2003,7 @@ def score_rows(
             risk_components=risk_components,
             legacy_risk=legacy_risk,
             purpose="discovery",
-            primary_cohort=primary_cohort,
+            primary_cohort=operational_cohort,
         )
         discovery_clinical_risk_drag = convex_risk_drag(discovery_risk, risk_w, config, "biotech_scoring")
         discovery_clinical_opportunity = clamp(clinical_positive - discovery_clinical_risk_drag)
@@ -1930,6 +2243,68 @@ def score_rows(
                 "valuation_growth_mismatch_score": commercial_risk["valuation_growth_mismatch_score"],
                 "transient_revenue_anchor_score": commercial_risk["transient_revenue_anchor_score"],
                 "commercial_business_shock_score": commercial_risk["commercial_business_shock_score"],
+                "forward_catalyst_nearest_days": forward_catalyst_nearest_days,
+                "forward_catalyst_event_type": forward_catalyst_event_type,
+                "forward_catalyst_source": forward_catalyst_source,
+                "forward_catalyst_source_url": forward_catalyst_source_url,
+                "forward_catalyst_confidence": forward_catalyst_confidence,
+                "forward_catalyst_score": round(forward_catalyst_score, 4),
+                "forward_catalyst_unfiltered_score": round(forward_catalyst_unfiltered_score, 4),
+                "ctgov_forward_catalyst_score": round(ctgov_forward_catalyst_score, 4),
+                "ctgov_forward_catalyst_guardrail_pass": ctgov_forward_catalyst_guardrail_pass,
+                "short_interest_shares": round(short_interest_shares, 4),
+                "float_shares": round(float_shares, 4),
+                "short_interest_pct_float": round(short_interest_pct_float, 8),
+                "days_to_cover": round(days_to_cover, 4),
+                "float_shares_source": float_shares_source,
+                "float_shares_asof_date": float_shares_asof_date,
+                "float_shares_source_asof_date": float_shares_source_asof_date,
+                "float_shares_staleness_days": round(float_shares_staleness_days, 4),
+                "float_shares_measurement_staleness_days": round(float_shares_measurement_staleness_days, 4),
+                "float_shares_proxy_flag": float_shares_proxy_flag,
+                "public_float_usd": round(public_float_usd, 4),
+                "public_float_price_date": public_float_price_date,
+                "public_float_close_price": round(public_float_close_price, 8),
+                "short_interest_pct_float_available_flag": short_interest_pct_float_available_flag,
+                "short_interest_pct_score": round(short_interest_pct_score, 4),
+                "short_interest_days_to_cover_score": round(short_interest_days_to_cover_score, 4),
+                "short_interest_signal_basis": short_interest_signal_basis,
+                "short_interest_signal_max_possible_score": round(short_interest_signal_max_possible_score, 4),
+                "short_interest_signal_score": round(short_interest_signal_score, 4),
+                "borrow_rate_current": round(borrow_rate_current, 8),
+                "borrow_fee_data_available_flag": borrow_fee_data_available_flag,
+                "shortable_data_available_flag": shortable_data_available_flag,
+                "borrow_fee_stale_flag": borrow_fee_stale_flag,
+                "shortable_stale_flag": shortable_stale_flag,
+                "borrow_fee_staleness_days": round(borrow_fee_staleness_days, 4),
+                "shortable_staleness_days": round(shortable_staleness_days, 4),
+                "borrow_fee_history_count_30d": round(borrow_fee_history_count_30d, 4),
+                "borrow_fee_history_count_90d": round(borrow_fee_history_count_90d, 4),
+                "borrow_rate_30d_avg": round(borrow_rate_30d_avg, 8),
+                "borrow_rate_90d_avg": round(borrow_rate_90d_avg, 8),
+                "borrow_rate_spike_flag": borrow_rate_spike_flag,
+                "borrow_rate_declining_flag": borrow_rate_declining_flag,
+                "shortable_shares": round(shortable_shares, 4),
+                "shares_shortable_k": round(shares_shortable_k, 4),
+                "hard_to_borrow_flag": hard_to_borrow_flag,
+                "borrow_pressure_score": round(borrow_pressure_score, 4),
+                "high_borrow_pressure_flag": high_borrow_pressure_flag,
+                "elevated_borrow_pressure_flag": elevated_borrow_pressure_flag,
+                "borrow_rate_high_flag": borrow_rate_high_flag,
+                "borrow_squeeze_setup_flag": borrow_squeeze_setup_flag,
+                "borrow_distress_flag": borrow_distress_flag,
+                "institutional_ownership_delta_pct": round(institutional_ownership_delta_pct, 8),
+                "institutional_accumulation_score": round(institutional_accumulation_score, 4),
+                "new_institutional_buyer_count": round(new_institutional_buyer_count, 4),
+                "exiting_institutional_holder_count": round(exiting_institutional_holder_count, 4),
+                "net_institutional_buyer_count": round(net_institutional_buyer_count, 4),
+                "insider_buy_count_90d": round(insider_buy_count_90d, 4),
+                "open_market_buy_count_90d": round(open_market_buy_count_90d, 4),
+                "planned_10b5_1_buy_count": round(planned_10b5_1_buy_count, 4),
+                "insider_buy_value_90d": round(insider_buy_value_90d, 2),
+                "insider_buy_cluster_count_90d": round(insider_buy_cluster_count_90d, 4),
+                "insider_sell_value_90d": round(insider_sell_value_90d, 2),
+                "insider_accumulation_score": round(insider_accumulation_score, 4),
                 "tier1_selection_gate_score": round(selection_gate, 4),
                 "discovery_selection_gate_score": round(discovery_selection_gate, 4),
                 "investment_profile": profile_name,
@@ -2031,12 +2406,7 @@ def score_rows(
                 "configured_event_hard_reasons": sorted(policy_settings["event_hard_reasons"]),
                 "configured_soft_weakness_reasons": sorted(policy_settings["soft_weakness_reasons"]),
             },
-            "biotech_taxonomy": biotech_taxonomy_payload
-            | {
-                "reason_codes": biotech_taxonomy.reason_codes,
-                "overlays": biotech_taxonomy.overlays,
-                "evidence": biotech_taxonomy.evidence,
-            },
+            "biotech_taxonomy": public_biotech_taxonomy_payload(biotech_taxonomy_payload),
             "commercial_risk_overlay": commercial_risk | {
                 "enabled": as_bool(commercial_risk_settings.get("enabled", True), True),
                 "penalty": round(commercial_overlay_penalty, 4),
@@ -2127,6 +2497,34 @@ def score_rows(
                 "leverage_fragility_score": round(policy_diagnostics["leverage_fragility_score"], 4),
                 "mature_defensive_score": round(mature_defensive, 4),
                 "expected_return_quality_score": round(expected_return_quality, 4),
+                "forward_catalyst_nearest_days": forward_catalyst_nearest_days,
+                "forward_catalyst_event_type": forward_catalyst_event_type,
+                "forward_catalyst_source": forward_catalyst_source,
+                "forward_catalyst_source_url": forward_catalyst_source_url,
+                "forward_catalyst_confidence": forward_catalyst_confidence,
+                "forward_catalyst_score": round(forward_catalyst_score, 4),
+                "forward_catalyst_unfiltered_score": round(forward_catalyst_unfiltered_score, 4),
+                "ctgov_forward_catalyst_score": round(ctgov_forward_catalyst_score, 4),
+                "ctgov_forward_catalyst_guardrail_pass": ctgov_forward_catalyst_guardrail_pass,
+                "short_interest_shares": round(short_interest_shares, 4),
+                "float_shares": round(float_shares, 4),
+                "short_interest_pct_float": round(short_interest_pct_float, 8),
+                "days_to_cover": round(days_to_cover, 4),
+                "float_shares_source": float_shares_source,
+                "float_shares_asof_date": float_shares_asof_date,
+                "float_shares_source_asof_date": float_shares_source_asof_date,
+                "float_shares_staleness_days": round(float_shares_staleness_days, 4),
+                "float_shares_measurement_staleness_days": round(float_shares_measurement_staleness_days, 4),
+                "float_shares_proxy_flag": float_shares_proxy_flag,
+                "public_float_usd": round(public_float_usd, 4),
+                "public_float_price_date": public_float_price_date,
+                "public_float_close_price": round(public_float_close_price, 8),
+                "short_interest_pct_float_available_flag": short_interest_pct_float_available_flag,
+                "short_interest_pct_score": round(short_interest_pct_score, 4),
+                "short_interest_days_to_cover_score": round(short_interest_days_to_cover_score, 4),
+                "short_interest_signal_basis": short_interest_signal_basis,
+                "short_interest_signal_max_possible_score": round(short_interest_signal_max_possible_score, 4),
+                "short_interest_signal_score": round(short_interest_signal_score, 4),
                 "commercial_entry_quality_score": commercial_expected_return_overlay[
                     "commercial_entry_quality_score"
                 ],
@@ -2137,6 +2535,40 @@ def score_rows(
                 "commercial_expected_return_overlay_score": commercial_expected_return_overlay[
                     "commercial_expected_return_overlay_score"
                 ],
+                "borrow_rate_current": round(borrow_rate_current, 8),
+                "borrow_fee_data_available_flag": borrow_fee_data_available_flag,
+                "shortable_data_available_flag": shortable_data_available_flag,
+                "borrow_fee_stale_flag": borrow_fee_stale_flag,
+                "shortable_stale_flag": shortable_stale_flag,
+                "borrow_fee_staleness_days": round(borrow_fee_staleness_days, 4),
+                "shortable_staleness_days": round(shortable_staleness_days, 4),
+                "borrow_fee_history_count_30d": round(borrow_fee_history_count_30d, 4),
+                "borrow_fee_history_count_90d": round(borrow_fee_history_count_90d, 4),
+                "borrow_rate_30d_avg": round(borrow_rate_30d_avg, 8),
+                "borrow_rate_90d_avg": round(borrow_rate_90d_avg, 8),
+                "borrow_rate_spike_flag": borrow_rate_spike_flag,
+                "borrow_rate_declining_flag": borrow_rate_declining_flag,
+                "shortable_shares": round(shortable_shares, 4),
+                "shares_shortable_k": round(shares_shortable_k, 4),
+                "hard_to_borrow_flag": hard_to_borrow_flag,
+                "borrow_pressure_score": round(borrow_pressure_score, 4),
+                "high_borrow_pressure_flag": high_borrow_pressure_flag,
+                "elevated_borrow_pressure_flag": elevated_borrow_pressure_flag,
+                "borrow_rate_high_flag": borrow_rate_high_flag,
+                "borrow_squeeze_setup_flag": borrow_squeeze_setup_flag,
+                "borrow_distress_flag": borrow_distress_flag,
+                "institutional_ownership_delta_pct": round(institutional_ownership_delta_pct, 8),
+                "institutional_accumulation_score": round(institutional_accumulation_score, 4),
+                "new_institutional_buyer_count": round(new_institutional_buyer_count, 4),
+                "exiting_institutional_holder_count": round(exiting_institutional_holder_count, 4),
+                "net_institutional_buyer_count": round(net_institutional_buyer_count, 4),
+                "insider_buy_count_90d": round(insider_buy_count_90d, 4),
+                "open_market_buy_count_90d": round(open_market_buy_count_90d, 4),
+                "planned_10b5_1_buy_count": round(planned_10b5_1_buy_count, 4),
+                "insider_buy_value_90d": round(insider_buy_value_90d, 2),
+                "insider_buy_cluster_count_90d": round(insider_buy_cluster_count_90d, 4),
+                "insider_sell_value_90d": round(insider_sell_value_90d, 2),
+                "insider_accumulation_score": round(insider_accumulation_score, 4),
                 "quality_adjusted_valuation_score": round(quality_adjusted_valuation_score, 4),
                 "used_quality_adjusted_valuation": used_quality_adjusted_valuation,
                 "valuation_quality_adjustment_delta": round(valuation_quality_adjustment_delta, 4),
@@ -2329,6 +2761,68 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "leverage_fragility_score",
         "mature_defensive_score",
         "expected_return_quality_score",
+        "forward_catalyst_nearest_days",
+        "forward_catalyst_event_type",
+        "forward_catalyst_source",
+        "forward_catalyst_source_url",
+        "forward_catalyst_confidence",
+        "forward_catalyst_score",
+        "forward_catalyst_unfiltered_score",
+        "ctgov_forward_catalyst_score",
+        "ctgov_forward_catalyst_guardrail_pass",
+        "short_interest_shares",
+        "float_shares",
+        "short_interest_pct_float",
+        "days_to_cover",
+        "float_shares_source",
+        "float_shares_asof_date",
+        "float_shares_source_asof_date",
+        "float_shares_staleness_days",
+        "float_shares_measurement_staleness_days",
+        "float_shares_proxy_flag",
+        "public_float_usd",
+        "public_float_price_date",
+        "public_float_close_price",
+        "short_interest_pct_float_available_flag",
+        "short_interest_pct_score",
+        "short_interest_days_to_cover_score",
+        "short_interest_signal_basis",
+        "short_interest_signal_max_possible_score",
+        "short_interest_signal_score",
+        "borrow_rate_current",
+        "borrow_fee_data_available_flag",
+        "shortable_data_available_flag",
+        "borrow_fee_stale_flag",
+        "shortable_stale_flag",
+        "borrow_fee_staleness_days",
+        "shortable_staleness_days",
+        "borrow_fee_history_count_30d",
+        "borrow_fee_history_count_90d",
+        "borrow_rate_30d_avg",
+        "borrow_rate_90d_avg",
+        "borrow_rate_spike_flag",
+        "borrow_rate_declining_flag",
+        "shortable_shares",
+        "shares_shortable_k",
+        "hard_to_borrow_flag",
+        "borrow_pressure_score",
+        "high_borrow_pressure_flag",
+        "elevated_borrow_pressure_flag",
+        "borrow_rate_high_flag",
+        "borrow_squeeze_setup_flag",
+        "borrow_distress_flag",
+        "institutional_ownership_delta_pct",
+        "institutional_accumulation_score",
+        "new_institutional_buyer_count",
+        "exiting_institutional_holder_count",
+        "net_institutional_buyer_count",
+        "insider_buy_count_90d",
+        "open_market_buy_count_90d",
+        "planned_10b5_1_buy_count",
+        "insider_buy_value_90d",
+        "insider_buy_cluster_count_90d",
+        "insider_sell_value_90d",
+        "insider_accumulation_score",
         "commercial_entry_quality_score",
         "commercial_overextension_score",
         "valuation_growth_fit_score",
@@ -2433,6 +2927,10 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "sec_negative_clinical_event_count",
         "biotech_primary_cohort",
         "biotech_secondary_cohort",
+        "biotech_calibration_cohort",
+        "biotech_calibration_cohort_source",
+        "biotech_calibration_cohort_reason",
+        "biotech_calibration_cohort_version",
         "biotech_cohort_reason_codes",
         "biotech_cohort_confidence",
         "biotech_cohort_margin",
@@ -2467,6 +2965,13 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "allocation_bucket",
         "production_rank_score_field",
         "production_score_source",
+        "forward_catalyst_event_type",
+        "forward_catalyst_source",
+        "forward_catalyst_source_url",
+        "float_shares_source",
+        "float_shares_asof_date",
+        "float_shares_source_asof_date",
+        "public_float_price_date",
         "core_structural_veto_reasons",
         "bucket",
         "primary_nct",
@@ -2487,6 +2992,10 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "going_concern_status",
         "biotech_primary_cohort",
         "biotech_secondary_cohort",
+        "biotech_calibration_cohort",
+        "biotech_calibration_cohort_source",
+        "biotech_calibration_cohort_reason",
+        "biotech_calibration_cohort_version",
         "biotech_cohort_reason_codes",
         "biotech_cohort_source",
         "biotech_cohort_overlays",
@@ -2525,6 +3034,70 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    market_positioning_fieldnames = [
+        "forward_catalyst_nearest_days",
+        "forward_catalyst_event_type",
+        "forward_catalyst_source",
+        "forward_catalyst_source_url",
+        "forward_catalyst_confidence",
+        "forward_catalyst_score",
+        "forward_catalyst_unfiltered_score",
+        "ctgov_forward_catalyst_score",
+        "ctgov_forward_catalyst_guardrail_pass",
+        "short_interest_shares",
+        "float_shares",
+        "short_interest_pct_float",
+        "days_to_cover",
+        "float_shares_source",
+        "float_shares_asof_date",
+        "float_shares_source_asof_date",
+        "float_shares_staleness_days",
+        "float_shares_measurement_staleness_days",
+        "float_shares_proxy_flag",
+        "public_float_usd",
+        "public_float_price_date",
+        "public_float_close_price",
+        "short_interest_pct_float_available_flag",
+        "short_interest_pct_score",
+        "short_interest_days_to_cover_score",
+        "short_interest_signal_basis",
+        "short_interest_signal_max_possible_score",
+        "short_interest_signal_score",
+        "borrow_rate_current",
+        "borrow_fee_data_available_flag",
+        "shortable_data_available_flag",
+        "borrow_fee_stale_flag",
+        "shortable_stale_flag",
+        "borrow_fee_staleness_days",
+        "shortable_staleness_days",
+        "borrow_fee_history_count_30d",
+        "borrow_fee_history_count_90d",
+        "borrow_rate_30d_avg",
+        "borrow_rate_90d_avg",
+        "borrow_rate_spike_flag",
+        "borrow_rate_declining_flag",
+        "shortable_shares",
+        "shares_shortable_k",
+        "hard_to_borrow_flag",
+        "borrow_pressure_score",
+        "high_borrow_pressure_flag",
+        "elevated_borrow_pressure_flag",
+        "borrow_rate_high_flag",
+        "borrow_squeeze_setup_flag",
+        "borrow_distress_flag",
+        "institutional_ownership_delta_pct",
+        "institutional_accumulation_score",
+        "new_institutional_buyer_count",
+        "exiting_institutional_holder_count",
+        "net_institutional_buyer_count",
+        "insider_buy_count_90d",
+        "open_market_buy_count_90d",
+        "planned_10b5_1_buy_count",
+        "insider_buy_value_90d",
+        "insider_buy_cluster_count_90d",
+        "insider_sell_value_90d",
+        "insider_accumulation_score",
+    ]
     fieldnames = [
         "asof_date",
         "rank",
@@ -2543,7 +3116,6 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "investment_score",
         "discovery_investment_score",
         "biotech_primary_cohort",
-        "biotech_secondary_cohort",
         "biotech_cohort_reason_codes",
         "biotech_cohort_confidence",
         "biotech_cohort_margin",
@@ -2632,6 +3204,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "commercial_overextension_score",
         "valuation_growth_fit_score",
         "commercial_expected_return_overlay_score",
+        *market_positioning_fieldnames,
         "quality_adjusted_valuation_score",
         "used_quality_adjusted_valuation",
         "valuation_quality_adjustment_delta",
@@ -2709,6 +3282,13 @@ def main() -> None:
     )
     taxonomy_overrides_path = resolve_path(
         cfg_get(config, "biotech_scoring.taxonomy_overrides_csv", "data/biotech_taxonomy_overrides.csv"),
+        base_dir=base_dir,
+    )
+    calibration_cohort_settings = cfg_get(config, "biotech_scoring.calibration_cohorts", {}) or {}
+    if not isinstance(calibration_cohort_settings, dict):
+        calibration_cohort_settings = {}
+    calibration_cohorts_path = resolve_path(
+        calibration_cohort_settings.get("csv", "data/biotech_calibration_cohorts.csv"),
         base_dir=base_dir,
     )
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
@@ -2809,13 +3389,30 @@ def main() -> None:
                 )
             else:
                 LOGGER.warning("Skipping optional governance freshness validation because no governance rows are available.")
-            taxonomy_overrides_by_ticker = load_taxonomy_overrides(taxonomy_overrides_path)
-            if taxonomy_overrides_by_ticker:
+            calibration_cohorts_by_ticker = (
+                load_calibration_cohort_overrides(calibration_cohorts_path)
+                if as_bool(calibration_cohort_settings.get("enabled", False), False)
+                else {}
+            )
+            if calibration_cohorts_by_ticker:
                 LOGGER.info(
-                    "Loaded biotech taxonomy overrides: tickers=%d path=%s",
-                    len(taxonomy_overrides_by_ticker),
-                    taxonomy_overrides_path,
+                    "Loaded biotech calibration cohort overrides: tickers=%d path=%s",
+                    len(calibration_cohorts_by_ticker),
+                    calibration_cohorts_path,
                 )
+            taxonomy_overrides_by_ticker: dict[str, list[TaxonomyOverride]] = {}
+            if calibration_cohorts_by_ticker:
+                LOGGER.info(
+                    "Skipping legacy biotech taxonomy overrides because official five-bucket cohorts are enabled."
+                )
+            else:
+                taxonomy_overrides_by_ticker = load_taxonomy_overrides(taxonomy_overrides_path)
+                if taxonomy_overrides_by_ticker:
+                    LOGGER.info(
+                        "Loaded biotech taxonomy overrides: tickers=%d path=%s",
+                        len(taxonomy_overrides_by_ticker),
+                        taxonomy_overrides_path,
+                    )
             scored = score_rows(
                 features,
                 config,
@@ -2823,6 +3420,7 @@ def main() -> None:
                 forward_by_company,
                 governance_by_company,
                 taxonomy_overrides_by_ticker,
+                calibration_cohorts_by_ticker,
             )
             validate_full_universe_coverage(
                 expected_tickers=expected_tickers,

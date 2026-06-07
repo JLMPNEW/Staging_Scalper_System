@@ -7,6 +7,7 @@ import hashlib
 import itertools
 import math
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import mean, median
@@ -31,6 +32,15 @@ HARD_EXCLUDED_CLASSIFICATIONS = {
     "data_review_required",
 }
 HARD_EXCLUDED_REGULATORY_MODELS = set(MANUAL_FDA_REVIEW_STATES)
+GATE_FIELDS = (
+    "raw_composite_score",
+    "cohort_percentile",
+    "fundamental_quality_score",
+    "fda_product_score",
+    "reimbursement_score",
+    "valuation_score",
+    "technical_entry_score",
+)
 BASE_FIELDS = [
     "calibration_cohort",
     "parameter_set_id",
@@ -56,6 +66,37 @@ BASE_FIELDS = [
     "validation_improved_selected_ticker_rate_120d",
     "selected_tickers_validation",
 ]
+
+
+@dataclass(frozen=True)
+class PreparedRow:
+    ticker: str
+    asof_date: str
+    static_allowed: bool
+    raw_composite_score: float | None
+    cohort_percentile: float | None
+    fundamental_quality_score: float | None
+    fda_product_score: float | None
+    reimbursement_score: float | None
+    valuation_score: float | None
+    technical_entry_score: float | None
+    value_trap_score: float | None
+    returns_by_horizon: dict[int, float | None]
+
+
+@dataclass(frozen=True)
+class PreparedCohort:
+    cohort: str
+    rows: list[PreparedRow]
+    base_mask: int
+    train_mask: int
+    validation_mask: int
+    validation_all_mask: int
+    return_masks: dict[int, int]
+    field_threshold_masks: dict[str, dict[float, int]]
+    value_trap_threshold_masks: dict[float, int]
+    validation_all_metrics: dict[int, dict[str, Any]]
+    validation_cohort_tickers: dict[int, set[str]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -241,6 +282,172 @@ def passes_gates(
     return True
 
 
+def iter_mask_indices(mask: int) -> Any:
+    while mask:
+        lowest_bit = mask & -mask
+        yield lowest_bit.bit_length() - 1
+        mask ^= lowest_bit
+
+
+def mask_values(prepared: PreparedCohort, mask: int, *, horizon: int) -> tuple[list[float], list[str]]:
+    values: list[float] = []
+    tickers: list[str] = []
+    eligible = mask & prepared.return_masks[horizon]
+    for idx in iter_mask_indices(eligible):
+        row = prepared.rows[idx]
+        value = row.returns_by_horizon.get(horizon)
+        if value is None:
+            continue
+        values.append(value)
+        tickers.append(row.ticker)
+    return values, tickers
+
+
+def unique_tickers_from_mask(prepared: PreparedCohort, mask: int, *, horizon: int | None = None) -> set[str]:
+    out: set[str] = set()
+    eligible = mask & prepared.return_masks[horizon] if horizon is not None else mask
+    for idx in iter_mask_indices(eligible):
+        ticker = prepared.rows[idx].ticker
+        if ticker:
+            out.add(ticker)
+    return out
+
+
+def ticker_improvement_rate_from_mask(prepared: PreparedCohort, mask: int, *, horizon: int) -> float | None:
+    grouped: dict[str, list[float]] = {}
+    eligible = mask & prepared.return_masks[horizon]
+    for idx in iter_mask_indices(eligible):
+        row = prepared.rows[idx]
+        value = row.returns_by_horizon.get(horizon)
+        if value is None or not row.ticker:
+            continue
+        grouped.setdefault(row.ticker, []).append(value)
+    if not grouped:
+        return None
+    improved = sum(1 for values in grouped.values() if median(values) > 0)
+    return improved / len(grouped)
+
+
+def metrics_from_mask(prepared: PreparedCohort, mask: int, *, horizon: int) -> dict[str, Any]:
+    values, tickers = mask_values(prepared, mask, horizon=horizon)
+    return metrics(values, tickers)
+
+
+def prepare_cohort(
+    rows: list[dict[str, str]],
+    *,
+    cohort: str,
+    horizons: list[int],
+    effective_train_end_asof: str,
+    validation_start_asof: str,
+    validation_end_asof: str,
+    raw_mins: list[float],
+    cohort_percentile_mins: list[float],
+    fundamental_mins: list[float],
+    fda_mins: list[float],
+    reimbursement_mins: list[float],
+    valuation_mins: list[float],
+    technical_mins: list[float],
+    value_trap_maxes: list[float],
+) -> PreparedCohort:
+    cohort_rows: list[PreparedRow] = []
+    base_mask = 0
+    train_mask = 0
+    validation_mask = 0
+    validation_all_mask = 0
+    return_masks = {horizon: 0 for horizon in horizons}
+    threshold_lists = {
+        "raw_composite_score": raw_mins,
+        "cohort_percentile": cohort_percentile_mins,
+        "fundamental_quality_score": fundamental_mins,
+        "fda_product_score": fda_mins,
+        "reimbursement_score": reimbursement_mins,
+        "valuation_score": valuation_mins,
+        "technical_entry_score": technical_mins,
+    }
+    field_threshold_masks = {
+        field: {threshold: 0 for threshold in thresholds}
+        for field, thresholds in threshold_lists.items()
+    }
+    value_trap_threshold_masks = {threshold: 0 for threshold in value_trap_maxes}
+
+    for row in rows:
+        if str(row.get("calibration_cohort") or "") != cohort:
+            continue
+        returns_by_horizon = {
+            horizon: to_float(row.get(f"cohort_excess_return_{horizon}d"))
+            for horizon in horizons
+        }
+        item = PreparedRow(
+            ticker=str(row.get("ticker") or ""),
+            asof_date=str(row.get("asof_date") or "")[:10],
+            static_allowed=passes_static_exclusions(row),
+            raw_composite_score=to_float(row.get("raw_composite_score")),
+            cohort_percentile=to_float(row.get("cohort_percentile")),
+            fundamental_quality_score=to_float(row.get("fundamental_quality_score")),
+            fda_product_score=to_float(row.get("fda_product_score")),
+            reimbursement_score=to_float(row.get("reimbursement_score")),
+            valuation_score=to_float(row.get("valuation_score")),
+            technical_entry_score=to_float(row.get("technical_entry_score")),
+            value_trap_score=to_float(row.get("value_trap_score")),
+            returns_by_horizon=returns_by_horizon,
+        )
+        idx = len(cohort_rows)
+        bit = 1 << idx
+        cohort_rows.append(item)
+        if item.static_allowed:
+            base_mask |= bit
+        if item.asof_date <= effective_train_end_asof:
+            train_mask |= bit
+        if validation_start_asof <= item.asof_date <= validation_end_asof:
+            validation_mask |= bit
+            validation_all_mask |= bit
+        for horizon, value in returns_by_horizon.items():
+            if value is not None:
+                return_masks[horizon] |= bit
+        for field, thresholds in threshold_lists.items():
+            value = getattr(item, field)
+            if value is None:
+                continue
+            for threshold in thresholds:
+                if value >= threshold:
+                    field_threshold_masks[field][threshold] |= bit
+        for threshold in value_trap_maxes:
+            if item.value_trap_score is None or item.value_trap_score <= threshold:
+                value_trap_threshold_masks[threshold] |= bit
+
+    prepared = PreparedCohort(
+        cohort=cohort,
+        rows=cohort_rows,
+        base_mask=base_mask,
+        train_mask=train_mask,
+        validation_mask=validation_mask,
+        validation_all_mask=validation_all_mask,
+        return_masks=return_masks,
+        field_threshold_masks=field_threshold_masks,
+        value_trap_threshold_masks=value_trap_threshold_masks,
+        validation_all_metrics={},
+        validation_cohort_tickers={},
+    )
+    object.__setattr__(
+        prepared,
+        "validation_all_metrics",
+        {
+            horizon: metrics_from_mask(prepared, validation_all_mask, horizon=horizon)
+            for horizon in horizons
+        },
+    )
+    object.__setattr__(
+        prepared,
+        "validation_cohort_tickers",
+        {
+            horizon: unique_tickers_from_mask(prepared, validation_all_mask, horizon=horizon)
+            for horizon in horizons
+        },
+    )
+    return prepared
+
+
 def score_objective(metrics_by_horizon: dict[int, dict[str, Any]], weights: dict[str, float]) -> float:
     if not metrics_by_horizon:
         return -999.0
@@ -268,6 +475,21 @@ def parameter_id(*values: object) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
+def validation_lcb_rejections(
+    metrics_by_horizon: dict[int, dict[str, Any]],
+    *,
+    required_horizons: list[int],
+    min_lcb_excess: float,
+) -> list[str]:
+    out: list[str] = []
+    for horizon in required_horizons:
+        payload = metrics_by_horizon.get(horizon)
+        lcb = to_float(payload.get("lcb")) if payload else None
+        if lcb is None or lcb < min_lcb_excess:
+            out.append(f"{horizon}d_lcb_below_min")
+    return out
+
+
 def evaluate_parameter_set(
     rows: list[dict[str, str]],
     *,
@@ -284,6 +506,8 @@ def evaluate_parameter_set(
     min_selected_validation: int,
     min_selected_ticker_coverage: float,
     min_improved_selected_ticker_rate: float,
+    min_validation_lcb_excess: float,
+    required_positive_lcb_horizons: list[int],
     objective_weights: dict[str, float],
     raw_score_min: float,
     cohort_percentile_min: float,
@@ -357,6 +581,13 @@ def evaluate_parameter_set(
         rejection.append("nonpositive_validation_median_excess")
     if (to_float(train_ref.get("median")) or 0.0) > 0 and (to_float(validation_ref.get("median")) or 0.0) < 0:
         rejection.append("train_validation_sign_flip")
+    rejection.extend(
+        validation_lcb_rejections(
+            metrics_validation,
+            required_horizons=required_positive_lcb_horizons,
+            min_lcb_excess=min_validation_lcb_excess,
+        )
+    )
     objective = score_objective(metrics_validation, objective_weights)
     base = {
         "calibration_cohort": cohort,
@@ -386,12 +617,135 @@ def evaluate_parameter_set(
         "validation_end_asof": validation_end_asof,
         "objective_score": f"{objective:.6f}",
         "pass_fail": "fail" if rejection else "pass",
-        "rejection_reason": ";".join(rejection),
+        "rejection_reason": ";".join(dict.fromkeys(rejection)),
         "validation_cohort_obs_120d": int(validation_all_ref["count"]),
         "validation_cohort_unique_tickers_120d": len(validation_cohort_tickers),
         "validation_selected_ticker_coverage_120d": f"{selected_coverage:.4f}",
         "validation_improved_selected_ticker_rate_120d": "" if improved_rate is None else f"{improved_rate:.4f}",
         "selected_tickers_validation": ";".join(sorted({str(row.get("ticker") or "") for row in validation}))[:500],
+    }
+    for horizon in horizons:
+        for prefix, payload in (("train", metrics_train[horizon]), ("validation", metrics_validation[horizon])):
+            for key, value in payload.items():
+                base[f"{prefix}_{key}_{horizon}d"] = value
+    return base
+
+
+def evaluate_prepared_parameter_set(
+    prepared: PreparedCohort,
+    *,
+    horizons: list[int],
+    train_end_asof: str,
+    effective_train_end_asof: str,
+    embargo_days: int,
+    validation_start_asof: str,
+    validation_end_asof: str,
+    min_train_obs: int,
+    min_validation_obs: int,
+    min_unique_tickers: int,
+    min_selected_validation: int,
+    min_selected_ticker_coverage: float,
+    min_improved_selected_ticker_rate: float,
+    min_validation_lcb_excess: float,
+    required_positive_lcb_horizons: list[int],
+    objective_weights: dict[str, float],
+    raw_score_min: float,
+    cohort_percentile_min: float,
+    fundamental_quality_min: float,
+    fda_product_min: float,
+    reimbursement_min: float,
+    valuation_min: float,
+    technical_entry_min: float,
+    value_trap_max: float,
+) -> dict[str, Any]:
+    selected_mask = (
+        prepared.base_mask
+        & prepared.field_threshold_masks["raw_composite_score"][raw_score_min]
+        & prepared.field_threshold_masks["cohort_percentile"][cohort_percentile_min]
+        & prepared.field_threshold_masks["fundamental_quality_score"][fundamental_quality_min]
+        & prepared.field_threshold_masks["fda_product_score"][fda_product_min]
+        & prepared.field_threshold_masks["reimbursement_score"][reimbursement_min]
+        & prepared.field_threshold_masks["valuation_score"][valuation_min]
+        & prepared.field_threshold_masks["technical_entry_score"][technical_entry_min]
+        & prepared.value_trap_threshold_masks[value_trap_max]
+    )
+    train_mask = selected_mask & prepared.train_mask
+    validation_mask = selected_mask & prepared.validation_mask
+    metrics_train = {
+        horizon: metrics_from_mask(prepared, train_mask, horizon=horizon)
+        for horizon in horizons
+    }
+    metrics_validation = {
+        horizon: metrics_from_mask(prepared, validation_mask, horizon=horizon)
+        for horizon in horizons
+    }
+    ref_horizon = max(horizons)
+    train_ref = metrics_train[ref_horizon]
+    validation_ref = metrics_validation[ref_horizon]
+    validation_all_ref = prepared.validation_all_metrics[ref_horizon]
+    validation_cohort_tickers = prepared.validation_cohort_tickers[ref_horizon]
+    selected_tickers = unique_tickers_from_mask(prepared, validation_mask, horizon=ref_horizon)
+    selected_coverage = (len(selected_tickers) / len(validation_cohort_tickers)) if validation_cohort_tickers else 0.0
+    improved_rate = ticker_improvement_rate_from_mask(prepared, validation_mask, horizon=ref_horizon)
+    rejection: list[str] = []
+    if int(train_ref["count"]) < min_train_obs:
+        rejection.append("insufficient_train_obs")
+    if int(validation_all_ref["count"]) < min_validation_obs:
+        rejection.append("insufficient_validation_obs")
+    if int(validation_ref["count"]) < min_selected_validation:
+        rejection.append("insufficient_selected_validation")
+    if int(validation_ref["unique_tickers"]) < min_unique_tickers:
+        rejection.append("insufficient_unique_tickers")
+    if selected_coverage < min_selected_ticker_coverage:
+        rejection.append("insufficient_selected_ticker_coverage")
+    if improved_rate is None or improved_rate < min_improved_selected_ticker_rate:
+        rejection.append("insufficient_improved_selected_ticker_rate")
+    if (to_float(validation_ref.get("median")) or 0.0) <= 0:
+        rejection.append("nonpositive_validation_median_excess")
+    if (to_float(train_ref.get("median")) or 0.0) > 0 and (to_float(validation_ref.get("median")) or 0.0) < 0:
+        rejection.append("train_validation_sign_flip")
+    rejection.extend(
+        validation_lcb_rejections(
+            metrics_validation,
+            required_horizons=required_positive_lcb_horizons,
+            min_lcb_excess=min_validation_lcb_excess,
+        )
+    )
+    objective = score_objective(metrics_validation, objective_weights)
+    base = {
+        "calibration_cohort": prepared.cohort,
+        "parameter_set_id": parameter_id(
+            prepared.cohort,
+            raw_score_min,
+            cohort_percentile_min,
+            fundamental_quality_min,
+            fda_product_min,
+            reimbursement_min,
+            valuation_min,
+            technical_entry_min,
+            value_trap_max,
+        ),
+        "raw_score_min": raw_score_min,
+        "cohort_percentile_min": cohort_percentile_min,
+        "fundamental_quality_min": fundamental_quality_min,
+        "fda_product_min": fda_product_min,
+        "reimbursement_min": reimbursement_min,
+        "valuation_min": valuation_min,
+        "technical_entry_min": technical_entry_min,
+        "value_trap_max": value_trap_max,
+        "train_end_asof": train_end_asof,
+        "effective_train_end_asof": effective_train_end_asof,
+        "embargo_days": embargo_days,
+        "validation_start_asof": validation_start_asof,
+        "validation_end_asof": validation_end_asof,
+        "objective_score": f"{objective:.6f}",
+        "pass_fail": "fail" if rejection else "pass",
+        "rejection_reason": ";".join(dict.fromkeys(rejection)),
+        "validation_cohort_obs_120d": int(validation_all_ref["count"]),
+        "validation_cohort_unique_tickers_120d": len(validation_cohort_tickers),
+        "validation_selected_ticker_coverage_120d": f"{selected_coverage:.4f}",
+        "validation_improved_selected_ticker_rate_120d": "" if improved_rate is None else f"{improved_rate:.4f}",
+        "selected_tickers_validation": ";".join(sorted(unique_tickers_from_mask(prepared, validation_mask)))[:500],
     }
     for horizon in horizons:
         for prefix, payload in (("train", metrics_train[horizon]), ("validation", metrics_validation[horizon])):
@@ -438,6 +792,17 @@ def main() -> None:
     min_selected_validation = int(cfg_get(config, "calibration.min_selected_validation", 20))
     min_selected_ticker_coverage = float(cfg_get(config, "calibration.min_selected_ticker_coverage", 0.60))
     min_improved_selected_ticker_rate = float(cfg_get(config, "calibration.min_improved_selected_ticker_rate", 0.60))
+    min_validation_lcb_excess = float(cfg_get(config, "calibration.min_validation_lcb_excess", 0.0))
+    required_positive_lcb_horizons = [
+        horizon
+        for horizon in parse_int_list(
+            cfg_get(config, "calibration.require_positive_lcb_horizons", str(max(horizons))),
+            str(max(horizons)),
+        )
+        if horizon in horizons
+    ]
+    if not required_positive_lcb_horizons:
+        required_positive_lcb_horizons = [max(horizons)]
     objective_weights = cfg_get(config, "calibration.objective", {}) or {}
 
     raw_mins = parse_float_list(cfg_get(config, "calibration.candidate_raw_score_min"), "55,60,65,70")
@@ -452,6 +817,22 @@ def main() -> None:
     cohorts = sorted({str(row.get("calibration_cohort") or "") for row in rows if str(row.get("calibration_cohort") or "")})
     all_results: list[dict[str, Any]] = []
     for cohort in cohorts:
+        prepared = prepare_cohort(
+            rows,
+            cohort=cohort,
+            horizons=horizons,
+            effective_train_end_asof=effective_train_end_asof,
+            validation_start_asof=validation_start_asof,
+            validation_end_asof=validation_end_asof,
+            raw_mins=raw_mins,
+            cohort_percentile_mins=cohort_percentile_mins,
+            fundamental_mins=fundamental_mins,
+            fda_mins=fda_mins,
+            reimbursement_mins=reimbursement_mins,
+            valuation_mins=valuation_mins,
+            technical_mins=technical_mins,
+            value_trap_maxes=value_trap_maxes,
+        )
         cohort_results: list[dict[str, Any]] = []
         for raw_min, pct_min, fund_min, fda_min, reimb_min, val_min, tech_min, trap_max in itertools.product(
             raw_mins,
@@ -464,9 +845,8 @@ def main() -> None:
             value_trap_maxes,
         ):
             cohort_results.append(
-                evaluate_parameter_set(
-                    rows,
-                    cohort=cohort,
+                evaluate_prepared_parameter_set(
+                    prepared,
                     horizons=horizons,
                     train_end_asof=train_end_asof,
                     effective_train_end_asof=effective_train_end_asof,
@@ -479,6 +859,8 @@ def main() -> None:
                     min_selected_validation=min_selected_validation,
                     min_selected_ticker_coverage=min_selected_ticker_coverage,
                     min_improved_selected_ticker_rate=min_improved_selected_ticker_rate,
+                    min_validation_lcb_excess=min_validation_lcb_excess,
+                    required_positive_lcb_horizons=required_positive_lcb_horizons,
                     objective_weights=objective_weights,
                     raw_score_min=raw_min,
                     cohort_percentile_min=pct_min,

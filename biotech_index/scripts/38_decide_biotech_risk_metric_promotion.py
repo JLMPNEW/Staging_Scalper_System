@@ -175,7 +175,7 @@ def evaluate_routed_discovery(path: Path) -> dict[str, Any]:
             )
         if updated_late_share > 75.0:
             warnings.append(
-                f"{horizon}d Top{top_n} routed discovery is concentrated in late_clinical_pivotal "
+                f"{horizon}d Top{top_n} routed discovery is concentrated in late_clinical_pivotal_or_registrational "
                 f"({updated_late_share:.1f}%)"
             )
     return {
@@ -198,7 +198,7 @@ def evaluate_cohort_discovery(path: Path) -> list[dict[str, Any]]:
         delta_loss20 = to_float(row.get("updated_loss20_rate_pct")) - to_float(row.get("current_loss20_rate_pct"))
         if updated_n <= 0:
             status = "not_selected_by_routed_discovery"
-        elif cohort in {"late_clinical_pivotal", "mid_clinical_phase2_poc"}:
+        elif cohort == "late_clinical_pivotal_or_registrational":
             passes = updated_unique >= 5 and delta_lcb >= 0.5 and delta_pf >= 0.10 and delta_loss20 <= 3.0
             status = "shadow_promote_discovery_only" if passes else "insufficient_for_promotion"
         elif delta_lcb < 0.0 or delta_pf < 0.0:

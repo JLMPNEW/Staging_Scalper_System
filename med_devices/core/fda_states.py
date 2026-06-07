@@ -7,6 +7,7 @@ MANUAL_FDA_REVIEW_STATES = frozenset(
         "confirmed_hard_red",
         "regulatory_review_required",
         "manual_review_required",
+        "manual_fda_footprint_ivd_lab",
         "mapping_review_required",
         "duplicate_cleanup_required",
     }

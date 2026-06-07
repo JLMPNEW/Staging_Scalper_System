@@ -297,8 +297,7 @@ def load_score_rows(
         score_expr(score_columns, "collaborator_dependency_risk_score", "NULL"),
         score_expr(score_columns, "trial_staleness_risk_score", "NULL"),
         score_expr(score_columns, "bucket"),
-        score_expr(score_columns, "biotech_primary_cohort", "'unclassified_review'"),
-        score_expr(score_columns, "biotech_secondary_cohort"),
+        score_expr(score_columns, "biotech_primary_cohort", "'unmapped_calibration_cohort'"),
         score_expr(score_columns, "biotech_cohort_confidence", "NULL"),
         score_expr(score_columns, "biotech_cohort_margin", "NULL"),
         score_expr(score_columns, "biotech_cohort_data_quality"),
@@ -414,14 +413,14 @@ def forward_return(
 
 
 def cohort_of(row: dict[str, Any]) -> str:
-    return str(row.get("biotech_primary_cohort") or "unclassified_review").strip() or "unclassified_review"
+    return str(row.get("biotech_primary_cohort") or "unmapped_calibration_cohort").strip() or "unmapped_calibration_cohort"
 
 
 def is_review_or_unclassified(row: dict[str, Any]) -> bool:
     cohort = cohort_of(row)
     quality = str(row.get("biotech_cohort_data_quality") or "").strip().lower()
     return (
-        cohort == "unclassified_review"
+        cohort == "unmapped_calibration_cohort"
         or quality == "review"
         or (to_float(row.get("biotech_taxonomy_review_required"), 0.0) or 0.0) > 0.0
     )

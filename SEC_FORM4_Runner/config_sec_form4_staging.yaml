@@ -1,0 +1,159 @@
+sec_form4:
+  run_mode: "daily"
+  db_path: "C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite"
+  raw_zip_dir: "C:/Users/josel/Documents/STAGING/DB/raw_zips"
+  report_output_dir: "output/sec_form4_staging"
+  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+
+  request:
+    timeout_seconds: 60
+    max_retries: 4
+    backoff_base_seconds: 1.5
+    backoff_cap_seconds: 60.0
+    accept_encoding: "gzip, deflate"
+    host_header: "www.sec.gov"
+
+  archives:
+    base_url: "https://www.sec.gov/Archives"
+    form_types: ["4", "4/A"]
+
+  daily:
+    process_name: "form4_daily"
+    start_date: null
+    end_date: null
+    days_back: 5
+    sleep_seconds: 0.15
+    force_reprocess: false
+    reconcile_current_quarter: false
+    index_timeout_seconds: 60
+    index_max_retries: 4
+    index_missing_statuses: [403, 404]
+    full_index_timeout_seconds: 60
+    full_index_max_retries: 4
+    full_index_missing_statuses: [403, 404]
+    filing_timeout_seconds: 120
+    filing_max_retries: 6
+    filing_missing_statuses: [404]
+
+  weekly:
+    process_name: "form4_weekly"
+    schedule_day: "SUN"
+    start_date: null
+    end_date: null
+    days_back: 10
+    sleep_seconds: 0.15
+    force_reprocess: false
+    reconcile_current_quarter: true
+    index_timeout_seconds: 60
+    index_max_retries: 4
+    index_missing_statuses: [403, 404]
+    full_index_timeout_seconds: 60
+    full_index_max_retries: 4
+    full_index_missing_statuses: [403, 404]
+    filing_timeout_seconds: 120
+    filing_max_retries: 6
+    filing_missing_statuses: [404]
+
+  quarterly:
+    dataset_page_url: "https://www.sec.gov/data-research/sec-markets-data/insider-transactions-data-sets"
+    dataset_page_timeout_seconds: 60
+    download_timeout_seconds: 120
+    to_sql_chunksize: 50
+    start_year: 2019
+    start_quarter: 1
+    end_year: 2026
+    end_quarter: 2
+    sleep_seconds: 0.5
+
+  build:
+    as_of_date: null
+    refresh_legacy_buy_table: true
+
+  execution:
+    use_acceptance_timestamp: true
+    entry_rule: "next_open"
+    same_day_cutoff_et: "15:45"
+
+  liquidity:
+    enabled: false
+    min_price: 0.0
+    min_adv20_usd: 0.0
+
+  behavior:
+    routine_enabled: true
+    routine_min_events: 4
+    routine_min_years: 2
+    routine_month_concentration_min: 0.60
+    routine_penalty: 0.75
+    opportunistic_boost: 1.15
+    tenb5_penalty: 0.85
+    filing_lag_penalty_per_bd: 0.03
+    filing_lag_penalty_floor: 0.50
+
+  scoring:
+    role_weight_top_exec: 1.50
+    role_weight_senior_officer: 1.35
+    role_weight_officer_or_director: 1.20
+    role_weight_ten_percent_owner: 0.90
+    role_weight_other: 1.00
+    ownership_weight_base: 1.00
+    ownership_weight_ratio_cap: 1.50
+    ownership_weight_ratio_multiplier: 0.50
+    size_weight_base: 1.00
+    size_weight_log_cap: 14.0
+    size_weight_log_divisor: 14.0
+    plan_weight_sell_10b5: 0.60
+    plan_weight_buy_10b5: 0.85
+    plan_weight_default: 1.00
+    direct_weight_direct: 1.10
+    direct_weight_indirect: 0.85
+    base_signal_buy: 1.00
+    base_signal_sell: 0.55
+    base_signal_other: 1.00
+    cluster_threshold_two_plus: 2
+    cluster_threshold_three_plus: 3
+    cluster_window_5bd: 5
+    cluster_window_10bd: 10
+    cluster_window_20bd: 20
+    buy_cluster_weight_2plus: 1.4
+    buy_cluster_weight_3plus: 1.8
+    buy_cluster_weight_default: 1.0
+    sell_cluster_weight_2plus: 1.2
+    sell_cluster_weight_3plus: 1.5
+    sell_cluster_weight_default: 1.0
+    cluster_weight_default_other_side: 1.0
+    decay_tau_business_days: 20.0
+    snapshot_score_window_bd: 20
+    snapshot_distinct_window_bd: 10
+    snapshot_net_sell_penalty: 0.60
+    snapshot_long_rank_buy_distinct_weight: 0.35
+    snapshot_long_rank_buy_distinct_cap: 3
+    snapshot_long_rank_buy_cluster_weight: 0.20
+    snapshot_long_rank_buy_cluster_cap: 2
+    snapshot_exit_risk_buy_offset: 0.40
+    snapshot_exit_risk_sell_distinct_weight: 0.25
+    snapshot_exit_risk_sell_distinct_cap: 3
+    snapshot_exit_risk_sell_cluster_weight: 0.20
+    snapshot_exit_risk_sell_cluster_cap: 2
+    action_buy_tier1_buy_score_min: 5.0
+    action_buy_tier1_buy_cluster10_min: 2
+    action_buy_tier1_sell_score_max_exclusive: 2.5
+    action_buy_watch_long_rank_min: 3.0
+    action_buy_watch_buy_score_min_exclusive: 0.0
+    action_avoid_trim_exit_risk_min: 4.0
+    action_avoid_trim_sell_cluster10_min: 2
+    action_avoid_trim_buy_score_max_exclusive: 2.0
+    action_sell_review_sell_score_min: 3.0
+    action_sell_review_buy_score_max_exclusive: 2.0
+
+  reports:
+    top_n: 100
+    min_distinct_insiders: 2
+    write_legacy_reports: true
+    as_of_date: null
+    min_price: 0.0
+    min_adv20_usd: 0.0
+    liquidity_only: false
+    cluster_top_n: 100
+    cluster_min_trades: 3
+    cluster_min_notional_usd: 100000

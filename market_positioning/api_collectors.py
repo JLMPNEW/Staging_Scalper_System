@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import json.decoder
+import math
 import re
 import sqlite3
 import time
@@ -12,12 +13,13 @@ import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from market_positioning.core import (
     aggregate_13f_ownership,
+    normalize_pct,
     normalize_ticker,
     parse_date,
     read_csv_rows,
@@ -593,12 +595,16 @@ def upsert_13f_records(
             """
             INSERT INTO institutional_13f_holdings(
                 filing_key, manager_cik, manager_name, ticker, cusip, period_of_report,
-                filing_date, accepted_at, shares, market_value, source, source_file, created_at, updated_at
+                filing_date, accepted_at, shares, market_value, title_of_class, share_type, put_call,
+                source, source_file, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(filing_key, ticker, cusip) DO UPDATE SET
                 shares = excluded.shares,
                 market_value = excluded.market_value,
+                title_of_class = excluded.title_of_class,
+                share_type = excluded.share_type,
+                put_call = excluded.put_call,
                 updated_at = excluded.updated_at
             """,
             holding_rows,
@@ -618,6 +624,7 @@ def sync_sec_13f_data_sets(
     timeout_sec: float = 120.0,
     sleep_sec: float = 0.2,
     max_archives: int = 0,
+    force_reprocess_archives: bool = False,
 ) -> SyncResult:
     name_map = load_universe_name_map(tickers_csv)
     cusip_map = load_cusip_ticker_map(cusip_ticker_map_csv)
@@ -637,7 +644,7 @@ def sync_sec_13f_data_sets(
     skipped_archives = 0
     for url in archives:
         archive_path = download_cached(url, cache_dir=cache_dir, user_agent=user_agent, timeout_sec=timeout_sec)
-        if archive_already_processed(conn, archive_path):
+        if not force_reprocess_archives and archive_already_processed(conn, archive_path):
             skipped_archives += 1
             continue
         now = utc_now()
@@ -711,6 +718,9 @@ def sync_sec_13f_data_sets(
                     str(submission.get("ACCEPTANCE_DATETIME") or submission.get("acceptedAt") or filing_date.isoformat()),
                     to_float(row.get("SSHPRNAMT") or row.get("sshPrnamt") or row.get("shares")),
                     to_float(row.get("VALUE") or row.get("value")),
+                    str(row.get("TITLEOFCLASS") or row.get("titleOfClass") or ""),
+                    str(row.get("SSHPRNAMTTYPE") or row.get("sshPrnamtType") or ""),
+                    str(row.get("PUTCALL") or row.get("putCall") or ""),
                     "sec_13f_data_sets",
                     str(archive_path),
                     now,
@@ -739,3 +749,266 @@ def sync_sec_13f_data_sets(
         message=message,
     )
     return SyncResult("institutional_13f", total_table_holdings, message)
+
+
+def normalize_ibkr_fee_rate(raw: object, *, unit: str = "decimal") -> float | None:
+    """Normalize IBKR FEE_RATE bars to decimal rate form.
+
+    This account/feed returns decimal rates in testing: 0.003 means 0.3%.
+    `unit=percent` is available if a different account returns percentage
+    points; `unit=auto` follows the project-wide percentage heuristic.
+    """
+    value = to_float(raw)
+    if value is None or not math.isfinite(value) or value < 0.0:
+        return None
+    clean_unit = str(unit or "decimal").strip().lower()
+    if clean_unit == "decimal":
+        return value
+    if clean_unit == "auto":
+        return normalize_pct(value)
+    if clean_unit in {"percent", "percentage", "pct"}:
+        return value / 100.0
+    raise ValueError(f"Unsupported IBKR fee-rate unit: {unit!r}")
+
+
+def ibkr_bar_date(raw: object) -> date | None:
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
+    return parse_date(raw)
+
+
+def latest_ibkr_fee_asof(conn: sqlite3.Connection, ticker: str) -> date | None:
+    row = conn.execute(
+        """
+        SELECT MAX(asof_date) AS max_asof
+        FROM ibkr_borrow_fee_rate_daily
+        WHERE ticker = ? AND source = 'interactive_brokers'
+        """,
+        (ticker,),
+    ).fetchone()
+    return parse_date(row["max_asof"] if row else None)
+
+
+def upsert_ibkr_fee_rows(conn: sqlite3.Connection, rows: list[tuple[Any, ...]]) -> None:
+    if not rows:
+        return
+    with conn:
+        conn.executemany(
+            """
+            INSERT INTO ibkr_borrow_fee_rate_daily(
+                ticker, asof_date, con_id, borrow_fee_rate, source, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, asof_date, source) DO UPDATE SET
+                con_id = excluded.con_id,
+                borrow_fee_rate = excluded.borrow_fee_rate,
+                updated_at = excluded.updated_at
+            """,
+            rows,
+        )
+
+
+def upsert_ibkr_shortable_rows(conn: sqlite3.Connection, rows: list[tuple[Any, ...]]) -> None:
+    if not rows:
+        return
+    with conn:
+        conn.executemany(
+            """
+            INSERT INTO ibkr_shortable_shares_snapshots(
+                ticker, asof_date, asof_datetime, con_id, shortable_shares,
+                market_data_type, source, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, asof_date, source) DO UPDATE SET
+                asof_datetime = excluded.asof_datetime,
+                con_id = excluded.con_id,
+                shortable_shares = excluded.shortable_shares,
+                market_data_type = excluded.market_data_type,
+                updated_at = excluded.updated_at
+            """,
+            rows,
+        )
+
+
+def sync_ibkr_borrow_availability(
+    conn: sqlite3.Connection,
+    *,
+    tickers_csv: Path | None,
+    history_start_date: date,
+    end_date: date,
+    host: str = "127.0.0.1",
+    port: int = 7497,
+    client_id: int = 7822,
+    market_data_type: int = 1,
+    fee_rate_unit: str = "decimal",
+    fee_rate_initial_duration: str = "7 Y",
+    fee_rate_incremental_duration: str = "45 D",
+    snapshot_wait_sec: float = 4.0,
+    shortable_snapshot: bool = True,
+    shortable_coverage_warn_min: float = 50.0,
+    batch_size: int = 50,
+    sleep_sec: float = 0.2,
+    max_tickers: int = 0,
+) -> SyncResult:
+    """Load IBKR borrow fee history and current shortable-share availability.
+
+    Historical availability is only supported for FEE_RATE in the tested TWS
+    feed.  shortableShares is a current market-data snapshot and must be
+    captured daily if historical supply availability is needed.
+    """
+    try:
+        from ib_insync import IB, Stock  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError("IBKR borrow sync requires the ib_insync package and a running TWS/IB Gateway session") from exc
+
+    tickers = load_universe_tickers(tickers_csv)
+    if max_tickers and max_tickers > 0:
+        tickers = tickers[:max_tickers]
+    if not tickers:
+        raise RuntimeError("IBKR borrow availability sync requires a non-empty ticker universe CSV")
+
+    ib = IB()
+    qualified: dict[str, Any] = {}
+    fee_rows_written = 0
+    shortable_rows_written = 0
+    failed_tickers: list[str] = []
+    skipped_fee_history = 0
+    try:
+        ib.connect(host, int(port), clientId=int(client_id), readonly=True, timeout=30)
+        ib.reqMarketDataType(int(market_data_type))
+        for ticker in tickers:
+            try:
+                contracts = ib.qualifyContracts(Stock(ticker, "SMART", "USD"))
+                if not contracts:
+                    failed_tickers.append(ticker)
+                    continue
+                contract = contracts[0]
+                latest_fee = latest_ibkr_fee_asof(conn, ticker)
+                if latest_fee is not None and latest_fee >= end_date:
+                    skipped_fee_history += 1
+                    qualified[ticker] = contract
+                    continue
+                duration = fee_rate_initial_duration if latest_fee is None else fee_rate_incremental_duration
+                bars = ib.reqHistoricalData(
+                    contract,
+                    endDateTime=f"{end_date.strftime('%Y%m%d')} 23:59:59",
+                    durationStr=str(duration),
+                    barSizeSetting="1 day",
+                    whatToShow="FEE_RATE",
+                    useRTH=False,
+                    formatDate=1,
+                    keepUpToDate=False,
+                )
+                now = utc_now()
+                records: list[tuple[Any, ...]] = []
+                for bar in bars:
+                    bar_date = ibkr_bar_date(getattr(bar, "date", ""))
+                    if bar_date is None or bar_date < history_start_date or bar_date > end_date:
+                        continue
+                    rate = normalize_ibkr_fee_rate(getattr(bar, "close", None), unit=fee_rate_unit)
+                    if rate is None:
+                        continue
+                    records.append(
+                        (
+                            ticker,
+                            bar_date.isoformat(),
+                            int(getattr(contract, "conId", 0) or 0),
+                            rate,
+                            "interactive_brokers",
+                            now,
+                            now,
+                        )
+                )
+                upsert_ibkr_fee_rows(conn, records)
+                fee_rows_written += len(records)
+                if records or latest_fee is not None:
+                    qualified[ticker] = contract
+                else:
+                    failed_tickers.append(ticker)
+            except Exception:
+                failed_tickers.append(ticker)
+            if sleep_sec > 0:
+                ib.sleep(float(sleep_sec))
+
+        qualified_items = list(qualified.items())
+        for start in range(0, len(qualified_items), max(1, int(batch_size))):
+            batch = qualified_items[start : start + max(1, int(batch_size))]
+            subscriptions: list[tuple[str, Any, Any]] = []
+            for ticker, contract in batch:
+                try:
+                    ticker_obj = ib.reqMktData(
+                        contract,
+                        genericTickList="236",
+                        snapshot=bool(shortable_snapshot),
+                        regulatorySnapshot=False,
+                    )
+                    subscriptions.append((ticker, contract, ticker_obj))
+                except Exception:
+                    failed_tickers.append(ticker)
+            ib.sleep(max(0.1, float(snapshot_wait_sec)))
+            now = utc_now()
+            snapshot_rows: list[tuple[Any, ...]] = []
+            for ticker, contract, ticker_obj in subscriptions:
+                raw_shortable = getattr(ticker_obj, "shortableShares", None)
+                shortable = to_float(raw_shortable)
+                if shortable is None or not math.isfinite(shortable) or shortable < 0.0:
+                    continue
+                snapshot_rows.append(
+                    (
+                        ticker,
+                        end_date.isoformat(),
+                        now,
+                        int(getattr(contract, "conId", 0) or 0),
+                        shortable,
+                        int(market_data_type),
+                        "interactive_brokers",
+                        now,
+                        now,
+                    )
+                )
+            upsert_ibkr_shortable_rows(conn, snapshot_rows)
+            shortable_rows_written += len(snapshot_rows)
+            if not bool(shortable_snapshot):
+                for _ticker, contract, _ticker_obj in subscriptions:
+                    try:
+                        ib.cancelMktData(contract)
+                    except Exception:
+                        pass
+            if sleep_sec > 0:
+                ib.sleep(float(sleep_sec))
+    finally:
+        if ib.isConnected():
+            ib.disconnect()
+
+    total_fee_rows = int(conn.execute("SELECT COUNT(*) FROM ibkr_borrow_fee_rate_daily").fetchone()[0])
+    total_shortable_rows = int(conn.execute("SELECT COUNT(*) FROM ibkr_shortable_shares_snapshots").fetchone()[0])
+    qualified_count = len(qualified)
+    shortable_coverage_pct = (
+        100.0 * shortable_rows_written / qualified_count if qualified_count > 0 else 0.0
+    )
+    coverage_warning = ""
+    if qualified_count > 0 and shortable_coverage_pct < float(shortable_coverage_warn_min):
+        coverage_warning = (
+            f" shortable_coverage_warning=below_min({shortable_coverage_pct:.1f}%"
+            f"<{float(shortable_coverage_warn_min):.1f}%)"
+        )
+    message = (
+        "IBKR borrow availability loaded: "
+        f"qualified={qualified_count} fee_rows_new_or_refreshed={fee_rows_written} "
+        f"fee_history_skipped_current={skipped_fee_history} shortable_rows_new_or_refreshed={shortable_rows_written} "
+        f"shortable_coverage_pct={shortable_coverage_pct:.1f} "
+        f"shortable_snapshot={bool(shortable_snapshot)} failed_tickers={len(set(failed_tickers))} "
+        f"total_fee_rows={total_fee_rows} total_shortable_rows={total_shortable_rows}{coverage_warning}"
+    )
+    update_feed_state(
+        conn,
+        feed_name="ibkr_borrow_availability",
+        history_start_date=history_start_date,
+        source="interactive_brokers",
+        source_file=None,
+        row_count=total_fee_rows + total_shortable_rows,
+        message=message,
+    )
+    return SyncResult("ibkr_borrow_availability", total_fee_rows + total_shortable_rows, message)
