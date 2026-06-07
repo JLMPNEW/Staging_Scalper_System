@@ -56,7 +56,7 @@ def parse_date(raw: object) -> date | None:
         return None
     for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%Y%m%d", "%d-%b-%Y", "%d-%B-%Y"):
         try:
-            return datetime.strptime(text[: max(10, len(text))], fmt).date()
+            return datetime.strptime(text[: min(10, len(text))], fmt).date()
         except ValueError:
             pass
     try:
@@ -661,7 +661,7 @@ def ingest_sec_public_float_proxies(
     forms: tuple[str, ...] = SEC_PUBLIC_FLOAT_FORMS,
 ) -> int:
     """Extract SEC 10-K public-float dollars and convert to float-share proxies."""
-    end_date = end_date or datetime.utcnow().date()
+    end_date = end_date or datetime.now(timezone.utc).date()
     min_filing_date = history_start_date - timedelta(days=550)
     tickers = {normalize_ticker(ticker) for ticker in (tickers or set()) if normalize_ticker(ticker)}
     form_placeholders = ",".join("?" for _ in forms)
@@ -1153,7 +1153,7 @@ def aggregate_13f_ownership(conn: sqlite3.Connection, *, source: str = "csv") ->
         prior_managers: set[str] | None = None
         for asof_date, period, payload in sorted(ticker_rows, key=lambda item: item[0]):
             shares = to_float(payload["institutional_shares"], 0.0) or 0.0
-            delta = (shares - prior_shares) / prior_shares if prior_shares and prior_shares > 0.0 else 0.0
+            delta = (shares - prior_shares) / prior_shares if prior_shares and prior_shares > 0.0 else None
             prior_shares = shares
             managers = set(payload.get("managers") or set())
             if prior_managers is None:

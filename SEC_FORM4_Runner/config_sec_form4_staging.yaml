@@ -25,6 +25,12 @@ sec_form4:
     sleep_seconds: 0.15
     force_reprocess: false
     reconcile_current_quarter: false
+    max_index_days: 5
+    max_filings_per_run: 500
+    max_reconcile_filings: 250
+    progress_every_filings: 100
+    progress_interval_sec: 60
+    stop_after_sec: 600
     index_timeout_seconds: 60
     index_max_retries: 4
     index_missing_statuses: [403, 404]
@@ -43,7 +49,13 @@ sec_form4:
     days_back: 10
     sleep_seconds: 0.15
     force_reprocess: false
-    reconcile_current_quarter: true
+    reconcile_current_quarter: false
+    max_index_days: 10
+    max_filings_per_run: 1200
+    max_reconcile_filings: 500
+    progress_every_filings: 100
+    progress_interval_sec: 60
+    stop_after_sec: 900
     index_timeout_seconds: 60
     index_max_retries: 4
     index_missing_statuses: [403, 404]

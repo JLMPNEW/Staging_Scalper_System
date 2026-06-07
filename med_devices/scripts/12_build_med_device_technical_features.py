@@ -704,12 +704,28 @@ def technical_breakdown_flag(row: TechnicalRow, profile: TechnicalSignalProfile,
     return 0
 
 
+TECHNICAL_PROFILE_COHORT_ALIASES = {
+    "capital_equipment_procedure_platforms": "capital_equipment_imaging_monitoring",
+    "home_chronic_care_devices_dme_drug_delivery": "diabetes_wearables_drug_delivery",
+    "healthcare_services_cro_lab_services": "healthcare_services_cro_other",
+    "hospital_supplies_surgical_consumables_oem": "hospital_supplies_consumables_dme",
+    "orthopedics_spine_sports_implants": "orthopedics_spine_dental",
+    "surgical_robotics_platforms": "capital_equipment_procedure_platforms",
+}
+
+
 def profile_for_row(
     row: TechnicalRow,
     default_profile: TechnicalSignalProfile,
     profiles: dict[str, TechnicalSignalProfile],
 ) -> TechnicalSignalProfile:
-    return profiles.get(row.calibration_cohort, default_profile)
+    cohort = str(row.calibration_cohort or "")
+    if cohort in profiles:
+        return profiles[cohort]
+    alias = TECHNICAL_PROFILE_COHORT_ALIASES.get(cohort)
+    if alias and alias in profiles:
+        return profiles[alias]
+    return default_profile
 
 
 def apply_alpha_score(row: TechnicalRow, profile: TechnicalSignalProfile) -> None:

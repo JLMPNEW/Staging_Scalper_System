@@ -5,6 +5,8 @@ import argparse
 import csv
 import io
 import json
+import logging
+import math
 import re
 import sys
 import time
@@ -29,6 +31,7 @@ from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+LOGGER = logging.getLogger("rebuild_med_device_sec_13f_common_share_facts")
 SOURCE_ID = "sec_13f_edgar"
 AGGREGATE_MANAGER_NAME = "aggregate_13f_common_share"
 LEGACY_AGGREGATE_MANAGER_NAME = "aggregate_13f_snapshot"
@@ -91,6 +94,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--summary-csv", type=Path, default=None)
     parser.add_argument("--max-archives", type=int, default=0)
+    parser.add_argument(
+        "--min-coverage-pct",
+        type=float,
+        default=None,
+        help="Minimum active-ticker 13F coverage percentage required after rebuild; missing tickers above this floor warn only.",
+    )
     return parser.parse_args()
 
 
@@ -111,7 +120,7 @@ def to_float(raw: object) -> float | None:
         value = float(str(raw).replace(",", "").strip())
     except (TypeError, ValueError):
         return None
-    return value if value == value else None
+    return value if math.isfinite(value) else None
 
 
 def first_present(row: dict[str, Any], *names: str) -> str:
@@ -365,7 +374,7 @@ def aggregate_holdings(
                 "market_value_usd": round(sum(holding.market_value for holding in group), 4),
                 "manager_count": float(manager_count),
                 "institutional_ownership_pct": None,
-                "institutional_ownership_delta_pct": 0.0,
+                "institutional_ownership_delta_pct": None,
                 "put_call": "",
                 "investment_discretion": "",
                 "voting_authority_json": "",
@@ -386,7 +395,7 @@ def aggregate_holdings(
         for row in sorted(rows, key=lambda item: item["report_date"]):
             shares = float(row["shares"] or 0.0)
             row["institutional_ownership_delta_pct"] = (
-                (shares - prior_shares) / prior_shares if prior_shares and prior_shares > 0 else 0.0
+                (shares - prior_shares) / prior_shares if prior_shares and prior_shares > 0 else None
             )
             prior_shares = shares
             out.append(row)
@@ -444,7 +453,7 @@ def replace_facts(conn: Any, rows: list[dict[str, Any]], *, history_start: date,
             payload_json, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT DO UPDATE SET
+        ON CONFLICT(accession_nodash, report_date, source_id, manager_name, ticker) DO UPDATE SET
             shares = excluded.shares,
             market_value_usd = excluded.market_value_usd,
             manager_count = excluded.manager_count,
@@ -557,14 +566,36 @@ def main() -> None:
             expected_tickers = set(company_by_ticker)
             observed_tickers = {str(row["ticker"]) for row in rows}
             missing = sorted(expected_tickers - observed_tickers)
+            coverage_pct = 100.0 * len(observed_tickers) / max(1, len(expected_tickers))
+            min_coverage_pct = (
+                float(args.min_coverage_pct)
+                if args.min_coverage_pct is not None
+                else float(cfg_get(config, "sec_13f_ingestion.min_rebuild_coverage_pct", 95.0))
+            )
             if missing:
-                raise RuntimeError(f"SEC 13F common-share rebuild missing {len(missing)} tickers: {missing}")
+                LOGGER.warning(
+                    "SEC 13F common-share rebuild missing %d/%d active tickers at %.2f%% coverage: %s",
+                    len(missing),
+                    len(expected_tickers),
+                    coverage_pct,
+                    ",".join(missing[:50]),
+                )
+            if coverage_pct < min_coverage_pct:
+                raise RuntimeError(
+                    f"SEC 13F common-share rebuild coverage {coverage_pct:.2f}% below "
+                    f"required {min_coverage_pct:.2f}% ({len(observed_tickers)}/{len(expected_tickers)} tickers)"
+                )
             count = replace_facts(conn, rows, history_start=history_start, asof=asof)
             write_csv(output_csv, rows, FIELDNAMES)
             write_csv(summary_csv, summary_rows, SUMMARY_FIELDNAMES)
+            period_range = (
+                f"{min(row['report_date'] for row in rows)}..{max(row['report_date'] for row in rows)}"
+                if rows
+                else "none"
+            )
             message = (
                 f"rows={count} tickers={len(observed_tickers)} "
-                f"periods={min(row['report_date'] for row in rows)}..{max(row['report_date'] for row in rows)}"
+                f"periods={period_range}"
             )
             finish_run(conn, run_id=run_id, status="success", row_count=count, message=message)
             print(f"rebuilt_sec13f_common_share_rows={count} tickers={len(observed_tickers)} output={output_csv}")

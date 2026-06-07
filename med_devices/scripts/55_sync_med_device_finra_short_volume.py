@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import logging
+import math
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -63,7 +64,7 @@ def to_float(raw: object) -> float | None:
         value = float(str(raw).strip())
     except (TypeError, ValueError):
         return None
-    return value if value == value else None
+    return value if math.isfinite(value) else None
 
 
 def parse_date(raw: str) -> date:
@@ -151,7 +152,7 @@ def fetch_finra_file(day: date, *, config: dict[str, Any]) -> str | None:
         except HTTPError as exc:
             if exc.code in {403, 404}:
                 return None
-            if 500 <= exc.code < 600 and attempt + 1 < retries:
+            if (exc.code == 429 or 500 <= exc.code < 600) and attempt + 1 < retries:
                 time.sleep(retry_sleep_sec * (attempt + 1))
                 continue
             LOGGER.warning("Skipping FINRA short-volume file after HTTP %s: %s", exc.code, url)
@@ -187,7 +188,7 @@ def load_rows(
     sleep_sec = float(cfg_get(config, "finra_short_volume_ingestion.request_sleep_sec", 0.25))
     days = date_range(start, end)
     if max_days > 0:
-        days = days[:max_days]
+        days = days[-max_days:]
     fetched_days = 0
     missing_days = 0
     for day in days:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import statistics
 import sys
 from datetime import date, datetime, timedelta
@@ -56,7 +57,7 @@ def to_float(raw: object) -> float | None:
         value = float(str(raw).strip())
     except (TypeError, ValueError):
         return None
-    return value if value == value else None
+    return value if math.isfinite(value) else None
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -114,17 +115,27 @@ def load_short_interest(conn: Any, *, asof: str) -> dict[int, list[dict[str, Any
         FROM fact_short_interest si
         LEFT JOIN dim_company dc ON dc.ticker = si.ticker
         WHERE si.settlement_date <= ?
-        ORDER BY COALESCE(si.company_id, dc.company_id), si.settlement_date DESC
+        ORDER BY
+            COALESCE(si.company_id, dc.company_id),
+            si.settlement_date DESC,
+            CASE WHEN si.source_id = 'finra_equity_short_interest' THEN 0 ELSE 1 END,
+            si.source_id
         """,
         (asof,),
     ).fetchall()
     out: dict[int, list[dict[str, Any]]] = {}
+    seen_dates: dict[int, set[str]] = {}
     for row in rows:
         item = dict(row)
         company_id = item.get("company_id") or item.get("mapped_company_id")
         if company_id is None:
             continue
-        out.setdefault(int(company_id), []).append(item)
+        company_id_int = int(company_id)
+        settlement_date = str(item.get("settlement_date") or "")
+        if settlement_date in seen_dates.setdefault(company_id_int, set()):
+            continue
+        seen_dates[company_id_int].add(settlement_date)
+        out.setdefault(company_id_int, []).append(item)
     return out
 
 
@@ -154,7 +165,7 @@ def load_short_volume_stats(conn: Any, *, asof: str, lookback_days: int) -> dict
         ratio = to_float(item.get("short_volume_ratio"))
         if company_id is None or ratio is None:
             continue
-        bucket = current if str(item.get("trade_date")) > cur_start else prior
+        bucket = current if str(item.get("trade_date")) >= cur_start else prior
         bucket.setdefault(int(company_id), []).append(ratio)
     out: dict[int, dict[str, float]] = {}
     for company_id, values in current.items():

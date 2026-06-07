@@ -114,6 +114,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--history-start-asof", type=str, default="", help="Earliest YYYY-MM-DD date for --history-restatement.")
     parser.add_argument("--history-end-asof", type=str, default="", help="Latest YYYY-MM-DD date for --history-restatement. Defaults to --asof.")
     parser.add_argument(
+        "--history-market-start-asof",
+        type=str,
+        default="",
+        help=(
+            "Earliest market-bar date to use when building historical market feature snapshots. "
+            "Use a date at least one year before --history-start-asof for 200d/52w metrics."
+        ),
+    )
+    parser.add_argument(
         "--history-dates",
         type=str,
         default="",
@@ -471,10 +480,18 @@ def pipeline_steps(
     return steps
 
 
-def historical_restatement_steps(*, reuse_unchanged_historical: bool = True) -> list[Step]:
+def historical_restatement_steps(
+    *,
+    reuse_unchanged_historical: bool = True,
+    market_start_asof: str = "",
+) -> list[Step]:
     """Derived layers that can be safely restated from already-synced source tables."""
     governance_args: tuple[str, ...] = ("--reuse-unchanged-historical",) if reuse_unchanged_historical else ()
+    market_args: tuple[str, ...] = ("--offline-existing-bars", "--allow-partial")
+    if str(market_start_asof or "").strip():
+        market_args = (*market_args, "--start-date", str(market_start_asof).strip())
     return [
+        Step("yahoo_market_adjusted", "17_sync_market_data_yahoo_adjusted.py", market_args),
         Step("market_positioning_export", "25_update_market_positioning.py", ("--skip-download",)),
         Step("forward_catalyst_calendar", "09_build_forward_catalyst_calendar.py"),
         Step("financial_survival", "16_build_financial_survival_features.py"),
@@ -1519,7 +1536,10 @@ def main() -> None:
     step_timeout_sec = raw_timeout if raw_timeout > 0 else None
     selected_steps = {step.strip() for step in args.steps.split(",") if step.strip()}
     all_steps = (
-        historical_restatement_steps(reuse_unchanged_historical=True)
+        historical_restatement_steps(
+            reuse_unchanged_historical=True,
+            market_start_asof=args.history_market_start_asof,
+        )
         if args.history_restatement
         else pipeline_steps(
             args.mode,

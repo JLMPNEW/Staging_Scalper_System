@@ -32,7 +32,7 @@ med_devices_universe:
     - wound_care
 
 universe_validation:
-  input_csv: "../ticker_mapping/med_dev_tickers.csv"
+  input_csv: "../ticker_mapping/med_dev_tickers_clean_keep.csv"
   output_csv: "../output/med_devices_reports/med_device_universe_validation.csv"
   keep_csv: "../output/med_devices_reports/med_device_tickers_keep.csv"
   clean_tickers_csv: "../output/med_devices_reports/med_dev_tickers_clean_keep.csv"
@@ -524,7 +524,7 @@ technical_features:
     reliability: 1.0
     rationale: "default_legacy_setup_score"
   cohort_signal_profiles:
-    capital_equipment_imaging_monitoring:
+    capital_equipment_procedure_platforms:
       mode: "pullback_mean_reversion"
       reliability: 0.65
       trend_weight: 0.55
@@ -534,7 +534,7 @@ technical_features:
       breakdown_floor: 35.0
       breakdown_cap: 45.0
       rationale: "ic120_negative_inverse_capital_equipment_2026_05_31"
-    diabetes_wearables_drug_delivery:
+    home_chronic_care_devices_dme_drug_delivery:
       mode: "trend_following"
       reliability: 0.75
       trend_weight: 0.45
@@ -556,7 +556,7 @@ technical_features:
       breakdown_floor: 35.0
       breakdown_cap: 45.0
       rationale: "ic120_positive_diagnostics_clinical_tests_2026_05_31"
-    healthcare_services_cro_other:
+    healthcare_services_cro_lab_services:
       mode: "neutral_overlay"
       reliability: 0.0
       trend_weight: 0.55
@@ -566,7 +566,7 @@ technical_features:
       breakdown_floor: 35.0
       breakdown_cap: 45.0
       rationale: "neutralized_after_alpha_validation_weak_healthcare_services_2026_05_31"
-    hospital_supplies_consumables_dme:
+    hospital_supplies_surgical_consumables_oem:
       mode: "neutral_overlay"
       reliability: 0.0
       trend_weight: 0.55
@@ -607,14 +607,18 @@ technical_features:
       breakdown_floor: 35.0
       breakdown_cap: 45.0
       rationale: "weak_positive_technical_life_science_tools_2026_05_31"
-    orthopedics_spine_dental:
+    orthopedics_spine_sports_implants:
       mode: "neutral_overlay"
       reliability: 0.0
       rationale: "weak_unstable_technical_orthopedics_spine_dental_2026_05_31"
-    surgical_robotics_platforms:
+    emerging_single_product_therapeutic_platforms:
       mode: "neutral_overlay"
       reliability: 0.0
-      rationale: "weak_unstable_technical_surgical_robotics_2026_05_31"
+      rationale: "neutralized_after_taxonomy_rebuild_emerging_binary_platforms_2026_06_07"
+    elective_vision_dental_aesthetic_devices:
+      mode: "neutral_overlay"
+      reliability: 0.0
+      rationale: "neutral_overlay_until_elective_vision_dental_technical_validation_2026_06_07"
 
 fda_features:
   output_csv: "../output/med_devices_reports/med_device_fda_product_risk_features.csv"
@@ -693,7 +697,7 @@ fda_features:
     evidence_weight: 0.20
     rationale: "stage1_fda_legacy_split_shrunk_alpha_not_global_positive_2026_05_31"
   cohort_signal_profiles:
-    healthcare_services_cro_other:
+    healthcare_services_cro_lab_services:
       mode: "neutral_overlay"
       reliability: 0.0
       no_data_score: 50.0
@@ -890,7 +894,7 @@ ibkr_borrow_ingestion:
   host: "127.0.0.1"
   port: 7497
   client_id: 7741
-  generic_tick_list: "236,237,499"
+  generic_tick_list: "236,499"
   default_exchange: "SMART"
   default_currency: "USD"
   sleep_sec: 0.25
@@ -937,6 +941,7 @@ short_interest_features:
 sec_13f_ingestion:
   output_csv: "../output/med_devices_reports/med_device_sec_13f_holdings.csv"
   common_share_rebuild_summary_csv: "../output/med_devices_reports/med_device_sec_13f_common_share_rebuild_summary.csv"
+  min_rebuild_coverage_pct: 95.0
   source_id: "sec_13f_edgar"
   input_csv: ""
 institutional_flow_features:
@@ -954,6 +959,8 @@ sec_form4_ingestion:
   output_csv: "../output/med_devices_reports/med_device_sec_form4_transactions.csv"
   source_id: "sec_form4_edgar"
   input_csv: ""
+  source_mode: "external_sec_form4_runner"
+  direct_edgar_enabled: false
   cache_dir: "../output/med_devices_cache/sec_form4"
   start_date: "2019-01-01"
   default_lookback_days: 365
@@ -968,10 +975,17 @@ insider_activity_features:
   source_id: "sec_form4_edgar"
   no_data_score: 50.0
   no_data_quality_score: 0.0
+  transaction_data_quality_score: 90.0
   lookback_days: 90
 external_positioning_import:
   market_positioning_db_path: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
   sec_form4_db_path: "C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite"
+  sec_form4_runner_config_path: "../SEC_FORM4_Runner/config_sec_form4_orchestrator_staging.yaml"
+  sec_form4_runner_profile: "weekly"
+  sec_form4_runner_timeout_sec: 1800
+  sec_form4_runner_heartbeat_sec: 60
+  sec_form4_runner_timeout_fallback: true
+  sec_form4_status_json: "../output/med_devices_reports/med_device_form4_refresh_status.json"
   history_start: "2019-01-01"
   output_csv: "../output/med_devices_reports/med_device_external_positioning_import_summary.csv"
 external_positioning_coverage:
@@ -995,7 +1009,7 @@ market_positioning_update:
     cache_dir: "../output/market_positioning_cache/sec_13f"
     sleep_sec: 0.2
     max_archives_per_run: 0
-    force_reprocess_archives: true
+    force_reprocess_archives: false
 
 scoring:
   model_version: "med_device_score_v22_2026_06_support_guarded_calibration"
@@ -1381,9 +1395,10 @@ scoring:
         data_completeness_min: 85
     life_science_tools_research_instruments:
       enabled: true
-      calibration_status: "restricted_research_only"
-      calibration_status_reason: "demoted_after_support_guardrail_2026_06_06;thin_support_2_of_20_tickers_10pct_coverage"
-      validation_note: "Demoted from production baseline seed after support guardrail: 120d validation n=14, 2 tickers, 10.00% ticker coverage, LCB +4.21%, hit 78.57%. Retain value/liquidity/quality template for research diagnostics only until broader ticker support passes."
+      calibration_status: "production_eligible"
+      calibration_status_reason: "promoted_to_calibrated_baseline_2026_06_07;gate_validation_n20_unique3_hit85_lcb5_78pct"
+      calibration_confidence: "medium"
+      validation_note: "Promoted as calibrated-baseline gate policy after refreshed gate calibration: 120d validation n=20, 3 tickers, 15.00% ticker coverage, hit 85.00%, LCB +5.78%. Optuna component policy remains shadow-only for comparison."
       tier1_safety_policy:
         allow_safe_core_gate_substitution: true
         min_safe_core_score: 60.0
@@ -1399,9 +1414,9 @@ scoring:
         max_fda_event_risk: 35.0
       score_template:
         template_id: "life_science_value_liquidity_quality_v1"
-        tier1_eligible: false
-        tier1_role: "research"
-        rationale: "component_policy_review_2026_06_03_valuation_positive_evidence_0_143322_technical_liquidity_positive_evidence_0_131086"
+        tier1_eligible: true
+        tier1_role: "safe_core"
+        rationale: "calibrated_baseline_gate_validation_2026_06_07_n20_unique3_hit85_lcb5_78pct;component_policy_review_2026_06_03_valuation_positive_evidence_0_143322_technical_liquidity_positive_evidence_0_131086"
         components:
           - field: "valuation_score"
             direction: "positive"
@@ -1425,18 +1440,23 @@ scoring:
         data_completeness_min: 85
     capital_equipment_procedure_platforms:
       enabled: true
-      calibration_status: "restricted_research_only"
-      calibration_status_reason: "demoted_after_support_guardrail_2026_06_06;current_candidate_1_of_12_tickers_8_33pct_coverage"
-      validation_note: "Demoted from production baseline seed after support guardrail. Current refreshed candidate is diagnostic only: 120d validation n=1, 1 ticker, 8.33% ticker coverage; insufficient selected observations, unique tickers, and ticker coverage."
+      calibration_status: "production_eligible"
+      calibration_status_reason: "promoted_to_calibrated_baseline_special_situation_2026_06_07;manual_concentration_override_n35_unique2_hit85_71_lcb25_62pct"
+      calibration_confidence: "low_concentrated"
+      validation_note: "Promoted as calibrated-baseline gate policy with explicit concentration caveat: 120d validation n=35, 2 tickers of 12, 17% ticker coverage, hit 85.71%, LCB +25.62%. Not eligible as broad safe-core Tier 1 because result is concentrated in two names."
+      tier1_safety_policy:
+        allow_safe_core_gate_substitution: false
+        cohort_denylist:
+          - "capital_equipment_procedure_platforms"
       gates:
         composite_min: 50
-        cohort_percentile_min: 50
+        cohort_percentile_min: 70
         fundamental_quality_min: 0
         durable_growth_min: 0
         fda_product_min: 0
-        reimbursement_min: 0
-        valuation_min: 60
-        technical_entry_min: 0
+        reimbursement_min: 45
+        valuation_min: 0
+        technical_entry_min: 45
         value_trap_max: 20
         data_completeness_min: 85
     healthcare_services_cro_lab_services:
@@ -1458,17 +1478,18 @@ scoring:
     orthopedics_spine_sports_implants:
       enabled: true
       calibration_status: "production_eligible"
-      calibration_status_reason: "promoted_after_support_guardrail_2026_06_06;support_tier_preferred_support"
-      validation_note: "Promoted after support-aware calibrated baseline review: 120d validation n=53, 4 tickers, 36.36% ticker coverage, LCB +2.44%, hit 58.49%. Passed 60d/120d persistence and ticker-support guardrails."
+      calibration_status_reason: "promoted_to_calibrated_baseline_low_confidence_2026_06_07;n95_unique4_hit52_63_lcb4_33pct"
+      calibration_confidence: "low"
+      validation_note: "Promoted as calibrated-baseline gate policy with low-confidence annotation: 120d validation n=95, 4 tickers of 11, 36.36% ticker coverage, hit 52.63%, median excess +0.82%, LCB +4.33%. Recheck in next calibration cycle before broadening."
       gates:
         composite_min: 50
         cohort_percentile_min: 50
         fundamental_quality_min: 0
         durable_growth_min: 0
         fda_product_min: 0
-        reimbursement_min: 45
+        reimbursement_min: 0
         valuation_min: 0
-        technical_entry_min: 45
+        technical_entry_min: 0
         value_trap_max: 20
         data_completeness_min: 85
     home_chronic_care_devices_dme_drug_delivery:
@@ -1597,6 +1618,56 @@ calibration:
     max_recommendations_per_cohort: 3
     max_high_risk_recommendations_per_cohort: 1
     min_supporting_components: 1
+  optuna_shadow_policy_candidates:
+    enabled: true
+    generated_at_utc: "2026-06-07T21:39:12Z"
+    promotion_note: "Shadow candidates only; do not use in production composite until separate holdout, support, loss-rate, and concentration review passes."
+    cohorts:
+      life_science_tools_research_instruments:
+        candidate_id: "optuna_72df8d4079be"
+        promotion_status: "shadow_promotion_review"
+        objective_value: 35.216927
+        pass_fold_rate: 0.615385
+        validation_count: 1490
+        validation_unique_tickers: 8
+        mean_loss_rate: 0.359291
+        max_single_ticker_share: 0.309524
+        max_single_ticker_share_limit: 0.35
+        min_lcb_scope: "passing_folds_only"
+        min_lcb_excess_60d: 0.000055
+        min_lcb_excess_120d: 0.000486
+        rationale: "Passed Optuna shadow guardrails. Keep shadow-only because fda_alpha_score overlaps with inverse fda_event_risk_score under risk_veto_only FDA policy."
+        component_spec:
+          - component: "technical_volatility_risk_score"
+            direction: "positive"
+            sleeve: "technical"
+            weight: 0.35
+          - component: "fda_product_score"
+            direction: "positive"
+            sleeve: "fda_regulatory"
+            weight: 0.27948719
+          - component: "fda_alpha_score"
+            direction: "positive"
+            sleeve: "fda_regulatory"
+            weight: 0.19838597
+          - component: "fda_event_risk_score"
+            direction: "inverse"
+            sleeve: "fda_regulatory"
+            weight: 0.17212684
+        sleeve_weight:
+          fda_regulatory: 0.65
+          technical: 0.35
+        gate_spec:
+          candidate_score_min: 50.0
+          candidate_percentile_min: 60.0
+          raw_composite_min: 55.0
+          ic_tilted_min: 50.0
+          valuation_min: 50.0
+          value_trap_max: 35.0
+          fda_event_risk_max: 40.0
+          market_cap_min: 250000000.0
+          avg_dollar_volume_min: 2000000.0
+          data_completeness_min: 85.0
   gate_grid_results_csv: "../output/med_devices_reports/calibration/med_device_gate_grid_results.csv"
   recommendations_csv: "../output/med_devices_reports/calibration/med_device_calibration_recommendations_by_cohort.csv"
   recommended_config_yaml: "../output/med_devices_reports/calibration/med_device_calibration_recommended_config.yaml"
@@ -1646,7 +1717,7 @@ calibration:
     profit_factor: 0.15
     mean_excess_return: 0.10
   refinement:
-    default_cohort: "hospital_supplies_consumables_dme"
+    default_cohort: "hospital_supplies_surgical_consumables_oem"
     output_csv: "../output/med_devices_reports/calibration/med_device_refined_gate_grid_results.csv"
     recommendation_csv: "../output/med_devices_reports/calibration/med_device_refined_gate_recommendation.csv"
     comparison_csv: "../output/med_devices_reports/calibration/med_device_refined_gate_comparison.csv"
@@ -1683,7 +1754,7 @@ calibration:
   technical_alpha_policy_top25_csv: "../output/med_devices_reports/calibration/med_device_technical_alpha_policy_top25.csv"
   technical_alpha_policy_candidate_weights: "0.05,0.075,0.10,0.125"
   bad_cohort_component_diagnostics:
-    cohorts: "capital_equipment_imaging_monitoring,diabetes_wearables_drug_delivery,diagnostics_clinical_tests,healthcare_services_cro_other,implantable_interventional_devices_direct_payment,implantable_interventional_devices_procedure_bundled,life_science_tools_research_instruments,orthopedics_spine_dental,surgical_robotics_platforms"
+    cohorts: "capital_equipment_procedure_platforms,diagnostics_clinical_tests,elective_vision_dental_aesthetic_devices,emerging_single_product_therapeutic_platforms,healthcare_services_cro_lab_services,home_chronic_care_devices_dme_drug_delivery,hospital_supplies_surgical_consumables_oem,implantable_interventional_devices_direct_payment,life_science_tools_research_instruments,orthopedics_spine_sports_implants"
     output_csv: "../output/med_devices_reports/calibration/med_device_bad_cohort_component_diagnostics.csv"
     summary_csv: "../output/med_devices_reports/calibration/med_device_bad_cohort_component_diagnostic_summary.csv"
   restricted_cohort_templates:
@@ -1756,6 +1827,71 @@ calibration:
     min_pass_folds: 2
     min_pass_fold_rate: 0.60
     min_summary_unique_tickers: 3
+  optuna_policy_optimizer:
+    input_csv: "../output/med_devices_reports/calibration/med_device_cohort_neutral_backtest.csv"
+    policy_csv: "../output/med_devices_reports/calibration/med_device_component_promotion_review.csv"
+    output_csv: "../output/med_devices_reports/calibration/med_device_optuna_policy_trials.csv"
+    summary_csv: "../output/med_devices_reports/calibration/med_device_optuna_policy_summary.csv"
+    recommendation_csv: "../output/med_devices_reports/calibration/med_device_optuna_policy_recommendations.csv"
+    fold_diagnostics_csv: "../output/med_devices_reports/calibration/med_device_optuna_policy_fold_diagnostics.csv"
+    config_fragment_yaml: "../output/med_devices_reports/calibration/med_device_optuna_policy_config_fragment.yaml"
+    horizons: "60,120"
+    n_trials_per_cohort: 200
+    timeout_sec_per_cohort: 0
+    seed: 20260607
+    train_months: 12
+    validation_months: 3
+    step_months: 3
+    embargo_days: 120
+    use_net_excess: true
+    min_lcb_scope: "passing_folds_only"
+    exclude_incomplete_validation_folds: true
+    min_validation_calendar_days: 45
+    hit_rate_test: "binomial"
+    hit_rate_null: 0.50
+    hit_rate_binomial_alpha: 0.10
+    review_actions: "promote_to_cohort_policy_review"
+    require_60_120_persistence: true
+    deduplicate_ic_fingerprints: true
+    excluded_components: "durable_growth_score,durable_growth_score_legacy"
+    component_pool_size: 12
+    min_components_per_candidate: 2
+    max_components_per_candidate: 5
+    max_component_weight: 0.65
+    max_sleeve_weight: 0.65
+    min_train_selected: 20
+    min_train_unique_tickers: 3
+    min_validation_selected: 10
+    min_validation_unique_tickers: 3
+    min_selected_ticker_coverage: 0.10
+    min_excess_hit_rate: 0.52
+    max_loss_rate: 0.45
+    max_single_ticker_share: 0.35
+    max_single_ticker_share_small_cohort: 0.50
+    small_cohort_ticker_threshold: 16
+    min_lcb_excess: 0.0
+    require_positive_lcb_horizons: "60,120"
+    min_pass_folds: 2
+    min_pass_fold_rate: 0.60
+    min_summary_unique_tickers: 3
+    prune_zero_validation_selected: true
+    prune_min_validation_unique_tickers: 2
+    candidate_score_min: "0,50,55,60,65,70"
+    candidate_percentile_min: "50,60,70,80,90"
+    raw_composite_min: "0,50,55,60"
+    ic_tilted_min: "0,50,55,60"
+    safe_core_min: "0,55,60,65"
+    fundamental_quality_min: "0,55,60,65"
+    valuation_min: "0,45,50,55"
+    technical_entry_min: "0,45,55"
+    data_completeness_min: "80,85,90"
+    liquidity_min: "0,40,50"
+    value_trap_max: "25,30,35,40,50"
+    fda_event_risk_max: "35,40,50,100"
+    borrow_squeeze_risk_max: "60,70,80,100"
+    market_cap_min: "0,250000000,500000000"
+    avg_dollar_volume_min: "0,1000000,2000000"
+    require_tier1_safety_gate: "0,1"
   calibration_readiness:
     output_csv: "../output/med_devices_reports/calibration/med_device_calibration_readiness_audit.csv"
     action_plan_csv: "../output/med_devices_reports/calibration/med_device_calibration_readiness_action_plan.csv"

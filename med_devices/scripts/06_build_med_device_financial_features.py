@@ -1122,9 +1122,9 @@ def build_raw_feature_row(
     else:
         interim_rd = interim.values.get("research_and_development") if interim is not None else None
         annualized_rd = annualize_interim(interim_rd, interim.fiscal_period) if interim is not None else None
-        if annualized_rd is not None and annualized_rd > 0:
+        if annualized_rd is not None:
             feature.annualized_research_and_development = annualized_rd
-        elif feature.research_and_development_ttm is not None and feature.research_and_development_ttm > 0:
+        elif feature.research_and_development_ttm is not None:
             feature.annualized_research_and_development = feature.research_and_development_ttm
 
     if annual is not None and prior_annual is not None:

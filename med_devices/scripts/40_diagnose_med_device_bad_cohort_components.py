@@ -22,9 +22,16 @@ from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_COHORTS = (
-    "implantable_interventional_devices_procedure_bundled",
-    "orthopedics_spine_dental",
-    "capital_equipment_imaging_monitoring",
+    "capital_equipment_procedure_platforms",
+    "diagnostics_clinical_tests",
+    "elective_vision_dental_aesthetic_devices",
+    "emerging_single_product_therapeutic_platforms",
+    "healthcare_services_cro_lab_services",
+    "home_chronic_care_devices_dme_drug_delivery",
+    "hospital_supplies_surgical_consumables_oem",
+    "implantable_interventional_devices_direct_payment",
+    "life_science_tools_research_instruments",
+    "orthopedics_spine_sports_implants",
 )
 COMPONENT_FIELDS = [
     "raw_composite_score",

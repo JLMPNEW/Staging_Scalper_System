@@ -17,7 +17,7 @@ from collections import defaultdict
 from collections.abc import Iterable as IterableABC
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from statistics import median
 from types import MappingProxyType
@@ -358,6 +358,25 @@ class BootstrapCiJob:
     policy: SelectionPolicy
 
 
+@dataclass(frozen=True)
+class SelectedTickerDiagnosticJob:
+    index: int
+    sample: str
+    evaluation_split: str
+    horizon: int
+    top_n: int
+    train_rank: int
+    candidate_id: str
+    spec: WeightSpec
+    policy: SelectionPolicy
+
+
+@dataclass(frozen=True)
+class ObservationDateJob:
+    index: int
+    asof_date: str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -386,6 +405,14 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Worker threads for independent candidate-grid and bootstrap jobs. Defaults to calibration.tier1.max_workers or CPU count.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Reuse completed chunk files under output_dir/_progress. This makes long calibration runs recoverable "
+            "after timeouts without changing calibration math."
+        ),
     )
     parser.add_argument(
         "--bootstrap-iterations",
@@ -3769,6 +3796,75 @@ def load_observations(
     return observations
 
 
+def load_observations_parallel(
+    db_path: Path,
+    dates: list[str],
+    excluded_tickers: set[str],
+    config: dict[str, Any],
+    *,
+    min_addv20: float,
+    strict_feature_lag: bool,
+    growth_drag_curve: str,
+    use_decomposed_risk_for_penalty: bool,
+    timeout_sec: float,
+    max_workers: int,
+) -> list[dict[str, Any]]:
+    if not dates:
+        return []
+    if max_workers <= 1 or len(dates) <= 1:
+        with connect(db_path, timeout_sec=timeout_sec) as conn:
+            return load_observations(
+                conn,
+                dates,
+                excluded_tickers,
+                config,
+                min_addv20=min_addv20,
+                strict_feature_lag=strict_feature_lag,
+                growth_drag_curve=growth_drag_curve,
+                use_decomposed_risk_for_penalty=use_decomposed_risk_for_penalty,
+            )
+
+    jobs = [ObservationDateJob(index=index, asof_date=asof_date) for index, asof_date in enumerate(dates)]
+    worker_count = max(1, min(max_workers, len(jobs)))
+    LOGGER.info("Loading observations by as-of date with %d worker(s): dates=%d", worker_count, len(jobs))
+
+    def worker(job: Any) -> dict[str, Any]:
+        if not isinstance(job, ObservationDateJob):
+            raise TypeError(f"Expected ObservationDateJob, got {type(job).__name__}")
+        start = time.perf_counter()
+        with connect(db_path, timeout_sec=timeout_sec) as conn:
+            rows = load_observations(
+                conn,
+                [job.asof_date],
+                excluded_tickers,
+                config,
+                min_addv20=min_addv20,
+                strict_feature_lag=strict_feature_lag,
+                growth_drag_curve=growth_drag_curve,
+                use_decomposed_risk_for_penalty=use_decomposed_risk_for_penalty,
+            )
+        LOGGER.info(
+            "Loaded observation date: asof=%s rows=%d elapsed=%.3fs",
+            job.asof_date,
+            len(rows),
+            time.perf_counter() - start,
+        )
+        return {"asof_date": job.asof_date, "rows": rows}
+
+    chunks = run_indexed_jobs(
+        jobs,
+        worker,
+        max_workers=worker_count,
+        job_label="load_observations",
+    )
+    observations: list[dict[str, Any]] = []
+    for chunk in chunks:
+        rows = chunk.get("rows") if isinstance(chunk, dict) else None
+        if isinstance(rows, list):
+            observations.extend(row for row in rows if isinstance(row, dict))
+    return observations
+
+
 def load_bars(
     conn: sqlite3.Connection,
     *,
@@ -4891,13 +4987,35 @@ def select_top_rows(
     top_n: int,
     params: CalibrationParams,
 ) -> list[dict[str, Any]]:
+    selected, _policy_eligible = select_top_rows_and_policy_eligible(
+        date_rows,
+        spec,
+        policy,
+        ret_key=ret_key,
+        top_n=top_n,
+        params=params,
+    )
+    return selected
+
+
+def select_top_rows_and_policy_eligible(
+    date_rows: list[dict[str, Any]],
+    spec: WeightSpec,
+    policy: SelectionPolicy,
+    *,
+    ret_key: str,
+    top_n: int,
+    params: CalibrationParams,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     candidates: list[tuple[float, str, dict[str, Any]]] = []
+    policy_eligible: list[dict[str, Any]] = []
     for row in date_rows:
         if to_float(row.get(ret_key)) is None:
             continue
         candidate_score, scores = policy_adjusted_score(row, spec, policy, params)
         if candidate_score is None:
             continue
+        policy_eligible.append(row)
         candidates.append(
             (
                 candidate_score,
@@ -4906,7 +5024,7 @@ def select_top_rows(
             )
         )
     candidates.sort(key=lambda item: (-item[0], item[1]))
-    return [row for _, _, row in candidates[:top_n]]
+    return [row for _, _, row in candidates[:top_n]], policy_eligible
 
 
 def split_rows_by_completed_return_date(
@@ -5007,7 +5125,7 @@ def build_candidate_grid_row(
         eligible = [row for row in date_rows if to_float(row.get(ret_key)) is not None]
         if not eligible:
             continue
-        selected = select_top_rows(
+        selected, policy_eligible = select_top_rows_and_policy_eligible(
             eligible,
             job.spec,
             job.policy,
@@ -5017,11 +5135,6 @@ def build_candidate_grid_row(
         )
         if not selected:
             continue
-        policy_eligible = [
-            row
-            for row in eligible
-            if policy_adjusted_score(row, job.spec, job.policy, params)[0] is not None
-        ]
         date_count += 1
         selected_counts.append(len(selected))
         selection_rates.append(len(selected) / len(eligible))
@@ -5135,6 +5248,64 @@ def build_candidate_grid_rows(
         job_label=f"candidate_grid:{sample}:{evaluation_split}",
     )
     attach_current_config_spreads(out, params=params)
+    return out
+
+
+def load_or_build_candidate_grid_chunk(
+    rows: list[dict[str, Any]],
+    specs: list[WeightSpec],
+    policies: list[SelectionPolicy],
+    *,
+    horizon: int,
+    top_ns: list[int],
+    sample: str,
+    evaluation_split: str,
+    params: CalibrationParams,
+    max_workers: int,
+    output_dir: Path,
+    resume: bool,
+) -> list[dict[str, Any]]:
+    path = candidate_grid_chunk_path(
+        output_dir,
+        sample=sample,
+        evaluation_split=evaluation_split,
+        horizon=horizon,
+        top_n=top_ns[0] if len(top_ns) == 1 else None,
+        policy_name=policies[0].policy_name if len(policies) == 1 else None,
+    )
+    if resume and path.exists():
+        cached = read_csv_rows(path)
+        LOGGER.info(
+            "Loaded cached candidate-grid chunk: sample=%s split=%s horizon=%sd rows=%d path=%s",
+            sample,
+            evaluation_split,
+            horizon,
+            len(cached),
+            path,
+        )
+        return cached
+    start = time.perf_counter()
+    out = build_candidate_grid_rows(
+        rows,
+        specs,
+        policies,
+        [horizon],
+        top_ns,
+        sample=sample,
+        evaluation_split=evaluation_split,
+        params=params,
+        max_workers=max_workers,
+    )
+    write_csv(path, out)
+    LOGGER.info(
+        "Wrote candidate-grid chunk: sample=%s split=%s horizon=%sd rows=%d elapsed=%.3fs path=%s",
+        sample,
+        evaluation_split,
+        horizon,
+        len(out),
+        time.perf_counter() - start,
+        path,
+    )
     return out
 
 
@@ -5859,8 +6030,11 @@ def build_selected_ticker_diagnostic_rows(
     *,
     top_train_ranks: int,
     params: CalibrationParams,
+    max_workers: int = 1,
 ) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
+    if top_train_ranks <= 0:
+        return []
+    jobs: list[SelectedTickerDiagnosticJob] = []
     seen: set[tuple[str, str, int, int, int, str]] = set()
     for holdout in holdout_rows:
         train_rank = int(to_float(holdout.get("train_rank"), 0.0) or 0)
@@ -5868,7 +6042,7 @@ def build_selected_ticker_diagnostic_rows(
         is_current_config = candidate_name == CURRENT_CONFIG_CANDIDATE_NAME
         if train_rank <= 0:
             continue
-        if train_rank > max(1, int(top_train_ranks)) and not is_current_config:
+        if train_rank > int(top_train_ranks) and not is_current_config:
             continue
         sample = str(holdout.get("sample") or "")
         horizon = int(to_float(holdout.get("horizon_days"), 0.0) or 0)
@@ -5883,28 +6057,59 @@ def build_selected_ticker_diagnostic_rows(
             if key in seen:
                 continue
             seen.add(key)
-            rows = split_rows_by_key.get((sample, evaluation_split, horizon), [])
-            selected = selected_rows_by_date(
-                rows,
-                spec,
-                policy,
-                horizon=horizon,
-                top_n=top_n,
-                params=params,
-            )
-            for selected_row in selected:
-                out.append(
-                    selected_ticker_diagnostic_record(
-                        selected_row,
-                        sample=sample,
-                        evaluation_split=evaluation_split,
-                        horizon=horizon,
-                        top_n=top_n,
-                        train_rank=train_rank,
-                        spec=spec,
-                        policy=policy,
-                    )
+            jobs.append(
+                SelectedTickerDiagnosticJob(
+                    index=len(jobs),
+                    sample=sample,
+                    evaluation_split=evaluation_split,
+                    horizon=horizon,
+                    top_n=top_n,
+                    train_rank=train_rank,
+                    candidate_id=candidate_id,
+                    spec=spec,
+                    policy=policy,
                 )
+            )
+
+    def worker(job: Any) -> dict[str, Any]:
+        if not isinstance(job, SelectedTickerDiagnosticJob):
+            raise TypeError(f"Expected SelectedTickerDiagnosticJob, got {type(job).__name__}")
+        rows = split_rows_by_key.get((job.sample, job.evaluation_split, job.horizon), [])
+        selected = selected_rows_by_date(
+            rows,
+            job.spec,
+            job.policy,
+            horizon=job.horizon,
+            top_n=job.top_n,
+            params=params,
+        )
+        return {
+            "rows": [
+                selected_ticker_diagnostic_record(
+                    selected_row,
+                    sample=job.sample,
+                    evaluation_split=job.evaluation_split,
+                    horizon=job.horizon,
+                    top_n=job.top_n,
+                    train_rank=job.train_rank,
+                    spec=job.spec,
+                    policy=job.policy,
+                )
+                for selected_row in selected
+            ]
+        }
+
+    chunks = run_indexed_jobs(
+        jobs,
+        worker,
+        max_workers=max_workers,
+        job_label="selected_ticker_diagnostics",
+    )
+    out: list[dict[str, Any]] = []
+    for chunk in chunks:
+        rows = chunk.get("rows") if isinstance(chunk, dict) else None
+        if isinstance(rows, list):
+            out.extend(row for row in rows if isinstance(row, dict))
     return out
 
 
@@ -6035,15 +6240,77 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str] | No
                     seen.add(key)
                     keys.append(key)
         fieldnames = keys
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n", extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+    tmp_path.replace(path)
+
+
+def read_csv_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return [dict(row) for row in reader]
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def read_json_payload(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def progress_dir(output_dir: Path) -> Path:
+    return output_dir / "_progress"
+
+
+def safe_file_slug(raw: object, *, max_len: int = 40) -> str:
+    text = str(raw or "").strip().lower()
+    out = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in text)
+    while "__" in out:
+        out = out.replace("__", "_")
+    out = out.strip("_") or "unknown"
+    if len(out) > max_len:
+        digest = hashlib.sha1(out.encode("utf-8")).hexdigest()[:8]
+        out = f"{out[: max(1, max_len - 9)].rstrip('_')}_{digest}"
+    return out
+
+
+def candidate_grid_chunk_path(
+    output_dir: Path,
+    *,
+    sample: str,
+    evaluation_split: str,
+    horizon: int,
+    top_n: int | None = None,
+    policy_name: str | None = None,
+) -> Path:
+    parts = ["t1grid", safe_file_slug(sample, max_len=12), safe_file_slug(evaluation_split, max_len=12), f"{horizon}d"]
+    if top_n is not None:
+        parts.append(f"top{int(top_n)}")
+    if policy_name:
+        parts.append(safe_file_slug(policy_name, max_len=24))
+    return progress_dir(output_dir) / ("_".join(parts) + ".csv")
+
+
+def progress_csv_path(output_dir: Path, name: str) -> Path:
+    return progress_dir(output_dir) / name
+
+
+def cache_signature_matches(manifest_path: Path, signature: dict[str, Any]) -> bool:
+    payload = read_json_payload(manifest_path)
+    return payload.get("signature") == signature
 
 
 def main() -> None:
@@ -6206,7 +6473,7 @@ def main() -> None:
         )
     candidates_by_id = {stable_candidate_id(spec, policy): (spec, policy) for spec in specs for policy in policies}
     selected_diagnostic_top_ranks = max(
-        1,
+        0,
         int(
             args.selected_ticker_diagnostic_top_ranks
             if args.selected_ticker_diagnostic_top_ranks is not None
@@ -6225,7 +6492,8 @@ def main() -> None:
         )
     )
 
-    with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
+    sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
+    with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         fridays_only = not args.include_non_fridays
         max_snapshots = max(0, int(args.max_snapshots))
         snapshot_dates = load_snapshot_dates(
@@ -6250,37 +6518,87 @@ def main() -> None:
             exclude_current_removals=exclude_current_removals,
             extra=extra_exclusions,
         )
-        observations = load_observations(
-            conn,
-            snapshot_dates,
-            excluded_tickers,
-            config,
-            min_addv20=min_addv20,
-            strict_feature_lag=strict_feature_lag,
-            growth_drag_curve=params.growth_drag_curve,
-            use_decomposed_risk_for_penalty=params.use_decomposed_risk_for_penalty,
-        )
+        observation_cache_path = progress_csv_path(output_dir, "tier1_observations_with_forward_returns.csv")
+        observation_cache_manifest_path = progress_csv_path(output_dir, "tier1_observations_with_forward_returns_manifest.json")
+        observation_cache_signature = {
+            "start_asof": start_asof.isoformat() if start_asof else "",
+            "end_asof": end_asof.isoformat() if end_asof else "",
+            "snapshot_dates": snapshot_dates,
+            "horizons": horizons,
+            "market_sources": market_sources,
+            "strict_feature_lag": strict_feature_lag,
+            "next_bar_entry": next_bar_entry,
+            "growth_drag_curve": params.growth_drag_curve,
+            "use_decomposed_risk_for_penalty": params.use_decomposed_risk_for_penalty,
+            "risk_penalty_mode": params.risk_penalty_mode,
+            "round_trip_cost_bps": params.round_trip_cost_bps,
+            "alpha_adjustment_enabled": params.alpha_adjustment_enabled,
+            "benchmark_ticker": params.benchmark_ticker,
+            "excluded_tickers": sorted(excluded_tickers),
+            "min_addv20": min_addv20,
+        }
+        observations_loaded_from_cache = False
+        if args.resume and observation_cache_path.exists() and cache_signature_matches(
+            observation_cache_manifest_path,
+            observation_cache_signature,
+        ):
+            observations = read_csv_rows(observation_cache_path)
+            observations_loaded_from_cache = bool(observations)
+            LOGGER.info(
+                "Loaded cached observations with forward returns: rows=%d path=%s",
+                len(observations),
+                observation_cache_path,
+            )
+        else:
+            if args.resume and observation_cache_path.exists():
+                LOGGER.info("Ignoring stale observation cache because its signature does not match: %s", observation_cache_path)
+            observations = load_observations_parallel(
+                db_path,
+                snapshot_dates,
+                excluded_tickers,
+                config,
+                min_addv20=min_addv20,
+                strict_feature_lag=strict_feature_lag,
+                growth_drag_curve=params.growth_drag_curve,
+                use_decomposed_risk_for_penalty=params.use_decomposed_risk_for_penalty,
+                timeout_sec=sqlite_timeout_sec,
+                max_workers=max_workers,
+            )
         if not observations:
             raise ValueError("No Tier-1 feature observations remain after exclusions.")
         tickers = {ticker for row in observations if (ticker := normalize_ticker(row["ticker"]))}
-        benchmark_ticker = params.benchmark_ticker if params.alpha_adjustment_enabled else ""
-        market_tickers = set(tickers)
-        if benchmark_ticker:
-            market_tickers.add(benchmark_ticker)
         asof_dates = [parsed for row in observations if (parsed := parse_date(row["asof_date"])) is not None]
         if not asof_dates:
             raise ValueError("Tier-1 feature observations do not contain valid as-of dates.")
-        bars_by_ticker = load_bars(conn, tickers=market_tickers, min_date=min(asof_dates), market_sources=market_sources)
-
-    add_forward_returns(
-        observations,
-        bars_by_ticker,
-        horizons,
-        round_trip_cost_bps=params.round_trip_cost_bps,
-        next_bar_entry=next_bar_entry,
-        benchmark_ticker=params.benchmark_ticker if params.alpha_adjustment_enabled else "",
-        benchmark_bars=bars_by_ticker.get(params.benchmark_ticker, []) if params.alpha_adjustment_enabled else [],
-    )
+        if not observations_loaded_from_cache:
+            benchmark_ticker = params.benchmark_ticker if params.alpha_adjustment_enabled else ""
+            market_tickers = set(tickers)
+            if benchmark_ticker:
+                market_tickers.add(benchmark_ticker)
+            bars_by_ticker = load_bars(conn, tickers=market_tickers, min_date=min(asof_dates), market_sources=market_sources)
+            add_forward_returns(
+                observations,
+                bars_by_ticker,
+                horizons,
+                round_trip_cost_bps=params.round_trip_cost_bps,
+                next_bar_entry=next_bar_entry,
+                benchmark_ticker=params.benchmark_ticker if params.alpha_adjustment_enabled else "",
+                benchmark_bars=bars_by_ticker.get(params.benchmark_ticker, []) if params.alpha_adjustment_enabled else [],
+            )
+            write_csv(observation_cache_path, observations)
+            write_json(
+                observation_cache_manifest_path,
+                {
+                    "signature": observation_cache_signature,
+                    "row_count": len(observations),
+                    "written_at_utc": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            LOGGER.info(
+                "Wrote observation cache with forward returns: rows=%d path=%s",
+                len(observations),
+                observation_cache_path,
+            )
     candidate_rows: list[dict[str, Any]] = []
     split_manifest: dict[str, Any] = {}
     split_rows_by_key: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
@@ -6309,93 +6627,105 @@ def main() -> None:
             "train_liquidity_ok_observation_count": len(liquid_train_observations),
             "test_liquidity_ok_observation_count": len(liquid_test_observations),
         }
-        candidate_rows.extend(
-            build_candidate_grid_rows(
-                train_observations,
-                specs,
-                policies,
-                [horizon],
-                top_ns,
-                sample="all",
-                evaluation_split="train",
-                params=params,
-                max_workers=max_workers,
-            )
-        )
-        candidate_rows.extend(
-            build_candidate_grid_rows(
-                liquid_train_observations,
-                specs,
-                policies,
-                [horizon],
-                top_ns,
-                sample="liquidity_ok",
-                evaluation_split="train",
-                params=params,
-                max_workers=max_workers,
-            )
-        )
-        candidate_rows.extend(
-            build_candidate_grid_rows(
-                test_observations,
-                specs,
-                policies,
-                [horizon],
-                top_ns,
-                sample="all",
-                evaluation_split="test",
-                params=params,
-                max_workers=max_workers,
-            )
-        )
-        candidate_rows.extend(
-            build_candidate_grid_rows(
-                liquid_test_observations,
-                specs,
-                policies,
-                [horizon],
-                top_ns,
-                sample="liquidity_ok",
-                evaluation_split="test",
-                params=params,
-                max_workers=max_workers,
-            )
-    )
+        row_groups = [
+            ("all", "train", train_observations),
+            ("liquidity_ok", "train", liquid_train_observations),
+            ("all", "test", test_observations),
+            ("liquidity_ok", "test", liquid_test_observations),
+        ]
+        for top_n in top_ns:
+            for policy in policies:
+                for sample, evaluation_split, rows_for_chunk in row_groups:
+                    candidate_rows.extend(
+                        load_or_build_candidate_grid_chunk(
+                            rows_for_chunk,
+                            specs,
+                            [policy],
+                            horizon=horizon,
+                            top_ns=[top_n],
+                            sample=sample,
+                            evaluation_split=evaluation_split,
+                            params=params,
+                            max_workers=max_workers,
+                            output_dir=output_dir,
+                            resume=bool(args.resume),
+                        )
+                    )
+    write_csv(progress_csv_path(output_dir, "tier1_weight_calibration_grid.csv"), candidate_rows)
     best_rows = build_best_rows(
         candidate_rows,
         medium_term_horizons=medium_term_horizons,
         limit=best_rows_limit,
     )
+    write_csv(progress_csv_path(output_dir, "tier1_weight_calibration_best.csv"), best_rows)
     holdout_rows = build_holdout_rows(candidate_rows, limit=holdout_top_k)
-    bootstrap_ci_rows = build_bootstrap_ci_rows(
-        split_rows_by_key,
-        holdout_rows,
-        candidates_by_id,
-        top_k=bootstrap_top_k,
-        iterations=bootstrap_iterations,
-        seed=bootstrap_seed,
-        params=params,
-        max_workers=max_workers,
-        snapshot_stride_bars=1 if args.include_non_fridays else 5,
-    )
+    write_csv(progress_csv_path(output_dir, "tier1_weight_calibration_holdout.csv"), holdout_rows)
+    bootstrap_progress_path = progress_csv_path(output_dir, "tier1_weight_calibration_bootstrap_ci.csv")
+    if args.resume and bootstrap_progress_path.exists():
+        bootstrap_ci_rows = read_csv_rows(bootstrap_progress_path)
+        LOGGER.info("Loaded cached bootstrap CI rows: rows=%d path=%s", len(bootstrap_ci_rows), bootstrap_progress_path)
+    else:
+        bootstrap_ci_rows = build_bootstrap_ci_rows(
+            split_rows_by_key,
+            holdout_rows,
+            candidates_by_id,
+            top_k=bootstrap_top_k,
+            iterations=bootstrap_iterations,
+            seed=bootstrap_seed,
+            params=params,
+            max_workers=max_workers,
+            snapshot_stride_bars=1 if args.include_non_fridays else 5,
+        )
+        write_csv(bootstrap_progress_path, bootstrap_ci_rows)
     spec_rows = [spec_fields(spec) for spec in specs]
     policy_rows = [policy_fields(policy) for policy in policies]
     candidate_policy_rows = [spec_fields(spec, policy) for spec in specs for policy in policies]
-    selected_ticker_diagnostic_rows = build_selected_ticker_diagnostic_rows(
-        split_rows_by_key,
-        holdout_rows,
-        candidates_by_id,
-        top_train_ranks=selected_diagnostic_top_ranks,
-        params=params,
-    )
-    binary_weakness_component_rows = build_binary_weakness_component_rows(
-        selected_ticker_diagnostic_rows,
-        params=params,
-    )
-    binary_weakness_severity_rows = build_binary_weakness_severity_rows(
-        selected_ticker_diagnostic_rows,
-        params=params,
-    )
+    diagnostics_progress_path = progress_csv_path(output_dir, "tier1_selected_ticker_diagnostics.csv")
+    if args.resume and diagnostics_progress_path.exists():
+        selected_ticker_diagnostic_rows = read_csv_rows(diagnostics_progress_path)
+        LOGGER.info(
+            "Loaded cached selected ticker diagnostics: rows=%d path=%s",
+            len(selected_ticker_diagnostic_rows),
+            diagnostics_progress_path,
+        )
+    else:
+        selected_ticker_diagnostic_rows = build_selected_ticker_diagnostic_rows(
+            split_rows_by_key,
+            holdout_rows,
+            candidates_by_id,
+            top_train_ranks=selected_diagnostic_top_ranks,
+            params=params,
+            max_workers=max_workers,
+        )
+        write_csv(diagnostics_progress_path, selected_ticker_diagnostic_rows)
+    binary_components_progress_path = progress_csv_path(output_dir, "tier1_binary_weakness_components.csv")
+    if args.resume and binary_components_progress_path.exists():
+        binary_weakness_component_rows = read_csv_rows(binary_components_progress_path)
+        LOGGER.info(
+            "Loaded cached binary weakness component rows: rows=%d path=%s",
+            len(binary_weakness_component_rows),
+            binary_components_progress_path,
+        )
+    else:
+        binary_weakness_component_rows = build_binary_weakness_component_rows(
+            selected_ticker_diagnostic_rows,
+            params=params,
+        )
+        write_csv(binary_components_progress_path, binary_weakness_component_rows)
+    binary_severity_progress_path = progress_csv_path(output_dir, "tier1_binary_weakness_severity.csv")
+    if args.resume and binary_severity_progress_path.exists():
+        binary_weakness_severity_rows = read_csv_rows(binary_severity_progress_path)
+        LOGGER.info(
+            "Loaded cached binary weakness severity rows: rows=%d path=%s",
+            len(binary_weakness_severity_rows),
+            binary_severity_progress_path,
+        )
+    else:
+        binary_weakness_severity_rows = build_binary_weakness_severity_rows(
+            selected_ticker_diagnostic_rows,
+            params=params,
+        )
+        write_csv(binary_severity_progress_path, binary_weakness_severity_rows)
 
     write_csv(output_dir / "tier1_weight_candidate_specs.csv", spec_rows)
     write_csv(output_dir / "tier1_selection_policy_specs.csv", policy_rows)
@@ -6444,6 +6774,8 @@ def main() -> None:
         "bootstrap_top_k": bootstrap_top_k,
         "holdout_top_k": holdout_top_k,
         "best_rows_limit": best_rows_limit,
+        "resume_enabled": bool(args.resume),
+        "progress_dir": str(progress_dir(output_dir)),
         "bootstrap_seed": bootstrap_seed,
         "bootstrap_ci_row_count": len(bootstrap_ci_rows),
         "forward_return_observation_counts": horizon_counts,

@@ -52,7 +52,7 @@ def to_float(raw: object) -> float | None:
         value = float(str(raw).strip())
     except (TypeError, ValueError):
         return None
-    return value if value == value else None
+    return value if math.isfinite(value) else None
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -110,16 +110,20 @@ def load_latest_snapshots(conn: Any, *, asof: str) -> dict[int, dict[str, Any]]:
         return {}
     rows = conn.execute(
         """
-        SELECT s.*
-        FROM fact_ibkr_borrow_snapshot s
-        WHERE s.rowid = (
-            SELECT s2.rowid
-            FROM fact_ibkr_borrow_snapshot s2
-            WHERE s2.company_id = s.company_id
-              AND s2.asof_date <= ?
-            ORDER BY s2.asof_date DESC, s2.rowid DESC
-            LIMIT 1
+        WITH ranked AS (
+            SELECT
+                s.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY s.company_id
+                    ORDER BY s.asof_date DESC, s.rowid DESC
+                ) AS rn
+            FROM fact_ibkr_borrow_snapshot s
+            WHERE s.company_id IS NOT NULL
+              AND s.asof_date <= ?
         )
+        SELECT *
+        FROM ranked
+        WHERE rn = 1
         """,
         (asof,),
     ).fetchall()

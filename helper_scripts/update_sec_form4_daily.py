@@ -118,6 +118,34 @@ def normalize_int_set(raw_values: object, default: set[int]) -> set[int]:
     return out or set(default)
 
 
+def optional_positive_int(raw_value: object, *, default: int = 0, name: str = "value") -> int:
+    if raw_value is None:
+        return default
+    if isinstance(raw_value, bool):
+        raise SystemExit(f"{name} must be an integer >= 0, got {raw_value!r}")
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"{name} must be an integer >= 0, got {raw_value!r}") from exc
+    if value < 0:
+        raise SystemExit(f"{name} must be >= 0, got {raw_value!r}")
+    return value
+
+
+def optional_positive_float(raw_value: object, *, default: float = 0.0, name: str = "value") -> float:
+    if raw_value is None:
+        return default
+    if isinstance(raw_value, bool):
+        raise SystemExit(f"{name} must be a number >= 0, got {raw_value!r}")
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"{name} must be a number >= 0, got {raw_value!r}") from exc
+    if value < 0:
+        raise SystemExit(f"{name} must be >= 0, got {raw_value!r}")
+    return value
+
+
 def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {
         row[1].lower()
@@ -767,12 +795,51 @@ def process_rows(
     retry_backoff_base_seconds: float,
     retry_backoff_cap_seconds: float,
     force_reprocess: bool,
-) -> tuple[int, int]:
+    max_filings: int = 0,
+    progress_every_filings: int = 100,
+    progress_interval_sec: float = 60.0,
+    stop_deadline: float | None = None,
+    stage_label: str = "daily",
+) -> tuple[int, int, bool]:
     seen = 0
     loaded = 0
+    limit_hit = False
     manifest_seen: set[str] = set()
+    started = time.monotonic()
+    last_progress_at = started
+    last_progress_seen = 0
+
+    def maybe_progress(*, force: bool = False) -> None:
+        nonlocal last_progress_at, last_progress_seen
+        now = time.monotonic()
+        by_count = progress_every_filings > 0 and seen - last_progress_seen >= progress_every_filings
+        by_time = progress_interval_sec > 0 and now - last_progress_at >= progress_interval_sec
+        if not force and not by_count and not by_time:
+            return
+        print(
+            "[PROGRESS] "
+            f"stage={stage_label} seen={seen:,} loaded={loaded:,} "
+            f"elapsed_sec={now - started:.1f}"
+        )
+        last_progress_at = now
+        last_progress_seen = seen
 
     for row in rows:
+        if max_filings > 0 and seen >= max_filings:
+            limit_hit = True
+            print(
+                f"[LIMIT] stage={stage_label} max_filings={max_filings:,} reached; "
+                "leaving remaining rows for a later run."
+            )
+            break
+        if stop_deadline is not None and time.monotonic() >= stop_deadline:
+            limit_hit = True
+            print(
+                f"[LIMIT] stage={stage_label} stop_after_sec reached; "
+                "leaving remaining rows for a later run."
+            )
+            break
+
         form_type = row["form_type"].upper()
         if form_type not in form_types:
             continue
@@ -865,9 +932,11 @@ def process_rows(
             )
             conn.commit()
 
+        maybe_progress()
         time.sleep(max(sleep_seconds, 0.0))
 
-    return seen, loaded
+    maybe_progress(force=True)
+    return seen, loaded, limit_hit
 
 
 def main() -> None:
@@ -885,6 +954,32 @@ def main() -> None:
     )
     parser.add_argument("--days-back", type=int, default=None)
     parser.add_argument("--sleep-seconds", type=float, default=None)
+    parser.add_argument("--max-index-days", type=int, default=None, help="Maximum daily indexes to attempt; 0 means no cap.")
+    parser.add_argument("--max-filings", type=int, default=None, help="Maximum eligible daily-index filings to attempt; 0 means no cap.")
+    parser.add_argument(
+        "--max-reconcile-filings",
+        type=int,
+        default=None,
+        help="Maximum eligible current-quarter reconciliation filings to attempt; 0 means no cap.",
+    )
+    parser.add_argument(
+        "--progress-every-filings",
+        type=int,
+        default=None,
+        help="Emit progress after this many eligible filings; 0 disables count-based progress.",
+    )
+    parser.add_argument(
+        "--progress-interval-sec",
+        type=float,
+        default=None,
+        help="Emit progress at least this often while processing filings; 0 disables time-based progress.",
+    )
+    parser.add_argument(
+        "--stop-after-sec",
+        type=float,
+        default=None,
+        help="Stop after this many seconds and leave remaining work for the next run; 0 disables.",
+    )
     parser.add_argument(
         "--force-reprocess",
         dest="force_reprocess",
@@ -1024,6 +1119,49 @@ def main() -> None:
         cfg_get(cfg, mode_key, "filing_missing_statuses", default=[404]),
         {404},
     )
+    max_index_days = optional_positive_int(
+        args.max_index_days
+        if args.max_index_days is not None
+        else cfg_get(cfg, mode_key, "max_index_days", default=0),
+        default=0,
+        name=f"{mode_key}.max_index_days",
+    )
+    max_filings = optional_positive_int(
+        args.max_filings
+        if args.max_filings is not None
+        else cfg_get(cfg, mode_key, "max_filings_per_run", default=0),
+        default=0,
+        name=f"{mode_key}.max_filings_per_run",
+    )
+    max_reconcile_filings = optional_positive_int(
+        args.max_reconcile_filings
+        if args.max_reconcile_filings is not None
+        else cfg_get(cfg, mode_key, "max_reconcile_filings", default=max_filings),
+        default=max_filings,
+        name=f"{mode_key}.max_reconcile_filings",
+    )
+    progress_every_filings = optional_positive_int(
+        args.progress_every_filings
+        if args.progress_every_filings is not None
+        else cfg_get(cfg, mode_key, "progress_every_filings", default=100),
+        default=100,
+        name=f"{mode_key}.progress_every_filings",
+    )
+    progress_interval_sec = optional_positive_float(
+        args.progress_interval_sec
+        if args.progress_interval_sec is not None
+        else cfg_get(cfg, mode_key, "progress_interval_sec", default=60.0),
+        default=60.0,
+        name=f"{mode_key}.progress_interval_sec",
+    )
+    stop_after_sec = optional_positive_float(
+        args.stop_after_sec
+        if args.stop_after_sec is not None
+        else cfg_get(cfg, mode_key, "stop_after_sec", default=0.0),
+        default=0.0,
+        name=f"{mode_key}.stop_after_sec",
+    )
+    stop_deadline = time.monotonic() + stop_after_sec if stop_after_sec > 0 else None
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
@@ -1055,10 +1193,27 @@ def main() -> None:
 
     total_seen = 0
     total_loaded = 0
+    days_attempted = 0
+    daily_limit_hit = False
 
     try:
         for dt in iter_weekdays(start_date, end_date):
+            if max_index_days > 0 and days_attempted >= max_index_days:
+                print(
+                    f"[LIMIT] max_index_days={max_index_days:,} reached at {dt.isoformat()}; "
+                    "leaving remaining dates for a later run."
+                )
+                break
+            if stop_deadline is not None and time.monotonic() >= stop_deadline:
+                daily_limit_hit = True
+                print(
+                    f"[LIMIT] stop_after_sec reached before daily index {dt.isoformat()}; "
+                    "leaving remaining dates for a later run."
+                )
+                break
+            days_attempted += 1
             url = daily_form_index_url(dt, archives_base_url=archives_base_url)
+            print(f"[DAY] {dt.isoformat()} fetching daily Form 4 index")
             try:
                 idx_text = fetch_text(
                     session,
@@ -1081,7 +1236,15 @@ def main() -> None:
                 continue
 
             rows = parse_form_index(idx_text)
-            seen, loaded = process_rows(
+            remaining_filings = max_filings - total_seen if max_filings > 0 else 0
+            if max_filings > 0 and remaining_filings <= 0:
+                daily_limit_hit = True
+                print(
+                    f"[LIMIT] max_filings={max_filings:,} reached before {dt.isoformat()}; "
+                    "leaving remaining dates for a later run."
+                )
+                break
+            seen, loaded, limit_hit = process_rows(
                 conn=conn,
                 session=session,
                 rows=rows,
@@ -1094,14 +1257,28 @@ def main() -> None:
                 retry_backoff_base_seconds=retry_backoff_base_seconds,
                 retry_backoff_cap_seconds=retry_backoff_cap_seconds,
                 force_reprocess=force_reprocess,
+                max_filings=remaining_filings,
+                progress_every_filings=progress_every_filings,
+                progress_interval_sec=progress_interval_sec,
+                stop_deadline=stop_deadline,
+                stage_label=f"daily:{dt.isoformat()}",
             )
             total_seen += seen
             total_loaded += loaded
 
-            set_state_date(conn, process_name, dt)
-            conn.commit()
+            if limit_hit:
+                daily_limit_hit = True
+                conn.commit()
+                print(
+                    f"[LIMIT] Daily processing stopped before completing {dt.isoformat()}; "
+                    "state date was not advanced for this date."
+                )
+                break
+            else:
+                set_state_date(conn, process_name, dt)
+                conn.commit()
 
-        if reconcile_current_quarter:
+        if reconcile_current_quarter and not daily_limit_hit:
             full_idx = None
             try:
                 full_idx = fetch_text(
@@ -1124,7 +1301,7 @@ def main() -> None:
                     raise
             if full_idx:
                 rows = parse_form_index(full_idx)
-                seen, loaded = process_rows(
+                seen, loaded, _ = process_rows(
                     conn=conn,
                     session=session,
                     rows=rows,
@@ -1137,11 +1314,21 @@ def main() -> None:
                     retry_backoff_base_seconds=retry_backoff_base_seconds,
                     retry_backoff_cap_seconds=retry_backoff_cap_seconds,
                     force_reprocess=True,
+                    max_filings=max_reconcile_filings,
+                    progress_every_filings=progress_every_filings,
+                    progress_interval_sec=progress_interval_sec,
+                    stop_deadline=stop_deadline,
+                    stage_label="current_quarter_reconcile",
                 )
                 total_seen += seen
                 total_loaded += loaded
+        elif reconcile_current_quarter and daily_limit_hit:
+            print("[INFO] Skipping current-quarter reconciliation because daily incremental work hit a run limit.")
 
-        print(f"Daily Form 4 ingest complete. Seen={total_seen:,}  Loaded/Upserted={total_loaded:,}")
+        print(
+            "Daily Form 4 ingest complete. "
+            f"DaysAttempted={days_attempted:,} Seen={total_seen:,} Loaded/Upserted={total_loaded:,}"
+        )
     finally:
         conn.close()
 

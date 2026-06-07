@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -53,7 +54,7 @@ def to_float(raw: object) -> float | None:
         value = float(str(raw).replace(",", "").strip())
     except (TypeError, ValueError):
         return None
-    return value if value == value else None
+    return value if math.isfinite(value) else None
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -160,7 +161,9 @@ def score_company(company: dict[str, Any], txs: list[dict[str, Any]], *, asof: s
         "open_market_sell_count_90d": len(sells),
         "unique_buyer_count_90d": len(unique_buyers),
         "unique_seller_count_90d": len(unique_sellers),
-        "data_quality_score": 90.0,
+        "data_quality_score": clamp(
+            float(cfg_get(config, "insider_activity_features.transaction_data_quality_score", 90.0))
+        ),
         "payload_json": json.dumps({"buy_value": buy_value, "sell_value": sell_value}, sort_keys=True, ensure_ascii=True),
     }
 

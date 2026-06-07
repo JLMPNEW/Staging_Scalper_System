@@ -254,8 +254,6 @@ def finra_short_interest_records(
                 short_shares = to_float(row.get("currentShortShareNumber"))
                 avg_daily_volume = to_float(row.get("averageShortShareNumber"))
                 days_to_cover = to_float(row.get("daysToCoverNumber"))
-                if days_to_cover is None and short_shares is not None and avg_daily_volume and avg_daily_volume > 0.0:
-                    days_to_cover = short_shares / avg_daily_volume
                 records.append(
                     (
                         api_ticker,
@@ -880,6 +878,8 @@ def sync_ibkr_borrow_availability(
         ib.reqMarketDataType(int(market_data_type))
         for ticker in tickers:
             try:
+                if not ib.isConnected():
+                    raise RuntimeError("IBKR connection lost during borrow fee history sync")
                 contracts = ib.qualifyContracts(Stock(ticker, "SMART", "USD"))
                 if not contracts:
                     failed_tickers.append(ticker)
@@ -927,7 +927,11 @@ def sync_ibkr_borrow_availability(
                     qualified[ticker] = contract
                 else:
                     failed_tickers.append(ticker)
-            except Exception:
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                if not ib.isConnected():
+                    raise RuntimeError("IBKR connection lost during borrow fee history sync") from exc
                 failed_tickers.append(ticker)
             if sleep_sec > 0:
                 ib.sleep(float(sleep_sec))
@@ -938,6 +942,8 @@ def sync_ibkr_borrow_availability(
             subscriptions: list[tuple[str, Any, Any]] = []
             for ticker, contract in batch:
                 try:
+                    if not ib.isConnected():
+                        raise RuntimeError("IBKR connection lost during shortable-share snapshot sync")
                     ticker_obj = ib.reqMktData(
                         contract,
                         genericTickList="236",
@@ -945,7 +951,11 @@ def sync_ibkr_borrow_availability(
                         regulatorySnapshot=False,
                     )
                     subscriptions.append((ticker, contract, ticker_obj))
-                except Exception:
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:
+                    if not ib.isConnected():
+                        raise RuntimeError("IBKR connection lost during shortable-share snapshot sync") from exc
                     failed_tickers.append(ticker)
             ib.sleep(max(0.1, float(snapshot_wait_sec)))
             now = utc_now()

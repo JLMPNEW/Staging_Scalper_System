@@ -10,7 +10,7 @@ import sys
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any
 
 try:
@@ -333,7 +333,22 @@ def format_table_column_candidates(candidates: tuple[tuple[str, str], ...]) -> s
     return ", ".join(f"{table}.{column}" for table, column in candidates)
 
 
-def run_step(cmd: list[str], *, dry_run: bool, timeout_seconds: int | None = None) -> None:
+def _terminate_process(proc: subprocess.Popen[object]) -> None:
+    try:
+        proc.terminate()
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def run_step(
+    cmd: list[str],
+    *,
+    dry_run: bool,
+    timeout_seconds: int | None = None,
+    heartbeat_seconds: int | None = 60,
+) -> None:
     if len(cmd) >= 2 and Path(cmd[0]).name.lower().startswith("python"):
         step_name = Path(cmd[1]).name
     else:
@@ -343,20 +358,29 @@ def run_step(cmd: list[str], *, dry_run: bool, timeout_seconds: int | None = Non
     if dry_run:
         return
     started = perf_counter()
+    next_heartbeat = float(heartbeat_seconds or 0)
     try:
-        subprocess.run(cmd, check=True, timeout=timeout_seconds)
-    except subprocess.CalledProcessError as exc:
-        elapsed = perf_counter() - started
-        print(f"FAILED {step_name} after {elapsed:.1f}s.")
-        raise RuntimeError(
-            f"{step_name} failed with exit code {exc.returncode}: {' '.join(cmd)}"
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        elapsed = perf_counter() - started
-        print(f"TIMEOUT {step_name} after {elapsed:.1f}s.")
-        raise RuntimeError(
-            f"{step_name} timed out after {exc.timeout}s: {' '.join(cmd)}"
-        ) from exc
+        proc = subprocess.Popen(cmd)
+        while True:
+            return_code = proc.poll()
+            elapsed = perf_counter() - started
+            if return_code is not None:
+                if return_code != 0:
+                    print(f"FAILED {step_name} after {elapsed:.1f}s.")
+                    raise RuntimeError(
+                        f"{step_name} failed with exit code {return_code}: {' '.join(cmd)}"
+                    )
+                break
+            if timeout_seconds is not None and elapsed >= timeout_seconds:
+                print(f"TIMEOUT {step_name} after {elapsed:.1f}s; terminating child process.")
+                _terminate_process(proc)
+                raise RuntimeError(
+                    f"{step_name} timed out after {timeout_seconds}s: {' '.join(cmd)}"
+                )
+            if heartbeat_seconds and elapsed >= next_heartbeat:
+                print(f"Still running {step_name}: elapsed={elapsed:.1f}s timeout={timeout_seconds}")
+                next_heartbeat += heartbeat_seconds
+            sleep(1.0)
     except OSError as exc:
         elapsed = perf_counter() - started
         print(f"OSERROR {step_name} after {elapsed:.1f}s.")
@@ -647,8 +671,15 @@ def run_form4_incremental_update(
     start_date: date,
     end_date: date,
     reconcile_current_quarter: bool,
+    max_index_days: int | None,
+    max_filings: int | None,
+    max_reconcile_filings: int | None,
+    progress_every_filings: int | None,
+    progress_interval_sec: int | None,
+    stop_after_sec: int | None,
     dry_run: bool,
     timeout_seconds: int | None,
+    heartbeat_seconds: int | None,
 ) -> None:
     cmd = [
         py_exe,
@@ -665,7 +696,24 @@ def run_form4_incremental_update(
         cmd.append("--reconcile-current-quarter")
     else:
         cmd.append("--no-reconcile-current-quarter")
-    run_step(cmd, dry_run=dry_run, timeout_seconds=timeout_seconds)
+    if max_index_days is not None:
+        cmd.extend(["--max-index-days", str(max_index_days)])
+    if max_filings is not None:
+        cmd.extend(["--max-filings", str(max_filings)])
+    if max_reconcile_filings is not None:
+        cmd.extend(["--max-reconcile-filings", str(max_reconcile_filings)])
+    if progress_every_filings is not None:
+        cmd.extend(["--progress-every-filings", str(progress_every_filings)])
+    if progress_interval_sec is not None:
+        cmd.extend(["--progress-interval-sec", str(progress_interval_sec)])
+    if stop_after_sec is not None:
+        cmd.extend(["--stop-after-sec", str(stop_after_sec)])
+    run_step(
+        cmd,
+        dry_run=dry_run,
+        timeout_seconds=timeout_seconds,
+        heartbeat_seconds=heartbeat_seconds,
+    )
 
 
 def run_form4_quarterly_backfill(
@@ -1021,6 +1069,10 @@ def main() -> None:
         cfg_get(run_cfg, "step_timeout_seconds", default=86400),
         default=86400,
     )
+    step_heartbeat_seconds = parse_optional_timeout(
+        cfg_get(run_cfg, "step_heartbeat_seconds", default=60),
+        default=60,
+    )
     report_output_path = resolve_config_relative_path(
         orch_cfg_path,
         cfg_get(run_cfg, "report_output_path", default=str(Path("..") / "output" / "sec_form4_orchestrator_report.json")),
@@ -1160,6 +1212,40 @@ def main() -> None:
             f"sec={sec_fallback_days} days, form4={form4_fallback_days} days."
         )
     form4_reconcile_current_quarter = bool(cfg_get(profile_cfg, "form4_reconcile_current_quarter", default=False))
+    form4_max_index_days = parse_optional_int(
+        cfg_get(profile_cfg, "form4_max_index_days", default=None),
+        config_key=f"profiles.{profile}.form4_max_index_days",
+    )
+    form4_max_filings = parse_optional_int(
+        cfg_get(profile_cfg, "form4_max_filings", default=None),
+        config_key=f"profiles.{profile}.form4_max_filings",
+    )
+    form4_max_reconcile_filings = parse_optional_int(
+        cfg_get(profile_cfg, "form4_max_reconcile_filings", default=None),
+        config_key=f"profiles.{profile}.form4_max_reconcile_filings",
+    )
+    form4_progress_every_filings = parse_optional_int(
+        cfg_get(profile_cfg, "form4_progress_every_filings", default=None),
+        config_key=f"profiles.{profile}.form4_progress_every_filings",
+    )
+    form4_progress_interval_sec = parse_optional_int(
+        cfg_get(profile_cfg, "form4_progress_interval_sec", default=None),
+        config_key=f"profiles.{profile}.form4_progress_interval_sec",
+    )
+    form4_stop_after_sec = parse_optional_int(
+        cfg_get(profile_cfg, "form4_stop_after_sec", default=None),
+        config_key=f"profiles.{profile}.form4_stop_after_sec",
+    )
+    for config_key, value in {
+        f"profiles.{profile}.form4_max_index_days": form4_max_index_days,
+        f"profiles.{profile}.form4_max_filings": form4_max_filings,
+        f"profiles.{profile}.form4_max_reconcile_filings": form4_max_reconcile_filings,
+        f"profiles.{profile}.form4_progress_every_filings": form4_progress_every_filings,
+        f"profiles.{profile}.form4_progress_interval_sec": form4_progress_interval_sec,
+        f"profiles.{profile}.form4_stop_after_sec": form4_stop_after_sec,
+    }.items():
+        if value is not None and value < 0:
+            raise ValueError(f"{config_key} must be >= 0 or null, got {value!r}")
     run_form4_quarterly_backfill_enabled = bool(
         cfg_get(profile_cfg, "run_form4_quarterly_backfill", default=False)
     )
@@ -1286,8 +1372,15 @@ def main() -> None:
                 start_date=form4_start,
                 end_date=end_date,
                 reconcile_current_quarter=form4_reconcile_current_quarter,
+                max_index_days=form4_max_index_days,
+                max_filings=form4_max_filings,
+                max_reconcile_filings=form4_max_reconcile_filings,
+                progress_every_filings=form4_progress_every_filings,
+                progress_interval_sec=form4_progress_interval_sec,
+                stop_after_sec=form4_stop_after_sec,
                 dry_run=dry_run,
                 timeout_seconds=step_timeout_seconds,
+                heartbeat_seconds=step_heartbeat_seconds,
             )
         else:
             print("Skipping Form4 ingest/fetch: no new dates to pull.")
@@ -1461,11 +1554,19 @@ def main() -> None:
         "end_date": to_iso(end_date),
         "dry_run": dry_run,
         "step_timeout_seconds": step_timeout_seconds,
+        "step_heartbeat_seconds": step_heartbeat_seconds,
         "incremental_from_latest_filing": incremental_from_latest,
         "sec_latest_filing_date_before_run": to_iso(sec_latest) if sec_latest else None,
         "form4_latest_filing_date_before_run": to_iso(form4_latest) if form4_latest else None,
         "sec_start_date": to_iso(sec_start) if sec_start else None,
         "form4_start_date": to_iso(form4_start) if form4_start else None,
+        "form4_reconcile_current_quarter": form4_reconcile_current_quarter,
+        "form4_max_index_days": form4_max_index_days,
+        "form4_max_filings": form4_max_filings,
+        "form4_max_reconcile_filings": form4_max_reconcile_filings,
+        "form4_progress_every_filings": form4_progress_every_filings,
+        "form4_progress_interval_sec": form4_progress_interval_sec,
+        "form4_stop_after_sec": form4_stop_after_sec,
         "alignment_enabled": align_enabled,
         "alignment_start_date": to_iso(align_start) if align_start is not None else None,
         "sec_snapshot_table": sec_table,

@@ -35,7 +35,7 @@ SOURCE_FIELDS = [
     "borrow_fee_rate",
     "source_timestamp",
 ]
-REQUIRED_IBKR_BORROW_GENERIC_TICKS = ("236", "237", "499")
+REQUIRED_IBKR_BORROW_GENERIC_TICKS = ("236", "499")
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,11 +56,11 @@ def to_float(raw: object) -> float | None:
         value = float(str(raw).strip())
     except (TypeError, ValueError):
         return None
-    return value if value == value else None
+    return value if math.isfinite(value) else None
 
 
 def borrow_generic_tick_list(config: dict[str, Any]) -> str:
-    raw_ticks = str(cfg_get(config, "ibkr_borrow_ingestion.generic_tick_list", "236,237,499") or "")
+    raw_ticks = str(cfg_get(config, "ibkr_borrow_ingestion.generic_tick_list", "236,499") or "")
     ticks: list[str] = []
     for raw_tick in raw_ticks.replace(";", ",").split(","):
         tick = raw_tick.strip()
@@ -178,6 +178,8 @@ def fetch_ib_rows(companies: list[dict[str, Any]], *, asof: str, source_id: str,
                 "ticks": [str(tick) for tick in getattr(snapshot, "ticks", [])],
                 "genericTickList": generic_ticks,
             }
+            fee_rate = to_float(payload["feeRate"])
+            rebate_rate = to_float(payload["rebateRate"])
             rows.append(
                 {
                     "ticker": ticker,
@@ -186,7 +188,7 @@ def fetch_ib_rows(companies: list[dict[str, Any]], *, asof: str, source_id: str,
                     "company_id": int(company["company_id"]),
                     "shortable_status": to_float(payload["shortable"]),
                     "shortable_shares": to_float(payload["shortableShares"]),
-                    "borrow_fee_rate": to_float(payload["feeRate"]) or to_float(payload["rebateRate"]),
+                    "borrow_fee_rate": fee_rate if fee_rate is not None else rebate_rate,
                     "source_timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                     "payload_json": json.dumps(payload, sort_keys=True, ensure_ascii=True),
                 }

@@ -1248,12 +1248,28 @@ def cap_fda_alpha_for_review_state(row: FdaFeatureRow, score: float, *, policy: 
     return score
 
 
+FDA_PROFILE_COHORT_ALIASES = {
+    "capital_equipment_procedure_platforms": "capital_equipment_imaging_monitoring",
+    "home_chronic_care_devices_dme_drug_delivery": "diabetes_wearables_drug_delivery",
+    "healthcare_services_cro_lab_services": "healthcare_services_cro_other",
+    "hospital_supplies_surgical_consumables_oem": "hospital_supplies_consumables_dme",
+    "orthopedics_spine_sports_implants": "orthopedics_spine_dental",
+    "surgical_robotics_platforms": "capital_equipment_procedure_platforms",
+}
+
+
 def fda_profile_for_row(
     row: FdaFeatureRow,
     default_profile: FdaSignalProfile,
     profiles: dict[str, FdaSignalProfile],
 ) -> FdaSignalProfile:
-    return profiles.get(row.calibration_cohort, default_profile)
+    cohort = str(row.calibration_cohort or "")
+    if cohort in profiles:
+        return profiles[cohort]
+    alias = FDA_PROFILE_COHORT_ALIASES.get(cohort)
+    if alias and alias in profiles:
+        return profiles[alias]
+    return default_profile
 
 
 def apply_fda_alpha_scores(

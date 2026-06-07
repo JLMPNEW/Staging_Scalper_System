@@ -101,6 +101,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tickers", type=int, default=0, help="Smoke-test limit. 0 means all.")
     parser.add_argument("--start-date", type=str, default="", help="Reload Yahoo adjusted history on or after this YYYY-MM-DD date.")
     parser.add_argument("--refetch-days", type=int, default=-1, help="Rolling refetch window. 0 means reload from configured start date.")
+    parser.add_argument(
+        "--offline-existing-bars",
+        action="store_true",
+        help="Build the as-of market snapshot/features only from existing yahoo_adjusted bars without network fetches.",
+    )
     parser.add_argument("--allow-partial", action="store_true", help="Return success even if one or more ticker updates fail.")
     return parser.parse_args()
 
@@ -915,11 +920,14 @@ def main() -> None:
             asof_decision.reason,
         )
     asof_date = asof_decision.effective_asof
-    if configured_start_date > asof_date:
-        raise ValueError(f"yahoo_market_data.start_date {configured_start_date.isoformat()} is after effective as-of date {asof_date.isoformat()}")
     if explicit_start_date is not None and explicit_start_date > asof_date:
         raise ValueError(f"--start-date {explicit_start_date.isoformat()} is after effective as-of date {asof_date.isoformat()}")
+    history_start_date = explicit_start_date or configured_start_date
+    if history_start_date > asof_date:
+        start_source = "--start-date" if explicit_start_date is not None else "yahoo_market_data.start_date"
+        raise ValueError(f"{start_source} {history_start_date.isoformat()} is after effective as-of date {asof_date.isoformat()}")
     refetch_days = args.refetch_days if args.refetch_days >= 0 else int(cfg_get(config, "yahoo_market_data.refetch_days", 0))
+    offline_existing_bars = bool(args.offline_existing_bars)
     continuity_max_missing_days = int(cfg_get(config, "yahoo_market_data.continuity_max_missing_days", cfg_get(config, "ib_market_data.continuity_max_missing_days", 2)))
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if value.strip()}
@@ -949,30 +957,34 @@ def main() -> None:
             LOGGER.info("Loaded %d company job(s) for Yahoo adjusted market sync", len(companies))
             all_symbols = [benchmark_ticker, *[company.ticker for company in companies]]
             latest_bar_dates = load_latest_bar_dates(conn, tickers=all_symbols, source=source)
-            benchmark_start = explicit_start_date or compute_fetch_start(
-                configured_start_date,
+            benchmark_start = compute_fetch_start(
+                history_start_date,
                 asof_date,
                 latest_bar_dates.get(benchmark_ticker),
                 refetch_days,
             )
             benchmark_refresh_failed = False
-            try:
-                benchmark_fetched = fetch_yahoo_bars(
-                    benchmark_ticker,
-                    start_date=benchmark_start,
-                    asof_date=asof_date,
-                    source=source,
-                    provisional_asof=asof_decision.provisional_asof,
-                )
-            except Exception as exc:
+            if offline_existing_bars:
                 benchmark_fetched = []
-                benchmark_refresh_failed = True
-                LOGGER.warning("Yahoo adjusted benchmark fetch failed for %s; trying existing DB bars: %s", benchmark_ticker, exc)
+                LOGGER.info("Yahoo adjusted benchmark using existing DB bars only for %s through %s", benchmark_ticker, asof_date.isoformat())
+            else:
+                try:
+                    benchmark_fetched = fetch_yahoo_bars(
+                        benchmark_ticker,
+                        start_date=benchmark_start,
+                        asof_date=asof_date,
+                        source=source,
+                        provisional_asof=asof_decision.provisional_asof,
+                    )
+                except Exception as exc:
+                    benchmark_fetched = []
+                    benchmark_refresh_failed = True
+                    LOGGER.warning("Yahoo adjusted benchmark fetch failed for %s; trying existing DB bars: %s", benchmark_ticker, exc)
             benchmark_existing = load_existing_bars(
                 conn,
                 ticker=benchmark_ticker,
                 source=source,
-                start_date=configured_start_date,
+                start_date=history_start_date,
                 asof_date=asof_date,
             )
             benchmark_bars = merge_bars(benchmark_existing, benchmark_fetched)
@@ -989,30 +1001,33 @@ def main() -> None:
             reused_existing_tickers: list[str] = []
             for idx, company in enumerate(companies, start=1):
                 try:
-                    fetch_start = explicit_start_date or compute_fetch_start(
-                        configured_start_date,
+                    fetch_start = compute_fetch_start(
+                        history_start_date,
                         asof_date,
                         latest_bar_dates.get(company.ticker),
                         refetch_days,
                     )
                     fetch_error: Exception | None = None
-                    try:
-                        fetched = fetch_yahoo_bars(
-                            company.ticker,
-                            start_date=fetch_start,
-                            asof_date=asof_date,
-                            source=source,
-                            provisional_asof=asof_decision.provisional_asof,
-                        )
-                    except Exception as exc:
+                    if offline_existing_bars:
                         fetched = []
-                        fetch_error = exc
-                        LOGGER.warning("Yahoo adjusted fetch failed for %s; trying existing DB bars: %s", company.ticker, exc)
+                    else:
+                        try:
+                            fetched = fetch_yahoo_bars(
+                                company.ticker,
+                                start_date=fetch_start,
+                                asof_date=asof_date,
+                                source=source,
+                                provisional_asof=asof_decision.provisional_asof,
+                            )
+                        except Exception as exc:
+                            fetched = []
+                            fetch_error = exc
+                            LOGGER.warning("Yahoo adjusted fetch failed for %s; trying existing DB bars: %s", company.ticker, exc)
                     existing = load_existing_bars(
                         conn,
                         ticker=company.ticker,
                         source=source,
-                        start_date=configured_start_date,
+                        start_date=history_start_date,
                         asof_date=asof_date,
                     )
                     bars = merge_bars(existing, fetched)
@@ -1035,10 +1050,11 @@ def main() -> None:
                     snapshots.append(snapshot)
                     features.append(feature)
                     LOGGER.info(
-                        "[%d/%d] %s fetched=%d bars=%d continuity=%s quality=%s",
+                        "[%d/%d] %s mode=%s fetched=%d bars=%d continuity=%s quality=%s",
                         idx,
                         len(companies),
                         company.ticker,
+                        "offline_existing_bars" if offline_existing_bars else "fetch",
                         len(fetched),
                         len(bars),
                         feature.get("continuity_status"),
@@ -1064,7 +1080,8 @@ def main() -> None:
             message = (
                 f"requested_asof={asof_decision.requested_asof.isoformat()} "
                 f"effective_asof={asof_date.isoformat()} source={source} "
-                f"start_date={explicit_start_date.isoformat() if explicit_start_date else configured_start_date.isoformat()} "
+                f"mode={'offline_existing_bars' if offline_existing_bars else 'fetch'} "
+                f"start_date={history_start_date.isoformat()} "
                 f"refetch_days={refetch_days} output={output_csv}"
             )
             if unique_failed_tickers:

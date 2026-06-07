@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
-from med_devices.core.text_norm import normalize_ticker  # noqa: E402
+from med_devices.core.text_norm import normalize_cik, normalize_ticker  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -53,7 +54,14 @@ def to_float(raw: object) -> float | None:
         value = float(str(raw).replace(",", "").strip())
     except (TypeError, ValueError):
         return None
-    return value if value == value else None
+    return value if math.isfinite(value) else None
+
+
+def normalize_pct_decimal(raw: object) -> float | None:
+    value = to_float(raw)
+    if value is None:
+        return None
+    return value / 100.0 if abs(value) > 2.0 else value
 
 
 def ensure_source(conn: Any, source_id: str) -> None:
@@ -90,21 +98,27 @@ def load_rows(path: Path, *, source_id: str, company_by_ticker: dict[str, dict[s
             if not accession:
                 accession = f"aggregate_{report_date.replace('-', '')}_{ticker}_{source_id}"
             company = company_by_ticker[ticker]
+            manager_name = str(raw.get("manager_name") or raw.get("institution_name") or "").strip()
+            manager_count = to_float(raw.get("manager_count") or raw.get("institutional_manager_count"))
+            if manager_count is None and manager_name:
+                manager_count = 1.0
             rows.append(
                 {
                     "accession_nodash": accession,
                     "report_date": report_date,
                     "source_id": str(raw.get("source_id") or source_id),
-                    "manager_cik": str(raw.get("manager_cik") or raw.get("cik") or ""),
-                    "manager_name": str(raw.get("manager_name") or raw.get("institution_name") or ""),
+                    "manager_cik": normalize_cik(raw.get("manager_cik") or raw.get("cik")),
+                    "manager_name": manager_name,
                     "ticker": ticker,
                     "company_id": int(company["company_id"]),
                     "cusip": str(raw.get("cusip") or ""),
                     "shares": to_float(raw.get("shares") or raw.get("share_count") or raw.get("institutional_share_count")),
                     "market_value_usd": to_float(raw.get("market_value_usd") or raw.get("value_usd") or raw.get("value")),
-                    "manager_count": to_float(raw.get("manager_count") or raw.get("institutional_manager_count")),
-                    "institutional_ownership_pct": to_float(raw.get("institutional_ownership_pct") or raw.get("ownership_pct")),
-                    "institutional_ownership_delta_pct": to_float(
+                    "manager_count": manager_count,
+                    "institutional_ownership_pct": normalize_pct_decimal(
+                        raw.get("institutional_ownership_pct") or raw.get("ownership_pct")
+                    ),
+                    "institutional_ownership_delta_pct": normalize_pct_decimal(
                         raw.get("institutional_ownership_delta_pct") or raw.get("ownership_delta_pct")
                     ),
                     "put_call": str(raw.get("put_call") or ""),
@@ -129,16 +143,18 @@ def upsert_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
             payload_json, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT DO UPDATE SET
+        ON CONFLICT(accession_nodash, report_date, source_id, manager_name, ticker) DO UPDATE SET
             report_date = excluded.report_date,
             manager_cik = excluded.manager_cik,
             manager_name = excluded.manager_name,
             company_id = excluded.company_id,
+            cusip = excluded.cusip,
             shares = excluded.shares,
             market_value_usd = excluded.market_value_usd,
             manager_count = excluded.manager_count,
             institutional_ownership_pct = excluded.institutional_ownership_pct,
             institutional_ownership_delta_pct = excluded.institutional_ownership_delta_pct,
+            put_call = excluded.put_call,
             investment_discretion = excluded.investment_discretion,
             voting_authority_json = excluded.voting_authority_json,
             payload_json = excluded.payload_json,

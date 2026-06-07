@@ -240,6 +240,17 @@ def normalize_text(raw: object) -> str:
     return str(raw or "").strip()
 
 
+def row_value(row: dict[str, str], *keys: str) -> str:
+    lowered = {str(key).strip().lower(): value for key, value in row.items()}
+    for key in keys:
+        if key in row and str(row.get(key) or "").strip():
+            return str(row.get(key) or "").strip()
+        value = lowered.get(key.strip().lower())
+        if str(value or "").strip():
+            return str(value or "").strip()
+    return ""
+
+
 def normalize_float(raw: object, default: float = 0.0) -> float:
     try:
         value = float(str(raw or "").replace(",", "").strip())
@@ -442,12 +453,12 @@ def default_policy(config: dict[str, Any]) -> ValidationPolicy:
 
 def validate_identity(row: dict[str, str], policy: ValidationPolicy) -> tuple[str, list[str]]:
     reasons: list[str] = []
-    cik = normalize_cik(row.get("CIK"))
-    security_type = normalize_text(row.get("SecurityType")).lower()
-    listing_status = normalize_text(row.get("ListingStatus")).lower()
-    exchange = normalize_text(row.get("Exchange")).lower()
-    country = normalize_text(row.get("Country")).lower()
-    currency = normalize_text(row.get("Currency")).upper()
+    cik = normalize_cik(row_value(row, "CIK", "cik"))
+    security_type = normalize_text(row_value(row, "SecurityType", "security_type")).lower()
+    listing_status = normalize_text(row_value(row, "ListingStatus", "listing_status")).lower()
+    exchange = normalize_text(row_value(row, "Exchange", "exchange")).lower()
+    country = normalize_text(row_value(row, "Country", "country")).lower()
+    currency = normalize_text(row_value(row, "Currency", "currency")).upper()
 
     if not cik:
         reasons.append("missing_cik")
@@ -783,11 +794,13 @@ def write_clean_input_rows(path: Path, input_rows: list[dict[str, str]], keep_ti
     fieldnames = list(input_rows[0].keys()) if input_rows else []
     rows: list[dict[str, str]] = []
     for row in input_rows:
-        if normalize_ticker(row.get("Name") or row.get("Ticker")) not in keep_tickers:
+        if normalize_ticker(row_value(row, "Name", "Ticker", "ticker", "symbol")) not in keep_tickers:
             continue
         out = dict(row)
         if "CIK" in out:
             out["CIK"] = normalize_cik(out.get("CIK"))
+        if "cik" in out:
+            out["cik"] = normalize_cik(out.get("cik"))
         rows.append(out)
     write_csv(path, rows, fieldnames)
 
@@ -804,20 +817,20 @@ def validate_one(
     cache_ttl_hours: float,
     user_agent: str,
 ) -> dict[str, Any]:
-    ticker = normalize_ticker(row.get("Name") or row.get("Ticker"))
-    cik = normalize_cik(row.get("CIK"))
-    company_name = normalize_text(row.get("Company_Name") or row.get("CompanyName"))
+    ticker = normalize_ticker(row_value(row, "Name", "Ticker", "ticker", "symbol"))
+    cik = normalize_cik(row_value(row, "CIK", "cik"))
+    company_name = normalize_text(row_value(row, "Company_Name", "CompanyName", "company_name", "name"))
     out: dict[str, Any] = {
         "ticker": ticker,
         "company_name": company_name,
         "cik": cik,
-        "exchange": normalize_text(row.get("Exchange")),
-        "security_type": normalize_text(row.get("SecurityType")),
-        "listing_status": normalize_text(row.get("ListingStatus")),
-        "country": normalize_text(row.get("Country")),
-        "currency": normalize_text(row.get("Currency")),
-        "input_industry": normalize_text(row.get("Industry")),
-        "input_index": normalize_text(row.get("Index")),
+        "exchange": normalize_text(row_value(row, "Exchange", "exchange")),
+        "security_type": normalize_text(row_value(row, "SecurityType", "security_type")),
+        "listing_status": normalize_text(row_value(row, "ListingStatus", "listing_status")),
+        "country": normalize_text(row_value(row, "Country", "country")),
+        "currency": normalize_text(row_value(row, "Currency", "currency")),
+        "input_industry": normalize_text(row_value(row, "Industry", "industry")),
+        "input_index": normalize_text(row_value(row, "Index", "index")),
     }
 
     identity_status, identity_reasons = validate_identity(row, policy)

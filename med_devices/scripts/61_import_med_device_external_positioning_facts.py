@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sqlite3
 import sys
 from datetime import datetime
@@ -35,6 +36,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--history-start", default="")
     parser.add_argument("--asof", default="")
     parser.add_argument("--output-csv", type=Path, default=None)
+    parser.add_argument(
+        "--sources",
+        default="",
+        help="Comma-separated subset to import: short_interest,borrow,13f,form4. Defaults to all.",
+    )
     return parser.parse_args()
 
 
@@ -43,7 +49,7 @@ def to_float(raw: object) -> float | None:
         value = float(str(raw).replace(",", "").strip())
     except (TypeError, ValueError):
         return None
-    return value if value == value else None
+    return value if math.isfinite(value) else None
 
 
 def int_flag(raw: object) -> int:
@@ -87,6 +93,37 @@ def qmarks(values: list[str]) -> str:
     return ",".join("?" for _ in values)
 
 
+VALID_IMPORT_SOURCES = {"short_interest", "borrow", "13f", "form4"}
+
+
+def parse_sources(raw: str) -> set[str]:
+    if not str(raw or "").strip():
+        return set(VALID_IMPORT_SOURCES)
+    aliases = {
+        "short": "short_interest",
+        "shortinterest": "short_interest",
+        "short_interest": "short_interest",
+        "borrow": "borrow",
+        "ibkr": "borrow",
+        "13f": "13f",
+        "sec13f": "13f",
+        "institutional": "13f",
+        "form4": "form4",
+        "form_4": "form4",
+        "insider": "form4",
+    }
+    out: set[str] = set()
+    for value in str(raw or "").replace(";", ",").split(","):
+        key = value.strip().lower()
+        if not key:
+            continue
+        source = aliases.get(key, key)
+        if source not in VALID_IMPORT_SOURCES:
+            raise ValueError(f"Unknown import source {value!r}; expected one of {sorted(VALID_IMPORT_SOURCES)}")
+        out.add(source)
+    return out or set(VALID_IMPORT_SOURCES)
+
+
 def import_short_interest(conn: Any, mp_conn: sqlite3.Connection, *, companies: dict[str, dict[str, Any]], start: str, asof: str) -> int:
     source_id = "finra_equity_short_interest"
     ensure_source(conn, source_id, name="FINRA equity short interest snapshots")
@@ -102,42 +139,43 @@ def import_short_interest(conn: Any, mp_conn: sqlite3.Connection, *, companies: 
         (*tickers, start, asof),
     ).fetchall()
     now = utc_now()
-    conn.executemany(
-        """
-        INSERT INTO fact_short_interest(
-            ticker, settlement_date, source_id, company_id, short_interest, avg_daily_volume,
-            days_to_cover, float_shares, short_interest_pct_float, publication_date,
-            payload_json, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(ticker, settlement_date, source_id) DO UPDATE SET
-            company_id = excluded.company_id,
-            short_interest = excluded.short_interest,
-            days_to_cover = excluded.days_to_cover,
-            float_shares = excluded.float_shares,
-            short_interest_pct_float = excluded.short_interest_pct_float,
-            publication_date = excluded.publication_date,
-            payload_json = excluded.payload_json,
-            updated_at = excluded.updated_at
-        """,
-        [
-            (
-                normalize_ticker(row["ticker"]),
-                row["settlement_date"],
-                source_id,
-                int(companies[normalize_ticker(row["ticker"])]["company_id"]),
-                to_float(row["short_interest_shares"]),
-                to_float(row["days_to_cover"]),
-                to_float(row["float_shares"]),
-                to_float(row["short_interest_pct_float"]),
-                row["publication_date"],
-                json.dumps(dict(row), sort_keys=True, ensure_ascii=True),
-                now,
-                now,
+    with conn:
+        conn.executemany(
+            """
+            INSERT INTO fact_short_interest(
+                ticker, settlement_date, source_id, company_id, short_interest, avg_daily_volume,
+                days_to_cover, float_shares, short_interest_pct_float, publication_date,
+                payload_json, created_at, updated_at
             )
-            for row in rows
-        ],
-    )
+            VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, settlement_date, source_id) DO UPDATE SET
+                company_id = excluded.company_id,
+                short_interest = excluded.short_interest,
+                days_to_cover = excluded.days_to_cover,
+                float_shares = excluded.float_shares,
+                short_interest_pct_float = excluded.short_interest_pct_float,
+                publication_date = excluded.publication_date,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at
+            """,
+            [
+                (
+                    normalize_ticker(row["ticker"]),
+                    row["settlement_date"],
+                    source_id,
+                    int(companies[normalize_ticker(row["ticker"])]["company_id"]),
+                    to_float(row["short_interest_shares"]),
+                    to_float(row["days_to_cover"]),
+                    to_float(row["float_shares"]),
+                    to_float(row["short_interest_pct_float"]),
+                    row["publication_date"],
+                    json.dumps(dict(row), sort_keys=True, ensure_ascii=True),
+                    now,
+                    now,
+                )
+                for row in rows
+            ],
+        )
     return len(rows)
 
 
@@ -166,62 +204,63 @@ def import_borrow(conn: Any, mp_conn: sqlite3.Connection, *, companies: dict[str
         (*tickers, start, asof),
     ).fetchall()
     now = utc_now()
-    conn.executemany(
-        """
-        INSERT INTO fact_ibkr_borrow_snapshot(
-            ticker, asof_date, source_id, company_id, shortable_status, shortable_shares,
-            borrow_fee_rate, source_timestamp, payload_json, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?)
-        ON CONFLICT(ticker, asof_date, source_id) DO UPDATE SET
-            company_id = excluded.company_id,
-            shortable_shares = COALESCE(excluded.shortable_shares, fact_ibkr_borrow_snapshot.shortable_shares),
-            source_timestamp = COALESCE(NULLIF(excluded.source_timestamp, ''), fact_ibkr_borrow_snapshot.source_timestamp),
-            payload_json = excluded.payload_json,
-            updated_at = excluded.updated_at
-        """,
-        [
-            (
-                normalize_ticker(row["ticker"]),
-                row["asof_date"],
-                source_id,
-                int(companies[normalize_ticker(row["ticker"])]["company_id"]),
-                to_float(row["shortable_shares"]),
-                row["asof_datetime"],
-                json.dumps(dict(row), sort_keys=True, ensure_ascii=True),
-                now,
-                now,
+    with conn:
+        conn.executemany(
+            """
+            INSERT INTO fact_ibkr_borrow_snapshot(
+                ticker, asof_date, source_id, company_id, shortable_status, shortable_shares,
+                borrow_fee_rate, source_timestamp, payload_json, created_at, updated_at
             )
-            for row in share_rows
-        ],
-    )
-    conn.executemany(
-        """
-        INSERT INTO fact_ibkr_borrow_snapshot(
-            ticker, asof_date, source_id, company_id, shortable_status, shortable_shares,
-            borrow_fee_rate, source_timestamp, payload_json, created_at, updated_at
+            VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?)
+            ON CONFLICT(ticker, asof_date, source_id) DO UPDATE SET
+                company_id = excluded.company_id,
+                shortable_shares = COALESCE(excluded.shortable_shares, fact_ibkr_borrow_snapshot.shortable_shares),
+                source_timestamp = COALESCE(NULLIF(excluded.source_timestamp, ''), fact_ibkr_borrow_snapshot.source_timestamp),
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at
+            """,
+            [
+                (
+                    normalize_ticker(row["ticker"]),
+                    row["asof_date"],
+                    source_id,
+                    int(companies[normalize_ticker(row["ticker"])]["company_id"]),
+                    to_float(row["shortable_shares"]),
+                    row["asof_datetime"],
+                    json.dumps(dict(row), sort_keys=True, ensure_ascii=True),
+                    now,
+                    now,
+                )
+                for row in share_rows
+            ],
         )
-        VALUES (?, ?, ?, ?, NULL, NULL, ?, '', ?, ?, ?)
-        ON CONFLICT(ticker, asof_date, source_id) DO UPDATE SET
-            company_id = excluded.company_id,
-            borrow_fee_rate = COALESCE(excluded.borrow_fee_rate, fact_ibkr_borrow_snapshot.borrow_fee_rate),
-            payload_json = excluded.payload_json,
-            updated_at = excluded.updated_at
-        """,
-        [
-            (
-                normalize_ticker(row["ticker"]),
-                row["asof_date"],
-                source_id,
-                int(companies[normalize_ticker(row["ticker"])]["company_id"]),
-                to_float(row["borrow_fee_rate"]),
-                json.dumps(dict(row), sort_keys=True, ensure_ascii=True),
-                now,
-                now,
+        conn.executemany(
+            """
+            INSERT INTO fact_ibkr_borrow_snapshot(
+                ticker, asof_date, source_id, company_id, shortable_status, shortable_shares,
+                borrow_fee_rate, source_timestamp, payload_json, created_at, updated_at
             )
-            for row in fee_rows
-        ],
-    )
+            VALUES (?, ?, ?, ?, NULL, NULL, ?, '', ?, ?, ?)
+            ON CONFLICT(ticker, asof_date, source_id) DO UPDATE SET
+                company_id = excluded.company_id,
+                borrow_fee_rate = COALESCE(excluded.borrow_fee_rate, fact_ibkr_borrow_snapshot.borrow_fee_rate),
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at
+            """,
+            [
+                (
+                    normalize_ticker(row["ticker"]),
+                    row["asof_date"],
+                    source_id,
+                    int(companies[normalize_ticker(row["ticker"])]["company_id"]),
+                    to_float(row["borrow_fee_rate"]),
+                    json.dumps(dict(row), sort_keys=True, ensure_ascii=True),
+                    now,
+                    now,
+                )
+                for row in fee_rows
+            ],
+        )
     return len(share_rows) + len(fee_rows)
 
 
@@ -274,7 +313,7 @@ def import_13f_snapshots(conn: Any, mp_conn: sqlite3.Connection, *, companies: d
         ticker = normalize_ticker(row["ticker"])
         shares = to_float(row["institutional_shares"]) or 0.0
         prior_shares = prior_by_ticker.get(ticker)
-        delta = (shares - prior_shares) / prior_shares if prior_shares and prior_shares > 0.0 else 0.0
+        delta = (shares - prior_shares) / prior_shares if prior_shares and prior_shares > 0.0 else None
         prior_by_ticker[ticker] = shares
         rows.append(
             {
@@ -287,51 +326,52 @@ def import_13f_snapshots(conn: Any, mp_conn: sqlite3.Connection, *, companies: d
             }
         )
     now = utc_now()
-    conn.execute(
-        """
-        DELETE FROM fact_sec_13f_holding
-        WHERE source_id = ?
-          AND manager_name = 'aggregate_13f_snapshot'
-          AND report_date >= ?
-          AND report_date <= ?
-        """,
-        (source_id, start, asof),
-    )
-    conn.executemany(
-        """
-        INSERT INTO fact_sec_13f_holding(
-            accession_nodash, report_date, source_id, manager_cik, manager_name, ticker,
-            company_id, cusip, shares, market_value_usd, manager_count, institutional_ownership_pct,
-            institutional_ownership_delta_pct, put_call, investment_discretion, voting_authority_json,
-            payload_json, created_at, updated_at
+    with conn:
+        conn.execute(
+            """
+            DELETE FROM fact_sec_13f_holding
+            WHERE source_id = ?
+              AND manager_name = 'aggregate_13f_snapshot'
+              AND report_date >= ?
+              AND report_date <= ?
+            """,
+            (source_id, start, asof),
         )
-        VALUES (?, ?, ?, '', 'aggregate_13f_snapshot', ?, ?, '', ?, ?, ?, NULL, ?, '', '', '', ?, ?, ?)
-        ON CONFLICT DO UPDATE SET
-            shares = excluded.shares,
-            market_value_usd = excluded.market_value_usd,
-            manager_count = excluded.manager_count,
-            institutional_ownership_delta_pct = excluded.institutional_ownership_delta_pct,
-            payload_json = excluded.payload_json,
-            updated_at = excluded.updated_at
-        """,
-        [
-            (
-                f"aggregate_{normalize_ticker(row['ticker'])}_{str(row['period_of_report']).replace('-', '')}",
-                row["period_of_report"],
-                source_id,
-                normalize_ticker(row["ticker"]),
-                int(companies[normalize_ticker(row["ticker"])]["company_id"]),
-                to_float(row["institutional_shares"]),
-                to_float(row["institutional_value"]),
-                to_float(row["manager_count"]),
-                to_float(row["institutional_ownership_delta_pct"]),
-                json.dumps(dict(row), sort_keys=True, ensure_ascii=True),
-                now,
-                now,
+        conn.executemany(
+            """
+            INSERT INTO fact_sec_13f_holding(
+                accession_nodash, report_date, source_id, manager_cik, manager_name, ticker,
+                company_id, cusip, shares, market_value_usd, manager_count, institutional_ownership_pct,
+                institutional_ownership_delta_pct, put_call, investment_discretion, voting_authority_json,
+                payload_json, created_at, updated_at
             )
-            for row in rows
-        ],
-    )
+            VALUES (?, ?, ?, '', 'aggregate_13f_snapshot', ?, ?, '', ?, ?, ?, NULL, ?, '', '', '', ?, ?, ?)
+            ON CONFLICT(accession_nodash, report_date, source_id, manager_name, ticker) DO UPDATE SET
+                shares = excluded.shares,
+                market_value_usd = excluded.market_value_usd,
+                manager_count = excluded.manager_count,
+                institutional_ownership_delta_pct = excluded.institutional_ownership_delta_pct,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at
+            """,
+            [
+                (
+                    f"aggregate_{normalize_ticker(row['ticker'])}_{str(row['period_of_report']).replace('-', '')}",
+                    row["period_of_report"],
+                    source_id,
+                    normalize_ticker(row["ticker"]),
+                    int(companies[normalize_ticker(row["ticker"])]["company_id"]),
+                    to_float(row["institutional_shares"]),
+                    to_float(row["institutional_value"]),
+                    to_float(row["manager_count"]),
+                    to_float(row["institutional_ownership_delta_pct"]),
+                    json.dumps(dict(row), sort_keys=True, ensure_ascii=True),
+                    now,
+                    now,
+                )
+                for row in rows
+            ],
+        )
     return len(rows)
 
 
@@ -405,37 +445,38 @@ def import_form4(conn: Any, form4_conn: sqlite3.Connection, *, companies: dict[s
                 now,
             )
         )
-    conn.executemany(
-        """
-        INSERT INTO fact_sec_form4_transaction(
-            accession_nodash, transaction_id, source_id, company_id, ticker, issuer_cik,
-            reporting_owner_cik, reporting_owner_name, officer_title, is_director, is_officer,
-            is_ten_percent_owner, transaction_date, transaction_code, transaction_shares,
-            transaction_price, transaction_value_usd, direct_or_indirect, post_transaction_shares,
-            derivative_flag, payload_json, created_at, updated_at
+    with conn:
+        conn.executemany(
+            """
+            INSERT INTO fact_sec_form4_transaction(
+                accession_nodash, transaction_id, source_id, company_id, ticker, issuer_cik,
+                reporting_owner_cik, reporting_owner_name, officer_title, is_director, is_officer,
+                is_ten_percent_owner, transaction_date, transaction_code, transaction_shares,
+                transaction_price, transaction_value_usd, direct_or_indirect, post_transaction_shares,
+                derivative_flag, payload_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(accession_nodash, transaction_id, source_id) DO UPDATE SET
+                company_id = excluded.company_id,
+                ticker = excluded.ticker,
+                reporting_owner_cik = excluded.reporting_owner_cik,
+                reporting_owner_name = excluded.reporting_owner_name,
+                officer_title = excluded.officer_title,
+                is_director = excluded.is_director,
+                is_officer = excluded.is_officer,
+                is_ten_percent_owner = excluded.is_ten_percent_owner,
+                transaction_date = excluded.transaction_date,
+                transaction_code = excluded.transaction_code,
+                transaction_shares = excluded.transaction_shares,
+                transaction_price = excluded.transaction_price,
+                transaction_value_usd = excluded.transaction_value_usd,
+                direct_or_indirect = excluded.direct_or_indirect,
+                post_transaction_shares = excluded.post_transaction_shares,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at
+            """,
+            filtered,
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(accession_nodash, transaction_id, source_id) DO UPDATE SET
-            company_id = excluded.company_id,
-            ticker = excluded.ticker,
-            reporting_owner_cik = excluded.reporting_owner_cik,
-            reporting_owner_name = excluded.reporting_owner_name,
-            officer_title = excluded.officer_title,
-            is_director = excluded.is_director,
-            is_officer = excluded.is_officer,
-            is_ten_percent_owner = excluded.is_ten_percent_owner,
-            transaction_date = excluded.transaction_date,
-            transaction_code = excluded.transaction_code,
-            transaction_shares = excluded.transaction_shares,
-            transaction_price = excluded.transaction_price,
-            transaction_value_usd = excluded.transaction_value_usd,
-            direct_or_indirect = excluded.direct_or_indirect,
-            post_transaction_shares = excluded.post_transaction_shares,
-            payload_json = excluded.payload_json,
-            updated_at = excluded.updated_at
-        """,
-        filtered,
-    )
     return len(filtered)
 
 
@@ -464,6 +505,7 @@ def main() -> None:
         if args.sec_form4_db
         else Path(str(cfg_get(config, "external_positioning_import.sec_form4_db_path"))).expanduser().resolve()
     )
+    sources = parse_sources(args.sources)
     start = args.history_start.strip() or str(cfg_get(config, "external_positioning_import.history_start", "2019-01-01"))
     asof = args.asof.strip() or datetime.now().date().isoformat()
     output_csv = (
@@ -471,9 +513,11 @@ def main() -> None:
         if args.output_csv
         else resolve_path(cfg_get(config, "external_positioning_import.output_csv"), base_dir=base_dir)
     )
-    if not market_db.exists():
+    needs_market_db = bool(sources & {"short_interest", "borrow", "13f"})
+    needs_form4_db = "form4" in sources
+    if needs_market_db and not market_db.exists():
         raise FileNotFoundError(f"market_positioning DB not found: {market_db}")
-    if not form4_db.exists():
+    if needs_form4_db and not form4_db.exists():
         raise FileNotFoundError(f"SEC Form 4 DB not found: {form4_db}")
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
@@ -481,31 +525,62 @@ def main() -> None:
         run_id = start_run(conn, run_type="import_med_device_external_positioning_facts", input_path=config_path)
         try:
             companies = company_map(conn)
-            mp_conn = sqlite3.connect(str(market_db))
-            mp_conn.row_factory = sqlite3.Row
-            form4_conn = sqlite3.connect(str(form4_db))
-            form4_conn.row_factory = sqlite3.Row
-            rows = [
-                {
-                    "source_table": "short_interest_snapshots",
-                    "rows_imported": import_short_interest(conn, mp_conn, companies=companies, start=start, asof=asof),
-                },
-                {
-                    "source_table": "ibkr_borrow",
-                    "rows_imported": import_borrow(conn, mp_conn, companies=companies, start=start, asof=asof),
-                },
-                {
-                    "source_table": "institutional_13f_ownership_snapshots",
-                    "rows_imported": import_13f_snapshots(conn, mp_conn, companies=companies, start=start, asof=asof),
-                },
-                {
-                    "source_table": "sec_ownership_nonderiv_trans",
-                    "rows_imported": import_form4(conn, form4_conn, companies=companies, start=start, asof=asof),
-                },
-            ]
+            rows: list[dict[str, Any]] = []
+            mp_conn: sqlite3.Connection | None = None
+            form4_conn: sqlite3.Connection | None = None
+            try:
+                if needs_market_db:
+                    mp_conn = sqlite3.connect(str(market_db))
+                    mp_conn.row_factory = sqlite3.Row
+                if needs_form4_db:
+                    form4_conn = sqlite3.connect(str(form4_db))
+                    form4_conn.row_factory = sqlite3.Row
+                if "short_interest" in sources:
+                    assert mp_conn is not None
+                    rows.append(
+                        {
+                            "source_table": "short_interest_snapshots",
+                            "rows_imported": import_short_interest(conn, mp_conn, companies=companies, start=start, asof=asof),
+                        }
+                    )
+                if "borrow" in sources:
+                    assert mp_conn is not None
+                    rows.append(
+                        {
+                            "source_table": "ibkr_borrow",
+                            "rows_imported": import_borrow(conn, mp_conn, companies=companies, start=start, asof=asof),
+                        }
+                    )
+                if "13f" in sources:
+                    assert mp_conn is not None
+                    rows.append(
+                        {
+                            "source_table": "institutional_13f_ownership_snapshots",
+                            "rows_imported": import_13f_snapshots(conn, mp_conn, companies=companies, start=start, asof=asof),
+                        }
+                    )
+                if "form4" in sources:
+                    assert form4_conn is not None
+                    rows.append(
+                        {
+                            "source_table": "sec_ownership_nonderiv_trans",
+                            "rows_imported": import_form4(conn, form4_conn, companies=companies, start=start, asof=asof),
+                        }
+                    )
+            finally:
+                if mp_conn is not None:
+                    mp_conn.close()
+                if form4_conn is not None:
+                    form4_conn.close()
             write_summary(output_csv, rows)
             total = sum(int(row["rows_imported"]) for row in rows)
-            finish_run(conn, run_id=run_id, status="success", row_count=total, message=f"start={start} asof={asof} rows={total}")
+            finish_run(
+                conn,
+                run_id=run_id,
+                status="success",
+                row_count=total,
+                message=f"start={start} asof={asof} sources={','.join(sorted(sources))} rows={total}",
+            )
             print(f"imported_rows={total} output={output_csv}")
         except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")

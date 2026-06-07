@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -51,7 +52,7 @@ def to_float(raw: object) -> float | None:
         value = float(str(raw).replace(",", "").strip())
     except (TypeError, ValueError):
         return None
-    return value if value == value else None
+    return value if math.isfinite(value) else None
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -154,18 +155,22 @@ def load_quarterly_facts(conn: Any, *, cutoff: str) -> dict[int, list[dict[str, 
             report_date,
             SUM(COALESCE(shares, 0.0)) AS shares,
             SUM(COALESCE(market_value_usd, 0.0)) AS market_value_usd,
-            MAX(manager_count) AS reported_manager_count,
+            CASE
+                WHEN MAX(COALESCE(manager_count, 0.0)) > 1.0 THEN MAX(manager_count)
+                ELSE COUNT(DISTINCT COALESCE(NULLIF(manager_cik, ''), NULLIF(manager_name, ''), accession_nodash))
+            END AS reported_manager_count,
             MAX(institutional_ownership_pct) AS reported_ownership_pct,
             MAX(institutional_ownership_delta_pct) AS reported_delta_pct,
             COUNT(DISTINCT COALESCE(manager_cik, manager_name, accession_nodash)) AS distinct_manager_count
         FROM fact_sec_13f_holding
         WHERE report_date <= ?
+          AND report_date >= date(?, '-3 years')
           AND company_id IS NOT NULL
           AND COALESCE(put_call, '') = ''
         GROUP BY company_id, ticker, report_date
         ORDER BY company_id, report_date DESC
         """,
-        (cutoff,),
+        (cutoff, cutoff),
     ).fetchall()
     out: dict[int, list[dict[str, Any]]] = {}
     for row in rows:

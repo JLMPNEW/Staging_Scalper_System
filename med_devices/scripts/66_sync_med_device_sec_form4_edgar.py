@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
+import math
 import sys
 import time
 from dataclasses import dataclass
@@ -89,6 +91,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-companies", type=int, default=0)
     parser.add_argument("--max-filings-per-company", type=int, default=None)
     parser.add_argument("--include-archives", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--allow-fallback",
+        action="store_true",
+        help="Explicitly allow direct EDGAR fallback ingestion. Primary production path is SEC_FORM4_Runner.",
+    )
     return parser.parse_args()
 
 
@@ -100,7 +107,7 @@ def to_float(raw: object) -> float | None:
         value = float(text)
     except ValueError:
         return None
-    return value if value == value else None
+    return value if math.isfinite(value) else None
 
 
 def int_flag(raw: object) -> int:
@@ -365,7 +372,6 @@ def transaction_rows_from_xml(
     ]
     if include_derivatives:
         transaction_groups.append((1, "derivativeTransaction", descendants(root, "derivativeTransaction")))
-    tx_index = 0
     for derivative_flag, tag_name, txs in transaction_groups:
         for tx in txs:
             code = text_path(tx, "transactionCoding", "transactionCode").upper()
@@ -375,8 +381,32 @@ def transaction_rows_from_xml(
             shares = to_float(text_path(tx, "transactionAmounts", "transactionShares", "value"))
             price = to_float(text_path(tx, "transactionAmounts", "transactionPricePerShare", "value"))
             value = shares * price if shares is not None and price is not None else None
-            tx_index += 1
-            transaction_id = f"{tag_name}_{tx_index}_{code}_{transaction_date}_{shares or 0:g}"
+            transaction_identity = {
+                "tag": tag_name,
+                "derivative_flag": derivative_flag,
+                "code": code,
+                "transaction_date": transaction_date,
+                "shares": shares,
+                "price": price,
+                "direct_or_indirect": text_path(tx, "ownershipNature", "directOrIndirectOwnership", "value"),
+                "post_transaction_shares": text_path(
+                    tx,
+                    "postTransactionAmounts",
+                    "sharesOwnedFollowingTransaction",
+                    "value",
+                ),
+                "acquired_disposed": text_path(
+                    tx,
+                    "transactionAmounts",
+                    "transactionAcquiredDisposedCode",
+                    "value",
+                ),
+                "xml": ET.tostring(tx, encoding="unicode"),
+            }
+            transaction_digest = hashlib.sha1(
+                json.dumps(transaction_identity, sort_keys=True, ensure_ascii=True).encode("utf-8")
+            ).hexdigest()[:20]
+            transaction_id = f"{tag_name}_{transaction_digest}"
             row = {
                 "accession_nodash": filing.accession_nodash,
                 "transaction_id": transaction_id,
@@ -606,6 +636,18 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
+    direct_enabled = str(cfg_get(config, "sec_form4_ingestion.direct_edgar_enabled", False)).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    if not args.allow_fallback and not direct_enabled:
+        raise RuntimeError(
+            "Direct med-device Form 4 EDGAR ingestion is fallback-only. "
+            "Use SEC_FORM4_Runner as the canonical source path, or pass --allow-fallback for repair runs."
+        )
     end = parse_date_text(args.end_date) or date.today()
     start = parse_date_text(args.start_date) or default_start_date(config, end)
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)

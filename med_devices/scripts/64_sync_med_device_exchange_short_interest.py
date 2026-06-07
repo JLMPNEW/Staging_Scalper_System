@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import logging
+import math
 import sys
 import time
 from datetime import date, datetime
@@ -66,7 +67,7 @@ def to_float(raw: object) -> float | None:
         value = float(text)
     except ValueError:
         return None
-    return value if value == value else None
+    return value if math.isfinite(value) else None
 
 
 def parse_date_text(raw: object) -> str:

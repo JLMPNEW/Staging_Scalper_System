@@ -619,7 +619,7 @@ CREATE TABLE IF NOT EXISTS fact_sec_13f_holding (
     report_date TEXT NOT NULL,
     source_id TEXT NOT NULL,
     manager_cik TEXT,
-    manager_name TEXT,
+    manager_name TEXT NOT NULL DEFAULT '',
     ticker TEXT NOT NULL,
     company_id INTEGER,
     cusip TEXT,
@@ -1362,6 +1362,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             "institutional_ownership_delta_pct": "REAL",
         },
     )
+    _ensure_sec_13f_holding_source_identity(conn)
     _ensure_table_optional_columns(
         conn,
         "fact_financial_statement",
@@ -1818,6 +1819,33 @@ def _migrate_raw_api_responses_unique(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("DROP TABLE raw_api_responses_legacy_unique")
+
+
+def _ensure_sec_13f_holding_source_identity(conn: sqlite3.Connection) -> None:
+    """Make SEC 13F upserts deterministic across CSV and aggregate rebuilds."""
+    conn.execute(
+        """
+        UPDATE fact_sec_13f_holding
+        SET manager_name = ''
+        WHERE manager_name IS NULL
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM fact_sec_13f_holding
+        WHERE holding_id NOT IN (
+            SELECT MAX(holding_id)
+            FROM fact_sec_13f_holding
+            GROUP BY accession_nodash, report_date, source_id, manager_name, ticker
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_sec_13f_holding_source_identity
+        ON fact_sec_13f_holding(accession_nodash, report_date, source_id, manager_name, ticker)
+        """
+    )
 
 
 def _table_column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:
