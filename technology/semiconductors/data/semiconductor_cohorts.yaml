@@ -1,0 +1,120 @@
+model_family: semiconductors
+cohorts:
+  - cohort_id: semi_c1
+    cohort_name: Digital compute, datacenter connectivity, processor IP & programmable/security silicon
+    calibration_use: core
+    tickers:
+      - NVDA
+      - AMD
+      - INTC
+      - ARM
+      - AVGO
+      - MRVL
+      - ALAB
+      - CRDO
+      - LSCC
+      - RMBS
+      - AMBA
+      - SIMO
+      - CBRS
+      - CEVA
+      - QUIK
+      - AMBQ
+      - LAES
+      - ICG
+      - GSIT
+      - VLN
+
+  - cohort_id: semi_c2
+    cohort_name: Analog, RF, wireless, IoT, display, sensor & auto/industrial product semis
+    calibration_use: core
+    tickers:
+      - QCOM
+      - TXN
+      - ADI
+      - NXPI
+      - MPWR
+      - STM
+      - MCHP
+      - "ON"
+      - MTSI
+      - SITM
+      - SMTC
+      - SWKS
+      - QRVO
+      - ALGM
+      - CRUS
+      - MXL
+      - SLAB
+      - VSH
+      - SYNA
+      - DIOD
+      - PI
+      - POWI
+      - HIMX
+      - NVTS
+      - AOSL
+      - NVEC
+      - INDI
+      - MX
+      - PXLW
+      - SQNS
+      - GCTS
+      - MOBX
+      - PRSO
+      - ARBE
+
+  - cohort_id: semi_c3
+    cohort_name: Manufacturing, memory, OSAT, materials, wafers, photonics & specialty suppliers
+    calibration_use: core
+    tickers:
+      - TSM
+      - MU
+      - ASX
+      - UMC
+      - GFS
+      - Q
+      - TSEM
+      - ENTG
+      - AMKR
+      - IPGP
+      - COHR
+      - AXTI
+      - LASR
+      - WOLF
+      - POET
+      - SKYT
+      - IMOS
+      - MRAM
+      - ALMU
+      - ATOM
+      - SMTK
+      - LEDS
+
+  - cohort_id: semi_c4
+    cohort_name: Semiconductor equipment, process tools, test, inspection, metrology & subsystems
+    calibration_use: core
+    tickers:
+      - ASML
+      - LRCX
+      - AMAT
+      - KLAC
+      - TER
+      - NVMI
+      - ONTO
+      - FORM
+      - CAMT
+      - ACMR
+      - KLIC
+      - ACLS
+      - UCTT
+      - VECO
+      - PLAB
+      - ICHR
+      - COHU
+      - KEYS
+      - MKSI
+      - AEHR
+      - ASYS
+      - INTT
+      - TRT

@@ -17,6 +17,9 @@ FileDepository/
 .biotech_pytest_tmp/
 ticker_mapping/_sec_cache/
 ticker_mapping/_identity_enrichment_cache/
+ticker_mapping/_semiconductor_sec_cache/
+ticker_mapping/_semiconductor_identity_cache/
+ticker_mapping/_semiconductor_yahoo_profile_cache/
 
 # --- Local secrets ---
 med_devices/secrets.local.yaml

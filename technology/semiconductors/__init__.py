@@ -1,0 +1,2 @@
+"""Semiconductor-specific model components."""
+

@@ -15,7 +15,7 @@ import sys
 import time
 from collections import defaultdict
 from collections.abc import Iterable as IterableABC
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -96,6 +96,11 @@ DEFAULT_BOOTSTRAP_SEED = 1729
 DEFAULT_HOLDOUT_TOP_K = 25
 DEFAULT_BEST_ROWS_LIMIT = 25
 DEFAULT_SELECTED_TICKER_DIAGNOSTIC_TOP_RANKS = 3
+DEFAULT_PROFIT_FACTOR_CAP = 10.0
+TRADING_BARS_PER_CALENDAR_YEAR = 252.0
+CALENDAR_DAYS_PER_YEAR = 365.25
+DEFAULT_EMBARGO_BUFFER_CALENDAR_DAYS = 10
+HARD_VETO_ALL_REASONS = frozenset({"*", "all", "any_hard_weakness"})
 CURRENT_CONFIG_CANDIDATE_NAME = "current_config"
 RAW_SCORE_KEYS = [
     "catalyst_score_raw",
@@ -271,6 +276,15 @@ class CalibrationParams:
         "no_guidance_negative_growth_cap",
         "unprofitable_value_mismatch_cap",
     )
+    catalyst_calendar_flag_min: float = 40.0
+    short_interest_pct_float_flag_min: float = 0.10
+    short_interest_signal_flag_min: float = 60.0
+    borrow_catalyst_score_min: float = 40.0
+    borrow_timing_score_min: float = 50.0
+    borrow_quality_score_min: float = 60.0
+    borrow_momentum_score_min: float = 60.0
+    commercial_entry_quality_neutral_score: float = 50.0
+    profit_factor_cap: float = DEFAULT_PROFIT_FACTOR_CAP
     alpha_adjustment_enabled: bool = True
     benchmark_ticker: str = "XBI"
     return_objective: str = "benchmark_alpha"
@@ -336,12 +350,70 @@ class SelectionPolicy:
     hard_weakness_penalty_reasons: tuple[str, ...] = ()
     targeted_soft_weakness_penalty_reasons: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        for field_name in (
+            "commercial_cohort_target_cohorts",
+            "borrow_overlay_target_cohorts",
+            "hard_veto_reasons",
+            "hard_weakness_penalty_reasons",
+            "targeted_soft_weakness_penalty_reasons",
+        ):
+            object.__setattr__(self, field_name, tuple(str(item) for item in getattr(self, field_name)))
+        if self.hard_veto and not self.hard_veto_reasons:
+            raise ValueError(
+                f"SelectionPolicy '{self.policy_name}' has hard_veto=True but no hard_veto_reasons. "
+                "Use '*' explicitly for all hard weakness reasons."
+            )
+        for field_name in (
+            "expected_return_quality_bonus",
+            "commercial_cohort_expected_return_bonus",
+            "short_term_catalyst_timing_bonus",
+            "borrow_squeeze_setup_bonus",
+            "borrow_pressure_conditional_bonus",
+        ):
+            value = float(getattr(self, field_name))
+            if not 0.0 <= value <= 25.0:
+                raise ValueError(
+                    f"SelectionPolicy '{self.policy_name}' {field_name}={value} outside allowed range [0, 25]."
+                )
+        for field_name in (
+            "hard_weakness_penalty",
+            "soft_weakness_penalty",
+            "illiquid_penalty",
+            "commercial_deterioration_penalty",
+            "valuation_growth_mismatch_penalty",
+            "transient_revenue_anchor_penalty",
+            "commercial_business_shock_penalty",
+            "commercial_risk_overlay_penalty",
+            "value_trap_penalty",
+            "leverage_fragility_penalty",
+            "guidance_staleness_penalty",
+            "mature_defensive_penalty",
+            "commercial_cohort_entry_quality_penalty",
+            "commercial_cohort_overextension_penalty",
+            "borrow_distress_penalty",
+            "targeted_soft_weakness_penalty",
+        ):
+            value = float(getattr(self, field_name))
+            if not 0.0 <= value <= 30.0:
+                raise ValueError(
+                    f"SelectionPolicy '{self.policy_name}' {field_name}={value} outside allowed range [0, 30]."
+                )
+
 
 @dataclass(frozen=True)
 class CandidateGridJob:
     index: int
     horizon: int
     top_n: int
+    spec: WeightSpec
+    policy: SelectionPolicy
+
+
+@dataclass(frozen=True)
+class CandidateGridMultiTopJob:
+    index: int
+    horizon: int
     spec: WeightSpec
     policy: SelectionPolicy
 
@@ -404,7 +476,16 @@ def parse_args() -> argparse.Namespace:
         "--max-workers",
         type=int,
         default=None,
-        help="Worker threads for independent candidate-grid and bootstrap jobs. Defaults to calibration.tier1.max_workers or CPU count.",
+        help="Workers for independent candidate-grid and bootstrap jobs. Defaults to calibration.tier1.max_workers or CPU count.",
+    )
+    parser.add_argument(
+        "--candidate-grid-executor",
+        choices=["thread", "process"],
+        default=None,
+        help=(
+            "Executor used for candidate-grid scoring. Use process for CPU-bound full calibration runs; "
+            "thread remains the lower-overhead default for smoke tests and resume-heavy runs."
+        ),
     )
     parser.add_argument(
         "--resume",
@@ -946,6 +1027,26 @@ def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
     alpha_cfg = cfg_get(config, "calibration.tier1.alpha_adjustment", {}) or {}
     if not isinstance(alpha_cfg, dict):
         alpha_cfg = {}
+    borrow_validation_cfg = cfg_get(config, "biotech_reports.borrow_availability_validation", {}) or {}
+    if not isinstance(borrow_validation_cfg, dict):
+        borrow_validation_cfg = {}
+    borrow_overlay_cfg = cfg_get(config, "calibration.tier1.borrow_overlay_thresholds", {}) or {}
+    if not isinstance(borrow_overlay_cfg, dict):
+        borrow_overlay_cfg = {}
+    catalyst_calendar_flag_min = float(
+        cfg_get(
+            config,
+            "calibration.tier1.catalyst_calendar_flag_min",
+            borrow_validation_cfg.get("squeeze_catalyst_min", 40.0),
+        )
+    )
+    short_interest_signal_flag_min = float(
+        cfg_get(
+            config,
+            "calibration.tier1.short_interest_signal_flag_min",
+            borrow_validation_cfg.get("squeeze_short_interest_min", 60.0),
+        )
+    )
     return CalibrationParams(
         round_trip_cost_bps=float(costs.get("long_round_trip_bps", DEFAULT_ROUND_TRIP_COST_BPS)),
         lcb_z=float(stack.get("lcb_z", DEFAULT_LCB_Z)),
@@ -1074,7 +1175,10 @@ def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
             rank_caps.get("cheap_low_growth_guidance_max_score", 60.0)
         ),
         rank_quality_cheap_low_growth_cap=float(rank_caps.get("cheap_low_growth_cap", 60.0)),
-        rank_quality_cap_veto_enabled=as_bool(rank_caps.get("rank_cap_veto_enabled", True), True),
+        rank_quality_cap_veto_enabled=as_bool(
+            rank_caps.get("rank_quality_cap_veto_enabled", rank_caps.get("rank_cap_veto_enabled", True)),
+            True,
+        ),
         rank_quality_cap_veto_threshold=float(rank_caps.get("rank_cap_veto_threshold", 49.0)),
         rank_quality_cap_veto_reasons=tuple(
             normalize_string_list(
@@ -1088,6 +1192,24 @@ def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
                     ],
                 )
             )
+        ),
+        catalyst_calendar_flag_min=catalyst_calendar_flag_min,
+        short_interest_pct_float_flag_min=float(
+            cfg_get(config, "calibration.tier1.short_interest_pct_float_flag_min", 0.10)
+        ),
+        short_interest_signal_flag_min=short_interest_signal_flag_min,
+        borrow_catalyst_score_min=float(
+            borrow_overlay_cfg.get("catalyst_score_min", catalyst_calendar_flag_min)
+        ),
+        borrow_timing_score_min=float(borrow_overlay_cfg.get("timing_score_min", 50.0)),
+        borrow_quality_score_min=float(borrow_overlay_cfg.get("quality_score_min", 60.0)),
+        borrow_momentum_score_min=float(borrow_overlay_cfg.get("momentum_score_min", 60.0)),
+        commercial_entry_quality_neutral_score=float(
+            cfg_get(config, "calibration.tier1.commercial_entry_quality_neutral_score", 50.0)
+        ),
+        profit_factor_cap=max(
+            1.0,
+            float(stack.get("profit_factor_cap", DEFAULT_PROFIT_FACTOR_CAP)),
         ),
         alpha_adjustment_enabled=as_bool(alpha_cfg.get("enabled", True), True),
         benchmark_ticker=normalize_ticker(alpha_cfg.get("benchmark_ticker", "XBI")) or "XBI",
@@ -1780,12 +1902,14 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
             policy_name="hard_weakness_veto",
             description="Exclude hard structural weakness; allow normal clinical-stage binary risk.",
             hard_veto=True,
+            hard_veto_reasons=("*",),
         ),
         SelectionPolicy(
             policy_name="hard_veto_soft_drag",
             description="Exclude hard structural weakness and modestly penalize soft weakness.",
             hard_veto=True,
             soft_weakness_penalty=8.0,
+            hard_veto_reasons=("*",),
         ),
         SelectionPolicy(
             policy_name="investable_core_risk_cap",
@@ -1793,6 +1917,7 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
             hard_veto=True,
             max_risk_score=70.0,
             soft_weakness_penalty=12.0,
+            hard_veto_reasons=("*",),
         ),
         SelectionPolicy(
             policy_name="core_structural_veto",
@@ -1901,6 +2026,48 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
             guidance_staleness_penalty=3.0,
             mature_defensive_penalty=prod_mature_penalty if prod_mature_penalty > 0.0 else 6.0,
             expected_return_quality_bonus=prod_expected_return_bonus if prod_expected_return_bonus > 0.0 else 4.0,
+            hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+            hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
+        ),
+        SelectionPolicy(
+            policy_name="core_veto_event_drag_rebound_preserve_value_guard",
+            description=(
+                "Challenger policy from 2026-06 policy-failure analysis: preserve rebound/turnaround names "
+                "by avoiding broad soft-quality drag, while strongly penalizing expensive low-growth "
+                "commercial replacements."
+            ),
+            hard_veto=True,
+            hard_weakness_penalty=prod_event_penalty,
+            commercial_deterioration_penalty=4.0,
+            valuation_growth_mismatch_penalty=14.0,
+            transient_revenue_anchor_penalty=6.0,
+            commercial_business_shock_penalty=12.0,
+            value_trap_penalty=8.0,
+            leverage_fragility_penalty=4.0,
+            guidance_staleness_penalty=2.0,
+            mature_defensive_penalty=4.0,
+            hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+            hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
+        ),
+        SelectionPolicy(
+            policy_name="core_veto_event_drag_rebound_catalyst_value_guard",
+            description=(
+                "Challenger policy from 2026-06 policy-failure analysis: preserve rebound/turnaround "
+                "optionality, add a small catalyst-timing bonus, and penalize expensive low-growth "
+                "commercial replacements."
+            ),
+            hard_veto=True,
+            hard_weakness_penalty=prod_event_penalty,
+            commercial_deterioration_penalty=4.0,
+            valuation_growth_mismatch_penalty=12.0,
+            transient_revenue_anchor_penalty=6.0,
+            commercial_business_shock_penalty=10.0,
+            value_trap_penalty=8.0,
+            leverage_fragility_penalty=4.0,
+            guidance_staleness_penalty=2.0,
+            mature_defensive_penalty=4.0,
+            expected_return_quality_bonus=2.0,
+            short_term_catalyst_timing_bonus=3.0,
             hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
             hard_weakness_penalty_reasons=tuple(sorted(EVENT_HARD_WEAKNESS_REASONS)),
         ),
@@ -2176,13 +2343,20 @@ def load_snapshot_dates(
     fridays_only: bool,
     max_snapshots: int,
 ) -> list[str]:
+    start_str = start_asof.isoformat() if start_asof else ""
+    end_str = end_asof.isoformat() if end_asof else ""
+    friday_predicate = "AND strftime('%w', asof_date) = '5'" if fridays_only else ""
     rows = conn.execute(
-        """
+        f"""
         SELECT asof_date
         FROM daily_features
+        WHERE (? = '' OR asof_date >= ?)
+          AND (? = '' OR asof_date <= ?)
+          {friday_predicate}
         GROUP BY asof_date
         ORDER BY asof_date
-        """
+        """,
+        (start_str, start_str, end_str, end_str),
     ).fetchall()
     dates: list[str] = []
     for row in rows:
@@ -2828,6 +3002,18 @@ def load_observations(
     high_borrow_rate_min = config_float(borrow_validation_cfg.get("high_borrow_rate_min"), 0.15)
     squeeze_short_interest_min = config_float(borrow_validation_cfg.get("squeeze_short_interest_min"), 60.0)
     squeeze_catalyst_min = config_float(borrow_validation_cfg.get("squeeze_catalyst_min"), 40.0)
+    catalyst_calendar_flag_min = config_float(
+        cfg_get(config, "calibration.tier1.catalyst_calendar_flag_min", squeeze_catalyst_min),
+        squeeze_catalyst_min,
+    )
+    short_interest_pct_float_flag_min = config_float(
+        cfg_get(config, "calibration.tier1.short_interest_pct_float_flag_min", 0.10),
+        0.10,
+    )
+    short_interest_signal_flag_min = config_float(
+        cfg_get(config, "calibration.tier1.short_interest_signal_flag_min", squeeze_short_interest_min),
+        squeeze_short_interest_min,
+    )
     for asof_date in dates:
         parsed_asof_date = parse_date(asof_date)
         sec_catalyst_timing_by_company = (
@@ -3635,7 +3821,7 @@ def load_observations(
             )
             observation["diag_forward_catalyst_calendar_score"] = float(observation["forward_catalyst_score"])
             observation["diag_forward_catalyst_calendar_flag"] = (
-                1.0 if float(observation["forward_catalyst_score"]) >= 40.0 else 0.0
+                1.0 if float(observation["forward_catalyst_score"]) >= catalyst_calendar_flag_min else 0.0
             )
             observation["diag_short_interest_pct_float"] = float(observation["short_interest_pct_float"])
             observation["diag_short_interest_signal_score"] = float(observation["short_interest_signal_score"])
@@ -3663,8 +3849,11 @@ def load_observations(
             )
             observation["diag_high_short_interest_flag"] = (
                 1.0
-                if float(observation["short_interest_pct_float"]) >= 0.10
-                or float(observation["short_interest_signal_score"]) >= 60.0
+                if (
+                    float(observation["short_interest_pct_float_available_flag"]) > 0.0
+                    and float(observation["short_interest_pct_float"]) >= short_interest_pct_float_flag_min
+                )
+                or float(observation["short_interest_signal_score"]) >= short_interest_signal_flag_min
                 else 0.0
             )
             observation["diag_borrow_pressure_score"] = float(observation["borrow_pressure_score"])
@@ -3926,7 +4115,7 @@ def forward_return(
         return None, "", ""
     days = [bar.day for bar in bars]
     entry_idx = bisect.bisect_right(days, asof) if next_bar_entry else bisect.bisect_left(days, asof)
-    if entry_idx < 0 or entry_idx >= len(bars):
+    if entry_idx >= len(bars):
         return None, "", ""
     target_idx = entry_idx + horizon
     if target_idx >= len(bars):
@@ -4253,18 +4442,19 @@ def cvar_left_tail(values: list[float], *, q: float) -> float | None:
     return mean(tail)
 
 
-def profit_factor(values: list[float], *, hurdle: float = 0.0) -> float | None:
+def profit_factor(values: list[float], *, hurdle: float = 0.0, cap: float = DEFAULT_PROFIT_FACTOR_CAP) -> float | None:
     gains = [max(value - hurdle, 0.0) for value in values]
     losses = [max(hurdle - value, 0.0) for value in values]
     total_loss = sum(losses)
     total_gain = sum(gains)
+    bounded_cap = max(1.0, float(cap))
     if total_loss <= 1e-12:
-        return None if total_gain <= 1e-12 else 999.0
-    return total_gain / total_loss
+        return None if total_gain <= 1e-12 else bounded_cap
+    return min(total_gain / total_loss, bounded_cap)
 
 
-def omega_ratio(values: list[float], *, hurdle: float = 0.0) -> float | None:
-    return profit_factor(values, hurdle=hurdle)
+def omega_ratio(values: list[float], *, hurdle: float = 0.0, cap: float = DEFAULT_PROFIT_FACTOR_CAP) -> float | None:
+    return profit_factor(values, hurdle=hurdle, cap=cap)
 
 
 def top_gain_contribution(values: list[float], *, top_n: int) -> float | None:
@@ -4359,7 +4549,7 @@ def summarize_return_risk(values: list[float], *, params: CalibrationParams) -> 
     downside_terms = [min(0.0, value - params.omega_hurdle) for value in values]
     avg = mean(values)
     volatility = stdev(values)
-    downside = math.sqrt(sum(value**2 for value in downside_terms) / max(1, len(values) - 1))
+    downside = math.sqrt(sum(value**2 for value in downside_terms) / max(1, len(values)))
     lcb = lower_confidence_bound(values, z=params.lcb_z)
     cvar = cvar_left_tail(values, q=params.cvar_q)
     return {
@@ -4375,10 +4565,12 @@ def summarize_return_risk(values: list[float], *, params: CalibrationParams) -> 
         "cvar_5_return_pct": pct(cvar),
         "sharpe_like": rounded(safe_ratio(avg, volatility)),
         "sortino_like": rounded(safe_ratio(avg, downside)),
-        "profit_factor": rounded(profit_factor(values, hurdle=0.0)),
-        "profit_factor_configured": rounded(profit_factor(values, hurdle=params.omega_hurdle)),
-        "omega_configured": rounded(omega_ratio(values, hurdle=params.omega_hurdle)),
-        "omega_0": rounded(omega_ratio(values, hurdle=0.0)),
+        "profit_factor": rounded(profit_factor(values, hurdle=0.0, cap=params.profit_factor_cap)),
+        "profit_factor_configured": rounded(
+            profit_factor(values, hurdle=params.omega_hurdle, cap=params.profit_factor_cap)
+        ),
+        "omega_configured": rounded(omega_ratio(values, hurdle=params.omega_hurdle, cap=params.profit_factor_cap)),
+        "omega_0": rounded(omega_ratio(values, hurdle=0.0, cap=params.profit_factor_cap)),
         "top3_gain_contribution_pct": pct(top_gain_contribution(values, top_n=3)),
         "worst_return_pct": pct(min(values)),
         "best_return_pct": pct(max(values)),
@@ -4783,10 +4975,10 @@ def policy_adjusted_score(
         return None, scores
     hard_reasons = set(reason_tuple(row.get("diag_hard_weakness_reasons")))
     if hard_reasons:
+        hard_veto_reason_set = set(policy.hard_veto_reasons)
         hard_veto_match = (
-            bool(hard_reasons.intersection(policy.hard_veto_reasons))
-            if policy.hard_veto_reasons
-            else True
+            bool(hard_veto_reason_set.intersection(HARD_VETO_ALL_REASONS))
+            or bool(hard_reasons.intersection(hard_veto_reason_set))
         )
         hard_penalty_match = (
             bool(hard_reasons.intersection(policy.hard_weakness_penalty_reasons))
@@ -4822,10 +5014,13 @@ def policy_adjusted_score(
     elevated_borrow_pressure = (to_float(row.get("diag_elevated_borrow_pressure_flag"), 0.0) or 0.0) > 0.0
     high_borrow_rate = (to_float(row.get("diag_borrow_rate_high_flag"), 0.0) or 0.0) > 0.0
     borrow_catalyst_or_quality_context = (
-        (to_float(row.get("diag_forward_catalyst_calendar_score"), 0.0) or 0.0) >= 40.0
-        or (to_float(row.get("diag_short_term_catalyst_timing_score"), 0.0) or 0.0) >= 50.0
-        or (to_float(row.get("diag_expected_return_quality_score"), 0.0) or 0.0) >= 60.0
-        or (to_float(row.get("momentum_score_raw"), 0.0) or 0.0) >= 60.0
+        (to_float(row.get("diag_forward_catalyst_calendar_score"), 0.0) or 0.0)
+        >= params.borrow_catalyst_score_min
+        or (to_float(row.get("diag_short_term_catalyst_timing_score"), 0.0) or 0.0)
+        >= params.borrow_timing_score_min
+        or (to_float(row.get("diag_expected_return_quality_score"), 0.0) or 0.0)
+        >= params.borrow_quality_score_min
+        or (to_float(row.get("momentum_score_raw"), 0.0) or 0.0) >= params.borrow_momentum_score_min
     )
     borrow_pressure_bonus_active = (
         borrow_cohort_target
@@ -4882,9 +5077,20 @@ def policy_adjusted_score(
             policy.commercial_cohort_entry_quality_penalty
             * max(
                 0.0,
-                50.0 - max(0.0, min(100.0, to_float(row.get("diag_commercial_entry_quality_score"), 50.0) or 50.0)),
+                params.commercial_entry_quality_neutral_score
+                - max(
+                    0.0,
+                    min(
+                        100.0,
+                        to_float(
+                            row.get("diag_commercial_entry_quality_score"),
+                            params.commercial_entry_quality_neutral_score,
+                        )
+                        or params.commercial_entry_quality_neutral_score,
+                    ),
+                ),
             )
-            / 50.0
+            / max(1e-9, params.commercial_entry_quality_neutral_score)
             if commercial_cohort_target
             else 0.0
         )
@@ -5100,51 +5306,40 @@ def split_rows_by_completed_return_date(
     return train_rows, test_rows, train_dates, test_dates
 
 
-def build_candidate_grid_row(
-    rows_by_date: dict[str, list[dict[str, Any]]],
-    job: CandidateGridJob,
+def minimum_calendar_embargo_days_for_horizon(
+    horizon_bars: int,
     *,
+    buffer_days: int = DEFAULT_EMBARGO_BUFFER_CALENDAR_DAYS,
+) -> int:
+    """Convert a trading-bar horizon into the calendar-day embargo needed to avoid split leakage."""
+    return int(
+        math.ceil(max(0, int(horizon_bars)) * CALENDAR_DAYS_PER_YEAR / TRADING_BARS_PER_CALENDAR_YEAR)
+        + max(0, int(buffer_days))
+    )
+
+
+def candidate_grid_summary_row(
+    *,
+    selected_rows: list[dict[str, Any]],
+    baseline_rows: list[dict[str, Any]],
+    raw_baseline_rows: list[dict[str, Any]],
+    selected_counts: list[int],
+    selection_rates: list[float],
+    policy_selection_rates: list[float],
+    selected_ticker_sets: list[set[str]],
+    date_count: int,
+    horizon: int,
+    top_n: int,
+    spec: WeightSpec,
+    policy: SelectionPolicy,
     sample: str,
     evaluation_split: str,
     params: CalibrationParams,
 ) -> dict[str, Any]:
-    raw_ret_key = f"fwd_{job.horizon}d_net_return"
-    benchmark_alpha_ret_key = f"fwd_{job.horizon}d_net_benchmark_alpha_return"
-    equal_weight_alpha_ret_key = f"fwd_{job.horizon}d_net_equal_weight_alpha_return"
-    ret_key = objective_return_key(job.horizon, params)
-    selected_rows: list[dict[str, Any]] = []
-    baseline_rows: list[dict[str, Any]] = []
-    raw_baseline_rows: list[dict[str, Any]] = []
-    selected_counts: list[int] = []
-    selection_rates: list[float] = []
-    policy_selection_rates: list[float] = []
-    selected_ticker_sets: list[set[str]] = []
-    date_count = 0
-    for asof_date in sorted(rows_by_date):
-        date_rows = rows_by_date[asof_date]
-        eligible = [row for row in date_rows if to_float(row.get(ret_key)) is not None]
-        if not eligible:
-            continue
-        selected, policy_eligible = select_top_rows_and_policy_eligible(
-            eligible,
-            job.spec,
-            job.policy,
-            ret_key=ret_key,
-            top_n=job.top_n,
-            params=params,
-        )
-        if not selected:
-            continue
-        date_count += 1
-        selected_counts.append(len(selected))
-        selection_rates.append(len(selected) / len(eligible))
-        if policy_eligible:
-            policy_selection_rates.append(len(selected) / len(policy_eligible))
-        selected_ticker_sets.append({str(row.get("ticker") or "") for row in selected if str(row.get("ticker") or "")})
-        selected_rows.extend(selected)
-        baseline_rows.extend(policy_eligible)
-        raw_baseline_rows.extend(eligible)
-
+    raw_ret_key = f"fwd_{horizon}d_net_return"
+    benchmark_alpha_ret_key = f"fwd_{horizon}d_net_benchmark_alpha_return"
+    equal_weight_alpha_ret_key = f"fwd_{horizon}d_net_equal_weight_alpha_return"
+    ret_key = objective_return_key(horizon, params)
     selected_summary = selection_quality_summary(selected_rows, ret_key, params=params)
     universe_summary = selection_quality_summary(baseline_rows, ret_key, params=params)
     raw_universe_summary = selection_quality_summary(raw_baseline_rows, ret_key, params=params)
@@ -5165,18 +5360,18 @@ def build_candidate_grid_row(
     return {
         "sample": sample,
         "evaluation_split": evaluation_split,
-        "horizon_days": job.horizon,
+        "horizon_days": horizon,
         "horizon_unit": "trading_bars",
-        "top_n": job.top_n,
+        "top_n": top_n,
         "return_basis": "net_after_round_trip_costs",
         "evaluation_return_key": ret_key,
         "evaluation_return_basis": return_objective_label(params),
         "benchmark_ticker": params.benchmark_ticker if params.alpha_adjustment_enabled else "",
         "round_trip_cost_bps": params.round_trip_cost_bps,
-        "candidate_name": job.spec.candidate_name,
-        "candidate_description": job.spec.description,
-        "selection_policy_name": job.policy.policy_name,
-        "selection_policy_description": job.policy.description,
+        "candidate_name": spec.candidate_name,
+        "candidate_description": spec.description,
+        "selection_policy_name": policy.policy_name,
+        "selection_policy_description": policy.description,
         "universe_baseline_type": "policy_eligible",
         "asof_dates": date_count,
         "avg_selected_names_per_date": rounded(mean([float(v) for v in selected_counts])),
@@ -5185,7 +5380,7 @@ def build_candidate_grid_row(
         "avg_policy_selection_rate_pct": pct(mean(policy_selection_rates)),
         "avg_candidate_turnover_pct": pct(mean_jaccard_turnover(selected_ticker_sets)),
         **constraint_fields,
-        **spec_fields(job.spec, job.policy),
+        **spec_fields(spec, policy),
         **prefixed("selected_", selected_summary),
         **prefixed("selected_raw_", selected_raw_return_summary),
         **prefixed("selected_benchmark_alpha_", selected_benchmark_alpha_summary),
@@ -5203,6 +5398,244 @@ def build_candidate_grid_row(
     }
 
 
+def build_candidate_grid_rows_for_top_ns(
+    rows_by_date: dict[str, list[dict[str, Any]]],
+    job: CandidateGridMultiTopJob,
+    *,
+    top_ns: list[int],
+    sample: str,
+    evaluation_split: str,
+    params: CalibrationParams,
+) -> list[dict[str, Any]]:
+    clean_top_ns = sorted({int(top_n) for top_n in top_ns if int(top_n) > 0})
+    if not clean_top_ns:
+        return []
+    ret_key = objective_return_key(job.horizon, params)
+    states: dict[int, dict[str, Any]] = {
+        top_n: {
+            "selected_rows": [],
+            "baseline_rows": [],
+            "raw_baseline_rows": [],
+            "selected_counts": [],
+            "selection_rates": [],
+            "policy_selection_rates": [],
+            "selected_ticker_sets": [],
+            "date_count": 0,
+        }
+        for top_n in clean_top_ns
+    }
+    for asof_date in sorted(rows_by_date):
+        date_rows = rows_by_date[asof_date]
+        eligible = [row for row in date_rows if to_float(row.get(ret_key)) is not None]
+        if not eligible:
+            continue
+        candidates: list[tuple[float, str, dict[str, Any]]] = []
+        policy_eligible: list[dict[str, Any]] = []
+        for row in eligible:
+            candidate_score, scores = policy_adjusted_score(row, job.spec, job.policy, params)
+            if candidate_score is None:
+                continue
+            policy_eligible.append(row)
+            candidates.append(
+                (
+                    candidate_score,
+                    str(row.get("ticker") or ""),
+                    annotate_selected_row(row, candidate_score=candidate_score, scores=scores, policy=job.policy),
+                )
+            )
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        ranked_rows = [row for _, _, row in candidates]
+        for top_n in clean_top_ns:
+            selected = ranked_rows[:top_n]
+            if not selected:
+                continue
+            state = states[top_n]
+            state["date_count"] += 1
+            state["selected_counts"].append(len(selected))
+            state["selection_rates"].append(len(selected) / len(eligible))
+            if policy_eligible:
+                state["policy_selection_rates"].append(len(selected) / len(policy_eligible))
+            state["selected_ticker_sets"].append(
+                {str(row.get("ticker") or "") for row in selected if str(row.get("ticker") or "")}
+            )
+            state["selected_rows"].extend(selected)
+            state["baseline_rows"].extend(policy_eligible)
+            state["raw_baseline_rows"].extend(eligible)
+
+    out: list[dict[str, Any]] = []
+    for top_n in clean_top_ns:
+        state = states[top_n]
+        out.append(
+            candidate_grid_summary_row(
+                selected_rows=state["selected_rows"],
+                baseline_rows=state["baseline_rows"],
+                raw_baseline_rows=state["raw_baseline_rows"],
+                selected_counts=state["selected_counts"],
+                selection_rates=state["selection_rates"],
+                policy_selection_rates=state["policy_selection_rates"],
+                selected_ticker_sets=state["selected_ticker_sets"],
+                date_count=int(state["date_count"]),
+                horizon=job.horizon,
+                top_n=top_n,
+                spec=job.spec,
+                policy=job.policy,
+                sample=sample,
+                evaluation_split=evaluation_split,
+                params=params,
+            )
+        )
+    return out
+
+
+def build_candidate_grid_row(
+    rows_by_date: dict[str, list[dict[str, Any]]],
+    job: CandidateGridJob,
+    *,
+    sample: str,
+    evaluation_split: str,
+    params: CalibrationParams,
+) -> dict[str, Any]:
+    rows = build_candidate_grid_rows_for_top_ns(
+        rows_by_date,
+        CandidateGridMultiTopJob(index=job.index, horizon=job.horizon, spec=job.spec, policy=job.policy),
+        top_ns=[job.top_n],
+        sample=sample,
+        evaluation_split=evaluation_split,
+        params=params,
+    )
+    if not rows:
+        raise ValueError(f"CandidateGridJob has no valid top_n: {job.top_n}")
+    return rows[0]
+
+
+_CANDIDATE_GRID_PROCESS_CONTEXT: dict[str, Any] = {}
+
+
+def weight_spec_payload(spec: WeightSpec) -> dict[str, Any]:
+    return {
+        "candidate_name": spec.candidate_name,
+        "description": spec.description,
+        "clinical_catalyst": spec.clinical_catalyst,
+        "clinical_credibility": spec.clinical_credibility,
+        "clinical_financial_quality": spec.clinical_financial_quality,
+        "clinical_momentum": spec.clinical_momentum,
+        "clinical_risk_penalty": spec.clinical_risk_penalty,
+        "clinical_stage_profile": dict(spec.clinical_stage_profile),
+        "commercial_stage_profile": dict(spec.commercial_stage_profile),
+    }
+
+
+def selection_policy_payload(policy: SelectionPolicy) -> dict[str, Any]:
+    return {key: getattr(policy, key) for key in SelectionPolicy.__dataclass_fields__}
+
+
+def candidate_grid_process_job_payload(job: CandidateGridMultiTopJob) -> dict[str, Any]:
+    return {
+        "index": job.index,
+        "horizon": job.horizon,
+        "spec": weight_spec_payload(job.spec),
+        "policy": selection_policy_payload(job.policy),
+    }
+
+
+def init_candidate_grid_process_context(
+    rows_by_date: dict[str, list[dict[str, Any]]],
+    top_ns: list[int],
+    sample: str,
+    evaluation_split: str,
+    params: CalibrationParams,
+) -> None:
+    _CANDIDATE_GRID_PROCESS_CONTEXT.clear()
+    _CANDIDATE_GRID_PROCESS_CONTEXT.update(
+        {
+            "rows_by_date": rows_by_date,
+            "top_ns": top_ns,
+            "sample": sample,
+            "evaluation_split": evaluation_split,
+            "params": params,
+        }
+    )
+
+
+def candidate_grid_process_worker(payload: dict[str, Any]) -> dict[str, Any]:
+    if not _CANDIDATE_GRID_PROCESS_CONTEXT:
+        raise RuntimeError("Candidate-grid process context was not initialized.")
+    spec = WeightSpec(**payload["spec"])
+    policy = SelectionPolicy(**payload["policy"])
+    job = CandidateGridMultiTopJob(
+        index=int(payload["index"]),
+        horizon=int(payload["horizon"]),
+        spec=spec,
+        policy=policy,
+    )
+    return {
+        "index": job.index,
+        "rows": build_candidate_grid_rows_for_top_ns(
+            _CANDIDATE_GRID_PROCESS_CONTEXT["rows_by_date"],
+            job,
+            top_ns=_CANDIDATE_GRID_PROCESS_CONTEXT["top_ns"],
+            sample=_CANDIDATE_GRID_PROCESS_CONTEXT["sample"],
+            evaluation_split=_CANDIDATE_GRID_PROCESS_CONTEXT["evaluation_split"],
+            params=_CANDIDATE_GRID_PROCESS_CONTEXT["params"],
+        ),
+    }
+
+
+def run_candidate_grid_process_jobs(
+    jobs: list[CandidateGridMultiTopJob],
+    *,
+    rows_by_date: dict[str, list[dict[str, Any]]],
+    top_ns: list[int],
+    sample: str,
+    evaluation_split: str,
+    params: CalibrationParams,
+    max_workers: int,
+    job_label: str,
+) -> list[dict[str, Any]]:
+    if not jobs:
+        return []
+    if max_workers <= 1 or len(jobs) <= 1:
+        init_candidate_grid_process_context(rows_by_date, top_ns, sample, evaluation_split, params)
+        return [candidate_grid_process_worker(candidate_grid_process_job_payload(job)) for job in jobs]
+    worker_count = max(1, min(int(max_workers), len(jobs)))
+    results: dict[int, dict[str, Any]] = {}
+    executor = ProcessPoolExecutor(
+        max_workers=worker_count,
+        initializer=init_candidate_grid_process_context,
+        initargs=(rows_by_date, top_ns, sample, evaluation_split, params),
+    )
+    shutdown_wait = True
+    future_map: dict[Any, int] = {}
+    try:
+        future_map = {
+            executor.submit(candidate_grid_process_worker, candidate_grid_process_job_payload(job)): int(job.index)
+            for job in jobs
+        }
+        for future in as_completed(future_map):
+            job_index = future_map[future]
+            try:
+                results[job_index] = future.result()
+            except Exception:
+                shutdown_wait = False
+                for pending in future_map:
+                    pending.cancel()
+                LOGGER.exception("%s process job failed: index=%s", job_label, job_index)
+                raise
+    except KeyboardInterrupt:
+        shutdown_wait = False
+        for pending in future_map:
+            pending.cancel()
+        raise
+    finally:
+        if sys.version_info >= (3, 9):
+            executor.shutdown(wait=shutdown_wait, cancel_futures=not shutdown_wait)
+        else:
+            executor.shutdown(wait=shutdown_wait)
+    return [results[int(job.index)] for job in sorted(jobs, key=lambda item: int(item.index))]
+
+
 def build_candidate_grid_rows(
     rows: list[dict[str, Any]],
     specs: list[WeightSpec],
@@ -5214,7 +5647,80 @@ def build_candidate_grid_rows(
     evaluation_split: str,
     params: CalibrationParams,
     max_workers: int,
+    executor_kind: str = "thread",
 ) -> list[dict[str, Any]]:
+    rows_by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        rows_by_date[str(row.get("asof_date") or "")].append(row)
+
+    jobs: list[CandidateGridMultiTopJob] = []
+    job_index = 0
+    for horizon in horizons:
+        for spec in specs:
+            for policy in policies:
+                jobs.append(CandidateGridMultiTopJob(index=job_index, horizon=horizon, spec=spec, policy=policy))
+                job_index += 1
+
+    clean_executor_kind = str(executor_kind or "thread").strip().lower()
+    if clean_executor_kind == "process":
+        chunks = run_candidate_grid_process_jobs(
+            jobs,
+            rows_by_date=rows_by_date,
+            top_ns=top_ns,
+            sample=sample,
+            evaluation_split=evaluation_split,
+            params=params,
+            max_workers=max_workers,
+            job_label=f"candidate_grid:{sample}:{evaluation_split}",
+        )
+    else:
+        def worker(job: Any) -> dict[str, Any]:
+            if not isinstance(job, CandidateGridMultiTopJob):
+                raise TypeError(f"Expected CandidateGridMultiTopJob, got {type(job).__name__}")
+            return {
+                "rows": build_candidate_grid_rows_for_top_ns(
+                    rows_by_date,
+                    job,
+                    top_ns=top_ns,
+                    sample=sample,
+                    evaluation_split=evaluation_split,
+                    params=params,
+                )
+            }
+
+        chunks = run_indexed_jobs(
+            jobs,
+            worker,
+            max_workers=max_workers,
+            job_label=f"candidate_grid:{sample}:{evaluation_split}",
+        )
+    out: list[dict[str, Any]] = []
+    for chunk in chunks:
+        chunk_rows = chunk.get("rows", [])
+        if isinstance(chunk_rows, list):
+            out.extend(chunk_rows)
+    attach_current_config_spreads(out, params=params)
+    return out
+
+
+def build_candidate_grid_rows_legacy_single_top_n(
+    rows: list[dict[str, Any]],
+    specs: list[WeightSpec],
+    policies: list[SelectionPolicy],
+    horizons: list[int],
+    top_ns: list[int],
+    *,
+    sample: str,
+    evaluation_split: str,
+    params: CalibrationParams,
+    max_workers: int,
+) -> list[dict[str, Any]]:
+    """Previous per-Top-N grid builder kept for targeted debugging.
+
+    The production path above reuses one sorted candidate list for all Top-N
+    cutoffs.  This fallback remains useful if a future bug report needs a direct
+    comparison against the older, more expensive job decomposition.
+    """
     rows_by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         rows_by_date[str(row.get("asof_date") or "")].append(row)
@@ -5262,15 +5768,19 @@ def load_or_build_candidate_grid_chunk(
     evaluation_split: str,
     params: CalibrationParams,
     max_workers: int,
+    executor_kind: str,
     output_dir: Path,
     resume: bool,
 ) -> list[dict[str, Any]]:
+    clean_top_ns = sorted({int(top_n) for top_n in top_ns if int(top_n) > 0})
+    top_n_label = "_".join(f"top{top_n}" for top_n in clean_top_ns) if len(clean_top_ns) > 1 else None
     path = candidate_grid_chunk_path(
         output_dir,
         sample=sample,
         evaluation_split=evaluation_split,
         horizon=horizon,
-        top_n=top_ns[0] if len(top_ns) == 1 else None,
+        top_n=clean_top_ns[0] if len(clean_top_ns) == 1 else None,
+        top_n_label=top_n_label,
         policy_name=policies[0].policy_name if len(policies) == 1 else None,
     )
     if resume and path.exists():
@@ -5290,11 +5800,12 @@ def load_or_build_candidate_grid_chunk(
         specs,
         policies,
         [horizon],
-        top_ns,
+        clean_top_ns,
         sample=sample,
         evaluation_split=evaluation_split,
         params=params,
         max_workers=max_workers,
+        executor_kind=executor_kind,
     )
     write_csv(path, out)
     LOGGER.info(
@@ -5518,6 +6029,8 @@ def build_holdout_rows(grid_rows: list[dict[str, Any]], *, limit: int = 25) -> l
         "calibration_objective_vs_current_config",
         "calibration_objective_vs_raw_current_config",
         "selected_mean_return_pct",
+        "selected_hit_rate_pct",
+        "selected_loss_rate_pct",
         "selected_lcb_return_pct",
         "selected_cvar_5_return_pct",
         "selected_sortino_like",
@@ -5599,6 +6112,276 @@ def build_holdout_rows(grid_rows: list[dict[str, Any]], *, limit: int = 25) -> l
                 )
             out.append(payload)
     return out
+
+
+def calibration_split_diagnostic(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "row_count": 0,
+            "pass_count": 0,
+            "fail_count": 0,
+            "best_lcb_return_pct": "",
+            "best_lcb_candidate_name": "",
+            "best_lcb_selection_policy_name": "",
+            "best_lcb_profit_factor": "",
+            "best_lcb_large_loss_20pct_rate_pct": "",
+            "max_lcb_return_pct": "",
+            "max_profit_factor": "",
+            "min_large_loss_20pct_rate_pct": "",
+            "mean_lcb_return_pct": "",
+        }
+    best_lcb_row = max(
+        rows,
+        key=lambda row: numeric_or_default(row.get("selected_lcb_return_pct"), -1e9),
+    )
+    lcb_values = numeric_values(rows, "selected_lcb_return_pct")
+    profit_values = numeric_values(rows, "selected_profit_factor")
+    loss20_values = numeric_values(rows, "selected_large_loss_20pct_rate_pct")
+    pass_count = sum(1 for row in rows if as_bool(row.get("calibration_pass")))
+    return {
+        "row_count": len(rows),
+        "pass_count": pass_count,
+        "fail_count": len(rows) - pass_count,
+        "best_lcb_return_pct": rounded(to_float(best_lcb_row.get("selected_lcb_return_pct"))),
+        "best_lcb_candidate_name": best_lcb_row.get("candidate_name", ""),
+        "best_lcb_selection_policy_name": best_lcb_row.get("selection_policy_name", ""),
+        "best_lcb_profit_factor": rounded(to_float(best_lcb_row.get("selected_profit_factor"))),
+        "best_lcb_large_loss_20pct_rate_pct": rounded(
+            to_float(best_lcb_row.get("selected_large_loss_20pct_rate_pct"))
+        ),
+        "max_lcb_return_pct": rounded(max(lcb_values) if lcb_values else None),
+        "max_profit_factor": rounded(max(profit_values) if profit_values else None),
+        "min_large_loss_20pct_rate_pct": rounded(min(loss20_values) if loss20_values else None),
+        "mean_lcb_return_pct": mean_numeric(rows, "selected_lcb_return_pct"),
+    }
+
+
+def build_horizon_calibration_summary(
+    grid_rows: list[dict[str, Any]],
+    *,
+    sample: str = "all",
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    horizons = sorted(
+        {
+            int(to_float(row.get("horizon_days"), 0.0) or 0)
+            for row in grid_rows
+            if to_float(row.get("horizon_days"), None) is not None
+        }
+    )
+    for horizon in horizons:
+        horizon_rows = [
+            row
+            for row in grid_rows
+            if str(row.get("sample") or "") == sample
+            and int(to_float(row.get("horizon_days"), 0.0) or 0) == horizon
+        ]
+        train_summary = calibration_split_diagnostic(
+            [row for row in horizon_rows if str(row.get("evaluation_split") or "") == "train"]
+        )
+        test_summary = calibration_split_diagnostic(
+            [row for row in horizon_rows if str(row.get("evaluation_split") or "") == "test"]
+        )
+        summary[str(horizon)] = {
+            "sample": sample,
+            "train": train_summary,
+            "test": test_summary,
+            "train_pass_count": train_summary["pass_count"],
+            "test_pass_count": test_summary["pass_count"],
+            "best_train_lcb_return_pct": train_summary["best_lcb_return_pct"],
+            "best_test_lcb_return_pct": test_summary["best_lcb_return_pct"],
+        }
+    return summary
+
+
+def build_test_period_policy_ranking(
+    grid_rows: list[dict[str, Any]],
+    *,
+    sample: str = "all",
+) -> dict[str, Any]:
+    test_rows = [
+        row
+        for row in grid_rows
+        if str(row.get("sample") or "") == sample
+        and str(row.get("evaluation_split") or "") == "test"
+    ]
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in test_rows:
+        policy_name = str(row.get("selection_policy_name") or "")
+        if policy_name:
+            grouped[policy_name].append(row)
+
+    ranked: list[dict[str, Any]] = []
+    for policy_name, rows_for_policy in grouped.items():
+        ranked.append(
+            {
+                "selection_policy_name": policy_name,
+                "row_count": len(rows_for_policy),
+                "pass_count": sum(1 for row in rows_for_policy if as_bool(row.get("calibration_pass"))),
+                "weighted_lcb_return_pct": rounded(
+                    weighted_mean_numeric(rows_for_policy, "selected_lcb_return_pct", "selected_n")
+                ),
+                "weighted_mean_return_pct": rounded(
+                    weighted_mean_numeric(rows_for_policy, "selected_mean_return_pct", "selected_n")
+                ),
+                "weighted_profit_factor": rounded(
+                    weighted_mean_numeric(rows_for_policy, "selected_profit_factor", "selected_n")
+                ),
+                "mean_large_loss_20pct_rate_pct": mean_numeric(
+                    rows_for_policy,
+                    "selected_large_loss_20pct_rate_pct",
+                ),
+            }
+        )
+    ranked.sort(
+        key=lambda row: (
+            numeric_or_default(row.get("weighted_lcb_return_pct"), -1e9),
+            numeric_or_default(row.get("weighted_profit_factor"), -1e9),
+            -numeric_or_default(row.get("mean_large_loss_20pct_rate_pct"), 100.0),
+        ),
+        reverse=True,
+    )
+    raw_rank = next(
+        (
+            index
+            for index, row in enumerate(ranked, start=1)
+            if str(row.get("selection_policy_name") or "") == "raw_legacy_score"
+        ),
+        None,
+    )
+
+    by_horizon_top_n: list[dict[str, Any]] = []
+    combo_groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in test_rows:
+        combo_groups[(str(row.get("horizon_days") or ""), str(row.get("top_n") or ""))].append(row)
+    for (horizon, top_n), rows_for_combo in sorted(
+        combo_groups.items(),
+        key=lambda item: (int(to_float(item[0][0], 0.0) or 0), int(to_float(item[0][1], 0.0) or 0)),
+    ):
+        best = max(
+            rows_for_combo,
+            key=lambda row: numeric_or_default(row.get("selected_lcb_return_pct"), -1e9),
+        )
+        worst = min(
+            rows_for_combo,
+            key=lambda row: numeric_or_default(row.get("selected_lcb_return_pct"), 1e9),
+        )
+        by_horizon_top_n.append(
+            {
+                "horizon_days": horizon,
+                "top_n": top_n,
+                "best_test_lcb_policy": best.get("selection_policy_name", ""),
+                "best_test_lcb_candidate_name": best.get("candidate_name", ""),
+                "best_test_lcb_return_pct": rounded(to_float(best.get("selected_lcb_return_pct"))),
+                "worst_test_lcb_policy": worst.get("selection_policy_name", ""),
+                "worst_test_lcb_candidate_name": worst.get("candidate_name", ""),
+                "worst_test_lcb_return_pct": rounded(to_float(worst.get("selected_lcb_return_pct"))),
+            }
+        )
+
+    best_policy = ranked[0] if ranked else {}
+    worst_policy = ranked[-1] if ranked else {}
+    raw_policy = ranked[raw_rank - 1] if raw_rank else {}
+    return {
+        "sample": sample,
+        "metric": "weighted_selected_lcb_return_pct_by_selection_policy",
+        "best_test_lcb_policy": best_policy.get("selection_policy_name", ""),
+        "best_test_lcb_return_pct": best_policy.get("weighted_lcb_return_pct", ""),
+        "worst_test_lcb_policy": worst_policy.get("selection_policy_name", ""),
+        "worst_test_lcb_return_pct": worst_policy.get("weighted_lcb_return_pct", ""),
+        "raw_legacy_score_rank": raw_rank or "",
+        "raw_legacy_score_lcb_return_pct": raw_policy.get("weighted_lcb_return_pct", ""),
+        "regime_reversal_signal": bool(raw_rank == 1),
+        "note": (
+            "raw_legacy_score is the best weighted test-period policy; sophisticated guardrails may be "
+            "underperforming in this regime."
+            if raw_rank == 1
+            else "raw_legacy_score did not rank first by weighted test-period LCB."
+        ),
+        "policy_rankings": ranked,
+        "by_horizon_top_n": by_horizon_top_n,
+    }
+
+
+def holdout_split_diagnostic(rows: list[dict[str, Any]], *, split: str) -> dict[str, Any]:
+    pass_state_key = f"{split}_calibration_pass_state"
+    pass_key = f"{split}_calibration_pass"
+    lcb_key = f"{split}_selected_lcb_return_pct"
+    profit_key = f"{split}_selected_profit_factor"
+    loss20_key = f"{split}_selected_large_loss_20pct_rate_pct"
+    if not rows:
+        return {
+            "row_count": 0,
+            "pass_count": 0,
+            "fail_count": 0,
+            "best_lcb_return_pct": "",
+            "best_lcb_candidate_name": "",
+            "best_lcb_selection_policy_name": "",
+            "best_lcb_profit_factor": "",
+            "best_lcb_large_loss_20pct_rate_pct": "",
+            "max_lcb_return_pct": "",
+            "max_profit_factor": "",
+            "min_large_loss_20pct_rate_pct": "",
+            "mean_lcb_return_pct": "",
+        }
+    best_lcb_row = max(rows, key=lambda row: numeric_or_default(row.get(lcb_key), -1e9))
+    lcb_values = numeric_values(rows, lcb_key)
+    profit_values = numeric_values(rows, profit_key)
+    loss20_values = numeric_values(rows, loss20_key)
+    pass_count = sum(
+        1
+        for row in rows
+        if str(row.get(pass_state_key) or "").strip().lower() == "pass"
+        or as_bool(row.get(pass_key), False)
+    )
+    return {
+        "row_count": len(rows),
+        "pass_count": pass_count,
+        "fail_count": len(rows) - pass_count,
+        "best_lcb_return_pct": rounded(to_float(best_lcb_row.get(lcb_key))),
+        "best_lcb_candidate_name": best_lcb_row.get("candidate_name", ""),
+        "best_lcb_selection_policy_name": best_lcb_row.get("selection_policy_name", ""),
+        "best_lcb_profit_factor": rounded(to_float(best_lcb_row.get(profit_key))),
+        "best_lcb_large_loss_20pct_rate_pct": rounded(to_float(best_lcb_row.get(loss20_key))),
+        "max_lcb_return_pct": rounded(max(lcb_values) if lcb_values else None),
+        "max_profit_factor": rounded(max(profit_values) if profit_values else None),
+        "min_large_loss_20pct_rate_pct": rounded(min(loss20_values) if loss20_values else None),
+        "mean_lcb_return_pct": mean_numeric(rows, lcb_key),
+    }
+
+
+def build_holdout_horizon_calibration_summary(
+    holdout_rows: list[dict[str, Any]],
+    *,
+    sample: str = "all",
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    horizons = sorted(
+        {
+            int(to_float(row.get("horizon_days"), 0.0) or 0)
+            for row in holdout_rows
+            if str(row.get("sample") or "") == sample and to_float(row.get("horizon_days"), None) is not None
+        }
+    )
+    for horizon in horizons:
+        rows_for_horizon = [
+            row
+            for row in holdout_rows
+            if str(row.get("sample") or "") == sample
+            and int(to_float(row.get("horizon_days"), 0.0) or 0) == horizon
+        ]
+        train_summary = holdout_split_diagnostic(rows_for_horizon, split="train")
+        test_summary = holdout_split_diagnostic(rows_for_horizon, split="test")
+        summary[str(horizon)] = {
+            "sample": sample,
+            "train": train_summary,
+            "test": test_summary,
+            "train_pass_count": train_summary["pass_count"],
+            "test_pass_count": test_summary["pass_count"],
+            "best_train_lcb_return_pct": train_summary["best_lcb_return_pct"],
+            "best_test_lcb_return_pct": test_summary["best_lcb_return_pct"],
+        }
+    return summary
 
 
 def deterministic_bootstrap_seed(*, base_seed: int, parts: list[object]) -> int:
@@ -6229,6 +7012,13 @@ def liquidity_ok_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if to_float(row.get("diag_liquidity_ok")) == 1.0]
 
 
+def filesystem_path(path: Path) -> str:
+    text = str(path.resolve())
+    if os.name == "nt" and not text.startswith("\\\\?\\"):
+        return "\\\\?\\" + text
+    return text
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str] | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if fieldnames is None:
@@ -6240,12 +7030,13 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str] | No
                     seen.add(key)
                     keys.append(key)
         fieldnames = keys
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
+    digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:10]
+    tmp_path = path.parent / f".tmp_{os.getpid()}_{digest}.csv"
+    with open(filesystem_path(tmp_path), "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n", extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
-    tmp_path.replace(path)
+    os.replace(filesystem_path(tmp_path), filesystem_path(path))
 
 
 def read_csv_rows(path: Path) -> list[dict[str, Any]]:
@@ -6258,9 +7049,12 @@ def read_csv_rows(path: Path) -> list[dict[str, Any]]:
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
-    tmp_path.replace(path)
+    digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:10]
+    tmp_path = path.parent / f".tmp_{os.getpid()}_{digest}.json"
+    with open(filesystem_path(tmp_path), "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True))
+        handle.write("\n")
+    os.replace(filesystem_path(tmp_path), filesystem_path(path))
 
 
 def read_json_payload(path: Path) -> dict[str, Any]:
@@ -6294,10 +7088,13 @@ def candidate_grid_chunk_path(
     evaluation_split: str,
     horizon: int,
     top_n: int | None = None,
+    top_n_label: str | None = None,
     policy_name: str | None = None,
 ) -> Path:
     parts = ["t1grid", safe_file_slug(sample, max_len=12), safe_file_slug(evaluation_split, max_len=12), f"{horizon}d"]
-    if top_n is not None:
+    if top_n_label:
+        parts.append(safe_file_slug(top_n_label, max_len=24))
+    elif top_n is not None:
         parts.append(f"top{int(top_n)}")
     if policy_name:
         parts.append(safe_file_slug(policy_name, max_len=24))
@@ -6385,12 +7182,26 @@ def main() -> None:
         else int(cfg_get(config, "calibration.tier1.embargo_days", max(horizons)))
     )
     embargo_days = max(0, embargo_days)
+    auto_expand_embargo = as_bool(
+        cfg_get(config, "calibration.tier1.auto_expand_embargo_to_horizon_calendar_days", True),
+        True,
+    )
     max_workers = (
         int(args.max_workers)
         if args.max_workers is not None
         else int(cfg_get(config, "calibration.tier1.max_workers", os.cpu_count() or 1))
     )
     max_workers = max(1, min(max_workers, (os.cpu_count() or 1) * 4))
+    candidate_grid_executor = str(
+        args.candidate_grid_executor
+        or cfg_get(config, "calibration.tier1.candidate_grid_executor", "thread")
+        or "thread"
+    ).strip().lower()
+    if candidate_grid_executor not in {"thread", "process"}:
+        raise ValueError(
+            "calibration.tier1.candidate_grid_executor must be 'thread' or 'process', "
+            f"got {candidate_grid_executor!r}"
+        )
     bootstrap_iterations = (
         int(args.bootstrap_iterations)
         if args.bootstrap_iterations is not None
@@ -6603,11 +7414,24 @@ def main() -> None:
     split_manifest: dict[str, Any] = {}
     split_rows_by_key: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
     for horizon in horizons:
+        minimum_horizon_embargo_days = minimum_calendar_embargo_days_for_horizon(horizon)
+        effective_embargo_days = (
+            max(embargo_days, minimum_horizon_embargo_days)
+            if auto_expand_embargo
+            else embargo_days
+        )
+        if effective_embargo_days > embargo_days:
+            LOGGER.info(
+                "Expanded Tier-1 embargo for horizon %sd from %d to %d calendar days to cover trading-bar forward returns.",
+                horizon,
+                embargo_days,
+                effective_embargo_days,
+            )
         train_observations, test_observations, train_dates, test_dates = split_rows_by_completed_return_date(
             observations,
             horizon=horizon,
             train_fraction=train_fraction,
-            embargo_days=embargo_days,
+            embargo_days=effective_embargo_days,
             ret_key=objective_return_key(horizon, params),
         )
         liquid_train_observations = liquidity_ok_rows(train_observations)
@@ -6621,7 +7445,10 @@ def main() -> None:
             "train_snapshot_date_count": len(train_dates),
             "test_snapshot_dates": test_dates,
             "test_snapshot_date_count": len(test_dates),
-            "embargo_days": embargo_days,
+            "configured_embargo_days": embargo_days,
+            "effective_embargo_days": effective_embargo_days,
+            "minimum_horizon_calendar_embargo_days": minimum_horizon_embargo_days,
+            "auto_expand_embargo_to_horizon_calendar_days": auto_expand_embargo,
             "train_observation_count": len(train_observations),
             "test_observation_count": len(test_observations),
             "train_liquidity_ok_observation_count": len(liquid_train_observations),
@@ -6633,24 +7460,24 @@ def main() -> None:
             ("all", "test", test_observations),
             ("liquidity_ok", "test", liquid_test_observations),
         ]
-        for top_n in top_ns:
-            for policy in policies:
-                for sample, evaluation_split, rows_for_chunk in row_groups:
-                    candidate_rows.extend(
-                        load_or_build_candidate_grid_chunk(
-                            rows_for_chunk,
-                            specs,
-                            [policy],
-                            horizon=horizon,
-                            top_ns=[top_n],
-                            sample=sample,
-                            evaluation_split=evaluation_split,
-                            params=params,
-                            max_workers=max_workers,
-                            output_dir=output_dir,
-                            resume=bool(args.resume),
-                        )
+        for policy in policies:
+            for sample, evaluation_split, rows_for_chunk in row_groups:
+                candidate_rows.extend(
+                    load_or_build_candidate_grid_chunk(
+                        rows_for_chunk,
+                        specs,
+                        [policy],
+                        horizon=horizon,
+                        top_ns=top_ns,
+                        sample=sample,
+                        evaluation_split=evaluation_split,
+                        params=params,
+                        max_workers=max_workers,
+                        executor_kind=candidate_grid_executor,
+                        output_dir=output_dir,
+                        resume=bool(args.resume),
                     )
+                )
     write_csv(progress_csv_path(output_dir, "tier1_weight_calibration_grid.csv"), candidate_rows)
     best_rows = build_best_rows(
         candidate_rows,
@@ -6748,10 +7575,24 @@ def main() -> None:
         if str(row.get("scope") or "") == medium_term_scope_name(medium_term_horizons)
         and str(row.get("rank") or "") == "1"
     ]
+    horizon_calibration_summary = build_horizon_calibration_summary(candidate_rows, sample="all")
+    horizon_calibration_summary_by_sample = {
+        sample: build_horizon_calibration_summary(candidate_rows, sample=sample)
+        for sample in sorted({str(row.get("sample") or "") for row in candidate_rows if str(row.get("sample") or "")})
+    }
+    holdout_horizon_calibration_summary = build_holdout_horizon_calibration_summary(holdout_rows, sample="all")
+    holdout_horizon_calibration_summary_by_sample = {
+        sample: build_holdout_horizon_calibration_summary(holdout_rows, sample=sample)
+        for sample in sorted({str(row.get("sample") or "") for row in holdout_rows if str(row.get("sample") or "")})
+    }
+    test_period_policy_ranking = build_test_period_policy_ranking(candidate_rows, sample="all")
     manifest = {
+        "status": "success",
         "script": Path(__file__).name,
         "db_path": str(db_path),
         "output_dir": str(output_dir),
+        "start_asof": str(args.start_asof or ""),
+        "end_asof": str(args.end_asof or ""),
         "snapshot_dates": snapshot_dates,
         "snapshot_date_count": len(snapshot_dates),
         "train_fraction": train_fraction,
@@ -6783,6 +7624,11 @@ def main() -> None:
         "strict_feature_lag": strict_feature_lag,
         "next_bar_entry": next_bar_entry,
         "medium_term_horizons": medium_term_horizons,
+        "horizon_calibration_summary": horizon_calibration_summary,
+        "horizon_calibration_summary_by_sample": horizon_calibration_summary_by_sample,
+        "holdout_horizon_calibration_summary": holdout_horizon_calibration_summary,
+        "holdout_horizon_calibration_summary_by_sample": holdout_horizon_calibration_summary_by_sample,
+        "test_period_policy_ranking": test_period_policy_ranking,
         "calibration_params": {
             "round_trip_cost_bps": params.round_trip_cost_bps,
             "lcb_z": params.lcb_z,
@@ -6810,6 +7656,9 @@ def main() -> None:
             "use_decomposed_risk_for_penalty": params.use_decomposed_risk_for_penalty,
             "risk_penalty_mode": params.risk_penalty_mode,
             "growth_drag_curve": params.growth_drag_curve,
+            "alpha_adjustment_enabled": params.alpha_adjustment_enabled,
+            "benchmark_ticker": params.benchmark_ticker,
+            "return_objective": params.return_objective,
         },
         "best_medium_term_rank1": best_medium_term,
         "elapsed_sec": round(time.perf_counter() - start_time, 3),
@@ -6821,9 +7670,11 @@ def main() -> None:
             "calibration_objective_vs_raw_current_config remains available for comparison against the raw_legacy_score current_config baseline.",
             "Candidate selection is reported on chronological train and test splits; use tier1_weight_calibration_holdout.csv to compare in-sample winners against out-of-sample results.",
             "tier1_weight_calibration_bootstrap_ci.csv reports circular block-bootstrap 5th/95th percentile intervals for top train-ranked candidates; block size is horizon-aware and uses daily blocks when --include-non-fridays is set.",
-            "Candidate-grid and bootstrap jobs can run in parallel via --max-workers or calibration.tier1.max_workers.",
+            "Candidate-grid and bootstrap jobs can run in parallel via --max-workers or calibration.tier1.max_workers; CPU-bound grid scoring can use --candidate-grid-executor process.",
             "The horizon_days column is retained for compatibility but represents trading bars, not calendar days.",
+            "Tier-1 embargo_days is interpreted as calendar days; auto_expand_embargo_to_horizon_calendar_days prevents trading-bar forward-return leakage into the test split.",
             "Pass/fail constraints use net LCB return, Sortino, profit factor, Omega, core hard-weakness exposure, illiquid exposure, large-loss rates, and top-winner concentration.",
+            "Profit factor and Omega are capped by calibration.tier1.recommended_stack.profit_factor_cap to prevent all-gain small samples from dominating the objective.",
             "omega_configured is reported for every run; its objective weight and constraint are active only when omega_hurdle is non-zero so it is not a duplicate of profit factor at the default hurdle.",
             "The broad legacy binary weakness flag is advisory by default; calibration separates core structural hard weakness, event/dilution hard weakness, soft weakness, and normal clinical-stage binary exposure.",
             "Aggregate hard-weakness exposure is advisory by default because event/dilution reasons can behave differently from structural non-investability; enable aggregate_hard_constraint_enabled to enforce it.",
@@ -6834,6 +7685,10 @@ def main() -> None:
             "Train/test splits apply an embargo around each split boundary by default to reduce overlap leakage from forward-return horizons.",
             "Financial quality and momentum profile weights are applied as residual weights after their embedded clinical-opportunity contribution to avoid double-counting.",
             "Current removals/manual exclusions are not excluded by default to reduce survivorship bias; set --exclude-current-removals to match current investable-universe diagnostics.",
+            "horizon_calibration_summary surfaces train/test pass counts and best LCB by horizon so short-horizon failures are visible even when medium-term summaries dominate.",
+            "holdout_horizon_calibration_summary uses tier1_weight_calibration_holdout.csv rows, matching the candidate set seen by the Optuna survivor gate.",
+            "test_period_policy_ranking surfaces regime-reversal risk when simpler/raw policies outperform more constrained guardrail policies out of sample.",
+            "When alpha_adjustment_enabled is false, pass/fail constraints use absolute returns; a broad biotech drawdown can correctly produce zero survivors even when relative alpha is positive.",
         ],
     }
     write_json(output_dir / "tier1_weight_calibration_manifest.json", manifest)

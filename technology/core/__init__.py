@@ -1,0 +1,2 @@
+"""Shared technology model infrastructure."""
+

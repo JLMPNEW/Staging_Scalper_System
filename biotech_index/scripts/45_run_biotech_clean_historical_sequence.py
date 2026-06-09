@@ -726,6 +726,7 @@ def main() -> None:
             args.horizons,
             "--strict-feature-lag",
             "--next-bar-entry",
+            "--resume",
         ]
         run_command(label="feature_ic_monitor", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timing_rows=timing_rows)
 

@@ -29,6 +29,8 @@ DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "output" / "biotech_index_reports" / "optun
 REQUIRED_CALIBRATION_FILES = (
     "tier1_weight_calibration_manifest.json",
     "tier1_weight_calibration_holdout.csv",
+)
+OPTIONAL_CALIBRATION_FILES = (
     "tier1_weight_calibration_bootstrap_ci.csv",
     "tier1_weight_calibration_best.csv",
 )
@@ -37,6 +39,18 @@ REQUIRED_IC_FILES = (
     "feature_ic_summary.csv",
 )
 PROMOTABLE_IC_CLASSES = frozenset({"promote_candidate", "cohort_specific_only"})
+SUCCESS_MANIFEST_STATUSES = frozenset({"success", "completed", "complete"})
+WEIGHT_PARAM_BOUNDS: dict[str, tuple[float, float]] = {
+    "w_lcb": (0.50, 2.00),
+    "w_mean": (0.00, 0.75),
+    "w_hit": (0.00, 0.75),
+    "w_profit": (0.00, 0.75),
+    "w_sortino": (0.00, 0.60),
+    "w_loss20": (0.40, 2.00),
+    "w_loss40": (0.40, 2.00),
+    "w_top3": (0.20, 1.50),
+    "w_train_test_gap": (0.00, 1.50),
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,12 +72,45 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-n", type=str, default="10,20")
     parser.add_argument("--n-trials", type=int, default=500)
     parser.add_argument("--seed", type=int, default=7331)
+    parser.add_argument(
+        "--top-k-survivors",
+        type=int,
+        default=3,
+        help="Rank-weight this many train-ranked survivors inside each Optuna trial instead of optimizing a single top-1 pick.",
+    )
+    parser.add_argument("--timeout-sec", type=float, default=None, help="Optional wall-clock timeout for Optuna trials.")
+    parser.add_argument(
+        "--n-startup-trials",
+        type=int,
+        default=0,
+        help="Optional Optuna TPE startup trials. Defaults to min(25, n_trials // 10).",
+    )
+    parser.add_argument(
+        "--disable-multivariate-tpe",
+        action="store_true",
+        help="Disable Optuna multivariate TPE. Enabled by default because the weights interact.",
+    )
+    parser.add_argument("--optuna-log-every", type=int, default=50, help="Log Optuna progress every N completed trials.")
+    parser.add_argument(
+        "--weight-bounds-json",
+        type=str,
+        default="",
+        help=(
+            "Optional JSON object overriding weight bounds, e.g. "
+            "'{\"w_lcb\":[0,2],\"w_loss20\":[0.2,2]}'."
+        ),
+    )
     parser.add_argument("--min-panel-dates", type=int, default=250)
     parser.add_argument("--min-promote-or-cohort-factors", type=int, default=1)
     parser.add_argument("--min-selected-n", type=int, default=60)
     parser.add_argument("--min-lcb-return-pct", type=float, default=0.0)
     parser.add_argument("--min-profit-factor", type=float, default=1.15)
-    parser.add_argument("--max-loss20-rate-pct", type=float, default=15.0)
+    parser.add_argument(
+        "--max-loss20-rate-pct",
+        type=float,
+        default=30.0,
+        help="Maximum 20% loss rate allowed for Optuna survivors. Defaults to the Tier-1 calibration threshold.",
+    )
     parser.add_argument("--max-loss40-rate-pct", type=float, default=12.5)
     parser.add_argument("--max-top3-gain-contribution-pct", type=float, default=50.0)
     parser.add_argument(
@@ -102,11 +149,25 @@ def as_bool(raw: object, default: bool = False) -> bool:
 
 
 def to_float(raw: object, default: float | None = None) -> float | None:
+    if raw is None:
+        return default
     try:
-        value = float(str(raw).strip())
+        text = str(raw).strip().replace(",", "")
+        if not text:
+            return default
+        value = float(text)
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default
+
+
+def required_float(row: dict[str, Any], key: str, default: float) -> float:
+    value = to_float(row.get(key), None)
+    return default if value is None else value
+
+
+def threshold_slug(value: float) -> str:
+    return f"{float(value):g}".replace("-", "neg").replace(".", "p")
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -148,8 +209,8 @@ def resolve_sequence_dir(input_dir: Path, explicit: Path | None) -> Path:
     if explicit is not None:
         return explicit.expanduser().resolve()
     if input_dir.name == "candidate_calibration":
-        return input_dir.parent
-    return input_dir.parent
+        return input_dir.parent.resolve()
+    return input_dir.resolve()
 
 
 def validate_required_files(input_dir: Path, feature_ic_dir: Path) -> list[dict[str, Any]]:
@@ -164,6 +225,16 @@ def validate_required_files(input_dir: Path, feature_ic_dir: Path) -> list[dict[
                 "details": "candidate calibration prerequisite",
             }
         )
+    for filename in OPTIONAL_CALIBRATION_FILES:
+        path = input_dir / filename
+        rows.append(
+            {
+                "gate": f"optional_calibration_file:{filename}",
+                "status": "PASS" if path.exists() else "WARN",
+                "value": str(path),
+                "details": "optional calibration diagnostic; not required for optimizer execution",
+            }
+        )
     for filename in REQUIRED_IC_FILES:
         path = feature_ic_dir / filename
         rows.append(
@@ -175,6 +246,93 @@ def validate_required_files(input_dir: Path, feature_ic_dir: Path) -> list[dict[
             }
         )
     return rows
+
+
+def validate_calibration_manifest(
+    manifest: dict[str, Any],
+    *,
+    requested_start_asof: str,
+    requested_end_asof: str,
+    manifest_path: Path,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    status = str(manifest.get("status") or "").strip().lower()
+    if status:
+        rows.append(
+            {
+                "gate": "calibration_manifest_status",
+                "status": "PASS" if status in SUCCESS_MANIFEST_STATUSES else "FAIL",
+                "value": status,
+                "details": str(manifest_path),
+            }
+        )
+    else:
+        rows.append(
+            {
+                "gate": "calibration_manifest_status",
+                "status": "WARN",
+                "value": "",
+                "details": f"manifest has no explicit status; file={manifest_path}",
+            }
+        )
+
+    snapshot_dates = [
+        str(value)[:10]
+        for value in (manifest.get("snapshot_dates") or [])
+        if str(value or "").strip()
+    ]
+    for key, requested in (("start_asof", requested_start_asof), ("end_asof", requested_end_asof)):
+        requested_clean = str(requested or "").strip()
+        if not requested_clean:
+            continue
+        manifest_value = str(manifest.get(key) or "").strip()
+        if not manifest_value:
+            if snapshot_dates:
+                if key == "start_asof":
+                    out_of_range = [value for value in snapshot_dates if value < requested_clean]
+                else:
+                    out_of_range = [value for value in snapshot_dates if value > requested_clean]
+                rows.append(
+                    {
+                        "gate": f"calibration_manifest_{key}",
+                        "status": "PASS" if not out_of_range else "FAIL",
+                        "value": f"snapshot_dates={len(snapshot_dates)}",
+                        "details": (
+                            f"requested={requested_clean}; manifest lacks {key}; "
+                            f"out_of_range_snapshot_dates={len(out_of_range)}"
+                        ),
+                    }
+                )
+                continue
+            rows.append(
+                {
+                    "gate": f"calibration_manifest_{key}",
+                    "status": "WARN",
+                    "value": "",
+                    "details": f"requested {key}={requested_clean}, but manifest has no {key} metadata",
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "gate": f"calibration_manifest_{key}",
+                    "status": "PASS" if manifest_value == requested_clean else "FAIL",
+                    "value": manifest_value,
+                    "details": f"requested={requested_clean}; file={manifest_path}",
+                }
+            )
+    return rows
+
+
+def validate_db_path(db_path: Path) -> list[dict[str, Any]]:
+    return [
+        {
+            "gate": "database_path_exists",
+            "status": "PASS" if db_path.exists() else "FAIL",
+            "value": str(db_path),
+            "details": "Resolved --db path or paths.database_path from config",
+        }
+    ]
 
 
 def validate_clean_qa(sequence_dir: Path, *, min_panel_dates: int, allow_missing: bool) -> list[dict[str, Any]]:
@@ -273,21 +431,21 @@ def filter_survivors(
     survivors: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for row in rows:
-        horizon = int(to_float(row.get("horizon_days"), -1) or -1)
-        top_n = int(to_float(row.get("top_n"), -1) or -1)
+        horizon = int(required_float(row, "horizon_days", -1.0))
+        top_n = int(required_float(row, "top_n", -1.0))
         if horizons and horizon not in horizons:
             continue
         if top_ns and top_n not in top_ns:
             continue
         train_pass = as_bool(row.get("train_calibration_pass"), False) or str(row.get("train_calibration_pass_state")) == "pass"
         test_pass = as_bool(row.get("test_calibration_pass"), False) or str(row.get("test_calibration_pass_state")) == "pass"
-        train_n = to_float(row.get("train_n"), 0.0) or 0.0
-        test_n = to_float(row.get("test_n"), 0.0) or 0.0
-        test_lcb = to_float(row.get("test_selected_lcb_return_pct"), -1e9) or -1e9
-        test_profit = to_float(row.get("test_selected_profit_factor"), 0.0) or 0.0
-        test_loss20 = to_float(row.get("test_selected_large_loss_20pct_rate_pct"), 100.0) or 100.0
-        test_loss40 = to_float(row.get("test_selected_large_loss_40pct_rate_pct"), 100.0) or 100.0
-        test_top3 = to_float(row.get("test_selected_top3_gain_contribution_pct"), 100.0) or 100.0
+        train_n = required_float(row, "train_n", 0.0)
+        test_n = required_float(row, "test_n", 0.0)
+        test_lcb = required_float(row, "test_selected_lcb_return_pct", -1e9)
+        test_profit = required_float(row, "test_selected_profit_factor", 0.0)
+        test_loss20 = required_float(row, "test_selected_large_loss_20pct_rate_pct", 100.0)
+        test_loss40 = required_float(row, "test_selected_large_loss_40pct_rate_pct", 100.0)
+        test_top3 = required_float(row, "test_selected_top3_gain_contribution_pct", 100.0)
         fail_reasons: list[str] = []
         if not train_pass:
             fail_reasons.append("train_calibration_failed")
@@ -300,11 +458,11 @@ def filter_survivors(
         if test_profit < min_profit_factor:
             fail_reasons.append("test_profit_factor_below_min")
         if test_loss20 > max_loss20:
-            fail_reasons.append("test_loss20_above_max")
+            fail_reasons.append(f"test_loss20_above_max_{threshold_slug(max_loss20)}pct")
         if test_loss40 > max_loss40:
-            fail_reasons.append("test_loss40_above_max")
+            fail_reasons.append(f"test_loss40_above_max_{threshold_slug(max_loss40)}pct")
         if test_top3 > max_top3:
-            fail_reasons.append("test_top3_concentration_above_max")
+            fail_reasons.append(f"test_top3_concentration_above_max_{threshold_slug(max_top3)}pct")
         out = dict(row)
         out["optimizer_candidate_key"] = candidate_key(row)
         out["optimizer_reject_reasons"] = "|".join(fail_reasons)
@@ -316,28 +474,98 @@ def filter_survivors(
 
 
 def metric(row: dict[str, Any], key: str, default: float = 0.0) -> float:
-    return to_float(row.get(key), default) or default
+    value = to_float(row.get(key), None)
+    return default if value is None else value
 
 
-def trial_candidate_score(row: dict[str, Any], params: dict[str, float], *, split: str) -> float:
+def parse_weight_bounds(raw: str) -> dict[str, tuple[float, float]]:
+    bounds = dict(WEIGHT_PARAM_BOUNDS)
+    text = str(raw or "").strip()
+    if not text:
+        return bounds
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("--weight-bounds-json must be a JSON object")
+    for name, pair in payload.items():
+        if name not in bounds:
+            raise ValueError(f"Unsupported optimizer weight bound: {name!r}")
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise ValueError(f"Weight bound for {name!r} must be [min, max]")
+        low = to_float(pair[0], None)
+        high = to_float(pair[1], None)
+        if low is None or high is None or low > high:
+            raise ValueError(f"Invalid weight bound for {name!r}: {pair!r}")
+        bounds[name] = (float(low), float(high))
+    return bounds
+
+
+def build_score_normalizers(rows: list[dict[str, Any]]) -> dict[str, tuple[float, float]]:
+    metric_names = (
+        "lcb_return_pct",
+        "mean_return_pct",
+        "hit_rate_pct",
+        "profit_factor",
+        "sortino_like",
+        "large_loss_20pct_rate_pct",
+        "large_loss_40pct_rate_pct",
+        "top3_gain_contribution_pct",
+    )
+    normalizers: dict[str, tuple[float, float]] = {}
+    for split in ("train", "test"):
+        prefix = f"{split}_selected_"
+        for metric_name in metric_names:
+            key = prefix + metric_name
+            values = [to_float(row.get(key), None) for row in rows]
+            clean = [float(value) for value in values if value is not None]
+            if not clean:
+                normalizers[key] = (0.0, 1.0)
+                continue
+            avg = sum(clean) / len(clean)
+            variance = sum((value - avg) ** 2 for value in clean) / max(1, len(clean))
+            std = math.sqrt(variance)
+            normalizers[key] = (avg, std if std > 1e-9 else 1.0)
+    return normalizers
+
+
+def normalized_metric(
+    row: dict[str, Any],
+    key: str,
+    normalizers: dict[str, tuple[float, float]],
+    *,
+    default: float = 0.0,
+    clip: float = 3.0,
+) -> float:
+    value = metric(row, key, default)
+    avg, std = normalizers.get(key, (0.0, 1.0))
+    z_value = (value - avg) / max(1e-9, std)
+    return max(-clip, min(clip, z_value))
+
+
+def trial_candidate_score(
+    row: dict[str, Any],
+    params: dict[str, float],
+    *,
+    split: str,
+    normalizers: dict[str, tuple[float, float]],
+) -> float:
     prefix = f"{split}_selected_"
-    lcb = metric(row, prefix + "lcb_return_pct")
-    mean = metric(row, prefix + "mean_return_pct")
-    hit = metric(row, prefix + "hit_rate_pct") / 100.0
-    profit = min(metric(row, prefix + "profit_factor"), 5.0)
-    loss20 = metric(row, prefix + "large_loss_20pct_rate_pct") / 100.0
-    loss40 = metric(row, prefix + "large_loss_40pct_rate_pct") / 100.0
-    top3 = metric(row, prefix + "top3_gain_contribution_pct") / 100.0
-    sortino = max(-5.0, min(5.0, metric(row, prefix + "sortino_like")))
+    lcb = normalized_metric(row, prefix + "lcb_return_pct", normalizers)
+    mean = normalized_metric(row, prefix + "mean_return_pct", normalizers)
+    hit = normalized_metric(row, prefix + "hit_rate_pct", normalizers)
+    profit = normalized_metric(row, prefix + "profit_factor", normalizers)
+    sortino = normalized_metric(row, prefix + "sortino_like", normalizers)
+    loss20 = normalized_metric(row, prefix + "large_loss_20pct_rate_pct", normalizers)
+    loss40 = normalized_metric(row, prefix + "large_loss_40pct_rate_pct", normalizers)
+    top3 = normalized_metric(row, prefix + "top3_gain_contribution_pct", normalizers)
     return (
         params["w_lcb"] * lcb
         + params["w_mean"] * mean
-        + params["w_hit"] * hit * 10.0
-        + params["w_profit"] * profit * 4.0
-        + params["w_sortino"] * sortino * 2.0
-        - params["w_loss20"] * loss20 * 25.0
-        - params["w_loss40"] * loss40 * 35.0
-        - params["w_top3"] * top3 * 10.0
+        + params["w_hit"] * hit
+        + params["w_profit"] * profit
+        + params["w_sortino"] * sortino
+        - params["w_loss20"] * loss20
+        - params["w_loss40"] * loss40
+        - params["w_top3"] * top3
     )
 
 
@@ -346,61 +574,133 @@ def run_optuna_trials(
     *,
     n_trials: int,
     seed: int,
+    top_k_survivors: int,
+    timeout_sec: float | None,
+    n_startup_trials: int,
+    multivariate_tpe: bool,
+    log_every: int,
+    weight_bounds: dict[str, tuple[float, float]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     try:
         import optuna  # type: ignore
     except Exception as exc:  # pragma: no cover - environment dependent
         raise RuntimeError("Optuna is not installed. Install with `pip install optuna` before running this step.") from exc
 
+    normalizers = build_score_normalizers(survivors)
+    top_k = max(1, int(top_k_survivors))
+
     def objective(trial: Any) -> float:
         params = {
-            "w_lcb": trial.suggest_float("w_lcb", 0.50, 2.00),
-            "w_mean": trial.suggest_float("w_mean", 0.00, 0.75),
-            "w_hit": trial.suggest_float("w_hit", 0.00, 0.75),
-            "w_profit": trial.suggest_float("w_profit", 0.00, 0.75),
-            "w_sortino": trial.suggest_float("w_sortino", 0.00, 0.60),
-            "w_loss20": trial.suggest_float("w_loss20", 0.40, 2.00),
-            "w_loss40": trial.suggest_float("w_loss40", 0.40, 2.00),
-            "w_top3": trial.suggest_float("w_top3", 0.20, 1.50),
-            "w_train_test_gap": trial.suggest_float("w_train_test_gap", 0.00, 1.50),
+            name: trial.suggest_float(name, bounds[0], bounds[1])
+            for name, bounds in weight_bounds.items()
         }
-        train_scored = [(trial_candidate_score(row, params, split="train"), row) for row in survivors]
+        train_scored = [
+            (trial_candidate_score(row, params, split="train", normalizers=normalizers), row)
+            for row in survivors
+        ]
         train_scored.sort(key=lambda item: item[0], reverse=True)
-        selected = train_scored[0][1]
-        train_score = train_scored[0][0]
-        test_score = trial_candidate_score(selected, params, split="test")
-        gap = abs(train_score - test_score)
+        top_rows = train_scored[: min(top_k, len(train_scored))]
+        weights = [1.0 / (rank + 1.0) for rank in range(len(top_rows))]
+        weight_sum = sum(weights) or 1.0
+        selected = top_rows[0][1]
+        train_scores = [score for score, _row in top_rows]
+        test_scores = [
+            trial_candidate_score(row, params, split="test", normalizers=normalizers)
+            for _score, row in top_rows
+        ]
+        train_score = sum(weight * score for weight, score in zip(weights, train_scores)) / weight_sum
+        test_score = sum(weight * score for weight, score in zip(weights, test_scores)) / weight_sum
+        gap = sum(
+            weight * max(0.0, train_value - test_value)
+            for weight, train_value, test_value in zip(weights, train_scores, test_scores)
+        ) / weight_sum
         trial.set_user_attr("selected_candidate_key", selected["optimizer_candidate_key"])
+        trial.set_user_attr(
+            "top_k_candidate_keys",
+            "||".join(str(row["optimizer_candidate_key"]) for _score, row in top_rows),
+        )
+        trial.set_user_attr("top_k_survivors", len(top_rows))
         trial.set_user_attr("candidate_name", selected.get("candidate_name", ""))
         trial.set_user_attr("selection_policy_name", selected.get("selection_policy_name", ""))
         trial.set_user_attr("horizon_days", selected.get("horizon_days", ""))
         trial.set_user_attr("top_n", selected.get("top_n", ""))
         trial.set_user_attr("train_score", round(train_score, 6))
         trial.set_user_attr("test_score", round(test_score, 6))
+        trial.set_user_attr("train_test_overfit_gap", round(gap, 6))
+        trial.set_user_attr("raw_test_objective", round(test_score, 6))
         trial.set_user_attr("test_lcb_return_pct", selected.get("test_selected_lcb_return_pct", ""))
         trial.set_user_attr("test_profit_factor", selected.get("test_selected_profit_factor", ""))
         trial.set_user_attr("test_large_loss_20pct_rate_pct", selected.get("test_selected_large_loss_20pct_rate_pct", ""))
         trial.set_user_attr("test_top3_gain_contribution_pct", selected.get("test_selected_top3_gain_contribution_pct", ""))
         return test_score - params["w_train_test_gap"] * gap
 
-    sampler = optuna.samplers.TPESampler(seed=seed)
+    startup_trials = int(n_startup_trials) if int(n_startup_trials) > 0 else min(25, max(1, int(n_trials) // 10))
+    try:
+        sampler = optuna.samplers.TPESampler(
+            seed=seed,
+            multivariate=bool(multivariate_tpe),
+            n_startup_trials=startup_trials,
+            constant_liar=True,
+        )
+    except TypeError:
+        sampler = optuna.samplers.TPESampler(seed=seed, n_startup_trials=startup_trials)
     study = optuna.create_study(direction="maximize", sampler=sampler)
-    study.optimize(objective, n_trials=max(1, int(n_trials)), show_progress_bar=False)
+
+    def log_callback(study_obj: Any, trial: Any) -> None:
+        every = int(log_every)
+        if every <= 0:
+            return
+        completed = [item for item in study_obj.trials if item.value is not None]
+        completed_count = len(completed)
+        if completed_count <= 0 or (completed_count != 1 and completed_count % every != 0):
+            return
+        try:
+            best_trial = study_obj.best_trial
+            LOGGER.info(
+                "Optuna progress: completed=%d/%d best_value=%.6f best_candidate=%s",
+                completed_count,
+                max(1, int(n_trials)),
+                float(study_obj.best_value),
+                best_trial.user_attrs.get("candidate_name", ""),
+            )
+        except ValueError:
+            LOGGER.info("Optuna progress: completed=%d/%d no completed best trial yet", completed_count, max(1, int(n_trials)))
+
+    study.optimize(
+        objective,
+        n_trials=max(1, int(n_trials)),
+        timeout=float(timeout_sec) if timeout_sec and timeout_sec > 0 else None,
+        callbacks=[log_callback],
+        show_progress_bar=False,
+    )
     trial_rows: list[dict[str, Any]] = []
     for trial in study.trials:
         row = {
             "trial_number": trial.number,
             "state": str(trial.state),
+            "datetime_start": trial.datetime_start.isoformat() if trial.datetime_start else "",
+            "datetime_complete": trial.datetime_complete.isoformat() if trial.datetime_complete else "",
+            "duration_sec": round(trial.duration.total_seconds(), 6) if trial.duration else "",
             "objective_value": trial.value if trial.value is not None else "",
             **trial.params,
             **trial.user_attrs,
         }
         trial_rows.append(row)
+    completed_trials = [trial for trial in study.trials if trial.value is not None]
+    if not completed_trials:
+        raise RuntimeError("All Optuna trials failed; no completed trial is available.")
+    try:
+        best_trial = study.best_trial
+    except ValueError as exc:
+        raise RuntimeError("All Optuna trials failed; no best trial is available.") from exc
     best = {
-        "best_trial_number": study.best_trial.number,
+        "best_trial_number": best_trial.number,
         "best_value": study.best_value,
-        **study.best_trial.params,
-        **study.best_trial.user_attrs,
+        "datetime_start": best_trial.datetime_start.isoformat() if best_trial.datetime_start else "",
+        "datetime_complete": best_trial.datetime_complete.isoformat() if best_trial.datetime_complete else "",
+        "duration_sec": round(best_trial.duration.total_seconds(), 6) if best_trial.duration else "",
+        **best_trial.params,
+        **best_trial.user_attrs,
     }
     return trial_rows, best
 
@@ -423,9 +723,24 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     horizons = parse_int_set(args.horizons)
     top_ns = parse_int_set(args.top_n)
+    weight_bounds = parse_weight_bounds(args.weight_bounds_json)
 
     gate_rows = validate_required_files(input_dir, feature_ic_dir)
-    if all(row["status"] == "PASS" for row in gate_rows):
+    gate_rows.extend(validate_db_path(db_path))
+    manifest_path = input_dir / "tier1_weight_calibration_manifest.json"
+    if manifest_path.exists():
+        calibration_manifest = read_json(manifest_path)
+        gate_rows.extend(
+            validate_calibration_manifest(
+                calibration_manifest,
+                requested_start_asof=args.start_asof,
+                requested_end_asof=args.end_asof,
+                manifest_path=manifest_path,
+            )
+        )
+    else:
+        calibration_manifest = {}
+    try:
         gate_rows.extend(
             validate_clean_qa(
                 sequence_dir,
@@ -433,6 +748,17 @@ def main() -> None:
                 allow_missing=bool(args.allow_missing_clean_qa),
             )
         )
+    except FileNotFoundError as exc:
+        gate_rows.append(
+            {
+                "gate": "clean_panel_qa",
+                "status": "WARN" if args.allow_missing_clean_qa else "FAIL",
+                "value": str(exc),
+                "details": "Missing clean historical QA artifacts",
+            }
+        )
+    ic_file_gates = [row for row in gate_rows if str(row.get("gate") or "").startswith("feature_ic_file:")]
+    if ic_file_gates and all(row["status"] == "PASS" for row in ic_file_gates):
         ic_gates, ic_class_counts = validate_ic(
             feature_ic_dir,
             min_promotable=max(0, int(args.min_promote_or_cohort_factors)),
@@ -453,6 +779,7 @@ def main() -> None:
                 "input_dir": str(input_dir),
                 "feature_ic_dir": str(feature_ic_dir),
                 "sequence_dir": str(sequence_dir),
+                "db_path": str(db_path),
             },
         )
         raise RuntimeError("Optuna prerequisite gates failed. See optuna_gate_report.csv.")
@@ -506,13 +833,25 @@ def main() -> None:
                 "survivor_count": len(survivors),
                 "ic_class_counts": ic_class_counts,
                 "n_trials_planned": args.n_trials,
+                "top_k_survivors": max(1, int(args.top_k_survivors)),
+                "weight_bounds": weight_bounds,
                 "elapsed_sec": round(time.perf_counter() - start, 3),
             },
         )
         LOGGER.info("Optuna candidate optimizer %s: survivors=%d output_dir=%s", status, len(survivors), output_dir)
         return
 
-    trial_rows, best = run_optuna_trials(survivors, n_trials=args.n_trials, seed=args.seed)
+    trial_rows, best = run_optuna_trials(
+        survivors,
+        n_trials=args.n_trials,
+        seed=args.seed,
+        top_k_survivors=max(1, int(args.top_k_survivors)),
+        timeout_sec=args.timeout_sec,
+        n_startup_trials=int(args.n_startup_trials),
+        multivariate_tpe=not bool(args.disable_multivariate_tpe),
+        log_every=int(args.optuna_log_every),
+        weight_bounds=weight_bounds,
+    )
     write_csv(output_dir / "optuna_trial_results.csv", trial_rows)
     write_csv(output_dir / "optuna_best_candidate.csv", [best])
     write_json(
@@ -528,6 +867,10 @@ def main() -> None:
             "end_asof": args.end_asof,
             "survivor_count": len(survivors),
             "trial_count": len(trial_rows),
+            "top_k_survivors": max(1, int(args.top_k_survivors)),
+            "timeout_sec": args.timeout_sec,
+            "weight_bounds": weight_bounds,
+            "calibration_manifest_status": calibration_manifest.get("status", ""),
             "best": best,
             "ic_class_counts": ic_class_counts,
             "elapsed_sec": round(time.perf_counter() - start, 3),

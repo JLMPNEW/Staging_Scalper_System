@@ -422,7 +422,9 @@ biotech_features:
         phase3: 0.55
   forward_catalyst_calendar_csv: "../output/biotech_index_reports/forward_catalyst_calendar.csv"
   forward_catalyst_overrides_csv: "data/forward_catalyst_overrides.csv"
-  forward_catalyst_calendar_lookahead_days: 365
+  # Keep forward catalysts aligned with the primary 120-trading-bar validation
+  # window instead of scoring catalysts too far outside the return horizon.
+  forward_catalyst_calendar_lookahead_days: 180
   forward_catalyst_manual_default_confidence: 0.80
   forward_catalyst_ctgov:
     enabled: true
@@ -936,7 +938,7 @@ biotech_scoring:
     cheap_low_growth_revenue_yoy_max: 0.10
     cheap_low_growth_guidance_max_score: 60.0
     cheap_low_growth_cap: 60.0
-    rank_cap_veto_enabled: true
+    rank_quality_cap_veto_enabled: true
     rank_cap_veto_threshold: 49.0
     rank_cap_veto_reasons:
       - commercial_business_shock_cap
@@ -1022,10 +1024,16 @@ biotech_scoring:
     commercial_value: 0.25
     forward_guidance: 0.05
     valuation: 0.15
-    upside_capacity: 0.10
+    upside_capacity: 0.05
     institutional_upside: 0.00
     financial_quality: 0.15
     momentum: 0.05
+    # borrow_signal: IC-validated 120d promote_candidate (IC=0.096, Q5-Q1 LCB +40.5%).
+    # Higher borrow rate/pressure = short-squeeze potential = positive selection signal.
+    borrow_signal: 0.05
+    # institutional_crowding: inverted 13F accumulation. Enabled per-profile where
+    # cohort IC evidence supports it (commercial_stage); disabled for clinical_stage.
+    institutional_crowding: 0.00
     risk_penalty: 0.15
   investment_weight_profiles:
     commercial_stage:
@@ -1034,9 +1042,13 @@ biotech_scoring:
       forward_guidance: 0.24
       valuation: 0.07
       upside_capacity: 0.04
-      institutional_upside: 0.12
+      institutional_upside: 0.06
       financial_quality: 0.14
       momentum: 0.08
+      borrow_signal: 0.04
+      # IC=-0.245 at 120d for commercial_profitable cohort. High institutional
+      # accumulation in commercial names = crowded trade = systematic underperformance.
+      institutional_crowding: 0.02
       risk_penalty: 0.24
     clinical_stage:
       clinical_opportunity: 0.45
@@ -1046,7 +1058,11 @@ biotech_scoring:
       upside_capacity: 0.15
       institutional_upside: 0.00
       financial_quality: 0.15
-      momentum: 0.10
+      momentum: 0.05
+      borrow_signal: 0.05
+      # Clinical crowding IC is mixed across cohorts; disabled until cohort-specific
+      # validation confirms a consistent direction.
+      institutional_crowding: 0.00
       risk_penalty: 0.40
   buckets:
     high_conviction_min: 80
@@ -1075,7 +1091,9 @@ biotech_reports:
     train_fraction: 0.70
     # Borrow validation is a shadow diagnostic by point-in-time feature date.
     # Keep the default holdout split usable for the currently available snapshot
-    # history; stricter embargo can be supplied on the command line.
+    # history; stricter embargo can be supplied on the command line. TODO:
+    # increase to 120+ calendar days once there are at least 2 years of point-in-time
+    # shortable-share snapshots.
     embargo_days: 0
     high_borrow_pressure_min: 60.0
     elevated_borrow_pressure_min: 30.0
@@ -1354,10 +1372,76 @@ calibration:
     exclude_current_removals: false
     strict_feature_lag: true
     train_fraction: 0.70
-    embargo_days: 120
+    # Calendar-day embargo. 120 trading bars are roughly 174 calendar days; use
+    # 185 calendar days to prevent train/test forward-return overlap.
+    embargo_days: 185
+    auto_expand_embargo_to_horizon_calendar_days: true
+    catalyst_calendar_flag_min: 40.0
+    short_interest_pct_float_flag_min: 0.10
+    short_interest_signal_flag_min: 60.0
+    commercial_entry_quality_neutral_score: 50.0
+    borrow_overlay_thresholds:
+      catalyst_score_min: 40.0
+      timing_score_min: 50.0
+      quality_score_min: 60.0
+      momentum_score_min: 60.0
     next_bar_entry: true
     max_workers: 8
-    selection_policies: []
+    candidate_grid_executor: "process"
+    selection_policies:
+      # ── Cohort-specific policies ───────────────────────────────────────────────
+      # These replace the global guardrail approach with per-cohort tuning derived
+      # from the IC monitor findings (borrow IC=0.096, institutional crowding
+      # IC=-0.245 for commercial_profitable at 120d).
+      #
+      # commercial_profitable: value/growth fit matters; crowding hurts; borrow signal
+      # already in score; penalise expensive-low-growth overextension.
+      - name: "cohort_commercial_profitable_value_fit"
+        description: "Commercial-profitable cohort: penalise overextension, stale guidance, and value traps; no soft-weakness blanket drag so rebound candidates surface."
+        hard_veto: true
+        hard_veto_reasons: "cash_runway_lt_9m|going_concern_confirmed|illiquid|no_active_trial_no_business_anchor|reverse_split_history|severe_runway_flag"
+        hard_weakness_penalty: 10.0
+        hard_weakness_penalty_reasons: "negative_clinical_event|repeated_dilution"
+        soft_weakness_penalty: 0.0
+        value_trap_penalty: 12.0
+        leverage_fragility_penalty: 6.0
+        guidance_staleness_penalty: 4.0
+        commercial_cohort_overextension_penalty: 8.0
+        commercial_cohort_entry_quality_penalty: 0.0
+        commercial_cohort_expected_return_bonus: 4.0
+        commercial_cohort_target_cohorts: "commercial_profitable_quality_or_mature"
+      # late_clinical: catalyst and risk routing dominate; commercial quality
+      # penalties are misleading for pre-revenue assets.
+      - name: "cohort_late_clinical_catalyst_risk"
+        description: "Late-clinical cohort: catalyst/risk routing only; suppress commercial quality drag; borrow squeeze bonus active."
+        hard_veto: true
+        hard_veto_reasons: "cash_runway_lt_9m|going_concern_confirmed|illiquid|no_active_trial_no_business_anchor|reverse_split_history|severe_runway_flag"
+        hard_weakness_penalty: 8.0
+        hard_weakness_penalty_reasons: "negative_clinical_event|repeated_dilution"
+        soft_weakness_penalty: 4.0
+        value_trap_penalty: 0.0
+        leverage_fragility_penalty: 4.0
+        guidance_staleness_penalty: 2.0
+        commercial_cohort_overextension_penalty: 0.0
+        commercial_cohort_entry_quality_penalty: 0.0
+        borrow_squeeze_setup_bonus: 5.0
+        borrow_distress_penalty: 8.0
+      # commercial_turnaround: allow rebound candidates; lighter penalties so
+      # recovering fundamentals can surface before institutional consensus forms.
+      - name: "cohort_commercial_turnaround_rebound"
+        description: "Commercial-turnaround cohort: light guardrails to allow rebound candidates; borrow and catalyst context gates distress."
+        hard_veto: true
+        hard_veto_reasons: "cash_runway_lt_9m|going_concern_confirmed|illiquid|no_active_trial_no_business_anchor|reverse_split_history|severe_runway_flag"
+        hard_weakness_penalty: 6.0
+        hard_weakness_penalty_reasons: "negative_clinical_event|repeated_dilution"
+        soft_weakness_penalty: 2.0
+        value_trap_penalty: 6.0
+        leverage_fragility_penalty: 8.0
+        guidance_staleness_penalty: 3.0
+        commercial_cohort_overextension_penalty: 0.0
+        commercial_cohort_expected_return_bonus: 2.0
+        commercial_cohort_target_cohorts: "commercial_turnaround_or_unprofitable_growth"
+        borrow_distress_penalty: 10.0
     risk_decomposition:
       use_for_penalty: false
       risk_penalty_mode: "legacy"
@@ -1408,6 +1492,7 @@ calibration:
       lcb_z: 1.0
       cvar_q: 0.05
       omega_hurdle: 0.0
+      profit_factor_cap: 10.0
       min_selected_observations: 60
       min_asof_dates: 8
       min_net_lcb_return_pct: 0.0

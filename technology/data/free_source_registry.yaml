@@ -1,0 +1,303 @@
+sources:
+  - source_id: sec_company_tickers
+    stage: security_master
+    source_name: SEC company ticker mapping
+    source_owner: SEC
+    source_type: rest_json
+    base_url: https://www.sec.gov/files/company_tickers_exchange.json
+    documentation_url: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: SEC
+    raw_schema: company_tickers_exchange_json
+    canonical_tables:
+      - dim_company
+      - dim_security
+      - dim_identifier
+    feature_stages:
+      - security_master
+    priority: 10
+    status: active
+    notes: Ticker, CIK, issuer name, and exchange mapping.
+
+  - source_id: nasdaq_trader_symbol_directory
+    stage: security_master
+    source_name: Nasdaq Trader symbol directory
+    source_owner: Nasdaq Trader
+    source_type: text_file
+    base_url: https://www.nasdaqtrader.com/dynamic/SymDir/
+    documentation_url: https://www.nasdaqtrader.com/trader.aspx?id=symboldirdefs
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: Nasdaq
+    raw_schema: nasdaqlisted_otherlisted_pipe_text
+    canonical_tables:
+      - dim_security
+    feature_stages:
+      - security_master
+    priority: 20
+    status: active
+    notes: Active listing, exchange, ETF/test issue, and security-name metadata.
+
+  - source_id: yahoo_finance_adjusted
+    stage: market_data
+    source_name: Yahoo Finance adjusted chart data
+    source_owner: Yahoo Finance
+    source_type: rest_json
+    base_url: https://query1.finance.yahoo.com/v8/finance/chart/
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: Yahoo
+    raw_schema: yahoo_chart_json
+    canonical_tables:
+      - fact_price_ohlcv
+      - fact_corporate_action
+    feature_stages:
+      - market_data
+      - technical_features
+    priority: 30
+    status: active
+    notes: Primary adjusted historical price source for scoring and backtests.
+
+  - source_id: yahoo_fx_rates
+    stage: sec_fundamentals
+    source_name: Yahoo Finance FX chart data
+    source_owner: Yahoo Finance
+    source_type: rest_json
+    base_url: https://query1.finance.yahoo.com/v8/finance/chart/
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: Yahoo
+    raw_schema: yahoo_fx_chart_json
+    canonical_tables:
+      - fact_fx_rate
+    feature_stages:
+      - financial_features
+      - valuation_features
+    priority: 32
+    status: active
+    notes: Daily USD conversion rates for non-USD SEC financial statements.
+
+  - source_id: ib_market_data
+    stage: market_data
+    source_name: Interactive Brokers market data
+    source_owner: Interactive Brokers
+    source_type: broker_api
+    base_url: ibkr://tws-gateway
+    authentication_required: true
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: Interactive Brokers
+    raw_schema: ib_contract_bars
+    canonical_tables:
+      - fact_price_ohlcv
+      - fact_market_snapshot
+    feature_stages:
+      - market_data
+      - live_validation
+    priority: 35
+    status: planned
+    notes: Future fallback and live-validation source; Yahoo adjusted remains the primary historical scoring source.
+
+  - source_id: sec_submissions
+    stage: sec_fundamentals
+    source_name: SEC submissions API
+    source_owner: SEC
+    source_type: rest_json
+    base_url: https://data.sec.gov/submissions/
+    documentation_url: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: SEC
+    raw_schema: sec_submissions_json
+    canonical_tables:
+      - fact_sec_filing
+    feature_stages:
+      - sec_fundamentals
+      - filing_text
+    priority: 40
+    status: active
+    notes: Filing history, form type, accession, filing date, and acceptance time.
+
+  - source_id: sec_companyfacts
+    stage: sec_fundamentals
+    source_name: SEC companyfacts API
+    source_owner: SEC
+    source_type: rest_json
+    base_url: https://data.sec.gov/api/xbrl/companyfacts/
+    documentation_url: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: quarterly
+    data_owner: SEC
+    raw_schema: sec_companyfacts_json
+    canonical_tables:
+      - fact_sec_xbrl_fact
+      - fact_sec_xbrl_fact_raw
+      - dim_issuer_reporting_profile
+      - dim_xbrl_concept_map
+      - fact_financial_statement_canonical
+      - feature_financial_statement
+    feature_stages:
+      - sec_fundamentals
+      - financial_features
+    priority: 50
+    status: active
+    notes: XBRL facts for revenue, margins, cash flow, capex, R&D, shares, and balance sheet metrics.
+
+  - source_id: sec_inline_xbrl_fallback
+    stage: sec_fundamentals
+    source_name: SEC filing inline XBRL fallback
+    source_owner: SEC
+    source_type: html_inline_xbrl
+    base_url: https://www.sec.gov/Archives/edgar/data/
+    documentation_url: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: on_gap_detection
+    data_owner: SEC
+    raw_schema: sec_inline_xbrl_html
+    canonical_tables:
+      - fact_sec_xbrl_fact_raw
+      - fact_sec_xbrl_fact
+      - dim_issuer_reporting_profile
+    feature_stages:
+      - sec_fundamentals
+      - financial_features
+    priority: 51
+    status: active
+    notes: Fallback parser for latest 20-F/40-F filings when SEC companyfacts lags the submissions metadata; facts are tagged through source_detail.
+
+  - source_id: sec_insider_upstream
+    stage: positioning
+    source_name: SEC Form 4 upstream database
+    source_owner: local_SEC_FORM4_Runner
+    source_type: sqlite_read_only
+    base_url: C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: SEC
+    raw_schema: sec_insider_sqlite
+    canonical_tables:
+      - fact_form4_signal
+    feature_stages:
+      - positioning
+    priority: 60
+    status: active
+    notes: Technology adapters should read this DB read-only and write normalized Form 4 signals into technology.sqlite.
+
+  - source_id: sec_ownership_direct
+    stage: positioning
+    source_name: SEC direct ownership filings
+    source_owner: SEC
+    source_type: rest_json_archive_xml
+    base_url: https://data.sec.gov/submissions/
+    documentation_url: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: SEC
+    raw_schema: sec_submissions_and_ownership_xml
+    canonical_tables:
+      - dim_insider_reporting_profile
+      - fact_sec_ownership_filing
+      - fact_sec_ownership_nonderivative_transaction
+      - fact_sec_ownership_derivative_transaction
+      - fact_sec_ownership_holding
+      - fact_sec_form4_transaction
+    feature_stages:
+      - positioning
+      - insider_signals
+    priority: 61
+    status: active
+    notes: Direct technology-owned Forms 3/4/5 ingestion from SEC submissions and EDGAR ownership XML; complements read-only sec_insider.sqlite.
+
+  - source_id: market_positioning_upstream
+    stage: positioning
+    source_name: Market positioning upstream database
+    source_owner: local_market_positioning
+    source_type: sqlite_read_only
+    base_url: C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: mixed
+    data_owner: SEC_FINRA_local
+    raw_schema: market_positioning_sqlite
+    canonical_tables:
+      - fact_13f_positioning
+      - fact_short_interest
+    feature_stages:
+      - positioning
+    priority: 70
+    status: active
+    notes: Technology adapters should read this DB read-only for 13F, FINRA short interest, short volume, and FTD features when available.
+
+  - source_id: technology_positioning_composite
+    stage: positioning
+    source_name: Technology positioning composite features
+    source_owner: local_technology
+    source_type: derived_feature
+    base_url: technology.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: local
+    raw_schema: technology_positioning_facts
+    canonical_tables:
+      - feature_positioning
+    feature_stages:
+      - positioning
+      - scoring
+    priority: 75
+    status: active
+    notes: Derived insider, institutional, short-interest, and borrow-rate feature layer owned by technology.sqlite.
+
+  - source_id: semiconductor_ticker_seed
+    stage: security_master
+    source_name: Enriched semiconductor ticker universe CSV
+    source_owner: local_ticker_mapping
+    source_type: csv
+    base_url: ../ticker_mapping/semiconductor_tickers.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: local
+    raw_schema: semiconductor_tickers_csv
+    canonical_tables:
+      - dim_company
+      - dim_security
+      - dim_identifier
+      - dim_company_alias
+    feature_stages:
+      - security_master
+    subsector_scope: semiconductors
+    priority: 15
+    status: active
+    notes: Stage 2 source-of-truth universe with 99 enriched semiconductor tickers and initial listing identity.
+
+  - source_id: semiconductor_cohort_policy
+    stage: security_master
+    source_name: Semiconductor cohort policy YAML
+    source_owner: local_technology
+    source_type: yaml
+    base_url: technology/semiconductors/data/semiconductor_cohorts.yaml
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: local
+    raw_schema: semiconductor_cohorts_yaml
+    canonical_tables:
+      - dim_technology_taxonomy
+    feature_stages:
+      - taxonomy
+      - calibration
+    subsector_scope: semiconductors
+    priority: 16
+    status: active
+    notes: Four core semiconductor calibration cohorts plus unassigned-review policy.

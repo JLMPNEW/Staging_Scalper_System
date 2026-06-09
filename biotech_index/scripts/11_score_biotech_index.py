@@ -957,7 +957,10 @@ def rank_quality_cap_settings(config: dict[str, Any]) -> dict[str, Any]:
         "cheap_low_growth_revenue_yoy_max": float(raw.get("cheap_low_growth_revenue_yoy_max", 0.10)),
         "cheap_low_growth_guidance_max_score": float(raw.get("cheap_low_growth_guidance_max_score", 60.0)),
         "cheap_low_growth_cap": float(raw.get("cheap_low_growth_cap", 60.0)),
-        "rank_cap_veto_enabled": as_bool(raw.get("rank_cap_veto_enabled", True), True),
+        "rank_cap_veto_enabled": as_bool(
+            raw.get("rank_quality_cap_veto_enabled", raw.get("rank_cap_veto_enabled", True)),
+            True,
+        ),
         "rank_cap_veto_threshold": float(raw.get("rank_cap_veto_threshold", 49.0)),
         "rank_cap_veto_reasons": set(
             parse_string_list(
@@ -1426,6 +1429,10 @@ def investment_weight_profile(config: dict[str, Any], commercial: dict[str, Any]
         "institutional_upside": float(raw_weights.get("institutional_upside", 0.0)),
         "financial_quality": float(raw_weights.get("financial_quality", 0.15)),
         "momentum": float(raw_weights.get("momentum", 0.05)),
+        # IC-validated signals: borrow_signal (IC=0.096) and institutional_crowding
+        # (inverted 13F accumulation, IC=-0.074 → crowding penalty for commercial).
+        "borrow_signal": float(raw_weights.get("borrow_signal", 0.0)),
+        "institutional_crowding": float(raw_weights.get("institutional_crowding", 0.0)),
         "risk_penalty": float(raw_weights.get("risk_penalty", 0.15)),
     }
     negative = [name for name, value in weights.items() if value < 0.0]
@@ -1442,7 +1449,8 @@ def investment_weight_profile(config: dict[str, Any], commercial: dict[str, Any]
     positive_total = sum(value for name, value in weights.items() if name != "risk_penalty")
     if positive_total <= 1e-12 or abs(positive_total - 1.0) > 1e-3:
         raise ValueError(
-            f"Investment weight profile '{profile_name}' positive weights sum to {positive_total:.4f}; expected 1.0 +/- 0.001"
+            f"Investment weight profile '{profile_name}' positive weights sum to {positive_total:.4f}; expected 1.0 +/- 0.001. "
+            "Note: borrow_signal and institutional_crowding are now part of the positive weight sum."
         )
     return (
         profile_name,
@@ -1927,6 +1935,13 @@ def score_rows(
             profile_weights["financial_quality"] - embedded_financial_quality_weight,
         )
         residual_momentum_weight = max(0.0, profile_weights["momentum"] - embedded_momentum_weight)
+        # borrow_signal uses borrow_pressure_score (already extracted; IC=0.096 at 120d).
+        # Higher borrow pressure = expensive to short = squeeze potential = positive signal.
+        borrow_signal_component = borrow_pressure_score
+        # institutional_crowding inverts the 13F accumulation signal.
+        # IC=-0.074 at 120d overall; -0.245 for commercial_profitable. High accumulation
+        # = crowded consensus trade = underperformance. Low accumulation = contrarian.
+        institutional_crowding_component = clamp(100.0 - institutional_accumulation_score)
         investment_positive = (
             profile_weights["clinical_opportunity"] * clinical_positive
             + profile_weights["commercial_value"] * commercial_value
@@ -1936,6 +1951,8 @@ def score_rows(
             + profile_weights["institutional_upside"] * institutional_upside_capacity_score
             + residual_financial_quality_weight * financial_quality
             + residual_momentum_weight * momentum
+            + profile_weights.get("borrow_signal", 0.0) * borrow_signal_component
+            + profile_weights.get("institutional_crowding", 0.0) * institutional_crowding_component
         )
         investment_risk_drag = convex_risk_drag(risk, profile_weights["risk_penalty"], config, "biotech_scoring")
         effective_pre_confidence_risk_drag = investment_risk_drag
