@@ -84,6 +84,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-name-filter", type=str, default="")
     parser.add_argument("--policy-name-filter", type=str, default="")
     parser.add_argument(
+        "--calibration-max-workers",
+        type=int,
+        default=0,
+        help="Optional --max-workers value passed through to script 28 candidate calibration.",
+    )
+    parser.add_argument(
+        "--candidate-grid-executor",
+        choices=["thread", "process"],
+        default="",
+        help="Optional script 28 candidate-grid executor override; use process for CPU-bound full runs.",
+    )
+    parser.add_argument(
         "--run-optuna",
         action="store_true",
         help=(
@@ -785,6 +797,10 @@ def main() -> None:
             cmd.extend(["--candidate-name-filter", args.candidate_name_filter])
         if args.policy_name_filter:
             cmd.extend(["--policy-name-filter", args.policy_name_filter])
+        if int(args.calibration_max_workers or 0) > 0:
+            cmd.extend(["--max-workers", str(int(args.calibration_max_workers))])
+        if args.candidate_grid_executor:
+            cmd.extend(["--candidate-grid-executor", args.candidate_grid_executor])
         run_command(label="candidate_calibration", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timing_rows=timing_rows)
 
     optuna_status = "not_requested"

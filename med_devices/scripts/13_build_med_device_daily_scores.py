@@ -29,13 +29,13 @@ from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 LOGGER = logging.getLogger("build_med_device_daily_scores")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_WEIGHTS = {
-    "fundamental_quality": 0.25,
-    "durable_growth": 0.15,
-    "fda_product": 0.15,
-    "reimbursement": 0.10,
-    "valuation": 0.20,
-    "technical_entry": 0.10,
-    "sentiment_catalyst": 0.05,
+    "fundamental_quality": 0.30,
+    "durable_growth": 0.00,
+    "fda_product": 0.00,
+    "reimbursement": 0.00,
+    "valuation": 0.40,
+    "technical_entry": 0.20,
+    "sentiment_catalyst": 0.10,
 }
 IC_COMPONENT_FIELD_MAP = {
     "fundamental_quality_score": "fundamental_quality",
@@ -45,6 +45,10 @@ IC_COMPONENT_FIELD_MAP = {
     "valuation_score": "valuation",
     "technical_entry_score": "technical_entry",
     "sentiment_catalyst_score": "sentiment_catalyst",
+    "technical_liquidity_score": "technical_liquidity",
+    "technical_volatility_risk_score": "technical_volatility_risk",
+    "fda_alpha_score": "fda_alpha",
+    "fda_safety_score": "fda_safety",
 }
 IC_COMPONENT_KEYS = set(IC_COMPONENT_FIELD_MAP.values())
 WEIGHT_EPSILON = 1e-9
@@ -1584,11 +1588,15 @@ def score_drivers(row: ScoreRow) -> tuple[list[str], list[str]]:
 
 
 def weighted_available_score(scores: dict[str, float], available: dict[str, bool], weights: dict[str, float]) -> float:
-    active_keys = [key for key, is_available in available.items() if is_available and key in scores]
-    total_weight = sum(weights[key] for key in active_keys)
+    active_keys = [
+        key
+        for key, is_available in available.items()
+        if is_available and key in scores and weights.get(key, 0.0) > WEIGHT_EPSILON
+    ]
+    total_weight = sum(weights.get(key, 0.0) for key in active_keys)
     if total_weight <= 0:
         return DEFAULT_NEUTRAL_SCORE
-    return sum(scores[key] * weights[key] for key in active_keys) / total_weight
+    return sum(scores[key] * weights.get(key, 0.0) for key in active_keys) / total_weight
 
 
 def value_trap_discount(value_trap_score: float, *, start: float = 40.0) -> float:
@@ -2498,7 +2506,9 @@ SCORE_TEMPLATE_FIELD_TO_ATTR = {
     "technical_core_score": "technical_core_score",
     "technical_alpha_score": "technical_alpha_score",
     "technical_liquidity_score": "technical_liquidity_score",
+    "technical_volatility_risk_score": "technical_volatility_risk_score",
     "technical_pullback_score": "technical_pullback_score",
+    "technical_overextension_score": "technical_overextension_score",
     "sentiment_catalyst_score": "sentiment_catalyst_score",
     "value_trap_score": "value_trap_score",
 }
@@ -2528,7 +2538,9 @@ SCORE_TEMPLATE_FIELD_TO_COMPONENT = {
     "technical_core_score": "technical_entry",
     "technical_alpha_score": "technical_entry",
     "technical_liquidity_score": "technical_entry",
+    "technical_volatility_risk_score": "technical_entry",
     "technical_pullback_score": "technical_entry",
+    "technical_overextension_score": "technical_entry",
     "sentiment_catalyst_score": "sentiment_catalyst",
     "value_trap_score": "valuation",
 }
@@ -3905,6 +3917,12 @@ def build_rows(
             cohort_profile_alias_map,
             default_durable_growth_policy,
         )
+        fda_policy = profile_for_cohort(
+            cohort,
+            fda_policy_profiles,
+            cohort_profile_alias_map,
+            default_fda_policy,
+        )
         fda_item = fda_rows.get(company_id, {})
         reimbursement_item = reimbursement_rows.get(company_id, {})
         technical_item = technical_rows.get(company_id, {})
@@ -4022,6 +4040,13 @@ def build_rows(
         if not durable_alpha_active:
             effective_weights["durable_growth"] = 0.0
             durable_component_weight = 0.0
+        if fda_policy.gate_mode in {FDA_GATE_RISK_VETO_ONLY, FDA_GATE_OVERLAY_ONLY, FDA_GATE_DISABLED}:
+            effective_weights["fda_product"] = 0.0
+            fda_component_weight = 0.0
+        effective_weights.setdefault("technical_liquidity", 0.0)
+        effective_weights.setdefault("technical_volatility_risk", 0.0)
+        effective_weights.setdefault("fda_alpha", 0.0)
+        effective_weights.setdefault("fda_safety", 0.0)
         current_shares_outstanding = to_float(item.get("current_shares_outstanding"))
         diluted_weighted_average_shares = to_float(item.get("diluted_weighted_average_shares"))
         basic_weighted_average_shares = to_float(item.get("basic_weighted_average_shares"))
@@ -4034,6 +4059,10 @@ def build_rows(
             "valuation": to_float(item.get("valuation_score_v1")) is not None,
             "technical_entry": technical_score_available(technical_item, source=technical_source),
             "sentiment_catalyst": has_sentiment_live_score,
+            "technical_liquidity": bool(technical_item) and to_float(technical_item.get("liquidity_score")) is not None,
+            "technical_volatility_risk": bool(technical_item) and to_float(technical_item.get("volatility_risk_score")) is not None,
+            "fda_alpha": bool(fda_item) and to_float(fda_item.get("fda_alpha_score")) is not None,
+            "fda_safety": bool(fda_item) and to_float(fda_item.get("fda_safety_score")) is not None,
         }
         score_field_available = {
             "fundamental_quality_score": component_available["fundamental_quality"],
@@ -4065,7 +4094,11 @@ def build_rows(
             "technical_core_score": bool(technical_item) and to_float(technical_item.get("technical_core_score")) is not None,
             "technical_alpha_score": bool(technical_item) and to_float(technical_item.get("technical_alpha_score")) is not None,
             "technical_liquidity_score": bool(technical_item) and to_float(technical_item.get("liquidity_score")) is not None,
+            "technical_volatility_risk_score": bool(technical_item)
+            and to_float(technical_item.get("volatility_risk_score")) is not None,
             "technical_pullback_score": bool(technical_item) and to_float(technical_item.get("technical_pullback_score")) is not None,
+            "technical_overextension_score": bool(technical_item)
+            and to_float(technical_item.get("technical_overextension_score")) is not None,
             "sentiment_catalyst_score": component_available["sentiment_catalyst"],
             "value_trap_score": to_float(item.get("value_trap_score")) is not None,
         }
@@ -4296,6 +4329,10 @@ def build_rows(
             "valuation": row.valuation_score,
             "technical_entry": row.technical_entry_score,
             "sentiment_catalyst": row.sentiment_catalyst_score,
+            "technical_liquidity": row.technical_liquidity_score,
+            "technical_volatility_risk": row.technical_volatility_risk_score,
+            "fda_alpha": row.fda_alpha_score,
+            "fda_safety": row.fda_safety_score,
         }
         fixed_weight_composite = weighted_available_score(component_scores, component_available, effective_weights)
         raw_composite = (

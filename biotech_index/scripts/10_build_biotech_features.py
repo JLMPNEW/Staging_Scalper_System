@@ -169,6 +169,18 @@ FEATURE_CSV_FIELDNAMES = [
     "insider_buy_cluster_count_90d",
     "insider_sell_value_90d",
     "insider_accumulation_score",
+    "adcom_nearest_days",
+    "adcom_within_60d_flag",
+    "adcom_within_120d_flag",
+    "adcom_score",
+    "adcom_committee_oncology_flag",
+    "breakthrough_therapy_count",
+    "orphan_drug_count",
+    "fast_track_count",
+    "rmat_count",
+    "priority_review_flag",
+    "fda_designation_tier",
+    "fda_designation_score",
     "manual_verdict",
     "feature_json",
 ]
@@ -920,6 +932,139 @@ def insider_activity_signal(row: dict[str, Any] | None) -> dict[str, float]:
     }
 
 
+_ONCOLOGY_COMMITTEE_KWS = frozenset({"oncolog", "odac", "hematol"})
+
+_DESIGNATION_TYPES = {
+    "breakthrough_therapy_granted": ("breakthrough_therapy_count", 5, 0.70),
+    "rmat_granted":                 ("rmat_count",                 4, 0.70),
+    "priority_review_granted":      ("priority_review_flag",       3, 0.60),
+    "fast_track_granted":           ("fast_track_count",           2, 0.30),
+    "orphan_drug_granted":          ("orphan_drug_count",          1, 0.50),
+}
+
+
+def load_fda_adcom_events(
+    conn: sqlite3.Connection,
+    asof_date: date,
+    *,
+    lookahead_days: int = 120,
+) -> dict[int, list[dict[str, Any]]]:
+    """Return company_id → list of upcoming AdCom meeting dicts."""
+    cutoff = asof_date.isoformat()
+    rows = conn.execute(
+        """
+        SELECT company_id, ticker, meeting_date, committee, drug_name, indication, vote_result, source_url
+        FROM fda_adcom_events
+        WHERE meeting_date >= ?
+        ORDER BY company_id, meeting_date
+        """,
+        (cutoff,),
+    ).fetchall()
+    result: dict[int, list[dict[str, Any]]] = {}
+    for r in rows:
+        cid = int(r[0])
+        entry = {
+            "company_id": cid,
+            "ticker": str(r[1] or ""),
+            "meeting_date": str(r[2] or ""),
+            "committee": str(r[3] or ""),
+            "drug_name": str(r[4] or ""),
+            "indication": str(r[5] or ""),
+            "vote_result": str(r[6] or ""),
+            "source_url": str(r[7] or ""),
+        }
+        meeting_dt_raw = str(r[2] or "")
+        try:
+            meeting_dt = date.fromisoformat(meeting_dt_raw)
+            days_until = (meeting_dt - asof_date).days
+            if days_until > lookahead_days:
+                continue
+            entry["days_until"] = days_until
+        except ValueError:
+            continue
+        result.setdefault(cid, []).append(entry)
+    return result
+
+
+def compute_adcom_features(
+    adcom_events: list[dict[str, Any]] | None,
+    asof_date: date,
+    *,
+    lookahead_days: int = 120,
+) -> dict[str, Any]:
+    null_result: dict[str, Any] = {
+        "adcom_nearest_days": None,
+        "adcom_within_60d_flag": 0.0,
+        "adcom_within_120d_flag": 0.0,
+        "adcom_score": 0.0,
+        "adcom_committee_oncology_flag": 0.0,
+    }
+    if not adcom_events:
+        return null_result
+    nearest = min(adcom_events, key=lambda e: e.get("days_until", 99999))
+    days_until = int(nearest.get("days_until", 99999))
+    if days_until > lookahead_days:
+        return null_result
+    committee = str(nearest.get("committee") or "").lower()
+    is_oncology = any(kw in committee for kw in _ONCOLOGY_COMMITTEE_KWS)
+    proximity = max(0.0, 1.0 - min(days_until, lookahead_days) / max(1.0, float(lookahead_days)))
+    oncology_multiplier = 1.15 if is_oncology else 1.0
+    score = clamp(100.0 * proximity * oncology_multiplier)
+    return {
+        "adcom_nearest_days": days_until,
+        "adcom_within_60d_flag": 1.0 if days_until <= 60 else 0.0,
+        "adcom_within_120d_flag": 1.0 if days_until <= 120 else 0.0,
+        "adcom_score": round(score, 4),
+        "adcom_committee_oncology_flag": 1.0 if is_oncology else 0.0,
+    }
+
+
+def compute_designation_features(sec_events: dict[str, Any] | None) -> dict[str, Any]:
+    null_result: dict[str, Any] = {
+        "breakthrough_therapy_count": 0.0,
+        "orphan_drug_count": 0.0,
+        "fast_track_count": 0.0,
+        "rmat_count": 0.0,
+        "priority_review_flag": 0.0,
+        "fda_designation_tier": 0.0,
+        "fda_designation_score": 0.0,
+    }
+    if not sec_events:
+        return null_result
+    counts = sec_events.get("counts", {}) if isinstance(sec_events, dict) else {}
+    if not isinstance(counts, dict):
+        counts = {}
+    bt_count = float(counts.get("breakthrough_therapy_granted", 0) or 0)
+    rmat_count = float(counts.get("rmat_granted", 0) or 0)
+    priority_count = float(counts.get("priority_review_granted", 0) or 0)
+    ft_count = float(counts.get("fast_track_granted", 0) or 0)
+    od_count = float(counts.get("orphan_drug_granted", 0) or 0)
+    # Tier: highest-priority designation held
+    tier = 0.0
+    if bt_count > 0 or rmat_count > 0:
+        tier = 5.0
+    elif priority_count > 0:
+        tier = 3.0
+    elif ft_count > 0:
+        tier = 2.0
+    elif od_count > 0:
+        tier = 1.0
+    # Approval probability uplift composite (research-cited uplifts)
+    # BT ~70% higher, RMAT ~70%, Priority Review implies BLA accepted, FT ~30%, Orphan ~50%
+    designation_score = clamp(
+        min(100.0, bt_count * 40.0 + rmat_count * 40.0 + priority_count * 25.0 + ft_count * 15.0 + od_count * 10.0)
+    )
+    return {
+        "breakthrough_therapy_count": bt_count,
+        "orphan_drug_count": od_count,
+        "fast_track_count": ft_count,
+        "rmat_count": rmat_count,
+        "priority_review_flag": 1.0 if priority_count > 0 else 0.0,
+        "fda_designation_tier": tier,
+        "fda_designation_score": round(designation_score, 4),
+    }
+
+
 def load_risk_decomposition_settings(config: dict[str, Any]) -> dict[str, Any]:
     raw = cfg_get(config, "biotech_features.risk_decomposition", {}) or {}
     if not isinstance(raw, dict):
@@ -1585,6 +1730,8 @@ def compute_feature_row(
     borrow_availability: dict[str, Any] | None = None,
     institutional_ownership: dict[str, Any] | None = None,
     governance: dict[str, Any] | None = None,
+    adcom_events: list[dict[str, Any]] | None = None,
+    adcom_lookahead_days: int = 120,
 ) -> dict[str, Any]:
     if borrow_interpretation_settings is None:
         borrow_interpretation_settings = load_borrow_interpretation_settings({})
@@ -1793,6 +1940,8 @@ def compute_feature_row(
     borrow_availability_signals = borrow_availability_signal(borrow_availability)
     institutional_ownership_signals = institutional_ownership_signal(institutional_ownership)
     insider_activity_signals = insider_activity_signal(governance)
+    adcom_signals = compute_adcom_features(adcom_events, asof_date, lookahead_days=adcom_lookahead_days)
+    designation_signals = compute_designation_features(sec_events)
 
     catalyst_components = {
         "verified_active_trials": min(
@@ -2222,6 +2371,8 @@ def compute_feature_row(
             "borrow_availability": borrow_shadow_signals,
             "institutional_ownership": institutional_ownership_signals,
             "insider_activity": insider_activity_signals,
+            "fda_adcom": adcom_signals,
+            "fda_designations": designation_signals,
         },
         "raw_scores": {
             "catalyst_score_raw": round(catalyst_raw, 4),
@@ -2701,6 +2852,8 @@ def main() -> None:
                 sec_catalyst_half_life_days=sec_catalyst_half_life_days,
                 sec_catalyst_event_weights=sec_catalyst_event_weights,
             )
+            adcom_lookahead_days = int(cfg_get(config, "fda_adcom_calendar.lookahead_days", 120))
+            adcom_by_company = load_fda_adcom_events(conn, asof_date, lookahead_days=adcom_lookahead_days)
             rows: list[dict[str, Any]] = []
             skipped: list[str] = []
             for ticker, universe_row in normalized_universe:
@@ -2747,6 +2900,8 @@ def main() -> None:
                         borrow_availability=borrow_availability_by_ticker.get(ticker),
                         institutional_ownership=institutional_ownership_by_ticker.get(ticker),
                         governance=governance_features.get(company_id),
+                        adcom_events=adcom_by_company.get(company_id),
+                        adcom_lookahead_days=adcom_lookahead_days,
                     )
                 )
             validate_nonempty_selection(count=len(rows), context="biotech feature build")

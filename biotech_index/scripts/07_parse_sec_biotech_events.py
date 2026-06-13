@@ -30,7 +30,7 @@ from biotech_index.core.pipeline_guards import read_final_scoring_tickers
 
 LOGGER = logging.getLogger("parse_sec_biotech_events")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-PARSER_LOGIC_VERSION = "2026-04-27-sec-event-parser-v3"
+PARSER_LOGIC_VERSION = "2026-06-11-sec-event-parser-v4"
 SQLITE_PARAM_CHUNK_SIZE = 800
 
 
@@ -253,6 +253,56 @@ RULES: tuple[EventRule, ...] = (
             rx(r"\b(license agreement|collaboration agreement|strategic collaboration|strategic partnership|exclusive license)\b.{0,160}\b(entered into|announced|signed|executed|granted|obtained|expanded|amended)\b"),
         ),
     ),
+    EventRule(
+        "breakthrough_therapy_granted",
+        "positive",
+        0.92,
+        (
+            rx(r"\bFDA\b.{0,160}\bgranted\b.{0,80}\bBreakthrough Therapy(?: designation)?\b"),
+            rx(r"\bBreakthrough Therapy(?: designation)?\b.{0,160}\b(granted|received|awarded|obtained)\b"),
+            rx(r"\b(received|been granted|obtained)\b.{0,80}\bBreakthrough Therapy(?: designation)?\b"),
+        ),
+    ),
+    EventRule(
+        "rmat_granted",
+        "positive",
+        0.92,
+        (
+            rx(r"\bFDA\b.{0,160}\bgranted\b.{0,80}\bRMAT(?: designation)?\b"),
+            rx(r"\bRMAT(?: designation)?\b.{0,160}\b(granted|received|awarded|obtained)\b"),
+            rx(r"\b(received|been granted|obtained)\b.{0,80}\bRegenerative Medicine Advanced Therapy(?: designation)?\b"),
+        ),
+    ),
+    EventRule(
+        "fast_track_granted",
+        "positive",
+        0.85,
+        (
+            rx(r"\bFDA\b.{0,160}\bgranted\b.{0,80}\bFast Track(?: designation)?\b"),
+            rx(r"\bFast Track(?: designation)?\b.{0,160}\b(granted|received|awarded|obtained)\b"),
+            rx(r"\b(received|been granted|obtained)\b.{0,80}\bFast Track(?: designation)?\b"),
+        ),
+    ),
+    EventRule(
+        "orphan_drug_granted",
+        "positive",
+        0.88,
+        (
+            rx(r"\bFDA\b.{0,160}\bgranted\b.{0,80}\b(Orphan Drug|orphan drug)(?: designation)?\b"),
+            rx(r"\b(Orphan Drug|orphan drug)(?: designation)?\b.{0,160}\b(granted|received|awarded|obtained)\b"),
+            rx(r"\b(received|been granted|obtained)\b.{0,80}\b(Orphan Drug|orphan drug)(?: designation)?\b"),
+        ),
+    ),
+    EventRule(
+        "priority_review_granted",
+        "positive",
+        0.92,
+        (
+            rx(r"\bFDA\b.{0,160}\bgranted\b.{0,80}\bPriority Review(?: designation)?\b"),
+            rx(r"\bPriority Review\b.{0,160}\b(granted|received|awarded|accepted)\b"),
+            rx(r"\b(received|been granted|accepted)\b.{0,80}\bPriority Review\b"),
+        ),
+    ),
 )
 
 RULE_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -271,6 +321,11 @@ RULE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "clinical_update_negative": ("negative", "disappointing", "unfavorable", "discontinue", "discontinued", "terminate", "terminated", "pause", "paused", "halt", "halted", "safety signal"),
     "clinical_update_positive": ("positive", "promising", "topline", "clinical"),
     "partnership_license": ("license agreement", "collaboration agreement", "strategic collaboration", "strategic partnership", "exclusive license"),
+    "breakthrough_therapy_granted": ("breakthrough therapy",),
+    "rmat_granted": ("rmat", "regenerative medicine advanced therapy"),
+    "fast_track_granted": ("fast track",),
+    "orphan_drug_granted": ("orphan drug", "orphan designation"),
+    "priority_review_granted": ("priority review",),
 }
 
 NEGATED_HOLD = rx(r"\b(no|not|without|never)\b.{0,80}\bclinical hold\b")
@@ -289,6 +344,15 @@ GENERIC_PDUFA = rx(
     r"\b(review goal|goal dates?|within (?:six|ten|6|10)\s+months|does not always meet|may be extended|or at all)\b"
 )
 HYPOTHETICAL_SUBMISSION = rx(r"\b(can submit|may submit|would submit|is required to submit|could submit)\b")
+HYPOTHETICAL_DESIGNATION = rx(
+    r"\b(may seek|plan to seek|seeking|intend to seek|could seek|might seek|"
+    r"applied for|plan to apply|may apply|plan to request|may request|considering|"
+    r"if (?:we receive|granted|we are granted|it is granted))\b"
+)
+GENERIC_DESIGNATION_RISK = rx(
+    r"\b(not guarantee|no assurance|may not|cannot guarantee|"
+    r"there can be no assurance|if we are unable to|if we fail to)\b"
+)
 PARTNERSHIP_NEGATIVE_OR_GENERIC = rx(
     r"\b(termination of|terminated the|may enter|could enter|would enter|if we enter|"
     r"license termination rights|breach our license agreement)\b"
@@ -426,6 +490,19 @@ def should_skip(rule: EventRule, window: str, *, filing_date: str) -> bool:
         if PARTNERSHIP_NEGATIVE_OR_GENERIC.search(window):
             return True
         if stale_historical_window(window, filing_date=filing_date):
+            return True
+    if rule.event_type in {
+        "breakthrough_therapy_granted",
+        "rmat_granted",
+        "fast_track_granted",
+        "orphan_drug_granted",
+        "priority_review_granted",
+    }:
+        if HYPOTHETICAL_DESIGNATION.search(window):
+            return True
+        if GENERIC_DESIGNATION_RISK.search(window):
+            return True
+        if GENERIC_RISK_FACTOR.search(window):
             return True
     return False
 

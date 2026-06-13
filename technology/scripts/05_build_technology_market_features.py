@@ -147,6 +147,13 @@ def window_average(rows: list[PriceRow], end_idx: int, lookback: int, *, dollar:
     return mean([row.volume for row in rows[start_idx : end_idx + 1]])
 
 
+def rel_strength(ticker_ret: float | None, bench_rows: list[PriceRow] | None, asof_date: date, lookback: int) -> float | None:
+    if ticker_ret is None or not bench_rows:
+        return None
+    bench_ret = benchmark_return_asof(bench_rows, asof_date, lookback)
+    return ticker_ret - bench_ret if bench_ret is not None else None
+
+
 def distance_from_high(rows: list[PriceRow], end_idx: int, lookback: int) -> float | None:
     start_idx = max(0, end_idx - lookback + 1)
     window = rows[start_idx : end_idx + 1]
@@ -183,12 +190,20 @@ def load_price_rows(conn: Any, ticker: str, source_id: str, asof: date | None) -
     return out
 
 
-def benchmark_returns(conn: Any, source_id: str, tickers: list[str], asof: date | None, lookback: int) -> dict[str, float | None]:
-    out: dict[str, float | None] = {}
-    for ticker in tickers:
-        rows = load_price_rows(conn, normalize_ticker(ticker), source_id, asof)
-        out[normalize_ticker(ticker)] = pct_return(rows, len(rows) - 1, lookback) if rows else None
-    return out
+def load_benchmark_rows(conn: Any, source_id: str, tickers: list[str], asof: date | None) -> dict[str, list[PriceRow]]:
+    return {normalize_ticker(ticker): load_price_rows(conn, normalize_ticker(ticker), source_id, asof) for ticker in tickers}
+
+
+def benchmark_return_asof(rows: list[PriceRow], asof_date: date, lookback: int) -> float | None:
+    """Benchmark return over the same window as the ticker (ending at the ticker's latest bar)."""
+    if not rows:
+        return None
+    idx = len(rows) - 1
+    while idx >= 0 and rows[idx].bar_date > asof_date:
+        idx -= 1
+    if idx < 0:
+        return None
+    return pct_return(rows, idx, lookback)
 
 
 def load_universe(conn: Any) -> list[str]:
@@ -214,7 +229,7 @@ def build_feature(
     min_days: int,
     min_avg_dollar_volume_60d: float,
     windows: dict[str, int],
-    bench_3m: dict[str, float | None],
+    bench_rows: dict[str, list[PriceRow]],
 ) -> tuple[dict[str, Any], str]:
     if not rows:
         return {
@@ -281,10 +296,10 @@ def build_feature(
         "ret_3m": ret_3m,
         "ret_6m": ret_6m,
         "ret_12m_ex_1m": ret_12m_ex_1m,
-        "rel_strength_smh_3m": ret_3m - bench_3m["SMH"] if ret_3m is not None and bench_3m.get("SMH") is not None else None,
-        "rel_strength_soxx_3m": ret_3m - bench_3m["SOXX"] if ret_3m is not None and bench_3m.get("SOXX") is not None else None,
-        "rel_strength_qqq_3m": ret_3m - bench_3m["QQQ"] if ret_3m is not None and bench_3m.get("QQQ") is not None else None,
-        "rel_strength_spy_3m": ret_3m - bench_3m["SPY"] if ret_3m is not None and bench_3m.get("SPY") is not None else None,
+        "rel_strength_smh_3m": rel_strength(ret_3m, bench_rows.get("SMH"), latest.bar_date, windows["three_month_days"]),
+        "rel_strength_soxx_3m": rel_strength(ret_3m, bench_rows.get("SOXX"), latest.bar_date, windows["three_month_days"]),
+        "rel_strength_qqq_3m": rel_strength(ret_3m, bench_rows.get("QQQ"), latest.bar_date, windows["three_month_days"]),
+        "rel_strength_spy_3m": rel_strength(ret_3m, bench_rows.get("SPY"), latest.bar_date, windows["three_month_days"]),
         "avg_volume_20d": avg_volume_20d,
         "avg_volume_60d": avg_volume_60d,
         "avg_dollar_volume_20d": avg_dollar_volume_20d,
@@ -466,7 +481,7 @@ def main() -> None:
                 effective_asof = parse_date(row["max_date"] if row is not None else "")
             if effective_asof is None:
                 raise ValueError(f"No price bars found for source_id={source_id}")
-            bench_3m = benchmark_returns(conn, source_id, benchmark_tickers, effective_asof, windows["three_month_days"])
+            bench_rows = load_benchmark_rows(conn, source_id, benchmark_tickers, effective_asof)
             report_rows: list[dict[str, Any]] = []
             review_count = 0
             with conn:
@@ -483,7 +498,7 @@ def main() -> None:
                         min_days=min_days,
                         min_avg_dollar_volume_60d=min_avg_dollar_volume_60d,
                         windows=windows,
-                        bench_3m=bench_3m,
+                        bench_rows=bench_rows,
                     )
                     upsert_feature(conn, feature)
                     if review_reason:

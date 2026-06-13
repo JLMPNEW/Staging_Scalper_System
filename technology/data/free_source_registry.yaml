@@ -274,6 +274,7 @@ sources:
       - dim_security
       - dim_identifier
       - dim_company_alias
+      - dim_universe_membership
     feature_stages:
       - security_master
     subsector_scope: semiconductors
@@ -301,3 +302,182 @@ sources:
     priority: 16
     status: active
     notes: Four core semiconductor calibration cohorts plus unassigned-review policy.
+
+  - source_id: semiconductor_historical_membership_seed
+    stage: security_master
+    source_name: Semiconductor historical membership seed
+    source_owner: local_technology
+    source_type: csv
+    base_url: technology/semiconductors/data/semiconductor_historical_membership.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: local
+    raw_schema: semiconductor_historical_membership_csv
+    canonical_tables:
+      - dim_company
+      - dim_security
+      - dim_technology_taxonomy
+      - dim_universe_membership
+    feature_stages:
+      - security_master
+      - model_calibration
+    subsector_scope: semiconductors
+    priority: 17
+    status: active
+    notes: Point-in-time research universe backfill for current and acquired/delisted semiconductor constituents used by Stage 8 calibration.
+
+  - source_id: semiconductor_scoring_contract
+    stage: scoring
+    source_name: Semiconductor scoring feature contract
+    source_owner: local_technology
+    source_type: derived_feature
+    base_url: technology.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: local
+    raw_schema: technology_feature_layers
+    canonical_tables:
+      - dim_scoring_component
+      - feature_scoring_input
+      - feature_scoring_component
+    feature_stages:
+      - scoring_contract
+      - calibration
+      - ranking
+    subsector_scope: semiconductors
+    priority: 80
+    status: active
+    notes: Semiconductor-owned Stage 6A score input contract built from technology financial, market, and positioning feature tables with neutral placeholders for sector overlays.
+
+  - source_id: semiconductor_calibrated_score_v1
+    stage: calibrated_scoring
+    source_name: Semiconductor calibrated scoring model v1
+    source_owner: local_technology
+    source_type: derived_feature
+    base_url: technology.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: local
+    raw_schema: semiconductor_scoring_contract_features
+    canonical_tables:
+      - feature_scoring_input
+      - feature_scoring_component
+      - feature_scoring_model_output
+    feature_stages:
+      - calibrated_scoring
+      - ranking
+      - model_validation
+    subsector_scope: semiconductors
+    priority: 81
+    status: active
+    notes: Stage 7 calibrated semiconductor ranking layer. It reads the validated Stage 6 feature contract, applies constrained walk-forward-informed weights, and writes separate calibrated scores without overwriting the baseline.
+
+  - source_id: semiconductor_stage8_optuna_calibration
+    stage: model_calibration
+    source_name: Semiconductor Stage 8 constrained Optuna calibration
+    source_owner: local_technology
+    source_type: derived_report
+    base_url: output/technology_reports/optuna_calibration
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: on_model_review
+    data_owner: local
+    raw_schema: point_in_time_feature_panel
+    canonical_tables: []
+    feature_stages:
+      - model_calibration
+      - optuna_weight_search
+      - out_of_sample_validation
+    subsector_scope: semiconductors
+    priority: 81
+    status: active
+    notes: Report-only Stage 8 optimizer. It reads the Stage 6/7 tables, uses Stage 7 as the benchmark, searches constrained candidate weights with Optuna, and writes CSV/JSON recommendations only; it owns no database tables.
+
+  - source_id: wsts_historical_billings
+    stage: semiconductor_sector_overlays
+    source_name: WSTS historical semiconductor billings
+    source_owner: WSTS
+    source_type: xlsx_download
+    base_url: https://www.wsts.org/67/Historical-Billings-Report
+    documentation_url: https://www.wsts.org/
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: monthly
+    data_owner: WSTS
+    raw_schema: wsts_historical_billings_xlsx
+    canonical_tables:
+      - fact_semiconductor_wsts_billings
+    feature_stages:
+      - sector_cycle
+      - scoring_overlay
+    subsector_scope: semiconductors
+    priority: 82
+    status: active
+    notes: Required/free Stage 6B source for semiconductor sector-cycle overlay; direct XLSX link is discovered from the historical billings subpage.
+
+  - source_id: semiconductor_sector_cycle
+    stage: semiconductor_sector_overlays
+    source_name: Semiconductor WSTS sector-cycle features
+    source_owner: local_technology
+    source_type: derived_feature
+    base_url: technology.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: monthly
+    data_owner: local
+    raw_schema: wsts_billings_features
+    canonical_tables:
+      - feature_semiconductor_sector_cycle
+    feature_stages:
+      - sector_cycle
+      - scoring_overlay
+    subsector_scope: semiconductors
+    priority: 83
+    status: active
+    notes: Derived semiconductor sector-cycle score from WSTS monthly billings, acceleration, and regional breadth.
+
+  - source_id: sec_big_tech_capex
+    stage: semiconductor_sector_overlays
+    source_name: SEC big-tech capex proxy facts
+    source_owner: SEC
+    source_type: rest_json
+    base_url: https://data.sec.gov/api/xbrl/companyfacts/
+    documentation_url: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: quarterly
+    data_owner: SEC
+    raw_schema: sec_companyfacts_capex_json
+    canonical_tables:
+      - fact_big_tech_capex
+    feature_stages:
+      - big_tech_capex
+      - scoring_overlay
+    subsector_scope: semiconductors
+    priority: 84
+    status: active
+    notes: Required/free Stage 6B demand-proxy source using SEC companyfacts capex for MSFT, AMZN, GOOGL, META, and ORCL.
+
+  - source_id: semiconductor_big_tech_capex_cycle
+    stage: semiconductor_sector_overlays
+    source_name: Semiconductor big-tech capex cycle features
+    source_owner: local_technology
+    source_type: derived_feature
+    base_url: technology.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: quarterly
+    data_owner: local
+    raw_schema: sec_big_tech_capex_features
+    canonical_tables:
+      - feature_big_tech_capex_cycle
+    feature_stages:
+      - big_tech_capex
+      - scoring_overlay
+    subsector_scope: semiconductors
+    priority: 85
+    status: active
+    notes: Derived AI/datacenter demand-proxy overlay from big-tech capex growth, quarter trend, and breadth.

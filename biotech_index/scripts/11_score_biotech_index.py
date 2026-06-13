@@ -519,6 +519,64 @@ def optional_score(raw_scores: dict[str, Any], row: dict[str, Any], key: str) ->
     return None
 
 
+def enforce_missing_raw_score_gate(
+    config: dict[str, Any],
+    *,
+    total_rows: int,
+    missing_by_field: dict[str, list[str]],
+) -> None:
+    """Fail scoring when upstream raw-score coverage is materially broken."""
+    gate_cfg = cfg_get(config, "biotech_scoring.missing_raw_score_gate", {}) or {}
+    if not isinstance(gate_cfg, dict):
+        gate_cfg = {}
+    if not as_bool(gate_cfg.get("enabled", True), True):
+        return
+    if total_rows <= 0:
+        return
+    max_missing_fraction = float(gate_cfg.get("max_missing_fraction", 0.05))
+    max_missing_count = int(float(gate_cfg.get("max_missing_count", max(1, math.floor(total_rows * max_missing_fraction)))))
+    max_missing_count = max(0, max_missing_count)
+    fail_on_error = as_bool(gate_cfg.get("fail_on_error", True), True)
+    required_fields = set(
+        parse_string_list(
+            gate_cfg.get("required_fields"),
+            default=[
+                "catalyst_score_raw",
+                "credibility_score_raw",
+                "financial_quality_score_raw",
+                "risk_score_raw",
+                "momentum_score_raw",
+            ],
+        )
+    )
+    failures: list[str] = []
+    warnings: list[str] = []
+    for field, tickers in sorted(missing_by_field.items()):
+        if field not in required_fields:
+            continue
+        missing_count = len(tickers)
+        if missing_count <= 0:
+            continue
+        missing_pct = 100.0 * missing_count / total_rows
+        message = (
+            f"{field} missing for {missing_count}/{total_rows} rows ({missing_pct:.2f}%); "
+            f"threshold_count={max_missing_count} sample={','.join(tickers[:10])}"
+        )
+        if missing_count > max_missing_count:
+            failures.append(message)
+        else:
+            warnings.append(message)
+    for message in warnings:
+        LOGGER.warning("Raw-score coverage warning: %s", message)
+    if failures and fail_on_error:
+        raise RuntimeError(
+            "Raw-score coverage gate failed. Refusing to score with material missing upstream inputs: "
+            + " | ".join(failures)
+        )
+    for message in failures:
+        LOGGER.error("Raw-score coverage failure suppressed by fail_on_error=false: %s", message)
+
+
 def convex_risk_drag(risk: float, weight: float, config: dict[str, Any], section: str) -> float:
     return shared_convex_risk_drag(
         risk,
@@ -1429,9 +1487,10 @@ def investment_weight_profile(config: dict[str, Any], commercial: dict[str, Any]
         "institutional_upside": float(raw_weights.get("institutional_upside", 0.0)),
         "financial_quality": float(raw_weights.get("financial_quality", 0.15)),
         "momentum": float(raw_weights.get("momentum", 0.05)),
-        # IC-validated signals: borrow_signal (IC=0.096) and institutional_crowding
-        # (inverted 13F accumulation, IC=-0.074 → crowding penalty for commercial).
+        # IC-validated signals: borrow_pressure_score (IC=0.095), borrow_rate_current (IC=0.096),
+        # short_interest_days_to_cover_score (IC=0.071), institutional_crowding (IC=−0.074 inverted).
         "borrow_signal": float(raw_weights.get("borrow_signal", 0.0)),
+        "short_interest_signal": float(raw_weights.get("short_interest_signal", 0.0)),
         "institutional_crowding": float(raw_weights.get("institutional_crowding", 0.0)),
         "risk_penalty": float(raw_weights.get("risk_penalty", 0.15)),
     }
@@ -1450,7 +1509,7 @@ def investment_weight_profile(config: dict[str, Any], commercial: dict[str, Any]
     if positive_total <= 1e-12 or abs(positive_total - 1.0) > 1e-3:
         raise ValueError(
             f"Investment weight profile '{profile_name}' positive weights sum to {positive_total:.4f}; expected 1.0 +/- 0.001. "
-            "Note: borrow_signal and institutional_crowding are now part of the positive weight sum."
+            "Note: borrow_signal, short_interest_signal, and institutional_crowding are part of the positive weight sum."
         )
     return (
         profile_name,
@@ -1644,6 +1703,20 @@ def score_rows(
         )
         if not isinstance(insider_activity, dict):
             insider_activity = {}
+        fda_adcom = (
+            shadow_signals.get("fda_adcom", {})
+            if isinstance(shadow_signals, dict)
+            else {}
+        )
+        if not isinstance(fda_adcom, dict):
+            fda_adcom = {}
+        fda_designations = (
+            shadow_signals.get("fda_designations", {})
+            if isinstance(shadow_signals, dict)
+            else {}
+        )
+        if not isinstance(fda_designations, dict):
+            fda_designations = {}
         commercial = commercial_by_company.get(company_id, {})
         forward_guidance = forward_by_company.get(company_id, {})
         governance = governance_by_company.get(company_id, {})
@@ -1785,6 +1858,18 @@ def score_rows(
         insider_buy_cluster_count_90d = to_float(insider_activity.get("insider_buy_cluster_count_90d"), 0.0)
         insider_sell_value_90d = to_float(insider_activity.get("insider_sell_value_90d"), 0.0)
         insider_accumulation_score = clamp(to_float(insider_activity.get("insider_accumulation_score"), 50.0))
+        adcom_nearest_days = fda_adcom.get("adcom_nearest_days")
+        adcom_within_60d_flag = 1.0 if to_float(fda_adcom.get("adcom_within_60d_flag"), 0.0) > 0.0 else 0.0
+        adcom_within_120d_flag = 1.0 if to_float(fda_adcom.get("adcom_within_120d_flag"), 0.0) > 0.0 else 0.0
+        adcom_score = clamp(to_float(fda_adcom.get("adcom_score"), 0.0))
+        adcom_committee_oncology_flag = 1.0 if to_float(fda_adcom.get("adcom_committee_oncology_flag"), 0.0) > 0.0 else 0.0
+        breakthrough_therapy_count = to_float(fda_designations.get("breakthrough_therapy_count"), 0.0)
+        orphan_drug_count = to_float(fda_designations.get("orphan_drug_count"), 0.0)
+        fast_track_count = to_float(fda_designations.get("fast_track_count"), 0.0)
+        rmat_count = to_float(fda_designations.get("rmat_count"), 0.0)
+        priority_review_flag = 1.0 if to_float(fda_designations.get("priority_review_flag"), 0.0) > 0.0 else 0.0
+        fda_designation_tier = to_float(fda_designations.get("fda_designation_tier"), 0.0)
+        fda_designation_score = clamp(to_float(fda_designations.get("fda_designation_score"), 0.0))
         momentum = clamp(momentum_raw if momentum_raw is not None else 0.0)
         clinical_positive = (
             catalyst_w * catalyst
@@ -1935,9 +2020,12 @@ def score_rows(
             profile_weights["financial_quality"] - embedded_financial_quality_weight,
         )
         residual_momentum_weight = max(0.0, profile_weights["momentum"] - embedded_momentum_weight)
-        # borrow_signal uses borrow_pressure_score (already extracted; IC=0.096 at 120d).
+        # borrow_signal uses borrow_pressure_score (IC=0.095 at 120d; borrow_rate_current IC=0.096).
         # Higher borrow pressure = expensive to short = squeeze potential = positive signal.
         borrow_signal_component = borrow_pressure_score
+        # short_interest_signal uses days_to_cover_score (IC=0.071 at 120d).
+        # High days-to-cover = large short position relative to daily volume = squeeze fuel.
+        short_interest_signal_component = short_interest_days_to_cover_score
         # institutional_crowding inverts the 13F accumulation signal.
         # IC=-0.074 at 120d overall; -0.245 for commercial_profitable. High accumulation
         # = crowded consensus trade = underperformance. Low accumulation = contrarian.
@@ -1952,6 +2040,7 @@ def score_rows(
             + residual_financial_quality_weight * financial_quality
             + residual_momentum_weight * momentum
             + profile_weights.get("borrow_signal", 0.0) * borrow_signal_component
+            + profile_weights.get("short_interest_signal", 0.0) * short_interest_signal_component
             + profile_weights.get("institutional_crowding", 0.0) * institutional_crowding_component
         )
         investment_risk_drag = convex_risk_drag(risk, profile_weights["risk_penalty"], config, "biotech_scoring")
@@ -2322,6 +2411,18 @@ def score_rows(
                 "insider_buy_cluster_count_90d": round(insider_buy_cluster_count_90d, 4),
                 "insider_sell_value_90d": round(insider_sell_value_90d, 2),
                 "insider_accumulation_score": round(insider_accumulation_score, 4),
+                "adcom_nearest_days": adcom_nearest_days,
+                "adcom_within_60d_flag": adcom_within_60d_flag,
+                "adcom_within_120d_flag": adcom_within_120d_flag,
+                "adcom_score": round(adcom_score, 4),
+                "adcom_committee_oncology_flag": adcom_committee_oncology_flag,
+                "breakthrough_therapy_count": round(breakthrough_therapy_count, 4),
+                "orphan_drug_count": round(orphan_drug_count, 4),
+                "fast_track_count": round(fast_track_count, 4),
+                "rmat_count": round(rmat_count, 4),
+                "priority_review_flag": priority_review_flag,
+                "fda_designation_tier": round(fda_designation_tier, 4),
+                "fda_designation_score": round(fda_designation_score, 4),
                 "tier1_selection_gate_score": round(selection_gate, 4),
                 "discovery_selection_gate_score": round(discovery_selection_gate, 4),
                 "investment_profile": profile_name,
@@ -2586,6 +2687,18 @@ def score_rows(
                 "insider_buy_cluster_count_90d": round(insider_buy_cluster_count_90d, 4),
                 "insider_sell_value_90d": round(insider_sell_value_90d, 2),
                 "insider_accumulation_score": round(insider_accumulation_score, 4),
+                "adcom_nearest_days": adcom_nearest_days,
+                "adcom_within_60d_flag": adcom_within_60d_flag,
+                "adcom_within_120d_flag": adcom_within_120d_flag,
+                "adcom_score": round(adcom_score, 4),
+                "adcom_committee_oncology_flag": adcom_committee_oncology_flag,
+                "breakthrough_therapy_count": round(breakthrough_therapy_count, 4),
+                "orphan_drug_count": round(orphan_drug_count, 4),
+                "fast_track_count": round(fast_track_count, 4),
+                "rmat_count": round(rmat_count, 4),
+                "priority_review_flag": priority_review_flag,
+                "fda_designation_tier": round(fda_designation_tier, 4),
+                "fda_designation_score": round(fda_designation_score, 4),
                 "quality_adjusted_valuation_score": round(quality_adjusted_valuation_score, 4),
                 "used_quality_adjusted_valuation": used_quality_adjusted_valuation,
                 "valuation_quality_adjustment_delta": round(valuation_quality_adjustment_delta, 4),
@@ -2731,6 +2844,17 @@ def score_rows(
             len(missing_momentum_raw),
             ",".join(missing_momentum_raw[:10]),
         )
+    enforce_missing_raw_score_gate(
+        config,
+        total_rows=len(rows),
+        missing_by_field={
+            "catalyst_score_raw": missing_catalyst_raw,
+            "credibility_score_raw": missing_credibility_raw,
+            "financial_quality_score_raw": missing_financial_raw,
+            "risk_score_raw": missing_risk_raw,
+            "momentum_score_raw": missing_momentum_raw,
+        },
+    )
     return scored
 
 def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_date: str) -> None:
@@ -2840,6 +2964,18 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "insider_buy_cluster_count_90d",
         "insider_sell_value_90d",
         "insider_accumulation_score",
+        "adcom_nearest_days",
+        "adcom_within_60d_flag",
+        "adcom_within_120d_flag",
+        "adcom_score",
+        "adcom_committee_oncology_flag",
+        "breakthrough_therapy_count",
+        "orphan_drug_count",
+        "fast_track_count",
+        "rmat_count",
+        "priority_review_flag",
+        "fda_designation_tier",
+        "fda_designation_score",
         "commercial_entry_quality_score",
         "commercial_overextension_score",
         "valuation_growth_fit_score",
@@ -3114,6 +3250,18 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "insider_buy_cluster_count_90d",
         "insider_sell_value_90d",
         "insider_accumulation_score",
+        "adcom_nearest_days",
+        "adcom_within_60d_flag",
+        "adcom_within_120d_flag",
+        "adcom_score",
+        "adcom_committee_oncology_flag",
+        "breakthrough_therapy_count",
+        "orphan_drug_count",
+        "fast_track_count",
+        "rmat_count",
+        "priority_review_flag",
+        "fda_designation_tier",
+        "fda_designation_score",
     ]
     fieldnames = [
         "asof_date",

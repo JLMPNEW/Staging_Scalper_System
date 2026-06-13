@@ -227,6 +227,27 @@ CREATE TABLE IF NOT EXISTS dim_technology_taxonomy (
     UNIQUE(ticker, model_family)
 );
 
+CREATE TABLE IF NOT EXISTS dim_universe_membership (
+    membership_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER,
+    ticker TEXT NOT NULL,
+    model_family TEXT NOT NULL,
+    membership_source_id TEXT,
+    membership_basis TEXT NOT NULL DEFAULT 'current_source_of_truth',
+    start_date TEXT NOT NULL DEFAULT '1900-01-01',
+    end_date TEXT,
+    membership_status TEXT NOT NULL DEFAULT 'active',
+    is_current_member INTEGER NOT NULL DEFAULT 1,
+    point_in_time_flag INTEGER NOT NULL DEFAULT 0,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE,
+    FOREIGN KEY (membership_source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL,
+    UNIQUE(ticker, model_family, membership_source_id, start_date)
+);
+
 CREATE TABLE IF NOT EXISTS fact_price_ohlcv (
     ticker TEXT NOT NULL,
     bar_date TEXT NOT NULL,
@@ -795,6 +816,247 @@ CREATE TABLE IF NOT EXISTS feature_positioning (
     FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
 );
 
+CREATE TABLE IF NOT EXISTS dim_scoring_component (
+    model_family TEXT NOT NULL,
+    component_name TEXT NOT NULL,
+    component_group TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    description TEXT,
+    is_core_component INTEGER NOT NULL DEFAULT 0,
+    default_score REAL NOT NULL DEFAULT 50.0,
+    default_quality REAL NOT NULL DEFAULT 0.0,
+    default_status TEXT NOT NULL DEFAULT 'not_loaded',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(model_family, component_name)
+);
+
+CREATE TABLE IF NOT EXISTS feature_scoring_input (
+    ticker TEXT NOT NULL,
+    asof_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    model_family TEXT NOT NULL DEFAULT 'semiconductors',
+    scoring_contract_version TEXT NOT NULL,
+    calibration_cohort_id TEXT,
+    calibration_cohort TEXT,
+    market_feature_asof_date TEXT,
+    financial_feature_asof_date TEXT,
+    positioning_feature_asof_date TEXT,
+    reporting_standard TEXT,
+    financial_frequency TEXT,
+    latest_price REAL,
+    market_cap REAL,
+    revenue_yoy_growth REAL,
+    gross_profit_yoy_growth REAL,
+    operating_income_yoy_growth REAL,
+    free_cash_flow_yoy_growth REAL,
+    revenue_acceleration REAL,
+    gross_margin REAL,
+    operating_margin REAL,
+    fcf_margin REAL,
+    fcf_to_net_income REAL,
+    net_cash_to_assets REAL,
+    sbc_pct_revenue REAL,
+    r_and_d_pct_revenue REAL,
+    share_count_yoy_growth REAL,
+    inventory_days REAL,
+    ev_gross_profit REAL,
+    ev_operating_income REAL,
+    fcf_yield REAL,
+    ret_3m REAL,
+    ret_12m_ex_1m REAL,
+    rel_strength_soxx_3m REAL,
+    realized_vol_60d REAL,
+    max_drawdown_12m REAL,
+    distance_from_52w_high REAL,
+    avg_dollar_volume_60d REAL,
+    low_liquidity_flag INTEGER NOT NULL DEFAULT 0,
+    insider_net_value_90d REAL,
+    insider_cluster_buyers_90d REAL,
+    institutional_ownership_delta_pct REAL,
+    latest_short_interest_pct_float REAL,
+    short_interest_change_3m REAL,
+    latest_days_to_cover REAL,
+    latest_borrow_fee_rate REAL,
+    quality_score REAL NOT NULL DEFAULT 50.0,
+    growth_score REAL NOT NULL DEFAULT 50.0,
+    valuation_score REAL NOT NULL DEFAULT 50.0,
+    market_behavior_score REAL NOT NULL DEFAULT 50.0,
+    positioning_score REAL NOT NULL DEFAULT 50.0,
+    risk_control_score REAL NOT NULL DEFAULT 50.0,
+    sector_cycle_score REAL NOT NULL DEFAULT 50.0,
+    equipment_cycle_score REAL NOT NULL DEFAULT 50.0,
+    sector_inventory_cycle_score REAL NOT NULL DEFAULT 50.0,
+    big_tech_capex_score REAL NOT NULL DEFAULT 50.0,
+    memory_ai_proxy_score REAL NOT NULL DEFAULT 50.0,
+    innovation_score REAL NOT NULL DEFAULT 50.0,
+    geo_customer_risk_score REAL NOT NULL DEFAULT 50.0,
+    sector_overlay_score REAL NOT NULL DEFAULT 50.0,
+    quality_component_quality REAL NOT NULL DEFAULT 0.0,
+    growth_component_quality REAL NOT NULL DEFAULT 0.0,
+    valuation_component_quality REAL NOT NULL DEFAULT 0.0,
+    market_component_quality REAL NOT NULL DEFAULT 0.0,
+    positioning_component_quality REAL NOT NULL DEFAULT 0.0,
+    risk_component_quality REAL NOT NULL DEFAULT 0.0,
+    sector_overlay_quality REAL NOT NULL DEFAULT 0.0,
+    sector_overlay_status TEXT NOT NULL DEFAULT 'not_loaded',
+    core_available_component_count INTEGER NOT NULL DEFAULT 0,
+    core_missing_component_count INTEGER NOT NULL DEFAULT 0,
+    core_data_quality_confidence REAL NOT NULL DEFAULT 0.0,
+    full_data_quality_confidence REAL NOT NULL DEFAULT 0.0,
+    market_quality TEXT,
+    financial_quality TEXT,
+    positioning_quality TEXT,
+    rank_ready_flag INTEGER NOT NULL DEFAULT 0,
+    calibration_eligible_flag INTEGER NOT NULL DEFAULT 0,
+    feature_status TEXT NOT NULL DEFAULT 'review',
+    review_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, asof_date, source_id, model_family),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS feature_scoring_component (
+    ticker TEXT NOT NULL,
+    asof_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    model_family TEXT NOT NULL DEFAULT 'semiconductors',
+    component_name TEXT NOT NULL,
+    component_group TEXT NOT NULL,
+    calibration_cohort_id TEXT,
+    component_score REAL NOT NULL DEFAULT 50.0,
+    universe_percentile REAL,
+    cohort_percentile REAL,
+    component_quality REAL NOT NULL DEFAULT 0.0,
+    component_status TEXT NOT NULL DEFAULT 'review',
+    available_subfeature_count INTEGER NOT NULL DEFAULT 0,
+    missing_subfeature_count INTEGER NOT NULL DEFAULT 0,
+    default_applied INTEGER NOT NULL DEFAULT 0,
+    review_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, asof_date, source_id, model_family, component_name),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS feature_scoring_model_output (
+    ticker TEXT NOT NULL,
+    asof_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    model_family TEXT NOT NULL DEFAULT 'semiconductors',
+    model_version TEXT NOT NULL,
+    baseline_source_id TEXT,
+    core_score REAL NOT NULL DEFAULT 50.0,
+    sector_overlay_score REAL NOT NULL DEFAULT 50.0,
+    final_score REAL NOT NULL DEFAULT 50.0,
+    final_rank INTEGER,
+    final_percentile REAL,
+    component_weights_json TEXT,
+    component_scores_json TEXT,
+    component_quality_json TEXT,
+    data_quality_confidence REAL NOT NULL DEFAULT 0.0,
+    rank_ready_flag INTEGER NOT NULL DEFAULT 0,
+    calibration_eligible_flag INTEGER NOT NULL DEFAULT 0,
+    model_status TEXT NOT NULL DEFAULT 'review',
+    review_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, asof_date, source_id, model_family),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_semiconductor_wsts_billings (
+    source_id TEXT NOT NULL,
+    dataset_type TEXT NOT NULL,
+    period_month TEXT NOT NULL,
+    region TEXT NOT NULL,
+    value_usd_thousands REAL NOT NULL,
+    value_millions_usd REAL NOT NULL,
+    source_url TEXT,
+    source_file TEXT,
+    workbook_sheet TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(source_id, dataset_type, period_month, region),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS feature_semiconductor_sector_cycle (
+    asof_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    model_family TEXT NOT NULL DEFAULT 'semiconductors',
+    latest_month TEXT,
+    global_sales_millions_usd REAL,
+    global_sales_yoy REAL,
+    global_sales_3m_change REAL,
+    global_sales_6m_change REAL,
+    global_3mma_millions_usd REAL,
+    global_3mma_3m_change REAL,
+    regional_breadth_score REAL,
+    sector_cycle_score REAL NOT NULL DEFAULT 50.0,
+    component_quality REAL NOT NULL DEFAULT 0.0,
+    stale_data INTEGER NOT NULL DEFAULT 0,
+    source_status TEXT NOT NULL DEFAULT 'review',
+    data_quality_status TEXT NOT NULL DEFAULT 'review',
+    review_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, source_id, model_family),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_big_tech_capex (
+    ticker TEXT NOT NULL,
+    calendar_period TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    cik TEXT NOT NULL,
+    period_start_date TEXT,
+    period_end_date TEXT NOT NULL,
+    fiscal_year INTEGER,
+    fiscal_period TEXT,
+    form_type TEXT,
+    filed_date TEXT,
+    accession_number TEXT NOT NULL,
+    source_concept TEXT NOT NULL,
+    frame TEXT,
+    duration_days INTEGER,
+    capex_usd REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, calendar_period, source_id, accession_number, source_concept),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS feature_big_tech_capex_cycle (
+    asof_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    model_family TEXT NOT NULL DEFAULT 'semiconductors',
+    latest_calendar_period TEXT,
+    latest_period_end_date TEXT,
+    latest_filed_date TEXT,
+    companies_expected INTEGER NOT NULL DEFAULT 0,
+    companies_current INTEGER NOT NULL DEFAULT 0,
+    companies_yoy INTEGER NOT NULL DEFAULT 0,
+    companies_qoq INTEGER NOT NULL DEFAULT 0,
+    current_capex_usd REAL,
+    prior_year_capex_usd REAL,
+    prior_quarter_capex_usd REAL,
+    capex_yoy_growth REAL,
+    capex_qoq_growth REAL,
+    capex_breadth_score REAL,
+    big_tech_capex_score REAL NOT NULL DEFAULT 50.0,
+    component_quality REAL NOT NULL DEFAULT 0.0,
+    stale_data INTEGER NOT NULL DEFAULT 0,
+    source_status TEXT NOT NULL DEFAULT 'review',
+    data_quality_status TEXT NOT NULL DEFAULT 'review',
+    review_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asof_date, source_id, model_family),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
 CREATE TABLE IF NOT EXISTS data_quality_issues (
     issue_id INTEGER PRIMARY KEY AUTOINCREMENT,
     detected_at TEXT NOT NULL,
@@ -830,6 +1092,12 @@ CREATE INDEX IF NOT EXISTS idx_dim_company_alias_norm
 
 CREATE INDEX IF NOT EXISTS idx_dim_technology_taxonomy_model_subsector
     ON dim_technology_taxonomy(model_family, subsector);
+
+CREATE INDEX IF NOT EXISTS idx_dim_universe_membership_lookup
+    ON dim_universe_membership(model_family, ticker, start_date, end_date);
+
+CREATE INDEX IF NOT EXISTS idx_dim_universe_membership_current
+    ON dim_universe_membership(model_family, is_current_member, membership_basis);
 
 CREATE INDEX IF NOT EXISTS idx_fact_price_ohlcv_ticker_date
     ON fact_price_ohlcv(ticker, bar_date);
@@ -902,6 +1170,27 @@ CREATE INDEX IF NOT EXISTS idx_fact_ibkr_borrow_snapshot_ticker_asof
 
 CREATE INDEX IF NOT EXISTS idx_feature_positioning_asof
     ON feature_positioning(model_family, asof_date);
+
+CREATE INDEX IF NOT EXISTS idx_feature_scoring_input_asof
+    ON feature_scoring_input(model_family, asof_date);
+
+CREATE INDEX IF NOT EXISTS idx_feature_scoring_component_lookup
+    ON feature_scoring_component(model_family, asof_date, component_name);
+
+CREATE INDEX IF NOT EXISTS idx_feature_scoring_model_output_asof
+    ON feature_scoring_model_output(model_family, source_id, asof_date);
+
+CREATE INDEX IF NOT EXISTS idx_fact_semiconductor_wsts_month
+    ON fact_semiconductor_wsts_billings(dataset_type, period_month, region);
+
+CREATE INDEX IF NOT EXISTS idx_feature_semiconductor_sector_cycle_asof
+    ON feature_semiconductor_sector_cycle(model_family, asof_date);
+
+CREATE INDEX IF NOT EXISTS idx_fact_big_tech_capex_period
+    ON fact_big_tech_capex(ticker, calendar_period);
+
+CREATE INDEX IF NOT EXISTS idx_feature_big_tech_capex_cycle_asof
+    ON feature_big_tech_capex_cycle(model_family, asof_date);
 
 CREATE INDEX IF NOT EXISTS idx_data_quality_issues_stage_ticker
     ON data_quality_issues(stage, ticker);

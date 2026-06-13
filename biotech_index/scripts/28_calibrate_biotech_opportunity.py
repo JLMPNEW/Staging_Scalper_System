@@ -119,6 +119,13 @@ PROFILE_COMPONENTS = [
     "institutional_upside",
     "financial_quality",
     "momentum",
+    # IC-validated signals included in positive weight sum.
+    # borrow_signal: IC=0.095 (borrow_pressure_score) at 120d, LCB spread +40.5%.
+    # short_interest_signal: IC=0.071 (days_to_cover_score) at 120d.
+    # institutional_crowding: IC=−0.074 inverted (contrarian signal for commercial).
+    "borrow_signal",
+    "short_interest_signal",
+    "institutional_crowding",
     "risk_penalty",
 ]
 SPREAD_KEYS = [
@@ -1379,6 +1386,9 @@ def normalize_profile(raw: Mapping[str, Any], *, profile_name: str = "profile") 
         "institutional_upside": float(raw.get("institutional_upside", 0.0)),
         "financial_quality": float(raw.get("financial_quality", 0.15)),
         "momentum": float(raw.get("momentum", 0.05)),
+        "borrow_signal": float(raw.get("borrow_signal", 0.0)),
+        "short_interest_signal": float(raw.get("short_interest_signal", 0.0)),
+        "institutional_crowding": float(raw.get("institutional_crowding", 0.0)),
         "risk_penalty": float(raw.get("risk_penalty", 0.15)),
     }
     for key, value in profile.items():
@@ -1634,6 +1644,94 @@ def generate_weight_specs(config: dict[str, Any], *, candidate_limit: int = 0) -
                 }
             ),
             base_commercial_profile,
+        ),
+        # IC-validated signal variants. borrow_signal IC=0.095, short_interest IC=0.071
+        # at 120d — highest validated factors in the system. These variants let calibration
+        # compare weighting at different levels relative to clinical fundamentals.
+        (
+            "borrow_squeeze_anchored",
+            normalize_profile(
+                {
+                    "clinical_opportunity": 0.36,
+                    "commercial_value": 0.02,
+                    "forward_guidance": 0.03,
+                    "valuation": 0.05,
+                    "upside_capacity": 0.10,
+                    "financial_quality": 0.15,
+                    "momentum": 0.04,
+                    "borrow_signal": 0.15,
+                    "short_interest_signal": 0.10,
+                    "risk_penalty": max(base_clinical_profile["risk_penalty"], 0.40),
+                }
+            ),
+            normalize_profile(
+                {
+                    "clinical_opportunity": 0.04,
+                    "commercial_value": 0.24,
+                    "forward_guidance": 0.18,
+                    "valuation": 0.06,
+                    "upside_capacity": 0.03,
+                    "financial_quality": 0.15,
+                    "momentum": 0.05,
+                    "borrow_signal": 0.12,
+                    "short_interest_signal": 0.06,
+                    "institutional_crowding": 0.07,
+                    "risk_penalty": max(base_commercial_profile["risk_penalty"], 0.24),
+                }
+            ),
+        ),
+        (
+            "borrow_moderate_short_interest",
+            normalize_profile(
+                {
+                    "clinical_opportunity": 0.38,
+                    "commercial_value": 0.02,
+                    "forward_guidance": 0.03,
+                    "valuation": 0.05,
+                    "upside_capacity": 0.11,
+                    "financial_quality": 0.15,
+                    "momentum": 0.05,
+                    "borrow_signal": 0.12,
+                    "short_interest_signal": 0.09,
+                    "risk_penalty": max(base_clinical_profile["risk_penalty"], 0.40),
+                }
+            ),
+            normalize_profile(
+                {
+                    "clinical_opportunity": 0.04,
+                    "commercial_value": 0.26,
+                    "forward_guidance": 0.19,
+                    "valuation": 0.07,
+                    "upside_capacity": 0.03,
+                    "institutional_upside": 0.02,
+                    "financial_quality": 0.14,
+                    "momentum": 0.06,
+                    "borrow_signal": 0.09,
+                    "short_interest_signal": 0.05,
+                    "institutional_crowding": 0.05,
+                    "risk_penalty": max(base_commercial_profile["risk_penalty"], 0.24),
+                }
+            ),
+        ),
+        (
+            "commercial_crowding_contrarian",
+            base_clinical_profile,
+            normalize_profile(
+                {
+                    "clinical_opportunity": 0.04,
+                    "commercial_value": 0.26,
+                    "forward_guidance": 0.18,
+                    "valuation": 0.07,
+                    "upside_capacity": 0.03,
+                    "institutional_upside": 0.03,
+                    "financial_quality": 0.14,
+                    "momentum": 0.06,
+                    "borrow_signal": 0.08,
+                    "short_interest_signal": 0.04,
+                    "institutional_crowding": 0.07,
+                    "risk_penalty": max(base_commercial_profile["risk_penalty"], 0.26),
+                }
+            ),
         ),
     ]
 
@@ -4286,6 +4384,11 @@ def score_observation(row: dict[str, Any], spec: WeightSpec, params: Calibration
         + profile["institutional_upside"] * clamp(to_float(row.get("institutional_upside_capacity_score")))
         + residual_financial_quality_weight * financial_quality
         + residual_momentum_weight * momentum
+        + profile.get("borrow_signal", 0.0) * clamp(to_float(row.get("borrow_pressure_score"), 0.0))
+        + profile.get("short_interest_signal", 0.0)
+        * clamp(to_float(row.get("short_interest_days_to_cover_score"), 0.0))
+        + profile.get("institutional_crowding", 0.0)
+        * clamp(100.0 - clamp(to_float(row.get("institutional_accumulation_score"), 50.0)))
     )
     investment_risk_drag = convex_risk_drag(risk, profile["risk_penalty"], params)
     confidence = clamp(to_float(row.get("confidence_multiplier"), 1.0), 0.0, 1.0)

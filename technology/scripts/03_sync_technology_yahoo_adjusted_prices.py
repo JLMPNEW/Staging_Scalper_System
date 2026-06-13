@@ -354,14 +354,17 @@ def fetch_job(
     timeout_sec: float,
     max_retries: int,
     retry_status_codes: set[int],
+    interval: str = "1d",
+    events: str = "div,splits",
+    include_adjusted_close: bool = True,
 ) -> FetchResult:
     endpoint = chart_url_template.format(ticker=job.ticker)
     query_params = {
         "period1": unix_timestamp(start_date),
         "period2": unix_timestamp(end_date + timedelta(days=1)),
-        "interval": "1d",
-        "events": "div,splits",
-        "includeAdjustedClose": "true",
+        "interval": interval,
+        "events": events,
+        "includeAdjustedClose": "true" if include_adjusted_close else "false",
     }
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / cache_name(job.ticker, start_date, end_date)
@@ -636,6 +639,9 @@ def main() -> None:
                 timeout_sec=timeout_sec,
                 max_retries=max_retries,
                 retry_status_codes=retry_status_codes,
+                interval=str(cfg_get(config, "yahoo_price_ingestion.interval", "1d") or "1d"),
+                events=str(cfg_get(config, "yahoo_price_ingestion.events", "div,splits") or "div,splits"),
+                include_adjusted_close=str(cfg_get(config, "yahoo_price_ingestion.include_adjusted_close", True)).lower() in {"1", "true", "yes", "y"},
             )
             for job in jobs
         ]
@@ -652,7 +658,13 @@ def main() -> None:
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
         with conn:
-            conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
+            processed = sorted({result.job.ticker for result in results})
+            if ticker_filter or int(args.max_tickers) > 0:
+                # Subset run: only clear issues for the tickers actually refreshed.
+                placeholders = ",".join("?" for _ in processed)
+                conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (RUN_TYPE, *processed))
+            else:
+                conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
             for result in sorted(results, key=lambda item: item.job.ticker):
                 bars_upserted, actions_upserted = upsert_result(conn, result, ingestion_run_id=ingestion_run_id)
                 total_bars += bars_upserted

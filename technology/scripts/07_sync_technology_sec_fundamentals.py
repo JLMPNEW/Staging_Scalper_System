@@ -134,12 +134,16 @@ def cik10(raw: str) -> str:
     return normalize_cik(raw).zfill(10)
 
 
-def load_universe(conn: Any, ticker_filter: set[str]) -> list[dict[str, str]]:
+def load_universe(conn: Any, ticker_filter: set[str], *, include_historical: bool = False) -> list[dict[str, str]]:
+    # Historical (delisted/acquired) members carry universe_status='historical'
+    # from the membership loader; their EDGAR fundamentals are backfillable even
+    # though their price feeds are not, so they are opt-in for this sync only.
+    historical_clause = "OR (is_active = 0 AND universe_status = 'historical')" if include_historical else ""
     rows = conn.execute(
-        """
-        SELECT ticker, cik, company_name
+        f"""
+        SELECT ticker, cik, company_name, is_active
         FROM dim_company
-        WHERE is_active = 1
+        WHERE is_active = 1 {historical_clause}
         ORDER BY ticker
         """
     ).fetchall()
@@ -148,7 +152,14 @@ def load_universe(conn: Any, ticker_filter: set[str]) -> list[dict[str, str]]:
         ticker = normalize_ticker(row["ticker"])
         if ticker_filter and ticker not in ticker_filter:
             continue
-        out.append({"ticker": ticker, "cik": cik10(str(row["cik"] or "")), "company_name": str(row["company_name"] or "")})
+        out.append(
+            {
+                "ticker": ticker,
+                "cik": cik10(str(row["cik"] or "")),
+                "company_name": str(row["company_name"] or ""),
+                "historical": int(row["is_active"] or 0) == 0,
+            }
+        )
     return out
 
 
@@ -1165,15 +1176,44 @@ def main() -> None:
         upsert_source_registry(conn, load_source_registry(registry_path))
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
-            companies = load_universe(conn, ticker_filter)
+            include_historical = str(cfg_get(config, "sec_fundamentals.include_historical_members", True)).strip().lower() in {"1", "true", "yes", "y"}
+            companies = load_universe(conn, ticker_filter, include_historical=include_historical)
             if max_tickers > 0:
                 companies = companies[:max_tickers]
             with conn:
-                conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
+                if ticker_filter or max_tickers > 0:
+                    processed = [company["ticker"] for company in companies]
+                    placeholders = ",".join("?" for _ in processed)
+                    conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (RUN_TYPE, *processed))
+                else:
+                    conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
             failures = 0
             for idx, company in enumerate(companies, start=1):
                 ticker = company["ticker"]
                 cik = company["cik"]
+                if not normalize_cik(cik).strip("0"):
+                    # Missing CIK is a review condition, not a fetch failure.
+                    with conn:
+                        add_issue(conn, ticker, submissions_source, "missing_cik_skipped_sec_sync", "Ticker has no CIK; SEC fundamentals sync skipped.")
+                    report_rows.append(
+                        {
+                            "ticker": ticker,
+                            "cik": "",
+                            "company_name": company["company_name"],
+                            "submissions_status": "skipped_missing_cik",
+                            "filings_upserted": 0,
+                            "companyfacts_status": "skipped_missing_cik",
+                            "facts_upserted": 0,
+                            "mapped_facts_upserted": 0,
+                            "coverage_status": "SEC_REVIEW_REQUIRED",
+                            "companyfacts_lag_status": "",
+                            "inline_fallback_status": "not_needed",
+                            "inline_fallback_mapped_facts": 0,
+                            "latest_financial_filing_date": "",
+                            "review_reason": "missing_cik",
+                        }
+                    )
+                    continue
                 reasons: list[str] = []
                 filings_count = 0
                 facts_count = 0
@@ -1234,11 +1274,20 @@ def main() -> None:
                         reasons.append("no_financial_filings_since_start")
                         sub_status = "review"
                 except Exception as exc:  # noqa: BLE001
-                    failures += 1
-                    sub_status = "failed"
-                    reasons.append(f"submissions_error:{type(exc).__name__}:{exc}")
-                    with conn:
-                        add_issue(conn, ticker, submissions_source, "sec_submissions_fetch_failed", reasons[-1], "error")
+                    if company.get("historical"):
+                        # Deregistered issuers can drop off EDGAR's JSON APIs
+                        # entirely; that is a data-availability fact, not a
+                        # pipeline failure.
+                        sub_status = "review"
+                        reasons.append(f"historical_submissions_unavailable:{type(exc).__name__}")
+                        with conn:
+                            add_issue(conn, ticker, submissions_source, "historical_member_sec_data_unavailable", reasons[-1], "warning")
+                    else:
+                        failures += 1
+                        sub_status = "failed"
+                        reasons.append(f"submissions_error:{type(exc).__name__}:{exc}")
+                        with conn:
+                            add_issue(conn, ticker, submissions_source, "sec_submissions_fetch_failed", reasons[-1], "error")
 
                 try:
                     facts_url = str(cfg_get(config, "sec_fundamentals.companyfacts_url_template")).format(cik=cik)
@@ -1321,11 +1370,17 @@ def main() -> None:
                         with conn:
                             add_issue(conn, ticker, companyfacts_source, "missing_mapped_operating_companyfacts", "No mapped operating financial companyfacts since configured start date.")
                 except Exception as exc:  # noqa: BLE001
-                    failures += 1
-                    facts_status = "failed"
-                    reasons.append(f"companyfacts_error:{type(exc).__name__}:{exc}")
-                    with conn:
-                        add_issue(conn, ticker, companyfacts_source, "sec_companyfacts_fetch_failed", reasons[-1], "error")
+                    if company.get("historical"):
+                        facts_status = "review"
+                        reasons.append(f"historical_companyfacts_unavailable:{type(exc).__name__}")
+                        with conn:
+                            add_issue(conn, ticker, companyfacts_source, "historical_member_sec_data_unavailable", reasons[-1], "warning")
+                    else:
+                        failures += 1
+                        facts_status = "failed"
+                        reasons.append(f"companyfacts_error:{type(exc).__name__}:{exc}")
+                        with conn:
+                            add_issue(conn, ticker, companyfacts_source, "sec_companyfacts_fetch_failed", reasons[-1], "error")
 
                 report_rows.append(
                     {

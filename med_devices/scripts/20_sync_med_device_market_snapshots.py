@@ -350,6 +350,7 @@ def fetch_yfinance_snapshots(
         shares = None
         market_cap = None
         currency = company.currency or "USD"
+        info: dict[str, Any] | None = None
         try:
             ticker = yf.Ticker(symbol)
             fast_info = ticker.fast_info
@@ -379,8 +380,9 @@ def fetch_yfinance_snapshots(
                 if shares is not None:
                     payload["share_method"] = "market_cap_div_price_fast_info"
             if shares is None:
-                info = ticker.get_info()
-                if isinstance(info, dict):
+                raw_info = ticker.get_info()
+                info = raw_info if isinstance(raw_info, dict) else None
+                if info is not None:
                     shares = normalize_share_count(
                         info.get("sharesOutstanding")
                         or info.get("impliedSharesOutstanding")
@@ -414,6 +416,24 @@ def fetch_yfinance_snapshots(
                     shares = normalize_share_count(latest)
                     payload["share_method"] = "shares_full_latest"
                     payload["shares_full_date"] = str(series.dropna().index[-1])
+            if info is None:
+                try:
+                    raw_info = ticker.get_info()
+                    info = raw_info if isinstance(raw_info, dict) else None
+                except Exception:
+                    pass
+            if info is not None:
+                shares_short = to_float(info.get("sharesShort"))
+                short_ratio = to_float(info.get("shortRatio"))
+                short_pct_float = to_float(info.get("shortPercentOfFloat"))
+                si_float_shares = to_float(info.get("floatShares"))
+                if any(v is not None for v in (shares_short, short_ratio, short_pct_float)):
+                    payload["short_interest"] = {
+                        "sharesShort": shares_short,
+                        "shortRatio": short_ratio,
+                        "shortPercentOfFloat": short_pct_float,
+                        "floatShares": si_float_shares,
+                    }
             if shares is not None:
                 out[company.ticker] = Snapshot(
                     ticker=company.ticker,
@@ -521,6 +541,59 @@ def upsert_snapshots(conn: Any, snapshots: list[Snapshot]) -> int:
         ],
     )
     return len(snapshots)
+
+
+def upsert_short_interest_from_snapshots(conn: Any, snapshots: list[Snapshot]) -> int:
+    rows = []
+    now = utc_now()
+    for item in snapshots:
+        si = item.payload.get("short_interest")
+        if not isinstance(si, dict):
+            continue
+        shares_short = to_float(si.get("sharesShort"))
+        short_ratio = to_float(si.get("shortRatio"))
+        short_pct_float = to_float(si.get("shortPercentOfFloat"))
+        si_float_shares = to_float(si.get("floatShares"))
+        if shares_short is None and short_ratio is None and short_pct_float is None:
+            continue
+        rows.append((
+            item.ticker,
+            item.asof_date,
+            item.source_id,
+            item.company_id,
+            shares_short,
+            None,
+            short_ratio,
+            si_float_shares,
+            short_pct_float,
+            item.asof_date,
+            json.dumps(si, ensure_ascii=True, sort_keys=True),
+            now,
+            now,
+        ))
+    if not rows:
+        return 0
+    conn.executemany(
+        """
+        INSERT INTO fact_short_interest(
+            ticker, settlement_date, source_id, company_id,
+            short_interest, avg_daily_volume, days_to_cover,
+            float_shares, short_interest_pct_float,
+            publication_date, payload_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ticker, settlement_date, source_id) DO UPDATE SET
+            company_id = excluded.company_id,
+            short_interest = excluded.short_interest,
+            days_to_cover = excluded.days_to_cover,
+            float_shares = excluded.float_shares,
+            short_interest_pct_float = excluded.short_interest_pct_float,
+            payload_json = excluded.payload_json,
+            updated_at = excluded.updated_at
+        """,
+        rows,
+    )
+    return len(rows)
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -697,10 +770,11 @@ def main() -> None:
                         }
                     )
             upserted = upsert_snapshots(conn, snapshots)
+            upserted_si = upsert_short_interest_from_snapshots(conn, snapshots)
             write_csv(output_csv, rows)
             failures = sum(1 for row in rows if row.get("status") != "success")
             status = "success" if failures == 0 or args.allow_partial else "failed"
-            message = f"asof={asof} rows={len(rows)} snapshots={upserted} failures={failures} output={output_csv}"
+            message = f"asof={asof} rows={len(rows)} snapshots={upserted} short_interest={upserted_si} failures={failures} output={output_csv}"
             finish_run(conn, run_id=run_id, status=status, row_count=upserted, message=message)
             finalized = True
             if status == "failed":

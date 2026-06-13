@@ -7,6 +7,7 @@ import json.decoder
 import math
 import re
 import sqlite3
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -375,6 +376,7 @@ def read_finra_equity_short_interest_file(path: Path) -> list[dict[str, str]]:
     text = path.read_text(encoding="utf-8-sig", errors="replace")
     if not text.strip():
         return []
+    csv.field_size_limit(min(sys.maxsize, 2_147_483_647))
     return [dict(row) for row in csv.DictReader(io.StringIO(text), delimiter="|")]
 
 

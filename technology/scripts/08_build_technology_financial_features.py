@@ -9,7 +9,7 @@ import math
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -151,8 +151,12 @@ def canonical_key(*parts: object) -> str:
     return hashlib.sha256("|".join(str(part or "") for part in parts).encode("utf-8")).hexdigest()
 
 
-def load_universe(conn: Any, ticker_filter: set[str]) -> list[str]:
-    rows = conn.execute("SELECT ticker FROM dim_company WHERE is_active = 1 ORDER BY ticker").fetchall()
+def load_universe(conn: Any, ticker_filter: set[str], *, include_historical: bool = False) -> list[str]:
+    # Historical members (universe_status='historical') get PIT financial
+    # features for research panels; they never enter production scoring, which
+    # filters on is_active=1 downstream.
+    historical_clause = "OR (is_active = 0 AND universe_status = 'historical')" if include_historical else ""
+    rows = conn.execute(f"SELECT ticker FROM dim_company WHERE is_active = 1 {historical_clause} ORDER BY ticker").fetchall()
     out = [normalize_ticker(row["ticker"]) for row in rows if normalize_ticker(row["ticker"])]
     return [ticker for ticker in out if not ticker_filter or ticker in ticker_filter]
 
@@ -443,54 +447,21 @@ def end_date_distance(fact: CanonicalFact, target_end: date | None) -> int:
     return abs((fact.end_date - target_end).days)
 
 
-def select_fact(
+QTD_DURATION = (70, 120)
+FY_DURATION = (330, 400)
+
+
+def select_balance_fact(
     candidates: list[CanonicalFact],
     metric: str,
     *,
-    form_type: str,
-    fiscal_period: str,
     target_end: date | None,
 ) -> CanonicalFact | None:
-    candidates = [fact for fact in candidates if fact.metric == metric]
-    if not candidates:
+    pool = [fact for fact in candidates if fact.metric == metric]
+    if not pool:
         return None
-    if metric in FLOW_METRICS:
-        if form_type.startswith("10-Q") and fiscal_period.upper() in {"Q1", "Q2", "Q3"}:
-            return sorted(
-                candidates,
-                key=lambda fact: (
-                    fact.source_priority,
-                    unit_score(metric, fact.source_unit),
-                    end_date_distance(fact, target_end),
-                    abs((duration_days(fact) or 999) - 91),
-                    -(duration_days(fact) or 0),
-                    -fact.source_quality,
-                ),
-            )[0]
-        if form_type.startswith(("10-K", "20-F", "40-F")) or fiscal_period.upper() == "FY":
-            return sorted(
-                candidates,
-                key=lambda fact: (
-                    fact.source_priority,
-                    unit_score(metric, fact.source_unit),
-                    end_date_distance(fact, target_end),
-                    abs((duration_days(fact) or 999) - 365),
-                    -(duration_days(fact) or 0),
-                    -fact.source_quality,
-                ),
-            )[0]
-        return sorted(
-            candidates,
-            key=lambda fact: (
-                fact.source_priority,
-                unit_score(metric, fact.source_unit),
-                end_date_distance(fact, target_end),
-                -1 * (duration_days(fact) or 0),
-                -fact.source_quality,
-            ),
-        )[0]
     return sorted(
-        candidates,
+        pool,
         key=lambda fact: (
             fact.source_priority,
             unit_score(metric, fact.source_unit),
@@ -501,34 +472,110 @@ def select_fact(
     )[0]
 
 
-def flow_ttm(features: list[dict[str, Any]], idx: int, metric: str) -> float | None:
-    current = features[idx]
-    if str(current.get("form_type") or "").startswith(("10-K", "20-F", "40-F")):
-        return safe_float(current.get(metric))
-    rows: list[dict[str, Any]] = []
-    for prior in reversed(features[: idx + 1]):
-        if safe_float(prior.get(metric)) is None:
-            continue
-        rows.append(prior)
-        if len(rows) == 4:
-            break
-    if len(rows) < 4:
+def select_flow_fact(
+    candidates: list[CanonicalFact],
+    metric: str,
+    *,
+    target_end: date | None,
+    dur_lo: int,
+    dur_hi: int,
+    dur_target: int,
+) -> CanonicalFact | None:
+    """Pick a flow fact by reported duration instead of fiscal-period labels.
+
+    SEC submissions metadata carries no fy/fp, so quarterly-versus-YTD selection
+    must rely on the XBRL start/end dates themselves.
+    """
+    pool = [
+        fact
+        for fact in candidates
+        if fact.metric == metric and duration_days(fact) is not None and dur_lo <= (duration_days(fact) or 0) <= dur_hi
+    ]
+    if not pool:
         return None
-    return sum(float(row[metric]) for row in rows if row.get(metric) is not None)
+    return sorted(
+        pool,
+        key=lambda fact: (
+            fact.source_priority,
+            unit_score(metric, fact.source_unit),
+            end_date_distance(fact, target_end),
+            abs((duration_days(fact) or 0) - dur_target),
+            -fact.source_quality,
+        ),
+    )[0]
 
 
-def latest_market_cap(conn: Any, ticker: str, asof_date: str) -> float | None:
+def select_ytd_fact(
+    candidates: list[CanonicalFact],
+    metric: str,
+    *,
+    target_end: date | None,
+) -> CanonicalFact | None:
+    pool = [
+        fact
+        for fact in candidates
+        if fact.metric == metric and duration_days(fact) is not None and (duration_days(fact) or 0) <= 400
+    ]
+    if not pool:
+        return None
+    return sorted(
+        pool,
+        key=lambda fact: (
+            fact.source_priority,
+            unit_score(metric, fact.source_unit),
+            end_date_distance(fact, target_end),
+            -(duration_days(fact) or 0),
+            -fact.source_quality,
+        ),
+    )[0]
+
+
+def shares_outstanding_at(conn: Any, ticker: str, raw_source: str, asof_iso: str) -> float | None:
+    """Point-in-time shares outstanding from dei cover-page facts filed on or before asof."""
     row = conn.execute(
         """
-        SELECT market_cap
-        FROM fact_market_snapshot
-        WHERE ticker = ? AND asof_date <= ? AND market_cap IS NOT NULL
-        ORDER BY asof_date DESC
+        SELECT value
+        FROM fact_sec_xbrl_fact_raw
+        WHERE ticker = ? AND source_id = ?
+          AND taxonomy = 'dei' AND concept = 'EntityCommonStockSharesOutstanding'
+          AND COALESCE(filing_date, '') <> '' AND filing_date <= ?
+          AND value IS NOT NULL AND value > 0
+        ORDER BY filing_date DESC, end_date DESC
         LIMIT 1
         """,
-        (ticker, asof_date),
+        (ticker, raw_source, asof_iso),
     ).fetchone()
-    return safe_float(row["market_cap"]) if row is not None else None
+    return safe_float(row["value"]) if row is not None else None
+
+
+def close_price_at(conn: Any, ticker: str, price_source: str, asof_iso: str, *, max_stale_days: int = 45) -> float | None:
+    row = conn.execute(
+        """
+        SELECT bar_date, close
+        FROM fact_price_ohlcv
+        WHERE ticker = ? AND source_id = ? AND bar_date <= ? AND close IS NOT NULL AND close > 0
+        ORDER BY bar_date DESC
+        LIMIT 1
+        """,
+        (ticker, price_source, asof_iso),
+    ).fetchone()
+    if row is None:
+        return None
+    bar_date = parse_date(row["bar_date"])
+    asof = parse_date(asof_iso)
+    if bar_date is None or asof is None or (asof - bar_date).days > max_stale_days:
+        return None
+    return safe_float(row["close"])
+
+
+def pit_market_cap(conn: Any, ticker: str, *, raw_source: str, price_source: str, asof_iso: str, diluted_shares: float | None) -> float | None:
+    shares = shares_outstanding_at(conn, ticker, raw_source, asof_iso)
+    if shares is None and diluted_shares is not None and diluted_shares > 0:
+        shares = diluted_shares
+    price = close_price_at(conn, ticker, price_source, asof_iso)
+    if shares is None or price is None:
+        return None
+    return shares * price
 
 
 def fx_rate_at_or_before(conn: Any, currency: str, asof: date | None, fx_source: str) -> float | None:
@@ -701,6 +748,123 @@ def write_report(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+FLOW_EXTRACT_METRICS = (
+    "revenue", "cost_of_sales", "gross_profit", "operating_income", "pretax_income",
+    "net_income", "operating_cash_flow", "capex", "research_and_development",
+    "stock_based_compensation", "eps_diluted", "diluted_shares",
+)
+BALANCE_EXTRACT_METRICS = (
+    "assets", "liabilities", "equity", "cash_and_equivalents", "inventory",
+    "debt_current", "debt_noncurrent", "debt_total",
+)
+TTM_METRICS = (
+    "revenue", "cost_of_sales", "gross_profit", "operating_income", "net_income",
+    "operating_cash_flow", "capex", "free_cash_flow", "research_and_development",
+    "stock_based_compensation",
+)
+YOY_METRICS = (
+    ("revenue", "revenue_yoy_growth"),
+    ("gross_profit", "gross_profit_yoy_growth"),
+    ("operating_income", "operating_income_yoy_growth"),
+    ("free_cash_flow", "free_cash_flow_yoy_growth"),
+)
+
+
+def _derive_levels(values: dict[str, float | None]) -> None:
+    """Fill gross_profit and free_cash_flow within one duration class."""
+    if values.get("gross_profit") is None and values.get("revenue") is not None and values.get("cost_of_sales") is not None:
+        values["gross_profit"] = float(values["revenue"]) - float(values["cost_of_sales"])
+    capex = values.get("capex")
+    if capex is not None:
+        values["capex"] = abs(float(capex))
+    if values.get("operating_cash_flow") is not None and values.get("capex") is not None:
+        values["free_cash_flow"] = float(values["operating_cash_flow"]) - float(values["capex"])
+    else:
+        values.setdefault("free_cash_flow", None)
+
+
+def _quarter_value(feature: dict[str, Any], metric: str) -> float | None:
+    """Single-quarter flow: the row value for quarterly rows, derived Q4 for annual rows."""
+    if feature["_is_annual"]:
+        return feature["_q4"].get(metric)
+    return safe_float(feature.get(metric))
+
+
+def _find_prior_year_row(features: list[dict[str, Any]], idx: int, *, annual: bool) -> dict[str, Any] | None:
+    cur_end: date = features[idx]["_end"]
+    best = None
+    for candidate in features[:idx]:
+        if candidate["_is_annual"] != annual:
+            continue
+        gap = (cur_end - candidate["_end"]).days
+        if 330 <= gap <= 400:
+            best = candidate
+    return best
+
+
+def _find_prev_same_class_row(features: list[dict[str, Any]], idx: int) -> dict[str, Any] | None:
+    cur = features[idx]
+    lo, hi = (330, 400) if cur["_is_annual"] else (60, 130)
+    for candidate in reversed(features[:idx]):
+        if candidate["_is_annual"] != cur["_is_annual"]:
+            continue
+        gap = (cur["_end"] - candidate["_end"]).days
+        if lo <= gap <= hi:
+            return candidate
+        if gap > hi:
+            return None
+    return None
+
+
+def _ttm_value(features: list[dict[str, Any]], idx: int, metric: str) -> float | None:
+    feature = features[idx]
+    if feature["_is_annual"]:
+        return safe_float(feature.get(metric))
+    # Preferred: latest annual + current YTD - prior-year YTD over the same span.
+    cur_ytd = feature["_ytd"].get(metric)
+    if cur_ytd is not None:
+        fy_row = None
+        for candidate in reversed(features[:idx]):
+            if not candidate["_is_annual"]:
+                continue
+            gap = (feature["_end"] - candidate["_end"]).days
+            if 0 < gap <= 380 and safe_float(candidate.get(metric)) is not None:
+                fy_row = candidate
+            break
+        if fy_row is not None:
+            for candidate in reversed(features[:idx]):
+                if candidate["_is_annual"]:
+                    continue
+                gap = (feature["_end"] - candidate["_end"]).days
+                if gap > 400:
+                    break
+                prior_ytd = candidate["_ytd"].get(metric)
+                if (
+                    330 <= gap <= 400
+                    and prior_ytd is not None
+                    and abs(candidate["_ytd_days"].get(metric, 0) - feature["_ytd_days"].get(metric, 0)) <= 20
+                ):
+                    return float(fy_row[metric]) + float(cur_ytd) - float(prior_ytd)
+    # Fallback: sum of four consecutive single-quarter values.
+    total = 0.0
+    count = 0
+    expected_end = feature["_end"]
+    pool = [feature] + list(reversed(features[:idx]))
+    for candidate in pool:
+        gap = (expected_end - candidate["_end"]).days
+        if gap < 0 or gap > 130:
+            continue
+        value = _quarter_value(candidate, metric)
+        if value is None:
+            return None
+        total += value
+        count += 1
+        if count == 4:
+            return total
+        expected_end = candidate["_end"] - timedelta(days=1)
+    return None
+
+
 def build_ticker_features(
     conn: Any,
     ticker: str,
@@ -708,8 +872,9 @@ def build_ticker_features(
     facts_source: str,
     filings_source: str,
     fx_source: str,
+    price_source: str,
     model_family: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> list[dict[str, Any]]:
     profile = load_profile(conn, ticker)
     reporting_standard = str(profile.get("primary_reporting_taxonomy") or "")
     financial_frequency = str(profile.get("financial_statement_frequency") or "")
@@ -718,7 +883,6 @@ def build_ticker_features(
     for fact in facts:
         by_accession[fact.accession].append(fact)
     features: list[dict[str, Any]] = []
-    report_rows: list[dict[str, Any]] = []
     for filing in load_filings(conn, ticker, filings_source):
         accession = str(filing.get("accession_number") or "")
         filing_facts = by_accession.get(accession, [])
@@ -727,29 +891,52 @@ def build_ticker_features(
         if not accession or not filing_facts or report_date is None or filing_date is None:
             continue
         form_type = str(filing.get("form_type") or "")
-        fiscal_period = str(filing.get("fiscal_period") or "")
+        is_annual = form_type.startswith(("10-K", "20-F", "40-F"))
         selected_facts: dict[str, CanonicalFact] = {}
         metric_values: dict[str, float | None] = {}
-        for metric in {
-            "revenue", "cost_of_sales", "gross_profit", "operating_income", "pretax_income",
-            "net_income", "eps_diluted", "assets", "liabilities", "equity",
-            "cash_and_equivalents", "inventory", "operating_cash_flow", "capex",
-            "research_and_development", "stock_based_compensation", "diluted_shares",
-            "debt_current", "debt_noncurrent", "debt_total",
-        }:
-            selected = select_fact(filing_facts, metric, form_type=form_type, fiscal_period=fiscal_period, target_end=report_date)
+        ytd_values: dict[str, float | None] = {}
+        ytd_starts: dict[str, str] = {}
+        ytd_days: dict[str, int] = {}
+        for metric in FLOW_EXTRACT_METRICS:
+            if is_annual:
+                selected = select_flow_fact(filing_facts, metric, target_end=report_date, dur_lo=FY_DURATION[0], dur_hi=FY_DURATION[1], dur_target=365)
+                if selected is None:
+                    selected = select_ytd_fact(filing_facts, metric, target_end=report_date)
+                if selected is not None:
+                    selected_facts[metric] = selected
+                    metric_values[metric] = selected.value
+                    ytd_values[metric] = selected.value
+                    ytd_starts[metric] = selected.start_date.isoformat() if selected.start_date else ""
+                    ytd_days[metric] = duration_days(selected) or 0
+                else:
+                    metric_values[metric] = None
+            else:
+                qtd = select_flow_fact(filing_facts, metric, target_end=report_date, dur_lo=QTD_DURATION[0], dur_hi=QTD_DURATION[1], dur_target=91)
+                ytd = select_ytd_fact(filing_facts, metric, target_end=report_date)
+                anchor = qtd or ytd
+                if anchor is not None:
+                    selected_facts[metric] = anchor
+                metric_values[metric] = qtd.value if qtd is not None else None
+                if ytd is not None:
+                    ytd_values[metric] = ytd.value
+                    ytd_starts[metric] = ytd.start_date.isoformat() if ytd.start_date else ""
+                    ytd_days[metric] = duration_days(ytd) or 0
+        for metric in BALANCE_EXTRACT_METRICS:
+            selected = select_balance_fact(filing_facts, metric, target_end=report_date)
             if selected is not None:
                 selected_facts[metric] = selected
             metric_values[metric] = selected.value if selected else None
-        if metric_values.get("gross_profit") is None and metric_values.get("revenue") is not None and metric_values.get("cost_of_sales") is not None:
-            metric_values["gross_profit"] = float(metric_values["revenue"]) - float(metric_values["cost_of_sales"])
+        _derive_levels(metric_values)
+        _derive_levels(ytd_values)
+        if "free_cash_flow" in ytd_values and ytd_values.get("free_cash_flow") is not None:
+            ytd_starts.setdefault("free_cash_flow", ytd_starts.get("operating_cash_flow", ""))
+            ytd_days.setdefault("free_cash_flow", ytd_days.get("operating_cash_flow", 0))
+        if ytd_values.get("gross_profit") is not None:
+            ytd_starts.setdefault("gross_profit", ytd_starts.get("revenue", ""))
+            ytd_days.setdefault("gross_profit", ytd_days.get("revenue", 0))
         total_debt = metric_values.get("debt_total")
         if total_debt is None and (metric_values.get("debt_current") is not None or metric_values.get("debt_noncurrent") is not None):
             total_debt = float(metric_values.get("debt_current") or 0.0) + float(metric_values.get("debt_noncurrent") or 0.0)
-        capex = abs(metric_values["capex"]) if metric_values.get("capex") is not None else None
-        free_cash_flow = None
-        if metric_values.get("operating_cash_flow") is not None and capex is not None:
-            free_cash_flow = float(metric_values["operating_cash_flow"]) - capex
         currency_candidates = [
             selected_facts[metric].reported_currency
             for metric in ("revenue", "assets", "operating_cash_flow")
@@ -768,7 +955,7 @@ def build_ticker_features(
             "form_type": form_type,
             "fiscal_period_end": report_date.isoformat(),
             "fiscal_year": filing.get("fiscal_year"),
-            "fiscal_period": fiscal_period,
+            "fiscal_period": str(filing.get("fiscal_period") or ""),
             "reporting_standard": reporting_standard,
             "financial_frequency": financial_frequency,
             "reported_currency": statement_currency,
@@ -783,102 +970,146 @@ def build_ticker_features(
             "cash_and_equivalents": metric_values.get("cash_and_equivalents"),
             "inventory": metric_values.get("inventory"),
             "operating_cash_flow": metric_values.get("operating_cash_flow"),
-            "capex": capex,
+            "capex": metric_values.get("capex"),
             "total_debt": total_debt,
-            "free_cash_flow": free_cash_flow,
+            "free_cash_flow": metric_values.get("free_cash_flow"),
             "research_and_development": metric_values.get("research_and_development"),
             "stock_based_compensation": metric_values.get("stock_based_compensation"),
             "diluted_shares": metric_values.get("diluted_shares"),
+            "cost_of_sales": metric_values.get("cost_of_sales"),
             "canonical_quality": canonical_quality,
             "data_quality_status": "review",
-            "_reported_currency": statement_currency,
+            "_is_annual": is_annual,
+            "_end": report_date,
+            "_ytd": ytd_values,
+            "_ytd_start": ytd_starts,
+            "_ytd_days": ytd_days,
+            "_q4": {},
         }
         apply_fx_conversion(conn, feature, selected_facts, fx_source)
-        reasons = [f"missing_{metric}" for metric in sorted(CRITICAL_METRICS) if metric_values.get(metric) is None]
-        if statement_currency and statement_currency != "USD" and feature.get("fx_conversion_status") != "converted":
-            reasons.append(f"valuation_fx_unconverted_{statement_currency}")
-        if not statement_currency:
-            reasons.append("missing_reported_currency")
-        quality = "complete" if not reasons else "review"
-        feature["data_quality_status"] = quality
-        feature["_review_reason"] = ";".join(reasons)
         features.append(feature)
-        report_rows.append(
-            {
-                "ticker": ticker,
-                "asof_date": filing_date.isoformat(),
-                "form_type": form_type,
-                "fiscal_period_end": report_date.isoformat(),
-                "fiscal_year": filing.get("fiscal_year"),
-                "fiscal_period": fiscal_period,
-                "reporting_standard": reporting_standard,
-                "financial_frequency": financial_frequency,
-                "reported_currency": statement_currency,
-                "fx_conversion_status": feature.get("fx_conversion_status"),
-                "fx_rate_income_statement": feature.get("fx_rate_income_statement"),
-                "fx_rate_balance_sheet": feature.get("fx_rate_balance_sheet"),
-                "revenue": metric_values.get("revenue"),
-                "revenue_usd": feature.get("revenue_usd"),
-                "free_cash_flow": free_cash_flow,
-                "data_quality_status": quality,
-                "review_reason": ";".join(reasons),
-            }
-        )
     features.sort(key=lambda row: (str(row["fiscal_period_end"]), str(row["asof_date"]), str(row["accession_number"])))
-    by_period_key: dict[tuple[str, int | None], dict[str, Any]] = {}
-    prev_yoy_growth: dict[str, float | None] = {}
+    # Pass 1: derive missing single-quarter flows by differencing same-start YTD spans,
+    # and derive the final-quarter flow embedded in each annual filing.
     for idx, feature in enumerate(features):
-        fiscal_year = int(feature["fiscal_year"]) if feature.get("fiscal_year") is not None else None
-        fiscal_period = str(feature.get("fiscal_period") or "")
-        prior = by_period_key.get((fiscal_period, fiscal_year - 1 if fiscal_year is not None else None))
-        for metric, out_name in (
-            ("revenue", "revenue_yoy_growth"),
-            ("gross_profit", "gross_profit_yoy_growth"),
-            ("operating_income", "operating_income_yoy_growth"),
-            ("free_cash_flow", "free_cash_flow_yoy_growth"),
-        ):
-            feature[out_name] = pct_change(safe_float(feature.get(metric)), safe_float(prior.get(metric)) if prior else None)
+        for metric in TTM_METRICS:
+            cur_ytd = feature["_ytd"].get(metric)
+            cur_start = feature["_ytd_start"].get(metric, "")
+            cur_days = feature["_ytd_days"].get(metric, 0)
+            if cur_ytd is None or not cur_start:
+                continue
+            target = None
+            for candidate in reversed(features[:idx]):
+                if (feature["_end"] - candidate["_end"]).days > 130:
+                    break
+                prior_ytd = candidate["_ytd"].get(metric)
+                if (
+                    prior_ytd is not None
+                    and not candidate["_is_annual"]
+                    and candidate["_ytd_start"].get(metric, "") == cur_start
+                    and QTD_DURATION[0] <= cur_days - candidate["_ytd_days"].get(metric, 0) <= QTD_DURATION[1]
+                ):
+                    target = float(cur_ytd) - float(prior_ytd)
+                    break
+            if target is None:
+                continue
+            if feature["_is_annual"]:
+                feature["_q4"][metric] = target
+            elif feature.get(metric) is None:
+                feature[metric] = target
+        if not feature["_is_annual"] and feature.get("free_cash_flow") is None:
+            if feature.get("operating_cash_flow") is not None and feature.get("capex") is not None:
+                feature["free_cash_flow"] = float(feature["operating_cash_flow"]) - abs(float(feature["capex"]))
+    # Pass 2: growth, TTM, margins, and point-in-time valuation.
+    for idx, feature in enumerate(features):
+        prior_year = _find_prior_year_row(features, idx, annual=feature["_is_annual"])
+        for metric, out_name in YOY_METRICS:
+            feature[out_name] = pct_change(
+                safe_float(feature.get(metric)),
+                safe_float(prior_year.get(metric)) if prior_year else None,
+            )
         feature["revenue_acceleration"] = None
-        if feature.get("revenue_yoy_growth") is not None and prev_yoy_growth.get(fiscal_period) is not None:
-            feature["revenue_acceleration"] = float(feature["revenue_yoy_growth"]) - float(prev_yoy_growth[fiscal_period])
-        if feature.get("revenue_yoy_growth") is not None:
-            prev_yoy_growth[fiscal_period] = feature["revenue_yoy_growth"]
-        for metric in ("revenue", "gross_profit", "operating_income", "net_income", "free_cash_flow"):
-            feature[f"{metric}_ttm"] = flow_ttm(features, idx, metric)
-        revenue = safe_float(feature.get("revenue"))
-        feature["gross_margin"] = safe_div(safe_float(feature.get("gross_profit")), revenue)
-        feature["operating_margin"] = safe_div(safe_float(feature.get("operating_income")), revenue)
-        feature["fcf_margin"] = safe_div(safe_float(feature.get("free_cash_flow")), revenue)
-        feature["r_and_d_pct_revenue"] = safe_div(safe_float(feature.get("research_and_development")), revenue)
-        feature["sbc_pct_revenue"] = safe_div(safe_float(feature.get("stock_based_compensation")), revenue)
+        prev_row = _find_prev_same_class_row(features, idx)
+        if (
+            feature.get("revenue_yoy_growth") is not None
+            and prev_row is not None
+            and prev_row.get("revenue_yoy_growth") is not None
+        ):
+            feature["revenue_acceleration"] = float(feature["revenue_yoy_growth"]) - float(prev_row["revenue_yoy_growth"])
+        for metric in TTM_METRICS:
+            feature[f"{metric}_ttm"] = _ttm_value(features, idx, metric)
+        revenue_ttm = safe_float(feature.get("revenue_ttm"))
+        revenue_period = safe_float(feature.get("revenue"))
+        def _ratio(metric: str) -> float | None:
+            ttm = safe_float(feature.get(f"{metric}_ttm"))
+            if ttm is not None and revenue_ttm:
+                return safe_div(ttm, revenue_ttm)
+            return safe_div(safe_float(feature.get(metric)), revenue_period)
+        feature["gross_margin"] = _ratio("gross_profit")
+        feature["operating_margin"] = _ratio("operating_income")
+        feature["fcf_margin"] = _ratio("free_cash_flow")
+        feature["r_and_d_pct_revenue"] = _ratio("research_and_development")
+        feature["sbc_pct_revenue"] = _ratio("stock_based_compensation")
         feature["net_cash"] = None
         if feature.get("cash_and_equivalents") is not None or feature.get("total_debt") is not None:
             feature["net_cash"] = float(feature.get("cash_and_equivalents") or 0.0) - float(feature.get("total_debt") or 0.0)
         feature["net_cash_to_assets"] = safe_div(safe_float(feature.get("net_cash")), safe_float(feature.get("assets")))
+        cogs_ttm = safe_float(feature.get("cost_of_sales_ttm"))
+        if cogs_ttm is None and revenue_ttm is not None and safe_float(feature.get("gross_profit_ttm")) is not None:
+            cogs_ttm = revenue_ttm - float(feature["gross_profit_ttm"])
         feature["inventory_days"] = None
-        if feature.get("inventory") is not None and revenue:
-            feature["inventory_days"] = float(feature["inventory"]) / revenue * 365.0
-        market_cap = latest_market_cap(conn, ticker, str(feature["asof_date"]))
+        if feature.get("inventory") is not None and cogs_ttm and cogs_ttm > 0:
+            feature["inventory_days"] = float(feature["inventory"]) / cogs_ttm * 365.0
+        # Point-in-time valuation: shares-from-filings x close price at the filing date.
+        market_cap = pit_market_cap(
+            conn,
+            ticker,
+            raw_source=facts_source,
+            price_source=price_source,
+            asof_iso=str(feature["asof_date"]),
+            diluted_shares=safe_float(feature.get("diluted_shares")),
+        )
         feature["market_cap"] = market_cap
-        enterprise_value = None
         valuation_currency_ready = feature.get("fx_conversion_status") in {"usd_native", "converted"}
-        gross_profit_ttm_for_val = safe_float(feature.get("gross_profit_ttm"))
-        operating_income_ttm_for_val = safe_float(feature.get("operating_income_ttm"))
-        free_cash_flow_ttm_for_val = safe_float(feature.get("free_cash_flow_ttm"))
-        if valuation_currency_ready:
-            gross_profit_ttm_for_val = flow_ttm(features, idx, "gross_profit_usd")
-            operating_income_ttm_for_val = flow_ttm(features, idx, "operating_income_usd")
-            free_cash_flow_ttm_for_val = flow_ttm(features, idx, "free_cash_flow_usd")
-        if market_cap is not None and valuation_currency_ready:
-            enterprise_value = market_cap + float(feature.get("total_debt_usd") or 0.0) - float(feature.get("cash_and_equivalents_usd") or 0.0)
-        feature["ev_gross_profit"] = safe_div(enterprise_value, gross_profit_ttm_for_val)
-        feature["ev_operating_income"] = safe_div(enterprise_value, operating_income_ttm_for_val)
-        feature["fcf_yield"] = safe_div(free_cash_flow_ttm_for_val, market_cap) if valuation_currency_ready else None
-        feature.pop("_reported_currency", None)
-        feature.pop("_review_reason", None)
-        if fiscal_year is not None:
-            by_period_key[(fiscal_period, fiscal_year)] = feature
-    return features, report_rows
+        flow_rate = safe_float(feature.get("fx_rate_income_statement"))
+        balance_rate = safe_float(feature.get("fx_rate_balance_sheet"))
+        feature["ev_gross_profit"] = None
+        feature["ev_operating_income"] = None
+        feature["fcf_yield"] = None
+        if market_cap is not None and valuation_currency_ready and flow_rate is not None and balance_rate is not None:
+            enterprise_value = (
+                market_cap
+                + float(safe_float(feature.get("total_debt")) or 0.0) * balance_rate
+                - float(safe_float(feature.get("cash_and_equivalents")) or 0.0) * balance_rate
+            )
+            gp_ttm_usd = safe_float(feature.get("gross_profit_ttm"))
+            oi_ttm_usd = safe_float(feature.get("operating_income_ttm"))
+            fcf_ttm_usd = safe_float(feature.get("free_cash_flow_ttm"))
+            gp_ttm_usd = gp_ttm_usd * flow_rate if gp_ttm_usd is not None else None
+            oi_ttm_usd = oi_ttm_usd * flow_rate if oi_ttm_usd is not None else None
+            fcf_ttm_usd = fcf_ttm_usd * flow_rate if fcf_ttm_usd is not None else None
+            # Ratios only when the denominator is positive: a negative stored ratio
+            # then unambiguously means negative enterprise value (favorably cheap).
+            if gp_ttm_usd is not None and gp_ttm_usd > 0:
+                feature["ev_gross_profit"] = enterprise_value / gp_ttm_usd
+            if oi_ttm_usd is not None and oi_ttm_usd > 0:
+                feature["ev_operating_income"] = enterprise_value / oi_ttm_usd
+            if fcf_ttm_usd is not None and market_cap > 0:
+                feature["fcf_yield"] = fcf_ttm_usd / market_cap
+        reasons = [f"missing_{metric}" for metric in sorted(CRITICAL_METRICS) if feature.get(metric) is None]
+        statement_currency = str(feature.get("reported_currency") or "")
+        if statement_currency and statement_currency != "USD" and feature.get("fx_conversion_status") != "converted":
+            reasons.append(f"valuation_fx_unconverted_{statement_currency}")
+        if not statement_currency:
+            reasons.append("missing_reported_currency")
+        if market_cap is None:
+            reasons.append("missing_pit_market_cap")
+        feature["data_quality_status"] = "complete" if not reasons else "review"
+        feature["_review_reason"] = ";".join(reasons)
+    for feature in features:
+        for key in ("_is_annual", "_end", "_ytd", "_ytd_start", "_ytd_days", "_q4", "cost_of_sales", "cost_of_sales_ttm"):
+            feature.pop(key, None)
+    return features
 
 
 def main() -> None:
@@ -892,6 +1123,7 @@ def main() -> None:
     facts_source = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts"))
     filings_source = str(cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions"))
     fx_source = str(cfg_get(config, "fx_rates.source_id", "yahoo_fx_rates"))
+    price_source = str(cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted") or "yahoo_finance_adjusted")
     model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors") or "semiconductors")
     ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
     report_rows: list[dict[str, Any]] = []
@@ -899,25 +1131,34 @@ def main() -> None:
         init_db(conn)
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
-            tickers = load_universe(conn, ticker_filter)
+            include_historical = str(cfg_get(config, "sec_fundamentals.include_historical_members", True)).strip().lower() in {"1", "true", "yes", "y"}
+            tickers = load_universe(conn, ticker_filter, include_historical=include_historical)
             with conn:
-                conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
+                if ticker_filter:
+                    placeholders = ",".join("?" for _ in tickers)
+                    conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (RUN_TYPE, *tickers))
+                else:
+                    conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
                 for ticker in tickers:
                     canonical_count = rebuild_canonical_for_ticker(conn, ticker, facts_source)
-                    features, rows = build_ticker_features(
+                    features = build_ticker_features(
                         conn,
                         ticker,
                         facts_source=facts_source,
                         filings_source=filings_source,
                         fx_source=fx_source,
+                        price_source=price_source,
                         model_family=model_family,
                     )
                     if not features:
                         add_issue(conn, ticker, facts_source, "missing_financial_features", "No canonical SEC financial features could be built.")
+                    rows: list[dict[str, Any]] = []
                     for feature in features:
                         sanity_issues = financial_sanity_issues(feature)
+                        review_reason = str(feature.pop("_review_reason", "") or "")
                         if sanity_issues:
                             feature["data_quality_status"] = "review"
+                            review_reason = ";".join(part for part in [review_reason, *sanity_issues] if part)
                         upsert_feature(conn, feature)
                         if feature.get("data_quality_status") != "complete":
                             missing = [metric for metric in CRITICAL_METRICS if feature.get(metric) is None]
@@ -930,6 +1171,7 @@ def main() -> None:
                                 details.append(str(feature.get("fx_conversion_status")))
                             details.extend(sanity_issues)
                             add_issue(conn, ticker, facts_source, "financial_feature_review", ";".join(details) or "review")
+                        rows.append({**{field: feature.get(field) for field in CSV_FIELDS}, "ticker": ticker, "review_reason": review_reason})
                     report_rows.extend(rows[-8:])
                     LOGGER.info("%s canonical_rows=%d financial_feature_rows=%d", ticker, canonical_count, len(features))
             write_report(output_csv, report_rows)

@@ -77,11 +77,29 @@ CANDIDATE_FACTORS = [
     "open_market_buy_count_90d",
     "planned_10b5_1_buy_count",
     "insider_accumulation_score",
+    "adcom_score",
+    "adcom_nearest_days",
+    "adcom_within_60d_flag",
+    "adcom_within_120d_flag",
+    "adcom_committee_oncology_flag",
+    "breakthrough_therapy_count",
+    "orphan_drug_count",
+    "fast_track_count",
+    "rmat_count",
+    "priority_review_flag",
+    "fda_designation_tier",
+    "fda_designation_score",
 ]
 CATALYST_FACTORS = {
     "forward_catalyst_score",
     "forward_catalyst_unfiltered_score",
     "ctgov_forward_catalyst_score",
+    "adcom_score",
+    "adcom_within_60d_flag",
+    "adcom_within_120d_flag",
+    "priority_review_flag",
+    "fda_designation_score",
+    "fda_designation_tier",
 }
 
 
@@ -110,6 +128,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--factors", type=str, default="", help="Optional comma-separated factor subset.")
     parser.add_argument("--min-observations", type=int, default=40)
     parser.add_argument("--min-quintile-observations", type=int, default=8)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Accepted for clean-sequence compatibility; the IC monitor recomputes report outputs.",
+    )
     return parser.parse_args()
 
 

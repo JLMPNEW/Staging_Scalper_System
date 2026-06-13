@@ -26,7 +26,6 @@ FIN_FEATURE_STAGE = "build_technology_financial_features"
 POSITIONING_STAGE = "import_technology_positioning"
 DIRECT_OWNERSHIP_STAGE = "sync_technology_sec_ownership"
 EXPECTED_IFRS_RECOVERY = {"ASX", "GFS", "IMOS", "SQNS", "TSM", "UMC"}
-EXPECTED_NEW_ISSUER_REVIEW = {"CBRS"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +49,18 @@ def placeholders(values: list[str]) -> str:
     if not values:
         raise ValueError("values cannot be empty")
     return ",".join("?" for _ in values)
+
+
+def cfg_ticker_set(raw: Any) -> set[str]:
+    if raw is None:
+        return set()
+    if isinstance(raw, str):
+        values = raw.split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        values = raw
+    else:
+        values = []
+    return {ticker for ticker in (normalize_ticker(value) for value in values) if ticker}
 
 
 def load_universe(conn: Any) -> list[str]:
@@ -76,6 +87,7 @@ def validate() -> int:
     require_13f = str(cfg_get(config, "positioning_import.require_upstream_13f_for_gate", False)).lower() in {"1", "true", "yes", "y"}
     require_short = str(cfg_get(config, "positioning_import.require_upstream_short_for_gate", False)).lower() in {"1", "true", "yes", "y"}
     require_borrow = str(cfg_get(config, "positioning_import.require_upstream_borrow_for_gate", False)).lower() in {"1", "true", "yes", "y"}
+    exempt_13f_tickers = cfg_ticker_set(cfg_get(config, "positioning_import.upstream_13f_gate_exempt_tickers", []))
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -281,6 +293,25 @@ def validate() -> int:
             f"SELECT COUNT(DISTINCT ticker) FROM fact_13f_positioning WHERE source_id = ? AND ticker IN ({ph})",
             (mp_source, *tickers),
         )
+        institutional_missing_rows = conn.execute(
+            f"""
+            SELECT ticker
+            FROM dim_company
+            WHERE is_active = 1
+              AND ticker IN ({ph})
+              AND ticker NOT IN (
+                  SELECT DISTINCT ticker
+                  FROM fact_13f_positioning
+                  WHERE source_id = ?
+              )
+            ORDER BY ticker
+            """,
+            (*tickers, mp_source),
+        ).fetchall()
+        missing_13f_tickers = [row["ticker"] for row in institutional_missing_rows]
+        unexpected_missing_13f = [ticker for ticker in missing_13f_tickers if ticker not in exempt_13f_tickers]
+        active_13f_exemptions = sorted(ticker for ticker in exempt_13f_tickers if ticker in missing_13f_tickers)
+        stale_13f_exemptions = sorted(ticker for ticker in exempt_13f_tickers if ticker in tickers and ticker not in missing_13f_tickers)
         short_tickers = scalar(
             conn,
             f"SELECT COUNT(DISTINCT ticker) FROM fact_short_interest WHERE source_id = ? AND ticker IN ({ph})",
@@ -316,8 +347,12 @@ def validate() -> int:
             errors.append("No Form 4 transactions imported from upstream or direct SEC ownership.")
         if form4_buy_rows == 0:
             warnings.append("No open-market Form 4 purchase rows imported for the current universe.")
-        if require_13f and institutional_tickers != len(tickers):
-            errors.append(f"13F coverage required but only {institutional_tickers}/{len(tickers)} tickers have rows.")
+        if require_13f and unexpected_missing_13f:
+            errors.append(f"13F coverage required; missing non-exempt tickers: {unexpected_missing_13f}")
+        if require_13f and active_13f_exemptions:
+            warnings.append(f"13F required with active new-issuer exemptions: {active_13f_exemptions}")
+        if require_13f and stale_13f_exemptions:
+            warnings.append(f"13F exemption can be removed; rows now exist for: {stale_13f_exemptions}")
         if require_short and short_tickers != len(tickers):
             errors.append(f"Short-interest coverage required but only {short_tickers}/{len(tickers)} tickers have rows.")
         if require_borrow and borrow_tickers != len(tickers):
@@ -335,7 +370,7 @@ def validate() -> int:
         warnings.append(f"FX rows={fx_rows} currencies={fx_currencies} non_usd_features_converted={converted_non_usd_feature_rows}/{non_usd_feature_rows}")
         warnings.append(f"Direct SEC ownership profiles={direct_profile_tickers} filing_rows={direct_filing_rows} filing_tickers={direct_filing_tickers} nonderiv_rows={direct_nonderiv_rows} deriv_rows={direct_deriv_rows} holding_rows={direct_holding_rows} expected_missing={direct_expected_missing} issues={direct_ownership_issue_count} required={require_direct_ownership}")
         warnings.append(f"Form 4 rows={form4_rows} covered_tickers={form4_tickers} open_market_purchase_rows={form4_buy_rows} upstream_rows={upstream_form4_rows}/{upstream_form4_tickers} direct_rows={direct_form4_rows}/{direct_form4_tickers}")
-        warnings.append(f"13F covered_tickers={institutional_tickers} required={require_13f}")
+        warnings.append(f"13F covered_tickers={institutional_tickers} required={require_13f} missing={missing_13f_tickers} exempt_missing={active_13f_exemptions}")
         warnings.append(f"Short-interest covered_tickers={short_tickers} required={require_short}")
         warnings.append(f"Borrow covered_tickers={borrow_tickers} required={require_borrow}")
         warnings.append(f"Positioning feature covered_tickers={positioning_features} missing_upstream_issues={missing_positioning_issue_count}")

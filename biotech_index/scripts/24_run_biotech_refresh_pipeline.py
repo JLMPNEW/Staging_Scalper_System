@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -468,6 +469,7 @@ def pipeline_steps(
         steps.append(Step("market_positioning", "25_update_market_positioning.py"))
     steps.extend(
         [
+            Step("fda_adcom_calendar", "14_sync_fda_adcom_calendar.py"),
             Step("biotech_features", "10_build_biotech_features.py"),
             Step("biotech_scores", "11_score_biotech_index.py"),
             Step("biotech_reports", "12_publish_biotech_reports.py"),
@@ -498,6 +500,7 @@ def historical_restatement_steps(
         Step("commercial_value", "18_build_commercial_value_features.py", ("--allow-missing-market", "--allow-stale-market")),
         Step("forward_guidance", "19_parse_forward_guidance.py", ("--run-mode", "weekly_reconcile")),
         Step("governance_events", "20_build_governance_event_features.py", governance_args),
+        Step("fda_adcom_calendar", "14_sync_fda_adcom_calendar.py"),
         Step("biotech_features", "10_build_biotech_features.py"),
         Step("biotech_scores", "11_score_biotech_index.py"),
         Step("multibagger_features", "21_build_multibagger_features.py", ("--allow-missing-market", "--allow-stale-market")),
@@ -754,9 +757,26 @@ def snapshot_direct_output_files(
             key=lambda path: path.name,
             reverse=True,
         )
+        prune_failures: list[tuple[Path, str]] = []
+        pruned_count = 0
         for old_dir in dated_dirs[max_history:]:
-            LOGGER.info("Pruning old biotech snapshot directory: %s", old_dir)
-            shutil.rmtree(old_dir)
+            try:
+                shutil.rmtree(old_dir)
+                pruned_count += 1
+            except OSError as exc:
+                prune_failures.append((old_dir, str(exc)))
+        if pruned_count:
+            LOGGER.info("Pruned old biotech snapshot directories: count=%d", pruned_count)
+        if prune_failures:
+            sample = "; ".join(f"{path} ({error})" for path, error in prune_failures[:5])
+            suffix = f"; ...(+{len(prune_failures) - 5})" if len(prune_failures) > 5 else ""
+            LOGGER.warning(
+                "Could not prune %d old biotech snapshot director%s; continuing because current outputs are already written. sample=%s%s",
+                len(prune_failures),
+                "y" if len(prune_failures) == 1 else "ies",
+                sample,
+                suffix,
+            )
     elapsed = round(time.monotonic() - start, 3)
     LOGGER.info(
         "Snapshot outputs written: asof=%s files=%d snapshot_dir=%s elapsed=%.3fs",
@@ -1163,6 +1183,92 @@ def validate_form4_preflight(
         "command": (
             f"validate Form 4 db={form4_db_path} asof={asof} snapshot_date={snapshot_raw or '<missing>'} "
             f"source={snapshot_source or '<missing>'} age_days={age_days} max_staleness_days={max_staleness_days}"
+        ),
+    }
+
+
+def ibkr_preflight_targets(config: dict[str, Any], steps: list[Step]) -> list[tuple[str, str, int]]:
+    """Return unique IBKR TCP endpoints required by the selected pipeline steps."""
+    step_names = {step.name for step in steps}
+    targets: list[tuple[str, str, int]] = []
+    if "ib_market" in step_names:
+        targets.append(
+            (
+                "ib_market_data",
+                str(cfg_get(config, "ib_market_data.host", "127.0.0.1")),
+                int(float(cfg_get(config, "ib_market_data.port", 7497))),
+            )
+        )
+    if "market_positioning" in step_names and as_bool(
+        cfg_get(config, "market_positioning.ibkr_borrow.enabled", False),
+        False,
+    ):
+        targets.append(
+            (
+                "market_positioning.ibkr_borrow",
+                str(cfg_get(config, "market_positioning.ibkr_borrow.host", "127.0.0.1")),
+                int(float(cfg_get(config, "market_positioning.ibkr_borrow.port", 7497))),
+            )
+        )
+    seen: set[tuple[str, int]] = set()
+    unique: list[tuple[str, str, int]] = []
+    for label, host, port in targets:
+        key = (host, port)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((label, host, port))
+    return unique
+
+
+def validate_ibkr_preflight(
+    config: dict[str, Any],
+    *,
+    steps: list[Step],
+    run_started_at: str,
+    mode: str,
+) -> dict[str, Any]:
+    """Fail early when selected steps require IBKR/TWS but the TCP port is unavailable."""
+    start = time.monotonic()
+    targets = ibkr_preflight_targets(config, steps)
+    timeout_sec = float(cfg_get(config, "biotech_refresh.ibkr_preflight.timeout_sec", 5.0))
+    required = as_bool(cfg_get(config, "biotech_refresh.ibkr_preflight.required", True), True)
+    failures: list[str] = []
+    successes: list[str] = []
+    for label, host, port in targets:
+        try:
+            with socket.create_connection((host, port), timeout=timeout_sec):
+                successes.append(f"{label}={host}:{port}")
+        except OSError as exc:
+            failures.append(f"{label}={host}:{port} unavailable ({type(exc).__name__}: {exc})")
+    elapsed = round(time.monotonic() - start, 3)
+    if failures and required:
+        raise RuntimeError(
+            "IBKR preflight failed; TWS/IBGateway must be running before IB-dependent biotech steps: "
+            + " | ".join(failures)
+        )
+    if failures:
+        LOGGER.warning("Finished ibkr_preflight status=warning elapsed=%.3fs warnings=%s", elapsed, " | ".join(failures))
+        status = "warning"
+        returncode = 0
+    else:
+        LOGGER.info(
+            "Finished ibkr_preflight status=success elapsed=%.3fs targets=%s",
+            elapsed,
+            ",".join(successes) if successes else "<none>",
+        )
+        status = "success"
+        returncode = 0
+    return {
+        "run_started_at": run_started_at,
+        "mode": mode,
+        "step": "ibkr_preflight",
+        "status": status,
+        "elapsed_sec": elapsed,
+        "returncode": returncode,
+        "command": (
+            "validate IBKR/TWS TCP connectivity targets="
+            + (",".join(f"{label}={host}:{port}" for label, host, port in targets) if targets else "<none>")
         ),
     }
 
@@ -1590,10 +1696,48 @@ def main() -> None:
     form4_refresh_required = as_bool(cfg_get(config, "biotech_refresh.form4_refresh.required", True), True)
     form4_warning_is_fatal = as_bool(cfg_get(config, "biotech_refresh.form4_preflight.warning_is_fatal", True), True)
     form4_preflight_needed = any(step.name == "governance_events" for step in steps)
+    ibkr_preflight_enabled = as_bool(cfg_get(config, "biotech_refresh.ibkr_preflight.enabled", True), True)
+    ibkr_preflight_needed = bool(ibkr_preflight_targets(config, steps))
 
     run_started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     timing_rows: list[dict[str, Any]] = []
     try:
+        if ibkr_preflight_needed and ibkr_preflight_enabled:
+            timing_rows.append(
+                {
+                    "run_started_at": run_started_at,
+                    "mode": args.mode,
+                    "step": "ibkr_preflight",
+                    "status": "running",
+                    "elapsed_sec": "",
+                    "returncode": "",
+                    "command": "validate IBKR/TWS TCP connectivity",
+                }
+            )
+            write_timing_csv(timing_csv, timing_rows)
+            try:
+                timing_rows[-1] = validate_ibkr_preflight(
+                    config,
+                    steps=steps,
+                    run_started_at=run_started_at,
+                    mode=args.mode,
+                )
+            except Exception as exc:
+                timing_rows[-1] = {
+                    "run_started_at": run_started_at,
+                    "mode": args.mode,
+                    "step": "ibkr_preflight",
+                    "status": "failed",
+                    "elapsed_sec": "",
+                    "returncode": 1,
+                    "command": f"validate IBKR/TWS TCP connectivity: {type(exc).__name__}: {exc}",
+                }
+                write_timing_csv(timing_csv, timing_rows)
+                raise
+            write_timing_csv(timing_csv, timing_rows)
+        elif ibkr_preflight_needed and not ibkr_preflight_enabled:
+            LOGGER.warning("IBKR preflight skipped because biotech_refresh.ibkr_preflight.enabled=false.")
+
         if (
             form4_preflight_needed
             and form4_refresh_enabled

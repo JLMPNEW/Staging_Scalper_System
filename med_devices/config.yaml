@@ -894,7 +894,7 @@ ibkr_borrow_ingestion:
   host: "127.0.0.1"
   port: 7497
   client_id: 7741
-  generic_tick_list: "236,499"
+  generic_tick_list: "236,237,499"
   default_exchange: "SMART"
   default_currency: "USD"
   sleep_sec: 0.25
@@ -960,7 +960,7 @@ sec_form4_ingestion:
   source_id: "sec_form4_edgar"
   input_csv: ""
   source_mode: "external_sec_form4_runner"
-  direct_edgar_enabled: false
+  direct_edgar_enabled: true
   cache_dir: "../output/med_devices_cache/sec_form4"
   start_date: "2019-01-01"
   default_lookback_days: 365
@@ -1127,16 +1127,16 @@ scoring:
     rd_scale_log_transform: true
   composite_weights:
     fundamental_quality: 0.300000
-    durable_growth: 0.170000
-    fda_product: 0.050000
-    reimbursement: 0.105556
-    valuation: 0.270000
-    technical_entry: 0.05
-    sentiment_catalyst: 0.054444
+    durable_growth: 0.000000
+    fda_product: 0.000000
+    reimbursement: 0.000000
+    valuation: 0.400000
+    technical_entry: 0.200000
+    sentiment_catalyst: 0.100000
   ic_tilted_composite:
     enabled: true
-    mode: "shadow"
-    allow_production_replace: false
+    mode: "replace_raw"
+    allow_production_replace: true
     source_csv: "../output/med_devices_reports/calibration/med_device_component_ic_by_cohort.csv"
     horizon_days: 120
     ic_metric: "net_spearman_ic_excess"
@@ -1154,9 +1154,9 @@ scoring:
     composite_min: 75
     cohort_percentile_min: 0
     fundamental_quality_min: 70
-    durable_growth_min: 60
-    fda_product_min: 60
-    reimbursement_min: 45
+    durable_growth_min: 0
+    fda_product_min: 0
+    reimbursement_min: 0
     valuation_min: 60
     technical_entry_min: 55
     data_completeness_min: 90
@@ -1230,12 +1230,12 @@ scoring:
         rationale: "non_device_service_cdrh_records_are_not_positive_alpha"
       composite_weights:
         fundamental_quality: 0.30
-        durable_growth: 0.20
+        durable_growth: 0.00
         fda_product: 0.00
-        reimbursement: 0.10
-        valuation: 0.25
-        technical_entry: 0.10
-        sentiment_catalyst: 0.05
+        reimbursement: 0.00
+        valuation: 0.40
+        technical_entry: 0.20
+        sentiment_catalyst: 0.10
     hospital_supplies_consumables_dme:
       enabled: true
       source: "calibration_promoted_2026_05_30"
@@ -1461,9 +1461,25 @@ scoring:
         data_completeness_min: 85
     healthcare_services_cro_lab_services:
       enabled: true
-      calibration_status: "restricted_research_only"
-      calibration_status_reason: "demoted_after_support_guardrail_2026_06_06;current_candidate_not_production_candidate_2_of_10_tickers_20pct_coverage"
-      validation_note: "Demoted from production baseline seed after support guardrail. Current refreshed candidate remains review/watchlist only: 120d validation n=6, 2 tickers, 20.00% ticker coverage, LCB +22.04%, hit 100.00%, but not a production candidate."
+      calibration_status: "production_eligible"
+      calibration_status_reason: "promoted_score_template_after_2019_rebuild_ic_review_2026_06_08;valuation_quality_liquidity_full_support"
+      calibration_confidence: "medium"
+      validation_note: "Promoted cohort score template after rebuilt 2019-2026 IC review: valuation, fundamental quality, and technical liquidity passed gross/net/factor-neutral IC at 60d and 120d with 10/10 ticker support. Gate thresholds remain conservative pending Optuna holdout."
+      score_template:
+        template_id: "healthcare_services_value_quality_liquidity_v1"
+        tier1_eligible: true
+        tier1_role: "safe_core"
+        rationale: "component_policy_review_2026_06_08_valuation_positive_evidence_0_187893_fundamental_quality_positive_evidence_0_132669_technical_liquidity_positive_evidence_0_128188"
+        components:
+          - field: "valuation_score"
+            direction: "positive"
+            weight: 0.45
+          - field: "technical_liquidity_score"
+            direction: "positive"
+            weight: 0.30
+          - field: "fundamental_quality_score"
+            direction: "positive"
+            weight: 0.25
       gates:
         composite_min: 50
         cohort_percentile_min: 70
@@ -1494,11 +1510,27 @@ scoring:
         data_completeness_min: 85
     home_chronic_care_devices_dme_drug_delivery:
       enabled: true
-      calibration_status: "restricted_research_only"
-      calibration_status_reason: "new_taxonomy_cohort_pending_full_2019_recalibration"
-      validation_note: "Home chronic care, DME, and drug-delivery cohort is economically cleaner than the prior diabetes-only cohort but remains research-only until refreshed calibration validates support, LCB, and loss controls."
+      calibration_status: "production_eligible"
+      calibration_status_reason: "promoted_watchlist_score_template_after_2019_rebuild_ic_review_2026_06_08;volatility_quality_value_full_support"
+      calibration_confidence: "low_watchlist"
+      validation_note: "Activated non-Tier-1 watchlist score template after rebuilt IC review: low-volatility technical profile and valuation passed 60d/120d IC with 13/13 ticker support. Keep template out of Tier 1 until Optuna/walk-forward clears loss and LCB guardrails."
       tier1_safety_policy:
         allow_safe_core_gate_substitution: false
+      score_template:
+        template_id: "home_chronic_low_vol_value_quality_watchlist_v1"
+        tier1_eligible: false
+        tier1_role: "research"
+        rationale: "component_policy_review_2026_06_08_technical_volatility_risk_positive_evidence_0_118077_valuation_positive_evidence_0_097368"
+        components:
+          - field: "technical_volatility_risk_score"
+            direction: "positive"
+            weight: 0.45
+          - field: "valuation_score"
+            direction: "positive"
+            weight: 0.40
+          - field: "fundamental_quality_score"
+            direction: "positive"
+            weight: 0.15
       durable_growth_policy:
         signal_mode: "neutral_overlay"
         gate_mode: "overlay_only"
@@ -1520,10 +1552,25 @@ scoring:
     elective_vision_dental_aesthetic_devices:
       enabled: true
       calibration_status: "restricted_research_only"
-      calibration_status_reason: "new_taxonomy_cohort_watchlist_pending_full_2019_recalibration"
-      validation_note: "Elective vision, dental, and aesthetic devices are economically coherent but more discretionary/cash-pay sensitive; keep out of production Tier 1 until cohort calibration clears validation guardrails."
+      calibration_status_reason: "guarded_watchlist_score_template_after_2019_rebuild_ic_review_2026_06_08;not_tier1_eligible"
+      validation_note: "Activated guarded watchlist score template after rebuilt IC review: technical overextension and sentiment passed 60d/120d IC with 10/10 ticker support, but overextension is not a safe-core quality signal. Keep restricted and non-Tier-1 until Optuna/walk-forward confirms loss controls."
       tier1_safety_policy:
         allow_safe_core_gate_substitution: false
+      score_template:
+        template_id: "elective_vision_overextension_sentiment_watchlist_v1"
+        tier1_eligible: false
+        tier1_role: "research"
+        rationale: "component_policy_review_2026_06_08_technical_overextension_positive_evidence_0_088239_sentiment_positive_evidence_0_085960"
+        components:
+          - field: "technical_overextension_score"
+            direction: "positive"
+            weight: 0.45
+          - field: "sentiment_catalyst_score"
+            direction: "positive"
+            weight: 0.35
+          - field: "valuation_score"
+            direction: "positive"
+            weight: 0.20
       durable_growth_policy:
         signal_mode: "neutral_overlay"
         gate_mode: "overlay_only"

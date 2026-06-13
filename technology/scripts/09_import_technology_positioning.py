@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from technology.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
 from technology.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
-from technology.core.text_norm import normalize_ticker  # noqa: E402
+from technology.core.text_norm import normalize_cik, normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("import_technology_positioning")
@@ -76,8 +76,27 @@ def ro_connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def load_universe(conn: Any, ticker_filter: set[str]) -> list[str]:
-    rows = conn.execute("SELECT ticker FROM dim_company WHERE is_active = 1 ORDER BY ticker").fetchall()
+def cfg_bool(config: dict[str, Any], key: str, default: bool = False) -> bool:
+    raw = cfg_get(config, key, default)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def load_universe(conn: Any, ticker_filter: set[str], *, model_family: str, include_historical: bool = False) -> list[str]:
+    if include_historical:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT ticker
+            FROM dim_universe_membership
+            WHERE model_family = ?
+              AND (is_current_member = 1 OR point_in_time_flag = 1)
+            ORDER BY ticker
+            """,
+            (model_family,),
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT ticker FROM dim_company WHERE is_active = 1 ORDER BY ticker").fetchall()
     tickers = [normalize_ticker(row["ticker"]) for row in rows if normalize_ticker(row["ticker"])]
     return [ticker for ticker in tickers if not ticker_filter or ticker in ticker_filter]
 
@@ -86,6 +105,29 @@ def qmarks(values: list[str]) -> str:
     if not values:
         raise ValueError("values cannot be empty")
     return ",".join("?" for _ in values)
+
+
+def load_source_ticker_map(conn: Any, internal_tickers: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Return source tickers to query and a source->internal ticker map."""
+    source_to_internal = {ticker: ticker for ticker in internal_tickers}
+    if not internal_tickers:
+        return [], source_to_internal
+    rows = conn.execute(
+        f"""
+        SELECT c.ticker AS internal_ticker, i.identifier_value AS source_ticker
+        FROM dim_company c
+        JOIN dim_identifier i ON i.company_id = c.company_id
+        WHERE c.ticker IN ({qmarks(internal_tickers)})
+          AND i.identifier_type = 'EXCHANGE_TICKER'
+        """,
+        internal_tickers,
+    ).fetchall()
+    for row in rows:
+        internal = normalize_ticker(row["internal_ticker"])
+        source = normalize_ticker(row["source_ticker"])
+        if internal and source:
+            source_to_internal[source] = internal
+    return sorted(source_to_internal), source_to_internal
 
 
 def add_issue(conn: Any, ticker: str, source_id: str, issue_type: str, detail: str, severity: str = "warning") -> None:
@@ -104,7 +146,16 @@ def add_issue(conn: Any, ticker: str, source_id: str, issue_type: str, detail: s
     )
 
 
-def import_form4(dest: Any, source: sqlite3.Connection, tickers: list[str], *, source_id: str, start: date) -> dict[str, dict[str, Any]]:
+def import_form4(
+    dest: Any,
+    source: sqlite3.Connection,
+    tickers: list[str],
+    *,
+    query_tickers: list[str],
+    source_to_internal: dict[str, str],
+    source_id: str,
+    start: date,
+) -> dict[str, dict[str, Any]]:
     stats = {ticker: {"form4_transactions": 0, "form4_latest_transaction_date": ""} for ticker in tickers}
     rows = source.execute(
         f"""
@@ -133,13 +184,16 @@ def import_form4(dest: Any, source: sqlite3.Connection, tickers: list[str], *, s
           ON t.accession_number = s.accession_number
         LEFT JOIN sec_ownership_reporting_owner ro
           ON ro.accession_number = s.accession_number
-        WHERE UPPER(s.issuer_trading_symbol) IN ({qmarks(tickers)})
+        WHERE UPPER(s.issuer_trading_symbol) IN ({qmarks(query_tickers)})
         """,
-        tickers,
+        query_tickers,
     )
     now = utc_now()
     for row in rows:
-        ticker = normalize_ticker(row["ticker"])
+        source_ticker = normalize_ticker(row["ticker"])
+        ticker = source_to_internal.get(source_ticker, source_ticker)
+        if ticker not in stats:
+            continue
         trans_date = parse_date(row["transaction_date"]) or parse_date(row["period_of_report"]) or parse_date(row["filing_date"])
         filing_date = parse_date(row["filing_date"])
         period_date = parse_date(row["period_of_report"])
@@ -187,7 +241,7 @@ def import_form4(dest: Any, source: sqlite3.Connection, tickers: list[str], *, s
                 ticker,
                 str(row["accession_number"] or ""),
                 str(row["nonderiv_trans_sk"] or ""),
-                str(row["rptowner_cik"] or ""),
+                normalize_cik(row["rptowner_cik"]),
                 source_id,
                 filing_date.isoformat() if filing_date else "",
                 period_date.isoformat() if period_date else "",
@@ -218,18 +272,36 @@ def import_form4(dest: Any, source: sqlite3.Connection, tickers: list[str], *, s
     return stats
 
 
-def import_13f(dest: Any, source: sqlite3.Connection, tickers: list[str], *, source_id: str, start: date) -> dict[str, int]:
+def import_13f(
+    dest: Any,
+    source: sqlite3.Connection,
+    tickers: list[str],
+    *,
+    query_tickers: list[str],
+    source_to_internal: dict[str, str],
+    source_id: str,
+    start: date,
+) -> dict[str, int]:
     stats = {ticker: 0 for ticker in tickers}
     now = utc_now()
+    # Full replace: upstream snapshots are period-level aggregates, so any stale
+    # legacy filing-day-slice rows must not survive alongside them.
+    dest.execute(
+        f"DELETE FROM fact_13f_positioning WHERE source_id = ? AND ticker IN ({qmarks(tickers)})",
+        (source_id, *tickers),
+    )
     rows = source.execute(
         f"""
         SELECT * FROM institutional_13f_ownership_snapshots
-        WHERE UPPER(ticker) IN ({qmarks(tickers)})
+        WHERE UPPER(ticker) IN ({qmarks(query_tickers)})
         """,
-        tickers,
+        query_tickers,
     )
     for row in rows:
-        ticker = normalize_ticker(row["ticker"])
+        source_ticker = normalize_ticker(row["ticker"])
+        ticker = source_to_internal.get(source_ticker, source_ticker)
+        if ticker not in stats:
+            continue
         asof = parse_date(row["asof_date"])
         if asof is None or asof < start:
             continue
@@ -272,15 +344,27 @@ def import_13f(dest: Any, source: sqlite3.Connection, tickers: list[str], *, sou
     return stats
 
 
-def import_short_interest(dest: Any, source: sqlite3.Connection, tickers: list[str], *, source_id: str, start: date) -> dict[str, int]:
+def import_short_interest(
+    dest: Any,
+    source: sqlite3.Connection,
+    tickers: list[str],
+    *,
+    query_tickers: list[str],
+    source_to_internal: dict[str, str],
+    source_id: str,
+    start: date,
+) -> dict[str, int]:
     stats = {ticker: 0 for ticker in tickers}
     now = utc_now()
     rows = source.execute(
-        f"SELECT * FROM short_interest_snapshots WHERE UPPER(ticker) IN ({qmarks(tickers)})",
-        tickers,
+        f"SELECT * FROM short_interest_snapshots WHERE UPPER(ticker) IN ({qmarks(query_tickers)})",
+        query_tickers,
     )
     for row in rows:
-        ticker = normalize_ticker(row["ticker"])
+        source_ticker = normalize_ticker(row["ticker"])
+        ticker = source_to_internal.get(source_ticker, source_ticker)
+        if ticker not in stats:
+            continue
         settlement = parse_date(row["settlement_date"]) or parse_date(row["asof_date"])
         asof = parse_date(row["asof_date"])
         publication = parse_date(row["publication_date"])
@@ -321,15 +405,27 @@ def import_short_interest(dest: Any, source: sqlite3.Connection, tickers: list[s
     return stats
 
 
-def import_borrow(dest: Any, source: sqlite3.Connection, tickers: list[str], *, source_id: str, start: date) -> dict[str, int]:
+def import_borrow(
+    dest: Any,
+    source: sqlite3.Connection,
+    tickers: list[str],
+    *,
+    query_tickers: list[str],
+    source_to_internal: dict[str, str],
+    source_id: str,
+    start: date,
+) -> dict[str, int]:
     stats = {ticker: 0 for ticker in tickers}
     now = utc_now()
     rows = source.execute(
-        f"SELECT * FROM ibkr_borrow_fee_rate_daily WHERE UPPER(ticker) IN ({qmarks(tickers)})",
-        tickers,
+        f"SELECT * FROM ibkr_borrow_fee_rate_daily WHERE UPPER(ticker) IN ({qmarks(query_tickers)})",
+        query_tickers,
     )
     for row in rows:
-        ticker = normalize_ticker(row["ticker"])
+        source_ticker = normalize_ticker(row["ticker"])
+        ticker = source_to_internal.get(source_ticker, source_ticker)
+        if ticker not in stats:
+            continue
         asof = parse_date(row["asof_date"])
         if asof is None or asof < start:
             continue
@@ -372,11 +468,41 @@ def direct_form4_stats(conn: Any, tickers: list[str], *, source_id: str) -> dict
     return stats
 
 
-def latest_row(conn: Any, table: str, ticker: str, date_col: str) -> sqlite3.Row | None:
+def latest_row(conn: Any, table: str, ticker: str, date_col: str, asof_iso: str) -> sqlite3.Row | None:
     return conn.execute(
-        f"SELECT * FROM {table} WHERE ticker = ? ORDER BY {date_col} DESC LIMIT 1",
-        (ticker,),
+        f"SELECT * FROM {table} WHERE ticker = ? AND {date_col} <= ? ORDER BY {date_col} DESC LIMIT 1",
+        (ticker, asof_iso),
     ).fetchone()
+
+
+def latest_short_row(conn: Any, ticker: str, asof_iso: str) -> sqlite3.Row | None:
+    # Point-in-time: FINRA short interest is only known once published.
+    return conn.execute(
+        """
+        SELECT * FROM fact_short_interest
+        WHERE ticker = ? AND settlement_date <= ?
+          AND (COALESCE(publication_date, '') = '' OR publication_date <= ?)
+        ORDER BY settlement_date DESC
+        LIMIT 1
+        """,
+        (ticker, asof_iso, asof_iso),
+    ).fetchone()
+
+
+def preferred_form4_source(conn: Any, ticker: str, *, window_start: str, asof_iso: str, direct_source: str, upstream_source: str) -> str:
+    """The same Form 4 can exist under both source feeds; aggregate exactly one."""
+    rows = conn.execute(
+        """
+        SELECT source_id, COUNT(*) AS n
+        FROM fact_sec_form4_transaction
+        WHERE ticker = ? AND source_id IN (?, ?)
+          AND COALESCE(NULLIF(filing_date, ''), transaction_date) BETWEEN ? AND ?
+        GROUP BY source_id
+        """,
+        (ticker, direct_source, upstream_source, window_start, asof_iso),
+    ).fetchall()
+    counts = {str(row["source_id"]): int(row["n"] or 0) for row in rows}
+    return direct_source if counts.get(direct_source, 0) > 0 else upstream_source
 
 
 def build_positioning_features(
@@ -388,6 +514,8 @@ def build_positioning_features(
     model_family: str,
     insider_days: int,
     short_change_days: int,
+    direct_source: str,
+    upstream_source: str,
     require_13f: bool,
     require_short: bool,
     require_borrow: bool,
@@ -397,42 +525,61 @@ def build_positioning_features(
     insider_start = (asof - timedelta(days=insider_days)).isoformat()
     short_prior_cutoff = (asof - timedelta(days=short_change_days)).isoformat()
     for ticker in tickers:
+        insider_source = preferred_form4_source(
+            conn,
+            ticker,
+            window_start=insider_start,
+            asof_iso=asof.isoformat(),
+            direct_source=direct_source,
+            upstream_source=upstream_source,
+        )
         purchase = conn.execute(
             """
             SELECT COUNT(*) AS n, COALESCE(SUM(transaction_value), 0) AS v,
                    COUNT(DISTINCT rptowner_cik) AS owners
             FROM fact_sec_form4_transaction
-            WHERE ticker = ? AND transaction_date >= ? AND transaction_date <= ?
+            WHERE ticker = ? AND source_id = ?
+              AND COALESCE(NULLIF(filing_date, ''), transaction_date) BETWEEN ? AND ?
               AND is_open_market_purchase = 1
             """,
-            (ticker, insider_start, asof.isoformat()),
+            (ticker, insider_source, insider_start, asof.isoformat()),
         ).fetchone()
         sale = conn.execute(
             """
             SELECT COUNT(*) AS n, COALESCE(SUM(transaction_value), 0) AS v
             FROM fact_sec_form4_transaction
-            WHERE ticker = ? AND transaction_date >= ? AND transaction_date <= ?
+            WHERE ticker = ? AND source_id = ?
+              AND COALESCE(NULLIF(filing_date, ''), transaction_date) BETWEEN ? AND ?
               AND is_open_market_sale = 1
             """,
-            (ticker, insider_start, asof.isoformat()),
+            (ticker, insider_source, insider_start, asof.isoformat()),
         ).fetchone()
-        inst = latest_row(conn, "fact_13f_positioning", ticker, "asof_date")
-        short = latest_row(conn, "fact_short_interest", ticker, "settlement_date")
-        borrow = latest_row(conn, "fact_ibkr_borrow_snapshot", ticker, "asof_date")
+        inst = latest_row(conn, "fact_13f_positioning", ticker, "asof_date", asof.isoformat())
+        short = latest_short_row(conn, ticker, asof.isoformat())
+        borrow = latest_row(conn, "fact_ibkr_borrow_snapshot", ticker, "asof_date", asof.isoformat())
         short_change = None
         if short is not None:
             prior = conn.execute(
                 """
-                SELECT short_interest_shares
+                SELECT short_interest_pct_float, short_interest_shares, float_shares
                 FROM fact_short_interest
-                WHERE ticker = ? AND settlement_date <= ? AND short_interest_shares IS NOT NULL
+                WHERE ticker = ? AND settlement_date <= ?
                 ORDER BY settlement_date DESC
                 LIMIT 1
                 """,
                 (ticker, short_prior_cutoff),
             ).fetchone()
-            latest_short = safe_float(short["short_interest_shares"])
-            short_change = None if prior is None else (latest_short - safe_float(prior["short_interest_shares"])) if latest_short is not None and safe_float(prior["short_interest_shares"]) is not None else None
+            # Change in percent-of-float, so the signal is comparable across companies.
+            latest_pct = safe_float(short["short_interest_pct_float"])
+            prior_pct = safe_float(prior["short_interest_pct_float"]) if prior is not None else None
+            if latest_pct is not None and prior_pct is not None:
+                short_change = latest_pct - prior_pct
+            else:
+                latest_shares = safe_float(short["short_interest_shares"])
+                prior_shares = safe_float(prior["short_interest_shares"]) if prior is not None else None
+                float_shares = safe_float(short["float_shares"])
+                if latest_shares is not None and prior_shares is not None and float_shares and float_shares > 0:
+                    short_change = (latest_shares - prior_shares) / float_shares
         reasons: list[str] = []
         if require_13f and inst is None:
             reasons.append("missing_13f")
@@ -524,9 +671,10 @@ def main() -> None:
     mp_source = str(cfg_get(config, "positioning_import.market_positioning_source_id", "market_positioning_upstream"))
     feature_source = str(cfg_get(config, "positioning_import.source_id", "technology_positioning_composite"))
     model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors") or "semiconductors")
-    require_13f = str(cfg_get(config, "positioning_import.require_upstream_13f_for_gate", False)).lower() in {"1", "true", "yes", "y"}
-    require_short = str(cfg_get(config, "positioning_import.require_upstream_short_for_gate", False)).lower() in {"1", "true", "yes", "y"}
-    require_borrow = str(cfg_get(config, "positioning_import.require_upstream_borrow_for_gate", False)).lower() in {"1", "true", "yes", "y"}
+    require_13f = cfg_bool(config, "positioning_import.require_upstream_13f_for_gate", False)
+    require_short = cfg_bool(config, "positioning_import.require_upstream_short_for_gate", False)
+    require_borrow = cfg_bool(config, "positioning_import.require_upstream_borrow_for_gate", False)
+    include_historical = cfg_bool(config, "positioning_import.include_historical_members", False)
     ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
 
     if not form4_db.exists():
@@ -538,46 +686,94 @@ def main() -> None:
         init_db(conn)
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
-            tickers = load_universe(conn, ticker_filter)
+            fact_tickers = load_universe(conn, ticker_filter, model_family=model_family, include_historical=include_historical)
+            feature_tickers = load_universe(conn, ticker_filter, model_family=model_family, include_historical=False)
+            feature_ticker_set = set(feature_tickers)
+            query_tickers, source_to_internal = load_source_ticker_map(conn, fact_tickers)
             with ro_connect(form4_db) as form4_conn, ro_connect(mp_db) as mp_conn:
                 with conn:
-                    conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
-                    form4_stats = import_form4(conn, form4_conn, tickers, source_id=form4_source, start=start)
-                    direct_stats = direct_form4_stats(conn, tickers, source_id=direct_ownership_source)
-                    inst_stats = import_13f(conn, mp_conn, tickers, source_id=mp_source, start=start)
-                    short_stats = import_short_interest(conn, mp_conn, tickers, source_id=mp_source, start=start)
-                    borrow_stats = import_borrow(conn, mp_conn, tickers, source_id=mp_source, start=start)
+                    if ticker_filter:
+                        conn.execute(
+                            f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({qmarks(fact_tickers)})",
+                            (RUN_TYPE, *fact_tickers),
+                        )
+                    else:
+                        conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
+                    form4_stats = import_form4(
+                        conn,
+                        form4_conn,
+                        fact_tickers,
+                        query_tickers=query_tickers,
+                        source_to_internal=source_to_internal,
+                        source_id=form4_source,
+                        start=start,
+                    )
+                    direct_stats = direct_form4_stats(conn, fact_tickers, source_id=direct_ownership_source)
+                    inst_stats = import_13f(
+                        conn,
+                        mp_conn,
+                        fact_tickers,
+                        query_tickers=query_tickers,
+                        source_to_internal=source_to_internal,
+                        source_id=mp_source,
+                        start=start,
+                    )
+                    short_stats = import_short_interest(
+                        conn,
+                        mp_conn,
+                        fact_tickers,
+                        query_tickers=query_tickers,
+                        source_to_internal=source_to_internal,
+                        source_id=mp_source,
+                        start=start,
+                    )
+                    borrow_stats = import_borrow(
+                        conn,
+                        mp_conn,
+                        fact_tickers,
+                        query_tickers=query_tickers,
+                        source_to_internal=source_to_internal,
+                        source_id=mp_source,
+                        start=start,
+                    )
                     feature_status = build_positioning_features(
                         conn,
-                        tickers,
+                        feature_tickers,
                         asof=date.today(),
                         feature_source_id=feature_source,
                         model_family=model_family,
                         insider_days=int(cfg_get(config, "positioning_import.lookback_days.insider", 90)),
                         short_change_days=int(cfg_get(config, "positioning_import.lookback_days.short_change", 92)),
+                        direct_source=direct_ownership_source,
+                        upstream_source=form4_source,
                         require_13f=require_13f,
                         require_short=require_short,
                         require_borrow=require_borrow,
                     )
                     rows: list[dict[str, Any]] = []
-                    for ticker in tickers:
+                    for ticker in fact_tickers:
                         reasons: list[str] = []
                         if form4_stats[ticker]["form4_transactions"] == 0 and direct_stats[ticker]["direct_form4_transactions"] == 0:
                             reasons.append("no_form4_transactions")
-                            add_issue(conn, ticker, form4_source, "missing_form4_upstream_rows", "No Form 4 rows imported from sec_insider.sqlite.")
+                            if ticker in feature_ticker_set:
+                                add_issue(conn, ticker, form4_source, "missing_form4_upstream_rows", "No Form 4 rows imported from sec_insider.sqlite.")
                         elif form4_stats[ticker]["form4_transactions"] == 0 and direct_stats[ticker]["direct_form4_transactions"] > 0:
                             reasons.append("form4_direct_sec_rows_found_no_upstream")
-                            add_issue(conn, ticker, form4_source, "form4_upstream_missing_direct_sec_rows_found", "No upstream Form 4 rows, but direct SEC ownership rows exist in technology.sqlite.")
+                            if ticker in feature_ticker_set:
+                                add_issue(conn, ticker, form4_source, "form4_upstream_missing_direct_sec_rows_found", "No upstream Form 4 rows, but direct SEC ownership rows exist in technology.sqlite.")
                         if inst_stats[ticker] == 0:
                             reasons.append("no_13f_rows")
-                            add_issue(conn, ticker, mp_source, "missing_13f_upstream_rows", "No 13F snapshot rows available in market_positioning.sqlite for this ticker.")
+                            if ticker in feature_ticker_set:
+                                add_issue(conn, ticker, mp_source, "missing_13f_upstream_rows", "No 13F snapshot rows available in market_positioning.sqlite for this ticker.")
                         if short_stats[ticker] == 0:
                             reasons.append("no_short_interest_rows")
-                            add_issue(conn, ticker, mp_source, "missing_short_interest_upstream_rows", "No short-interest rows available in market_positioning.sqlite for this ticker.")
+                            if ticker in feature_ticker_set:
+                                add_issue(conn, ticker, mp_source, "missing_short_interest_upstream_rows", "No short-interest rows available in market_positioning.sqlite for this ticker.")
                         if borrow_stats[ticker] == 0:
                             reasons.append("no_borrow_rows")
-                            add_issue(conn, ticker, mp_source, "missing_borrow_upstream_rows", "No IBKR borrow rows available in market_positioning.sqlite for this ticker.")
-                        if feature_status.get(ticker):
+                            if ticker in feature_ticker_set:
+                                add_issue(conn, ticker, mp_source, "missing_borrow_upstream_rows", "No IBKR borrow rows available in market_positioning.sqlite for this ticker.")
+                        if ticker in feature_ticker_set and feature_status.get(ticker):
                             reasons.append(feature_status[ticker])
                         rows.append(
                             {
@@ -593,9 +789,9 @@ def main() -> None:
                             }
                         )
             write_report(output_csv, rows)
-            finish_run(conn, run_id=run_id, status="success", row_count=sum(int(row["form4_transactions"]) for row in rows), message=f"tickers={len(rows)} output={output_csv}")
+            finish_run(conn, run_id=run_id, status="success", row_count=sum(int(row["form4_transactions"]) for row in rows), message=f"fact_tickers={len(rows)} feature_tickers={len(feature_tickers)} output={output_csv}")
             LOGGER.info("Wrote positioning import report: %s", output_csv)
-            LOGGER.info("Positioning import complete: tickers=%d form4_rows=%d 13f_rows=%d short_rows=%d borrow_rows=%d", len(rows), sum(int(row["form4_transactions"]) for row in rows), sum(int(row["institutional_rows"]) for row in rows), sum(int(row["short_interest_rows"]) for row in rows), sum(int(row["borrow_rows"]) for row in rows))
+            LOGGER.info("Positioning import complete: fact_tickers=%d feature_tickers=%d form4_rows=%d 13f_rows=%d short_rows=%d borrow_rows=%d", len(rows), len(feature_tickers), sum(int(row["form4_transactions"]) for row in rows), sum(int(row["institutional_rows"]) for row in rows), sum(int(row["short_interest_rows"]) for row in rows), sum(int(row["borrow_rows"]) for row in rows))
         except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise

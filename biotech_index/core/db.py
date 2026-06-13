@@ -843,6 +843,25 @@ CREATE INDEX IF NOT EXISTS idx_multibagger_features_company_asof ON multibagger_
 CREATE INDEX IF NOT EXISTS idx_multibagger_scores_company_asof ON multibagger_scores_daily(company_id, asof_date DESC);
 CREATE INDEX IF NOT EXISTS idx_multibagger_scores_asof_rank ON multibagger_scores_daily(asof_date, rank);
 CREATE INDEX IF NOT EXISTS idx_daily_scores_asof_rank ON daily_scores(asof_date, rank);
+
+CREATE TABLE IF NOT EXISTS fda_adcom_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    meeting_date TEXT NOT NULL,
+    committee TEXT,
+    drug_name TEXT,
+    indication TEXT,
+    vote_result TEXT,
+    source TEXT NOT NULL DEFAULT 'fda_calendar',
+    source_url TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES companies(company_id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fda_adcom_events_company_date_drug ON fda_adcom_events(company_id, meeting_date, drug_name);
+CREATE INDEX IF NOT EXISTS idx_fda_adcom_events_ticker_date ON fda_adcom_events(ticker, meeting_date);
 """
 
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -1262,6 +1281,18 @@ DAILY_FEATURES_OPTIONAL_COLUMNS = {
     "insider_sell_value_90d": "REAL",
     "insider_accumulation_score": "REAL",
     "momentum_score_raw": "REAL",
+    "adcom_nearest_days": "REAL",
+    "adcom_within_60d_flag": "REAL",
+    "adcom_within_120d_flag": "REAL",
+    "adcom_score": "REAL",
+    "adcom_committee_oncology_flag": "REAL",
+    "breakthrough_therapy_count": "REAL",
+    "orphan_drug_count": "REAL",
+    "fast_track_count": "REAL",
+    "rmat_count": "REAL",
+    "priority_review_flag": "REAL",
+    "fda_designation_tier": "REAL",
+    "fda_designation_score": "REAL",
 }
 
 FORWARD_GUIDANCE_OPTIONAL_COLUMNS = {
@@ -1404,6 +1435,12 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_table_optional_columns(conn, "governance_event_features_daily", GOVERNANCE_EVENT_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "multibagger_features_daily", MULTIBAGGER_FEATURE_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "multibagger_scores_daily", MULTIBAGGER_SCORES_OPTIONAL_COLUMNS)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fda_adcom_events_company_date
+        ON fda_adcom_events(company_id, meeting_date)
+        """
+    )
     ensure_state_tables_created_at(conn)
     ensure_table_optional_columns(conn, "sec_event_parse_state", SEC_EVENT_PARSE_STATE_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "forward_guidance_parse_state", FORWARD_GUIDANCE_PARSE_STATE_OPTIONAL_COLUMNS)

@@ -485,14 +485,32 @@ sec_filings:
   max_retries: 3
   max_workers: 4
 
+fda_adcom_calendar:
+  # FDA Advisory Committee calendar sync (shadow-only — not a pipeline blocker).
+  # Fetches from FDA.gov and stores to fda_adcom_events table.
+  calendar_url: "https://www.fda.gov/media/advisory-committees/AdvisoryCommitteeCalendar/data.json"
+  fetch_timeout_sec: 30
+  lookahead_days: 120
+  # Shadow-only gate: adcom_score and adcom_within_60d_flag are IC-monitored
+  # but not yet integrated into primary scoring formulas.
+  shadow_only: true
+  include_in_primary_score: false
+
+fda_designations:
+  # Designation events (BT, RMAT, FT, Orphan, Priority Review) are parsed from
+  # SEC filings by 07_parse_sec_biotech_events.py using v4 rule set.
+  # All designation features shadow-only until IC validation is complete.
+  shadow_only: true
+  include_in_primary_score: false
+
 sec_event_parser:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
   output_csv: "../output/biotech_index_reports/sec_events.csv"
   lookback_days: 730
   min_confidence: 0.65
   max_events_per_filing_type: 2
-  batch_size: 250
-  max_workers: 2
+  batch_size: 500
+  max_workers: 8
 
 sec_companyfacts_history:
   final_scoring_universe_csv: "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"
@@ -894,7 +912,7 @@ biotech_scoring:
       candidate_id: "tier1_b011ee62a2ea"
       candidate_name: "catalyst_credibility_risk015_commercial_quality_value_guarded"
       top_n: 20
-      selection_policy: "core_veto_event_drag"
+      selection_policy: "cohort_late_clinical_catalyst_risk"
       test_lcb_return_pct: 4.355781
       test_sortino_like: 0.440351
       test_profit_factor: 1.846492
@@ -924,6 +942,19 @@ biotech_scoring:
     valuation_score: 50.0
     upside_capacity_score: 50.0
     institutional_upside_capacity_score: 50.0
+  missing_raw_score_gate:
+    # Fail loudly when upstream feature construction stops populating core raw
+    # scores.  Silent 0.0 fallbacks are especially dangerous for risk_score_raw
+    # because 0.0 means best-case risk.
+    enabled: true
+    fail_on_error: true
+    max_missing_fraction: 0.05
+    required_fields:
+      - catalyst_score_raw
+      - credibility_score_raw
+      - financial_quality_score_raw
+      - risk_score_raw
+      - momentum_score_raw
   rank_quality_caps:
     enabled: true
     business_shock_min_score: 70.0
@@ -1019,18 +1050,22 @@ biotech_scoring:
     momentum: 0.05
     risk_penalty: 0.15
   investment_weights:
-    # risk_penalty is validated separately and excluded from the positive weight sum.
-    clinical_opportunity: 0.25
-    commercial_value: 0.25
+    # Fallback weights used only when no investment_weight_profiles are defined.
+    # In practice, clinical_stage and commercial_stage profiles override these.
+    # NOTE: borrow_pressure_score IC=-0.007 at 120d on 250-date clean panel (NOT 0.095).
+    # The IC=0.095 figure was from a smaller pre-2024 panel and is not reproduced.
+    clinical_opportunity: 0.24
+    commercial_value: 0.23
     forward_guidance: 0.05
     valuation: 0.15
     upside_capacity: 0.05
     institutional_upside: 0.00
     financial_quality: 0.15
     momentum: 0.05
-    # borrow_signal: IC-validated 120d promote_candidate (IC=0.096, Q5-Q1 LCB +40.5%).
-    # Higher borrow rate/pressure = short-squeeze potential = positive selection signal.
+    # borrow_signal: clean-panel IC=-0.007 at 120d; weight aligned with clinical_stage profile.
     borrow_signal: 0.05
+    # short_interest_signal: IC=+0.048 at 120d confirmed; only promote_candidate at 120d.
+    short_interest_signal: 0.03
     # institutional_crowding: inverted 13F accumulation. Enabled per-profile where
     # cohort IC evidence supports it (commercial_stage); disabled for clinical_stage.
     institutional_crowding: 0.00
@@ -1039,29 +1074,37 @@ biotech_scoring:
     commercial_stage:
       clinical_opportunity: 0.04
       commercial_value: 0.27
-      forward_guidance: 0.24
+      forward_guidance: 0.20
       valuation: 0.07
       upside_capacity: 0.04
       institutional_upside: 0.06
       financial_quality: 0.14
-      momentum: 0.08
+      momentum: 0.06
+      # borrow_signal: validated null at 120d (IC=-0.007, ALL cohort). Minimal weight
+      # retained for squeeze-setup tail coverage; not a directional return predictor.
       borrow_signal: 0.04
-      # IC=-0.245 at 120d for commercial_profitable cohort. High institutional
-      # accumulation in commercial names = crowded trade = systematic underperformance.
-      institutional_crowding: 0.02
+      # short_interest_signal: promote_candidate at 120d (IC=+0.048, LCB spread +11.7%).
+      short_interest_signal: 0.03
+      # institutional_crowding: inverted 13F accumulation. Commercial cohort IC=-0.245
+      # (high accumulation predicts underperformance); inverted direction is validated.
+      institutional_crowding: 0.05
       risk_penalty: 0.24
     clinical_stage:
       clinical_opportunity: 0.45
-      commercial_value: 0.05
-      forward_guidance: 0.05
+      commercial_value: 0.03
+      forward_guidance: 0.04
       valuation: 0.05
       upside_capacity: 0.15
       institutional_upside: 0.00
       financial_quality: 0.15
       momentum: 0.05
+      # borrow_signal: validated null at 120d (IC=-0.007, ALL cohort). Minimal weight
+      # retained for squeeze-setup tail coverage; not a directional return predictor.
       borrow_signal: 0.05
-      # Clinical crowding IC is mixed across cohorts; disabled until cohort-specific
-      # validation confirms a consistent direction.
+      # short_interest_signal: promote_candidate at 120d (IC=+0.048, LCB spread +11.7%).
+      short_interest_signal: 0.03
+      # institutional_crowding: clinical cohort IC is mixed across sub-cohorts; disabled
+      # until cohort-specific validation confirms a consistent direction.
       institutional_crowding: 0.00
       risk_penalty: 0.40
   buckets:
@@ -1105,12 +1148,14 @@ biotech_reports:
     # IBKR shortable-share snapshots are point-in-time going forward; historical
     # borrow validation should rely primarily on fee-rate history.
     max_snapshot_staleness_days: 7
-    # REGIME DEPENDENCY: borrow_rate_high_flag shows sign flip between train and test.
-    # Train/120d: high-borrow group LCB +14.4% vs low-borrow +18.2% (delta -3.8%).
-    # Test/120d:  high-borrow group LCB +31.0% vs low-borrow +5.4% (delta +25.6%).
-    # The recent test period captures a squeeze regime; the training history reflects
-    # fundamental-weakness dominance. Do NOT promote until signal is stable across regimes.
-    promotion_status: "shadow_only_pending_validation"
+    # VALIDATED (2026-06-09): Clean-panel IC run (250 dates, 364 tickers, 91k rows).
+    # borrow_pressure_score IC=-0.007 at 120d (ALL cohort); borrow_rate_current IC=-0.006.
+    # Near-zero overall: no directional predictive value at 120d for the full universe.
+    # Cohort-specific positive: platform_partnered IC=+0.144 at 120d (LCB spread +33%).
+    # Prior regime-flip note (train -3.8% / test +25.6% delta) was from a smaller panel
+    # and is superseded by this full-panel result. Signal retained in profiles at minimal
+    # weight (0.04-0.05) for squeeze-setup tail coverage; not promoted to formula primary.
+    promotion_status: "validated_null_overall_cohort_specific_positive"
   forward_catalyst_validation:
     output_dir: "../output/biotech_index_reports/forward_catalyst_validation"
     horizons:
@@ -1189,9 +1234,16 @@ biotech_reports:
 
 biotech_refresh:
   timing_csv: "../output/biotech_index_reports/biotech_refresh_timing.csv"
-  step_timeout_sec: 14400
+  step_timeout_sec: 28800
   max_upstream_staleness_days: 2
   validate_final_outputs: true
+  ibkr_preflight:
+    # Catch stale/missing IB market and borrow data before the long refresh run.
+    # This mirrors the Form 4 preflight: daily production runs should not
+    # silently continue when TWS/IBGateway is unavailable.
+    enabled: true
+    required: true
+    timeout_sec: 5.0
   company_master:
     # The full screen is a slow universe-rebuild input, not a required daily
     # refresh dependency once the companies table is already seeded.
