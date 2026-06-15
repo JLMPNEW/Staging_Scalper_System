@@ -327,6 +327,75 @@ sources:
     status: active
     notes: Point-in-time research universe backfill for current and acquired/delisted semiconductor constituents used by Stage 8 calibration.
 
+  - source_id: software_infrastructure_ticker_seed
+    stage: security_master
+    source_name: Enriched software infrastructure ticker universe CSV
+    source_owner: local_ticker_mapping
+    source_type: csv
+    base_url: ../ticker_mapping/software_infrastructure_tickers.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: local
+    raw_schema: software_infrastructure_tickers_csv
+    canonical_tables:
+      - dim_company
+      - dim_security
+      - dim_identifier
+      - dim_company_alias
+      - dim_universe_membership
+    feature_stages:
+      - security_master
+    subsector_scope: software_infrastructure
+    priority: 18
+    status: active
+    notes: Stage 2 source-of-truth universe with enriched software-infrastructure tickers and initial listing identity.
+
+  - source_id: software_infrastructure_cohort_policy
+    stage: security_master
+    source_name: Software infrastructure cohort policy YAML
+    source_owner: local_technology
+    source_type: yaml
+    base_url: technology/software_infrastructure/data/software_infrastructure_cohorts.yaml
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: local
+    raw_schema: software_infrastructure_cohorts_yaml
+    canonical_tables:
+      - dim_technology_taxonomy
+    feature_stages:
+      - taxonomy
+      - calibration
+    subsector_scope: software_infrastructure
+    priority: 19
+    status: active
+    notes: Core software-infrastructure calibration cohorts plus unassigned-review policy.
+
+  - source_id: software_infrastructure_historical_membership_seed
+    stage: security_master
+    source_name: Software infrastructure historical membership seed
+    source_owner: local_technology
+    source_type: csv
+    base_url: technology/software_infrastructure/data/software_infrastructure_historical_membership.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: local
+    raw_schema: software_infrastructure_historical_membership_csv
+    canonical_tables:
+      - dim_company
+      - dim_security
+      - dim_technology_taxonomy
+      - dim_universe_membership
+    feature_stages:
+      - security_master
+      - model_calibration
+    subsector_scope: software_infrastructure
+    priority: 20
+    status: active
+    notes: Point-in-time research universe backfill for acquired/delisted software-infrastructure constituents used by calibration and backtests.
+
   - source_id: semiconductor_scoring_contract
     stage: scoring
     source_name: Semiconductor scoring feature contract
@@ -350,6 +419,180 @@ sources:
     priority: 80
     status: active
     notes: Semiconductor-owned Stage 6A score input contract built from technology financial, market, and positioning feature tables with neutral placeholders for sector overlays.
+
+  - source_id: software_infrastructure_scoring_contract
+    stage: scoring
+    source_name: Software infrastructure scoring feature contract
+    source_owner: local_technology
+    source_type: derived_feature
+    base_url: technology.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: local
+    raw_schema: technology_feature_layers
+    canonical_tables:
+      - dim_scoring_component
+      - feature_scoring_input
+      - feature_scoring_component
+    feature_stages:
+      - scoring_contract
+      - calibration
+      - ranking
+    subsector_scope: software_infrastructure
+    priority: 80
+    status: active
+    notes: Software-infrastructure-owned Stage 6A score input contract built from technology financial, market, and positioning feature tables with QQQ-relative market behavior inputs.
+
+  - source_id: software_infrastructure_calibrated_score_v1
+    stage: calibrated_scoring
+    source_name: Software infrastructure calibrated scoring model v1
+    source_owner: local_technology
+    source_type: derived_feature
+    base_url: technology.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: local
+    raw_schema: software_infrastructure_scoring_contract_features
+    canonical_tables:
+      - feature_scoring_input
+      - feature_scoring_component
+      - feature_scoring_model_output
+    feature_stages:
+      - calibrated_scoring
+      - ranking
+      - model_validation
+    subsector_scope: software_infrastructure
+    priority: 81
+    status: active
+    notes: Stage 7 calibrated software-infrastructure ranking layer. It reads the validated Stage 6 feature contract and writes separate production rank scores without overwriting the baseline.
+
+  - source_id: software_infrastructure_stage8_signal_diagnostics
+    stage: model_calibration
+    source_name: Software infrastructure Stage 8A signal diagnostics
+    source_owner: local_technology
+    source_type: derived_report
+    base_url: output/technology_reports/software_infrastructure/signal_diagnostics
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: on_model_review
+    data_owner: local
+    raw_schema: point_in_time_feature_panel
+    canonical_tables: []
+    feature_stages:
+      - signal_diagnostics
+      - model_calibration
+      - historical_panel
+    subsector_scope: software_infrastructure
+    priority: 81
+    status: active
+    notes: Report-only Stage 8A diagnostics. It builds a point-in-time active plus delisted software panel, computes forward residual returns, ICs, Newey-West t-stats, signal birthdates, and candidate review files without writing model weights to the database.
+
+  - source_id: software_infrastructure_stage8_optuna_calibration
+    stage: model_calibration
+    source_name: Software infrastructure Stage 8B constrained Optuna calibration
+    source_owner: local_technology
+    source_type: derived_report
+    base_url: output/technology_reports/software_infrastructure/optuna_calibration
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: on_model_review
+    data_owner: local
+    raw_schema: stage8a_signal_panel_csv
+    canonical_tables: []
+    feature_stages:
+      - optuna_weight_search
+      - model_calibration
+      - holdout_validation
+    subsector_scope: software_infrastructure
+    priority: 82
+    status: active
+    notes: Report-only Stage 8B optimizer. It reads the Stage 8A software historical signal panel, searches bounded candidate weights, evaluates against Stage 7 on an embargoed holdout, and writes recommendations only.
+
+  - source_id: software_infrastructure_stage8_walk_forward_calibration
+    stage: model_calibration
+    source_name: Software infrastructure Stage 8C walk-forward calibration validation
+    source_owner: local_technology
+    source_type: derived_report
+    base_url: output/technology_reports/software_infrastructure/optuna_calibration/walk_forward
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: on_model_review
+    data_owner: local
+    raw_schema: stage8a_signal_panel_csv
+    canonical_tables: []
+    feature_stages:
+      - walk_forward_validation
+      - model_calibration
+      - out_of_sample_validation
+    subsector_scope: software_infrastructure
+    priority: 83
+    status: active
+    notes: Report-only Stage 8C procedure test. It repeatedly refits constrained software weights on expanding training windows and compares each untouched test block against the static Stage 7 baseline.
+
+  - source_id: software_infrastructure_stage9_portfolio_backtest
+    stage: portfolio_backtest
+    source_name: Software infrastructure Stage 9 portfolio backtest
+    source_owner: local_technology
+    source_type: derived_report
+    base_url: output/technology_reports/software_infrastructure/backtests
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: on_model_review
+    data_owner: local
+    raw_schema: stage8a_signal_panel_csv
+    canonical_tables: []
+    feature_stages:
+      - portfolio_backtest
+      - model_validation
+      - ranking_review
+    subsector_scope: software_infrastructure
+    priority: 84
+    status: active
+    notes: Report-only Stage 9 portfolio simulations comparing the production Stage 7 software score with the Stage 8B report-only candidate across long-only, hedged-long, and long-short portfolios.
+
+  - source_id: software_infrastructure_stage10_dashboard_reports
+    stage: dashboard_reports
+    source_name: Software infrastructure Stage 10 dashboard reports
+    source_owner: local_technology
+    source_type: derived_report
+    base_url: output/technology_reports/software_infrastructure/dashboard
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: on_model_review
+    data_owner: local
+    raw_schema: software_infrastructure_stage7_stage8_stage9_reports
+    canonical_tables: []
+    feature_stages:
+      - dashboard_reports
+      - ranking_review
+      - model_validation
+    subsector_scope: software_infrastructure
+    priority: 85
+    status: active
+    notes: Stage 10 dashboard publisher. It combines current Stage 7 production ranks, Stage 8 candidate ranks, Stage 8 calibration evidence, Stage 9 backtest leaders, risk flags, cohort summaries, and company scorecards without changing model weights or database rows.
+
+  - source_id: software_infrastructure_stage10b_lcr_governance
+    stage: governance_lockbox
+    source_name: Software infrastructure Stage 10B LCR governance lockbox
+    source_owner: local_technology
+    source_type: derived_report
+    base_url: output/technology_reports/software_infrastructure/governance
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: on_model_review
+    data_owner: local
+    raw_schema: software_infrastructure_governance_artifacts
+    canonical_tables: []
+    feature_stages:
+      - lockbox_ledger
+      - signal_registry
+      - promotion_review
+    subsector_scope: software_infrastructure
+    priority: 86
+    status: active
+    notes: Stage 10B governance package. It freezes artifact hashes, Stage 8 production status, Stage 7 challenger status, manual promotion approval, walk-forward verdict, Stage 9 reference performance, signal registry metadata, and top ranked names without applying automatic promotion.
 
   - source_id: semiconductor_calibrated_score_v1
     stage: calibrated_scoring

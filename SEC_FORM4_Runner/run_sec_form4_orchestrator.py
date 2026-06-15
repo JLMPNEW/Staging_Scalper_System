@@ -51,6 +51,9 @@ VALID_PROFILES = {"daily", "weekly", "quarterly"}
 VALID_SEC_FETCH_MODES = {"daily", "weekly", "quarterly", "backfill"}
 VALID_FORM4_FETCH_MODES = {"daily", "weekly"}
 SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+LEXICALLY_SORTABLE_DATE_RE = re.compile(
+    r"^(?:\d{4}-\d{2}-\d{2}(?:[T ].*)?|\d{8}|\d{4}/\d{2}/\d{2})$"
+)
 
 
 def warn(message: str) -> None:
@@ -436,6 +439,52 @@ def parse_db_date(text: str | None) -> date | None:
     return None
 
 
+def db_date_text_is_lexically_sortable(text: str | None) -> bool:
+    """True when SQLite text MAX() has the same order as parsed dates."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    return bool(LEXICALLY_SORTABLE_DATE_RE.match(raw))
+
+
+def max_parsed_date_from_conn(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    column: str,
+    context: str,
+) -> date | None:
+    """Scan distinct date strings and compare parsed dates.
+
+    Form 4 tables may store dates as DD-MON-YYYY.  SQLite MAX() on those strings
+    is lexical, so 31-DEC-2025 can incorrectly sort after 05-JUN-2026.  The
+    distinct scan is only used for non-sortable date formats.
+    """
+    rows = conn.execute(
+        f"SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL AND {column} <> ''"
+    ).fetchall()
+    best: date | None = None
+    parsed_count = 0
+    for row in rows:
+        dt = parse_db_date(row[0] if row else None)
+        if dt is None:
+            continue
+        parsed_count += 1
+        if best is None or dt > best:
+            best = dt
+    if best is None and rows:
+        warn(
+            f"{context}: parsed-date scan found no valid dates in {table}.{column} "
+            f"({len(rows)} distinct values). Incremental start may use fallback lookback."
+        )
+    elif parsed_count < len(rows):
+        warn(
+            f"{context}: ignored {len(rows) - parsed_count} unparseable distinct date values "
+            f"while scanning {table}.{column}."
+        )
+    return best
+
+
 def max_date_from_conn(
     conn: sqlite3.Connection,
     *,
@@ -457,8 +506,25 @@ def max_date_from_conn(
             f"SELECT MAX({column_name}) FROM {table_name} "
             f"WHERE {column_name} IS NOT NULL AND {column_name} <> ''"
         ).fetchone()
-        fast = parse_db_date(row[0] if row else None)
+        raw_max = row[0] if row else None
+        fast = parse_db_date(raw_max)
+        if fast is not None and db_date_text_is_lexically_sortable(raw_max):
+            return fast
         if fast is not None:
+            parsed_best = max_parsed_date_from_conn(
+                conn,
+                table=table_name,
+                column=column_name,
+                context=context,
+            )
+            if parsed_best is not None:
+                if parsed_best != fast:
+                    warn(
+                        f"{context}: corrected non-sortable text MAX for {table_name}.{column_name}: "
+                        f"sqlite_max={raw_max!r} parsed={fast.isoformat()} "
+                        f"parsed_distinct_max={parsed_best.isoformat()}."
+                    )
+                return parsed_best
             return fast
         # Fallback: scan recent values if lexical MAX is non-date text.
         rows = conn.execute(

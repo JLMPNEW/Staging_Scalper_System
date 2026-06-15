@@ -36,7 +36,19 @@ DEFAULT_YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ti
 DEFAULT_USER_AGENT = "JL, Independent Research, jm.357@hotmail.com"
 
 DEFAULT_ACTIVE_LISTING_STATUSES = {"active"}
-DEFAULT_INVESTABLE_SECURITY_TYPES = {"common stock", "ordinary shares", "adr/ads"}
+DEFAULT_NON_INVESTABLE_LISTING_STATUSES = {
+    "active_financial_status_d",
+    "active_financial_status_e",
+    "inactive_or_not_investable",
+    "invalid_or_inactive",
+}
+DEFAULT_INVESTABLE_SECURITY_TYPES = {
+    "common stock",
+    "ordinary shares",
+    "adr/ads",
+    "american depositary shares",
+    "new york registry shares",
+}
 DEFAULT_US_EXCHANGES = {
     "nasdaq",
     "nasd",
@@ -106,6 +118,7 @@ DEFAULT_HARD_EXCLUSION_REASONS = {
 
 FIELDNAMES = [
     "ticker",
+    "investability_status",
     "company_name",
     "cik",
     "exchange",
@@ -158,6 +171,7 @@ class ValidationPolicy:
     request_sleep_sec: float
     include_us_listed_only: bool
     active_listing_statuses: set[str]
+    non_investable_listing_statuses: set[str]
     investable_security_types: set[str]
     us_exchanges: set[str]
     recent_forms: set[str]
@@ -382,6 +396,14 @@ def default_policy(config: dict[str, Any]) -> ValidationPolicy:
             cfg_get(config, "universe_validation.active_listing_statuses", list(DEFAULT_ACTIVE_LISTING_STATUSES)),
             DEFAULT_ACTIVE_LISTING_STATUSES,
         ),
+        non_investable_listing_statuses=str_set(
+            cfg_get(
+                config,
+                "universe_validation.non_investable_listing_statuses",
+                list(DEFAULT_NON_INVESTABLE_LISTING_STATUSES),
+            ),
+            DEFAULT_NON_INVESTABLE_LISTING_STATUSES,
+        ),
         investable_security_types=str_set(
             cfg_get(config, "universe_validation.investable_security_types", list(DEFAULT_INVESTABLE_SECURITY_TYPES)),
             DEFAULT_INVESTABLE_SECURITY_TYPES,
@@ -473,6 +495,18 @@ def validate_identity(row: dict[str, str], policy: ValidationPolicy) -> tuple[st
     if currency and currency != "USD":
         reasons.append(f"non_usd_currency:{currency}")
     return ("pass" if not reasons else "fail", reasons)
+
+
+def investability_status_for_row(row: dict[str, str], policy: ValidationPolicy) -> str:
+    listing_status = normalize_text(row_value(row, "ListingStatus", "listing_status")).lower()
+    security_type = normalize_text(row_value(row, "SecurityType", "security_type")).lower()
+    if listing_status in policy.non_investable_listing_statuses:
+        return "non_investable_listing_status"
+    if security_type and security_type not in policy.investable_security_types:
+        return "non_investable_security_type"
+    if listing_status and listing_status not in policy.active_listing_statuses:
+        return "review_listing_status"
+    return "investable"
 
 
 def filing_summary(submissions: dict[str, Any], asof_date: date, policy: ValidationPolicy) -> tuple[dict[str, Any], list[str]]:
@@ -790,13 +824,29 @@ def output_paths(config: dict[str, Any], config_path: Path, args: argparse.Names
     return output_csv, keep_csv, clean_tickers_csv, calibration_core_csv, cache_dir
 
 
-def write_clean_input_rows(path: Path, input_rows: list[dict[str, str]], keep_tickers: set[str]) -> None:
+def write_clean_input_rows(
+    path: Path,
+    input_rows: list[dict[str, str]],
+    keep_tickers: set[str],
+    *,
+    investability_by_ticker: dict[str, str],
+) -> None:
     fieldnames = list(input_rows[0].keys()) if input_rows else []
+    investability_field = next(
+        (field for field in fieldnames if field.strip().lower().replace("_", "") == "investabilitystatus"),
+        "",
+    )
+    if not investability_field:
+        investability_field = "investability_status"
+        insert_at = 1 if fieldnames else 0
+        fieldnames.insert(insert_at, investability_field)
     rows: list[dict[str, str]] = []
     for row in input_rows:
-        if normalize_ticker(row_value(row, "Name", "Ticker", "ticker", "symbol")) not in keep_tickers:
+        ticker = normalize_ticker(row_value(row, "Name", "Ticker", "ticker", "symbol"))
+        if ticker not in keep_tickers:
             continue
         out = dict(row)
+        out[investability_field] = investability_by_ticker.get(ticker, "")
         if "CIK" in out:
             out["CIK"] = normalize_cik(out.get("CIK"))
         if "cik" in out:
@@ -822,6 +872,7 @@ def validate_one(
     company_name = normalize_text(row_value(row, "Company_Name", "CompanyName", "company_name", "name"))
     out: dict[str, Any] = {
         "ticker": ticker,
+        "investability_status": investability_status_for_row(row, policy),
         "company_name": company_name,
         "cik": cik,
         "exchange": normalize_text(row_value(row, "Exchange", "exchange")),
@@ -965,10 +1016,19 @@ def main() -> None:
         if str(row.get("calibration_bucket") or "") == "core_calibration"
     ]
     calibration_core_tickers = {str(row.get("ticker") or "") for row in calibration_core_rows}
+    investability_by_ticker = {
+        str(row.get("ticker") or ""): str(row.get("investability_status") or "")
+        for row in validated
+    }
     write_csv(output_csv, validated, FIELDNAMES)
     write_csv(keep_csv, keep_rows, FIELDNAMES)
-    write_clean_input_rows(clean_tickers_csv, rows, keep_tickers)
-    write_clean_input_rows(calibration_core_csv, rows, calibration_core_tickers)
+    write_clean_input_rows(clean_tickers_csv, rows, keep_tickers, investability_by_ticker=investability_by_ticker)
+    write_clean_input_rows(
+        calibration_core_csv,
+        rows,
+        calibration_core_tickers,
+        investability_by_ticker=investability_by_ticker,
+    )
     action_counts: dict[str, int] = {}
     calibration_counts: dict[str, int] = {}
     for row in validated:

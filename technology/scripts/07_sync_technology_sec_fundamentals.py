@@ -41,6 +41,7 @@ CORE_OPERATING_METRICS = {"revenue", "assets"}
 CONCEPT_METRICS: dict[str, str] = {
     "Revenues": "revenue",
     "RevenueFromContractWithCustomerExcludingAssessedTax": "revenue",
+    "RevenueFromContractWithCustomerIncludingAssessedTax": "revenue",
     "SalesRevenueNet": "revenue",
     "SalesRevenueGoodsNet": "revenue",
     "GrossProfit": "gross_profit",
@@ -91,6 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync SEC submissions and selected companyfacts for technology tickers.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--model-family", default="", help="Technology model family to sync, e.g. semiconductors.")
     parser.add_argument("--tickers", default="")
     parser.add_argument("--max-tickers", type=int, default=0)
     parser.add_argument("--force-refresh", action="store_true")
@@ -134,19 +136,36 @@ def cik10(raw: str) -> str:
     return normalize_cik(raw).zfill(10)
 
 
-def load_universe(conn: Any, ticker_filter: set[str], *, include_historical: bool = False) -> list[dict[str, str]]:
+def load_universe(conn: Any, ticker_filter: set[str], *, model_family: str, include_historical: bool = False) -> list[dict[str, str]]:
     # Historical (delisted/acquired) members carry universe_status='historical'
     # from the membership loader; their EDGAR fundamentals are backfillable even
     # though their price feeds are not, so they are opt-in for this sync only.
-    historical_clause = "OR (is_active = 0 AND universe_status = 'historical')" if include_historical else ""
-    rows = conn.execute(
-        f"""
-        SELECT ticker, cik, company_name, is_active
-        FROM dim_company
-        WHERE is_active = 1 {historical_clause}
-        ORDER BY ticker
-        """
-    ).fetchall()
+    if include_historical:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT c.ticker, c.cik, c.company_name, c.is_active
+            FROM dim_company c
+            JOIN dim_universe_membership m
+              ON m.ticker = c.ticker
+             AND m.model_family = ?
+             AND (m.is_current_member = 1 OR m.point_in_time_flag = 1)
+            ORDER BY c.ticker
+            """,
+            (model_family,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT c.ticker, c.cik, c.company_name, c.is_active
+            FROM dim_company c
+            JOIN dim_technology_taxonomy t
+              ON t.ticker = c.ticker
+             AND t.model_family = ?
+            WHERE c.is_active = 1
+            ORDER BY c.ticker
+            """,
+            (model_family,),
+        ).fetchall()
     out: list[dict[str, str]] = []
     for row in rows:
         ticker = normalize_ticker(row["ticker"])
@@ -1157,6 +1176,13 @@ def main() -> None:
     start = parse_date(cfg_get(config, "sec_fundamentals.start_date", "2015-01-01")) or date(2015, 1, 1)
     submissions_source = str(cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions"))
     companyfacts_source = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts"))
+    model_family = str(
+        args.model_family
+        or cfg_get(config, "technology_universe.initial_subsector", "semiconductors")
+        or "semiconductors"
+    ).strip()
+    if not model_family:
+        raise ValueError("model_family cannot be empty")
     user_agent = expand_env_vars(cfg_get(config, "sec_fundamentals.user_agent", "technology-research/1.0"))
     headers = {"User-Agent": user_agent, "Accept-Encoding": "gzip, deflate", "Host": "data.sec.gov"}
     timeout_sec = float(cfg_get(config, "sec_fundamentals.timeout_sec", 30.0))
@@ -1177,16 +1203,16 @@ def main() -> None:
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
             include_historical = str(cfg_get(config, "sec_fundamentals.include_historical_members", True)).strip().lower() in {"1", "true", "yes", "y"}
-            companies = load_universe(conn, ticker_filter, include_historical=include_historical)
+            companies = load_universe(conn, ticker_filter, model_family=model_family, include_historical=include_historical)
             if max_tickers > 0:
                 companies = companies[:max_tickers]
+            if not companies:
+                raise ValueError(f"No SEC universe tickers found for model_family={model_family}.")
             with conn:
-                if ticker_filter or max_tickers > 0:
-                    processed = [company["ticker"] for company in companies]
+                processed = [company["ticker"] for company in companies]
+                if processed:
                     placeholders = ",".join("?" for _ in processed)
                     conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (RUN_TYPE, *processed))
-                else:
-                    conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
             failures = 0
             for idx, company in enumerate(companies, start=1):
                 ticker = company["ticker"]

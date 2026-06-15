@@ -47,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-import", action="store_true", help="Skip med-devices import from sec_insider.sqlite.")
     parser.add_argument("--skip-feature-build", action="store_true", help="Skip script 60 insider feature build.")
     parser.add_argument("--skip-coverage-audit", action="store_true", help="Skip external positioning coverage audit.")
+    parser.add_argument("--skip-missing-ticker-audit", action="store_true", help="Skip detailed Form 4 missing-ticker audit.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running them.")
     return parser.parse_args()
 
@@ -175,6 +176,7 @@ def main() -> None:
         "import_completed": False,
         "feature_build_completed": False,
         "coverage_audit_completed": False,
+        "missing_ticker_audit_completed": False,
     }
 
     if not args.skip_runner:
@@ -248,6 +250,21 @@ def main() -> None:
             dry_run=args.dry_run,
         )
         status["coverage_audit_completed"] = True
+    if not args.skip_missing_ticker_audit:
+        run_command(
+            [
+                sys.executable,
+                str(resolved_script("med_devices/scripts/69_audit_med_device_form4_missing_tickers.py")),
+                "--config",
+                str(config_path),
+                "--history-start",
+                history_start,
+                "--asof",
+                asof,
+            ],
+            dry_run=args.dry_run,
+        )
+        status["missing_ticker_audit_completed"] = True
     status["completed_utc"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     write_status(status_json, status, dry_run=args.dry_run)
 

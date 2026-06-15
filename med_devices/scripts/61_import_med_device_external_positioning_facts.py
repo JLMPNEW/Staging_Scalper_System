@@ -85,12 +85,23 @@ def ensure_source(conn: Any, source_id: str, *, name: str, source_type: str = "l
 
 
 def company_map(conn: Any) -> dict[str, dict[str, Any]]:
-    rows = conn.execute("SELECT company_id, ticker FROM dim_company WHERE is_active = 1").fetchall()
+    rows = conn.execute("SELECT company_id, ticker, cik FROM dim_company WHERE is_active = 1").fetchall()
     return {normalize_ticker(row["ticker"]): dict(row) for row in rows}
 
 
 def qmarks(values: list[str]) -> str:
     return ",".join("?" for _ in values)
+
+
+def cik_aliases(raw: object) -> set[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return set()
+    out = {text}
+    if text.isdigit():
+        out.add(str(int(text)))
+        out.add(text.zfill(10))
+    return {value for value in out if value}
 
 
 VALID_IMPORT_SOURCES = {"short_interest", "borrow", "13f", "form4"}
@@ -379,6 +390,16 @@ def import_form4(conn: Any, form4_conn: sqlite3.Connection, *, companies: dict[s
     source_id = "sec_form4_edgar"
     ensure_source(conn, source_id, name="SEC Form 4 insider transactions")
     tickers = sorted(companies)
+    companies_by_cik: dict[str, dict[str, Any]] = {}
+    for company in companies.values():
+        for cik in cik_aliases(company.get("cik")):
+            companies_by_cik[cik] = company
+    ciks = sorted(companies_by_cik)
+    company_filter = f"UPPER(s.issuer_trading_symbol) IN ({qmarks(tickers)})"
+    params: list[str] = list(tickers)
+    if ciks:
+        company_filter = f"({company_filter} OR CAST(s.issuer_cik AS TEXT) IN ({qmarks(ciks)}))"
+        params.extend(ciks)
     rows = form4_conn.execute(
         f"""
         SELECT
@@ -403,10 +424,10 @@ def import_form4(conn: Any, form4_conn: sqlite3.Connection, *, companies: dict[s
         FROM sec_ownership_submission s
         JOIN sec_ownership_nonderiv_trans t ON t.accession_number = s.accession_number
         LEFT JOIN sec_ownership_reporting_owner o ON o.accession_number = s.accession_number
-        WHERE UPPER(s.issuer_trading_symbol) IN ({qmarks(tickers)})
+        WHERE {company_filter}
           AND t.transaction_code IN ('P', 'S')
         """,
-        tickers,
+        params,
     ).fetchall()
     now = utc_now()
     filtered = []
@@ -414,7 +435,16 @@ def import_form4(conn: Any, form4_conn: sqlite3.Connection, *, companies: dict[s
         trade_date = parse_sec_date(row["transaction_date"])
         if not trade_date or trade_date < start or trade_date > asof:
             continue
-        ticker = normalize_ticker(row["ticker"])
+        source_ticker = normalize_ticker(row["ticker"])
+        company = companies.get(source_ticker)
+        if company is None:
+            for cik in cik_aliases(row["issuer_cik"]):
+                company = companies_by_cik.get(cik)
+                if company is not None:
+                    break
+        if company is None:
+            continue
+        ticker = normalize_ticker(company["ticker"])
         shares = to_float(row["transaction_shares"])
         price = to_float(row["transaction_price_per_share"])
         value = shares * price if shares is not None and price is not None else None
@@ -423,7 +453,7 @@ def import_form4(conn: Any, form4_conn: sqlite3.Connection, *, companies: dict[s
                 str(row["accession_number"]).replace("-", ""),
                 str(row["transaction_id"]),
                 source_id,
-                int(companies[ticker]["company_id"]),
+                int(company["company_id"]),
                 ticker,
                 str(row["issuer_cik"] or ""),
                 str(row["rptowner_cik"] or ""),

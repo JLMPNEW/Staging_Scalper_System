@@ -49,10 +49,17 @@ universe_validation:
   request_sleep_sec: 0.1
   active_listing_statuses:
     - active
+  non_investable_listing_statuses:
+    - active_financial_status_d
+    - active_financial_status_e
+    - inactive_or_not_investable
+    - invalid_or_inactive
   investable_security_types:
     - common stock
     - ordinary shares
     - adr/ads
+    - american depositary shares
+    - new york registry shares
   us_exchanges:
     - nasdaq
     - nasd
@@ -894,7 +901,7 @@ ibkr_borrow_ingestion:
   host: "127.0.0.1"
   port: 7497
   client_id: 7741
-  generic_tick_list: "236,237,499"
+  generic_tick_list: "236,499"
   default_exchange: "SMART"
   default_currency: "USD"
   sleep_sec: 0.25
@@ -990,6 +997,8 @@ external_positioning_import:
   output_csv: "../output/med_devices_reports/med_device_external_positioning_import_summary.csv"
 external_positioning_coverage:
   output_csv: "../output/med_devices_reports/med_device_external_positioning_coverage.csv"
+form4_missing_ticker_audit:
+  output_csv_template: "../output/med_devices_reports/med_device_form4_missing_ticker_audit_{asof}.csv"
 market_positioning_update:
   user_agent: "JL, Independent Research, jm.357@hotmail.com"
   timeout_sec: 120.0

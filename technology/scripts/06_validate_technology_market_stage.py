@@ -29,6 +29,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate Stage 3 technology market-data gates.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--model-family", default="", help="Technology model family to validate, e.g. semiconductors.")
+    parser.add_argument("--benchmark-tickers", default="", help="Optional comma-separated benchmark ticker override.")
+    parser.add_argument("--policy", type=Path, default=None, help="Optional universe policy YAML override.")
     parser.add_argument("--asof", default="", help="Validation date for staleness checks. Defaults to today.")
     parser.add_argument("--strict-history", action="store_true", help="Fail low-history tickers instead of review-only.")
     return parser.parse_args()
@@ -60,8 +63,23 @@ def placeholders(values: list[str]) -> str:
     return ",".join("?" for _ in values)
 
 
-def read_expected_ticker_count(config: dict[str, Any], base_dir: Path) -> int:
-    policy_path = resolve_path(cfg_get(config, "technology_universe.policy_path"), base_dir=base_dir)
+def parse_ticker_list(raw: object) -> list[str]:
+    if isinstance(raw, list):
+        values = raw
+    else:
+        values = str(raw or "").split(",")
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        ticker = normalize_ticker(value)
+        if ticker and ticker not in seen:
+            out.append(ticker)
+            seen.add(ticker)
+    return out
+
+
+def read_expected_ticker_count(config: dict[str, Any], base_dir: Path, policy_path: Path | None) -> int:
+    policy_path = policy_path or resolve_path(cfg_get(config, "technology_universe.policy_path"), base_dir=base_dir)
     policy = load_yaml(policy_path)
     return int(policy.get("expected_ticker_count") or 0)
 
@@ -89,11 +107,19 @@ def validate() -> int:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors") or "semiconductors")
+    model_family = str(
+        args.model_family
+        or cfg_get(config, "technology_universe.initial_subsector", "semiconductors")
+        or "semiconductors"
+    ).strip()
+    if not model_family:
+        raise ValueError("model_family cannot be empty")
     source_id = str(cfg_get(config, "market_data_policy.scoring_primary_source", "yahoo_finance_adjusted") or "yahoo_finance_adjusted")
-    benchmark_tickers = [normalize_ticker(x) for x in cfg_get(config, "technology_universe.benchmark_tickers", [])]
-    benchmark_tickers = [ticker for ticker in benchmark_tickers if ticker]
-    expected_count = read_expected_ticker_count(config, base_dir)
+    benchmark_tickers = parse_ticker_list(args.benchmark_tickers) or parse_ticker_list(
+        cfg_get(config, "technology_universe.benchmark_tickers", [])
+    )
+    policy_path = args.policy.expanduser().resolve() if args.policy else None
+    expected_count = read_expected_ticker_count(config, base_dir, policy_path)
     min_days = int(cfg_get(config, "market_data_policy.min_trading_days_for_full_features", 252))
     min_avg_dollar_volume_60d = float(cfg_get(config, "market_data_policy.min_avg_dollar_volume_60d_for_full_features", 0) or 0)
     max_staleness_days = int(cfg_get(config, "market_data_policy.max_staleness_days", 7))
@@ -109,14 +135,21 @@ def validate() -> int:
             errors.append(f"Source {source_id} is not active in source_registry: {source_status!r}")
 
         universe = load_universe(conn, model_family)
+        if not universe:
+            errors.append(f"No active technology universe tickers found for model_family={model_family}")
+            all_tickers = sorted(set(benchmark_tickers))
+            if not all_tickers:
+                all_tickers = ["__NO_TICKERS__"]
+        else:
+            all_tickers = sorted(set(universe + benchmark_tickers))
         if expected_count and len(universe) != expected_count:
             errors.append(f"Universe count mismatch: expected={expected_count} actual={len(universe)}")
 
-        all_tickers = sorted(set(universe + benchmark_tickers))
+        universe_query = universe if universe else ["__NO_TICKERS__"]
         ph_all = placeholders(all_tickers)
-        ph_universe = placeholders(universe)
+        ph_universe = placeholders(universe_query)
         params_all = (source_id, *all_tickers)
-        params_universe = (source_id, *universe)
+        params_universe = (source_id, *universe_query)
 
         price_rows = conn.execute(
             f"""
@@ -179,7 +212,11 @@ def validate() -> int:
         if snapshot_tickers != len(all_tickers):
             errors.append(f"Market snapshot ticker coverage mismatch: expected={len(all_tickers)} actual={snapshot_tickers}")
 
-        corporate_actions = scalar(conn, "SELECT COUNT(*) FROM fact_corporate_action WHERE source_id = ?", (source_id,))
+        corporate_actions = scalar(
+            conn,
+            f"SELECT COUNT(*) FROM fact_corporate_action WHERE source_id = ? AND ticker IN ({ph_all})",
+            params_all,
+        )
         if corporate_actions == 0:
             errors.append(f"No corporate actions loaded for source_id={source_id}")
 
@@ -204,7 +241,7 @@ def validate() -> int:
                   AND asof_date = ?
                   AND ticker IN ({ph_universe})
                 """,
-                (source_id, model_family, feature_asof, *universe),
+                (source_id, model_family, feature_asof, *universe_query),
             )
             feature_rows = conn.execute(
                 f"""
@@ -216,7 +253,7 @@ def validate() -> int:
                   AND ticker IN ({ph_universe})
                 ORDER BY ticker
                 """,
-                (source_id, model_family, feature_asof, *universe),
+                (source_id, model_family, feature_asof, *universe_query),
             ).fetchall()
             feature_tickers = {str(row["ticker"]) for row in feature_rows}
             missing_features = [ticker for ticker in universe if ticker not in feature_tickers]
@@ -243,8 +280,14 @@ def validate() -> int:
 
         review_issue_count = scalar(
             conn,
-            "SELECT COUNT(*) FROM data_quality_issues WHERE stage = ? AND issue_type = 'market_feature_review'",
-            (FEATURE_STAGE,),
+            f"""
+            SELECT COUNT(*)
+            FROM data_quality_issues
+            WHERE stage = ?
+              AND issue_type = 'market_feature_review'
+              AND ticker IN ({ph_universe})
+            """,
+            (FEATURE_STAGE, *universe_query),
         )
         if feature_asof and len(review_features) != review_issue_count:
             errors.append(f"Feature review issue mismatch: features={len(review_features)} issues={review_issue_count}")

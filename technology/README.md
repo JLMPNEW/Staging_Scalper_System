@@ -200,7 +200,7 @@ Stage 9 converts the research score panel into report-only portfolio simulations
 python technology\semiconductors\scripts\09b_run_semiconductor_portfolio_backtest.py
 ```
 
-It writes summary, period-level, holding-level, and manifest outputs to `output/technology_reports/backtests/`. The backtest uses point-in-time universe membership, the research price-source priority list, monthly-style rebalance dates from the diagnostics panel, transaction-cost assumptions from `semiconductor_portfolio_backtest`, and both equal-weight and score-weight versions of top-decile, top-quintile, long-short-decile, and long-short-quintile portfolios. Long-only portfolios are also tested as beta-hedged longs; long-short portfolios are gross-normalized and tested as both dollar-neutral and beta-neutral books. Period rows include SMH and equal-weight-universe benchmark returns, borrow-cost estimates for short legs, gross exposure, and beta exposure.
+It writes summary, period-level, holding-level, and manifest outputs to `output/technology_reports/backtests/`. The backtest uses point-in-time universe membership, the research price-source priority list, monthly-style rebalance dates from the diagnostics panel, transaction-cost assumptions from `semiconductor_portfolio_backtest`, and both equal-weight and score-weight versions of top-decile, top-quintile, long-short-decile, and long-short-quintile portfolios. Long-only portfolios are also tested as beta-hedged longs; long-short portfolios are gross-normalized and tested as both dollar-neutral and beta-neutral books. Period rows include SMH and equal-weight-universe benchmark returns, borrow-cost estimates for short legs, stock/hedge turnover and transaction-cost columns, gross exposure, and beta exposure.
 
 ## Stage 10 Dashboard Reports
 
@@ -221,6 +221,50 @@ python technology\semiconductors\scripts\16_publish_semiconductor_lockbox_ledger
 ```
 
 It reads `technology/semiconductors/data/semiconductor_signal_registry.yaml`, the Stage 7 config weights, diagnostics, Stage 8 research outputs, Stage 9 backtests, Stage 10 dashboard manifest, and the latest production score rows. Outputs land under `output/technology_reports/governance/`: `semiconductor_signal_registry.csv`, `semiconductor_signal_registry.json`, `semiconductor_lockbox_ledger.csv`, `semiconductor_lockbox_ledger.json`, `semiconductor_governance_manifest.json`, and a timestamped snapshot under `snapshots/`. The registry shows production-locked, research-candidate, measurement-only, zero-weight, and planned signals with their diagnostic IC/NW t-stats and birthdate gates. The lockbox ledger records artifact paths, file hashes, row counts, Stage 8 promotion status, walk-forward verdict, backtest reference row, and latest top ranked names.
+
+## Stage 12 Refresh Orchestration
+
+Stage 12 provides one production refresh entry point for each validated subsector sequence.
+
+Semiconductors:
+
+```powershell
+python technology\semiconductors\scripts\17_run_semiconductor_refresh_pipeline.py
+```
+
+The default run executes the production path only: DB/schema initialization, universe validation, prices, PIT membership, market features, SEC fundamentals, FX, positioning, Stage 6A, Stage 6B, Stage 7, the hardening validator, dashboard publishing, governance lockbox, and the final audit. It writes a manifest and per-step logs under `output/technology_reports/orchestration/`.
+
+Script numbers are historical and no longer map one-to-one to stage labels; the Stage 12 orchestrator step table is the authoritative execution map.
+
+Useful modes:
+
+```powershell
+python technology\semiconductors\scripts\17_run_semiconductor_refresh_pipeline.py --dry-run
+python technology\semiconductors\scripts\17_run_semiconductor_refresh_pipeline.py --skip-network
+python technology\semiconductors\scripts\17_run_semiconductor_refresh_pipeline.py --include-research
+python technology\semiconductors\scripts\17_run_semiconductor_refresh_pipeline.py --include-optuna
+python technology\semiconductors\scripts\17_run_semiconductor_refresh_pipeline.py --list-steps
+```
+
+Research diagnostics, Stage 9 backtests, Stage 8 Optuna, and one-time Norgate delisted-price backfill are opt-in so routine refreshes do not accidentally rerun model-review workflows.
+
+Software infrastructure:
+
+```powershell
+python technology\software_infrastructure\scripts\17_run_software_infrastructure_refresh_pipeline.py
+```
+
+The software default run executes the production path only: DB/schema initialization, universe and PIT membership validation, prices, market features, SEC fundamentals, FX, positioning, Stage 6A, deliberate neutral Stage 6B closure, production calibrated scores, dashboard publishing, and governance lockbox validation. It writes a manifest and per-step logs under `output/technology_reports/software_infrastructure/orchestration/`.
+
+Useful software modes:
+
+```powershell
+python technology\software_infrastructure\scripts\17_run_software_infrastructure_refresh_pipeline.py --dry-run
+python technology\software_infrastructure\scripts\17_run_software_infrastructure_refresh_pipeline.py --skip-network
+python technology\software_infrastructure\scripts\17_run_software_infrastructure_refresh_pipeline.py --include-research
+python technology\software_infrastructure\scripts\17_run_software_infrastructure_refresh_pipeline.py --include-optuna
+python technology\software_infrastructure\scripts\17_run_software_infrastructure_refresh_pipeline.py --list-steps
+```
 
 ## Extended History And Historical Fundamentals
 

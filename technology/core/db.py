@@ -12,8 +12,9 @@ SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 XBRL_CONCEPT_MAP_SEED: list[dict[str, Any]] = [
     {"canonical_metric": "revenue", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "Revenues", "priority": 1, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 1},
     {"canonical_metric": "revenue", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "RevenueFromContractWithCustomerExcludingAssessedTax", "priority": 2, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 1},
-    {"canonical_metric": "revenue", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "SalesRevenueNet", "priority": 3, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 1},
-    {"canonical_metric": "revenue", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "SalesRevenueGoodsNet", "priority": 4, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 1},
+    {"canonical_metric": "revenue", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "RevenueFromContractWithCustomerIncludingAssessedTax", "priority": 3, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 1},
+    {"canonical_metric": "revenue", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "SalesRevenueNet", "priority": 4, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 1},
+    {"canonical_metric": "revenue", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "SalesRevenueGoodsNet", "priority": 5, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 1},
     {"canonical_metric": "revenue", "statement": "income_statement", "taxonomy": "ifrs-full", "concept": "Revenue", "priority": 1, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 1},
     {"canonical_metric": "cost_of_sales", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "CostOfRevenue", "priority": 1, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive_abs", "currency_required": 1, "is_core": 0},
     {"canonical_metric": "cost_of_sales", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "CostOfGoodsAndServicesSold", "priority": 2, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive_abs", "currency_required": 1, "is_core": 0},
@@ -71,6 +72,19 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, Any]] = [
     {"canonical_metric": "debt_noncurrent", "statement": "balance_sheet", "taxonomy": "us-gaap", "concept": "LongTermDebt", "priority": 3, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
     {"canonical_metric": "debt_noncurrent", "statement": "balance_sheet", "taxonomy": "ifrs-full", "concept": "NoncurrentBorrowings", "priority": 1, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
     {"canonical_metric": "debt_total", "statement": "balance_sheet", "taxonomy": "ifrs-full", "concept": "Borrowings", "priority": 1, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    # Deferred revenue / contract liabilities + remaining performance obligations.
+    # Software booking / forward-demand signals; measurement-only (no production weight).
+    {"canonical_metric": "deferred_revenue_current", "statement": "balance_sheet", "taxonomy": "us-gaap", "concept": "ContractWithCustomerLiabilityCurrent", "priority": 1, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "deferred_revenue_current", "statement": "balance_sheet", "taxonomy": "us-gaap", "concept": "DeferredRevenueCurrent", "priority": 2, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "deferred_revenue_current", "statement": "balance_sheet", "taxonomy": "ifrs-full", "concept": "CurrentContractLiabilities", "priority": 3, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "deferred_revenue_noncurrent", "statement": "balance_sheet", "taxonomy": "us-gaap", "concept": "ContractWithCustomerLiabilityNoncurrent", "priority": 1, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "deferred_revenue_noncurrent", "statement": "balance_sheet", "taxonomy": "us-gaap", "concept": "DeferredRevenueNoncurrent", "priority": 2, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "deferred_revenue_noncurrent", "statement": "balance_sheet", "taxonomy": "ifrs-full", "concept": "NoncurrentContractLiabilities", "priority": 3, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "deferred_revenue_total", "statement": "balance_sheet", "taxonomy": "us-gaap", "concept": "ContractWithCustomerLiability", "priority": 1, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "deferred_revenue_total", "statement": "balance_sheet", "taxonomy": "us-gaap", "concept": "DeferredRevenue", "priority": 2, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "deferred_revenue_total", "statement": "balance_sheet", "taxonomy": "ifrs-full", "concept": "ContractLiabilities", "priority": 3, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "remaining_performance_obligation", "statement": "balance_sheet", "taxonomy": "us-gaap", "concept": "RevenueRemainingPerformanceObligation", "priority": 1, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "remaining_performance_obligation", "statement": "balance_sheet", "taxonomy": "ifrs-full", "concept": "TransactionPriceAllocatedToRemainingPerformanceObligations", "priority": 2, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
     {"canonical_metric": "diluted_shares", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "WeightedAverageNumberOfDilutedSharesOutstanding", "priority": 1, "period_type": "duration", "unit_type": "shares", "sign_policy": "positive", "currency_required": 0, "is_core": 0},
     {"canonical_metric": "diluted_shares", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "WeightedAverageNumberOfShareDiluted", "priority": 2, "period_type": "duration", "unit_type": "shares", "sign_policy": "positive", "currency_required": 0, "is_core": 0},
     {"canonical_metric": "diluted_shares", "statement": "income_statement", "taxonomy": "ifrs-full", "concept": "AdjustedWeightedAverageShares", "priority": 1, "period_type": "duration", "unit_type": "shares", "sign_policy": "positive", "currency_required": 0, "is_core": 0},
@@ -865,6 +879,7 @@ CREATE TABLE IF NOT EXISTS feature_scoring_input (
     fcf_yield REAL,
     ret_3m REAL,
     ret_12m_ex_1m REAL,
+    rel_strength_bench_3m REAL,
     rel_strength_soxx_3m REAL,
     realized_vol_60d REAL,
     max_drawdown_12m REAL,
@@ -1206,6 +1221,7 @@ def connect(db_path: Path, *, timeout_sec: float = 30.0) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), timeout=float(timeout_sec))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(f"PRAGMA busy_timeout = {int(float(timeout_sec) * 1000)}")
     conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
@@ -1242,6 +1258,8 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "feature_financial_statement", "fx_rate_income_statement", "REAL")
     ensure_column(conn, "feature_financial_statement", "fx_rate_balance_sheet", "REAL")
     ensure_column(conn, "feature_financial_statement", "canonical_quality", "TEXT")
+    ensure_column(conn, "feature_financial_statement", "deferred_revenue", "REAL")
+    ensure_column(conn, "feature_financial_statement", "remaining_performance_obligation", "REAL")
     for column_name in (
         "revenue_usd",
         "gross_profit_usd",
@@ -1267,6 +1285,7 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "fact_sec_xbrl_fact_raw", "source_detail", "TEXT")
     ensure_column(conn, "fact_sec_xbrl_fact_raw", "source_accession_url", "TEXT")
     ensure_column(conn, "fact_financial_statement_canonical", "source_detail", "TEXT")
+    ensure_column(conn, "feature_scoring_input", "rel_strength_bench_3m", "REAL")
 
 
 def seed_xbrl_concept_map(conn: sqlite3.Connection) -> None:

@@ -23,11 +23,26 @@ from med_devices.core.text_norm import as_bool, normalize_cik, normalize_org_nam
 
 LOGGER = logging.getLogger("load_med_device_universe")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+DEFAULT_ACTIVE_LISTING_STATUSES = {"active"}
+DEFAULT_NON_INVESTABLE_LISTING_STATUSES = {
+    "active_financial_status_d",
+    "active_financial_status_e",
+    "inactive_or_not_investable",
+    "invalid_or_inactive",
+}
+DEFAULT_INVESTABLE_SECURITY_TYPES = {
+    "common_stock",
+    "ordinary_shares",
+    "adr_ads",
+    "american_depositary_shares",
+    "new_york_registry_shares",
+}
 
 
 @dataclass(frozen=True)
 class UniverseCompany:
     ticker: str
+    investability_status: str
     company_name: str
     cik: str
     exchange: str
@@ -89,6 +104,36 @@ def universe_status_from_flags(row: dict[str, str]) -> str:
     return "keep"
 
 
+def normalized_set(raw: Any, default: set[str]) -> set[str]:
+    values = raw if isinstance(raw, list) else list(default)
+    out = {normalize_subsector(value) for value in values if str(value or "").strip()}
+    return out or set(default)
+
+
+def derive_investability_status(
+    *,
+    manual_status: str,
+    listing_status: str,
+    security_type: str,
+    active_listing_statuses: set[str],
+    non_investable_listing_statuses: set[str],
+    investable_security_types: set[str],
+) -> tuple[str, str, int]:
+    if manual_status == "remove":
+        return "manual_exclude", "remove", 0
+    listing_key = normalize_subsector(listing_status)
+    security_key = normalize_subsector(security_type)
+    if listing_key in non_investable_listing_statuses:
+        return "non_investable_listing_status", "non_investable_listing_status", 0
+    if security_key and security_key not in investable_security_types:
+        return "non_investable_security_type", "non_investable_security_type", 0
+    if listing_key and listing_key not in active_listing_statuses:
+        return "review_listing_status", "review", 1
+    if manual_status == "review":
+        return "manual_review", "review", 1
+    return "investable", "keep", 1
+
+
 def data_quality_status(company: UniverseCompany) -> str:
     required = [
         company.ticker,
@@ -113,10 +158,26 @@ def medtech_pure_play_flag(industry: str, subsector: str) -> int:
     return int(bool(labels & pure_play_labels))
 
 
-def parse_universe_rows(path: Path) -> list[UniverseCompany]:
+def parse_universe_rows(path: Path, *, config: dict[str, Any]) -> list[UniverseCompany]:
     rows = read_csv_flexible(path)
     companies: list[UniverseCompany] = []
     seen: set[str] = set()
+    active_listing_statuses = normalized_set(
+        cfg_get(config, "universe_validation.active_listing_statuses", list(DEFAULT_ACTIVE_LISTING_STATUSES)),
+        DEFAULT_ACTIVE_LISTING_STATUSES,
+    )
+    non_investable_listing_statuses = normalized_set(
+        cfg_get(
+            config,
+            "universe_validation.non_investable_listing_statuses",
+            list(DEFAULT_NON_INVESTABLE_LISTING_STATUSES),
+        ),
+        DEFAULT_NON_INVESTABLE_LISTING_STATUSES,
+    )
+    investable_security_types = normalized_set(
+        cfg_get(config, "universe_validation.investable_security_types", list(DEFAULT_INVESTABLE_SECURITY_TYPES)),
+        DEFAULT_INVESTABLE_SECURITY_TYPES,
+    )
     for raw in rows:
         ticker = normalize_ticker(row_get(raw, "ticker", "Ticker", "Name", "MatchedTicker"))
         matched_ticker = normalize_ticker(row_get(raw, "MatchedTicker", "ticker", "Ticker", "Name"))
@@ -134,7 +195,16 @@ def parse_universe_rows(path: Path) -> list[UniverseCompany]:
         industry = row_get(raw, "industry", "IndustryGroup", "Index")
         subsector = normalize_subsector(row_get(raw, "medtech_subsector", "Subsector", "Index"))
         security_type = row_get(raw, "security_type", "SecurityType")
+        listing_status = row_get(raw, "listing_status", "ListingStatus")
         status = universe_status_from_flags(raw)
+        investability_status, universe_status, is_active = derive_investability_status(
+            manual_status=status,
+            listing_status=listing_status,
+            security_type=security_type,
+            active_listing_statuses=active_listing_statuses,
+            non_investable_listing_statuses=non_investable_listing_statuses,
+            investable_security_types=investable_security_types,
+        )
         source_aliases = tuple(
             alias
             for alias in {
@@ -147,6 +217,7 @@ def parse_universe_rows(path: Path) -> list[UniverseCompany]:
         )
         company = UniverseCompany(
             ticker=ticker,
+            investability_status=investability_status,
             company_name=company_name,
             cik=normalize_cik(row_get(raw, "cik", "CIK")),
             exchange=row_get(raw, "exchange", "Exchange"),
@@ -156,10 +227,10 @@ def parse_universe_rows(path: Path) -> list[UniverseCompany]:
             country=row_get(raw, "country", "Country"),
             currency=row_get(raw, "currency", "Currency"),
             security_type=security_type,
-            listing_status=row_get(raw, "listing_status", "ListingStatus"),
+            listing_status=listing_status,
             is_primary_listing=1 if as_bool(row_get(raw, "is_primary_listing", "IsPrimaryListing")) else 0,
-            universe_status=status,
-            is_active=0 if status == "remove" else 1,
+            universe_status=universe_status,
+            is_active=is_active,
             medtech_pure_play_flag=medtech_pure_play_flag(industry, subsector),
             source_aliases=source_aliases,
             data_quality_status="",
@@ -298,7 +369,7 @@ def main() -> None:
     if not universe_csv.exists():
         raise FileNotFoundError(f"Med-devices universe CSV not found: {universe_csv}")
 
-    companies = parse_universe_rows(universe_csv)
+    companies = parse_universe_rows(universe_csv, config=config)
     with connect(db_path, timeout_sec=timeout_sec) as conn:
         init_db(conn)
         run_id = start_run(conn, run_type="load_med_device_universe", input_path=universe_csv)

@@ -38,6 +38,7 @@ med_devices/secrets*.local.yaml
 *.feather
 *.arrow
 *.log
+*.html
 
 # --- Large data / generated files ---
 tmpomvpuh6h/

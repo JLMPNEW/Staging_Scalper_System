@@ -274,3 +274,28 @@ Acceptance tests:
 - The signal registry includes Stage 7 weights, Stage 8 candidate flags, signal birthdates, and Newey-West diagnostic IC statistics when available.
 - The lockbox ledger records file paths, SHA-256 hashes, row counts, Stage 8 promotion decision, walk-forward verdict, reference backtest row, latest Stage 7 summary, and top ranked names.
 - The publisher is read-only with respect to `technology.sqlite`.
+
+## Stage 12 - Refresh Orchestration
+
+Goal: provide one validated refresh entry point per technology subsector with reportable per-step status and logs.
+
+Run order:
+
+```powershell
+python technology\semiconductors\scripts\17_run_semiconductor_refresh_pipeline.py
+python technology\software_infrastructure\scripts\17_run_software_infrastructure_refresh_pipeline.py
+```
+
+Acceptance tests:
+
+- The default run executes the production refresh path and excludes research-only, Optuna, and one-time Norgate backfill steps.
+- The runner supports `--dry-run`, `--skip-network`, `--include-research`, `--include-optuna`, `--include-norgate-backfill`, `--from-step`, `--to-step`, `--only`, and `--list-steps`.
+- The runner step table is the authoritative stage map; script numbers are historical and may not match stage labels.
+- The production default path runs the hardening validator even when Optuna research is not requested.
+- Each step runs as a subprocess using the current Python executable and the configured `technology/config.yaml`.
+- The final audit is included in the default production path.
+- A JSON manifest and CSV step ledger are written under `output/technology_reports/orchestration/`.
+- Per-step logs are written under `output/technology_reports/orchestration/logs/`.
+- The runner stops on first failure unless `--continue-on-error` is set.
+- Stage 8 weight searches remain opt-in and are not part of routine refreshes.
+- The software-infrastructure default path uses the deliberate neutral Stage 6B closure and existing validators instead of semiconductor-specific hardening/final-audit scripts.

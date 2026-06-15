@@ -48,6 +48,7 @@ class CohortAssignment:
 @dataclass(frozen=True)
 class UniverseCompany:
     ticker: str
+    investability_status: str
     company_name: str
     cik: str
     exchange: str
@@ -195,6 +196,8 @@ def data_quality_status(company: UniverseCompany, *, unassigned_cohort_id: str) 
 
 
 def universe_status(company: UniverseCompany, *, active_statuses: set[str], investable_types: set[str]) -> str:
+    if company.investability_status.startswith("non_investable_"):
+        return company.investability_status
     if normalize_label(company.listing_status) not in active_statuses:
         return "review"
     if normalize_label(company.security_type) not in investable_types:
@@ -216,6 +219,13 @@ def parse_universe_rows(
     companies: list[UniverseCompany] = []
     seen: set[str] = set()
     active_statuses = {normalize_label(x) for x in policy.get("active_listing_statuses", ["active"])}
+    non_investable_statuses = {
+        normalize_label(x)
+        for x in policy.get(
+            "non_investable_listing_statuses",
+            ["active_financial_status_d", "active_financial_status_e", "inactive_or_not_investable", "invalid_or_inactive"],
+        )
+    }
     investable_types = {normalize_label(x) for x in policy.get("investable_security_types", [])}
     unassigned_id = str(policy.get("default_unassigned_cohort_id") or settings.default_unassigned_cohort_id).strip()
     unassigned_name = str(policy.get("default_unassigned_cohort_name") or settings.default_unassigned_cohort_name).strip()
@@ -237,18 +247,31 @@ def parse_universe_rows(
                 cohort_name=unassigned_name,
                 calibration_use=unassigned_use,
             )
+        listing_status = row_get(raw, "listing_status", "ListingStatus")
+        security_type = row_get(raw, "security_type", "SecurityType")
+        listing_key = normalize_label(listing_status)
+        security_key = normalize_label(security_type)
+        if listing_key in non_investable_statuses:
+            investability_status = "non_investable_listing_status"
+        elif security_key and security_key not in investable_types:
+            investability_status = "non_investable_security_type"
+        elif listing_key and listing_key not in active_statuses:
+            investability_status = "review_listing_status"
+        else:
+            investability_status = "investable"
         company = UniverseCompany(
             ticker=ticker,
+            investability_status=investability_status,
             company_name=row_get(raw, "company_name", "CompanyName", "company", "name"),
             cik=normalize_cik(row_get(raw, "cik", "CIK")),
             exchange=row_get(raw, "exchange", "Exchange"),
             sector=row_get(raw, "sector", "Sector") or "Technology",
-            industry=row_get(raw, "industry", "Industry") or "Semiconductors",
+            industry=row_get(raw, "industry", "Industry") or str(policy.get("default_industry") or "Technology"),
             subindustry_role=row_get(raw, "subsector", "Subsector", "subindustry_role"),
             country=row_get(raw, "country", "Country"),
             currency=row_get(raw, "currency", "Currency"),
-            security_type=row_get(raw, "security_type", "SecurityType"),
-            listing_status=row_get(raw, "listing_status", "ListingStatus"),
+            security_type=security_type,
+            listing_status=listing_status,
             is_primary_listing=1 if as_bool(row_get(raw, "is_primary_listing", "IsPrimaryListing")) else 0,
             model_family=model_family,
             taxonomy_subsector=model_family,
@@ -264,7 +287,7 @@ def parse_universe_rows(
             **{
                 **company.__dict__,
                 "universe_status": status,
-                "is_active": 0 if status == "remove" else 1,
+                "is_active": 0 if status == "remove" or status.startswith("non_investable_") else 1,
             }
         )
         company = UniverseCompany(**{**company.__dict__, "data_quality_status": data_quality_status(company, unassigned_cohort_id=unassigned_id)})
@@ -622,6 +645,20 @@ def upsert_universe(
                 issue_detail=settings.unassigned_issue_detail,
                 load_stage=settings.load_stage,
                 severity="warning",
+            )
+        if company.investability_status.startswith("non_investable_"):
+            add_issue(
+                conn,
+                ticker=company.ticker,
+                company_id=company_id,
+                source_id=seed_source_id,
+                issue_type=company.investability_status,
+                issue_detail=(
+                    f"Excluded from active investable universe because "
+                    f"listing_status={company.listing_status!r} security_type={company.security_type!r}."
+                ),
+                load_stage=settings.load_stage,
+                severity="error",
             )
     return len(companies)
 

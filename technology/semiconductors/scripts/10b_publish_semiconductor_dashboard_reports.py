@@ -166,7 +166,7 @@ def load_latest_score_rows(conn: sqlite3.Connection, *, source_id: str, baseline
         WHERE o.source_id = ?
           AND o.model_family = ?
           AND o.asof_date = ?
-        ORDER BY o.final_rank
+        ORDER BY o.final_rank IS NULL, o.final_rank, o.ticker
         """,
         (baseline_source, source_id, model_family, asof),
     )

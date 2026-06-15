@@ -36,6 +36,12 @@ from biotech_index.core.pipeline_guards import format_ticker_sample, read_final_
 
 LOGGER = logging.getLogger("run_biotech_refresh_pipeline")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+DEFAULT_FORM4_RAW_FILING_DATE_SOURCES = (
+    ("sec_ownership_submission", "filing_date"),
+    ("sec_form4_daily_ingest_log", "filing_date"),
+    ("form4_events_tier1", "filing_date"),
+    ("form4_buy_events_v1", "filing_date"),
+)
 
 BIOTECH_SCORE_REQUIRED_COLUMNS = [
     "tier1_selection_gate_score",
@@ -157,6 +163,27 @@ def parse_date(raw: object) -> date | None:
         return None
 
 
+def parse_db_date(raw: object) -> date | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    candidates = [text]
+    if "T" in text:
+        candidates.append(text.split("T", 1)[0])
+    elif len(text) > 10:
+        candidates.append(text[:10])
+    for candidate in candidates:
+        parsed = parse_date(candidate)
+        if parsed is not None:
+            return parsed
+    for fmt in ("%Y%m%d", "%Y/%m/%d", "%d-%b-%Y", "%d-%B-%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def compact_asof(asof: str) -> str:
     parsed = parse_date(asof)
     return parsed.strftime("%Y%m%d") if parsed is not None else str(asof).replace("-", "")
@@ -194,6 +221,37 @@ def parse_string_list(raw: object, default: list[str] | None = None) -> list[str
         parts = [str(raw)]
     values = [part.strip() for part in parts if part.strip()]
     return values or list(default or [])
+
+
+def parse_table_column_sources(
+    raw: object,
+    default: tuple[tuple[str, str], ...],
+) -> list[tuple[str, str]]:
+    if raw is None:
+        return list(default)
+    values: list[tuple[str, str]] = []
+    if isinstance(raw, dict):
+        raw_items: list[object] = [raw]
+    elif isinstance(raw, (list, tuple)):
+        raw_items = list(raw)
+    else:
+        raw_items = [str(raw)]
+    for item in raw_items:
+        if isinstance(item, dict):
+            table = str(item.get("table") or "").strip()
+            column = str(item.get("column") or "").strip()
+        else:
+            text = str(item or "").strip()
+            if "." not in text:
+                raise ValueError(
+                    "Form 4 raw filing date sources must be mappings with table/column "
+                    f"or strings in table.column form; got {item!r}"
+                )
+            table, column = (part.strip() for part in text.split(".", 1))
+        if not table or not column:
+            raise ValueError(f"Invalid Form 4 raw filing date source: {item!r}")
+        values.append((table, column))
+    return values or list(default)
 
 
 def resolved_path_text(path: Path) -> str:
@@ -1067,7 +1125,35 @@ def read_form4_snapshot_date(conn: sqlite3.Connection, snapshot_table: str) -> t
             continue
         if row and row["snapshot_date"]:
             raw = str(row["snapshot_date"])
-            parsed = parse_date(raw)
+            parsed = parse_db_date(raw)
+            if parsed is not None and (best_date is None or parsed > best_date):
+                best_raw = raw
+                best_source = f"{table}.{field}"
+                best_date = parsed
+    return best_raw, best_source
+
+
+def read_form4_raw_filing_date(
+    conn: sqlite3.Connection,
+    sources: list[tuple[str, str]],
+) -> tuple[str, str]:
+    best_raw = ""
+    best_source = ""
+    best_date: date | None = None
+    for table, field in sources:
+        try:
+            table_sql = quote_identifier(table)
+            field_sql = quote_identifier(field)
+            rows = conn.execute(
+                f"SELECT DISTINCT {field_sql} AS filing_date FROM {table_sql} "
+                f"WHERE {field_sql} IS NOT NULL AND {field_sql} <> ''"
+            ).fetchall()
+        except (sqlite3.Error, ValueError) as exc:
+            LOGGER.debug("Form 4 raw filing probe skipped source=%s.%s error=%s", table, field, exc)
+            continue
+        for row in rows:
+            raw = str(row["filing_date"] or "").strip()
+            parsed = parse_db_date(raw)
             if parsed is not None and (best_date is None or parsed > best_date):
                 best_raw = raw
                 best_source = f"{table}.{field}"
@@ -1114,26 +1200,56 @@ def validate_form4_preflight(
         True,
     )
     warn_only = as_bool(cfg_get(config, "biotech_refresh.form4_preflight.warn_only", False), False)
+    raw_filing_check_enabled = as_bool(
+        cfg_get(config, "biotech_refresh.form4_preflight.raw_filing_freshness_enabled", True),
+        True,
+    )
+    raw_filing_required = as_bool(
+        cfg_get(config, "biotech_refresh.form4_preflight.raw_filing_required", required),
+        required,
+    )
+    max_raw_filing_lag_days = int(
+        cfg_get(config, "biotech_refresh.form4_preflight.max_raw_filing_lag_days", 5)
+    )
+    raw_filing_lag_day_basis = str(
+        cfg_get(config, "biotech_refresh.form4_preflight.raw_filing_lag_day_basis", staleness_day_basis)
+    ).strip().lower()
+    if raw_filing_lag_day_basis not in {"calendar", "business"}:
+        raise ValueError(
+            "biotech_refresh.form4_preflight.raw_filing_lag_day_basis must be 'calendar' or 'business', "
+            f"got {raw_filing_lag_day_basis!r}"
+        )
+    raw_filing_sources = parse_table_column_sources(
+        cfg_get(config, "biotech_refresh.form4_preflight.raw_filing_date_sources", None),
+        DEFAULT_FORM4_RAW_FILING_DATE_SOURCES,
+    )
 
     failures: list[str] = []
     warnings: list[str] = []
     snapshot_raw = ""
     snapshot_source = ""
     age_days: int | str = ""
+    raw_filing_raw = ""
+    raw_filing_source = ""
+    raw_filing_age_days: int | str = ""
 
     if max_staleness_days < 0:
         raise ValueError("biotech_refresh.form4_preflight.max_staleness_days must be >= 0")
+    if max_raw_filing_lag_days < 0:
+        raise ValueError("biotech_refresh.form4_preflight.max_raw_filing_lag_days must be >= 0")
     if not form4_db_path.exists():
         failures.append(f"Form 4 database not found: {form4_db_path}")
     else:
         try:
             with closing(connect_form4_readonly(form4_db_path)) as conn:
                 snapshot_raw, snapshot_source = read_form4_snapshot_date(conn, snapshot_table)
+                if raw_filing_check_enabled:
+                    raw_filing_raw, raw_filing_source = read_form4_raw_filing_date(conn, raw_filing_sources)
         except sqlite3.Error as exc:
             failures.append(f"Form 4 database cannot be opened read-only: {form4_db_path} ({type(exc).__name__}: {exc})")
 
     if not failures:
-        snapshot_date = parse_date(snapshot_raw)
+        snapshot_date = parse_db_date(snapshot_raw)
         if snapshot_date is None:
             failures.append(f"Form 4 snapshot date is unavailable in {form4_db_path}")
         else:
@@ -1153,6 +1269,34 @@ def validate_form4_preflight(
                     f"asof={target_date.isoformat()} age_days={age_days} basis={staleness_day_basis} "
                     f"max_staleness_days={max_staleness_days}"
                 )
+        if raw_filing_check_enabled:
+            raw_filing_date = parse_db_date(raw_filing_raw)
+            if raw_filing_date is None:
+                message = (
+                    f"Form 4 raw filing date is unavailable in {form4_db_path}; "
+                    f"checked sources={raw_filing_sources}"
+                )
+                if raw_filing_required:
+                    failures.append(message)
+                else:
+                    warnings.append(message)
+            else:
+                raw_filing_age_days = (
+                    business_day_age(raw_filing_date, target_date)
+                    if raw_filing_lag_day_basis == "business"
+                    else (target_date - raw_filing_date).days
+                )
+                if isinstance(raw_filing_age_days, int) and raw_filing_age_days < 0:
+                    failures.append(
+                        f"Form 4 raw filing date is future-dated: raw_filing_date={raw_filing_date.isoformat()} "
+                        f"asof={target_date.isoformat()} age_days={raw_filing_age_days} basis={raw_filing_lag_day_basis}"
+                    )
+                elif isinstance(raw_filing_age_days, int) and raw_filing_age_days > max_raw_filing_lag_days:
+                    failures.append(
+                        f"Form 4 raw filings are stale: raw_filing_date={raw_filing_date.isoformat()} "
+                        f"asof={target_date.isoformat()} age_days={raw_filing_age_days} "
+                        f"basis={raw_filing_lag_day_basis} max_raw_filing_lag_days={max_raw_filing_lag_days}"
+                    )
 
     if failures and (required and not warn_only):
         raise RuntimeError("Form 4 preflight failed: " + " | ".join(failures))
@@ -1165,12 +1309,16 @@ def validate_form4_preflight(
         status = "warning"
     else:
         LOGGER.info(
-            "Finished form4_preflight status=success elapsed=%.3fs db=%s snapshot_date=%s source=%s age_days=%s",
+            "Finished form4_preflight status=success elapsed=%.3fs db=%s snapshot_date=%s source=%s "
+            "age_days=%s raw_filing_date=%s raw_source=%s raw_age_days=%s",
             elapsed,
             form4_db_path,
             snapshot_raw,
             snapshot_source,
             age_days,
+            raw_filing_raw,
+            raw_filing_source,
+            raw_filing_age_days,
         )
         status = "success"
     return {
@@ -1182,7 +1330,9 @@ def validate_form4_preflight(
         "returncode": 0,
         "command": (
             f"validate Form 4 db={form4_db_path} asof={asof} snapshot_date={snapshot_raw or '<missing>'} "
-            f"source={snapshot_source or '<missing>'} age_days={age_days} max_staleness_days={max_staleness_days}"
+            f"source={snapshot_source or '<missing>'} age_days={age_days} max_staleness_days={max_staleness_days} "
+            f"raw_filing_date={raw_filing_raw or '<missing>'} raw_source={raw_filing_source or '<missing>'} "
+            f"raw_age_days={raw_filing_age_days} max_raw_filing_lag_days={max_raw_filing_lag_days}"
         ),
     }
 

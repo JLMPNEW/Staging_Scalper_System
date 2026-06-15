@@ -84,6 +84,8 @@ CSV_FIELDS = [
     "free_cash_flow_ttm",
     "revenue_yoy_growth",
     "inventory_days",
+    "deferred_revenue",
+    "remaining_performance_obligation",
     "data_quality_status",
     "review_reason",
 ]
@@ -112,6 +114,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build canonical SEC financial statement features for technology tickers.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--model-family", default="", help="Technology model family to build, e.g. semiconductors.")
     parser.add_argument("--tickers", default="")
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
@@ -151,12 +154,36 @@ def canonical_key(*parts: object) -> str:
     return hashlib.sha256("|".join(str(part or "") for part in parts).encode("utf-8")).hexdigest()
 
 
-def load_universe(conn: Any, ticker_filter: set[str], *, include_historical: bool = False) -> list[str]:
+def load_universe(conn: Any, ticker_filter: set[str], *, model_family: str, include_historical: bool = False) -> list[str]:
     # Historical members (universe_status='historical') get PIT financial
     # features for research panels; they never enter production scoring, which
     # filters on is_active=1 downstream.
-    historical_clause = "OR (is_active = 0 AND universe_status = 'historical')" if include_historical else ""
-    rows = conn.execute(f"SELECT ticker FROM dim_company WHERE is_active = 1 {historical_clause} ORDER BY ticker").fetchall()
+    if include_historical:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT c.ticker
+            FROM dim_company c
+            JOIN dim_universe_membership m
+              ON m.ticker = c.ticker
+             AND m.model_family = ?
+             AND (m.is_current_member = 1 OR m.point_in_time_flag = 1)
+            ORDER BY c.ticker
+            """,
+            (model_family,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT c.ticker
+            FROM dim_company c
+            JOIN dim_technology_taxonomy t
+              ON t.ticker = c.ticker
+             AND t.model_family = ?
+            WHERE c.is_active = 1
+            ORDER BY c.ticker
+            """,
+            (model_family,),
+        ).fetchall()
     out = [normalize_ticker(row["ticker"]) for row in rows if normalize_ticker(row["ticker"])]
     return [ticker for ticker in out if not ticker_filter or ticker in ticker_filter]
 
@@ -716,6 +743,7 @@ def upsert_feature(conn: Any, feature: dict[str, Any]) -> None:
         "operating_cash_flow_usd", "capex_usd", "free_cash_flow_usd",
         "assets_usd", "liabilities_usd", "equity_usd", "cash_and_equivalents_usd",
         "total_debt_usd", "inventory_usd",
+        "deferred_revenue", "remaining_performance_obligation",
         "revenue_ttm", "gross_profit_ttm", "operating_income_ttm", "net_income_ttm",
         "free_cash_flow_ttm", "gross_margin", "operating_margin", "fcf_margin",
         "r_and_d_pct_revenue", "sbc_pct_revenue", "net_cash", "net_cash_to_assets",
@@ -756,6 +784,8 @@ FLOW_EXTRACT_METRICS = (
 BALANCE_EXTRACT_METRICS = (
     "assets", "liabilities", "equity", "cash_and_equivalents", "inventory",
     "debt_current", "debt_noncurrent", "debt_total",
+    "deferred_revenue_current", "deferred_revenue_noncurrent", "deferred_revenue_total",
+    "remaining_performance_obligation",
 )
 TTM_METRICS = (
     "revenue", "cost_of_sales", "gross_profit", "operating_income", "net_income",
@@ -977,6 +1007,10 @@ def build_ticker_features(
             "stock_based_compensation": metric_values.get("stock_based_compensation"),
             "diluted_shares": metric_values.get("diluted_shares"),
             "cost_of_sales": metric_values.get("cost_of_sales"),
+            "deferred_revenue_current": metric_values.get("deferred_revenue_current"),
+            "deferred_revenue_noncurrent": metric_values.get("deferred_revenue_noncurrent"),
+            "deferred_revenue_total": metric_values.get("deferred_revenue_total"),
+            "remaining_performance_obligation": metric_values.get("remaining_performance_obligation"),
             "canonical_quality": canonical_quality,
             "data_quality_status": "review",
             "_is_annual": is_annual,
@@ -1053,6 +1087,19 @@ def build_ticker_features(
         feature["net_cash"] = None
         if feature.get("cash_and_equivalents") is not None or feature.get("total_debt") is not None:
             feature["net_cash"] = float(feature.get("cash_and_equivalents") or 0.0) - float(feature.get("total_debt") or 0.0)
+        # Deferred revenue = current + noncurrent contract liabilities (ASC 606 or
+        # legacy split); fall back to the reported total when the split is absent.
+        dr_current = safe_float(feature.get("deferred_revenue_current"))
+        dr_noncurrent = safe_float(feature.get("deferred_revenue_noncurrent"))
+        dr_total = safe_float(feature.get("deferred_revenue_total"))
+        if dr_current is not None and dr_noncurrent is not None:
+            feature["deferred_revenue"] = dr_current + dr_noncurrent
+        elif dr_total is not None:
+            feature["deferred_revenue"] = dr_total
+        elif dr_current is not None:
+            feature["deferred_revenue"] = dr_current
+        else:
+            feature["deferred_revenue"] = dr_noncurrent
         feature["net_cash_to_assets"] = safe_div(safe_float(feature.get("net_cash")), safe_float(feature.get("assets")))
         cogs_ttm = safe_float(feature.get("cost_of_sales_ttm"))
         if cogs_ttm is None and revenue_ttm is not None and safe_float(feature.get("gross_profit_ttm")) is not None:
@@ -1124,7 +1171,13 @@ def main() -> None:
     filings_source = str(cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions"))
     fx_source = str(cfg_get(config, "fx_rates.source_id", "yahoo_fx_rates"))
     price_source = str(cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted") or "yahoo_finance_adjusted")
-    model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors") or "semiconductors")
+    model_family = str(
+        args.model_family
+        or cfg_get(config, "technology_universe.initial_subsector", "semiconductors")
+        or "semiconductors"
+    ).strip()
+    if not model_family:
+        raise ValueError("model_family cannot be empty")
     ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
     report_rows: list[dict[str, Any]] = []
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
@@ -1132,13 +1185,12 @@ def main() -> None:
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
             include_historical = str(cfg_get(config, "sec_fundamentals.include_historical_members", True)).strip().lower() in {"1", "true", "yes", "y"}
-            tickers = load_universe(conn, ticker_filter, include_historical=include_historical)
+            tickers = load_universe(conn, ticker_filter, model_family=model_family, include_historical=include_historical)
+            if not tickers:
+                raise ValueError(f"No SEC feature universe tickers found for model_family={model_family}.")
             with conn:
-                if ticker_filter:
-                    placeholders = ",".join("?" for _ in tickers)
-                    conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (RUN_TYPE, *tickers))
-                else:
-                    conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
+                placeholders = ",".join("?" for _ in tickers)
+                conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (RUN_TYPE, *tickers))
                 for ticker in tickers:
                     canonical_count = rebuild_canonical_for_ticker(conn, ticker, facts_source)
                     features = build_ticker_features(

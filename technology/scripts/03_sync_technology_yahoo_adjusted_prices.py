@@ -107,10 +107,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync Yahoo adjusted daily OHLCV for the technology universe.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--model-family", default="", help="Technology model family to refresh, e.g. semiconductors.")
     parser.add_argument("--start-date", default="")
     parser.add_argument("--asof", default="", help="Fetch bars through this YYYY-MM-DD date. Defaults to today.")
     parser.add_argument("--tickers", default="", help="Optional comma-separated ticker subset.")
     parser.add_argument("--max-tickers", type=int, default=0)
+    parser.add_argument("--benchmark-tickers", default="", help="Optional comma-separated benchmark ticker override.")
     parser.add_argument("--skip-benchmarks", action="store_true")
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--allow-partial", action="store_true")
@@ -165,14 +167,33 @@ def cache_name(ticker: str, start_date: date, end_date: date) -> str:
     return f"{safe}_{start_date.isoformat()}_{end_date.isoformat()}.json"
 
 
-def load_universe_jobs(conn: Any, *, ticker_filter: set[str], max_tickers: int) -> list[PriceJob]:
+def parse_ticker_list(raw: object) -> list[str]:
+    if isinstance(raw, list):
+        values = raw
+    else:
+        values = str(raw or "").split(",")
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        ticker = normalize_ticker(value)
+        if ticker and ticker not in seen:
+            out.append(ticker)
+            seen.add(ticker)
+    return out
+
+
+def load_universe_jobs(conn: Any, *, model_family: str, ticker_filter: set[str], max_tickers: int) -> list[PriceJob]:
     rows = conn.execute(
         """
-        SELECT ticker, company_name
-        FROM dim_company
-        WHERE is_active = 1
-        ORDER BY ticker
-        """
+        SELECT DISTINCT c.ticker, c.company_name
+        FROM dim_company c
+        JOIN dim_technology_taxonomy t
+          ON t.ticker = c.ticker
+         AND t.model_family = ?
+        WHERE c.is_active = 1
+        ORDER BY c.ticker
+        """,
+        (model_family,),
     ).fetchall()
     out: list[PriceJob] = []
     seen: set[str] = set()
@@ -606,14 +627,28 @@ def main() -> None:
     max_retries = int(cfg_get(config, "yahoo_price_ingestion.max_retries", 3))
     parallel_workers = max(1, int(cfg_get(config, "yahoo_price_ingestion.parallel_workers", 4)))
     retry_status_codes = int_set(cfg_get(config, "yahoo_price_ingestion.retry_status_codes"), {429, 500, 502, 503, 504})
-    benchmark_tickers = [str(x) for x in cfg_get(config, "technology_universe.benchmark_tickers", [])]
+    model_family = str(
+        args.model_family
+        or cfg_get(config, "technology_universe.initial_subsector", "semiconductors")
+        or "semiconductors"
+    ).strip()
+    if not model_family:
+        raise ValueError("model_family cannot be empty")
+    benchmark_tickers = parse_ticker_list(args.benchmark_tickers) or parse_ticker_list(
+        cfg_get(config, "technology_universe.benchmark_tickers", [])
+    )
     ticker_filter = {normalize_ticker(x) for x in str(args.tickers or "").split(",") if normalize_ticker(x)}
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
         source_registry_path = resolve_path(cfg_get(config, "source_registry.path"), base_dir=base_dir)
         upsert_source_registry(conn, load_source_registry(source_registry_path))
-        jobs = load_universe_jobs(conn, ticker_filter=ticker_filter, max_tickers=int(args.max_tickers))
+        jobs = load_universe_jobs(
+            conn,
+            model_family=model_family,
+            ticker_filter=ticker_filter,
+            max_tickers=int(args.max_tickers),
+        )
         jobs = append_benchmarks(jobs, benchmark_tickers, skip_benchmarks=bool(args.skip_benchmarks))
         if source_id != SOURCE_ID_DEFAULT:
             raise ValueError(f"This script currently expects source_id={SOURCE_ID_DEFAULT}, got {source_id}")
@@ -622,7 +657,13 @@ def main() -> None:
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         ingestion_run_id = start_ingestion_run(conn, SOURCE_ID_DEFAULT)
 
-    LOGGER.info("Fetching Yahoo adjusted prices for %d tickers from %s through %s", len(jobs), start, end)
+    LOGGER.info(
+        "Fetching Yahoo adjusted prices for model_family=%s tickers=%d from %s through %s",
+        model_family,
+        len(jobs),
+        start,
+        end,
+    )
     results: list[FetchResult] = []
     with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
         futures = [
@@ -659,12 +700,12 @@ def main() -> None:
         init_db(conn)
         with conn:
             processed = sorted({result.job.ticker for result in results})
-            if ticker_filter or int(args.max_tickers) > 0:
-                # Subset run: only clear issues for the tickers actually refreshed.
+            if processed:
                 placeholders = ",".join("?" for _ in processed)
-                conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (RUN_TYPE, *processed))
-            else:
-                conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
+                conn.execute(
+                    f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})",
+                    (RUN_TYPE, *processed),
+                )
             for result in sorted(results, key=lambda item: item.job.ticker):
                 bars_upserted, actions_upserted = upsert_result(conn, result, ingestion_run_id=ingestion_run_id)
                 total_bars += bars_upserted

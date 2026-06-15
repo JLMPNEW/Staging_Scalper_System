@@ -99,6 +99,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync direct SEC Forms 3/4/5 ownership filings for technology tickers.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--model-family", default="", help="Technology model family to sync, e.g. semiconductors.")
     parser.add_argument("--tickers", default="")
     parser.add_argument("--max-tickers", type=int, default=0)
     parser.add_argument("--force-refresh", action="store_true")
@@ -233,16 +234,20 @@ def record_raw_response(conn: Any, *, source_id: str, endpoint: str, status: int
     )
 
 
-def load_universe(conn: Any, ticker_filter: set[str]) -> list[dict[str, Any]]:
+def load_universe(conn: Any, ticker_filter: set[str], *, model_family: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT c.ticker, c.cik, c.company_name, c.country,
+        SELECT DISTINCT c.ticker, c.cik, c.company_name, c.country,
                COALESCE(p.is_foreign_private_issuer, 0) AS is_fpi
         FROM dim_company c
+        JOIN dim_technology_taxonomy t
+          ON t.ticker = c.ticker
+         AND t.model_family = ?
         LEFT JOIN dim_issuer_reporting_profile p ON p.ticker = c.ticker
         WHERE c.is_active = 1
         ORDER BY c.ticker
-        """
+        """,
+        (model_family,),
     ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -1068,7 +1073,15 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    LOGGER.info("Using technology DB: %s", db_path)
     source_id = str(cfg_get(config, "sec_ownership_direct.source_id", "sec_ownership_direct"))
+    model_family = str(
+        args.model_family
+        or cfg_get(config, "technology_universe.initial_subsector", "semiconductors")
+        or "semiconductors"
+    ).strip()
+    if not model_family:
+        raise ValueError("model_family cannot be empty")
     registry_path = resolve_path(cfg_get(config, "source_registry.path"), base_dir=base_dir)
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(cfg_get(config, "sec_ownership_direct.report_output_csv"), base_dir=base_dir)
     cache_dir = resolve_path(cfg_get(config, "sec_ownership_direct.cache_dir"), base_dir=base_dir)
@@ -1088,9 +1101,11 @@ def main() -> None:
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
         upsert_source_registry(conn, load_source_registry(registry_path))
-        companies = load_universe(conn, ticker_filter)
+        companies = load_universe(conn, ticker_filter, model_family=model_family)
         if max_tickers > 0:
             companies = companies[:max_tickers]
+        if not companies:
+            raise ValueError(f"No direct ownership universe tickers found for model_family={model_family}.")
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
             with conn:

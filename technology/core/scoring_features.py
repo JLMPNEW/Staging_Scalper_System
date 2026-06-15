@@ -104,7 +104,7 @@ SUBFEATURE_SPECS: list[tuple[str, str, bool, Any]] = [
     ("fcf_yield", "fcf_yield_score", True, None),
     ("ret_12m_ex_1m", "ret_12m_ex_1m_score", True, None),
     ("ret_3m", "ret_3m_score", True, None),
-    ("rel_strength_soxx_3m", "rel_strength_soxx_3m_score", True, None),
+    ("rel_strength_bench_3m", "rel_strength_bench_3m_score", True, None),
     ("realized_vol_60d", "realized_vol_60d_score", False, lambda value: value >= 0),
     ("max_drawdown_12m", "max_drawdown_12m_score", True, None),
     ("distance_from_52w_high", "distance_from_52w_high_score", True, None),
@@ -129,6 +129,12 @@ SUBFEATURE_SPECS: list[tuple[str, str, bool, Any]] = [
     # Rising values are bad, hence higher_is_better=False.
     ("inventory_days_yoy_change", "inventory_days_yoy_change_score", False, None),
     ("inventory_to_revenue_growth_gap", "inventory_to_revenue_growth_gap_score", False, None),
+    # Software booking / forward-demand signals (measurement-only): deferred-revenue
+    # and remaining-performance-obligation YoY growth, plus RPO booking coverage.
+    # Higher is better; no production weight until the IC gate validates them.
+    ("deferred_revenue_yoy_growth", "deferred_revenue_yoy_growth_score", True, None),
+    ("rpo_yoy_growth", "rpo_yoy_growth_score", True, None),
+    ("rpo_to_revenue", "rpo_to_revenue_score", True, None),
 ]
 
 COMPONENT_SPECS: dict[str, list[tuple[str, float]]] = {
@@ -156,7 +162,7 @@ COMPONENT_SPECS: dict[str, list[tuple[str, float]]] = {
     "market_behavior": [
         ("ret_12m_ex_1m_score", 0.25),
         ("ret_3m_score", 0.15),
-        ("rel_strength_soxx_3m_score", 0.20),
+        ("rel_strength_bench_3m_score", 0.20),
         ("realized_vol_60d_score", 0.15),
         ("max_drawdown_12m_score", 0.10),
         ("distance_from_52w_high_score", 0.10),
@@ -518,6 +524,7 @@ def build_raw_rows(
     market_source: str,
     financial_source: str,
     positioning_source: str,
+    relative_strength_market_field: str = "rel_strength_soxx_3m",
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in universe:
@@ -572,7 +579,6 @@ def build_raw_rows(
             for key in (
                 "ret_3m",
                 "ret_12m_ex_1m",
-                "rel_strength_soxx_3m",
                 "realized_vol_60d",
                 "max_drawdown_12m",
                 "distance_from_52w_high",
@@ -580,6 +586,10 @@ def build_raw_rows(
                 "low_liquidity_flag",
             ):
                 row[key] = market[key]
+            bench_value = market[relative_strength_market_field]
+            row["rel_strength_bench_3m"] = bench_value
+            # Deprecated compatibility alias for older semiconductor reports/configs.
+            row["rel_strength_soxx_3m"] = bench_value
         if financial is not None:
             for key in (
                 "revenue_yoy_growth",
@@ -749,6 +759,13 @@ def load_preserved_overlays(
     return {normalize_ticker(row["ticker"]): dict(row) for row in rows}
 
 
+def configured_overlay_names(config: dict[str, Any], config_key: str) -> list[str]:
+    raw = cfg_get(config, f"{config_key}.sector_overlay_components", None)
+    if raw is None:
+        return list(DEFAULT_OVERLAY_COMPONENTS)
+    return list(raw or [])
+
+
 def finalize_rows(
     rows: list[dict[str, Any]],
     *,
@@ -768,7 +785,7 @@ def finalize_rows(
     }
     min_components = int(cfg_get(config, f"{config_key}.min_core_components_for_rank_ready", 4))
     min_confidence = float(cfg_get(config, f"{config_key}.min_core_data_quality_confidence", 0.40))
-    overlay_names = list(cfg_get(config, f"{config_key}.sector_overlay_components", DEFAULT_OVERLAY_COMPONENTS) or DEFAULT_OVERLAY_COMPONENTS)
+    overlay_names = configured_overlay_names(config, config_key)
     preserved_overlays = preserved_overlays or {}
 
     for row in rows:
@@ -891,6 +908,7 @@ def upsert_scoring_input(
         "fcf_yield",
         "ret_3m",
         "ret_12m_ex_1m",
+        "rel_strength_bench_3m",
         "rel_strength_soxx_3m",
         "realized_vol_60d",
         "max_drawdown_12m",
@@ -970,6 +988,20 @@ def upsert_component_rows(
     now = utc_now()
     component_names = [component["component_name"] for component in component_defs]
     component_groups = {component["component_name"]: component["component_group"] for component in component_defs}
+    if rows and component_names:
+        build_asof = str(rows[0]["asof_date"])
+        tickers = [str(row["ticker"]) for row in rows]
+        conn.execute(
+            f"""
+            DELETE FROM feature_scoring_component
+            WHERE source_id = ?
+              AND model_family = ?
+              AND asof_date = ?
+              AND ticker IN ({qmarks(tickers)})
+              AND component_name NOT IN ({qmarks(component_names)})
+            """,
+            (source_id, model_family, build_asof, *tickers, *component_names),
+        )
     universe_percentiles: dict[str, dict[str, float]] = {}
     cohort_percentiles: dict[str, dict[str, float]] = {}
     for component_name in component_names:
@@ -1063,6 +1095,17 @@ def load_registry_into_db(conn: Any, config: dict[str, Any], base_dir: Path) -> 
     upsert_source_registry(conn, sources)
 
 
+def resolve_model_family(config: dict[str, Any], settings: ScoringFeatureSettings) -> str:
+    return str(
+        cfg_get(
+            config,
+            f"{settings.config_key}.model_family",
+            cfg_get(config, "technology_universe.initial_subsector", settings.default_model_family),
+        )
+        or settings.default_model_family
+    )
+
+
 def run_scoring_feature_build(settings: ScoringFeatureSettings) -> None:
     configure_utc_logging()
     args = parse_build_args(settings)
@@ -1072,14 +1115,18 @@ def run_scoring_feature_build(settings: ScoringFeatureSettings) -> None:
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     source_id = str(cfg_get(config, f"{settings.config_key}.source_id", settings.default_source_id) or settings.default_source_id)
     contract_version = str(cfg_get(config, f"{settings.config_key}.contract_version", "stage6a_v1") or "stage6a_v1")
-    model_family = str(cfg_get(config, "technology_universe.initial_subsector", settings.default_model_family) or settings.default_model_family)
+    model_family = resolve_model_family(config, settings)
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(cfg_get(config, f"{settings.config_key}.output_csv"), base_dir=base_dir)
     neutral_score = float(cfg_get(config, f"{settings.config_key}.neutral_score", 50.0))
     overlay_default_quality = float(cfg_get(config, f"{settings.config_key}.sector_overlay_default_quality", 0.0))
     market_source = str(cfg_get(config, f"{settings.config_key}.input_sources.market", cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted")))
     financial_source = str(cfg_get(config, f"{settings.config_key}.input_sources.financial", cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts")))
     positioning_source = str(cfg_get(config, f"{settings.config_key}.input_sources.positioning", cfg_get(config, "positioning_import.source_id", "technology_positioning_composite")))
-    overlay_names = list(cfg_get(config, f"{settings.config_key}.sector_overlay_components", DEFAULT_OVERLAY_COMPONENTS) or DEFAULT_OVERLAY_COMPONENTS)
+    relative_strength_market_field = str(
+        cfg_get(config, f"{settings.config_key}.relative_strength_market_field", "rel_strength_soxx_3m")
+        or "rel_strength_soxx_3m"
+    )
+    overlay_names = configured_overlay_names(config, settings.config_key)
     ticker_filter = {ticker for ticker in (normalize_ticker(x) for x in args.tickers.split(",")) if ticker}
     effective_asof = parse_date(args.asof) or date.today()
     component_defs = CORE_COMPONENT_DEFS + overlay_component_defs(overlay_names)
@@ -1109,6 +1156,7 @@ def run_scoring_feature_build(settings: ScoringFeatureSettings) -> None:
                     market_source=market_source,
                     financial_source=financial_source,
                     positioning_source=positioning_source,
+                    relative_strength_market_field=relative_strength_market_field,
                 )
                 apply_subfeature_scores(rows)
                 apply_component_scores(rows, neutral_score=neutral_score)
@@ -1185,10 +1233,10 @@ def validate_scoring_feature_contract(settings: ScoringFeatureSettings) -> int:
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     source_id = str(cfg_get(config, f"{settings.config_key}.source_id", settings.default_source_id) or settings.default_source_id)
-    model_family = str(cfg_get(config, "technology_universe.initial_subsector", settings.default_model_family) or settings.default_model_family)
+    model_family = resolve_model_family(config, settings)
     neutral_score = float(cfg_get(config, f"{settings.config_key}.neutral_score", 50.0))
     overlay_default_quality = float(cfg_get(config, f"{settings.config_key}.sector_overlay_default_quality", 0.0))
-    overlay_names = list(cfg_get(config, f"{settings.config_key}.sector_overlay_components", DEFAULT_OVERLAY_COMPONENTS) or DEFAULT_OVERLAY_COMPONENTS)
+    overlay_names = configured_overlay_names(config, settings.config_key)
     expected_components = [component["component_name"] for component in CORE_COMPONENT_DEFS] + overlay_names
     rank_ready_exempt = cfg_ticker_set(cfg_get(config, f"{settings.config_key}.rank_ready_exempt_tickers", []))
 
@@ -1292,33 +1340,34 @@ def validate_scoring_feature_contract(settings: ScoringFeatureSettings) -> int:
             if ticker in feature_tickers
             and ticker not in active_exemptions
         )
-        overlay_bad = conn.execute(
-            f"""
-            SELECT ticker, component_name, component_score, component_quality, component_status
-            FROM feature_scoring_component
-            WHERE source_id = ?
-              AND model_family = ?
-              AND asof_date = ?
-              AND component_name IN ({qmarks(overlay_names)})
-              AND (
-                  (
-                      component_status = 'not_loaded'
-                      AND (
-                          ABS(component_score - ?) > 0.0001
-                          OR ABS(component_quality - ?) > 0.0001
+        if overlay_names:
+            overlay_bad = conn.execute(
+                f"""
+                SELECT ticker, component_name, component_score, component_quality, component_status
+                FROM feature_scoring_component
+                WHERE source_id = ?
+                  AND model_family = ?
+                  AND asof_date = ?
+                  AND component_name IN ({qmarks(overlay_names)})
+                  AND (
+                      (
+                          component_status = 'not_loaded'
+                          AND (
+                              ABS(component_score - ?) > 0.0001
+                              OR ABS(component_quality - ?) > 0.0001
+                          )
+                      )
+                      OR (
+                          component_status <> 'not_loaded'
+                          AND component_quality <= 0
                       )
                   )
-                  OR (
-                      component_status <> 'not_loaded'
-                      AND component_quality <= 0
-                  )
-              )
-            ORDER BY ticker, component_name
-            """,
-            (source_id, model_family, asof.isoformat(), *overlay_names, neutral_score, overlay_default_quality),
-        ).fetchall()
-        if overlay_bad:
-            errors.append(f"Sector overlay component state is invalid: {[dict(row) for row in overlay_bad[:10]]}")
+                ORDER BY ticker, component_name
+                """,
+                (source_id, model_family, asof.isoformat(), *overlay_names, neutral_score, overlay_default_quality),
+            ).fetchall()
+            if overlay_bad:
+                errors.append(f"Sector overlay component state is invalid: {[dict(row) for row in overlay_bad[:10]]}")
 
         # Universe-level component health gates: a core component that is dead
         # (quality=0) for a large share of the universe, or that has no

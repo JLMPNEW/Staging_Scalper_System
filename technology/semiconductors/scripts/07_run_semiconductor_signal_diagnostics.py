@@ -290,7 +290,8 @@ def market_subfeatures(series: PriceSeries, asof: date, soxx: PriceSeries) -> di
     if out.get("ret_3m") is not None and soxx.dates:
         soxx_idx = soxx.idx_at(series.dates[idx])
         bench_ret = soxx.ret(soxx_idx, 63) if soxx_idx >= 0 else None
-        out["rel_strength_soxx_3m"] = out["ret_3m"] - bench_ret if bench_ret is not None else None
+        out["rel_strength_bench_3m"] = out["ret_3m"] - bench_ret if bench_ret is not None else None
+        out["rel_strength_soxx_3m"] = out["rel_strength_bench_3m"]
     return out
 
 
@@ -1014,7 +1015,7 @@ def main() -> int:
     wsts_corr_fields = [
         "ret_12m_ex_1m",
         "ret_3m",
-        "rel_strength_soxx_3m",
+        "rel_strength_bench_3m",
         "realized_vol_60d",
         "max_drawdown_12m",
         "distance_from_52w_high",

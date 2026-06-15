@@ -58,6 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build market and technical features for the technology universe.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--model-family", default="", help="Technology model family to build, e.g. semiconductors.")
+    parser.add_argument("--benchmark-tickers", default="", help="Optional comma-separated benchmark ticker override.")
     parser.add_argument("--asof", default="", help="Feature as-of date. Defaults to latest available per ticker.")
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
@@ -206,14 +208,39 @@ def benchmark_return_asof(rows: list[PriceRow], asof_date: date, lookback: int) 
     return pct_return(rows, idx, lookback)
 
 
-def load_universe(conn: Any) -> list[str]:
+def parse_ticker_list(raw: object) -> list[str]:
+    if isinstance(raw, list):
+        values = raw
+    else:
+        values = str(raw or "").split(",")
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        ticker = normalize_ticker(value)
+        if ticker and ticker not in seen:
+            out.append(ticker)
+            seen.add(ticker)
+    return out
+
+
+def placeholders(values: list[str]) -> str:
+    if not values:
+        raise ValueError("values cannot be empty")
+    return ",".join("?" for _ in values)
+
+
+def load_universe(conn: Any, model_family: str) -> list[str]:
     rows = conn.execute(
         """
-        SELECT ticker
-        FROM dim_company
-        WHERE is_active = 1
-        ORDER BY ticker
-        """
+        SELECT DISTINCT c.ticker
+        FROM dim_company c
+        JOIN dim_technology_taxonomy t
+          ON t.ticker = c.ticker
+         AND t.model_family = ?
+        WHERE c.is_active = 1
+        ORDER BY c.ticker
+        """,
+        (model_family,),
     ).fetchall()
     return [normalize_ticker(row["ticker"]) for row in rows if normalize_ticker(row["ticker"])]
 
@@ -444,7 +471,13 @@ def main() -> None:
         else resolve_path(cfg_get(config, "market_feature_build.output_csv"), base_dir=base_dir)
     )
     source_id = str(cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted") or "yahoo_finance_adjusted")
-    model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors") or "semiconductors")
+    model_family = str(
+        args.model_family
+        or cfg_get(config, "technology_universe.initial_subsector", "semiconductors")
+        or "semiconductors"
+    ).strip()
+    if not model_family:
+        raise ValueError("model_family cannot be empty")
     max_staleness_days = int(cfg_get(config, "market_data_policy.max_staleness_days", 7))
     min_days = int(cfg_get(config, "market_feature_build.min_trading_days_for_full_features", 252))
     min_avg_dollar_volume_60d = float(
@@ -455,7 +488,9 @@ def main() -> None:
         )
         or 0
     )
-    benchmark_tickers = [normalize_ticker(x) for x in cfg_get(config, "technology_universe.benchmark_tickers", [])]
+    benchmark_tickers = parse_ticker_list(args.benchmark_tickers) or parse_ticker_list(
+        cfg_get(config, "technology_universe.benchmark_tickers", [])
+    )
     windows = {
         "one_month_days": int(cfg_get(config, "market_feature_build.windows.one_month_days", 21)),
         "three_month_days": int(cfg_get(config, "market_feature_build.windows.three_month_days", 63)),
@@ -472,12 +507,17 @@ def main() -> None:
         init_db(conn)
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
-            tickers = load_universe(conn)
+            tickers = load_universe(conn, model_family)
             if not tickers:
-                raise ValueError("No active technology universe tickers found.")
+                raise ValueError(f"No active technology universe tickers found for model_family={model_family}.")
             effective_asof = asof
             if effective_asof is None:
-                row = conn.execute("SELECT MAX(bar_date) AS max_date FROM fact_price_ohlcv WHERE source_id = ?", (source_id,)).fetchone()
+                all_symbols = sorted(set(tickers + benchmark_tickers))
+                ph = placeholders(all_symbols)
+                row = conn.execute(
+                    f"SELECT MAX(bar_date) AS max_date FROM fact_price_ohlcv WHERE source_id = ? AND ticker IN ({ph})",
+                    (source_id, *all_symbols),
+                ).fetchone()
                 effective_asof = parse_date(row["max_date"] if row is not None else "")
             if effective_asof is None:
                 raise ValueError(f"No price bars found for source_id={source_id}")
@@ -485,7 +525,11 @@ def main() -> None:
             report_rows: list[dict[str, Any]] = []
             review_count = 0
             with conn:
-                conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
+                ph_tickers = placeholders(tickers)
+                conn.execute(
+                    f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({ph_tickers})",
+                    (RUN_TYPE, *tickers),
+                )
                 for ticker in tickers:
                     rows = load_price_rows(conn, ticker, source_id, effective_asof)
                     feature, review_reason = build_feature(

@@ -45,6 +45,7 @@ TOP_SCORE_FIELDS = [
     "rank_source",
     "production_rank",
     "ticker",
+    "listing_status",
     "company_name",
     "bucket",
     "opportunity_score",
@@ -275,6 +276,7 @@ SHADOW_SCORE_FIELDS = [
     "asof_date",
     "rank",
     "ticker",
+    "listing_status",
     "company_name",
     "shadow_candidate_name",
     "shadow_selection_policy",
@@ -420,6 +422,7 @@ DISCOVERY_SCORE_FIELDS = [
     "allocation_rank",
     "rank_gap_allocation_vs_discovery",
     "ticker",
+    "listing_status",
     "company_name",
     "bucket",
     "biotech_primary_cohort",
@@ -533,6 +536,7 @@ RANKING_DIAGNOSTIC_FIELDS = [
     "asof_date",
     "diagnostic_group",
     "ticker",
+    "listing_status",
     "company_name",
     "prod_rank",
     "prod_score",
@@ -768,15 +772,21 @@ def apply_action_tier(
     return out
 
 
-def allocation_sort_key(row: dict[str, Any]) -> tuple[int, int, int, float, float, str]:
+def allocation_sort_key(row: dict[str, Any]) -> tuple[int, int, int, int, float, float, str]:
     return (
         1 if to_float(row.get("biotech_cohort_investible_flag"), 1.0) <= 0.0 else 0,
+        1 if listing_status_not_clean(row.get("listing_status")) else 0,
         1 if str(row.get("allocation_bucket") or row.get("bucket") or "").lower() == "avoid" else 0,
         1 if to_float(row.get("rank_quality_cap_vetoed"), 0.0) > 0.0 else 0,
         -to_float(row.get("allocation_opportunity_score", row.get("opportunity_score")), 0.0),
         to_float(row.get("allocation_risk_score", row.get("risk_score")), 100.0),
         str(row.get("ticker") or ""),
     )
+
+
+def listing_status_not_clean(raw: object) -> bool:
+    status = str(raw or "").strip().lower()
+    return bool(status) and status != "active"
 
 
 def build_allocation_ranked_rows(
@@ -789,6 +799,8 @@ def build_allocation_ranked_rows(
         allocation_score = to_float(row.get("allocation_opportunity_score", row.get("opportunity_score")), 0.0)
         allocation_bucket = str(row.get("allocation_bucket") or row.get("bucket") or "").strip().lower()
         if to_float(row.get("biotech_cohort_investible_flag"), 1.0) <= 0.0:
+            continue
+        if listing_status_not_clean(row.get("listing_status")):
             continue
         if allocation_bucket == "avoid":
             continue
@@ -828,7 +840,8 @@ def apply_discovery_action_framework(row: dict[str, Any], settings: dict[str, fl
     research_score_min = float(settings["research_score_min"])
     rank_cap_vetoed = to_float(out.get("rank_quality_cap_vetoed"), 0.0) > 0.0
     allocation_bucket = str(out.get("allocation_bucket") or out.get("bucket") or "").strip().lower()
-    allocation_blocked = allocation_bucket == "avoid" or rank_cap_vetoed
+    listing_blocked = listing_status_not_clean(out.get("listing_status"))
+    allocation_blocked = allocation_bucket == "avoid" or rank_cap_vetoed or listing_blocked
 
     out["allocation_rank"] = allocation_rank if allocation_rank > 0 else ""
     out["allocation_opportunity_score"] = allocation_score
@@ -854,6 +867,9 @@ def apply_discovery_action_framework(row: dict[str, Any], settings: dict[str, fl
     elif discovery_candidate and allocation_bucket == "avoid":
         discovery_action_tier = "research_only_allocation_avoid"
         discovery_action_reason = "discovery_candidate_but_allocation_bucket=avoid"
+    elif discovery_candidate and listing_blocked:
+        discovery_action_tier = "research_only_listing_status_not_clean"
+        discovery_action_reason = f"discovery_candidate_but_listing_status={out.get('listing_status')}"
     elif discovery_rank > 0 and discovery_rank <= allocation_rank_max and discovery_score >= high_confidence_score_min:
         discovery_action_tier = "high_confidence_discovery"
         discovery_action_reason = f"discovery_rank<={allocation_rank_max} and discovery_score>={high_confidence_score_min:g}"
@@ -876,6 +892,9 @@ def apply_discovery_action_framework(row: dict[str, Any], settings: dict[str, fl
     elif discovery_candidate and allocation_bucket == "avoid":
         tier = "research_only_allocation_avoid"
         reason = "discovery_candidate_but_allocation_bucket=avoid"
+    elif discovery_candidate and listing_blocked:
+        tier = "research_only_listing_status_not_clean"
+        reason = f"discovery_candidate_but_listing_status={out.get('listing_status')}"
     elif discovery_candidate:
         tier = "discovery_candidate"
         reason = f"discovery_rank<={research_rank_max} and discovery_score>={research_score_min:g}"
@@ -915,6 +934,8 @@ def validate_ranked_outputs(
             errors.append(f"allocation_contains_rank_cap_vetoed:{ticker}")
         if to_float(row.get("biotech_cohort_investible_flag"), 1.0) <= 0.0:
             errors.append(f"allocation_contains_non_investible_cohort:{ticker}")
+        if listing_status_not_clean(row.get("listing_status")):
+            errors.append(f"allocation_contains_non_clean_listing_status:{ticker}:{row.get('listing_status')}")
         if str(row.get("rank_source") or "") != "allocation_opportunity_score":
             errors.append(f"allocation_rank_source_not_allocation_score:{ticker}")
 
@@ -923,6 +944,12 @@ def validate_ranked_outputs(
         allocation_bucket = str(row.get("allocation_bucket") or row.get("bucket") or "").strip().lower()
         if str(row.get("rank_source") or "") != "discovery_opportunity_score":
             errors.append(f"discovery_rank_source_not_discovery_score:{ticker}")
+        if (
+            allocation_bucket != "avoid"
+            and listing_status_not_clean(row.get("listing_status"))
+            and str(row.get("discovery_action_tier") or "") != "research_only_listing_status_not_clean"
+        ):
+            errors.append(f"discovery_non_clean_listing_not_research_only:{ticker}:{row.get('listing_status')}")
         if allocation_bucket == "avoid" and str(row.get("discovery_action_tier") or "") != "research_only_allocation_avoid":
             errors.append(f"discovery_avoid_not_research_only:{ticker}")
         if allocation_bucket == "avoid" and str(row.get("dual_consensus_tier") or "") != "research_only_allocation_avoid":
@@ -1036,7 +1063,7 @@ def load_scores(conn: sqlite3.Connection, asof_date: str) -> list[dict[str, Any]
             s.rank, s.bucket, s.top_evidence_json,
             s.ctgov_evidence_type, s.company_strategy_category,
             s.ctgov_review_bucket, s.ctgov_manual_root_cause,
-            c.ticker, c.company_name, c.exchange, c.industry, c.industry_aggregate
+            c.ticker, c.listing_status, c.company_name, c.exchange, c.industry, c.industry_aggregate
         FROM daily_scores s
         JOIN companies c ON c.company_id = s.company_id
         WHERE s.asof_date = ?
@@ -1241,6 +1268,7 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "company_id": row.get("company_id", ""),
         "rank": row.get("rank", ""),
         "ticker": row.get("ticker", ""),
+        "listing_status": row.get("listing_status", ""),
         "company_name": row.get("company_name", ""),
         "bucket": row.get("bucket", ""),
         "opportunity_score": row.get("opportunity_score", ""),
@@ -1665,7 +1693,7 @@ def build_shadow_top_rows(
     taxonomy_rows = conn.execute(
         """
         SELECT
-            c.ticker, s.biotech_primary_cohort,
+            c.ticker, c.listing_status, s.biotech_primary_cohort,
             s.biotech_cohort_confidence, s.biotech_cohort_sparse_data_flag,
             s.biotech_cohort_investible_flag, s.biotech_cohort_calibration_eligible_flag,
             s.biotech_cohort_calibration_mode, s.biotech_cohort_exclusion_reason
@@ -1685,6 +1713,7 @@ def build_shadow_top_rows(
             "asof_date": asof_date,
             "rank": rank,
             "ticker": row.get("ticker", ""),
+            "listing_status": taxonomy.get("listing_status", ""),
             "company_name": row.get("company_name", ""),
             "shadow_candidate_name": candidate_name,
             "shadow_selection_policy": policy_name,
@@ -1820,6 +1849,7 @@ def build_ranking_order_diagnostics(
                     "asof_date": asof_date,
                     "diagnostic_group": group_name,
                     "ticker": ticker,
+                    "listing_status": prod.get("listing_status", shadow.get("listing_status", "")),
                     "company_name": prod.get("company_name", shadow.get("company_name", "")),
                     "prod_rank": prod.get("rank", ""),
                     "prod_score": prod.get("opportunity_score", ""),

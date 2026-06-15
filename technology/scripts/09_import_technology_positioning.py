@@ -43,6 +43,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Import technology positioning facts from read-only upstream databases.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--model-family", default="", help="Technology model family to import, e.g. semiconductors.")
+    parser.add_argument("--asof", default="", help="Feature as-of date. Defaults to today.")
     parser.add_argument("--tickers", default="")
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
@@ -96,7 +98,18 @@ def load_universe(conn: Any, ticker_filter: set[str], *, model_family: str, incl
             (model_family,),
         ).fetchall()
     else:
-        rows = conn.execute("SELECT ticker FROM dim_company WHERE is_active = 1 ORDER BY ticker").fetchall()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT c.ticker
+            FROM dim_company c
+            JOIN dim_technology_taxonomy t
+              ON t.ticker = c.ticker
+             AND t.model_family = ?
+            WHERE c.is_active = 1
+            ORDER BY c.ticker
+            """,
+            (model_family,),
+        ).fetchall()
     tickers = [normalize_ticker(row["ticker"]) for row in rows if normalize_ticker(row["ticker"])]
     return [ticker for ticker in tickers if not ticker_filter or ticker in ticker_filter]
 
@@ -122,11 +135,23 @@ def load_source_ticker_map(conn: Any, internal_tickers: list[str]) -> tuple[list
         """,
         internal_tickers,
     ).fetchall()
+    source_groups: dict[str, set[str]] = {}
     for row in rows:
         internal = normalize_ticker(row["internal_ticker"])
         source = normalize_ticker(row["source_ticker"])
         if internal and source:
-            source_to_internal[source] = internal
+            source_groups.setdefault(source, set()).add(internal)
+    for source, internals in sorted(source_groups.items()):
+        existing = source_to_internal.get(source)
+        if len(internals) > 1 or (existing and existing not in internals):
+            LOGGER.warning(
+                "Skipping ambiguous source ticker mapping: source=%s internals=%s existing=%s",
+                source,
+                sorted(internals),
+                existing or "",
+            )
+            continue
+        source_to_internal[source] = next(iter(internals))
     return sorted(source_to_internal), source_to_internal
 
 
@@ -670,7 +695,13 @@ def main() -> None:
     direct_ownership_source = str(cfg_get(config, "positioning_import.direct_ownership_source_id", "sec_ownership_direct"))
     mp_source = str(cfg_get(config, "positioning_import.market_positioning_source_id", "market_positioning_upstream"))
     feature_source = str(cfg_get(config, "positioning_import.source_id", "technology_positioning_composite"))
-    model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors") or "semiconductors")
+    model_family = str(
+        args.model_family
+        or cfg_get(config, "technology_universe.initial_subsector", "semiconductors")
+        or "semiconductors"
+    ).strip()
+    if not model_family:
+        raise ValueError("model_family cannot be empty")
     require_13f = cfg_bool(config, "positioning_import.require_upstream_13f_for_gate", False)
     require_short = cfg_bool(config, "positioning_import.require_upstream_short_for_gate", False)
     require_borrow = cfg_bool(config, "positioning_import.require_upstream_borrow_for_gate", False)
@@ -688,17 +719,16 @@ def main() -> None:
         try:
             fact_tickers = load_universe(conn, ticker_filter, model_family=model_family, include_historical=include_historical)
             feature_tickers = load_universe(conn, ticker_filter, model_family=model_family, include_historical=False)
+            if not fact_tickers or not feature_tickers:
+                raise ValueError(f"No positioning universe tickers found for model_family={model_family}.")
             feature_ticker_set = set(feature_tickers)
             query_tickers, source_to_internal = load_source_ticker_map(conn, fact_tickers)
             with ro_connect(form4_db) as form4_conn, ro_connect(mp_db) as mp_conn:
                 with conn:
-                    if ticker_filter:
-                        conn.execute(
-                            f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({qmarks(fact_tickers)})",
-                            (RUN_TYPE, *fact_tickers),
-                        )
-                    else:
-                        conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
+                    conn.execute(
+                        f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({qmarks(fact_tickers)})",
+                        (RUN_TYPE, *fact_tickers),
+                    )
                     form4_stats = import_form4(
                         conn,
                         form4_conn,
@@ -736,10 +766,11 @@ def main() -> None:
                         source_id=mp_source,
                         start=start,
                     )
+                    feature_asof = parse_date(args.asof) or date.today()
                     feature_status = build_positioning_features(
                         conn,
                         feature_tickers,
-                        asof=date.today(),
+                        asof=feature_asof,
                         feature_source_id=feature_source,
                         model_family=model_family,
                         insider_days=int(cfg_get(config, "positioning_import.lookback_days.insider", 90)),

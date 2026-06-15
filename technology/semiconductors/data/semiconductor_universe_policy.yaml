@@ -10,8 +10,15 @@ investable_security_types:
   - common stock
   - ordinary shares
   - adr/ads
+  - american depositary shares
+  - new york registry shares
 active_listing_statuses:
   - active
+non_investable_listing_statuses:
+  - active_financial_status_d
+  - active_financial_status_e
+  - inactive_or_not_investable
+  - invalid_or_inactive
 benchmark_tickers:
   - SMH
   - SOXX

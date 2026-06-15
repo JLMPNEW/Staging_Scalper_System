@@ -120,8 +120,8 @@ signals:
     source_layer: market_prices
     source_ids: [yahoo_finance_adjusted, norgate_us_equities_total_return]
     production_policy: zero_weight_until_revalidated
-  - signal: rel_strength_soxx_3m
-    score_key: rel_strength_soxx_3m_score
+  - signal: rel_strength_bench_3m
+    score_key: rel_strength_bench_3m_score
     components: [market_behavior]
     source_layer: market_prices
     source_ids: [yahoo_finance_adjusted]

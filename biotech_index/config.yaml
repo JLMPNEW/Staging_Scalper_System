@@ -1274,6 +1274,23 @@ biotech_refresh:
     warning_is_fatal: true
     max_staleness_days: 0
     staleness_day_basis: "business"
+    # Snapshot recency alone is not enough: the snapshot can be current while
+    # raw Form 4 filings are stale.  Allow a small business-day lag for SEC
+    # filing/index availability, but fail if raw ingestion falls materially
+    # behind the pipeline as-of date.
+    raw_filing_freshness_enabled: true
+    raw_filing_required: true
+    max_raw_filing_lag_days: 5
+    raw_filing_lag_day_basis: "business"
+    raw_filing_date_sources:
+      - table: "sec_ownership_submission"
+        column: "filing_date"
+      - table: "sec_form4_daily_ingest_log"
+        column: "filing_date"
+      - table: "form4_events_tier1"
+        column: "filing_date"
+      - table: "form4_buy_events_v1"
+        column: "filing_date"
   max_snapshot_history: 30
   snapshot_outputs:
     enabled: true

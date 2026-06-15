@@ -282,7 +282,11 @@ def summarize_returns(rows: list[dict[str, Any]], horizon: int) -> dict[str, Any
         "avg_excess_return_vs_smh": sum(float(row["excess_return_vs_smh"]) for row in rows) / len(rows),
         "avg_excess_return_vs_equal_weight": sum(float(row["excess_return_vs_equal_weight"]) for row in rows) / len(rows),
         "avg_turnover": sum(float(row["turnover"]) for row in rows) / len(rows),
+        "avg_stock_turnover": sum(float(row.get("stock_turnover") or 0.0) for row in rows) / len(rows),
+        "avg_hedge_turnover": sum(float(row.get("hedge_turnover") or 0.0) for row in rows) / len(rows),
         "avg_transaction_cost": sum(float(row["transaction_cost"]) for row in rows) / len(rows),
+        "avg_stock_transaction_cost": sum(float(row.get("stock_transaction_cost") or 0.0) for row in rows) / len(rows),
+        "avg_hedge_transaction_cost": sum(float(row.get("hedge_transaction_cost") or 0.0) for row in rows) / len(rows),
         "avg_borrow_cost": sum(float(row["borrow_cost"]) for row in rows) / len(rows),
         "avg_total_cost": sum(float(row["total_cost"]) for row in rows) / len(rows),
         "avg_positions": sum(int(row["position_count"]) for row in rows) / len(rows),
@@ -345,7 +349,8 @@ def simulate(
         if row["asof_date"] in dates:
             rows_by_date.setdefault(row["asof_date"], []).append(row)
 
-    previous_weights: dict[str, float] | None = None
+    previous_stock_weights: dict[str, float] | None = None
+    previous_hedge_weight: float | None = None
     period_rows: list[dict[str, Any]] = []
     holding_rows: list[dict[str, Any]] = []
     for asof in sorted(rows_by_date):
@@ -377,8 +382,12 @@ def simulate(
             effective_weights["__SMH_HEDGE__"] = hedge_weight
         gross_exposure = sum(abs(weight) for weight in effective_weights.values())
         beta_exp = beta_exposure(weights, by_ticker) + hedge_weight
-        period_turnover = turnover(previous_weights, effective_weights)
-        transaction_cost = period_turnover * transaction_cost_bps / 10000.0
+        stock_turnover = turnover(previous_stock_weights, weights)
+        hedge_turnover = abs(hedge_weight) if previous_hedge_weight is None else abs(hedge_weight - previous_hedge_weight)
+        period_turnover = stock_turnover + hedge_turnover
+        stock_transaction_cost = stock_turnover * transaction_cost_bps / 10000.0
+        hedge_transaction_cost = hedge_turnover * transaction_cost_bps / 10000.0
+        transaction_cost = stock_transaction_cost + hedge_transaction_cost
         borrow_cost = borrow_cost_for_period(
             weights,
             by_ticker,
@@ -403,6 +412,8 @@ def simulate(
                 "hedge_return": hedge_return,
                 "raw_return": raw_return,
                 "transaction_cost": transaction_cost,
+                "stock_transaction_cost": stock_transaction_cost,
+                "hedge_transaction_cost": hedge_transaction_cost,
                 "borrow_cost": borrow_cost,
                 "total_cost": total_cost,
                 "net_return": net_return,
@@ -413,6 +424,8 @@ def simulate(
                 "excess_return_vs_smh": net_return - smh_benchmark_return,
                 "excess_return_vs_equal_weight": net_return - equal_weight_benchmark_return,
                 "turnover": period_turnover,
+                "stock_turnover": stock_turnover,
+                "hedge_turnover": hedge_turnover,
                 "gross_exposure": gross_exposure,
                 "beta_exposure": beta_exp,
                 "hedge_weight": hedge_weight,
@@ -475,7 +488,8 @@ def simulate(
                     "growth_score": "",
                 }
             )
-        previous_weights = effective_weights
+        previous_stock_weights = dict(weights)
+        previous_hedge_weight = hedge_weight
     return period_rows, holding_rows
 
 
@@ -567,7 +581,7 @@ def main() -> int:
         "borrow_cost_default_annual_rate": borrow_cost_default_annual_rate,
         "return_normalization": {
             "long_short": "stock weights are gross-normalized to 1.0 for dollar-neutral and beta-neutral exposure modes",
-            "hedged_long": "long basket return minus trailing-beta-scaled SMH return; hedge leg is included in turnover and gross exposure",
+            "hedged_long": "long basket return minus trailing-beta-scaled SMH return; hedge leg has explicit turnover/cost columns and is included in total turnover, transaction cost, and gross exposure",
         },
         "outputs": {
             "summary_csv": str(output_dir / "semiconductor_portfolio_backtest_summary.csv"),

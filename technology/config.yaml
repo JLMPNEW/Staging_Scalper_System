@@ -4,7 +4,7 @@ paths:
   cache_dir: "../output/technology_cache"
 
 runtime:
-  sqlite_timeout_sec: 30.0
+  sqlite_timeout_sec: 120.0
 
 source_registry:
   path: "data/free_source_registry.yaml"
@@ -81,6 +81,11 @@ semiconductor_research:
     - "yahoo_finance_adjusted"
     - "norgate_us_equities_total_return"
 
+software_infrastructure_research:
+  price_source_ids:
+    - "yahoo_finance_adjusted"
+    - "norgate_us_equities_total_return"
+
 semiconductor_portfolio_backtest:
   output_dir: "../output/technology_reports/backtests"
   stage8_weights_json: "../output/technology_reports/optuna_calibration/stage8_best_weights.json"
@@ -88,6 +93,36 @@ semiconductor_portfolio_backtest:
   borrow_cost_default_annual_rate: 0.0
   min_cross_section: 30
   min_positions: 5
+  weight_methods:
+    - "equal_weight"
+    - "score_weight"
+  portfolio_specs:
+    - portfolio_name: "top_decile"
+      long_quantile: 0.10
+      short_quantile: 0.00
+    - portfolio_name: "top_quintile"
+      long_quantile: 0.20
+      short_quantile: 0.00
+    - portfolio_name: "long_short_decile"
+      long_quantile: 0.10
+      short_quantile: 0.10
+    - portfolio_name: "long_short_quintile"
+      long_quantile: 0.20
+      short_quantile: 0.20
+
+software_infrastructure_portfolio_backtest:
+  output_dir: "../output/technology_reports/software_infrastructure/backtests"
+  stage8_weights_json: "../output/technology_reports/software_infrastructure/optuna_calibration/stage8_best_weights.json"
+  production_model_name: "stage8_promoted_production_v1"
+  production_model_type: "production"
+  include_stage8_report_only_candidate: true
+  stage7_challenger_config_key: "software_infrastructure_stage7_challenger_scoring"
+  stage7_challenger_model_name: "stage7_challenger_v1"
+  transaction_cost_bps: 20.0
+  borrow_cost_default_annual_rate: 0.0
+  min_cross_section: 30
+  min_positions: 5
+  benchmark_ticker: "QQQ"
   weight_methods:
     - "equal_weight"
     - "score_weight"
@@ -113,6 +148,39 @@ semiconductor_dashboard_reports:
   max_review_rows_in_html: 50
   top_rank_rows_in_html: 25
 
+software_infrastructure_dashboard_reports:
+  output_dir: "../output/technology_reports/software_infrastructure/dashboard"
+  backtest_summary_csv: "../output/technology_reports/software_infrastructure/backtests/software_infrastructure_portfolio_backtest_summary.csv"
+  signal_diagnostics_summary_json: "../output/technology_reports/software_infrastructure/signal_diagnostics/stage8a_summary.json"
+  optuna_summary_csv: "../output/technology_reports/software_infrastructure/optuna_calibration/stage8_best_summary.csv"
+  optuna_weights_json: "../output/technology_reports/software_infrastructure/optuna_calibration/stage8_best_weights.json"
+  optuna_candidate_scores_csv: "../output/technology_reports/software_infrastructure/optuna_calibration/stage8_candidate_current_scores.csv"
+  walk_forward_summary_json: "../output/technology_reports/software_infrastructure/optuna_calibration/walk_forward/walk_forward_summary.json"
+  production_source_id: "software_infrastructure_calibrated_score_v1"
+  stage7_challenger_model_name: "stage7_challenger_v1"
+  baseline_feature_source_id: "software_infrastructure_scoring_contract"
+  model_family: "software_infrastructure"
+  max_review_rows_in_html: 50
+  top_rank_rows_in_html: 25
+  backtest_leader_rows: 16
+
+software_infrastructure_governance_reports:
+  output_dir: "../output/technology_reports/software_infrastructure/governance"
+  signal_registry_path: "software_infrastructure/data/software_infrastructure_signal_registry.yaml"
+  production_model_status: "stage8_active"
+  stage7_challenger_status: "active_challenger"
+  stage8_candidate_status: "promoted_to_production"
+  manual_promotion_approved: true
+  promotion_effective_date: "2026-06-15"
+  recommended_stage8_use_case: "score_weighted_long_only"
+  promotion_confidence: "moderate"
+  required_outputs:
+    - "software_infrastructure_signal_registry.csv"
+    - "software_infrastructure_signal_registry.json"
+    - "software_infrastructure_lockbox_ledger.csv"
+    - "software_infrastructure_lockbox_ledger.json"
+    - "software_infrastructure_governance_manifest.json"
+
 semiconductor_governance_reports:
   output_dir: "../output/technology_reports/governance"
   signal_registry_path: "semiconductors/data/semiconductor_signal_registry.yaml"
@@ -122,6 +190,18 @@ semiconductor_governance_reports:
     - "semiconductor_lockbox_ledger.csv"
     - "semiconductor_lockbox_ledger.json"
     - "semiconductor_governance_manifest.json"
+
+semiconductor_refresh_pipeline:
+  output_dir: "../output/technology_reports/orchestration"
+  default_include_research: false
+  default_include_optuna: false
+  default_include_norgate_backfill: false
+
+software_infrastructure_refresh_pipeline:
+  output_dir: "../output/technology_reports/software_infrastructure/orchestration"
+  default_include_research: false
+  default_include_optuna: false
+  default_include_norgate_backfill: false
 
 sec_fundamentals:
   submissions_source_id: "sec_submissions"
@@ -176,6 +256,7 @@ positioning_import:
   positioning_universe_csv: "../output/technology_cache/positioning/semiconductor_positioning_universe.csv"
   output_csv: "../output/technology_reports/positioning/positioning_import_coverage.csv"
   feature_output_csv: "../output/technology_reports/positioning/positioning_feature_coverage.csv"
+  form4_reconciliation_output_csv: "../output/technology_reports/positioning/form4_missing_ticker_reconciliation.csv"
   lookback_days:
     insider: 90
     short_change: 92
@@ -188,6 +269,7 @@ positioning_import:
 
 semiconductor_scoring_features:
   source_id: "semiconductor_scoring_contract"
+  model_family: "semiconductors"
   contract_version: "semiconductor_stage6a_v1"
   output_csv: "../output/technology_reports/scoring/semiconductor_scoring_feature_contract.csv"
   neutral_score: 50.0
@@ -217,6 +299,35 @@ semiconductor_scoring_features:
     - memory_ai_proxy
     - innovation
     - geo_customer_risk
+
+software_infrastructure_scoring_features:
+  source_id: "software_infrastructure_scoring_contract"
+  model_family: "software_infrastructure"
+  contract_version: "software_infrastructure_stage6a_v1"
+  output_csv: "../output/technology_reports/software_infrastructure/scoring/software_infrastructure_scoring_feature_contract.csv"
+  neutral_score: 50.0
+  sector_overlay_default_score: 50.0
+  sector_overlay_default_quality: 0.0
+  min_core_components_for_rank_ready: 4
+  min_core_data_quality_confidence: 0.40
+  max_dead_core_component_pct: 0.20
+  rank_ready_exempt_tickers: []
+  input_sources:
+    market: "yahoo_finance_adjusted"
+    financial: "sec_companyfacts"
+    positioning: "technology_positioning_composite"
+  relative_strength_market_field: "rel_strength_qqq_3m"
+  core_component_weights:
+    quality: 0.22
+    growth: 0.18
+    valuation: 0.18
+    market_behavior: 0.17
+    positioning: 0.13
+    risk_control: 0.12
+  sector_overlay_components: []
+
+software_infrastructure_stage6b_overlay_closure:
+  output_csv: "../output/technology_reports/software_infrastructure/scoring/software_infrastructure_stage6b_overlay_closure.csv"
 
 semiconductor_sector_overlays:
   smoke_test_output_csv: "../output/technology_reports/sector_overlays/stage6b_source_smoke_test.csv"
@@ -279,9 +390,108 @@ semiconductor_signal_diagnostics:
     - 75
   wsts_cohort_min_cross_section: 10
 
+software_infrastructure_signal_diagnostics:
+  source_id: "software_infrastructure_stage8_signal_diagnostics"
+  output_dir: "../output/technology_reports/software_infrastructure/signal_diagnostics"
+  model_family: "software_infrastructure"
+  calibrated_config_key: "software_infrastructure_calibrated_scoring"
+  start_date: "2011-01-01"
+  step_trading_days: 21
+  horizons_trading_days:
+    - 21
+    - 63
+  benchmark_ticker: "QQQ"
+  beta_lookback_days: 252
+  min_cross_section: 30
+  min_forward_return: -0.95
+  max_forward_return: 3.00
+  min_abs_t_stat_for_keep: 1.5
+  include_inactive_tickers: true
+  price_source_ids:
+    - "yahoo_finance_adjusted"
+    - "norgate_us_equities_total_return"
+  excluded_subfeatures:
+    - "wsts_cycle_exposure"
+    - "inventory_days_yoy_change"
+    - "inventory_to_revenue_growth_gap"
+
+software_infrastructure_optuna_calibration:
+  source_id: "software_infrastructure_stage8_optuna_calibration"
+  baseline_feature_source_id: "software_infrastructure_scoring_contract"
+  stage7_source_id: "software_infrastructure_calibrated_score_v1"
+  model_family: "software_infrastructure"
+  signal_diagnostics_output_dir: "../output/technology_reports/software_infrastructure/signal_diagnostics"
+  output_dir: "../output/technology_reports/software_infrastructure/optuna_calibration"
+  random_seed: 357
+  n_trials: 180
+  timeout_sec: 0
+  holdout_fraction: 0.30
+  embargo_panel_dates: 4
+  top_quantile: 0.20
+  min_positions: 5
+  max_turnover: 0.60
+  max_top_cohort_share: 0.55
+  min_holdout_mean_ic_21: 0.005
+  min_holdout_mean_ic_63: 0.005
+  min_holdout_mean_spread_net_21: 0.000
+  min_holdout_mean_spread_net_63: 0.000
+  min_holdout_hit_rate: 0.50
+  promotion_min_objective_improvement: 0.002
+  stability_lambda: 0.10
+  complexity_penalty_per_subfeature: 0.0005
+  turnover_cost_bps: 20.0
+  robustness_folds: 5
+  min_fold_win_fraction: 0.50
+  hard_constraints_in_search: true
+  walk_forward:
+    output_subdir: "walk_forward"
+    initial_train_dates: 40
+    test_block_dates: 12
+    n_trials_per_refit: 60
+    min_test_blocks: 3
+  component_bounds:
+    quality: [0.15, 0.40]
+    valuation: [0.05, 0.30]
+    growth: [0.00, 0.08]
+    market_behavior: [0.10, 0.30]
+    positioning: [0.00, 0.12]
+    risk_control: [0.15, 0.35]
+  subfeature_candidates:
+    quality:
+      - gross_margin_score
+      - operating_margin_score
+      - fcf_margin_score
+      - sbc_pct_revenue_score
+    valuation:
+      - ev_operating_income_score
+      - fcf_yield_score
+      - ev_gross_profit_score
+    growth:
+      - revenue_yoy_growth_score
+      - revenue_acceleration_score
+      - rpo_to_revenue_score
+    market_behavior:
+      - distance_from_52w_high_score
+      - max_drawdown_12m_score
+      - ret_12m_ex_1m_score
+      - rel_strength_bench_3m_score
+    positioning:
+      - latest_days_to_cover_score
+      - latest_borrow_fee_rate_score
+      - institutional_ownership_delta_pct_score
+    risk_control:
+      - realized_vol_60d_score
+      - max_drawdown_12m_score
+      - avg_dollar_volume_60d_score
+      - share_count_yoy_growth_score
+  subfeature_effective_weight_bounds:
+    growth:
+      rpo_to_revenue_score: [0.00, 0.05]
+
 semiconductor_calibrated_scoring:
   source_id: "semiconductor_calibrated_score_v1"
   baseline_source_id: "semiconductor_scoring_contract"
+  model_family: "semiconductors"
   model_version: "semiconductor_stage7_calibrated_v1"
   output_csv: "../output/technology_reports/scoring/semiconductor_stage7_calibrated_scores.csv"
   validation_output_csv: "../output/technology_reports/scoring/semiconductor_stage7_validation.csv"
@@ -290,6 +500,7 @@ semiconductor_calibrated_scoring:
   min_core_data_quality_confidence: 0.50
   max_missing_positive_component_weight: 0.35
   max_dead_core_component_pct: 0.20
+  require_zero_growth_weight: true
   rank_ready_exempt_tickers:
     - CBRS
   component_weights:
@@ -324,7 +535,7 @@ semiconductor_calibrated_scoring:
       avg_dollar_volume_60d_score: 0.20
       ret_12m_ex_1m_score: 0.20
       ret_3m_score: 0.00
-      rel_strength_soxx_3m_score: 0.00
+      rel_strength_bench_3m_score: 0.00
       realized_vol_60d_score: 0.00
     positioning:
       latest_borrow_fee_rate_score: 0.65
@@ -343,6 +554,111 @@ semiconductor_calibrated_scoring:
       net_cash_to_assets_score: 0.00
       latest_short_interest_pct_float_score: 0.00
       inventory_days_score: 0.00
+
+software_infrastructure_calibrated_scoring:
+  source_id: "software_infrastructure_calibrated_score_v1"
+  baseline_source_id: "software_infrastructure_scoring_contract"
+  model_family: "software_infrastructure"
+  model_version: "software_infrastructure_stage8_promoted_v1"
+  output_csv: "../output/technology_reports/software_infrastructure/scoring/software_infrastructure_production_calibrated_scores.csv"
+  validation_output_csv: "../output/technology_reports/software_infrastructure/scoring/software_infrastructure_production_validation.csv"
+  neutral_score: 50.0
+  overlay_weight: 0.00
+  min_core_data_quality_confidence: 0.50
+  max_missing_positive_component_weight: 0.35
+  max_dead_core_component_pct: 0.20
+  require_zero_growth_weight: false
+  rank_ready_exempt_tickers: []
+  sector_overlay_components: []
+  component_weights:
+    growth: 0.0068283188548218235
+    market_behavior: 0.2970482598586994
+    positioning: 0.11942209850030938
+    quality: 0.20118038872990676
+    risk_control: 0.20526581744489844
+    valuation: 0.17025511661136425
+  subfeature_weights:
+    quality:
+      fcf_margin_score: 0.09210297604014483
+      gross_margin_score: 0.6907677713132947
+      operating_margin_score: 0.05055322128822552
+      sbc_pct_revenue_score: 0.16657603135833488
+    growth:
+      revenue_acceleration_score: 0.5031017026133338
+      revenue_yoy_growth_score: 0.4968982973866662
+    valuation:
+      ev_gross_profit_score: 0.3974190060892694
+      ev_operating_income_score: 0.5617690575585543
+      fcf_yield_score: 0.04081193635217619
+    market_behavior:
+      distance_from_52w_high_score: 0.3225073590951369
+      max_drawdown_12m_score: 0.055660875112778785
+      rel_strength_bench_3m_score: 0.2995303442830771
+      ret_12m_ex_1m_score: 0.3223014215090071
+    positioning:
+      institutional_ownership_delta_pct_score: 0.6277570451866898
+      latest_borrow_fee_rate_score: 0.2758779885797481
+      latest_days_to_cover_score: 0.09636496623356211
+    risk_control:
+      avg_dollar_volume_60d_score: 0.12444225783867972
+      max_drawdown_12m_score: 0.0019881608336461388
+      realized_vol_60d_score: 0.5875785565691374
+      share_count_yoy_growth_score: 0.28599102475853677
+
+software_infrastructure_stage7_challenger_scoring:
+  model_name: "stage7_challenger_v1"
+  model_type: "challenger_baseline"
+  model_version: "software_infrastructure_stage7_calibrated_v1"
+  source_id: "software_infrastructure_stage7_challenger_score_v1"
+  baseline_source_id: "software_infrastructure_scoring_contract"
+  model_family: "software_infrastructure"
+  output_csv: "../output/technology_reports/software_infrastructure/scoring/software_infrastructure_stage7_challenger_scores.csv"
+  component_weights:
+    quality: 0.30
+    valuation: 0.20
+    growth: 0.15
+    market_behavior: 0.15
+    positioning: 0.10
+    risk_control: 0.10
+  subfeature_weights:
+    quality:
+      fcf_margin_score: 0.30
+      operating_margin_score: 0.22
+      gross_margin_score: 0.14
+      sbc_pct_revenue_score: 0.16
+      share_count_yoy_growth_score: 0.12
+      fcf_to_net_income_score: 0.06
+    growth:
+      revenue_yoy_growth_score: 0.30
+      revenue_acceleration_score: 0.25
+      gross_profit_yoy_growth_score: 0.20
+      free_cash_flow_yoy_growth_score: 0.15
+      operating_income_yoy_growth_score: 0.10
+    valuation:
+      fcf_yield_score: 0.45
+      ev_gross_profit_score: 0.35
+      ev_operating_income_score: 0.20
+    market_behavior:
+      ret_12m_ex_1m_score: 0.30
+      rel_strength_bench_3m_score: 0.25
+      distance_from_52w_high_score: 0.20
+      max_drawdown_12m_score: 0.15
+      avg_dollar_volume_60d_score: 0.10
+    positioning:
+      institutional_ownership_delta_pct_score: 0.30
+      short_interest_change_3m_score: 0.20
+      latest_borrow_fee_rate_score: 0.20
+      latest_days_to_cover_score: 0.15
+      insider_net_value_90d_score: 0.10
+      insider_cluster_buyers_90d_score: 0.05
+    risk_control:
+      realized_vol_60d_score: 0.25
+      max_drawdown_12m_score: 0.20
+      sbc_pct_revenue_score: 0.15
+      share_count_yoy_growth_score: 0.15
+      latest_borrow_fee_rate_score: 0.10
+      avg_dollar_volume_60d_score: 0.10
+      net_cash_to_assets_score: 0.05
 
 semiconductor_optuna_calibration:
   source_id: "semiconductor_stage8_optuna_calibration"

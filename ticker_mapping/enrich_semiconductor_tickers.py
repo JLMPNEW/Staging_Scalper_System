@@ -36,6 +36,7 @@ DEFAULT_USER_AGENT = "JL, Independent Research, jm.357@hotmail.com"
 
 OUTPUT_COLUMNS = [
     "ticker",
+    "investability_status",
     "company_name",
     "cik",
     "exchange",
@@ -144,6 +145,37 @@ def clean_text(raw: Any) -> str:
     return re.sub(r"\s+", " ", str(raw or "").strip())
 
 
+def normalize_status_label(raw: Any) -> str:
+    text = str(raw or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
+
+
+def derive_investability_status(row: pd.Series) -> str:
+    listing_status = normalize_status_label(row.get("listing_status"))
+    security_type = normalize_status_label(row.get("security_type"))
+    non_investable_listing_statuses = {
+        "active_financial_status_d",
+        "active_financial_status_e",
+        "inactive_or_not_investable",
+        "invalid_or_inactive",
+    }
+    investable_security_types = {
+        "common_stock",
+        "ordinary_shares",
+        "adr_ads",
+        "american_depositary_shares",
+        "new_york_registry_shares",
+    }
+    if listing_status in non_investable_listing_statuses:
+        return "non_investable_listing_status"
+    if security_type and security_type not in investable_security_types:
+        return "non_investable_security_type"
+    if listing_status and listing_status != "active":
+        return "review_listing_status"
+    return "investable"
+
+
 def read_csv_flexible(path: Path) -> pd.DataFrame:
     last_error: Exception | None = None
     for encoding in ("utf-8-sig", "utf-8", "cp1252"):
@@ -172,6 +204,7 @@ def standardize_input_columns(df: pd.DataFrame) -> pd.DataFrame:
         "currency": ("currency",),
         "security_type": ("securitytype", "securitytype", "security"),
         "listing_status": ("listingstatus", "status"),
+        "investability_status": ("investabilitystatus", "investablestatus"),
         "is_primary_listing": ("isprimarylisting", "primarylisting"),
     }
     rename: dict[str, str] = {}
@@ -711,6 +744,7 @@ def main() -> None:
 
     df = reapply_panel_primary_flags(df, panel_map, overwrite_existing=True)
     df["cik"] = df["cik"].map(normalize_cik)
+    df["investability_status"] = df.apply(derive_investability_status, axis=1)
     for column in OUTPUT_COLUMNS:
         df[column] = df[column].fillna("").astype(str).map(clean_text)
     df = df[OUTPUT_COLUMNS]

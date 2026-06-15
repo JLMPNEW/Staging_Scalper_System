@@ -280,7 +280,7 @@ def infer_listing_status(entry: Optional[DirectoryEntry]) -> str:
         return "unknown"
     if entry.test_issue == "Y":
         return "test_issue"
-    if entry.financial_status and entry.financial_status not in {"N", "G", "S", "Q"}:
+    if entry.financial_status and entry.financial_status != "N":
         return f"active_financial_status_{entry.financial_status}"
     return "active"
 

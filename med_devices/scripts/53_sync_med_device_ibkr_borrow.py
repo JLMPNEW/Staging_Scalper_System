@@ -37,6 +37,7 @@ SOURCE_FIELDS = [
     "source_timestamp",
 ]
 REQUIRED_IBKR_BORROW_GENERIC_TICKS = ("236", "499")
+SUPPORTED_IBKR_BORROW_GENERIC_TICKS = frozenset(REQUIRED_IBKR_BORROW_GENERIC_TICKS)
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,10 +64,19 @@ def to_float(raw: object) -> float | None:
 def borrow_generic_tick_list(config: dict[str, Any]) -> str:
     raw_ticks = str(cfg_get(config, "ibkr_borrow_ingestion.generic_tick_list", "236,499") or "")
     ticks: list[str] = []
+    unsupported: list[str] = []
     for raw_tick in raw_ticks.replace(";", ",").split(","):
         tick = raw_tick.strip()
+        if tick and tick not in SUPPORTED_IBKR_BORROW_GENERIC_TICKS:
+            unsupported.append(tick)
+            continue
         if tick and tick not in ticks:
             ticks.append(tick)
+    if unsupported:
+        LOGGER.warning(
+            "Ignoring unsupported IBKR borrow generic ticks: %s",
+            ",".join(dict.fromkeys(unsupported)),
+        )
     missing = [tick for tick in REQUIRED_IBKR_BORROW_GENERIC_TICKS if tick not in ticks]
     if missing:
         LOGGER.warning(

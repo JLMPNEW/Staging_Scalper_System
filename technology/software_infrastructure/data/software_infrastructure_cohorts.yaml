@@ -1,0 +1,75 @@
+model_family: software_infrastructure
+cohorts:
+  - cohort_id: software_infra_cloud_data_devops_ai
+    cohort_name: Cloud, Data, DevOps, AI Platforms & Communications
+    calibration_use: core
+    tickers:
+      - MSFT
+      - ORCL
+      - PLTR
+      - SNPS
+      - MDB
+      - NTAP
+      - DOCN
+      - NTNX
+      - TDC
+      - BLZE
+      - GTLB
+      - PRGS
+      - PATH
+      - TWLO
+      - BAND
+      - DOX
+      - CALX
+      - NTCT
+      - FIVN
+      - ALLT
+      - SANG
+      - FATN
+      - CRWV
+      - RXT
+      - AI
+      - AVPT
+      - DDOG
+      - SNOW
+      - FROG
+      - ESTC
+      - DT
+      - CDNS
+      - TEAM
+      - NOW
+      - PD
+      - IBM
+  - cohort_id: software_infra_security_identity_edge
+    cohort_name: Security, Identity, Edge & Resilience
+    calibration_use: core
+    tickers:
+      - PANW
+      - CRWD
+      - FTNT
+      - ZS
+      - CHKP
+      - NTSK
+      - S
+      - QLYS
+      - TENB
+      - RPD
+      - OKTA
+      - SAIL
+      - OSPN
+      - AUID
+      - VRNS
+      - RBRK
+      - GEN
+      - BB
+      - TLS
+      - CLBT
+      - CGNT
+      - NET
+      - AKAM
+      - FFIV
+      - ATEN
+      - RDWR
+      - VRSN
+      - CVLT
+      - FSLY

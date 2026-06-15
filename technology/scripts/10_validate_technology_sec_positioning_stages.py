@@ -32,6 +32,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate technology Stage 4/5 SEC and positioning gates.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--model-family", default="", help="Technology model family to validate, e.g. semiconductors.")
+    parser.add_argument("--allow-missing-borrow", action="store_true", help="Downgrade missing IBKR borrow coverage to warning.")
+    parser.add_argument("--13f-exempt-tickers", default="", help="Comma-separated tickers with explicit 13F no-row exemptions.")
     return parser.parse_args()
 
 
@@ -63,8 +66,19 @@ def cfg_ticker_set(raw: Any) -> set[str]:
     return {ticker for ticker in (normalize_ticker(value) for value in values) if ticker}
 
 
-def load_universe(conn: Any) -> list[str]:
-    rows = conn.execute("SELECT ticker FROM dim_company WHERE is_active = 1 ORDER BY ticker").fetchall()
+def load_universe(conn: Any, model_family: str) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT c.ticker
+        FROM dim_company c
+        JOIN dim_technology_taxonomy t
+          ON t.ticker = c.ticker
+         AND t.model_family = ?
+        WHERE c.is_active = 1
+        ORDER BY c.ticker
+        """,
+        (model_family,),
+    ).fetchall()
     return [normalize_ticker(row["ticker"]) for row in rows if normalize_ticker(row["ticker"])]
 
 
@@ -75,7 +89,13 @@ def validate() -> int:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors") or "semiconductors")
+    model_family = str(
+        args.model_family
+        or cfg_get(config, "technology_universe.initial_subsector", "semiconductors")
+        or "semiconductors"
+    ).strip()
+    if not model_family:
+        raise ValueError("model_family cannot be empty")
     submissions_source = str(cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions"))
     companyfacts_source = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts"))
     fx_source = str(cfg_get(config, "fx_rates.source_id", "yahoo_fx_rates"))
@@ -86,14 +106,21 @@ def validate() -> int:
     require_direct_ownership = str(cfg_get(config, "positioning_import.require_direct_ownership_for_gate", False)).lower() in {"1", "true", "yes", "y"}
     require_13f = str(cfg_get(config, "positioning_import.require_upstream_13f_for_gate", False)).lower() in {"1", "true", "yes", "y"}
     require_short = str(cfg_get(config, "positioning_import.require_upstream_short_for_gate", False)).lower() in {"1", "true", "yes", "y"}
-    require_borrow = str(cfg_get(config, "positioning_import.require_upstream_borrow_for_gate", False)).lower() in {"1", "true", "yes", "y"}
+    require_borrow = (
+        str(cfg_get(config, "positioning_import.require_upstream_borrow_for_gate", False)).lower() in {"1", "true", "yes", "y"}
+        and not bool(args.allow_missing_borrow)
+    )
     exempt_13f_tickers = cfg_ticker_set(cfg_get(config, "positioning_import.upstream_13f_gate_exempt_tickers", []))
+    exempt_13f_tickers.update(cfg_ticker_set(args.__dict__.get("13f_exempt_tickers", "")))
 
     errors: list[str] = []
     warnings: list[str] = []
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
-        tickers = load_universe(conn)
+        tickers = load_universe(conn, model_family)
+        if not tickers:
+            errors.append(f"No active technology universe tickers found for model_family={model_family}")
+            tickers = ["__NO_TICKERS__"]
         ph = placeholders(tickers)
         for source_id in (submissions_source, companyfacts_source, fx_source, form4_source, direct_ownership_source, mp_source, positioning_source):
             status = value(conn, "SELECT status FROM source_registry WHERE source_id = ?", (source_id,))
@@ -141,19 +168,24 @@ def validate() -> int:
         )
         missing_fin_issue_count = scalar(
             conn,
-            "SELECT COUNT(*) FROM data_quality_issues WHERE stage IN (?, ?) AND source_id = ?",
-            (SEC_SYNC_STAGE, FIN_FEATURE_STAGE, companyfacts_source),
+            f"SELECT COUNT(*) FROM data_quality_issues WHERE stage IN (?, ?) AND source_id = ? AND ticker IN ({ph})",
+            (SEC_SYNC_STAGE, FIN_FEATURE_STAGE, companyfacts_source, *tickers),
         )
         if filing_tickers != len(tickers):
             missing = conn.execute(
                 f"""
-                SELECT ticker FROM dim_company
-                WHERE is_active = 1 AND ticker NOT IN (
+                SELECT c.ticker
+                FROM dim_company c
+                JOIN dim_technology_taxonomy t
+                  ON t.ticker = c.ticker
+                 AND t.model_family = ?
+                WHERE c.is_active = 1
+                  AND c.ticker NOT IN (
                     SELECT DISTINCT ticker FROM fact_sec_filing WHERE source_id = ?
                 )
-                ORDER BY ticker
+                ORDER BY c.ticker
                 """,
-                (submissions_source,),
+                (model_family, submissions_source),
             ).fetchall()
             errors.append(f"SEC filing coverage missing tickers: {[row['ticker'] for row in missing]}")
         if filing_rows == 0:
@@ -170,40 +202,41 @@ def validate() -> int:
             errors.append("No financial feature rows built.")
         if fact_tickers < fin_feature_tickers:
             errors.append(f"Financial feature ticker count exceeds XBRL fact ticker count: facts={fact_tickers} features={fin_feature_tickers}")
-        ifrs_bad = conn.execute(
-            f"""
-            SELECT ticker, coverage_status
-            FROM dim_issuer_reporting_profile
-            WHERE ticker IN ({placeholders(sorted(EXPECTED_IFRS_RECOVERY))})
-              AND coverage_status <> 'SEC_OK_IFRS_FULL'
-            ORDER BY ticker
-            """,
-            tuple(sorted(EXPECTED_IFRS_RECOVERY)),
-        ).fetchall()
-        if ifrs_bad:
-            errors.append(f"Expected IFRS issuers not recovered: {[dict(row) for row in ifrs_bad]}")
-        ifrs_missing_features = conn.execute(
-            f"""
-            SELECT ticker
-            FROM dim_company
-            WHERE ticker IN ({placeholders(sorted(EXPECTED_IFRS_RECOVERY))})
-              AND ticker NOT IN (
-                  SELECT DISTINCT ticker
-                  FROM feature_financial_statement
-                  WHERE source_id = ? AND model_family = ?
-              )
-            ORDER BY ticker
-            """,
-            (*tuple(sorted(EXPECTED_IFRS_RECOVERY)), companyfacts_source, model_family),
-        ).fetchall()
-        if ifrs_missing_features:
-            errors.append(f"Expected IFRS issuers missing financial features: {[row['ticker'] for row in ifrs_missing_features]}")
-        cbrs_status = value(conn, "SELECT coverage_status FROM dim_issuer_reporting_profile WHERE ticker = 'CBRS'")
-        if cbrs_status != "SEC_NEW_ISSUER_INSUFFICIENT_FILINGS":
-            errors.append(f"CBRS expected SEC_NEW_ISSUER_INSUFFICIENT_FILINGS, found {cbrs_status!r}")
-        cbrs_eligible = value(conn, "SELECT calibration_fundamental_eligible FROM dim_issuer_reporting_profile WHERE ticker = 'CBRS'")
-        if int(cbrs_eligible or 0) != 0:
-            errors.append("CBRS should be excluded from fundamental calibration until regular financial statements exist.")
+        if model_family == "semiconductors":
+            ifrs_bad = conn.execute(
+                f"""
+                SELECT ticker, coverage_status
+                FROM dim_issuer_reporting_profile
+                WHERE ticker IN ({placeholders(sorted(EXPECTED_IFRS_RECOVERY))})
+                  AND coverage_status <> 'SEC_OK_IFRS_FULL'
+                ORDER BY ticker
+                """,
+                tuple(sorted(EXPECTED_IFRS_RECOVERY)),
+            ).fetchall()
+            if ifrs_bad:
+                errors.append(f"Expected IFRS issuers not recovered: {[dict(row) for row in ifrs_bad]}")
+            ifrs_missing_features = conn.execute(
+                f"""
+                SELECT ticker
+                FROM dim_company
+                WHERE ticker IN ({placeholders(sorted(EXPECTED_IFRS_RECOVERY))})
+                  AND ticker NOT IN (
+                      SELECT DISTINCT ticker
+                      FROM feature_financial_statement
+                      WHERE source_id = ? AND model_family = ?
+                  )
+                ORDER BY ticker
+                """,
+                (*tuple(sorted(EXPECTED_IFRS_RECOVERY)), companyfacts_source, model_family),
+            ).fetchall()
+            if ifrs_missing_features:
+                errors.append(f"Expected IFRS issuers missing financial features: {[row['ticker'] for row in ifrs_missing_features]}")
+            cbrs_status = value(conn, "SELECT coverage_status FROM dim_issuer_reporting_profile WHERE ticker = 'CBRS'")
+            if cbrs_status != "SEC_NEW_ISSUER_INSUFFICIENT_FILINGS":
+                errors.append(f"CBRS expected SEC_NEW_ISSUER_INSUFFICIENT_FILINGS, found {cbrs_status!r}")
+            cbrs_eligible = value(conn, "SELECT calibration_fundamental_eligible FROM dim_issuer_reporting_profile WHERE ticker = 'CBRS'")
+            if int(cbrs_eligible or 0) != 0:
+                errors.append("CBRS should be excluded from fundamental calibration until regular financial statements exist.")
         lagged_profiles = scalar(
             conn,
             "SELECT COUNT(*) FROM dim_issuer_reporting_profile WHERE companyfacts_lag_flag = 1",
@@ -259,15 +292,17 @@ def validate() -> int:
         direct_holding_rows = scalar(conn, "SELECT COUNT(*) FROM fact_sec_ownership_holding WHERE source_id = ?", (direct_ownership_source,))
         direct_expected_missing = scalar(
             conn,
-            """
+            f"""
             SELECT COUNT(*)
             FROM dim_insider_reporting_profile
-            WHERE coverage_status IN (
-                'ownership_domestic_expected_missing_review',
-                'ownership_fpi_post_hfia_expected_direct_sec_not_found',
-                'ownership_sec_filings_found_parser_failed'
-            )
+            WHERE ticker IN ({ph})
+              AND coverage_status IN (
+                  'ownership_domestic_expected_missing_review',
+                  'ownership_fpi_post_hfia_expected_direct_sec_not_found',
+                  'ownership_sec_filings_found_parser_failed'
+              )
             """,
+            tuple(tickers),
         )
         upstream_form4_tickers = scalar(
             conn,
@@ -275,19 +310,42 @@ def validate() -> int:
             (form4_source, *tickers),
         )
         upstream_form4_rows = scalar(conn, "SELECT COUNT(*) FROM fact_sec_form4_transaction WHERE source_id = ?", (form4_source,))
+        upstream_form4_rows = scalar(
+            conn,
+            f"SELECT COUNT(*) FROM fact_sec_form4_transaction WHERE source_id = ? AND ticker IN ({ph})",
+            (form4_source, *tickers),
+        )
         direct_form4_tickers = scalar(
             conn,
             f"SELECT COUNT(DISTINCT ticker) FROM fact_sec_form4_transaction WHERE source_id = ? AND ticker IN ({ph})",
             (direct_ownership_source, *tickers),
         )
-        direct_form4_rows = scalar(conn, "SELECT COUNT(*) FROM fact_sec_form4_transaction WHERE source_id = ?", (direct_ownership_source,))
+        direct_form4_rows = scalar(
+            conn,
+            f"SELECT COUNT(*) FROM fact_sec_form4_transaction WHERE source_id = ? AND ticker IN ({ph})",
+            (direct_ownership_source, *tickers),
+        )
         form4_tickers = scalar(
             conn,
             f"SELECT COUNT(DISTINCT ticker) FROM fact_sec_form4_transaction WHERE source_id IN (?, ?) AND ticker IN ({ph})",
             (form4_source, direct_ownership_source, *tickers),
         )
-        form4_rows = scalar(conn, "SELECT COUNT(*) FROM fact_sec_form4_transaction WHERE source_id IN (?, ?)", (form4_source, direct_ownership_source))
-        form4_buy_rows = scalar(conn, "SELECT COUNT(*) FROM fact_sec_form4_transaction WHERE source_id IN (?, ?) AND is_open_market_purchase = 1", (form4_source, direct_ownership_source))
+        form4_rows = scalar(
+            conn,
+            f"SELECT COUNT(*) FROM fact_sec_form4_transaction WHERE source_id IN (?, ?) AND ticker IN ({ph})",
+            (form4_source, direct_ownership_source, *tickers),
+        )
+        form4_buy_rows = scalar(
+            conn,
+            f"""
+            SELECT COUNT(*)
+            FROM fact_sec_form4_transaction
+            WHERE source_id IN (?, ?)
+              AND ticker IN ({ph})
+              AND is_open_market_purchase = 1
+            """,
+            (form4_source, direct_ownership_source, *tickers),
+        )
         institutional_tickers = scalar(
             conn,
             f"SELECT COUNT(DISTINCT ticker) FROM fact_13f_positioning WHERE source_id = ? AND ticker IN ({ph})",
@@ -329,13 +387,13 @@ def validate() -> int:
         )
         missing_positioning_issue_count = scalar(
             conn,
-            "SELECT COUNT(*) FROM data_quality_issues WHERE stage = ? AND issue_type LIKE 'missing_%_upstream_rows'",
-            (POSITIONING_STAGE,),
+            f"SELECT COUNT(*) FROM data_quality_issues WHERE stage = ? AND issue_type LIKE 'missing_%_upstream_rows' AND ticker IN ({ph})",
+            (POSITIONING_STAGE, *tickers),
         )
         direct_ownership_issue_count = scalar(
             conn,
-            "SELECT COUNT(*) FROM data_quality_issues WHERE stage = ?",
-            (DIRECT_OWNERSHIP_STAGE,),
+            f"SELECT COUNT(*) FROM data_quality_issues WHERE stage = ? AND ticker IN ({ph})",
+            (DIRECT_OWNERSHIP_STAGE, *tickers),
         )
         if require_direct_ownership and direct_profile_tickers != len(tickers):
             errors.append(f"Direct ownership profile coverage mismatch: expected={len(tickers)} actual={direct_profile_tickers}")
