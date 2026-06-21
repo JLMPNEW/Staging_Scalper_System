@@ -451,6 +451,48 @@ def upsert_current_membership(
     )
 
 
+def prune_removed_current_universe_rows(
+    conn: Any,
+    *,
+    model_family: str,
+    keep_tickers: set[str],
+    cohort_source_id: str,
+) -> int:
+    """Remove stale current-source rows for tickers no longer present in the CSV.
+
+    Historical PIT rows use separate membership sources and calibration_use values,
+    so this only removes the current-production universe surface.
+    """
+    if not keep_tickers:
+        return 0
+    tickers = sorted(keep_tickers)
+    placeholders = ",".join("?" for _ in tickers)
+    before = conn.total_changes
+    conn.execute(
+        f"""
+        DELETE FROM dim_universe_membership
+        WHERE model_family = ?
+          AND is_current_member = 1
+          AND ticker NOT IN ({placeholders})
+        """,
+        (model_family, *tickers),
+    )
+    conn.execute(
+        f"""
+        DELETE FROM dim_technology_taxonomy
+        WHERE model_family = ?
+          AND ticker NOT IN ({placeholders})
+          AND (
+              taxonomy_source = ?
+              OR calibration_use IN ('core', 'review')
+              OR liquidity_instrument_flag IN ('primary_listing', 'non_primary_or_secondary_listing')
+          )
+        """,
+        (model_family, *tickers, cohort_source_id),
+    )
+    return conn.total_changes - before
+
+
 def upsert_universe(
     conn: Any,
     companies: list[UniverseCompany],
@@ -462,6 +504,16 @@ def upsert_universe(
     seed_source_id = source_id_or_none(conn, settings.seed_source_id)
     cohort_source_id = source_id_or_none(conn, settings.cohort_source_id)
     sec_source_id = source_id_or_none(conn, "sec_company_tickers")
+    if companies:
+        model_family = companies[0].model_family
+        pruned = prune_removed_current_universe_rows(
+            conn,
+            model_family=model_family,
+            keep_tickers={company.ticker for company in companies},
+            cohort_source_id=settings.cohort_source_id,
+        )
+        if pruned:
+            LOGGER.info("Pruned stale current universe rows: model_family=%s rows=%d", model_family, pruned)
     clear_stage_issues(conn, [company.ticker for company in companies], load_stage=settings.load_stage)
 
     for company in companies:

@@ -1,0 +1,87 @@
+model_family: technology_hardware
+cohorts:
+  - cohort_id: tech_hw_communications_networking
+    cohort_name: Communications & Networking
+    calibration_use: core
+    tickers:
+      - AAOI
+      - ADTN
+      - ANET
+      - AUDC
+      - AVNW
+      - BDC
+      - CIEN
+      - CLFD
+      - CRNT
+      - CSCO
+      - DGII
+      - EXTR
+      - GILT
+      - GRMN
+      - HLIT
+      - LITE
+      - LTRX
+      - MSI
+      - NTGR
+      - SILC
+      - UI
+      - VIAV
+      - VSAT
+      - ZBRA
+  - cohort_id: tech_hw_components_sensors_distribution
+    cohort_name: Components, Sensors & Distribution
+    calibration_use: core
+    tickers:
+      - ALNT
+      - APH
+      - ARW
+      - AVT
+      - BELFB
+      - CLMB
+      - CNXN
+      - CTS
+      - DAKT
+      - FN
+      - GLW
+      - KN
+      - KOPN
+      - LFUS
+      - LPTH
+      - MEI
+      - NOVT
+      - NSIT
+      - OLED
+      - OSIS
+      - OUST
+      - RAL
+      - ROG
+      - SCSC
+      - SNX
+      - ST
+      - TEL
+      - TTMI
+      - VICR
+  - cohort_id: tech_hw_systems_storage_manufacturing
+    cohort_name: Systems, Storage & Manufacturing
+    calibration_use: core
+    tickers:
+      - ALOT
+      - BHE
+      - CLS
+      - CRSR
+      - DDD
+      - DELL
+      - FLEX
+      - HPE
+      - HPQ
+      - JBL
+      - LOGI
+      - NTAP
+      - OSS
+      - PLXS
+      - P
+      - SANM
+      - SMCI
+      - STX
+      - TACT
+      - WDC

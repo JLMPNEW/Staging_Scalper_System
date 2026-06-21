@@ -1,0 +1,2 @@
+"""Technology hardware subsector implementation."""
+

@@ -68,3 +68,250 @@ fda_manufacturer_id,manufacturer_name,ticker,company_id,confidence,mapping_metho
 850,"ZOLL Medical Corporation",,,0,out_of_universe,Asahi Kasei/ZOLL subsidiary; parent target AHKSY is outside the current med-device universe
 426,"Canon Medical Systems Corporation",,,0,out_of_universe,Canon Medical Systems subsidiary; parent target CAJPY/7751:TYO is outside the current med-device universe
 959,"MicroPort CRM USA, Inc.",,,0,out_of_universe,MicroPort Scientific CRM subsidiary; parent target MCRPY/0853:HKG is outside the current med-device universe
+7601,"Arrow International Inc",TFX,42,99,manual_override,Confirmed Arrow vascular-access operating entity under Teleflex; route high-volume FDA rows to TFX
+980,"ARROW INTERNATIONAL LLC",TFX,42,99,manual_override,Confirmed Arrow vascular-access operating entity under Teleflex; route high-volume FDA rows to TFX
+4414,"Smiths Medical ASD Inc.",ICUI,53,99,manual_override,Smiths Medical was acquired by ICU Medical; route legacy Smiths rows to ICUI
+1058,"Howmedica Osteonics Corp.",SYK,4,99,manual_override,Confirmed Stryker orthopaedics legal entity; route FDA rows to SYK
+1142,"MDT POWERED SURGICAL SOLUTIONS",MDT,6,99,manual_override,Confirmed Medtronic powered surgical solutions operating entity; route FDA rows to MDT
+1131,"AIZU OLYMPUS CO., LTD.",,,0,out_of_universe,Olympus operating facility; parent target OLYMY/7733:TYO is outside the current med-device universe
+1141,"SHIRAKAWA OLYMPUS CO., LTD.",,,0,out_of_universe,Olympus operating facility; parent target OLYMY/7733:TYO is outside the current med-device universe
+10407,"AOMORI OLYMPUS CO., LTD.",,,0,out_of_universe,Olympus operating facility; parent target OLYMY/7733:TYO is outside the current med-device universe
+1116,"OLYMPUS WINTER & IBE GMBH",,,0,out_of_universe,Olympus operating entity; parent target OLYMY/7733:TYO is outside the current med-device universe
+221,"OLYMPUS MEDICAL SYSTEMS CORP.",,,0,out_of_universe,Olympus operating entity; parent target OLYMY/7733:TYO is outside the current med-device universe
+90,"INSTITUT STRAUMANN AG",,,0,out_of_universe,Straumann operating entity; parent target SAHLY/STMN is outside the current med-device universe
+1133,"MIS IMPLANTS TECHNOLOGIES LTD.",,,0,out_of_universe,Straumann MIS Implants subsidiary; parent target SAHLY/STMN is outside the current med-device universe
+10686,"JJGC S.A.",,,0,out_of_universe,Straumann Neodent legal entity; parent target SAHLY/STMN is outside the current med-device universe
+10693,"BIOHORIZONS INC.",,,0,out_of_universe,BioHorizons dental entity; proposed parent is outside current universe and ICLR is not Henry Schein
+180,"MAQUET CARDIOVASCULAR LLC",,,0,out_of_universe,Getinge Maquet operating entity; parent target GETIB.ST is outside the current med-device universe
+9346,"Maquet Medical Systems USA",,,0,out_of_universe,Getinge Maquet operating entity; parent target GETIB.ST is outside the current med-device universe
+10615,"ABIOMED, INC. - 1220648",,,0,out_of_universe,Johnson & Johnson Abiomed subsidiary; parent target JNJ is outside the current med-device universe
+10586,"DEPUY ORTHOPAEDICS INC US",,,0,out_of_universe,Johnson & Johnson DePuy Synthes subsidiary; parent target JNJ is outside the current med-device universe
+10629,"DEPUY IRELAND - 3015516266",,,0,out_of_universe,Johnson & Johnson DePuy Synthes subsidiary; parent target JNJ is outside the current med-device universe
+10585,"DEPUY IRELAND - 9616671",,,0,out_of_universe,Johnson & Johnson DePuy Synthes subsidiary; parent target JNJ is outside the current med-device universe
+10627,"DEPUY MITEK LLC US",,,0,out_of_universe,Johnson & Johnson DePuy Mitek subsidiary; parent target JNJ is outside the current med-device universe
+65,"ETHICON ENDO-SURGERY, LLC.",,,0,out_of_universe,Johnson & Johnson Ethicon subsidiary; parent target JNJ is outside the current med-device universe
+1130,"UNOMEDICAL A/S",,,0,out_of_universe,Unomedical is tied to Convatec; parent target is outside current universe and not safely attributable to CNMD
+146,"BETA BIONICS, INC.",,,0,out_of_universe,Beta Bionics public parent BBNX is not yet in the current med-device universe; add BBNX before mapping this entity
+172,"CARDINAL HEALTH 200, LLC",,,0,out_of_universe,Cardinal Health distributor/logistics entity; exclude to avoid broad supply-chain FDA risk pollution
+860,"COOK INC",,,0,out_of_universe,Private Cook Medical parent; explicit exclusion from public med-device universe
+289,"EXACTECH, INC.",,,0,out_of_universe,Exactech is private/distressed post-TPG transaction; explicit exclusion from public med-device universe
+1009,"American Contract Systems, Inc.",,,0,out_of_universe,Private contract packaging and sterilization entity; explicit exclusion from public med-device universe
+1105,"Beaver-Visitec International Inc.",,,0,out_of_universe,Private-equity-backed ophthalmic surgical device entity; explicit exclusion from public med-device universe
+1054,"DATASCOPE CORP.",,,0,out_of_universe,Datascope was acquired by Mindray and lacks a current investable public parent in this universe
+9484,"Datascope Corporation",,,0,out_of_universe,Datascope was acquired by Mindray and lacks a current investable public parent in this universe
+1114,"ALLERGAN (COSTA RICA)",,,0,out_of_universe,Allergan/Mentor aesthetic implant manufacturing entity is outside core investable med-device universe
+1140,"MENTOR TEXAS",,,0,out_of_universe,Allergan/Mentor aesthetic implant manufacturing entity is outside core investable med-device universe
+817,"Mentor Worldwide, LLC",,,0,out_of_universe,Allergan/Mentor aesthetic implant manufacturing entity is outside core investable med-device universe
+820,"Mentor Corp.",,,0,out_of_universe,Allergan/Mentor aesthetic implant manufacturing entity is outside core investable med-device universe
+1120,"DENTSPLY IMPLANTS MANUFACTURING GMBH",XRAY,64,99,manual_override,Confirmed Dentsply Sirona dental implant manufacturing hub; route high-volume FDA rows to XRAY
+1136,"DENTSPLY IMPLANTS (A DIVISION OF DENTSPLY IH AB)",XRAY,64,99,manual_override,Confirmed Dentsply Sirona dental implant manufacturing hub; route high-volume FDA rows to XRAY
+798,"Micro Therapeutics, Inc. d/b/a ev3 Neurovascular",MDT,6,99,manual_override,Legacy ev3 neurovascular operating entity rolled through Covidien into Medtronic; route FDA rows to MDT
+9586,"Respironics California, LLC",PHG,310,99,manual_override,Philips Respironics California operating entity; route FDA sleep and respiratory platform rows to PHG
+2331,"Tosoh Bioscience Inc",,,0,out_of_universe,Tosoh diagnostics division; parent target 4042.T is outside the current med-device universe
+2026,"Pentax of America Inc",,,0,out_of_universe,Pentax Medical operating entity; parent target 7741.T/Hoya is outside the current med-device universe
+226,"Shanghai United Imaging Healthcare Co., Ltd.",,,0,out_of_universe,Shanghai United Imaging public parent trades on SSE STAR market and is outside the current med-device universe
+1117,"FRESENIUS KABI USA LLC",,,0,out_of_universe,Fresenius Kabi belongs to Fresenius SE/KGaA rather than FMS; parent target is outside the current med-device universe
+2133,"DeRoyal Industries Inc",,,0,out_of_universe,Private family-owned healthcare manufacturer; explicit exclusion from public med-device universe
+1014,"Avid Medical, Inc.",,,0,out_of_universe,Legacy private/custom procedure tray entity with no current investable public parent; explicit exclusion from public med-device universe
+582,"SYNTHES GMBH",,,0,out_of_universe,Johnson & Johnson DePuy Synthes subsidiary; parent target JNJ is outside the current med-device universe
+857,"ALCON RESEARCH, LLC",,,0,out_of_universe,Alcon research operating entity; parent target ALC is outside the current med-device universe
+841,"MICROVENTION, INC.",,,0,out_of_universe,Terumo MicroVention neurovascular subsidiary; parent target TRUMY/4543.T is outside the current med-device universe
+301,"ROCHE DIAGNOSTICS",,,0,out_of_universe,Roche diagnostics operating entity; parent target RHHBY/ROG is outside the current med-device universe
+1066,"Roche Diagnostics Operations, Inc.",,,0,out_of_universe,Roche diagnostics operating entity; parent target RHHBY/ROG is outside the current med-device universe
+277,"Biomerieux Inc",,,0,out_of_universe,bioMerieux diagnostics operating entity; parent target BIM.PA is outside the current med-device universe
+9897,"Centurion Medical Products Corporation",,,0,out_of_universe,Private procedural kit and contract-packaging manufacturer; explicit exclusion from public med-device universe
+10252,"Valorem Surgical LLC",,,0,out_of_universe,Private spinal implant and custom instrument manufacturer; explicit exclusion from public med-device universe
+477,"Adin Dental Implant Systems , Ltd.",,,0,out_of_universe,Privately held international dental implant manufacturer; explicit exclusion from public med-device universe
+10347,"Mckesson Medical-Surgical Inc. Corporate Office",,,0,out_of_universe,McKesson distribution/logistics entity; exclude to avoid supply-chain FDA risk pollution
+858,"Exact Sciences Corporation",,,0,out_of_universe,Exact Sciences EXAS is not in the current med-device universe; add EXAS before mapping this diagnostics entity
+976,"BioFire Diagnostics, LLC",,,0,out_of_universe,bioMerieux BioFire diagnostics subsidiary; parent target BIM.PA is outside the current med-device universe
+2362,"Luminex Corporation",,,0,out_of_universe,DiaSorin Luminex diagnostics subsidiary; parent target DIAS.MI is outside the current med-device universe
+947,"Gen-Probe Incorporated",,,0,out_of_universe,Hologic Gen-Probe molecular diagnostics subsidiary; parent target HOLX is outside the current med-device universe
+10015,"Roche Diagnostics Corporation",,,0,out_of_universe,Roche diagnostics operating entity; parent target RHHBY/ROG is outside the current med-device universe
+585,"Qiagen, GmbH",,,0,out_of_universe,Qiagen diagnostics entity; parent target QGEN is outside the current med-device universe
+1034,"Synthes (USA) Products LLC",,,0,out_of_universe,Johnson & Johnson DePuy Synthes subsidiary; parent target JNJ is outside the current med-device universe
+433,"MEDOS INTERNATIONAL SARL",,,0,out_of_universe,Johnson & Johnson DePuy Synthes neurovascular-related entity; parent target JNJ is outside the current med-device universe
+4590,"Atrium Medical Corporation",,,0,out_of_universe,Getinge Atrium surgical products subsidiary; parent target GETIB.ST is outside the current med-device universe
+1010,"Elekta Inc",,,0,out_of_universe,Elekta radiotherapy operating entity; parent target EKTAY/EKTA-B.ST is outside the current med-device universe
+1127,"ALCON RESEARCH, LLC - HOUSTON",,,0,out_of_universe,Alcon research operating site; parent target ALC is outside the current med-device universe
+944,"Alcon Laboratories",,,0,out_of_universe,Alcon operating entity; parent target ALC is outside the current med-device universe
+1271,"RAYSEARCH LABORATORIES AB",,,0,out_of_universe,RaySearch oncology software company; parent target RAY-B.ST is outside the current med-device universe
+9123,"Karl Storz Endoscopy",,,0,out_of_universe,Private Karl Storz entity; do not proxy to Hoya/Pentax
+73,"KARL STORZ SE & CO. KG",,,0,out_of_universe,Private Karl Storz entity; do not proxy to Hoya/Pentax
+21,"KARL STORZ Endoscopy-America, Inc.",,,0,out_of_universe,Private Karl Storz entity; do not proxy to Hoya/Pentax
+939,"TERUMO MEDICAL CORPORATION",,,0,out_of_universe,Terumo operating entity; parent target TRUMY/4543.T is outside the current med-device universe
+4516,"TERUMO CARDIOVASCULAR SYSTEMS CORPORATION",,,0,out_of_universe,Terumo cardiovascular operating entity; parent target TRUMY/4543.T is outside the current med-device universe
+9373,"HEARTWARE, INC.",MDT,6,99,manual_override,HeartWare LVAD business was acquired by Medtronic; route FDA rows to MDT
+1087,"Canon Medical System, USA, INC.",,,0,out_of_universe,Canon Medical/Toshiba Medical imaging entity; parent target CAJPY/7751.T is outside the current med-device universe
+1026,"TORNIER INC",SYK,4,99,manual_override,Tornier/Wright Medical orthopedics business was acquired by Stryker; route FDA rows to SYK
+3640,"TORNIER S.A.S.",SYK,4,99,manual_override,Tornier/Wright Medical orthopedics business was acquired by Stryker; route FDA rows to SYK
+873,"Bolton Medical Inc.",,,0,out_of_universe,Terumo Aortic/Bolton entity; parent target TRUMY/4543.T is outside the current med-device universe
+895,"Medinol, Ltd.",,,0,out_of_universe,Medinol is a strategic cardiovascular partner rather than controlled BSX parent/subsidiary; exclude from direct parent attribution
+1065,"Instrumentation Laboratory",,,0,out_of_universe,Werfen diagnostics entity; parent target WER.MC is outside the current med-device universe
+676,"ARGON MEDICAL DEVICES, INC",,,0,out_of_universe,Argon vascular access entity; parent target is outside the current med-device universe or private-equity controlled
+880,"Seikagaku Corp.",,,0,out_of_universe,Seikagaku public parent trades outside the current med-device universe
+63,"Shenzhen Mindray Bio-Medical Electronics Co., Ltd.",,,0,out_of_universe,Mindray public parent trades outside the current med-device universe
+220,"Varian Medical Systems, Inc.",,,0,out_of_universe,Siemens Healthineers Varian subsidiary; parent target SMMNY/SIE.DE is outside the current med-device universe
+9109,"Getinge Usa Sales Inc",,,0,out_of_universe,Getinge US sales entity; parent target GETIB.ST is outside the current med-device universe
+1399,"Brainlab AG",,,0,out_of_universe,Private surgical navigation/radiotherapy software entity; do not proxy to Siemens ecosystem
+630,"GYRUS ACMI, INC.",,,0,out_of_universe,Olympus Gyrus ACMI surgical entity; parent target OLYMY/7733.T is outside the current med-device universe
+878,"ZOLL CIRCULATION, INC.",,,0,out_of_universe,Asahi Kasei/ZOLL circulation entity; parent target AHKSY/3407.T is outside the current med-device universe
+3932,"CORDIS US CORP",,,0,out_of_universe,Cordis is private-equity controlled after legacy public-parent divestitures; exclude from direct parent attribution
+8959,"Lutonix",BDX,10,99,manual_override,Lutonix drug-coated balloon platform was acquired via C. R. Bard; route FDA rows to BDX
+286,"CORCYM S.R.L.",,,0,out_of_universe,CORCYM structural heart entity lacks a controlled active public parent in the current med-device universe
+4646,"AMO MANUFACTURING USA, LLC",,,0,out_of_universe,AMO/J&J Vision operating entity; parent target JNJ is outside the current med-device universe
+1074,"FujiFilm Healthcare Americas Corporation",,,0,out_of_universe,Fujifilm healthcare operating entity; parent target FUJIY/4901.T is outside the current med-device universe
+912,"VANTIVE US HEALTHCARE LLC",BAX,34,95,manual_override,Vantive acute kidney care entity originated from Baxter; route rows to BAX until Vantive is separately in universe
+9193,"Draeger Medical, Inc.",,,0,out_of_universe,Draeger respiratory care entity; parent target DRW3.DE is outside the current med-device universe
+8125,"Vyaire Medical",,,0,out_of_universe,Vyaire respiratory entity has private/distressed ownership history; avoid proxy attribution to BDX or ICUI
+1043,"ConvaTec, Inc",,,0,out_of_universe,Convatec chronic care entity; parent target CTEC.L is outside the current med-device universe
+8922,"Nevro Corporation",,,0,out_of_universe,Nevro NVRO is not in the current med-device universe; add NVRO before mapping this entity
+913,"Neomend, Inc.",BDX,10,95,manual_override,Neomend surgical sealant assets were absorbed through C. R. Bard; route FDA rows to BDX
+7662,"Oridion Medical 1987 Ltd.",MDT,6,99,manual_override,Oridion Microstream capnography line was acquired by Covidien and then Medtronic; route FDA rows to MDT
+10381,"THOMMEN MEDICAL AG",,,0,out_of_universe,Private dental implant entity; do not proxy to Novartis strategic pool
+1068,"Encore Medical, Lp",ENOV,69,95,manual_override,Encore/DJO orthopedic implant history rolls into Enovis lineage; route FDA rows to ENOV
+5763,"Aesculap Implant Systems LLC",,,0,out_of_universe,B. Braun/Aesculap entity; parent is private/outside current med-device universe
+1047,"Waldemar Link GmbH & Co. KG (Mfg Site)",,,0,out_of_universe,Private Waldemar Link orthopedic manufacturer; do not proxy to ZBH distribution network
+3778,"ANTHOGYR",,,0,out_of_universe,Straumann Anthogyr dental implant subsidiary; parent target SAHLY/STMN is outside the current med-device universe
+10599,"ZIMVIE US CORP LLC",,,0,out_of_universe,ZimVie was spun from ZBH and later taken private; do not attribute current rows to ZBH
+3551,"KEYSTONE DENTAL, INC.",,,0,out_of_universe,Keystone Dental ownership is private/ambiguous; do not proxy to XRAY
+781,"PRISMATIK DENTALCRAFT, INC.",,,0,out_of_universe,Private Glidewell/Prismatik dental manufacturing entity; explicit exclusion from public med-device universe
+1254,"SEASPINE ORTHOPEDICS CORPORATION",OFIX,96,99,manual_override,SeaSpine completed merger with Orthofix; route FDA rows to OFIX
+1126,"PALTOP ADVANCED DENTAL SOLUTIONS INC.",XRAY,64,95,manual_override,Paltop dental implant system is attributed to Dentsply Sirona per manual taxonomy decision
+511,"Paragon 28, Inc.",,,0,out_of_universe,Paragon 28/FNA is not in the current med-device universe; add FNA before mapping this entity
+1144,"ALTATEC GMBH",NVST,50,95,manual_override,Altatec/Camlog dental implant network is attributed to Envista; route FDA rows to NVST
+4282,"Implant Direct Sybron Manufacturing, LLC",NVST,50,99,manual_override,Implant Direct Sybron is an Envista implant specialty entity; route FDA rows to NVST
+10661,"IMPLANT DIRECT SYBRON MANUFACT",NVST,50,99,manual_override,Implant Direct Sybron is an Envista implant specialty entity; route FDA rows to NVST
+1019,"Linkbio Corp.",,,0,out_of_universe,Linkbio/ZBH relationship is not a controlled parent mapping; exclude from direct attribution
+1200,"ConforMIS, Inc.",,,0,out_of_universe,ConforMIS was taken private by restor3d; explicit exclusion from public med-device universe
+514,"K2M, Inc",SYK,4,99,manual_override,K2M spine business was acquired by Stryker; route FDA rows to SYK
+9857,"Skeletal Kinetics, Llc",,,0,out_of_universe,Private orthopedic entity; explicit exclusion from public med-device universe
+26,"TriMed Inc.",,,0,out_of_universe,Private orthopedic entity; explicit exclusion from public med-device universe
+9117,"ROi CPS LLC",,,0,out_of_universe,Private GPO/custom procedure packager; explicit exclusion from public med-device universe
+1244,"Microbiologics Inc",,,0,out_of_universe,Private microbiology quality-control material manufacturer; explicit exclusion from public med-device universe
+9453,"Stradis Medical, LLC dba Stradis Healthcare",,,0,out_of_universe,Private surgical tray kitting and logistics provider; explicit exclusion from public med-device universe
+3298,"Hobbs Medical, Inc.",,,0,out_of_universe,Private GI and pulmonary endoscopy accessory manufacturer; explicit exclusion from public med-device universe
+2435,"Randox Laboratories Ltd.",,,0,out_of_universe,Private UK diagnostics reagent supplier; explicit exclusion from public med-device universe
+1004,"Remel Inc",,,0,out_of_universe,Thermo Fisher microbiology commodity/distribution entity; excluded to avoid skewing premium instrument metrics
+9454,"Cardinal Health",,,0,out_of_universe,Cardinal Health distribution/logistics entity; exclude to avoid supply-chain FDA risk pollution
+823,"Cook Medical Incorporated",,,0,out_of_universe,Private Cook Medical operating entity; explicit exclusion from public med-device universe
+871,"Cook Ireland, Ltd.",,,0,out_of_universe,Private Cook Medical operating entity; explicit exclusion from public med-device universe
+814,"Tiger Aesthetics Medical, LLC",,,0,out_of_universe,Private-equity aesthetics entity; explicit exclusion from public med-device universe
+9754,"Zavation",,,0,out_of_universe,Private-equity-backed spinal implant and biologics manufacturer; explicit exclusion from public med-device universe
+9362,"Busse Hospital Disposables, Inc.",,,0,out_of_universe,Private disposable procedural consumables manufacturer; explicit exclusion from public med-device universe
+10250,"International Medsurg Connection, Inc.",,,0,out_of_universe,Private disposable respiratory/anesthesia consumables manufacturer; explicit exclusion from public med-device universe
+1045,"Burlington Medical, LLC",,,0,out_of_universe,Private radiation protection garment manufacturer; explicit exclusion from public med-device universe
+9873,"CME America, LLC",,,0,out_of_universe,Isolated ambulatory infusion pump line under regulatory mitigation; exclude from BDX parent attribution
+896,"Ferrosan Meidcal Devices A/S",,,0,out_of_universe,Private Danish topical hemostatic device manufacturer; explicit exclusion from public med-device universe
+819,"Teoxane S.A.",,,0,out_of_universe,Private Swiss dermal filler manufacturer; explicit exclusion from public med-device universe
+968,"Berlin Heart, Inc.",,,0,out_of_universe,Private pediatric VAD manufacturer; explicit exclusion from public med-device universe
+953,"Med-El Corp.",,,0,out_of_universe,Private Austrian cochlear implant manufacturer; explicit exclusion from public med-device universe
+1115,"COCHLEAR LTD",,,0,out_of_universe,Cochlear public parent trades on ASX and is outside the current med-device universe
+10473,"ALCON LABORATORIES IRELAND LTD.",,,0,out_of_universe,Alcon Ireland manufacturing site; parent target ALC is outside the current med-device universe
+8969,"Medtimo, Inc.",,,0,out_of_universe,Low-liquidity/inactive asset shell; explicit exclusion from public med-device universe
+140,"Fujifilm Corporation",,,0,out_of_universe,Fujifilm medical imaging entity; parent target FUJIY/4901.T is outside the current med-device universe
+1029,"WILSON-COOK MEDICAL INC",,,0,out_of_universe,Cook Medical/Wilson-Cook is privately held; do not proxy to BSX or Olympus under legal-ownership attribution
+578,"RIVERPOINT MEDICAL LLC",,,0,out_of_universe,Riverpoint parent target NOVT is not in the current med-device universe; add NOVT before mapping this entity
+915,"Cardiovascular Systems Inc",ABT,3,99,manual_override,Cardiovascular Systems was acquired by Abbott; route FDA rows to ABT vascular segment
+919,"STAAR SURGICAL COMPANY",,,0,out_of_universe,STAAR/STAA is not in the current med-device universe; add STAA before mapping this entity
+867,"Advanced Bionics",,,0,out_of_universe,Sonova Advanced Bionics cochlear implant entity; parent target SONWY/SOON.SW is outside the current med-device universe
+1122,"FISHER & PAYKEL HEALTHCARE LTD",,,0,out_of_universe,Fisher & Paykel Healthcare parent target FSPKF/FPH.NZ is outside the current med-device universe; avoid false TMO match
+7370,"Jiangsu Shenli Medical Production Co., Ltd.",,,0,out_of_universe,Standalone Chinese consumables contract manufacturer; explicit exclusion from public med-device universe
+4260,"SEDECAL SA",,,0,out_of_universe,Private Spanish OEM imaging generator manufacturer; explicit exclusion from public med-device universe
+931,"SynCardia Systems LLC",,,0,out_of_universe,Private/distressed total artificial-heart manufacturer; explicit exclusion from public med-device universe
+899,"Highridge Medical, LLC",,,0,out_of_universe,Private H.I.G.-owned former ZimVie spine division; explicit exclusion from public med-device universe
+3968,"ROCHE DIABETES CARE, INC.",,,0,out_of_universe,Roche Diabetes Care operating entity; parent target RHHBY/ROG is outside the current med-device universe and must not be mapped to ABT or TNDM
+4298,"Roche Diabetes Care GmbH",,,0,out_of_universe,Roche Diabetes Care operating entity; parent target RHHBY/ROG is outside the current med-device universe and must not be mapped to ABT or TNDM
+8524,"Roche Diabetes Care",,,0,out_of_universe,Roche Diabetes Care operating entity; parent target RHHBY/ROG is outside the current med-device universe and must not be mapped to ABT or TNDM
+9015,"Reshape Lifesciences, Inc.",,,0,out_of_universe,ReShape/HIND successor ticker is not in the current med-device universe; add HIND before mapping this entity
+4464,"Reshape Lifesciences",,,0,out_of_universe,ReShape/HIND successor ticker is not in the current med-device universe; add HIND before mapping this entity
+9440,"TEI Biosciences, Inc.",IART,75,99,manual_override,TEI Biosciences tissue repair scaffold business was acquired by Integra LifeSciences; route FDA rows to IART
+10253,"TEI Biosciences",IART,75,99,manual_override,TEI Biosciences tissue repair scaffold business was acquired by Integra LifeSciences; route FDA rows to IART
+10630,"SURGICAL",,,0,out_of_universe,Generic/truncated manufacturer text fragment; explicit exclusion to prevent false SYK/ISRG attribution
+9005,"Celonova Biosciences, Inc.",,,0,out_of_universe,Private Celonova Biosciences entity; explicit exclusion from public med-device universe
+2427,"Kuros Biosciences B.V",,,0,out_of_universe,Kuros Swiss-listed parent KURN.SW is outside the current med-device universe
+4331,"Kuros Biosciences",,,0,out_of_universe,Kuros Swiss-listed parent KURN.SW is outside the current med-device universe
+2470,"Ascensia Diabetes Care U.S., Inc.",,,0,out_of_universe,Ascensia is tied to PHC Holdings/Bayer diabetes care and is outside the current med-device universe; do not proxy to ABT
+3623,"Ascensia Diabetes Care",,,0,out_of_universe,Ascensia is tied to PHC Holdings/Bayer diabetes care and is outside the current med-device universe; do not proxy to ABT
+9442,"Ascensia Diabetes Care US, Inc.",,,0,out_of_universe,Ascensia is tied to PHC Holdings/Bayer diabetes care and is outside the current med-device universe; do not proxy to ABT
+8098,"Baxter/ Synovis Micro Companies Alliance, Inc.",BAX,34,99,manual_override,Synovis Micro Companies Alliance is consolidated under Baxter surgical portfolio; route FDA rows to BAX
+7903,"Synovis Life Technologies, Inc. (Baxter International Inc.)",BAX,34,99,manual_override,Synovis Life Technologies is explicitly tied to Baxter International; route FDA rows to BAX
+10269,"Respironics California Inc",PHG,310,99,manual_override,Respironics California maps to Philips sleep and respiratory care infrastructure; route FDA rows to PHG
+10167,"GE Healthcare Biosciences",GEHC,14,99,manual_override,GE Healthcare Biosciences is a GE HealthCare manufacturing/diagnostics footprint; route FDA rows to GEHC
+9368,"GE Hangwei Medical Systems, Co. LTD
+ West Area Bldg. 3, No.1 Yongchang North Road
+ 1 Yongchangbeilu; Beijing Economic and Technological Development Area
+ Beijing China",GEHC,14,99,manual_override,GE Hangwei Medical Systems is a GE HealthCare manufacturing footprint; route FDA rows to GEHC
+8735,"Lntegra Lifesciences",IART,75,99,manual_override,Typo string for Integra LifeSciences; route FDA rows to IART
+8988,"Bausch Health Companies, Inc.",,,0,out_of_universe,BHC is not in the current med-device universe; add BHC before mapping this entity
+10039,"Bio-Rad Labs",BIO,37,99,manual_override,Bio-Rad Labs shorthand maps to Bio-Rad Laboratories; route FDA rows to BIO
+2960,"Pacira Biosciences, Inc.",,,0,out_of_universe,PCRX is not in the current med-device universe; add PCRX before mapping this entity
+6957,"Vivos Therapeutics, Inc. (Formerly Vivos Biotechnologies, I)",,,0,out_of_universe,VVOS is not in the current med-device universe; add VVOS before mapping this entity
+3993,"Alafair Biosciences, Inc.",,,0,out_of_universe,Private Alafair Biosciences soft-tissue repair developer; explicit exclusion from public med-device universe
+1651,"Alafair Biosciences",,,0,out_of_universe,Private Alafair Biosciences soft-tissue repair developer; explicit exclusion from public med-device universe
+4101,"DreaMed Diabetes, Ltd.",,,0,out_of_universe,Private AI insulin optimization software developer; explicit exclusion from public med-device universe
+2050,"Ihealth Labs, Inc.",,,0,out_of_universe,Private consumer digital-health manufacturer; explicit exclusion from public med-device universe
+5670,"Peca Labs",,,0,out_of_universe,Private cardiovascular conduit developer; explicit exclusion from public med-device universe
+3740,"Peca Labs, Inc.",,,0,out_of_universe,Private cardiovascular conduit developer; explicit exclusion from public med-device universe
+1756,"Scopio Labs , Ltd.",,,0,out_of_universe,Private digital cell morphology diagnostics startup; explicit exclusion from public med-device universe
+8970,"Tempus Labs, Inc.",,,0,out_of_universe,Private genomics and healthcare data analytics ecosystem; explicit exclusion from public med-device universe
+8620,"Ansh Labs, LLC",,,0,out_of_universe,Private immunoassay and ELISA test-kit developer; explicit exclusion from public med-device universe
+9275,"Boston Foundation For Sight",,,0,out_of_universe,Non-profit/private specialty lens clinic; explicit exclusion from public med-device universe
+3436,"Boston Foundation For Sight, Inc. D/B/A Bostonsight",,,0,out_of_universe,Non-profit/private specialty lens clinic; explicit exclusion from public med-device universe
+9781,"Confirm Biosciences Inc",,,0,out_of_universe,Private diagnostic testing line; explicit exclusion from public med-device universe
+8954,"Pillar Biosciences",,,0,out_of_universe,Private clinical oncology NGS specialist; explicit exclusion from public med-device universe
+1765,"Atmo Biosciences, Ltd.",,,0,out_of_universe,Private ingestible gas-sensing capsule startup; explicit exclusion from public med-device universe
+7800,"Bay Labs, Inc.",,,0,out_of_universe,Former private Caption Health ecosystem; exclude to avoid historical factor contamination
+565,"Bionit Labs Srl",,,0,out_of_universe,Private Italian bionic upper-limb prosthetics developer; explicit exclusion from public med-device universe
+7736,"Cognita Labs, LLC",,,0,out_of_universe,Private chronic respiratory/spirometry tracking provider; explicit exclusion from public med-device universe
+3411,"Cortechs Labs, Inc.",,,0,out_of_universe,Private neuroimaging software provider; explicit exclusion from public med-device universe
+5851,"Csd Labs GmbH",,,0,out_of_universe,Private digital phonocardiography algorithm developer; explicit exclusion from public med-device universe
+1993,"Csd Labs",,,0,out_of_universe,Private digital phonocardiography algorithm developer; explicit exclusion from public med-device universe
+7657,"Hd Lifesciences, LLC",,,0,out_of_universe,Private 3D-printed spinal lattice asset; explicit exclusion from public med-device universe
+1722,"Nanospectra Biosciences, Inc.",,,0,out_of_universe,Private laser-particle cancer therapy developer; explicit exclusion from public med-device universe
+7722,"Reciprocal Labs Corporation",,,0,out_of_universe,Propeller Health software ecosystem; explicit exclusion from public med-device universe
+250,"Sensomedical Labs, Ltd.",,,0,out_of_universe,Private neuro-stimulation contract engineering firm; explicit exclusion from public med-device universe
+2363,"Si-Technology, LLC",,,0,out_of_universe,Private/custom surgical tool string match; explicit exclusion from public med-device universe
+2139,"Si Solutions, LLC",,,0,out_of_universe,Private/custom surgical tool string match; explicit exclusion from public med-device universe
+6598,"Sota Precision Optics, Inc. Dba Sota Imaging",,,0,out_of_universe,Private dental imaging and intraoral camera developer; explicit exclusion from public med-device universe
+3633,"Advanced Tactile Imaging, Inc.",,,0,out_of_universe,Private tactile imaging tissue-systems developer; explicit exclusion from public med-device universe
+3553,"Concha Labs",,,0,out_of_universe,Private hearing-aid technology developer; explicit exclusion from public med-device universe
+7726,"Conversion Labs, Pr, LLC",,,0,out_of_universe,Telehealth infrastructure branch outside med-device scope; explicit exclusion
+2267,"Electrogenics Labs, Ltd.",,,0,out_of_universe,Private ultrasound/bone-healing device developer; explicit exclusion from public med-device universe
+3383,"Ensol Biosciences, Inc.",,,0,out_of_universe,Out-of-scope Korean micro-pharma entity; explicit exclusion from public med-device universe
+4674,"Formus Labs, Ltd.",,,0,out_of_universe,Private 3D orthopedic planning software suite; explicit exclusion from public med-device universe
+6307,"Human Biosciences, Inc.",,,0,out_of_universe,Private collagen wound-care sheet developer; explicit exclusion from public med-device universe
+3214,"Imbed Biosciences",,,0,out_of_universe,Private bio-resorbable antimicrobial dressing developer; explicit exclusion from public med-device universe
+4488,"Indica Labs, Inc.",,,0,out_of_universe,Private digital pathology image-analysis software platform; explicit exclusion from public med-device universe
+2115,"Indica Labs, LLC",,,0,out_of_universe,Private digital pathology image-analysis software platform; explicit exclusion from public med-device universe
+7702,"Inova Labs",,,0,out_of_universe,Oxygen concentrator company absorbed by ResMed; explicit exclusion from public med-device universe
+1829,"Lumos Labs, Inc.",,,0,out_of_universe,Digital wellness/gaming entity outside med-device scope; explicit exclusion
+5084,"MD Labs, LLC",,,0,out_of_universe,Private clinical toxicology laboratory; explicit exclusion from public med-device universe
+720,"Measure Labs, Inc. (Dba Preemptiveai, Inc.)",,,0,out_of_universe,Early-stage private health-tech platform; explicit exclusion from public med-device universe
+7471,"Medsource Labs",,,0,out_of_universe,Private custom medical product manufacturer; explicit exclusion from public med-device universe
+8498,"Mespere Lifesciences, Inc.",,,0,out_of_universe,Private venous-pressure cardiac monitoring platform; explicit exclusion from public med-device universe
+7105,"Mint Labs, Inc., D/B/A. Qmenta",,,0,out_of_universe,Private neuroimaging platform company; explicit exclusion from public med-device universe
+5075,"Mio Labs, Inc.",,,0,out_of_universe,Private medical utility kit/software entity; explicit exclusion from public med-device universe
+5204,"Mmj Labs, LLC",,,0,out_of_universe,Private medical utility kit/software entity; explicit exclusion from public med-device universe
+7762,"Ophthalmic Labs, Inc.",,,0,out_of_universe,Generic or uninvestable ophthalmic-lab entity; explicit exclusion from public med-device universe
+6211,"Precision Align, LLC",,,0,out_of_universe,Private dental aligner software developer; explicit exclusion from public med-device universe
+8012,"Quadrant Biosciences",,,0,out_of_universe,Private epigenetic diagnostics laboratory; explicit exclusion from public med-device universe
+5816,"Rune Labs, Inc.",,,0,out_of_universe,Private neurological data analytics platform; explicit exclusion from public med-device universe
+4392,"Select Labs, LLC",,,0,out_of_universe,Private clinical tracking or medical product entity; explicit exclusion from public med-device universe
+8867,"Shift Labs, Inc.",,,0,out_of_universe,Private infusion/clinical tracking software developer; explicit exclusion from public med-device universe
+1868,"Solius Labs, Inc.",,,0,out_of_universe,Private targeted UV phototherapy equipment developer; explicit exclusion from public med-device universe
+7389,"Sonavi Labs, Inc.",,,0,out_of_universe,Private digital stethoscope developer; explicit exclusion from public med-device universe
+8320,"Stasis Labs, Inc.",,,0,out_of_universe,Private remote patient monitoring software stack; explicit exclusion from public med-device universe
+7216,"Strados Labs",,,0,out_of_universe,Private respiratory monitoring wearable developer; explicit exclusion from public med-device universe
+5946,"Strados Labs, Inc.",,,0,out_of_universe,Private respiratory monitoring wearable developer; explicit exclusion from public med-device universe
+8863,"Synergen Technology Labs, LLC",,,0,out_of_universe,Private technology engineering development facility; explicit exclusion from public med-device universe
+9964,"Taewoong Medical Co., Ltd. 14 Gojeong-ro, Wolgot-Myeon, Gimpo-Si, Gyeonggi-Do Korea (the Republic of)",,,0,out_of_universe,South Korean domestic GI metallic stent producer outside current universe; explicit exclusion
+4109,"Terran Biosciences, Inc.",,,0,out_of_universe,Private biotech/neurology platform company; explicit exclusion from public med-device universe
+10062,"U & I CORP. 20 Sandan-Ro 76 Beon-Gil Uijeongbu-Si Gyeonggi-Do Korea (the Republic of)",,,0,out_of_universe,Korean domestic orthopedic spinal implant developer outside current universe; explicit exclusion
+8187,"Ue Lifesciences, Inc.",,,0,out_of_universe,Private mobile breast screening device developer; explicit exclusion from public med-device universe
+6703,"Vista Lifesciences, Inc.",,,0,out_of_universe,Private neurocognitive software platform; explicit exclusion from public med-device universe
+10675,"SALTER LABS",,,0,out_of_universe,Salter Labs acquired into private medical holding structure; explicit exclusion from public med-device universe
+7855,"Salter Labs, Inc.",,,0,out_of_universe,Salter Labs acquired into private medical holding structure; explicit exclusion from public med-device universe
+3859,"Akili Interactive Labs, Inc.",,,0,out_of_universe,Akili delisted after acquisition by Virtual Therapeutics; explicit exclusion from active public med-device universe
+1424,"Fresenius Medical Care North America",,,0,out_of_universe,FMS North America clinical services division excluded from pure medical-device instrument benchmarks
+4384,"Sun Pharmaceutical Industries, Inc.",,,0,out_of_universe,India-listed generic pharmaceutical manufacturer outside current med-device universe

@@ -1,0 +1,35 @@
+model_family: technology_hardware
+source_csv: "../../../ticker_mapping/technology_hardware_cleaned.csv"
+source_of_truth: true
+expected_ticker_count: 73
+allow_missing_cik_for_foreign_otc: false
+default_industry: Technology Hardware
+default_unassigned_calibration_use: review
+default_unassigned_cohort_id: tech_hw_unassigned
+default_unassigned_cohort_name: Unassigned technology hardware review
+investable_security_types:
+  - common stock
+  - ordinary shares
+active_listing_statuses:
+  - active
+non_investable_listing_statuses:
+  - active_financial_status_d
+  - active_financial_status_e
+  - inactive_or_not_investable
+  - invalid_or_inactive
+benchmark_tickers:
+  - QQQ
+  - SPY
+required_non_cik_fields:
+  - ticker
+  - cohort
+  - company_name
+  - exchange
+  - sector
+  - subsector
+  - country
+  - currency
+  - security_type
+  - listing_status
+  - is_primary_listing
+

@@ -67,6 +67,13 @@ COMPARISON_FIELDS = [
     "production_broad_median_excess",
     "production_broad_hit_rate",
     "production_broad_lcb_excess",
+    "frozen_baseline_version",
+    "frozen_baseline_count",
+    "frozen_baseline_unique_tickers",
+    "frozen_baseline_median_excess",
+    "frozen_baseline_hit_rate",
+    "frozen_baseline_lcb_excess",
+    "frozen_baseline_selected_tickers",
     "cohort_top_decile_count",
     "cohort_top_decile_unique_tickers",
     "cohort_top_decile_median_excess",
@@ -77,6 +84,7 @@ COMPARISON_FIELDS = [
     "full_cohort_median_excess",
     "full_cohort_hit_rate",
     "full_cohort_lcb_excess",
+    "candidate_lcb_delta_vs_frozen_baseline",
     "candidate_lcb_delta_vs_production_broad",
     "candidate_lcb_delta_vs_cohort_top_decile",
     "candidate_lcb_delta_vs_full_cohort",
@@ -110,6 +118,31 @@ CONSTITUENT_FIELDS = [
     "decision_bucket",
     "fda_review_state",
 ]
+BASELINE_SNAPSHOT_FIELDS = [
+    "baseline_version",
+    "baseline_role",
+    "calibration_cohort",
+    "horizon_days",
+    "baseline_seed_status",
+    "support_tier",
+    "status_reason",
+    "baseline_count",
+    "baseline_unique_tickers",
+    "baseline_ticker_coverage",
+    "baseline_observation_coverage",
+    "baseline_median_excess",
+    "baseline_hit_rate",
+    "baseline_lcb_excess",
+    "selected_tickers",
+    "raw_score_min",
+    "cohort_percentile_min",
+    "fundamental_quality_min",
+    "fda_product_min",
+    "reimbursement_min",
+    "valuation_min",
+    "technical_entry_min",
+    "value_trap_max",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -120,6 +153,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--comparison-csv", type=Path, default=None)
     parser.add_argument("--constituents-csv", type=Path, default=None)
     parser.add_argument("--config-fragment-yaml", type=Path, default=None)
+    parser.add_argument("--snapshot-csv", type=Path, default=None)
+    parser.add_argument("--frozen-baseline-csv", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -150,6 +185,12 @@ def to_bool(raw: object) -> bool:
 
 def parse_csv_set(raw: object) -> set[str]:
     return {item.strip() for item in str(raw or "").split(",") if item.strip()}
+
+
+def optional_path(raw: object, *, base_dir: Path) -> Path | None:
+    if raw is None or str(raw).strip() == "":
+        return None
+    return resolve_path(str(raw), base_dir=base_dir)
 
 
 def fmt_float(value: float | None, digits: int = 6) -> str:
@@ -216,6 +257,20 @@ def delta(candidate: dict[str, Any], baseline: dict[str, Any]) -> str:
     return fmt_float(float(candidate["lcb_excess"]) - float(baseline["lcb_excess"]))
 
 
+def load_frozen_baseline(path: Path | None) -> dict[tuple[str, int], dict[str, str]]:
+    if path is None or not path.exists():
+        return {}
+    rows = read_csv(path)
+    out: dict[tuple[str, int], dict[str, str]] = {}
+    for row in rows:
+        cohort = str(row.get("calibration_cohort") or "").strip()
+        horizon = to_float(row.get("horizon_days"))
+        if not cohort or horizon is None:
+            continue
+        out[(cohort, int(horizon))] = row
+    return out
+
+
 def passes_static_exclusions(row: dict[str, str]) -> bool:
     if str(row.get("classification") or "") in HARD_EXCLUDED_CLASSIFICATIONS:
         return False
@@ -266,17 +321,21 @@ def status_for_candidate(
     min_lcb_excess: float,
     require_60_120_persistence: bool,
     production_seed_cohorts: set[str],
+    manual_production_seed_cohorts: set[str],
     watchlist_seed_cohorts: set[str],
     event_driven_excluded_cohorts: set[str],
 ) -> tuple[str, str, str]:
     reasons: list[str] = []
-    if cohort in event_driven_excluded_cohorts:
-        return EXCLUDED_EVENT_DRIVEN, "excluded_event_driven", "event_driven_or_binary_outcome_dominates_validation"
-    if str(rec.get("production_candidate") or "") != "1":
-        return DIAGNOSTIC_ONLY, "not_baseline", rec.get("rejection_reason") or "not_a_production_candidate"
     ref = metrics_by_horizon[reference_horizon]
     full_ref = full_metrics_by_horizon[reference_horizon]
     ref_ticker_coverage = coverage_ratio(ref["unique_tickers"], full_ref["unique_tickers"])
+    if cohort in event_driven_excluded_cohorts:
+        return EXCLUDED_EVENT_DRIVEN, "excluded_event_driven", "event_driven_or_binary_outcome_dominates_validation"
+    if str(rec.get("production_candidate") or "") != "1":
+        if cohort in watchlist_seed_cohorts and ref["count"] > 0:
+            reason = rec.get("rejection_reason") or "not_a_production_candidate"
+            return WATCHLIST_BASELINE_SEED, "manual_watchlist", reason
+        return DIAGNOSTIC_ONLY, "not_baseline", rec.get("rejection_reason") or "not_a_production_candidate"
     support_reasons: list[str] = []
     performance_reasons: list[str] = []
     if ref["count"] < min_selected_obs:
@@ -302,6 +361,12 @@ def status_for_candidate(
                 performance_reasons.append(f"{horizon}d_lcb_below_min")
     reasons = support_reasons + performance_reasons
     deduped_reasons = ";".join(dict.fromkeys(reasons))
+    if reasons and cohort in manual_production_seed_cohorts and ref["count"] > 0:
+        support_tier = "manual_monitoring" if performance_reasons else "manual_thin_support"
+        status_reason = "manual_production_seed_override"
+        if deduped_reasons:
+            status_reason = f"{status_reason};{deduped_reasons}"
+        return PRODUCTION_BASELINE_SEED, support_tier, status_reason
     if reasons:
         if ref["count"] > 0 and support_reasons and not performance_reasons:
             return WATCHLIST_BASELINE_SEED, "thin_support", deduped_reasons
@@ -320,12 +385,47 @@ def status_for_candidate(
     return WATCHLIST_BASELINE_SEED, "watchlist", "passes_minimums_but_not_promoted_to_production_baseline"
 
 
+def build_baseline_snapshot_rows(comparison_rows: list[dict[str, Any]], *, baseline_version: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in comparison_rows:
+        if row.get("baseline_seed_status") != PRODUCTION_BASELINE_SEED:
+            continue
+        out.append(
+            {
+                "baseline_version": baseline_version,
+                "baseline_role": row.get("support_tier", ""),
+                "calibration_cohort": row.get("calibration_cohort", ""),
+                "horizon_days": row.get("horizon_days", ""),
+                "baseline_seed_status": row.get("baseline_seed_status", ""),
+                "support_tier": row.get("support_tier", ""),
+                "status_reason": row.get("status_reason", ""),
+                "baseline_count": row.get("candidate_count", ""),
+                "baseline_unique_tickers": row.get("candidate_unique_tickers", ""),
+                "baseline_ticker_coverage": row.get("candidate_ticker_coverage", ""),
+                "baseline_observation_coverage": row.get("candidate_observation_coverage", ""),
+                "baseline_median_excess": row.get("candidate_median_excess", ""),
+                "baseline_hit_rate": row.get("candidate_hit_rate", ""),
+                "baseline_lcb_excess": row.get("candidate_lcb_excess", ""),
+                "selected_tickers": row.get("selected_tickers", ""),
+                "raw_score_min": row.get("raw_score_min", ""),
+                "cohort_percentile_min": row.get("cohort_percentile_min", ""),
+                "fundamental_quality_min": row.get("fundamental_quality_min", ""),
+                "fda_product_min": row.get("fda_product_min", ""),
+                "reimbursement_min": row.get("reimbursement_min", ""),
+                "valuation_min": row.get("valuation_min", ""),
+                "technical_entry_min": row.get("technical_entry_min", ""),
+                "value_trap_max": row.get("value_trap_max", ""),
+            }
+        )
+    return out
+
+
 def yaml_number(raw: object) -> str:
     value = to_float(raw)
     return str(raw or "") if value is None else f"{value:g}"
 
 
-def write_config_fragment(path: Path, rows: list[dict[str, Any]]) -> None:
+def write_config_fragment(path: Path, rows: list[dict[str, Any]], *, baseline_version: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     eligible = [row for row in rows if row["horizon_days"] == 120 and row["baseline_seed_status"] == PRODUCTION_BASELINE_SEED]
     lines = [
@@ -341,7 +441,7 @@ def write_config_fragment(path: Path, rows: list[dict[str, Any]]) -> None:
             [
                 f"    {cohort}:",
                 f"      calibration_status: production_eligible",
-                f"      calibration_status_reason: production_baseline_seed_2026_06_05;support_tier_{row['support_tier']}",
+                f"      calibration_status_reason: production_baseline_seed_{baseline_version};support_tier_{row['support_tier']}",
                 "      gates:",
                 f"        composite_min: {yaml_number(row['raw_score_min'])}",
                 f"        cohort_percentile_min: {yaml_number(row['cohort_percentile_min'])}",
@@ -425,6 +525,34 @@ def main() -> None:
         if args.config_fragment_yaml
         else resolve_path(cfg_get(config, "calibration.calibrated_baseline.config_fragment_yaml"), base_dir=base_dir)
     )
+    snapshot_csv = (
+        args.snapshot_csv.expanduser().resolve()
+        if args.snapshot_csv
+        else optional_path(
+            cfg_get(
+                config,
+                "calibration.calibrated_baseline.snapshot_csv",
+                "../output/med_devices_reports/calibration/med_device_calibrated_baseline_snapshot.csv",
+            ),
+            base_dir=base_dir,
+        )
+    )
+    frozen_baseline_csv = (
+        args.frozen_baseline_csv.expanduser().resolve()
+        if args.frozen_baseline_csv
+        else optional_path(
+            cfg_get(config, "calibration.calibrated_baseline.frozen_baseline_csv", None),
+            base_dir=base_dir,
+        )
+    )
+    baseline_version = str(
+        cfg_get(config, "calibration.calibrated_baseline.baseline_version", "med_device_calibrated_baseline_current")
+        or "med_device_calibrated_baseline_current"
+    )
+    freeze_baseline_if_missing = to_bool(
+        cfg_get(config, "calibration.calibrated_baseline.freeze_baseline_if_missing", False)
+    )
+    frozen_baseline = load_frozen_baseline(frozen_baseline_csv)
     validation_start = str(cfg_get(config, "calibration.validation_start_asof", ""))
     validation_end = str(cfg_get(config, "calibration.validation_end_asof", ""))
     horizons = [int(item.strip()) for item in str(cfg_get(config, "calibration.horizons", "30,60,120")).split(",") if item.strip()]
@@ -442,6 +570,9 @@ def main() -> None:
     min_lcb_excess = float(cfg_get(config, "calibration.calibrated_baseline.min_lcb_excess_return", 0.0))
     require_60_120_persistence = to_bool(cfg_get(config, "calibration.calibrated_baseline.require_60_120_persistence", True))
     production_seed_cohorts = parse_csv_set(cfg_get(config, "calibration.calibrated_baseline.production_seed_cohorts", ""))
+    manual_production_seed_cohorts = parse_csv_set(
+        cfg_get(config, "calibration.calibrated_baseline.manual_production_seed_cohorts", "")
+    )
     watchlist_seed_cohorts = parse_csv_set(cfg_get(config, "calibration.calibrated_baseline.watchlist_seed_cohorts", ""))
     event_driven_excluded_cohorts = parse_csv_set(cfg_get(config, "calibration.calibrated_baseline.event_driven_excluded_cohorts", ""))
 
@@ -475,6 +606,7 @@ def main() -> None:
             min_lcb_excess=min_lcb_excess,
             require_60_120_persistence=require_60_120_persistence,
             production_seed_cohorts=production_seed_cohorts,
+            manual_production_seed_cohorts=manual_production_seed_cohorts,
             watchlist_seed_cohorts=watchlist_seed_cohorts,
             event_driven_excluded_cohorts=event_driven_excluded_cohorts,
         )
@@ -484,6 +616,8 @@ def main() -> None:
             broad = metrics([row for row in cohort_rows if str(row.get("final_investability_gate") or "") == "1"], horizon=horizon)
             top_decile = metrics([row for row in cohort_rows if (to_float(row.get("cohort_percentile")) or -1.0) >= 90.0], horizon=horizon)
             full = metrics(cohort_rows, horizon=horizon)
+            frozen = frozen_baseline.get((cohort, horizon), {})
+            frozen_lcb = to_float(frozen.get("baseline_lcb_excess"))
             candidate_ticker_coverage = coverage_ratio(candidate["unique_tickers"], full["unique_tickers"])
             candidate_observation_coverage = coverage_ratio(candidate["count"], full["count"])
             item: dict[str, Any] = {
@@ -494,12 +628,20 @@ def main() -> None:
                 "status_reason": status_reason,
                 "production_candidate": rec.get("production_candidate", ""),
                 "selected_row_type": rec.get("selected_row_type", ""),
+                "candidate_lcb_delta_vs_frozen_baseline": delta(candidate, {"lcb_excess": frozen_lcb}),
                 "candidate_lcb_delta_vs_production_broad": delta(candidate, broad),
                 "candidate_lcb_delta_vs_cohort_top_decile": delta(candidate, top_decile),
                 "candidate_lcb_delta_vs_full_cohort": delta(candidate, full),
                 "candidate_ticker_coverage": fmt_float(candidate_ticker_coverage, 4),
                 "candidate_observation_coverage": fmt_float(candidate_observation_coverage, 4),
                 "selected_tickers": selected_tickers(candidate_rows, horizon=horizon),
+                "frozen_baseline_version": frozen.get("baseline_version", ""),
+                "frozen_baseline_count": frozen.get("baseline_count", ""),
+                "frozen_baseline_unique_tickers": frozen.get("baseline_unique_tickers", ""),
+                "frozen_baseline_median_excess": frozen.get("baseline_median_excess", ""),
+                "frozen_baseline_hit_rate": frozen.get("baseline_hit_rate", ""),
+                "frozen_baseline_lcb_excess": frozen.get("baseline_lcb_excess", ""),
+                "frozen_baseline_selected_tickers": frozen.get("selected_tickers", ""),
             }
             item.update(prefixed_metrics("candidate", candidate))
             item.update(prefixed_metrics("production_tier1", tier1))
@@ -513,7 +655,14 @@ def main() -> None:
 
     write_csv(comparison_csv, comparison_rows, COMPARISON_FIELDS)
     write_csv(constituents_csv, constituent_rows, CONSTITUENT_FIELDS)
-    write_config_fragment(fragment_yaml, comparison_rows)
+    write_config_fragment(fragment_yaml, comparison_rows, baseline_version=baseline_version)
+    snapshot_rows = build_baseline_snapshot_rows(comparison_rows, baseline_version=baseline_version)
+    if snapshot_csv is not None:
+        write_csv(snapshot_csv, snapshot_rows, BASELINE_SNAPSHOT_FIELDS)
+    frozen_written = False
+    if frozen_baseline_csv is not None and freeze_baseline_if_missing and not frozen_baseline_csv.exists():
+        write_csv(frozen_baseline_csv, snapshot_rows, BASELINE_SNAPSHOT_FIELDS)
+        frozen_written = True
     seed_count = sum(
         1
         for row in comparison_rows
@@ -530,6 +679,11 @@ def main() -> None:
     print(f"calibrated_baseline_comparison_csv={comparison_csv} rows={len(comparison_rows)}")
     print(f"calibrated_baseline_constituents_csv={constituents_csv} rows={len(constituent_rows)}")
     print(f"calibrated_baseline_config_fragment_yaml={fragment_yaml} baseline_seeds={seed_count}")
+    if snapshot_csv is not None:
+        print(f"calibrated_baseline_snapshot_csv={snapshot_csv} rows={len(snapshot_rows)}")
+    if frozen_baseline_csv is not None:
+        action = "created" if frozen_written else "loaded_or_unchanged"
+        print(f"frozen_baseline_csv={frozen_baseline_csv} action={action}")
 
 
 if __name__ == "__main__":

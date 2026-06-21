@@ -86,6 +86,8 @@ SCORE_FIELDS = [
     "fda_clearance_acceleration_score",
     "fda_evidence_quality_score",
     "fda_event_risk_score",
+    "fda_event_risk_breadth_adjusted_score",
+    "fda_safety_breadth_adjusted_score",
     "fda_signal_mode",
     "fda_signal_direction",
     "fda_signal_reliability",

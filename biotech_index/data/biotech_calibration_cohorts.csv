@@ -364,3 +364,50 @@ SLS,early_clinical_speculative_or_single_asset_pipeline,early clinical speculati
 SXTP,early_clinical_speculative_or_single_asset_pipeline,early clinical speculative or single asset calibration cohort
 UNCY,early_clinical_speculative_or_single_asset_pipeline,early clinical speculative or single asset calibration cohort
 XFOR,early_clinical_speculative_or_single_asset_pipeline,early clinical speculative or single asset calibration cohort
+ACRV,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage single-asset/speculative pipeline
+ADPT,commercial_turnaround_or_unprofitable_growth,added from current scoring universe; commercial diagnostics/unprofitable growth driver
+ALLR,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative pipeline
+ANIK,commercial_profitable_quality_or_mature,added from current scoring universe; commercial device/orthobiologics driver
+ANIX,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative pipeline
+APLM,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative oncology pipeline
+ATHE,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative neurologic pipeline
+ATNM,late_clinical_pivotal_or_registrational,added from current scoring universe; late-stage radiopharma/registrational clinical driver
+BOLD,platform_partnered_modality_pipeline,added from current scoring universe; modality/platform oncology pipeline driver
+CELZ,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; early clinical cell-therapy/speculative pipeline
+CGEN,platform_partnered_modality_pipeline,added from current scoring universe; immuno-oncology platform/partnered pipeline driver
+CLYM,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative pipeline
+CMND,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; early clinical speculative CNS pipeline
+CSBR,commercial_turnaround_or_unprofitable_growth,added from current scoring universe; commercial oncology services execution driver
+DMAC,late_clinical_pivotal_or_registrational,added from current scoring universe; late-stage clinical/pivotal development driver
+ENTA,platform_partnered_modality_pipeline,added from current scoring universe; multi-asset antiviral discovery/pipeline driver
+FBRX,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative pipeline
+FHTX,platform_partnered_modality_pipeline,added from current scoring universe; chromatin/modality platform pipeline driver
+GH,commercial_turnaround_or_unprofitable_growth,added from current scoring universe; commercial diagnostics/unprofitable growth driver
+IGC,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; early clinical speculative pipeline
+KIDS,commercial_turnaround_or_unprofitable_growth,added from current scoring universe; commercial medtech growth/execution driver
+KPRX,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative pipeline
+LONA,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; early clinical/speculative pipeline
+LUNG,commercial_turnaround_or_unprofitable_growth,added from current scoring universe; commercial medtech growth/execution driver
+MBRX,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative oncology pipeline
+MNOV,late_clinical_pivotal_or_registrational,added from current scoring universe; late-stage clinical development driver
+MOLN,platform_partnered_modality_pipeline,added from current scoring universe; partnered/modality platform pipeline driver
+MSLE,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; early clinical speculative pipeline
+NGEN,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; early clinical speculative neurologic pipeline
+NVCT,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative oncology pipeline
+PGEN,platform_partnered_modality_pipeline,added from current scoring universe; gene/cell-therapy platform pipeline driver
+PHGE,platform_partnered_modality_pipeline,added from current scoring universe; phage/modality platform pipeline driver
+PLRX,late_clinical_pivotal_or_registrational,added from current scoring universe; late-stage clinical/pivotal development driver
+PMN,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; early clinical speculative neurodegeneration pipeline
+PMVP,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative oncology pipeline
+PRLD,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative oncology pipeline
+PRQR,platform_partnered_modality_pipeline,added from current scoring universe; RNA/oligonucleotide platform pipeline driver
+RADX,platform_partnered_modality_pipeline,added from current scoring universe; radiopharma modality platform pipeline driver
+RNA,platform_partnered_modality_pipeline,added from current scoring universe; RNA modality platform pipeline driver
+SGHT,commercial_turnaround_or_unprofitable_growth,added from current scoring universe; commercial medtech turnaround/execution driver
+TCRX,platform_partnered_modality_pipeline,added from current scoring universe; TCR/cell-therapy platform pipeline driver
+TLSA,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative pipeline
+TLSI,commercial_turnaround_or_unprofitable_growth,added from current scoring universe; commercial medtech/therapeutic execution driver
+VANI,platform_partnered_modality_pipeline,added from current scoring universe; implant/modality platform pipeline driver
+VCYT,commercial_profitable_quality_or_mature,added from current scoring universe; commercial diagnostics quality/mature driver
+WHWK,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative pipeline
+XBIT,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative pipeline

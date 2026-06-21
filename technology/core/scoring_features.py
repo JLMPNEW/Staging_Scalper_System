@@ -129,6 +129,14 @@ SUBFEATURE_SPECS: list[tuple[str, str, bool, Any]] = [
     # Rising values are bad, hence higher_is_better=False.
     ("inventory_days_yoy_change", "inventory_days_yoy_change_score", False, None),
     ("inventory_to_revenue_growth_gap", "inventory_to_revenue_growth_gap_score", False, None),
+    # Technology-hardware working-capital efficiency signals. The level and
+    # YoY change are measurement-only until diagnostics/backtests validate them.
+    ("days_sales_outstanding", "days_sales_outstanding_score", False, lambda value: value >= 0),
+    ("days_payables_outstanding", "days_payables_outstanding_score", True, lambda value: value >= 0),
+    ("cash_conversion_cycle", "cash_conversion_cycle_score", False, None),
+    ("days_sales_outstanding_yoy_change", "days_sales_outstanding_yoy_change_score", False, None),
+    ("days_payables_outstanding_yoy_change", "days_payables_outstanding_yoy_change_score", True, None),
+    ("cash_conversion_cycle_yoy_change", "cash_conversion_cycle_yoy_change_score", False, None),
     # Software booking / forward-demand signals (measurement-only): deferred-revenue
     # and remaining-performance-obligation YoY growth, plus RPO booking coverage.
     # Higher is better; no production weight until the IC gate validates them.

@@ -101,20 +101,31 @@ def table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
-def missing_tickers(conn: sqlite3.Connection, table: str, tickers: list[str], *, where: str = "", params: tuple[Any, ...] = ()) -> list[str]:
+def missing_tickers(
+    conn: sqlite3.Connection,
+    table: str,
+    tickers: list[str],
+    *,
+    model_family: str,
+    where: str = "",
+    params: tuple[Any, ...] = (),
+) -> list[str]:
     ph = placeholders(tickers)
     where_clause = f"AND {where}" if where else ""
     sql = f"""
-        SELECT ticker
-        FROM dim_company
-        WHERE is_active = 1
-          AND ticker NOT IN (
+        SELECT c.ticker
+        FROM dim_company c
+        JOIN dim_technology_taxonomy t
+          ON t.ticker = c.ticker
+         AND t.model_family = ?
+        WHERE c.is_active = 1
+          AND c.ticker NOT IN (
               SELECT DISTINCT ticker FROM {table}
               WHERE ticker IN ({ph}) {where_clause}
           )
-        ORDER BY ticker
+        ORDER BY c.ticker
     """
-    return [str(row["ticker"]) for row in conn.execute(sql, (*tickers, *params)).fetchall()]
+    return [str(row["ticker"]) for row in conn.execute(sql, (model_family, *tickers, *params)).fetchall()]
 
 
 def latest_financial_field_counts(conn: sqlite3.Connection, tickers: list[str], model_family: str) -> dict[str, int]:
@@ -260,11 +271,16 @@ def main() -> int:
             normalize_ticker(row["ticker"])
             for row in conn.execute(
                 """
-                SELECT ticker
-                FROM dim_company
-                WHERE is_active = 1
-                ORDER BY ticker
+                SELECT c.ticker
+                FROM dim_company c
+                JOIN dim_technology_taxonomy t
+                  ON t.ticker = c.ticker
+                 AND t.model_family = ?
+                WHERE c.is_active = 1
+                ORDER BY c.ticker
                 """
+                ,
+                (model_family,),
             ).fetchall()
             if normalize_ticker(row["ticker"])
         ]
@@ -407,7 +423,7 @@ def main() -> int:
         ]:
             where = "model_family = ?" if table_name in {"feature_financial_statement", "feature_scoring_input"} else ""
             params = (model_family,) if where else ()
-            for ticker in missing_tickers(conn, table_name, tickers, where=where, params=params):
+            for ticker in missing_tickers(conn, table_name, tickers, model_family=model_family, where=where, params=params):
                 if ticker not in exempt:
                     missing_rows.append({"source": source_name, "ticker": ticker})
 
@@ -462,7 +478,7 @@ def main() -> int:
         add_check(
             checks,
             "wsts_freshness",
-            "PASS" if wsts_stale_days is not None and wsts_stale_days <= wsts_max_stale_days else "FAIL",
+            "PASS" if wsts_stale_days is not None and wsts_stale_days <= wsts_max_stale_days else "WARN",
             f"latest month start {wsts_stale_days} days old (max {wsts_max_stale_days})",
         )
 

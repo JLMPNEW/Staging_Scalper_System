@@ -125,6 +125,33 @@ def load_universe_name_map(path: Path | None) -> dict[str, str]:
     return out
 
 
+def load_universe_exchange_map(path: Path | None) -> dict[str, str]:
+    if path is None or not path.exists():
+        return {}
+    aliases = {
+        "NASDAQ": "NASDAQ",
+        "NASD": "NASDAQ",
+        "NMS": "NASDAQ",
+        "NASDAQGS": "NASDAQ",
+        "NASDAQGM": "NASDAQ",
+        "NASDAQCM": "NASDAQ",
+        "NYSE": "NYSE",
+        "NEW YORK STOCK EXCHANGE": "NYSE",
+        "AMEX": "AMEX",
+        "NYSEAMERICAN": "AMEX",
+        "NYSE AMERICAN": "AMEX",
+        "ARCA": "ARCA",
+        "NYSEARCA": "ARCA",
+    }
+    out: dict[str, str] = {}
+    for row in read_csv_rows(path):
+        ticker = normalize_ticker(row.get("ticker") or row.get("symbol"))
+        exchange = str(row.get("exchange") or row.get("primary_exchange") or "").strip().upper()
+        if ticker and exchange:
+            out[ticker] = aliases.get(exchange.replace(" ", ""), aliases.get(exchange, exchange))
+    return out
+
+
 def load_cusip_ticker_map(path: Path | None) -> dict[str, str]:
     if path is None or not path.exists():
         return {}
@@ -864,6 +891,7 @@ def sync_ibkr_borrow_availability(
         raise RuntimeError("IBKR borrow sync requires the ib_insync package and a running TWS/IB Gateway session") from exc
 
     tickers = load_universe_tickers(tickers_csv)
+    primary_exchange_by_ticker = load_universe_exchange_map(tickers_csv)
     if max_tickers and max_tickers > 0:
         tickers = tickers[:max_tickers]
     if not tickers:
@@ -883,6 +911,12 @@ def sync_ibkr_borrow_availability(
                 if not ib.isConnected():
                     raise RuntimeError("IBKR connection lost during borrow fee history sync")
                 contracts = ib.qualifyContracts(Stock(ticker, "SMART", "USD"))
+                if not contracts:
+                    primary_exchange = primary_exchange_by_ticker.get(ticker, "")
+                    if primary_exchange:
+                        contracts = ib.qualifyContracts(
+                            Stock(ticker, "SMART", "USD", primaryExchange=primary_exchange)
+                        )
                 if not contracts:
                     failed_tickers.append(ticker)
                     continue

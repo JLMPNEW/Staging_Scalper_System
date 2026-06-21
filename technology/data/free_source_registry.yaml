@@ -396,6 +396,75 @@ sources:
     status: active
     notes: Point-in-time research universe backfill for acquired/delisted software-infrastructure constituents used by calibration and backtests.
 
+  - source_id: technology_hardware_ticker_seed
+    stage: security_master
+    source_name: Enriched technology hardware ticker universe CSV
+    source_owner: local_ticker_mapping
+    source_type: csv
+    base_url: ../ticker_mapping/technology_hardware_cleaned.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: local
+    raw_schema: technology_hardware_cleaned_csv
+    canonical_tables:
+      - dim_company
+      - dim_security
+      - dim_identifier
+      - dim_company_alias
+      - dim_universe_membership
+    feature_stages:
+      - security_master
+    subsector_scope: technology_hardware
+    priority: 21
+    status: active
+    notes: Stage 2 source-of-truth universe with enriched technology-hardware tickers and listing identity.
+
+  - source_id: technology_hardware_cohort_policy
+    stage: security_master
+    source_name: Technology hardware cohort policy YAML
+    source_owner: local_technology
+    source_type: yaml
+    base_url: technology/technology_hardware/data/technology_hardware_cohorts.yaml
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: local
+    raw_schema: technology_hardware_cohorts_yaml
+    canonical_tables:
+      - dim_technology_taxonomy
+    feature_stages:
+      - taxonomy
+      - calibration
+    subsector_scope: technology_hardware
+    priority: 22
+    status: active
+    notes: Core technology-hardware calibration cohorts plus unassigned-review policy.
+
+  - source_id: technology_hardware_historical_membership_seed
+    stage: security_master
+    source_name: Technology hardware historical membership seed
+    source_owner: local_technology
+    source_type: csv
+    base_url: technology/technology_hardware/data/technology_hardware_historical_membership.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: local
+    raw_schema: technology_hardware_historical_membership_csv
+    canonical_tables:
+      - dim_company
+      - dim_security
+      - dim_technology_taxonomy
+      - dim_universe_membership
+    feature_stages:
+      - security_master
+      - model_calibration
+    subsector_scope: technology_hardware
+    priority: 23
+    status: active
+    notes: Point-in-time research universe backfill for acquired/delisted technology-hardware constituents used by calibration and backtests.
+
   - source_id: semiconductor_scoring_contract
     stage: scoring
     source_name: Semiconductor scoring feature contract
@@ -444,6 +513,30 @@ sources:
     status: active
     notes: Software-infrastructure-owned Stage 6A score input contract built from technology financial, market, and positioning feature tables with QQQ-relative market behavior inputs.
 
+  - source_id: technology_hardware_scoring_contract
+    stage: scoring
+    source_name: Technology hardware scoring feature contract
+    source_owner: local_technology
+    source_type: derived_feature
+    base_url: technology.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: local
+    raw_schema: technology_feature_layers
+    canonical_tables:
+      - dim_scoring_component
+      - feature_scoring_input
+      - feature_scoring_component
+    feature_stages:
+      - scoring_contract
+      - calibration
+      - ranking
+    subsector_scope: technology_hardware
+    priority: 80
+    status: active
+    notes: Technology-hardware-owned Stage 6A score input contract built from technology financial, market, and positioning feature tables with QQQ-relative market behavior inputs.
+
   - source_id: software_infrastructure_calibrated_score_v1
     stage: calibrated_scoring
     source_name: Software infrastructure calibrated scoring model v1
@@ -467,6 +560,78 @@ sources:
     priority: 81
     status: active
     notes: Stage 7 calibrated software-infrastructure ranking layer. It reads the validated Stage 6 feature contract and writes separate production rank scores without overwriting the baseline.
+
+  - source_id: software_infrastructure_stage7_challenger_score_v1
+    stage: calibrated_scoring
+    source_name: Software infrastructure Stage 7 challenger scoring model v1
+    source_owner: local_technology
+    source_type: derived_feature
+    base_url: technology.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: local
+    raw_schema: software_infrastructure_scoring_contract_features
+    canonical_tables:
+      - feature_scoring_input
+      - feature_scoring_component
+      - feature_scoring_model_output
+    feature_stages:
+      - calibrated_scoring
+      - ranking
+      - challenger_validation
+    subsector_scope: software_infrastructure
+    priority: 81
+    status: active
+    notes: Stage 7 challenger software-infrastructure ranking layer retained for production-vs-challenger comparison after Stage 8 promotion.
+
+  - source_id: technology_hardware_calibrated_score_v1
+    stage: calibrated_scoring
+    source_name: Technology hardware calibrated scoring model v1
+    source_owner: local_technology
+    source_type: derived_feature
+    base_url: technology.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: local
+    raw_schema: technology_hardware_scoring_contract_features
+    canonical_tables:
+      - feature_scoring_input
+      - feature_scoring_component
+      - feature_scoring_model_output
+    feature_stages:
+      - calibrated_scoring
+      - ranking
+      - model_validation
+    subsector_scope: technology_hardware
+    priority: 81
+    status: active
+    notes: Stage 7 calibrated technology-hardware ranking layer. It reads the validated Stage 6 feature contract and writes separate production rank scores without overwriting the baseline.
+
+  - source_id: technology_hardware_stage7_challenger_score_v1
+    stage: calibrated_scoring
+    source_name: Technology hardware Stage 7 challenger scoring model v1
+    source_owner: local_technology
+    source_type: derived_feature
+    base_url: technology.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: local
+    raw_schema: technology_hardware_scoring_contract_features
+    canonical_tables:
+      - feature_scoring_input
+      - feature_scoring_component
+      - feature_scoring_model_output
+    feature_stages:
+      - calibrated_scoring
+      - ranking
+      - challenger_validation
+    subsector_scope: technology_hardware
+    priority: 81
+    status: active
+    notes: Stage 7 challenger technology-hardware ranking layer retained for future production-vs-challenger comparisons.
 
   - source_id: software_infrastructure_stage8_signal_diagnostics
     stage: model_calibration
@@ -530,6 +695,69 @@ sources:
     priority: 83
     status: active
     notes: Report-only Stage 8C procedure test. It repeatedly refits constrained software weights on expanding training windows and compares each untouched test block against the static Stage 7 baseline.
+
+  - source_id: technology_hardware_stage8_signal_diagnostics
+    stage: model_calibration
+    source_name: Technology hardware Stage 8A signal diagnostics
+    source_owner: local_technology
+    source_type: derived_report
+    base_url: output/technology_reports/technology_hardware/signal_diagnostics
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: on_model_review
+    data_owner: local
+    raw_schema: point_in_time_feature_panel
+    canonical_tables: []
+    feature_stages:
+      - signal_diagnostics
+      - model_calibration
+      - historical_panel
+    subsector_scope: technology_hardware
+    priority: 81
+    status: active
+    notes: Report-only Stage 8A diagnostics. It builds a point-in-time active plus delisted hardware panel, computes forward residual returns, ICs, Newey-West t-stats, signal birthdates, and candidate review files without writing model weights to the database.
+
+  - source_id: technology_hardware_stage8_optuna_calibration
+    stage: model_calibration
+    source_name: Technology hardware Stage 8B constrained Optuna calibration
+    source_owner: local_technology
+    source_type: derived_report
+    base_url: output/technology_reports/technology_hardware/optuna_calibration
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: on_model_review
+    data_owner: local
+    raw_schema: stage8a_signal_panel_csv
+    canonical_tables: []
+    feature_stages:
+      - optuna_weight_search
+      - model_calibration
+      - holdout_validation
+    subsector_scope: technology_hardware
+    priority: 82
+    status: active
+    notes: Report-only Stage 8B optimizer. It reads the Stage 8A hardware historical signal panel, searches bounded candidate weights, evaluates against Stage 7 on an embargoed holdout, and writes recommendations only.
+
+  - source_id: technology_hardware_stage8_walk_forward_calibration
+    stage: model_calibration
+    source_name: Technology hardware Stage 8C walk-forward calibration validation
+    source_owner: local_technology
+    source_type: derived_report
+    base_url: output/technology_reports/technology_hardware/optuna_calibration/walk_forward
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: on_model_review
+    data_owner: local
+    raw_schema: stage8a_signal_panel_csv
+    canonical_tables: []
+    feature_stages:
+      - walk_forward_validation
+      - model_calibration
+      - out_of_sample_validation
+    subsector_scope: technology_hardware
+    priority: 83
+    status: active
+    notes: Report-only Stage 8C procedure test. It repeatedly refits constrained hardware weights on expanding training windows and compares each untouched test block against the static Stage 7 baseline.
 
   - source_id: software_infrastructure_stage9_portfolio_backtest
     stage: portfolio_backtest

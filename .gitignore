@@ -33,6 +33,8 @@ med_devices/secrets*.local.yaml
 *.db
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
 *.h5
 *.hdf5
 *.feather
@@ -59,6 +61,7 @@ tmpomvpuh6h/
 !med_devices/data/fda_manual_footprint_evidence.csv
 !med_devices/data/fda_manufacturer_overrides.csv
 !med_devices/data/fda_regulatory_review_overrides.csv
+!portfolio_layer/data/*.csv
 !SEC_fundamentals/sec_issuer_metric_override_seed.csv
 !SEC_fundamentals/sec_metric_mapping_full.csv
 

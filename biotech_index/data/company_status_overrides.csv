@@ -1,4 +1,5 @@
 ticker,decision,listing_status,manual_include,manual_exclude,manual_review,reason_codes,notes
+KALV,remove,acquired_delisted_non_public,,true,,acquired_delisted_non_public;manual_exclude,"Acquired by Chiesi and Nasdaq trading suspended before market open on 2026-06-11; exclude from active public biotech scoring universe."
 DAWN,remove,acquired_delisted,,true,,acquired_delisted_non_public,Acquired by Servier and ceased trading on Nasdaq on 2026-04-22; exclude from active public universe.
 ACLX,remove,inactive,,true,,inactive_ticker;manual_exclude,User confirmed ticker is no longer active on 2026-05-04; remove from active scoring universe.
 FOLD,remove,inactive,,true,,inactive_ticker;manual_exclude,User confirmed ticker is no longer active on 2026-05-04; remove from active scoring universe.

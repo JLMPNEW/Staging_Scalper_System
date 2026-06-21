@@ -34,6 +34,9 @@ FIN_FIELDS = [
     "net_cash_to_assets",
     "sbc_pct_revenue",
     "inventory_days",
+    "days_sales_outstanding",
+    "days_payables_outstanding",
+    "cash_conversion_cycle",
     "revenue_yoy_growth",
     "gross_profit_yoy_growth",
     "operating_income_yoy_growth",
@@ -316,7 +319,7 @@ def load_financial_rows(conn: sqlite3.Connection, source_id: str, model_family: 
         f"""
         SELECT ticker, asof_date, fiscal_period_end, diluted_shares,
                free_cash_flow_ttm, net_income_ttm, market_cap, net_cash,
-               fx_rate_balance_sheet, inventory, revenue_ttm,
+               fx_rate_balance_sheet, inventory, accounts_receivable, accounts_payable, revenue_ttm,
                deferred_revenue, remaining_performance_obligation, {", ".join(FIN_FIELDS)}
         FROM feature_financial_statement
         WHERE source_id = ? AND model_family = ?
@@ -365,8 +368,14 @@ def financial_subfeatures(rows: list[dict[str, Any]], asof_iso: str) -> dict[str
                 break
     out["inventory_days_yoy_change"] = None
     out["inventory_to_revenue_growth_gap"] = None
+    out["days_sales_outstanding_yoy_change"] = None
+    out["days_payables_outstanding_yoy_change"] = None
+    out["cash_conversion_cycle_yoy_change"] = None
     latest_inv_days = safe_float(latest.get("inventory_days"))
     latest_inv = safe_float(latest.get("inventory"))
+    latest_dso = safe_float(latest.get("days_sales_outstanding"))
+    latest_dpo = safe_float(latest.get("days_payables_outstanding"))
+    latest_ccc = safe_float(latest.get("cash_conversion_cycle"))
     latest_rev_ttm = safe_float(latest.get("revenue_ttm"))
     if latest_end is not None:
         for row in reversed(rows):
@@ -380,6 +389,9 @@ def financial_subfeatures(rows: list[dict[str, Any]], asof_iso: str) -> dict[str
                 continue
             prior_inv_days = safe_float(row.get("inventory_days"))
             prior_inv = safe_float(row.get("inventory"))
+            prior_dso = safe_float(row.get("days_sales_outstanding"))
+            prior_dpo = safe_float(row.get("days_payables_outstanding"))
+            prior_ccc = safe_float(row.get("cash_conversion_cycle"))
             prior_rev_ttm = safe_float(row.get("revenue_ttm"))
             if out["inventory_days_yoy_change"] is None and latest_inv_days is not None and prior_inv_days is not None:
                 out["inventory_days_yoy_change"] = latest_inv_days - prior_inv_days
@@ -393,7 +405,19 @@ def financial_subfeatures(rows: list[dict[str, Any]], asof_iso: str) -> dict[str
                 and prior_rev_ttm > 0
             ):
                 out["inventory_to_revenue_growth_gap"] = (latest_inv / prior_inv - 1.0) - (latest_rev_ttm / prior_rev_ttm - 1.0)
-            if out["inventory_days_yoy_change"] is not None and out["inventory_to_revenue_growth_gap"] is not None:
+            if out["days_sales_outstanding_yoy_change"] is None and latest_dso is not None and prior_dso is not None:
+                out["days_sales_outstanding_yoy_change"] = latest_dso - prior_dso
+            if out["days_payables_outstanding_yoy_change"] is None and latest_dpo is not None and prior_dpo is not None:
+                out["days_payables_outstanding_yoy_change"] = latest_dpo - prior_dpo
+            if out["cash_conversion_cycle_yoy_change"] is None and latest_ccc is not None and prior_ccc is not None:
+                out["cash_conversion_cycle_yoy_change"] = latest_ccc - prior_ccc
+            if (
+                out["inventory_days_yoy_change"] is not None
+                and out["inventory_to_revenue_growth_gap"] is not None
+                and out["days_sales_outstanding_yoy_change"] is not None
+                and out["days_payables_outstanding_yoy_change"] is not None
+                and out["cash_conversion_cycle_yoy_change"] is not None
+            ):
                 break
     # Deferred-revenue / RPO booking signals (software forward-demand). RPO/revenue
     # is a point-in-time coverage ratio; the YoY growths are billings momentum.

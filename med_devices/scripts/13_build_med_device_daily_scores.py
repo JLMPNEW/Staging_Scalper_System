@@ -49,6 +49,7 @@ IC_COMPONENT_FIELD_MAP = {
     "technical_volatility_risk_score": "technical_volatility_risk",
     "fda_alpha_score": "fda_alpha",
     "fda_safety_score": "fda_safety",
+    "fda_safety_breadth_adjusted_score": "fda_safety_breadth_adjusted",
 }
 IC_COMPONENT_KEYS = set(IC_COMPONENT_FIELD_MAP.values())
 WEIGHT_EPSILON = 1e-9
@@ -198,6 +199,17 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "fda_clearance_acceleration_score": "REAL DEFAULT 50.0",
     "fda_evidence_quality_score": "REAL DEFAULT 0.0",
     "fda_event_risk_score": "REAL DEFAULT 0.0",
+    "fda_event_risk_breadth_adjusted_score": "REAL DEFAULT 0.0",
+    "fda_safety_breadth_adjusted_score": "REAL DEFAULT 50.0",
+    "fda_distinct_device_category_count": "INTEGER DEFAULT 0",
+    "fda_recall_count_raw": "INTEGER DEFAULT 0",
+    "fda_recall_count_per_category": "REAL DEFAULT 0.0",
+    "fda_class_i_recall_count": "INTEGER DEFAULT 0",
+    "fda_warning_letter_count_36m": "INTEGER DEFAULT 0",
+    "fda_mdr_death_injury_count_24m": "INTEGER DEFAULT 0",
+    "fda_mdr_malfunction_count_24m": "INTEGER DEFAULT 0",
+    "fda_mdr_malfunction_count_per_category": "REAL DEFAULT 0.0",
+    "fda_breadth_adjustment_applied": "INTEGER DEFAULT 0",
     "fda_signal_mode": "TEXT DEFAULT ''",
     "fda_signal_direction": "TEXT DEFAULT ''",
     "fda_signal_reliability": "REAL DEFAULT 0.0",
@@ -341,6 +353,17 @@ FIELDNAMES = [
     "fda_clearance_acceleration_score",
     "fda_evidence_quality_score",
     "fda_event_risk_score",
+    "fda_event_risk_breadth_adjusted_score",
+    "fda_safety_breadth_adjusted_score",
+    "fda_distinct_device_category_count",
+    "fda_recall_count_raw",
+    "fda_recall_count_per_category",
+    "fda_class_i_recall_count",
+    "fda_warning_letter_count_36m",
+    "fda_mdr_death_injury_count_24m",
+    "fda_mdr_malfunction_count_24m",
+    "fda_mdr_malfunction_count_per_category",
+    "fda_breadth_adjustment_applied",
     "fda_signal_mode",
     "fda_signal_direction",
     "fda_signal_reliability",
@@ -530,6 +553,17 @@ class ScoreRow:
     fda_clearance_acceleration_score: float = 50.0
     fda_evidence_quality_score: float = 50.0
     fda_event_risk_score: float = 0.0
+    fda_event_risk_breadth_adjusted_score: float = 0.0
+    fda_safety_breadth_adjusted_score: float = 50.0
+    fda_distinct_device_category_count: int = 0
+    fda_recall_count_raw: int = 0
+    fda_recall_count_per_category: float = 0.0
+    fda_class_i_recall_count: int = 0
+    fda_warning_letter_count_36m: int = 0
+    fda_mdr_death_injury_count_24m: int = 0
+    fda_mdr_malfunction_count_24m: int = 0
+    fda_mdr_malfunction_count_per_category: float = 0.0
+    fda_breadth_adjustment_applied: int = 0
     fda_signal_mode: str = ""
     fda_signal_direction: str = ""
     fda_signal_reliability: float = 0.0
@@ -915,14 +949,16 @@ def load_ic_tilted_component_ics(policy: dict[str, Any]) -> dict[str, dict[str, 
 def load_financial_rows(conn: Any, *, asof: str, ticker_filter: set[str], max_tickers: int) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT *
-        FROM feature_financial_valuation
-        WHERE asof_date = (
+        SELECT f.*
+        FROM feature_financial_valuation f
+        JOIN dim_company c ON c.company_id = f.company_id
+        WHERE c.is_active = 1
+          AND f.asof_date = (
             SELECT MAX(asof_date)
             FROM feature_financial_valuation
             WHERE asof_date <= ?
         )
-        ORDER BY ticker
+        ORDER BY f.ticker
         """,
         (asof,),
     ).fetchall()
@@ -2499,6 +2535,8 @@ SCORE_TEMPLATE_FIELD_TO_ATTR = {
     "fda_clearance_acceleration_score": "fda_clearance_acceleration_score",
     "fda_evidence_quality_score": "fda_evidence_quality_score",
     "fda_event_risk_score": "fda_event_risk_score",
+    "fda_event_risk_breadth_adjusted_score": "fda_event_risk_breadth_adjusted_score",
+    "fda_safety_breadth_adjusted_score": "fda_safety_breadth_adjusted_score",
     "reimbursement_score": "reimbursement_score",
     "valuation_score": "valuation_score",
     "technical_entry_score": "technical_entry_score",
@@ -2531,6 +2569,8 @@ SCORE_TEMPLATE_FIELD_TO_COMPONENT = {
     "fda_clearance_acceleration_score": "fda_product",
     "fda_evidence_quality_score": "fda_product",
     "fda_event_risk_score": "fda_product",
+    "fda_event_risk_breadth_adjusted_score": "fda_product",
+    "fda_safety_breadth_adjusted_score": "fda_product",
     "reimbursement_score": "reimbursement",
     "valuation_score": "valuation",
     "technical_entry_score": "technical_entry",
@@ -4047,6 +4087,7 @@ def build_rows(
         effective_weights.setdefault("technical_volatility_risk", 0.0)
         effective_weights.setdefault("fda_alpha", 0.0)
         effective_weights.setdefault("fda_safety", 0.0)
+        effective_weights.setdefault("fda_safety_breadth_adjusted", 0.0)
         current_shares_outstanding = to_float(item.get("current_shares_outstanding"))
         diluted_weighted_average_shares = to_float(item.get("diluted_weighted_average_shares"))
         basic_weighted_average_shares = to_float(item.get("basic_weighted_average_shares"))
@@ -4063,6 +4104,8 @@ def build_rows(
             "technical_volatility_risk": bool(technical_item) and to_float(technical_item.get("volatility_risk_score")) is not None,
             "fda_alpha": bool(fda_item) and to_float(fda_item.get("fda_alpha_score")) is not None,
             "fda_safety": bool(fda_item) and to_float(fda_item.get("fda_safety_score")) is not None,
+            "fda_safety_breadth_adjusted": bool(fda_item)
+            and to_float(fda_item.get("fda_safety_breadth_adjusted_score")) is not None,
         }
         score_field_available = {
             "fundamental_quality_score": component_available["fundamental_quality"],
@@ -4083,6 +4126,10 @@ def build_rows(
             "fda_clearance_acceleration_score": bool(fda_item) and to_float(fda_item.get("fda_clearance_acceleration_score")) is not None,
             "fda_evidence_quality_score": bool(fda_item) and to_float(fda_item.get("fda_evidence_quality_score")) is not None,
             "fda_event_risk_score": bool(fda_item) and to_float(fda_item.get("fda_event_risk_score")) is not None,
+            "fda_event_risk_breadth_adjusted_score": bool(fda_item)
+            and to_float(fda_item.get("fda_event_risk_breadth_adjusted_score")) is not None,
+            "fda_safety_breadth_adjusted_score": bool(fda_item)
+            and to_float(fda_item.get("fda_safety_breadth_adjusted_score")) is not None,
             "reimbursement_score": component_available["reimbursement"],
             "valuation_score": component_available["valuation"],
             "technical_entry_score": component_available["technical_entry"],
@@ -4177,6 +4224,35 @@ def build_rows(
             fda_clearance_acceleration_score=score_or(fda_item.get("fda_clearance_acceleration_score"), 50.0) if fda_item else 50.0,
             fda_evidence_quality_score=score_or(fda_item.get("fda_evidence_quality_score"), 50.0) if fda_item else 50.0,
             fda_event_risk_score=score_or(fda_item.get("fda_event_risk_score"), 0.0) if fda_item else 0.0,
+            fda_event_risk_breadth_adjusted_score=(
+                score_or(fda_item.get("fda_event_risk_breadth_adjusted_score"), 0.0) if fda_item else 0.0
+            ),
+            fda_safety_breadth_adjusted_score=(
+                score_or(fda_item.get("fda_safety_breadth_adjusted_score"), 50.0) if fda_item else 50.0
+            ),
+            fda_distinct_device_category_count=int(to_float(fda_item.get("fda_distinct_device_category_count")) or 0)
+            if fda_item
+            else 0,
+            fda_recall_count_raw=int(to_float(fda_item.get("fda_recall_count_raw")) or 0) if fda_item else 0,
+            fda_recall_count_per_category=(
+                score_or(fda_item.get("fda_recall_count_per_category"), 0.0) if fda_item else 0.0
+            ),
+            fda_class_i_recall_count=int(to_float(fda_item.get("fda_class_i_recall_count")) or 0) if fda_item else 0,
+            fda_warning_letter_count_36m=int(to_float(fda_item.get("fda_warning_letter_count_36m")) or 0)
+            if fda_item
+            else 0,
+            fda_mdr_death_injury_count_24m=int(to_float(fda_item.get("fda_mdr_death_injury_count_24m")) or 0)
+            if fda_item
+            else 0,
+            fda_mdr_malfunction_count_24m=int(to_float(fda_item.get("fda_mdr_malfunction_count_24m")) or 0)
+            if fda_item
+            else 0,
+            fda_mdr_malfunction_count_per_category=(
+                score_or(fda_item.get("fda_mdr_malfunction_count_per_category"), 0.0) if fda_item else 0.0
+            ),
+            fda_breadth_adjustment_applied=int(to_float(fda_item.get("fda_breadth_adjustment_applied")) or 0)
+            if fda_item
+            else 0,
             fda_signal_mode=str(fda_item.get("fda_signal_mode") or "") if fda_item else "",
             fda_signal_direction=str(fda_item.get("fda_signal_direction") or "") if fda_item else "",
             fda_signal_reliability=(
@@ -4333,6 +4409,7 @@ def build_rows(
             "technical_volatility_risk": row.technical_volatility_risk_score,
             "fda_alpha": row.fda_alpha_score,
             "fda_safety": row.fda_safety_score,
+            "fda_safety_breadth_adjusted": row.fda_safety_breadth_adjusted_score,
         }
         fixed_weight_composite = weighted_available_score(component_scores, component_available, effective_weights)
         raw_composite = (
@@ -4451,11 +4528,15 @@ def ensure_daily_score_policy_columns(conn: Any) -> None:
             conn.execute(f"ALTER TABLE med_device_daily_scores ADD COLUMN {quote_identifier(column)} {ddl}")
 
 
-def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
+def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) -> int:
     if not rows:
         return 0
     ensure_daily_score_policy_columns(conn)
     now = utc_now()
+    if replace_asof:
+        target_asofs = sorted({row.asof_date for row in rows})
+        for target_asof in target_asofs:
+            conn.execute("DELETE FROM med_device_daily_scores WHERE asof_date = ?", (target_asof,))
     columns = [
         "asof_date",
         "company_id",
@@ -4523,6 +4604,17 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
         "fda_clearance_acceleration_score",
         "fda_evidence_quality_score",
         "fda_event_risk_score",
+        "fda_event_risk_breadth_adjusted_score",
+        "fda_safety_breadth_adjusted_score",
+        "fda_distinct_device_category_count",
+        "fda_recall_count_raw",
+        "fda_recall_count_per_category",
+        "fda_class_i_recall_count",
+        "fda_warning_letter_count_36m",
+        "fda_mdr_death_injury_count_24m",
+        "fda_mdr_malfunction_count_24m",
+        "fda_mdr_malfunction_count_per_category",
+        "fda_breadth_adjustment_applied",
         "fda_signal_mode",
         "fda_signal_direction",
         "fda_signal_reliability",
@@ -4723,6 +4815,17 @@ def upsert_rows(conn: Any, rows: list[ScoreRow]) -> int:
                 row.fda_clearance_acceleration_score,
                 row.fda_evidence_quality_score,
                 row.fda_event_risk_score,
+                row.fda_event_risk_breadth_adjusted_score,
+                row.fda_safety_breadth_adjusted_score,
+                row.fda_distinct_device_category_count,
+                row.fda_recall_count_raw,
+                row.fda_recall_count_per_category,
+                row.fda_class_i_recall_count,
+                row.fda_warning_letter_count_36m,
+                row.fda_mdr_death_injury_count_24m,
+                row.fda_mdr_malfunction_count_24m,
+                row.fda_mdr_malfunction_count_per_category,
+                row.fda_breadth_adjustment_applied,
                 row.fda_signal_mode,
                 row.fda_signal_direction,
                 row.fda_signal_reliability,
@@ -4900,7 +5003,8 @@ def main() -> None:
                 ticker_filter=ticker_filter,
                 max_tickers=int(args.max_tickers),
             )
-            upserted = upsert_rows(conn, rows)
+            replace_asof = not ticker_filter and int(args.max_tickers) <= 0
+            upserted = upsert_rows(conn, rows, replace_asof=replace_asof)
             upsert_durable_growth_proxy_rows(conn, rows)
             upsert_sentiment_proxy_rows(conn, rows)
             write_csv(output_csv, rows)

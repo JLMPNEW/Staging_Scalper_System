@@ -488,8 +488,15 @@ sec_filings:
 fda_adcom_calendar:
   # FDA Advisory Committee calendar sync (shadow-only — not a pipeline blocker).
   # Fetches from FDA.gov and stores to fda_adcom_events table.
-  calendar_url: "https://www.fda.gov/media/advisory-committees/AdvisoryCommitteeCalendar/data.json"
-  fetch_timeout_sec: 30
+  calendar_url: "https://www.fda.gov/datatables-json/advisory-committee-calendar-json"
+  fallback_calendar_urls:
+    - "https://www.fda.gov/media/advisory-committees/AdvisoryCommitteeCalendar/data.json"
+  warmup_url: "https://www.fda.gov/advisory-committees/advisory-committee-calendar"
+  fetch_timeout_sec: 120
+  # Use truststore/certifi explicitly so FDA.gov TLS validation is not dependent
+  # on stale local urllib defaults. auto = truststore -> certifi -> system.
+  ssl_context: "auto"  # auto | truststore | certifi | system | none | insecure_no_verify
+  ca_bundle_path: ""
   lookahead_days: 120
   # Shadow-only gate: adcom_score and adcom_within_60d_flag are IC-monitored
   # but not yet integrated into primary scoring formulas.

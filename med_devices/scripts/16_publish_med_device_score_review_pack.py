@@ -92,6 +92,17 @@ SCORE_FIELDS = [
     "fda_clearance_acceleration_score",
     "fda_evidence_quality_score",
     "fda_event_risk_score",
+    "fda_event_risk_breadth_adjusted_score",
+    "fda_safety_breadth_adjusted_score",
+    "fda_distinct_device_category_count",
+    "fda_recall_count_raw",
+    "fda_recall_count_per_category",
+    "fda_class_i_recall_count",
+    "fda_warning_letter_count_36m",
+    "fda_mdr_death_injury_count_24m",
+    "fda_mdr_malfunction_count_24m",
+    "fda_mdr_malfunction_count_per_category",
+    "fda_breadth_adjustment_applied",
     "fda_signal_mode",
     "fda_signal_direction",
     "fda_signal_reliability",
@@ -692,6 +703,9 @@ def write_markdown(
                 f"legacy={first_float(row.get('fda_product_score_legacy'), row.get('fda_product_score')):.2f} "
                 f"alpha={first_float(row.get('fda_alpha_score'), row.get('fda_product_score')):.2f} "
                 f"event_risk={first_float(row.get('fda_event_risk_score')):.2f} "
+                f"breadth_adj_event_risk={first_float(row.get('fda_event_risk_breadth_adjusted_score')):.2f} "
+                f"breadth_adj_safety={first_float(row.get('fda_safety_breadth_adjusted_score')):.2f} "
+                f"categories={first_float(row.get('fda_distinct_device_category_count')):.0f} "
                 f"mode={row.get('fda_gate_mode') or 'legacy'} "
                 f"source={row.get('fda_score_source') or 'fda_product_score'}"
                 for row in top25

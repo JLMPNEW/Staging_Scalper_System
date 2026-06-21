@@ -55,6 +55,7 @@ from biotech_index.core.scoring_math import (  # noqa: E402
     score_commercial_expected_return_overlay,
     score_growth_drag as shared_growth_drag_score,
 )
+from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("score_biotech_index")
@@ -1322,8 +1323,9 @@ def load_feature_rows(conn: sqlite3.Connection, asof_date: str) -> list[dict[str
             f.financial_quality_score_raw, f.risk_score_raw, f.momentum_score_raw, f.feature_json,
             c.ticker, c.company_name
         FROM daily_features f
-        LEFT JOIN companies c ON c.company_id = f.company_id
+        JOIN companies c ON c.company_id = f.company_id
         WHERE f.asof_date = ?
+          AND COALESCE(c.is_active, 0) = 1
         ORDER BY c.ticker
         """,
         (asof_date,),
@@ -1337,6 +1339,11 @@ def load_feature_rows(conn: sqlite3.Connection, asof_date: str) -> list[dict[str
             + (f"...(+{len(missing_company_ids) - 25})" if len(missing_company_ids) > 25 else "")
         )
     return out
+
+
+def load_inactive_company_tickers(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("SELECT ticker FROM companies WHERE COALESCE(is_active, 0) <= 0").fetchall()
+    return {ticker for row in rows if (ticker := normalize_ticker(row["ticker"]))}
 
 
 def load_commercial_rows(conn: sqlite3.Connection, asof_date: str) -> dict[int, dict[str, Any]]:
@@ -3477,6 +3484,15 @@ def main() -> None:
                 asof_date=asof_date,
             )
             expected_tickers = read_final_scoring_tickers(universe_csv)
+            inactive_expected_tickers = expected_tickers.intersection(load_inactive_company_tickers(conn))
+            if inactive_expected_tickers:
+                LOGGER.warning(
+                    "Excluding %d inactive/delisted final-universe ticker(s) from scoring coverage: %s",
+                    len(inactive_expected_tickers),
+                    ",".join(sorted(inactive_expected_tickers)[:25])
+                    + (f"...(+{len(inactive_expected_tickers) - 25})" if len(inactive_expected_tickers) > 25 else ""),
+                )
+                expected_tickers = expected_tickers - inactive_expected_tickers
             run_id = start_run(conn, run_type="score_biotech_index", input_path=db_path)
             features = load_feature_rows(conn, asof_date)
             if not features:

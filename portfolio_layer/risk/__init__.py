@@ -1,0 +1,1 @@
+"""Stage 2 - live/current-book cross-sector risk panel (self-sourced prices + covariance)."""

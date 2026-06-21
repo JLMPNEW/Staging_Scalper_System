@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-family", default="", help="Technology model family to validate, e.g. semiconductors.")
     parser.add_argument("--allow-missing-borrow", action="store_true", help="Downgrade missing IBKR borrow coverage to warning.")
     parser.add_argument("--13f-exempt-tickers", default="", help="Comma-separated tickers with explicit 13F no-row exemptions.")
+    parser.add_argument("--borrow-exempt-tickers", default="", help="Comma-separated tickers with explicit IBKR borrow no-row exemptions.")
     return parser.parse_args()
 
 
@@ -112,6 +113,8 @@ def validate() -> int:
     )
     exempt_13f_tickers = cfg_ticker_set(cfg_get(config, "positioning_import.upstream_13f_gate_exempt_tickers", []))
     exempt_13f_tickers.update(cfg_ticker_set(args.__dict__.get("13f_exempt_tickers", "")))
+    exempt_borrow_tickers = cfg_ticker_set(cfg_get(config, "positioning_import.upstream_borrow_gate_exempt_tickers", []))
+    exempt_borrow_tickers.update(cfg_ticker_set(args.borrow_exempt_tickers))
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -380,6 +383,25 @@ def validate() -> int:
             f"SELECT COUNT(DISTINCT ticker) FROM fact_ibkr_borrow_snapshot WHERE source_id = ? AND ticker IN ({ph})",
             (mp_source, *tickers),
         )
+        borrow_missing_rows = conn.execute(
+            f"""
+            SELECT ticker
+            FROM dim_company
+            WHERE is_active = 1
+              AND ticker IN ({ph})
+              AND ticker NOT IN (
+                  SELECT DISTINCT ticker
+                  FROM fact_ibkr_borrow_snapshot
+                  WHERE source_id = ?
+              )
+            ORDER BY ticker
+            """,
+            (*tickers, mp_source),
+        ).fetchall()
+        missing_borrow_tickers = [row["ticker"] for row in borrow_missing_rows]
+        unexpected_missing_borrow = [ticker for ticker in missing_borrow_tickers if ticker not in exempt_borrow_tickers]
+        active_borrow_exemptions = sorted(ticker for ticker in exempt_borrow_tickers if ticker in missing_borrow_tickers)
+        stale_borrow_exemptions = sorted(ticker for ticker in exempt_borrow_tickers if ticker in tickers and ticker not in missing_borrow_tickers)
         positioning_features = scalar(
             conn,
             f"SELECT COUNT(DISTINCT ticker) FROM feature_positioning WHERE source_id = ? AND model_family = ? AND ticker IN ({ph})",
@@ -413,8 +435,14 @@ def validate() -> int:
             warnings.append(f"13F exemption can be removed; rows now exist for: {stale_13f_exemptions}")
         if require_short and short_tickers != len(tickers):
             errors.append(f"Short-interest coverage required but only {short_tickers}/{len(tickers)} tickers have rows.")
-        if require_borrow and borrow_tickers != len(tickers):
-            errors.append(f"Borrow coverage required but only {borrow_tickers}/{len(tickers)} tickers have rows.")
+        if require_borrow and unexpected_missing_borrow:
+            errors.append(
+                f"Borrow coverage required; missing non-exempt tickers: {unexpected_missing_borrow}"
+            )
+        if require_borrow and active_borrow_exemptions:
+            warnings.append(f"Borrow required with active broker-contract exemptions: {active_borrow_exemptions}")
+        if require_borrow and stale_borrow_exemptions:
+            warnings.append(f"Borrow exemption can be removed; rows now exist for: {stale_borrow_exemptions}")
         if positioning_features != len(tickers):
             errors.append(f"Positioning feature coverage mismatch: expected={len(tickers)} actual={positioning_features}")
 
@@ -430,7 +458,7 @@ def validate() -> int:
         warnings.append(f"Form 4 rows={form4_rows} covered_tickers={form4_tickers} open_market_purchase_rows={form4_buy_rows} upstream_rows={upstream_form4_rows}/{upstream_form4_tickers} direct_rows={direct_form4_rows}/{direct_form4_tickers}")
         warnings.append(f"13F covered_tickers={institutional_tickers} required={require_13f} missing={missing_13f_tickers} exempt_missing={active_13f_exemptions}")
         warnings.append(f"Short-interest covered_tickers={short_tickers} required={require_short}")
-        warnings.append(f"Borrow covered_tickers={borrow_tickers} required={require_borrow}")
+        warnings.append(f"Borrow covered_tickers={borrow_tickers} required={require_borrow} missing={missing_borrow_tickers} exempt_missing={active_borrow_exemptions}")
         warnings.append(f"Positioning feature covered_tickers={positioning_features} missing_upstream_issues={missing_positioning_issue_count}")
 
     for message in warnings:

@@ -8,6 +8,10 @@ from typing import Optional
 
 
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SAFE_COLUMN_TYPE_RE = re.compile(
+    r"^(TEXT|INTEGER|REAL|BLOB|NUMERIC)(?:\s+DEFAULT\s+(?:NULL|[-+]?\d+(?:\.\d+)?|'[^']*'))?$",
+    re.IGNORECASE,
+)
 
 
 SCHEMA_SQL = """
@@ -750,6 +754,17 @@ CREATE TABLE IF NOT EXISTS feature_fda_product_risk (
     fda_clearance_acceleration_score REAL,
     fda_evidence_quality_score REAL,
     fda_event_risk_score REAL,
+    fda_event_risk_breadth_adjusted_score REAL DEFAULT 0.0,
+    fda_safety_breadth_adjusted_score REAL DEFAULT 50.0,
+    fda_distinct_device_category_count INTEGER DEFAULT 0,
+    fda_recall_count_raw INTEGER DEFAULT 0,
+    fda_recall_count_per_category REAL DEFAULT 0.0,
+    fda_class_i_recall_count INTEGER DEFAULT 0,
+    fda_warning_letter_count_36m INTEGER DEFAULT 0,
+    fda_mdr_death_injury_count_24m INTEGER DEFAULT 0,
+    fda_mdr_malfunction_count_24m INTEGER DEFAULT 0,
+    fda_mdr_malfunction_count_per_category REAL DEFAULT 0.0,
+    fda_breadth_adjustment_applied INTEGER DEFAULT 0,
     fda_signal_mode TEXT,
     fda_signal_direction TEXT,
     fda_signal_reliability REAL,
@@ -1094,6 +1109,17 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     fda_clearance_acceleration_score REAL DEFAULT 50.0,
     fda_evidence_quality_score REAL DEFAULT 0.0,
     fda_event_risk_score REAL DEFAULT 0.0,
+    fda_event_risk_breadth_adjusted_score REAL DEFAULT 0.0,
+    fda_safety_breadth_adjusted_score REAL DEFAULT 50.0,
+    fda_distinct_device_category_count INTEGER DEFAULT 0,
+    fda_recall_count_raw INTEGER DEFAULT 0,
+    fda_recall_count_per_category REAL DEFAULT 0.0,
+    fda_class_i_recall_count INTEGER DEFAULT 0,
+    fda_warning_letter_count_36m INTEGER DEFAULT 0,
+    fda_mdr_death_injury_count_24m INTEGER DEFAULT 0,
+    fda_mdr_malfunction_count_24m INTEGER DEFAULT 0,
+    fda_mdr_malfunction_count_per_category REAL DEFAULT 0.0,
+    fda_breadth_adjustment_applied INTEGER DEFAULT 0,
     fda_signal_mode TEXT DEFAULT '',
     fda_signal_direction TEXT DEFAULT '',
     fda_signal_reliability REAL DEFAULT 0.0,
@@ -1482,6 +1508,17 @@ def init_db(conn: sqlite3.Connection) -> None:
             "fda_clearance_acceleration_score": "REAL",
             "fda_evidence_quality_score": "REAL",
             "fda_event_risk_score": "REAL",
+            "fda_event_risk_breadth_adjusted_score": "REAL DEFAULT 0.0",
+            "fda_safety_breadth_adjusted_score": "REAL DEFAULT 50.0",
+            "fda_distinct_device_category_count": "INTEGER DEFAULT 0",
+            "fda_recall_count_raw": "INTEGER DEFAULT 0",
+            "fda_recall_count_per_category": "REAL DEFAULT 0.0",
+            "fda_class_i_recall_count": "INTEGER DEFAULT 0",
+            "fda_warning_letter_count_36m": "INTEGER DEFAULT 0",
+            "fda_mdr_death_injury_count_24m": "INTEGER DEFAULT 0",
+            "fda_mdr_malfunction_count_24m": "INTEGER DEFAULT 0",
+            "fda_mdr_malfunction_count_per_category": "REAL DEFAULT 0.0",
+            "fda_breadth_adjustment_applied": "INTEGER DEFAULT 0",
             "fda_signal_mode": "TEXT",
             "fda_signal_direction": "TEXT",
             "fda_signal_reliability": "REAL",
@@ -1634,6 +1671,17 @@ def init_db(conn: sqlite3.Connection) -> None:
             "fda_clearance_acceleration_score": "REAL",
             "fda_evidence_quality_score": "REAL",
             "fda_event_risk_score": "REAL",
+            "fda_event_risk_breadth_adjusted_score": "REAL DEFAULT 0.0",
+            "fda_safety_breadth_adjusted_score": "REAL DEFAULT 50.0",
+            "fda_distinct_device_category_count": "INTEGER DEFAULT 0",
+            "fda_recall_count_raw": "INTEGER DEFAULT 0",
+            "fda_recall_count_per_category": "REAL DEFAULT 0.0",
+            "fda_class_i_recall_count": "INTEGER DEFAULT 0",
+            "fda_warning_letter_count_36m": "INTEGER DEFAULT 0",
+            "fda_mdr_death_injury_count_24m": "INTEGER DEFAULT 0",
+            "fda_mdr_malfunction_count_24m": "INTEGER DEFAULT 0",
+            "fda_mdr_malfunction_count_per_category": "REAL DEFAULT 0.0",
+            "fda_breadth_adjustment_applied": "INTEGER DEFAULT 0",
             "fda_signal_mode": "TEXT",
             "fda_signal_direction": "TEXT",
             "fda_signal_reliability": "REAL",
@@ -1862,11 +1910,11 @@ def _ensure_table_optional_columns(conn: sqlite3.Connection, table_name: str, co
             continue
         if not SAFE_IDENTIFIER_RE.fullmatch(str(column or "")):
             raise ValueError(f"Unsafe SQLite column name: {column!r}")
-        normalized_type = str(column_type or "").strip().upper()
-        if normalized_type not in {"TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC"}:
+        normalized_type = str(column_type or "").strip()
+        if not SAFE_COLUMN_TYPE_RE.fullmatch(normalized_type):
             raise ValueError(
                 f"Non-standard SQLite column type for {table_name}.{column}: {column_type!r}. "
-                "Use TEXT, INTEGER, REAL, BLOB, or NUMERIC."
+                "Use TEXT, INTEGER, REAL, BLOB, NUMERIC, optionally with a literal DEFAULT."
             )
         conn.execute(f"ALTER TABLE {quote_identifier(table_name)} ADD COLUMN {quote_identifier(column)} {normalized_type}")
 

@@ -650,6 +650,10 @@ fda_features:
     injury_per_billion_weight: 0.5
     malfunction_per_billion_weight: 0.1
     adverse_acceleration_per_billion_weight: 0.5
+  event_risk_breadth_adjustment:
+    min_device_categories: 3
+    warning_letter_event_weight: 20.0
+    production_usage: "shadow_only_until_ic_validation"
   windows_months:
     short: 12
     medium: 24
@@ -1449,10 +1453,10 @@ scoring:
         data_completeness_min: 85
     capital_equipment_procedure_platforms:
       enabled: true
-      calibration_status: "production_eligible"
-      calibration_status_reason: "promoted_to_calibrated_baseline_special_situation_2026_06_07;manual_concentration_override_n35_unique2_hit85_71_lcb25_62pct"
-      calibration_confidence: "low_concentrated"
-      validation_note: "Promoted as calibrated-baseline gate policy with explicit concentration caveat: 120d validation n=35, 2 tickers of 12, 17% ticker coverage, hit 85.71%, LCB +25.62%. Not eligible as broad safe-core Tier 1 because result is concentrated in two names."
+      calibration_status: "restricted_research_only"
+      calibration_status_reason: "held_as_60d_watchlist_after_2026_06_17_rebuild;n35_unique2_hit85_71_lcb25_62pct_requires_third_ticker_support"
+      calibration_confidence: "watchlist_concentrated"
+      validation_note: "Held as 60-day watchlist rather than production seed: 120d validation n=35, 2 tickers of 12, hit 85.71%, LCB +25.62%, but validation is concentrated in CBLL and MASI. Promote only after broader ticker support or explicit concentration acceptance."
       tier1_safety_policy:
         allow_safe_core_gate_substitution: false
         cohort_denylist:
@@ -1503,9 +1507,9 @@ scoring:
     orthopedics_spine_sports_implants:
       enabled: true
       calibration_status: "production_eligible"
-      calibration_status_reason: "promoted_to_calibrated_baseline_low_confidence_2026_06_07;n95_unique4_hit52_63_lcb4_33pct"
-      calibration_confidence: "low"
-      validation_note: "Promoted as calibrated-baseline gate policy with low-confidence annotation: 120d validation n=95, 4 tickers of 11, 36.36% ticker coverage, hit 52.63%, median excess +0.82%, LCB +4.33%. Recheck in next calibration cycle before broadening."
+      calibration_status_reason: "promoted_with_monitoring_after_2026_06_17_rebuild;n55_unique3_hit63_64_lcb10_49pct_nonpositive_60d_median"
+      calibration_confidence: "medium_monitoring"
+      validation_note: "Promoted with monitoring: 120d validation n=55, 3 tickers of 11, 27.27% ticker coverage, hit 63.64%, LCB +10.49%. Keep monitoring flag because the 60d median was nonpositive and CNMD/GMED/ZBH are correlated mid-cap ortho names."
       gates:
         composite_min: 50
         cohort_percentile_min: 50
@@ -1728,11 +1732,16 @@ calibration:
   recommendations_csv: "../output/med_devices_reports/calibration/med_device_calibration_recommendations_by_cohort.csv"
   recommended_config_yaml: "../output/med_devices_reports/calibration/med_device_calibration_recommended_config.yaml"
   calibrated_baseline:
+    baseline_version: "med_device_calibrated_baseline_v23_2026_06_17"
     comparison_csv: "../output/med_devices_reports/calibration/med_device_calibrated_baseline_comparison.csv"
     constituents_csv: "../output/med_devices_reports/calibration/med_device_calibrated_baseline_constituents.csv"
     config_fragment_yaml: "../output/med_devices_reports/calibration/med_device_calibrated_baseline_config_fragment.yaml"
-    production_seed_cohorts: "orthopedics_spine_sports_implants,capital_equipment_procedure_platforms,healthcare_services_cro_lab_services,life_science_tools_research_instruments"
-    watchlist_seed_cohorts: "diagnostics_clinical_tests,elective_vision_dental_aesthetic_devices"
+    snapshot_csv: "../output/med_devices_reports/calibration/med_device_calibrated_baseline_snapshot.csv"
+    frozen_baseline_csv: "../output/med_devices_reports/calibration/baselines/med_device_calibrated_baseline_v23_2026_06_17.csv"
+    freeze_baseline_if_missing: true
+    production_seed_cohorts: "orthopedics_spine_sports_implants,healthcare_services_cro_lab_services,life_science_tools_research_instruments"
+    manual_production_seed_cohorts: "orthopedics_spine_sports_implants,life_science_tools_research_instruments"
+    watchlist_seed_cohorts: "capital_equipment_procedure_platforms"
     event_driven_excluded_cohorts: "implantable_interventional_devices_direct_payment,emerging_single_product_therapeutic_platforms"
     min_selected_obs: 10
     min_unique_tickers: 3
@@ -1757,7 +1766,7 @@ calibration:
   require_positive_lcb_horizons: "60,120"
   min_selected_validation_for_production: 12
   min_unique_tickers_for_production: 3
-  production_candidate_override_cohorts: "orthopedics_spine_sports_implants,capital_equipment_procedure_platforms,healthcare_services_cro_lab_services,life_science_tools_research_instruments"
+  production_candidate_override_cohorts: "orthopedics_spine_sports_implants,healthcare_services_cro_lab_services,life_science_tools_research_instruments"
   candidate_raw_score_min: "50,55,60,65,70"
   candidate_cohort_percentile_min: "50,60,70,80,90"
   candidate_fundamental_quality_min: "0,60,70"
@@ -1859,7 +1868,7 @@ calibration:
     min_coverage_pct: 0.80
     min_cross_sectional_obs: 5
     min_abs_cross_sectional_ic: 0.05
-    components: "raw_composite_score,ic_tilted_composite_score,cohort_percentile,fundamental_quality_score,durable_growth_score,durable_growth_score_legacy,durable_growth_alpha_score,durable_growth_growth_score,durable_growth_quality_score,durable_growth_efficiency_score,durable_growth_capital_discipline_score,durable_growth_evidence_quality_score,fda_product_score,fda_alpha_score,fda_safety_score,fda_clearance_velocity_raw,fda_clearance_velocity_score,fda_clearance_acceleration_raw,fda_clearance_acceleration_score,fda_evidence_quality_score,fda_event_risk_score,quality_value_interaction_score,fda_technical_interaction_score,reimbursement_score,valuation_score,technical_entry_score,technical_setup_score,technical_core_score,technical_alpha_score,technical_pullback_score,borrow_availability_score,borrow_fee_score,borrow_squeeze_risk_score,borrow_pressure_score,short_interest_score,short_pressure_score,short_squeeze_score,short_volume_score,short_interest_velocity_score,days_to_cover_score,institutional_accumulation_score,institutional_crowding_score,institutional_breadth_score,insider_net_buy_score,insider_cluster_buy_score,insider_selling_pressure_score,insider_activity_score,sentiment_catalyst_score,value_trap_score,data_completeness_score,liquidity_score"
+    components: "raw_composite_score,ic_tilted_composite_score,cohort_percentile,fundamental_quality_score,durable_growth_score,durable_growth_score_legacy,durable_growth_alpha_score,durable_growth_growth_score,durable_growth_quality_score,durable_growth_efficiency_score,durable_growth_capital_discipline_score,durable_growth_evidence_quality_score,fda_product_score,fda_alpha_score,fda_safety_score,fda_safety_breadth_adjusted_score,fda_clearance_velocity_raw,fda_clearance_velocity_score,fda_clearance_acceleration_raw,fda_clearance_acceleration_score,fda_evidence_quality_score,fda_event_risk_score,fda_event_risk_breadth_adjusted_score,quality_value_interaction_score,fda_technical_interaction_score,reimbursement_score,valuation_score,technical_entry_score,technical_setup_score,technical_core_score,technical_alpha_score,technical_pullback_score,borrow_availability_score,borrow_fee_score,borrow_squeeze_risk_score,borrow_pressure_score,short_interest_score,short_pressure_score,short_squeeze_score,short_volume_score,short_interest_velocity_score,days_to_cover_score,institutional_accumulation_score,institutional_crowding_score,institutional_breadth_score,insider_net_buy_score,insider_cluster_buy_score,insider_selling_pressure_score,insider_activity_score,sentiment_catalyst_score,value_trap_score,data_completeness_score,liquidity_score"
   component_weight_optimizer:
     output_csv: "../output/med_devices_reports/calibration/med_device_component_weight_optimizer_results.csv"
     summary_csv: "../output/med_devices_reports/calibration/med_device_component_weight_optimizer_summary.csv"
@@ -1963,7 +1972,7 @@ calibration:
     output_csv: "../output/med_devices_reports/calibration/med_device_component_redesign_priority.csv"
     detail_csv: "../output/med_devices_reports/calibration/med_device_component_redesign_priority_detail.csv"
     include_control_components: false
-    scoring_components: "ic_tilted_composite_score,fundamental_quality_score,durable_growth_score,durable_growth_score_legacy,durable_growth_alpha_score,durable_growth_growth_score,durable_growth_quality_score,durable_growth_efficiency_score,durable_growth_capital_discipline_score,durable_growth_evidence_quality_score,fda_product_score,fda_alpha_score,fda_safety_score,fda_clearance_velocity_raw,fda_clearance_velocity_score,fda_clearance_acceleration_raw,fda_clearance_acceleration_score,fda_evidence_quality_score,fda_event_risk_score,quality_value_interaction_score,fda_technical_interaction_score,reimbursement_score,valuation_score,technical_alpha_score,technical_pullback_score,borrow_availability_score,borrow_fee_score,borrow_squeeze_risk_score,borrow_pressure_score,short_interest_score,short_pressure_score,short_squeeze_score,short_volume_score,short_interest_velocity_score,days_to_cover_score,institutional_accumulation_score,institutional_crowding_score,institutional_breadth_score,insider_net_buy_score,insider_cluster_buy_score,insider_selling_pressure_score,insider_activity_score,sentiment_catalyst_score,value_trap_score"
+    scoring_components: "ic_tilted_composite_score,fundamental_quality_score,durable_growth_score,durable_growth_score_legacy,durable_growth_alpha_score,durable_growth_growth_score,durable_growth_quality_score,durable_growth_efficiency_score,durable_growth_capital_discipline_score,durable_growth_evidence_quality_score,fda_product_score,fda_alpha_score,fda_safety_score,fda_safety_breadth_adjusted_score,fda_clearance_velocity_raw,fda_clearance_velocity_score,fda_clearance_acceleration_raw,fda_clearance_acceleration_score,fda_evidence_quality_score,fda_event_risk_score,quality_value_interaction_score,fda_technical_interaction_score,reimbursement_score,valuation_score,technical_alpha_score,technical_pullback_score,borrow_availability_score,borrow_fee_score,borrow_squeeze_risk_score,borrow_pressure_score,short_interest_score,short_pressure_score,short_squeeze_score,short_volume_score,short_interest_velocity_score,days_to_cover_score,institutional_accumulation_score,institutional_crowding_score,institutional_breadth_score,insider_net_buy_score,insider_cluster_buy_score,insider_selling_pressure_score,insider_activity_score,sentiment_catalyst_score,value_trap_score"
   signal_decay:
     output_csv: "../output/med_devices_reports/calibration/med_device_signal_decay_analysis.csv"
     horizons: "30,60,120"

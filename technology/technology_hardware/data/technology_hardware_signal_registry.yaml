@@ -1,0 +1,263 @@
+registry_version: technology_hardware_signal_registry_v1
+model_family: technology_hardware
+description: >
+  Governance registry for technology-hardware production, research, and planned
+  scoring signals. This file is metadata only; production weights still come
+  from technology/config.yaml and must be changed manually after review.
+
+lockbox_policy:
+  production_weight_changes_require:
+    - updated diagnostics with Newey-West adjusted IC statistics
+    - Stage 9 portfolio backtest review
+    - explicit human promotion decision
+    - config diff recorded in the lockbox ledger
+  optuna_promotion: manual_only
+  report_only_models:
+    - stage8_candidate_report_only
+  current_production_model: stage7_current_production_v1
+  current_challenger_model: stage8_candidate_report_only
+
+signals:
+  - signal: gross_margin
+    score_key: gross_margin_score
+    components: [quality]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: production_allowed
+  - signal: operating_margin
+    score_key: operating_margin_score
+    components: [quality]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: production_allowed
+  - signal: fcf_margin
+    score_key: fcf_margin_score
+    components: [quality]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: production_allowed
+  - signal: fcf_to_net_income
+    score_key: fcf_to_net_income_score
+    components: [quality]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: production_allowed
+  - signal: net_cash_to_assets
+    score_key: net_cash_to_assets_score
+    components: [risk_control]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: production_allowed
+  - signal: sbc_pct_revenue
+    score_key: sbc_pct_revenue_score
+    components: [quality, risk_control]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: production_allowed
+  - signal: share_count_yoy_growth
+    score_key: share_count_yoy_growth_score
+    components: [quality, risk_control]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: production_allowed
+  - signal: revenue_yoy_growth
+    score_key: revenue_yoy_growth_score
+    components: [growth]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: production_allowed
+  - signal: gross_profit_yoy_growth
+    score_key: gross_profit_yoy_growth_score
+    components: [growth]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: production_allowed
+  - signal: operating_income_yoy_growth
+    score_key: operating_income_yoy_growth_score
+    components: [growth]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: production_allowed
+  - signal: free_cash_flow_yoy_growth
+    score_key: free_cash_flow_yoy_growth_score
+    components: [growth]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: production_allowed
+  - signal: revenue_acceleration
+    score_key: revenue_acceleration_score
+    components: [growth]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: production_allowed
+  - signal: ev_gross_profit
+    score_key: ev_gross_profit_score
+    components: [valuation]
+    source_layer: sec_financials_and_prices
+    source_ids: [sec_companyfacts, yahoo_finance_adjusted, norgate_us_equities_total_return]
+    production_policy: production_allowed
+  - signal: ev_operating_income
+    score_key: ev_operating_income_score
+    components: [valuation]
+    source_layer: sec_financials_and_prices
+    source_ids: [sec_companyfacts, yahoo_finance_adjusted, norgate_us_equities_total_return]
+    production_policy: production_allowed
+  - signal: fcf_yield
+    score_key: fcf_yield_score
+    components: [valuation]
+    source_layer: sec_financials_and_prices
+    source_ids: [sec_companyfacts, yahoo_finance_adjusted, norgate_us_equities_total_return]
+    production_policy: production_allowed
+  - signal: ret_12m_ex_1m
+    score_key: ret_12m_ex_1m_score
+    components: [market_behavior]
+    source_layer: market_prices
+    source_ids: [yahoo_finance_adjusted, norgate_us_equities_total_return]
+    production_policy: production_allowed
+  - signal: ret_3m
+    score_key: ret_3m_score
+    components: [market_behavior]
+    source_layer: market_prices
+    source_ids: [yahoo_finance_adjusted, norgate_us_equities_total_return]
+    production_policy: zero_weight_until_revalidated
+  - signal: rel_strength_bench_3m
+    score_key: rel_strength_bench_3m_score
+    components: [market_behavior]
+    source_layer: market_prices
+    source_ids: [yahoo_finance_adjusted, norgate_us_equities_total_return]
+    production_policy: production_allowed
+    notes: QQQ-relative strength for technology hardware.
+  - signal: realized_vol_60d
+    score_key: realized_vol_60d_score
+    components: [risk_control]
+    source_layer: market_prices
+    source_ids: [yahoo_finance_adjusted, norgate_us_equities_total_return]
+    production_policy: production_allowed
+  - signal: max_drawdown_12m
+    score_key: max_drawdown_12m_score
+    components: [market_behavior, risk_control]
+    source_layer: market_prices
+    source_ids: [yahoo_finance_adjusted, norgate_us_equities_total_return]
+    production_policy: production_allowed
+  - signal: distance_from_52w_high
+    score_key: distance_from_52w_high_score
+    components: [market_behavior]
+    source_layer: market_prices
+    source_ids: [yahoo_finance_adjusted, norgate_us_equities_total_return]
+    production_policy: production_allowed
+  - signal: avg_dollar_volume_60d
+    score_key: avg_dollar_volume_60d_score
+    components: [market_behavior, risk_control]
+    source_layer: market_prices
+    source_ids: [yahoo_finance_adjusted, norgate_us_equities_total_return]
+    production_policy: production_allowed
+  - signal: insider_net_value_90d
+    score_key: insider_net_value_90d_score
+    components: [positioning]
+    source_layer: positioning
+    source_ids: [sec_ownership_direct, sec_insider_upstream]
+    production_policy: production_allowed
+  - signal: insider_cluster_buyers_90d
+    score_key: insider_cluster_buyers_90d_score
+    components: [positioning]
+    source_layer: positioning
+    source_ids: [sec_ownership_direct, sec_insider_upstream]
+    production_policy: production_allowed
+  - signal: institutional_ownership_delta_pct
+    score_key: institutional_ownership_delta_pct_score
+    components: [positioning]
+    source_layer: positioning
+    source_ids: [market_positioning_upstream]
+    production_policy: production_allowed
+  - signal: latest_short_interest_pct_float
+    score_key: latest_short_interest_pct_float_score
+    components: [positioning]
+    source_layer: positioning
+    source_ids: [market_positioning_upstream]
+    production_policy: zero_weight_until_revalidated
+  - signal: short_interest_change_3m
+    score_key: short_interest_change_3m_score
+    components: [positioning]
+    source_layer: positioning
+    source_ids: [market_positioning_upstream]
+    production_policy: production_allowed
+  - signal: latest_days_to_cover
+    score_key: latest_days_to_cover_score
+    components: [positioning]
+    source_layer: positioning
+    source_ids: [market_positioning_upstream]
+    production_policy: production_allowed
+  - signal: latest_borrow_fee_rate
+    score_key: latest_borrow_fee_rate_score
+    components: [positioning, risk_control]
+    source_layer: positioning
+    source_ids: [market_positioning_upstream]
+    production_policy: production_allowed
+  - signal: inventory_days
+    score_key: inventory_days_score
+    components: [risk_control]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: production_allowed
+  - signal: inventory_days_yoy_change
+    score_key: inventory_days_yoy_change_score
+    components: [risk_control]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: stage8_candidate_only
+    notes: Hardware inventory-cycle deterioration/improvement signal; Stage 8 candidate but not production-promoted.
+  - signal: inventory_to_revenue_growth_gap
+    score_key: inventory_to_revenue_growth_gap_score
+    components: [risk_control]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: stage8_candidate_only
+    notes: Inventory growth exceeding revenue growth; Stage 8 candidate but not production-promoted.
+  - signal: days_sales_outstanding
+    score_key: days_sales_outstanding_score
+    components: [risk_control]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: measurement_only_zero_weight
+    notes: Receivables collection speed; lower is better but structural differences require IC validation.
+  - signal: days_payables_outstanding
+    score_key: days_payables_outstanding_score
+    components: [risk_control]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: measurement_only_zero_weight
+    notes: Payables funding speed; measured separately but not production-weighted without validation.
+  - signal: cash_conversion_cycle
+    score_key: cash_conversion_cycle_score
+    components: [risk_control]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: measurement_only_zero_weight
+    notes: DIO plus DSO minus DPO; lower is better, but level can differ by hardware business model.
+  - signal: days_sales_outstanding_yoy_change
+    score_key: days_sales_outstanding_yoy_change_score
+    components: [risk_control]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: measurement_only_zero_weight
+    notes: DSO deterioration/improvement trend; lower is better.
+  - signal: days_payables_outstanding_yoy_change
+    score_key: days_payables_outstanding_yoy_change_score
+    components: [risk_control]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: measurement_only_zero_weight
+    notes: DPO trend; positive values can improve cash cycle but require diagnostics before use.
+  - signal: cash_conversion_cycle_yoy_change
+    score_key: cash_conversion_cycle_yoy_change_score
+    components: [risk_control]
+    source_layer: sec_financials
+    source_ids: [sec_companyfacts, sec_inline_xbrl_fallback]
+    production_policy: measurement_only_zero_weight
+    notes: Main hardware CCC candidate; rising CCC is a working-capital deterioration warning.
+
+planned_signals:
+  - signal: backlog_growth
+    source_layer: sec_filings_text
+    production_policy: planned_stage11_optional
+    notes: Add only if hardware backlog disclosures can be parsed consistently and clear adjusted IC gates.

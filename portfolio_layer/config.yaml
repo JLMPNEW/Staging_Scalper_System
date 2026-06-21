@@ -1,0 +1,127 @@
+# Portfolio layer configuration. All paths resolve under Staging_Scalper_System and never
+# reach into PROD_Scalper_System. Override the DB directory via PORTFOLIO_LAYER_DB_DIR.
+paths:
+  database_path: "${PORTFOLIO_LAYER_DB_DIR:-db}/portfolio_layer.sqlite"
+  output_dir: "output"
+  cache_dir: "output/cache"
+  macro_serving_db_path: "macro/macro_serving.sqlite"
+
+runtime:
+  sqlite_timeout_sec: 120.0
+
+# Stage 1 - canonical cross-sector stocks_scores contract.
+# Adapters read each sector's published score CSV (never its DB) and map onto the contract.
+# calibration.expected_alpha_at_full = provisional annualized alpha at native score==100; empirical
+# IC re-calibration against the Stage 2 return panel refines these slopes later.
+score_contract:
+  contract_version: "stocks_scores_v1"
+  sector_output_root: "../output"        # repo-level output/ tree (relative to this config)
+  staleness_tolerance_days: 10
+  min_successful_sectors: 4              # fail collection if fewer enabled sectors publish usable rows
+  # When a ticker is scored by >1 sector, force it to its canonical source pipeline before the
+  # confidence/order tie-break (keeps sector pipelines untouched). ticker -> canonical_pipeline.
+  canonical_pipeline_overrides_csv: "data/canonical_sector_overrides.csv"
+  rating_bands:                          # within-sector percentile floor -> rating label
+    strong_buy: 90.0
+    buy: 70.0
+    hold: 40.0
+    reduce: 20.0
+    avoid: 0.0
+  sectors:
+    - model_family: semiconductors
+      adapter: tech_family
+      enabled: true
+      sector: "Information Technology"
+      industry: "Semiconductors"
+      industry_aggregate: "Semiconductors & Semiconductor Equipment"
+      file_mode: flat
+      file_path: "technology_reports/scoring/semiconductor_stage7_calibrated_scores.csv"
+      calibration: {neutral: 50.0, scale: 50.0, expected_alpha_at_full: 0.15}
+    - model_family: software_infrastructure
+      adapter: tech_family
+      enabled: true
+      sector: "Information Technology"
+      industry: "Software"
+      industry_aggregate: "Software & Services"
+      file_mode: flat
+      file_path: "technology_reports/software_infrastructure/scoring/software_infrastructure_production_calibrated_scores.csv"
+      calibration: {neutral: 50.0, scale: 50.0, expected_alpha_at_full: 0.15}
+    - model_family: technology_hardware
+      adapter: tech_family
+      enabled: true
+      sector: "Information Technology"
+      industry: "Technology Hardware"
+      industry_aggregate: "Technology Hardware & Equipment"
+      file_mode: flat
+      file_path: "technology_reports/technology_hardware/scoring/technology_hardware_stage7_calibrated_scores.csv"
+      calibration: {neutral: 50.0, scale: 50.0, expected_alpha_at_full: 0.15}
+    - model_family: biotech
+      adapter: biotech
+      enabled: true
+      sector: "Health Care"
+      industry: "Biotechnology"
+      industry_aggregate: "Pharmaceuticals, Biotechnology & Life Sciences"
+      file_mode: dated
+      file_path: "biotech_index_reports/{yyyymmdd}/biotech_daily_scores.csv"
+      calibration: {neutral: 50.0, scale: 50.0, expected_alpha_at_full: 0.20}
+    - model_family: med_devices
+      adapter: med_devices
+      enabled: true
+      sector: "Health Care"
+      industry: "Health Care Equipment"
+      industry_aggregate: "Health Care Equipment & Services"
+      file_mode: flat
+      file_path: "med_devices_reports/med_device_daily_composite_scores.csv"
+      calibration: {neutral: 50.0, scale: 50.0, expected_alpha_at_full: 0.15}
+
+# Stage 2 - live/current-book cross-sector risk panel (self-sourced, NOT survivorship history).
+risk_panel:
+  price_provider: "yahoo_adjusted"
+  adjustment_policy: "yahoo_adjclose_div_split"   # Yahoo adjusted close = dividend + split adjusted
+  master_calendar_ticker: "SPY"                   # benchmark calendar = US master trading calendar
+  lookback_trading_days: 504
+  min_direct_history_days: 252                     # >= -> risk_status=direct
+  hard_floor_history_days: 60                      # < -> risk_status=excluded (risk_eligible=0)
+  max_missing_day_fraction: 0.10                   # max fraction of master-calendar days a ticker may miss
+  max_stale_price_trading_days: 0                  # missing right-edge bars beyond this exclude risk sizing
+  readiness_stale_status: "FAIL"                   # stale/missing required sectors block Stage 2 by default
+  covariance_frequency: "daily"                    # daily | weekly
+  shrinkage_method: "pairwise_linear"              # pairwise_linear (ragged-panel safe) | ledoit_wolf | oas
+  shrinkage_intensity: 0.20                         # linear shrink toward diagonal (preserves correlations)
+  max_abs_return_for_covariance: 0.0                # 0 = NO blanket cap: real catalyst variance is preserved
+                                                    # (Rank IC / MI need it). Corruption is handled only via the
+                                                    # split-aligned detector + explicit quarantine, never a cap.
+  split_jump_threshold: 0.4                          # |daily return| above this is reviewed by the detector
+  split_review_window_days: 7                        # flag a jump as suspect ONLY if a split event is within +/- days
+  split_artifact_abs_tolerance: 0.15                  # abs diff vs raw split-implied return
+  split_artifact_rel_tolerance: 0.25                  # relative diff vs raw split-implied return
+  cluster_distance_threshold: 0.5                   # 1 - corr distance at which names merge
+  max_condition_number: 1.0e7                       # realistic for a ~430-name daily covariance
+  ticker_aliases:                                   # contract ticker -> active market-data symbol
+    PSTG:
+      active_ticker: P
+      effective_date: "2026-04-17"
+      issuer_id: "CIK0001474432"
+      reason: "Pure Storage/Everpure ticker migration; keep Stage 1 contract ticker stable"
+    P:
+      active_ticker: P
+      effective_date: "2026-04-17"
+      issuer_id: "CIK0001474432"
+      reason: "Pure Storage/Everpure active ticker; floor reused single-letter history"
+  benchmark_tickers: [SPY, QQQ, SMH, SOXX, XBI, XLK, XLV, XLF, XLE, XLI, XLP, XLY, XLU, XLB, XLRE, XLC]
+  hedge_rotation_etfs: [IGV, IHI, MCHI, FXI, INDA, EWZ, EWG, EWY, EWT, IEMG]
+  sector_etf_map:                                  # source_pipeline -> shrinkage-target ETF
+    semiconductors: SOXX
+    software_infrastructure: IGV
+    technology_hardware: XLK
+    biotech: XBI
+    med_devices: IHI
+  fetch:
+    chart_url_templates:
+      - "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+      - "https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
+    enable_stooq_fallback: true
+    max_workers: 10
+    request_timeout_sec: 20
+    max_retries: 3
+    user_agent: "portfolio_layer/0.1 (+research)"

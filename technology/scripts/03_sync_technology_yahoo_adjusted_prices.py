@@ -224,6 +224,59 @@ def append_benchmarks(jobs: list[PriceJob], benchmark_tickers: list[str], *, ski
     return out
 
 
+def existing_coverage_row(conn: Any, job: PriceJob, *, source_id: str, start_date: date, end_date: date) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS bars,
+            MIN(bar_date) AS first_bar_date,
+            MAX(bar_date) AS last_bar_date,
+            SUM(CASE WHEN adj_close IS NOT NULL THEN 1 ELSE 0 END) AS adjusted_bars
+        FROM fact_price_ohlcv
+        WHERE ticker = ?
+          AND source_id = ?
+        """,
+        (job.ticker, source_id),
+    ).fetchone()
+    if row is None:
+        return None
+    bars = int(row["bars"] or 0)
+    adjusted_bars = int(row["adjusted_bars"] or 0)
+    first_bar_date = parse_date(row["first_bar_date"])
+    last_bar_date = parse_date(row["last_bar_date"])
+    if bars == 0 or adjusted_bars == 0 or first_bar_date is None or last_bar_date is None:
+        return None
+    if last_bar_date < end_date:
+        return None
+    latest = conn.execute(
+        """
+        SELECT close, adj_close, price_adjustment, is_adjusted
+        FROM fact_price_ohlcv
+        WHERE ticker = ?
+          AND source_id = ?
+          AND bar_date = ?
+        LIMIT 1
+        """,
+        (job.ticker, source_id, last_bar_date.isoformat()),
+    ).fetchone()
+    return {
+        "ticker": job.ticker,
+        "company_name": job.company_name,
+        "is_benchmark": int(job.is_benchmark),
+        "source_id": source_id,
+        "status": "already_current",
+        "bars_upserted": 0,
+        "actions_upserted": 0,
+        "first_bar_date": first_bar_date.isoformat(),
+        "last_bar_date": last_bar_date.isoformat(),
+        "latest_close": latest["close"] if latest is not None else "",
+        "latest_adj_close": latest["adj_close"] if latest is not None else "",
+        "price_adjustment": latest["price_adjustment"] if latest is not None else "",
+        "is_adjusted": latest["is_adjusted"] if latest is not None else 0,
+        "review_reason": "Existing adjusted OHLCV is current through requested end date.",
+    }
+
+
 def fetch_chart_payload(
     job: PriceJob,
     *,
@@ -637,6 +690,14 @@ def main() -> None:
     benchmark_tickers = parse_ticker_list(args.benchmark_tickers) or parse_ticker_list(
         cfg_get(config, "technology_universe.benchmark_tickers", [])
     )
+    raw_start_overrides = cfg_get(config, "yahoo_price_ingestion.ticker_start_date_overrides", {}) or {}
+    ticker_start_overrides: dict[str, date] = {}
+    if isinstance(raw_start_overrides, dict):
+        for raw_ticker, raw_date in raw_start_overrides.items():
+            ticker = normalize_ticker(raw_ticker)
+            override = parse_date(raw_date)
+            if ticker and override is not None:
+                ticker_start_overrides[ticker] = override
     ticker_filter = {normalize_ticker(x) for x in str(args.tickers or "").split(",") if normalize_ticker(x)}
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
@@ -654,45 +715,57 @@ def main() -> None:
             raise ValueError(f"This script currently expects source_id={SOURCE_ID_DEFAULT}, got {source_id}")
         if not jobs:
             raise ValueError("No technology tickers found to fetch.")
+        skipped_report_rows: list[dict[str, Any]] = []
+        if not bool(args.force_refresh):
+            jobs_to_fetch: list[PriceJob] = []
+            for job in jobs:
+                coverage_row = existing_coverage_row(conn, job, source_id=SOURCE_ID_DEFAULT, start_date=start, end_date=end)
+                if coverage_row is None:
+                    jobs_to_fetch.append(job)
+                else:
+                    skipped_report_rows.append(coverage_row)
+            jobs = jobs_to_fetch
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         ingestion_run_id = start_ingestion_run(conn, SOURCE_ID_DEFAULT)
 
     LOGGER.info(
-        "Fetching Yahoo adjusted prices for model_family=%s tickers=%d from %s through %s",
+        "Fetching Yahoo adjusted prices for model_family=%s tickers=%d skipped_already_current=%d from %s through %s",
         model_family,
         len(jobs),
+        len(skipped_report_rows),
         start,
         end,
     )
     results: list[FetchResult] = []
-    with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
-        futures = [
-            executor.submit(
-                fetch_job,
-                job,
-                chart_url_template=chart_url_template,
-                start_date=start,
-                end_date=end,
-                source_id=SOURCE_ID_DEFAULT,
-                cache_dir=cache_dir,
-                force_refresh=bool(args.force_refresh),
-                user_agent=user_agent,
-                timeout_sec=timeout_sec,
-                max_retries=max_retries,
-                retry_status_codes=retry_status_codes,
-                interval=str(cfg_get(config, "yahoo_price_ingestion.interval", "1d") or "1d"),
-                events=str(cfg_get(config, "yahoo_price_ingestion.events", "div,splits") or "div,splits"),
-                include_adjusted_close=str(cfg_get(config, "yahoo_price_ingestion.include_adjusted_close", True)).lower() in {"1", "true", "yes", "y"},
-            )
-            for job in jobs
-        ]
-        for idx, future in enumerate(as_completed(futures), start=1):
-            result = future.result()
-            results.append(result)
-            status = "ok" if result.bars and not result.error else f"error={result.error}"
-            LOGGER.info("[%d/%d] %s bars=%d actions=%d %s", idx, len(jobs), result.job.ticker, len(result.bars), len(result.actions), status)
+    if jobs:
+        with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+            futures = [
+                executor.submit(
+                    fetch_job,
+                    job,
+                    chart_url_template=chart_url_template,
+                    start_date=max(start, ticker_start_overrides.get(job.ticker, start)),
+                    end_date=end,
+                    source_id=SOURCE_ID_DEFAULT,
+                    cache_dir=cache_dir,
+                    force_refresh=bool(args.force_refresh),
+                    user_agent=user_agent,
+                    timeout_sec=timeout_sec,
+                    max_retries=max_retries,
+                    retry_status_codes=retry_status_codes,
+                    interval=str(cfg_get(config, "yahoo_price_ingestion.interval", "1d") or "1d"),
+                    events=str(cfg_get(config, "yahoo_price_ingestion.events", "div,splits") or "div,splits"),
+                    include_adjusted_close=str(cfg_get(config, "yahoo_price_ingestion.include_adjusted_close", True)).lower() in {"1", "true", "yes", "y"},
+                )
+                for job in jobs
+            ]
+            for idx, future in enumerate(as_completed(futures), start=1):
+                result = future.result()
+                results.append(result)
+                status = "ok" if result.bars and not result.error else f"error={result.error}"
+                LOGGER.info("[%d/%d] %s bars=%d actions=%d %s", idx, len(jobs), result.job.ticker, len(result.bars), len(result.actions), status)
 
-    report_rows: list[dict[str, Any]] = []
+    report_rows: list[dict[str, Any]] = list(skipped_report_rows)
     total_bars = 0
     total_actions = 0
     failures = 0

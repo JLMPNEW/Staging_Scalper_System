@@ -1239,6 +1239,11 @@ def load_company_ids(conn: sqlite3.Connection) -> dict[str, int]:
     return {normalize_ticker(row["ticker"]): int(row["company_id"]) for row in rows}
 
 
+def load_inactive_company_tickers(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("SELECT ticker FROM companies WHERE COALESCE(is_active, 0) <= 0").fetchall()
+    return {ticker for row in rows if (ticker := normalize_ticker(row["ticker"]))}
+
+
 def load_latest_survival_features(conn: sqlite3.Connection, asof_date: date) -> dict[int, dict[str, Any]]:
     rows = conn.execute(
         """
@@ -2830,6 +2835,21 @@ def main() -> None:
         try:
             run_id = start_run(conn, run_type="build_biotech_features", input_path=universe_csv)
             company_ids = load_company_ids(conn)
+            inactive_company_tickers = load_inactive_company_tickers(conn)
+            inactive_expected_tickers = expected_tickers.intersection(inactive_company_tickers)
+            if inactive_expected_tickers:
+                LOGGER.warning(
+                    "Excluding %d inactive/delisted final-universe ticker(s) from feature build: %s",
+                    len(inactive_expected_tickers),
+                    ",".join(sorted(inactive_expected_tickers)[:25])
+                    + (f"...(+{len(inactive_expected_tickers) - 25})" if len(inactive_expected_tickers) > 25 else ""),
+                )
+                expected_tickers = expected_tickers - inactive_expected_tickers
+                normalized_universe = [
+                    (ticker, universe_row)
+                    for ticker, universe_row in normalized_universe
+                    if ticker not in inactive_expected_tickers
+                ]
             survival_features = load_latest_survival_features(conn, asof_date)
             market_source_priority = scoring_market_sources(config)
             market_features = load_latest_market_features(

@@ -61,6 +61,8 @@ BALANCE_USD_METRICS = {
     "cash_and_equivalents",
     "total_debt",
     "inventory",
+    "accounts_receivable",
+    "accounts_payable",
 }
 CSV_FIELDS = [
     "ticker",
@@ -84,6 +86,9 @@ CSV_FIELDS = [
     "free_cash_flow_ttm",
     "revenue_yoy_growth",
     "inventory_days",
+    "days_sales_outstanding",
+    "days_payables_outstanding",
+    "cash_conversion_cycle",
     "deferred_revenue",
     "remaining_performance_obligation",
     "data_quality_status",
@@ -463,7 +468,18 @@ def unit_score(metric: str, unit: str) -> int:
         return 0 if "share" in unit_lower or "/" in unit_lower else 5
     if metric == "diluted_shares":
         return 0 if "share" in unit_lower else 5
-    if metric in FLOW_METRICS or metric in {"assets", "liabilities", "equity", "cash_and_equivalents", "inventory", "debt_current", "debt_noncurrent", "debt_total"}:
+    if metric in FLOW_METRICS or metric in {
+        "assets",
+        "liabilities",
+        "equity",
+        "cash_and_equivalents",
+        "inventory",
+        "accounts_receivable",
+        "accounts_payable",
+        "debt_current",
+        "debt_noncurrent",
+        "debt_total",
+    }:
         return 5 if unit_lower in {"shares", "pure"} else 0
     return 1
 
@@ -737,17 +753,19 @@ def upsert_feature(conn: Any, feature: dict[str, Any]) -> None:
         "fx_rate_income_statement", "fx_rate_balance_sheet",
         "revenue", "gross_profit", "operating_income", "net_income",
         "eps_diluted", "assets", "liabilities", "equity", "cash_and_equivalents",
-        "total_debt", "inventory", "operating_cash_flow", "capex", "free_cash_flow",
+        "total_debt", "inventory", "accounts_receivable", "accounts_payable",
+        "operating_cash_flow", "capex", "free_cash_flow",
         "research_and_development", "stock_based_compensation", "diluted_shares",
         "revenue_usd", "gross_profit_usd", "operating_income_usd", "net_income_usd",
         "operating_cash_flow_usd", "capex_usd", "free_cash_flow_usd",
         "assets_usd", "liabilities_usd", "equity_usd", "cash_and_equivalents_usd",
-        "total_debt_usd", "inventory_usd",
+        "total_debt_usd", "inventory_usd", "accounts_receivable_usd", "accounts_payable_usd",
         "deferred_revenue", "remaining_performance_obligation",
         "revenue_ttm", "gross_profit_ttm", "operating_income_ttm", "net_income_ttm",
         "free_cash_flow_ttm", "gross_margin", "operating_margin", "fcf_margin",
         "r_and_d_pct_revenue", "sbc_pct_revenue", "net_cash", "net_cash_to_assets",
-        "inventory_days", "revenue_yoy_growth", "gross_profit_yoy_growth",
+        "inventory_days", "days_sales_outstanding", "days_payables_outstanding",
+        "cash_conversion_cycle", "revenue_yoy_growth", "gross_profit_yoy_growth",
         "operating_income_yoy_growth", "free_cash_flow_yoy_growth", "revenue_acceleration",
         "market_cap", "ev_gross_profit", "ev_operating_income", "fcf_yield",
         "canonical_quality", "data_quality_status",
@@ -783,6 +801,7 @@ FLOW_EXTRACT_METRICS = (
 )
 BALANCE_EXTRACT_METRICS = (
     "assets", "liabilities", "equity", "cash_and_equivalents", "inventory",
+    "accounts_receivable", "accounts_payable",
     "debt_current", "debt_noncurrent", "debt_total",
     "deferred_revenue_current", "deferred_revenue_noncurrent", "deferred_revenue_total",
     "remaining_performance_obligation",
@@ -999,6 +1018,8 @@ def build_ticker_features(
             "equity": metric_values.get("equity"),
             "cash_and_equivalents": metric_values.get("cash_and_equivalents"),
             "inventory": metric_values.get("inventory"),
+            "accounts_receivable": metric_values.get("accounts_receivable"),
+            "accounts_payable": metric_values.get("accounts_payable"),
             "operating_cash_flow": metric_values.get("operating_cash_flow"),
             "capex": metric_values.get("capex"),
             "total_debt": total_debt,
@@ -1107,6 +1128,23 @@ def build_ticker_features(
         feature["inventory_days"] = None
         if feature.get("inventory") is not None and cogs_ttm and cogs_ttm > 0:
             feature["inventory_days"] = float(feature["inventory"]) / cogs_ttm * 365.0
+        feature["days_sales_outstanding"] = None
+        if feature.get("accounts_receivable") is not None and revenue_ttm and revenue_ttm > 0:
+            feature["days_sales_outstanding"] = float(feature["accounts_receivable"]) / revenue_ttm * 365.0
+        feature["days_payables_outstanding"] = None
+        if feature.get("accounts_payable") is not None and cogs_ttm and cogs_ttm > 0:
+            feature["days_payables_outstanding"] = float(feature["accounts_payable"]) / cogs_ttm * 365.0
+        feature["cash_conversion_cycle"] = None
+        if (
+            feature.get("inventory_days") is not None
+            and feature.get("days_sales_outstanding") is not None
+            and feature.get("days_payables_outstanding") is not None
+        ):
+            feature["cash_conversion_cycle"] = (
+                float(feature["inventory_days"])
+                + float(feature["days_sales_outstanding"])
+                - float(feature["days_payables_outstanding"])
+            )
         # Point-in-time valuation: shares-from-filings x close price at the filing date.
         market_cap = pit_market_cap(
             conn,

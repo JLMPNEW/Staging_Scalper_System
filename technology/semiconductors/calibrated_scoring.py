@@ -6,6 +6,8 @@ from pathlib import Path
 from technology.core.calibrated_scoring import (
     CalibratedScoringSettings,
     build_calibrated_scores,
+    component_weight_specs as core_component_weight_specs,
+    subfeature_weight_specs as core_subfeature_weight_specs,
     validate_calibrated_scores,
 )
 from technology.core.scoring_features import DEFAULT_OVERLAY_COMPONENTS
@@ -38,6 +40,14 @@ SETTINGS = CalibratedScoringSettings(
 
 def build_semiconductor_calibrated_scores() -> None:
     build_calibrated_scores(SETTINGS)
+
+
+def component_weight_specs(config: dict) -> dict[str, float]:
+    return core_component_weight_specs(config, SETTINGS)
+
+
+def subfeature_weight_specs(config: dict) -> dict[str, list[tuple[str, float]]]:
+    return core_subfeature_weight_specs(config, SETTINGS)
 
 
 def validate_semiconductor_calibrated_scores() -> int:

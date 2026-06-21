@@ -1,0 +1,1 @@
+"""Core utilities for the portfolio layer (config, paths, logging, DB foundation)."""

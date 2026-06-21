@@ -18,6 +18,7 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, Any]] = [
     {"canonical_metric": "revenue", "statement": "income_statement", "taxonomy": "ifrs-full", "concept": "Revenue", "priority": 1, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 1},
     {"canonical_metric": "cost_of_sales", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "CostOfRevenue", "priority": 1, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive_abs", "currency_required": 1, "is_core": 0},
     {"canonical_metric": "cost_of_sales", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "CostOfGoodsAndServicesSold", "priority": 2, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive_abs", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "cost_of_sales", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "CostOfGoodsSold", "priority": 3, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive_abs", "currency_required": 1, "is_core": 0},
     {"canonical_metric": "cost_of_sales", "statement": "income_statement", "taxonomy": "ifrs-full", "concept": "CostOfSales", "priority": 1, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive_abs", "currency_required": 1, "is_core": 0},
     {"canonical_metric": "gross_profit", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "GrossProfit", "priority": 1, "period_type": "duration", "unit_type": "currency", "sign_policy": "as_reported", "currency_required": 1, "is_core": 0},
     {"canonical_metric": "gross_profit", "statement": "income_statement", "taxonomy": "ifrs-full", "concept": "GrossProfit", "priority": 1, "period_type": "duration", "unit_type": "currency", "sign_policy": "as_reported", "currency_required": 1, "is_core": 0},
@@ -49,6 +50,15 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, Any]] = [
     {"canonical_metric": "cash_and_equivalents", "statement": "balance_sheet", "taxonomy": "ifrs-full", "concept": "CashAndCashEquivalents", "priority": 1, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
     {"canonical_metric": "inventory", "statement": "balance_sheet", "taxonomy": "us-gaap", "concept": "InventoryNet", "priority": 1, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
     {"canonical_metric": "inventory", "statement": "balance_sheet", "taxonomy": "ifrs-full", "concept": "Inventories", "priority": 1, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    # Working-capital efficiency inputs for technology hardware CCC signals.
+    {"canonical_metric": "accounts_receivable", "statement": "balance_sheet", "taxonomy": "us-gaap", "concept": "AccountsReceivableNetCurrent", "priority": 1, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "accounts_receivable", "statement": "balance_sheet", "taxonomy": "us-gaap", "concept": "AccountsReceivableNet", "priority": 2, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "accounts_receivable", "statement": "balance_sheet", "taxonomy": "ifrs-full", "concept": "CurrentTradeReceivables", "priority": 1, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "accounts_receivable", "statement": "balance_sheet", "taxonomy": "ifrs-full", "concept": "TradeAndOtherCurrentReceivables", "priority": 2, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "accounts_payable", "statement": "balance_sheet", "taxonomy": "us-gaap", "concept": "AccountsPayableCurrent", "priority": 1, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "accounts_payable", "statement": "balance_sheet", "taxonomy": "us-gaap", "concept": "AccountsPayableTradeCurrent", "priority": 2, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "accounts_payable", "statement": "balance_sheet", "taxonomy": "ifrs-full", "concept": "CurrentTradePayables", "priority": 1, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
+    {"canonical_metric": "accounts_payable", "statement": "balance_sheet", "taxonomy": "ifrs-full", "concept": "TradeAndOtherCurrentPayables", "priority": 2, "period_type": "instant", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 0},
     {"canonical_metric": "operating_cash_flow", "statement": "cash_flow", "taxonomy": "us-gaap", "concept": "NetCashProvidedByUsedInOperatingActivities", "priority": 1, "period_type": "duration", "unit_type": "currency", "sign_policy": "as_reported", "currency_required": 1, "is_core": 0},
     {"canonical_metric": "operating_cash_flow", "statement": "cash_flow", "taxonomy": "ifrs-full", "concept": "CashFlowsFromUsedInOperatingActivities", "priority": 1, "period_type": "duration", "unit_type": "currency", "sign_policy": "as_reported", "currency_required": 1, "is_core": 0},
     {"canonical_metric": "investing_cash_flow", "statement": "cash_flow", "taxonomy": "us-gaap", "concept": "NetCashProvidedByUsedInInvestingActivities", "priority": 1, "period_type": "duration", "unit_type": "currency", "sign_policy": "as_reported", "currency_required": 1, "is_core": 0},
@@ -544,6 +554,8 @@ CREATE TABLE IF NOT EXISTS feature_financial_statement (
     cash_and_equivalents REAL,
     total_debt REAL,
     inventory REAL,
+    accounts_receivable REAL,
+    accounts_payable REAL,
     operating_cash_flow REAL,
     capex REAL,
     free_cash_flow REAL,
@@ -563,6 +575,8 @@ CREATE TABLE IF NOT EXISTS feature_financial_statement (
     cash_and_equivalents_usd REAL,
     total_debt_usd REAL,
     inventory_usd REAL,
+    accounts_receivable_usd REAL,
+    accounts_payable_usd REAL,
     revenue_ttm REAL,
     gross_profit_ttm REAL,
     operating_income_ttm REAL,
@@ -576,6 +590,9 @@ CREATE TABLE IF NOT EXISTS feature_financial_statement (
     net_cash REAL,
     net_cash_to_assets REAL,
     inventory_days REAL,
+    days_sales_outstanding REAL,
+    days_payables_outstanding REAL,
+    cash_conversion_cycle REAL,
     revenue_yoy_growth REAL,
     gross_profit_yoy_growth REAL,
     operating_income_yoy_growth REAL,
@@ -1260,6 +1277,11 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "feature_financial_statement", "canonical_quality", "TEXT")
     ensure_column(conn, "feature_financial_statement", "deferred_revenue", "REAL")
     ensure_column(conn, "feature_financial_statement", "remaining_performance_obligation", "REAL")
+    ensure_column(conn, "feature_financial_statement", "accounts_receivable", "REAL")
+    ensure_column(conn, "feature_financial_statement", "accounts_payable", "REAL")
+    ensure_column(conn, "feature_financial_statement", "days_sales_outstanding", "REAL")
+    ensure_column(conn, "feature_financial_statement", "days_payables_outstanding", "REAL")
+    ensure_column(conn, "feature_financial_statement", "cash_conversion_cycle", "REAL")
     for column_name in (
         "revenue_usd",
         "gross_profit_usd",
@@ -1274,6 +1296,8 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         "cash_and_equivalents_usd",
         "total_debt_usd",
         "inventory_usd",
+        "accounts_receivable_usd",
+        "accounts_payable_usd",
     ):
         ensure_column(conn, "feature_financial_statement", column_name, "REAL")
     for table_name in ("dim_issuer_reporting_profile",):

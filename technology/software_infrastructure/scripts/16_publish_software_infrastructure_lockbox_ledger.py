@@ -522,6 +522,22 @@ def main() -> int:
     risk_flags = read_csv_rows(dashboard_dir / "software_infrastructure_risk_flags.csv")
     production_model_name = str(cfg_get(config, "software_infrastructure_portfolio_backtest.production_model_name", "stage8_promoted_production_v1"))
     challenger_model_name = str(cfg_get(config, "software_infrastructure_portfolio_backtest.stage7_challenger_model_name", "stage7_challenger_v1"))
+    challenger_scores_path = resolve_path(
+        cfg_get(
+            config,
+            "software_infrastructure_stage7_challenger_scoring.output_csv",
+            "../output/technology_reports/software_infrastructure/scoring/software_infrastructure_stage7_challenger_scores.csv",
+        ),
+        base_dir=config_path.parent,
+    )
+    challenger_validation_path = resolve_path(
+        cfg_get(
+            config,
+            "software_infrastructure_stage7_challenger_scoring.validation_output_csv",
+            "../output/technology_reports/software_infrastructure/scoring/software_infrastructure_stage7_challenger_validation.csv",
+        ),
+        base_dir=config_path.parent,
+    )
     challenger_reference = matching_backtest(backtest_rows, challenger_model_name, "top_decile", "score_weight", "long_only")
     production_reference = matching_backtest(backtest_rows, production_model_name, "top_decile", "score_weight", "long_only")
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -533,8 +549,8 @@ def main() -> int:
         artifact_row("stage6_scoring_contract", "model_input", scoring_dir / "software_infrastructure_scoring_feature_contract.csv"),
         artifact_row("production_calibrated_scores", "production_scores", scoring_dir / "software_infrastructure_production_calibrated_scores.csv"),
         artifact_row("production_validation", "validation", scoring_dir / "software_infrastructure_production_validation.csv"),
-        artifact_row("stage7_challenger_scores", "challenger_scores", scoring_dir / "software_infrastructure_stage7_calibrated_scores.csv"),
-        artifact_row("stage7_challenger_validation", "challenger_validation", scoring_dir / "software_infrastructure_stage7_validation.csv"),
+        artifact_row("stage7_challenger_scores", "challenger_scores", challenger_scores_path),
+        artifact_row("stage7_challenger_validation", "challenger_validation", challenger_validation_path),
         artifact_row("stage8a_summary", "diagnostics", diagnostics_dir / "stage8a_summary.json"),
         artifact_row("subfeature_ic", "diagnostics", diagnostics_dir / "subfeature_ic.csv"),
         artifact_row("component_ic", "diagnostics", diagnostics_dir / "component_ic.csv"),

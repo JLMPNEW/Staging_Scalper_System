@@ -72,6 +72,17 @@ OPTIONAL_FDA_FEATURE_COLUMNS = {
     "fda_clearance_acceleration_score": "REAL DEFAULT 50.0",
     "fda_evidence_quality_score": "REAL DEFAULT 0.0",
     "fda_event_risk_score": "REAL DEFAULT 0.0",
+    "fda_event_risk_breadth_adjusted_score": "REAL DEFAULT 0.0",
+    "fda_safety_breadth_adjusted_score": "REAL DEFAULT 50.0",
+    "fda_distinct_device_category_count": "INTEGER DEFAULT 0",
+    "fda_recall_count_raw": "INTEGER DEFAULT 0",
+    "fda_recall_count_per_category": "REAL DEFAULT 0.0",
+    "fda_class_i_recall_count": "INTEGER DEFAULT 0",
+    "fda_warning_letter_count_36m": "INTEGER DEFAULT 0",
+    "fda_mdr_death_injury_count_24m": "INTEGER DEFAULT 0",
+    "fda_mdr_malfunction_count_24m": "INTEGER DEFAULT 0",
+    "fda_mdr_malfunction_count_per_category": "REAL DEFAULT 0.0",
+    "fda_breadth_adjustment_applied": "INTEGER DEFAULT 0",
     "fda_signal_mode": "TEXT DEFAULT ''",
     "fda_signal_direction": "TEXT DEFAULT ''",
     "fda_signal_reliability": "REAL DEFAULT 0.0",
@@ -123,6 +134,17 @@ FIELDNAMES = [
     "fda_clearance_acceleration_score",
     "fda_evidence_quality_score",
     "fda_event_risk_score",
+    "fda_event_risk_breadth_adjusted_score",
+    "fda_safety_breadth_adjusted_score",
+    "fda_distinct_device_category_count",
+    "fda_recall_count_raw",
+    "fda_recall_count_per_category",
+    "fda_class_i_recall_count",
+    "fda_warning_letter_count_36m",
+    "fda_mdr_death_injury_count_24m",
+    "fda_mdr_malfunction_count_24m",
+    "fda_mdr_malfunction_count_per_category",
+    "fda_breadth_adjustment_applied",
     "fda_signal_mode",
     "fda_signal_direction",
     "fda_signal_reliability",
@@ -214,9 +236,13 @@ class FdaFeatureRow:
     terminated_class_i_recall_count_36m: int = 0
     canonical_recall_duplicate_source_count: int = 0
     recall_severity_36m: float = 0.0
+    class_i_recall_severity_36m: float = 0.0
     death_count_24m: int = 0
     injury_count_24m: int = 0
     malfunction_count_24m: int = 0
+    prev_death_count_24m: int = 0
+    prev_injury_count_24m: int = 0
+    prev_malfunction_count_24m: int = 0
     prev_adverse_event_count_24m: int = 0
     current_adverse_event_count_24m: int = 0
     revenue_ttm: float | None = None
@@ -240,6 +266,17 @@ class FdaFeatureRow:
     fda_clearance_acceleration_score: float = 50.0
     fda_evidence_quality_score: float = 0.0
     fda_event_risk_score: float = 0.0
+    fda_event_risk_breadth_adjusted_score: float = 0.0
+    fda_safety_breadth_adjusted_score: float = 50.0
+    fda_distinct_device_category_count: int = 0
+    fda_recall_count_raw: int = 0
+    fda_recall_count_per_category: float = 0.0
+    fda_class_i_recall_count: int = 0
+    fda_warning_letter_count_36m: int = 0
+    fda_mdr_death_injury_count_24m: int = 0
+    fda_mdr_malfunction_count_24m: int = 0
+    fda_mdr_malfunction_count_per_category: float = 0.0
+    fda_breadth_adjustment_applied: int = 0
     fda_signal_mode: str = FDA_SIGNAL_LEGACY_BROAD
     fda_signal_direction: str = FDA_DIRECTION_POSITIVE
     fda_signal_reliability: float = 1.0
@@ -305,6 +342,8 @@ class FdaFeaturePolicy:
     open_class_i_12m_confirmed_min_count: int = 1
     open_class_i_36m_confirmed_min_count: int = 2
     innovation_approval_12m_log_weight: float = 24.0
+    breadth_adjustment_min_device_categories: int = 3
+    warning_letter_event_weight: float = 20.0
 
 
 @dataclass(frozen=True)
@@ -482,6 +521,15 @@ def fda_feature_policy(config: dict[str, Any]) -> FdaFeaturePolicy:
         ),
         open_class_i_36m_confirmed_min_count=int(
             cfg_get(config, "fda_features.review_state.open_class_i_36m_confirmed_min_count", 2)
+        ),
+        breadth_adjustment_min_device_categories=max(
+            1,
+            int(cfg_get(config, "fda_features.event_risk_breadth_adjustment.min_device_categories", 3)),
+        ),
+        warning_letter_event_weight=cfg_float(
+            config,
+            "fda_features.event_risk_breadth_adjustment.warning_letter_event_weight",
+            20.0,
         ),
     )
 
@@ -1034,9 +1082,11 @@ def count_recalls(conn: Any, row: FdaFeatureRow, *, asof: date, policy: FdaFeatu
         days_since = (asof - event_day).days if event_day is not None else 0
         decay = 0.5 ** (max(0, days_since) / max(1.0, policy.recall_decay_half_life_days))
         status_multiplier = recall_status_multiplier(item["status"], item["termination_date"], asof=asof)
-        row.recall_severity_36m += float(item["severity_weight"] or 1.0) * decay * status_multiplier
+        adjusted_severity = float(item["severity_weight"] or 1.0) * decay * status_multiplier
+        row.recall_severity_36m += adjusted_severity
         if is_class_i(item["classification"]):
             row.class_i_recall_count_36m += 1
+            row.class_i_recall_severity_36m += adjusted_severity
             if int(item["source_count"] or 1) >= 2:
                 row.dedup_class_i_recall_count_36m += 1
                 row.class_i_multi_source_recall_count_36m += 1
@@ -1081,7 +1131,58 @@ def count_adverse_events(conn: Any, row: FdaFeatureRow, *, asof: date, policy: F
                 update_risk_mapping_confidence(row, item["mapping_confidence"])
         else:
             row.prev_adverse_event_count_24m += event_count
+            row.prev_death_count_24m += int(item["death_count"] or 0)
+            row.prev_injury_count_24m += int(item["injury_count"] or 0)
+            row.prev_malfunction_count_24m += int(item["malfunction_count"] or 0)
         update_latest_fda_event_date(row, event_day.isoformat())
+
+
+def count_device_categories(conn: Any, row: FdaFeatureRow, *, asof: date, policy: FdaFeaturePolicy) -> None:
+    long_start = months_before(asof, policy.long_months).isoformat()
+    rows = conn.execute(
+        """
+        WITH product_events AS (
+            SELECT product_code
+            FROM fact_fda_approval
+            WHERE company_id = ?
+              AND COALESCE(decision_date, '') != ''
+              AND decision_date <= ?
+              AND decision_date >= ?
+            UNION
+            SELECT product_code
+            FROM fact_fda_recall_canonical
+            WHERE company_id = ?
+              AND COALESCE(recall_initiation_date, center_classification_date, '') != ''
+              AND COALESCE(recall_initiation_date, center_classification_date) <= ?
+              AND COALESCE(recall_initiation_date, center_classification_date) >= ?
+            UNION
+            SELECT product_code
+            FROM fact_fda_adverse_event
+            WHERE company_id = ?
+              AND COALESCE(report_date, event_date, '') != ''
+              AND COALESCE(report_date, event_date) <= ?
+              AND COALESCE(report_date, event_date) >= ?
+        )
+        SELECT DISTINCT
+               COALESCE(NULLIF(TRIM(p.medical_specialty), ''), NULLIF(TRIM(e.product_code), '')) AS device_category
+        FROM product_events e
+        LEFT JOIN dim_fda_product_code p
+          ON p.product_code = e.product_code
+        WHERE COALESCE(NULLIF(TRIM(p.medical_specialty), ''), NULLIF(TRIM(e.product_code), '')) IS NOT NULL
+        """,
+        (
+            row.company_id,
+            asof.isoformat(),
+            long_start,
+            row.company_id,
+            asof.isoformat(),
+            long_start,
+            row.company_id,
+            asof.isoformat(),
+            long_start,
+        ),
+    ).fetchall()
+    row.fda_distinct_device_category_count = len({str(item["device_category"] or "").strip() for item in rows if item["device_category"]})
 
 
 def manufacturer_mapping_summary(conn: Any, row: FdaFeatureRow) -> None:
@@ -1128,6 +1229,85 @@ def directional_score(score: float, direction: str, *, neutral: float) -> float:
     if direction == FDA_DIRECTION_INVERSE:
         return 100.0 - score
     return neutral
+
+
+def apply_breadth_adjusted_event_risk(row: FdaFeatureRow, *, policy: FdaFeaturePolicy, revenue_base: float | None) -> None:
+    row.fda_recall_count_raw = row.recall_count_36m
+    row.fda_class_i_recall_count = row.class_i_recall_count_36m
+    row.fda_warning_letter_count_36m = max(0, row.fda_warning_letter_count_36m)
+    row.fda_mdr_death_injury_count_24m = row.death_count_24m + row.injury_count_24m
+    row.fda_mdr_malfunction_count_24m = row.malfunction_count_24m
+    if not row.fda_data_available or revenue_base is None or revenue_base <= 0:
+        row.fda_event_risk_breadth_adjusted_score = row.fda_event_risk_score
+        row.fda_safety_breadth_adjusted_score = row.fda_safety_score
+        return
+
+    category_count = max(0, row.fda_distinct_device_category_count)
+    adjustment_applies = category_count >= policy.breadth_adjustment_min_device_categories
+    scoring_divisor = float(category_count if adjustment_applies else 1)
+    per_category_divisor = float(max(category_count, 1))
+    lower_severity_recall_count = max(
+        0,
+        row.recall_count_36m - row.class_i_recall_count_36m,
+    )
+    row.fda_recall_count_per_category = round(lower_severity_recall_count / per_category_divisor, 4)
+    row.fda_mdr_malfunction_count_per_category = round(row.malfunction_count_24m / per_category_divisor, 4)
+    row.fda_breadth_adjustment_applied = int(adjustment_applies)
+
+    lower_severity_recall_severity = max(0.0, row.recall_severity_36m - row.class_i_recall_severity_36m)
+    adjusted_recall_severity = row.class_i_recall_severity_36m + (lower_severity_recall_severity / scoring_divisor)
+    adjusted_recall_severity_rate = adjusted_recall_severity / revenue_base
+    death_rate = row.death_count_24m / revenue_base
+    injury_rate = row.injury_count_24m / revenue_base
+    adjusted_malfunction_rate = (row.malfunction_count_24m / scoring_divisor) / revenue_base
+    current_severe_mdr = row.death_count_24m + row.injury_count_24m
+    previous_severe_mdr = row.prev_death_count_24m + row.prev_injury_count_24m
+    severe_mdr_acceleration = max(0, current_severe_mdr - previous_severe_mdr)
+    malfunction_acceleration = max(0, row.malfunction_count_24m - row.prev_malfunction_count_24m) / scoring_divisor
+    adjusted_adverse_acceleration_rate = (severe_mdr_acceleration + malfunction_acceleration) / revenue_base
+    # The current FDA ingestion schema has no canonical warning-letter source table,
+    # so this is zero today. Keep the formula parameterized so it activates when
+    # fda_warning_letter_count_36m is wired.
+    warning_letter_penalty = row.fda_warning_letter_count_36m * policy.warning_letter_event_weight
+    adjusted_regulatory_risk = round(
+        clamp(
+            100.0
+            - adjusted_recall_severity_rate * policy.risk_recall_severity_weight
+            - row.class_i_recall_count_36m * policy.risk_class_i_recall_weight
+            - warning_letter_penalty
+            - death_rate * policy.risk_death_per_billion_weight
+            - injury_rate * policy.risk_injury_per_billion_weight
+            - adjusted_malfunction_rate * policy.risk_malfunction_per_billion_weight
+            - adjusted_adverse_acceleration_rate * policy.risk_adverse_acceleration_per_billion_weight
+        ),
+        2,
+    )
+    # regulatory_risk_score is a high-is-good safety score; fda_event_risk_* fields are high-is-worse.
+    row.fda_safety_breadth_adjusted_score = adjusted_regulatory_risk
+    row.fda_event_risk_breadth_adjusted_score = round(clamp(100.0 - adjusted_regulatory_risk), 2)
+    if row.payload is not None:
+        row.payload["fda_event_risk_breadth_adjustment"] = {
+            "min_device_categories": policy.breadth_adjustment_min_device_categories,
+            "device_category_count": row.fda_distinct_device_category_count,
+            "adjustment_applied": row.fda_breadth_adjustment_applied,
+            "adjustment_eligible": int(adjustment_applies),
+            "scoring_divisor": scoring_divisor,
+            "per_category_divisor": per_category_divisor,
+            "raw_event_risk_score": row.fda_event_risk_score,
+            "breadth_adjusted_event_risk_score": row.fda_event_risk_breadth_adjusted_score,
+            "breadth_adjusted_safety_score": row.fda_safety_breadth_adjusted_score,
+            "lower_severity_recall_count": lower_severity_recall_count,
+            "lower_severity_recall_count_per_category": row.fda_recall_count_per_category,
+            "class_i_recall_count_unadjusted": row.class_i_recall_count_36m,
+            "warning_letter_count_unadjusted": row.fda_warning_letter_count_36m,
+            "warning_letter_source_status": (
+                "observed" if row.fda_warning_letter_count_36m > 0 else "not_configured_or_zero"
+            ),
+            "warning_letter_penalty_active": bool(row.fda_warning_letter_count_36m > 0),
+            "death_injury_mdr_count_unadjusted": row.fda_mdr_death_injury_count_24m,
+            "malfunction_mdr_count_per_category": row.fda_mdr_malfunction_count_per_category,
+            "normalizer": "distinct_medical_specialty_or_product_code",
+        }
 
 
 def percentile_from_pairs(pairs: list[tuple[int, float]], *, higher_is_better: bool) -> dict[int, float]:
@@ -1349,6 +1529,7 @@ def apply_fda_alpha_scores(
                 "fda_clearance_acceleration_score": row.fda_clearance_acceleration_score,
                 "fda_evidence_quality_score": row.fda_evidence_quality_score,
                 "fda_event_risk_score": row.fda_event_risk_score,
+                "fda_event_risk_breadth_adjusted_score": row.fda_event_risk_breadth_adjusted_score,
                 "fda_signal_mode": row.fda_signal_mode,
                 "fda_signal_direction": row.fda_signal_direction,
                 "fda_signal_reliability": row.fda_signal_reliability,
@@ -1371,8 +1552,10 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
     row.fda_clearance_velocity_raw = float(row.approval_count_12m - prior_12m_count)
     prior_velocity = prior_12m_count - month_25_36_count
     row.fda_clearance_acceleration_raw = float(row.fda_clearance_velocity_raw - prior_velocity)
+    breadth_adjustment_revenue_base: float | None = None
     if has_fda_records:
         revenue_base = revenue_normalizer(row, policy=policy)
+        breadth_adjustment_revenue_base = revenue_base
         recall_severity_rate = round(row.recall_severity_36m / revenue_base, 4)
         row.recall_severity_per_billion_revenue = recall_severity_rate
         row.adverse_event_rate_per_billion_revenue = round(row.current_adverse_event_count_24m / revenue_base, 4)
@@ -1487,6 +1670,7 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
     row.fda_clearance_velocity_score = 50.0
     row.fda_clearance_acceleration_score = 50.0
     row.fda_event_risk_score = round(clamp(100.0 - row.regulatory_risk_score), 2)
+    apply_breadth_adjusted_event_risk(row, policy=policy, revenue_base=breadth_adjustment_revenue_base)
     row.fda_evidence_quality_score = fda_evidence_quality_score(
         row,
         policy=policy,
@@ -1516,9 +1700,17 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
             "terminated_class_i_recall_36m": row.terminated_class_i_recall_count_36m,
             "canonical_recall_duplicate_source_count": row.canonical_recall_duplicate_source_count,
             "recall_severity_36m": row.recall_severity_36m,
+            "fda_distinct_device_category_count": row.fda_distinct_device_category_count,
+            "fda_recall_count_raw": row.fda_recall_count_raw,
+            "fda_recall_count_per_category": row.fda_recall_count_per_category,
+            "fda_class_i_recall_count": row.fda_class_i_recall_count,
+            "fda_warning_letter_count_36m": row.fda_warning_letter_count_36m,
             "death_24m": row.death_count_24m,
             "injury_24m": row.injury_count_24m,
             "malfunction_24m": row.malfunction_count_24m,
+            "fda_mdr_death_injury_count_24m": row.fda_mdr_death_injury_count_24m,
+            "fda_mdr_malfunction_count_24m": row.fda_mdr_malfunction_count_24m,
+            "fda_mdr_malfunction_count_per_category": row.fda_mdr_malfunction_count_per_category,
             "current_adverse_24m": row.current_adverse_event_count_24m,
             "previous_adverse_24m": row.prev_adverse_event_count_24m,
             "approval_prior_12m": prior_12m_count,
@@ -1572,10 +1764,41 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
             "fda_clearance_acceleration_score": row.fda_clearance_acceleration_score,
             "fda_evidence_quality_score": row.fda_evidence_quality_score,
             "fda_event_risk_score": row.fda_event_risk_score,
+            "fda_event_risk_breadth_adjusted_score": row.fda_event_risk_breadth_adjusted_score,
+            "fda_safety_breadth_adjusted_score": row.fda_safety_breadth_adjusted_score,
             "fda_signal_mode": row.fda_signal_mode,
             "fda_signal_direction": row.fda_signal_direction,
             "fda_signal_reliability": row.fda_signal_reliability,
             "fda_policy_reason": row.fda_policy_reason,
+        },
+        "fda_event_risk_breadth_adjustment": {
+            "min_device_categories": policy.breadth_adjustment_min_device_categories,
+            "device_category_count": row.fda_distinct_device_category_count,
+            "adjustment_applied": row.fda_breadth_adjustment_applied,
+            "adjustment_eligible": int(
+                row.fda_distinct_device_category_count >= policy.breadth_adjustment_min_device_categories
+            ),
+            "scoring_divisor": float(
+                row.fda_distinct_device_category_count
+                if row.fda_distinct_device_category_count >= policy.breadth_adjustment_min_device_categories
+                else 1
+            ),
+            "per_category_divisor": float(max(row.fda_distinct_device_category_count, 1)),
+            "raw_event_risk_score": row.fda_event_risk_score,
+            "breadth_adjusted_event_risk_score": row.fda_event_risk_breadth_adjusted_score,
+            "breadth_adjusted_safety_score": row.fda_safety_breadth_adjusted_score,
+            "lower_severity_recall_count": max(0, row.recall_count_36m - row.class_i_recall_count_36m),
+            "lower_severity_recall_count_per_category": row.fda_recall_count_per_category,
+            "class_i_recall_count_unadjusted": row.class_i_recall_count_36m,
+            "warning_letter_count_unadjusted": row.fda_warning_letter_count_36m,
+            "warning_letter_source_status": (
+                "observed" if row.fda_warning_letter_count_36m > 0 else "not_configured_or_zero"
+            ),
+            "warning_letter_penalty_active": bool(row.fda_warning_letter_count_36m > 0),
+            "death_injury_mdr_count_unadjusted": row.fda_mdr_death_injury_count_24m,
+            "malfunction_mdr_count_per_category": row.fda_mdr_malfunction_count_per_category,
+            "normalizer": "distinct_medical_specialty_or_product_code",
+            "production_usage": "shadow_only",
         },
         "risk_penalties": {
             "recall_severity_per_billion": policy.risk_recall_severity_weight,
@@ -1771,6 +1994,7 @@ def build_rows(
             )
         count_recalls(conn, row, asof=asof, policy=policy)
         count_adverse_events(conn, row, asof=asof, policy=policy)
+        count_device_categories(conn, row, asof=asof, policy=policy)
         manufacturer_mapping_summary(conn, row)
         row.revenue_ttm = latest_revenue_ttm(conn, company.company_id, asof=asof)
         score_row(row, policy=policy)
@@ -1826,6 +2050,17 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
         "fda_clearance_acceleration_score",
         "fda_evidence_quality_score",
         "fda_event_risk_score",
+        "fda_event_risk_breadth_adjusted_score",
+        "fda_safety_breadth_adjusted_score",
+        "fda_distinct_device_category_count",
+        "fda_recall_count_raw",
+        "fda_recall_count_per_category",
+        "fda_class_i_recall_count",
+        "fda_warning_letter_count_36m",
+        "fda_mdr_death_injury_count_24m",
+        "fda_mdr_malfunction_count_24m",
+        "fda_mdr_malfunction_count_per_category",
+        "fda_breadth_adjustment_applied",
         "fda_signal_mode",
         "fda_signal_direction",
         "fda_signal_reliability",
@@ -1885,6 +2120,17 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
             "fda_clearance_acceleration_score": row.fda_clearance_acceleration_score,
             "fda_evidence_quality_score": row.fda_evidence_quality_score,
             "fda_event_risk_score": row.fda_event_risk_score,
+            "fda_event_risk_breadth_adjusted_score": row.fda_event_risk_breadth_adjusted_score,
+            "fda_safety_breadth_adjusted_score": row.fda_safety_breadth_adjusted_score,
+            "fda_distinct_device_category_count": row.fda_distinct_device_category_count,
+            "fda_recall_count_raw": row.fda_recall_count_raw,
+            "fda_recall_count_per_category": row.fda_recall_count_per_category,
+            "fda_class_i_recall_count": row.fda_class_i_recall_count,
+            "fda_warning_letter_count_36m": row.fda_warning_letter_count_36m,
+            "fda_mdr_death_injury_count_24m": row.fda_mdr_death_injury_count_24m,
+            "fda_mdr_malfunction_count_24m": row.fda_mdr_malfunction_count_24m,
+            "fda_mdr_malfunction_count_per_category": row.fda_mdr_malfunction_count_per_category,
+            "fda_breadth_adjustment_applied": row.fda_breadth_adjustment_applied,
             "fda_signal_mode": row.fda_signal_mode,
             "fda_signal_direction": row.fda_signal_direction,
             "fda_signal_reliability": row.fda_signal_reliability,
