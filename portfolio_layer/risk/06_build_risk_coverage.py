@@ -23,7 +23,7 @@ from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, write_csv  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
-from portfolio_layer.risk.panel import build_universe  # noqa: E402
+from portfolio_layer.risk.panel import build_universe, classify_coverage, coverage_stats  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
 
@@ -111,45 +111,31 @@ def main() -> int:
 
     out: list[dict] = []
     for ticker in universe_tickers:
-        col = prices[ticker] if ticker in prices.columns else None
-        obs = int(col.notna().sum()) if col is not None else 0
-        if obs > 0:
-            present = col.dropna()
-            first, last = str(present.index[0]), str(present.index[-1])
-            listed_span = prices.loc[first:panel_end].shape[0]
-            missing_days = max(0, listed_span - obs)
-            right_edge_missing = max(0, prices.loc[last:panel_end].shape[0] - 1)
-            gap_frac = round(missing_days / listed_span, 4) if listed_span else 0.0
-        else:
-            first = last = ""
-            missing_days = prices.shape[0]
-            right_edge_missing = prices.shape[0]
-            gap_frac = 1.0
         meta = fetch_meta.get(ticker, {})
         role = str(meta.get("role", ""))
         pipeline = str(meta.get("source_pipeline", ""))
         score_row = score_rows.get(ticker)
         score_eligible = str(score_row["investable_eligible"]) if score_row else ("n/a" if role else "")
 
-        if obs == 0:
-            status, reason = "excluded", f"no_price_data:{meta.get('status', 'missing')}"
-        elif right_edge_missing > max_stale_days:
-            status, reason = "excluded", f"stale_right_edge:{last}"
-        elif obs < hard_floor:
-            status, reason = "excluded", "below_hard_floor"
-        elif obs < min_direct or gap_frac > max_gap_frac:
-            status = "shrunk"
-            reason = "partial_history" if obs < min_direct else "high_internal_gaps"
-        else:
-            status, reason = "direct", "direct"
-        risk_eligible = 0 if status == "excluded" else 1
+        stats = coverage_stats(prices, ticker, panel_end)
+        status, risk_eligible, reason = classify_coverage(
+            stats,
+            min_direct=min_direct,
+            hard_floor=hard_floor,
+            max_gap_frac=max_gap_frac,
+            max_stale_days=max_stale_days,
+            fetch_status=str(meta.get("status", "missing")),
+        )
         target = "" if status != "shrunk" else (sector_etf.get(pipeline, fallback_etf))
 
         out.append({
             "ticker": ticker, "role": role, "source_pipeline": pipeline, "score_eligible": score_eligible,
-            "risk_status": status, "risk_eligible": risk_eligible, "observation_count": obs,
-            "missing_day_count": missing_days, "missing_day_fraction": gap_frac,
-            "start_date": first, "end_date": last, "right_edge_missing_day_count": right_edge_missing,
+            "risk_status": status, "risk_eligible": risk_eligible,
+            "observation_count": stats["observation_count"],
+            "missing_day_count": stats["missing_day_count"],
+            "missing_day_fraction": stats["missing_day_fraction"],
+            "start_date": stats["start_date"], "end_date": stats["end_date"],
+            "right_edge_missing_day_count": stats["right_edge_missing_day_count"],
             "shrinkage_target": target, "risk_reason": reason,
         })
 

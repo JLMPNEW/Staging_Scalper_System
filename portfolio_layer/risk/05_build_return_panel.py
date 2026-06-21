@@ -26,7 +26,8 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.config import resolve_path  # noqa: E402
+from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.db import connect, finish_run, start_run  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
@@ -102,9 +103,17 @@ def parse_ticker_aliases(rc: dict) -> dict[str, dict[str, str]]:
         if not active or not effective:
             raise ValueError(f"risk_panel.ticker_aliases.{ticker} requires active_ticker and effective_date")
         date.fromisoformat(effective)
+        predecessor = str(
+            raw_cfg.get("predecessor_ticker")
+            or raw_cfg.get("legacy_ticker")
+            or raw_cfg.get("old_ticker")
+            or (ticker if ticker != active else "")
+        ).strip().upper()
         aliases[ticker] = {
             "active_ticker": active,
+            "predecessor_ticker": predecessor,
             "effective_date": effective,
+            "price_history_csv": str(raw_cfg.get("price_history_csv") or "").strip(),
             "issuer_id": str(raw_cfg.get("issuer_id") or "").strip(),
             "reason": str(raw_cfg.get("reason") or "").strip(),
         }
@@ -121,6 +130,45 @@ def fetch_symbols_for(ticker: str, aliases: dict[str, dict[str, str]], *, run_da
     # After a same-issuer ticker migration, the retired symbol can return stale legacy bars. Query only
     # the configured active symbol and floor the fetch at the effective date below.
     return [active]
+
+
+def fetch_segments_for(
+    ticker: str,
+    aliases: dict[str, dict[str, str]],
+    *,
+    start: date,
+    end: date,
+) -> list[dict[str, date | str]]:
+    """Return provider-symbol date segments for same-issuer ticker lineage."""
+    ticker = ticker.upper()
+    alias = aliases.get(ticker)
+    if not alias:
+        return [{"query_symbol": ticker, "start": start, "end": end, "segment": "direct"}]
+    effective = date.fromisoformat(alias["effective_date"])
+    active = alias["active_ticker"]
+    predecessor = str(alias.get("predecessor_ticker") or "").upper()
+    if end < effective:
+        return [{"query_symbol": predecessor or ticker, "start": start, "end": end, "segment": "predecessor"}]
+
+    segments: list[dict[str, date | str]] = []
+    if predecessor and start < effective:
+        predecessor_end = min(end, effective - timedelta(days=1))
+        if start <= predecessor_end:
+            segments.append({
+                "query_symbol": predecessor,
+                "start": start,
+                "end": predecessor_end,
+                "segment": "predecessor",
+            })
+    active_start = max(start, effective)
+    if active_start <= end:
+        segments.append({
+            "query_symbol": active,
+            "start": active_start,
+            "end": end,
+            "segment": "active",
+        })
+    return segments or [{"query_symbol": active, "start": start, "end": end, "segment": "active"}]
 
 
 def load_cached_bars(
@@ -205,6 +253,53 @@ def load_existing_price_seed(path: Path, *, end: date) -> dict[str, list[tuple[s
     return seed
 
 
+def load_price_history_csv(
+    path: Path,
+    ticker: str,
+    *,
+    start: date,
+    end: date,
+    alternate_tickers: set[str] | None = None,
+) -> list[tuple[str, float]]:
+    """Load an explicit same-issuer lineage price-history override."""
+    if not path.exists():
+        return []
+    out: list[tuple[str, float]] = []
+    start_s = start.isoformat()
+    end_s = end.isoformat()
+    allowed_tickers = {ticker.upper()}
+    allowed_tickers.update(str(t).upper() for t in (alternate_tickers or set()) if str(t).strip())
+    for row in read_csv(path):
+        row_ticker = str(row.get("ticker") or "").strip().upper()
+        day = str(row.get("date") or row.get("bar_date") or "").strip()
+        raw_adj = str(row.get("adjclose") or row.get("adj_close") or "").strip()
+        if row_ticker not in allowed_tickers or not day or day < start_s or day > end_s or not raw_adj:
+            continue
+        try:
+            adj = float(raw_adj)
+        except ValueError:
+            continue
+        if adj > 0:
+            out.append((day, adj))
+    return sorted(out)
+
+
+def price_history_csv_summary(path: Path) -> dict[str, str | int | bool]:
+    if not path.exists():
+        return {"exists": False, "rows": 0, "first_date": "", "last_date": ""}
+    dates = [
+        str(row.get("date") or row.get("bar_date") or "").strip()
+        for row in read_csv(path)
+        if str(row.get("date") or row.get("bar_date") or "").strip()
+    ]
+    return {
+        "exists": True,
+        "rows": len(dates),
+        "first_date": min(dates) if dates else "",
+        "last_date": max(dates) if dates else "",
+    }
+
+
 def main() -> int:
     configure_utc_logging()
     args = parse_args()
@@ -259,6 +354,12 @@ def main() -> int:
             risk_dir / "covariance_meta.json",
             risk_dir / "return_outliers.csv",
             risk_dir / "data_quality_review.csv",
+            risk_dir / "ib_spread_samples.csv",
+            risk_dir / "spread_snapshot.csv",
+            risk_dir / "spread_snapshot_meta.json",
+            risk_dir / "liquidity_audit.csv",
+            risk_dir / "liquidity_audit_by_sector.csv",
+            risk_dir / "liquidity_audit_summary.json",
             risk_dir / "validation" / "risk_panel_validation.csv",
             risk_dir / "risk_manifest.json",
         ])
@@ -296,6 +397,22 @@ def main() -> int:
     except ValueError as exc:
         LOGGER.error("%s", exc)
         return 1
+    price_history_overrides = []
+    for ticker, alias in sorted(ticker_aliases.items()):
+        raw_history = str(alias.get("price_history_csv") or "").strip()
+        if not raw_history:
+            continue
+        history_path = resolve_path(raw_history, base_dir=config_path.parent)
+        summary = price_history_csv_summary(history_path)
+        price_history_overrides.append({
+            "ticker": ticker,
+            "path": str(history_path),
+            "exists": summary["exists"],
+            "rows": summary["rows"],
+            "first_date": summary["first_date"],
+            "last_date": summary["last_date"],
+            "sha256": sha256_file(history_path) if history_path.exists() else "",
+        })
 
     def fetch_one(
         ticker: str,
@@ -305,8 +422,8 @@ def main() -> int:
         alias_effective_date = alias["effective_date"] if alias_applied and alias else ""
         alias_issuer_id = alias["issuer_id"] if alias_applied and alias else ""
         alias_reason = alias["reason"] if alias_applied and alias else ""
-        query_symbols = fetch_symbols_for(ticker, ticker_aliases, run_date=run_date)
-        expected_query_symbols = set(query_symbols)
+        segments = fetch_segments_for(ticker, ticker_aliases, start=start, end=run_date)
+        expected_query_symbols = {str(segment["query_symbol"]) for segment in segments}
 
         if ticker in existing_seed and not alias_applied:
             bars = existing_seed[ticker]
@@ -345,19 +462,60 @@ def main() -> int:
                 alias_reason,
             )
 
-        statuses: list[str] = []
-        for query_symbol in query_symbols:
-            # Reused single-letter tickers (e.g. PSTG->P) must not pull the prior issuer's older history:
-            # floor the active alias symbol's fetch at the alias effective_date.
-            sym_start = start
-            if alias and query_symbol == alias["active_ticker"]:
-                eff = date.fromisoformat(alias["effective_date"])
-                if eff > sym_start:
-                    sym_start = eff
+        combined_bars: dict[str, float] = {}
+        combined_splits: list[dict[str, str]] = []
+        providers: list[str] = []
+        query_symbols_used: list[str] = []
+        source_symbols_used: list[str] = []
+        tail_notes: list[str] = []
+        lineage_used = False
+        lineage_last: date | None = None
+        if alias_applied and alias and alias.get("price_history_csv"):
+            history_path = resolve_path(alias["price_history_csv"], base_dir=config_path.parent)
+            bars = load_price_history_csv(
+                history_path,
+                ticker,
+                start=start,
+                end=run_date,
+                alternate_tickers={str(alias.get("active_ticker") or ""), str(alias.get("predecessor_ticker") or "")},
+            )
+            if bars:
+                dates = [d for d, _ in bars]
+                left_ok = min(dates) <= (start + timedelta(days=7)).isoformat()
+                if left_ok:
+                    for day, value in bars:
+                        combined_bars[day] = value
+                    lineage_used = True
+                    lineage_last = date.fromisoformat(max(dates))
+                    providers.append("lineage_price_history_csv")
+                    query_symbols_used.append(f"{alias.get('predecessor_ticker') or ticker}|{alias['active_ticker']}")
+                    source_symbols_used.append(ticker)
+                    statuses = []
+                else:
+                    statuses = [f"{ticker}:lineage_csv:insufficient_left_edge:{min(dates)}..{max(dates)}"]
+            else:
+                statuses = [f"{ticker}:lineage_csv:missing_or_empty:{history_path}"]
+        else:
+            statuses = []
+
+        for segment in segments:
+            query_symbol = str(segment["query_symbol"])
+            sym_start = segment["start"]
+            sym_end = segment["end"]
+            if not isinstance(sym_start, date) or not isinstance(sym_end, date):
+                statuses.append(f"{query_symbol}:invalid_segment")
+                continue
+            if lineage_used:
+                if str(segment["segment"]) == "predecessor":
+                    continue
+                if alias and query_symbol == alias["active_ticker"] and lineage_last is not None:
+                    sym_start = max(sym_start, lineage_last + timedelta(days=1))
+                    if sym_start > sym_end:
+                        continue
             bars, split_events, status, provider, source_symbol = fetch_adjclose_with_splits(
                 query_symbol,
                 start=sym_start,
-                end=run_date,
+                end=sym_end,
                 url_templates=url_templates,
                 user_agent=ua,
                 timeout_sec=timeout,
@@ -365,38 +523,74 @@ def main() -> int:
                 enable_stooq_fallback=enable_stooq,
             )
             if status == "ok" and bars:
-                bars = [(d, v) for d, v in bars if d >= sym_start.isoformat()]
-                split_events = [row for row in split_events if row["split_date"] >= sym_start.isoformat()]
+                bars = [(d, v) for d, v in bars if sym_start.isoformat() <= d <= sym_end.isoformat()]
+                split_events = [
+                    {
+                        **row,
+                        "_query_symbol": query_symbol,
+                        "_source_symbol": source_symbol,
+                        "_provider": provider,
+                        "_segment": str(segment["segment"]),
+                    }
+                    for row in split_events
+                    if sym_start.isoformat() <= row["split_date"] <= sym_end.isoformat()
+                ]
             if status == "ok" and bars:
-                write_cached_bars(
-                    price_cache_dir,
-                    ticker,
-                    provider,
-                    bars,
-                    split_events,
-                    query_symbol=query_symbol,
-                    source_symbol=source_symbol,
+                for day, value in bars:
+                    combined_bars[day] = value
+                combined_splits.extend(split_events)
+                providers.append(provider)
+                query_symbols_used.append(query_symbol)
+                source_symbols_used.append(source_symbol)
+                continue
+            if lineage_used and alias and query_symbol == alias["active_ticker"]:
+                tail_notes.append(
+                    f"{query_symbol}:{status if bars or status != 'ok' else 'empty_after_lineage_tail'}"
                 )
-                return (
-                    bars,
-                    split_events,
-                    "ok",
-                    provider,
-                    source_symbol,
-                    query_symbol,
-                    alias_applied,
-                    alias_effective_date,
-                    alias_issuer_id,
-                    alias_reason,
-                )
-            statuses.append(f"{query_symbol}:{status if bars or status != 'ok' else 'empty_after_start_floor'}")
+                continue
+            statuses.append(
+                f"{query_symbol}:{segment['segment']}:"
+                f"{status if bars or status != 'ok' else 'empty_after_segment_floor'}"
+            )
+        if combined_bars and not statuses:
+            bars = sorted(combined_bars.items())
+            provider = providers[0] if len(set(providers)) == 1 else "lineage:" + "+".join(providers)
+            if tail_notes:
+                provider = f"{provider};tail_gap={'|'.join(tail_notes)}"
+            query_symbol = query_symbols_used[0] if len(query_symbols_used) == 1 else "|".join(query_symbols_used)
+            source_symbol = (
+                source_symbols_used[0]
+                if len(source_symbols_used) == 1
+                else "|".join(source_symbols_used)
+            )
+            write_cached_bars(
+                price_cache_dir,
+                ticker,
+                provider,
+                bars,
+                combined_splits,
+                query_symbol=query_symbol,
+                source_symbol=source_symbol,
+            )
+            return (
+                bars,
+                combined_splits,
+                "ok",
+                provider,
+                source_symbol,
+                query_symbol,
+                alias_applied,
+                alias_effective_date,
+                alias_issuer_id,
+                alias_reason,
+            )
         return (
             [],
             [],
             "|".join(statuses) if statuses else "no_providers",
             "",
-            query_symbols[0],
-            query_symbols[0],
+            str(segments[0]["query_symbol"]) if segments else ticker,
+            str(segments[0]["query_symbol"]) if segments else ticker,
             alias_applied,
             alias_effective_date,
             alias_issuer_id,
@@ -430,9 +624,9 @@ def main() -> int:
                 for row in split_events:
                     split_rows.append({
                         "ticker": t,
-                        "query_symbol": query_symbol,
-                        "source_symbol": source_symbol,
-                        "provider": provider,
+                        "query_symbol": row.get("_query_symbol", query_symbol),
+                        "source_symbol": row.get("_source_symbol", source_symbol),
+                        "provider": row.get("_provider", provider),
                         "split_date": row["split_date"],
                         "numerator": row.get("numerator", ""),
                         "denominator": row.get("denominator", ""),
@@ -514,6 +708,7 @@ def main() -> int:
             for r in sorted(fetch_rows, key=lambda row: row["ticker"])
             if int(r.get("alias_applied") or 0) == 1
         ],
+        "price_history_overrides": price_history_overrides,
         "fallbacks_enabled": {"stooq_us_daily": enable_stooq},
         "files": {
             "prices_adjclose.csv": {"sha256": sha256_file(prices_path), "rows": len(prices)},

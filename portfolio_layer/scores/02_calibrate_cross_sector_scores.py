@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sys
 from datetime import date
 from pathlib import Path
@@ -64,6 +65,16 @@ def staleness_days(run_as_of: str, source_asof: str) -> int | None:
         return None
 
 
+def parse_finite(value: object, label: str) -> float:
+    try:
+        parsed = float(value) if value is not None and str(value).strip() != "" else float("nan")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be numeric, got {value!r}") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"{label} must be finite, got {value!r}")
+    return parsed
+
+
 def assign_percentiles_and_ratings(rows: list[dict], bands: dict[str, float]) -> None:
     """Assign within-sector percentiles after duplicate resolution."""
     by_pipeline: dict[str, list[dict]] = {}
@@ -74,6 +85,18 @@ def assign_percentiles_and_ratings(rows: list[dict], bands: dict[str, float]) ->
         for row, pct in zip(sector_rows, percentiles_within(natives)):
             row["within_sector_percentile"] = round(pct, 4)
             row["rating"] = rating_for_percentile(pct, bands)
+
+
+def invalidate_downstream_artifacts(run_dir: Path) -> None:
+    """Calibration changes invalidate the sealed Stage 1 manifest and validation outputs."""
+    for path in (run_dir / "manifest.json",):
+        if path.exists():
+            path.unlink()
+    validation_dir = run_dir / "validation"
+    if validation_dir.exists():
+        for path in validation_dir.iterdir():
+            if path.is_file():
+                path.unlink()
 
 
 def main() -> int:
@@ -135,20 +158,36 @@ def main() -> int:
     contract_rows: list[dict] = []
     for pipeline, rows in by_pipeline.items():
         calib = calib_by_family.get(pipeline, {})
-        neutral = float(calib.get("neutral", 50.0))
-        scale = float(calib.get("scale", 50.0))
-        alpha_full = float(calib.get("expected_alpha_at_full", 0.15))
+        try:
+            neutral = parse_finite(calib.get("neutral", 50.0), f"{pipeline}:calibration.neutral")
+            scale = parse_finite(calib.get("scale", 50.0), f"{pipeline}:calibration.scale")
+            alpha_full = parse_finite(
+                calib.get("expected_alpha_at_full", 0.15),
+                f"{pipeline}:calibration.expected_alpha_at_full",
+            )
+        except ValueError as exc:
+            LOGGER.error("%s", exc)
+            return 1
         for r in rows:
-            native = float(r["native_score"])
+            ticker = str(r.get("ticker", "<missing>"))
+            try:
+                native = parse_finite(r.get("native_score"), f"{pipeline}:{ticker}:native_score")
+                score_confidence = parse_finite(
+                    r.get("score_confidence"),
+                    f"{pipeline}:{ticker}:score_confidence",
+                )
+                final_score = expected_alpha(
+                    native, neutral=neutral, scale=scale, expected_alpha_at_full=alpha_full,
+                )
+            except ValueError as exc:
+                LOGGER.error("%s", exc)
+                return 1
             contract_rows.append({
                 "as_of_date": run_as_of, "ticker": r["ticker"], "source_pipeline": pipeline,
                 "sector": r["sector"], "industry": r["industry"], "industry_aggregate": r["industry_aggregate"],
-                "final_score": round(
-                    expected_alpha(native, neutral=neutral, scale=scale, expected_alpha_at_full=alpha_full),
-                    6,
-                ),
+                "final_score": round(final_score, 6),
                 "rating": "", "within_sector_percentile": "",
-                "score_confidence": round(float(r["score_confidence"]), 4),
+                "score_confidence": round(score_confidence, 4),
                 "investable_eligible": int(r["investable_eligible"]),
                 "eligibility_reason": r["eligibility_reason"], "native_score": native,
                 "source_asof_date": r["source_asof_date"],
@@ -215,6 +254,8 @@ def main() -> int:
     final_rows = sorted(final_rows, key=lambda r: (r["source_pipeline"], -float(r["final_score"])))
     out_path = run_dir / "stocks_scores.csv"
     duplicate_path = run_dir / "validation" / "duplicate_resolution.csv"
+    if args.force:
+        invalidate_downstream_artifacts(run_dir)
     try:
         fail_if_exists([out_path, duplicate_path], force=args.force)
     except FileExistsError as exc:

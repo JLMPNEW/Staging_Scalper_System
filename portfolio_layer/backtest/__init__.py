@@ -1,0 +1,1 @@
+"""Report-only diagnostics for the portfolio layer (Stage 3 static replay; Stage 11 walk-forward)."""

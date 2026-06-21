@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd  # noqa: E402
+import numpy as np  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
@@ -23,7 +24,12 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 )
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
-from portfolio_layer.risk.panel import to_returns  # noqa: E402
+from portfolio_layer.risk.liquidity import (  # noqa: E402
+    finite_float,
+    liquidity_panel_active,
+    load_spread_snapshot,
+)
+from portfolio_layer.risk.panel import classify_coverage, coverage_stats, to_returns  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
 
@@ -85,6 +91,7 @@ def main() -> int:  # noqa: C901
     coverage = {r["ticker"]: r for r in read_csv(risk_dir / "risk_coverage.csv")}
     clusters = {r["ticker"]: r["cluster_id"] for r in read_csv(risk_dir / "correlation_clusters.csv")}
     meta = json.loads((risk_dir / "covariance_meta.json").read_text(encoding="utf-8"))
+    covariance = pd.read_csv(risk_dir / "covariance.csv", index_col=0)
     snapshot = json.loads((risk_dir / "price_snapshot.json").read_text(encoding="utf-8"))
     scores = read_csv(run_dir / "stocks_scores.csv")
     split_events_path = risk_dir / "split_events.csv"
@@ -94,41 +101,6 @@ def main() -> int:  # noqa: C901
     for row in split_event_rows:
         splits_by_ticker.setdefault(str(row.get("ticker", "")).upper(), []).append(row)
     panel_end = str(prices.index[-1]) if not prices.empty else run_as_of
-
-    def price_coverage_stats(ticker: str) -> dict[str, str | int | float]:
-        if ticker not in prices.columns:
-            return {
-                "observation_count": 0,
-                "missing_day_count": prices.shape[0],
-                "right_edge_missing_day_count": prices.shape[0],
-                "missing_day_fraction": 1.0,
-                "start_date": "",
-                "end_date": "",
-            }
-        col = prices[ticker]
-        obs = int(col.notna().sum())
-        if obs == 0:
-            return {
-                "observation_count": 0,
-                "missing_day_count": prices.shape[0],
-                "right_edge_missing_day_count": prices.shape[0],
-                "missing_day_fraction": 1.0,
-                "start_date": "",
-                "end_date": "",
-            }
-        present = col.dropna()
-        first, last = str(present.index[0]), str(present.index[-1])
-        span = prices.loc[first:panel_end].shape[0]
-        missing = max(0, span - obs)
-        right_edge_missing = max(0, prices.loc[last:panel_end].shape[0] - 1)
-        return {
-            "observation_count": obs,
-            "missing_day_count": missing,
-            "right_edge_missing_day_count": right_edge_missing,
-            "missing_day_fraction": round(missing / span, 4) if span else 0.0,
-            "start_date": first,
-            "end_date": last,
-        }
 
     checks: list[dict] = []
 
@@ -247,7 +219,7 @@ def main() -> int:  # noqa: C901
     # 3b. coverage fields must match the raw price panel, including right-edge missing bars.
     bad_cov_fields = []
     for t, r in coverage.items():
-        stats = price_coverage_stats(t)
+        stats = coverage_stats(prices, t, panel_end)
         checks_to_compare = (
             ("observation_count", int(float(r.get("observation_count") or 0)), stats["observation_count"]),
             ("missing_day_count", int(float(r.get("missing_day_count") or 0)), stats["missing_day_count"]),
@@ -271,18 +243,14 @@ def main() -> int:  # noqa: C901
     # 4. thin-history routing matches thresholds
     bad_route = []
     for t, r in coverage.items():
-        stats = price_coverage_stats(t)
-        obs = int(stats["observation_count"])
-        gap = float(stats["missing_day_fraction"])
-        right_edge_missing = int(stats["right_edge_missing_day_count"])
-        if obs == 0 or obs < hard_floor:
-            expect = "excluded"
-        elif right_edge_missing > max_stale_days:
-            expect = "excluded"
-        elif obs < min_direct or gap > max_gap:
-            expect = "shrunk"
-        else:
-            expect = "direct"
+        stats = coverage_stats(prices, t, panel_end)
+        expect, _, _ = classify_coverage(
+            stats,
+            min_direct=min_direct,
+            hard_floor=hard_floor,
+            max_gap_frac=max_gap,
+            max_stale_days=max_stale_days,
+        )
         if r["risk_status"] != expect:
             bad_route.append(f"{t}:{r['risk_status']}!={expect}")
     rec("thin_history_routing", "PASS" if not bad_route else "FAIL",
@@ -296,7 +264,7 @@ def main() -> int:  # noqa: C901
         if not row:
             bad_market.append(f"{ticker}:missing")
             continue
-        stats = price_coverage_stats(ticker)
+        stats = coverage_stats(prices, ticker, panel_end)
         obs = int(stats["observation_count"])
         right_edge_missing = int(stats["right_edge_missing_day_count"])
         if row["risk_status"] != "direct" or obs < calendar_days or right_edge_missing:
@@ -311,11 +279,56 @@ def main() -> int:  # noqa: C901
     # 6. FX normalization (US universe / Yahoo USD) — informational
     rec("fx_usd", "PASS", "universe is US-listed USD via Yahoo adjusted close")
 
-    # 7. covariance PSD + condition number
-    rec("covariance_psd", "PASS" if float(meta.get("psd_min_eig", -1)) > 0 else "FAIL",
-        f"min_eig={meta.get('psd_min_eig')}")
-    rec("covariance_condition_number", "PASS" if meta.get("condition_ok") else "FAIL",
-        f"cond={round(float(meta.get('condition_number', 0)), 1)} max={meta.get('max_condition_number')}")
+    # 7. covariance PSD + condition number, recomputed from the artifact Stage 3 consumes.
+    cov_square = covariance.shape[0] == covariance.shape[1]
+    cov_labels_match = list(map(str, covariance.index)) == list(map(str, covariance.columns))
+    cov_numeric = covariance.apply(pd.to_numeric, errors="coerce")
+    cov_values = cov_numeric.to_numpy(dtype=float)
+    cov_finite = bool(np.isfinite(cov_values).all()) if cov_values.size else False
+    cov_symmetric = False
+    cov_min_eig: float | None = None
+    cov_condition: float | None = None
+    if cov_square and cov_finite:
+        cov_symmetric = bool(np.allclose(cov_values, cov_values.T, rtol=0.0, atol=1e-10))
+        try:
+            sym_cov = 0.5 * (cov_values + cov_values.T)
+            eigvals = np.linalg.eigvalsh(sym_cov)
+            cov_min_eig = float(eigvals.min())
+            cov_condition = float(np.linalg.cond(sym_cov))
+        except np.linalg.LinAlgError:
+            cov_min_eig = None
+            cov_condition = None
+
+    def _meta_float(key: str) -> float | None:
+        try:
+            value = float(meta.get(key))
+        except (TypeError, ValueError):
+            return None
+        return value if np.isfinite(value) else None
+
+    def _close(a: float | None, b: float | None, *, rel: float = 1e-6, abs_tol: float = 1e-10) -> bool:
+        if a is None or b is None:
+            return False
+        return abs(a - b) <= max(abs_tol, rel * max(abs(a), abs(b), 1.0))
+
+    meta_min_eig = _meta_float("psd_min_eig")
+    meta_condition = _meta_float("condition_number")
+    max_condition = _meta_float("max_condition_number") or float(rc.get("max_condition_number", 1e6))
+    matrix_psd = (
+        cov_square and cov_labels_match and cov_finite and cov_symmetric
+        and cov_min_eig is not None and cov_min_eig > 0
+    )
+    meta_psd_matches = _close(cov_min_eig, meta_min_eig)
+    matrix_condition_ok = cov_condition is not None and cov_condition <= max_condition
+    meta_condition_matches = _close(cov_condition, meta_condition, rel=1e-5, abs_tol=1e-6)
+    meta_condition_flag_matches = bool(meta.get("condition_ok")) == bool(matrix_condition_ok)
+    rec("covariance_psd", "PASS" if matrix_psd and meta_psd_matches else "FAIL",
+        f"matrix_min_eig={cov_min_eig} meta_min_eig={meta_min_eig} "
+        f"square={cov_square} labels_match={cov_labels_match} finite={cov_finite} symmetric={cov_symmetric}")
+    rec("covariance_condition_number",
+        "PASS" if matrix_condition_ok and meta_condition_matches and meta_condition_flag_matches else "FAIL",
+        f"matrix_cond={cov_condition} meta_cond={meta_condition} max={max_condition} "
+        f"meta_flag_matches={meta_condition_flag_matches}")
     rec("covariance_units_annualized", "PASS" if meta.get("covariance_units") == "annualized" else "FAIL",
         f"covariance_units={meta.get('covariance_units')}")
 
@@ -336,6 +349,104 @@ def main() -> int:  # noqa: C901
             bad_hash.append(fname)
     rec("price_snapshot_reproducible", "PASS" if not bad_hash else "FAIL",
         "snapshot hashes match panel files" if not bad_hash else f"mismatch: {bad_hash}")
+
+    bad_cov_hash = []
+    for fname, info in (meta.get("files") or {}).items():
+        fp = risk_dir / fname
+        if not fp.exists() or sha256_file(fp) != info.get("sha256"):
+            bad_cov_hash.append(fname)
+    rec("covariance_artifacts_reproducible", "PASS" if not bad_cov_hash else "FAIL",
+        "covariance meta hashes match matrix artifacts" if not bad_cov_hash else f"mismatch: {bad_cov_hash}")
+
+    # 10. Optional intraday liquidity panel. Disabled is the default and does not require IB artifacts.
+    try:
+        liquidity_enabled = liquidity_panel_active(config)
+        liquidity_mode_error = ""
+    except ValueError as exc:
+        liquidity_enabled = False
+        liquidity_mode_error = str(exc)
+    spread_samples_path = risk_dir / "ib_spread_samples.csv"
+    spread_snapshot_path = risk_dir / "spread_snapshot.csv"
+    spread_meta_path = risk_dir / "spread_snapshot_meta.json"
+    liquidity_audit_path = risk_dir / "liquidity_audit.csv"
+    liquidity_sector_path = risk_dir / "liquidity_audit_by_sector.csv"
+    liquidity_summary_path = risk_dir / "liquidity_audit_summary.json"
+    if liquidity_mode_error:
+        rec("liquidity_panel_mode", "FAIL", liquidity_mode_error)
+    elif not liquidity_enabled:
+        rec("liquidity_panel_mode", "PASS", "enhanced spread panel inactive; Stage 4 uses config/default spread")
+    else:
+        liquidity_bad = []
+        spread_rows = {}
+        spread_meta = {}
+        if not spread_samples_path.exists():
+            liquidity_bad.append("missing_ib_spread_samples.csv")
+        if not spread_snapshot_path.exists():
+            liquidity_bad.append("missing_spread_snapshot.csv")
+        else:
+            spread_rows = load_spread_snapshot(spread_snapshot_path)
+        if not spread_meta_path.exists():
+            liquidity_bad.append("missing_spread_snapshot_meta.json")
+        else:
+            spread_meta = json.loads(spread_meta_path.read_text(encoding="utf-8"))
+            for fname, info in (spread_meta.get("files") or {}).items():
+                fp = risk_dir / fname
+                if not fp.exists() or sha256_file(fp) != info.get("sha256"):
+                    liquidity_bad.append(f"hash_mismatch:{fname}")
+        fallback = sum(1 for row in spread_rows.values() if str(row.get("spread_status", "")) == "fallback")
+        failed = sum(1 for row in spread_rows.values() if str(row.get("spread_status", "")) == "failed")
+        max_fallback = finite_float(cfg_get(config, "liquidity_panel.max_universe_fallback_fraction", 0.10),
+                                    name="liquidity_panel.max_universe_fallback_fraction")
+        max_stale = int(finite_float(cfg_get(config, "liquidity_panel.max_stale_liquidity_days", 5),
+                                     name="liquidity_panel.max_stale_liquidity_days"))
+        fallback_fraction = fallback / len(spread_rows) if spread_rows else 0.0
+        if fallback_fraction > max_fallback + 1e-12:
+            liquidity_bad.append(f"fallback_fraction={fallback_fraction:.4f}>{max_fallback}")
+        if failed:
+            liquidity_bad.append(f"failed_spread_rows={failed}")
+        stale_bad = []
+        for ticker, row in spread_rows.items():
+            status = str(row.get("spread_status", "")).strip()
+            if status not in {"ok", "ok_latest_available"}:
+                continue
+            try:
+                age = int(finite_float(row.get("latest_sample_age_days", 0),
+                                       name=f"spread_snapshot:{ticker}.latest_sample_age_days"))
+            except ValueError:
+                stale_bad.append(f"{ticker}:missing_age")
+                continue
+            if age < 0 or age > max_stale:
+                stale_bad.append(f"{ticker}:age={age}>{max_stale}")
+        if stale_bad:
+            liquidity_bad.append(f"stale_liquidity_rows={stale_bad[:10]}")
+        rec("liquidity_panel_mode", "PASS" if not liquidity_bad else "FAIL",
+            f"enabled snapshot_rows={len(spread_rows)} fallback={fallback} failed={failed}"
+            if not liquidity_bad else f"{liquidity_bad[:10]}")
+
+        audit_bad = []
+        audit_summary = {}
+        if not liquidity_audit_path.exists():
+            audit_bad.append("missing_liquidity_audit.csv")
+        if not liquidity_sector_path.exists():
+            audit_bad.append("missing_liquidity_audit_by_sector.csv")
+        if not liquidity_summary_path.exists():
+            audit_bad.append("missing_liquidity_audit_summary.json")
+        else:
+            audit_summary = json.loads(liquidity_summary_path.read_text(encoding="utf-8"))
+            for fname, info in (audit_summary.get("files") or {}).items():
+                fp = risk_dir / fname
+                if not fp.exists() or sha256_file(fp) != info.get("sha256"):
+                    audit_bad.append(f"hash_mismatch:{fname}")
+            if audit_summary.get("acceptance") != "PASS":
+                audit_bad.append(f"audit_acceptance={audit_summary.get('acceptance')}")
+        rec("liquidity_audit_reproducible", "PASS" if not audit_bad else "FAIL",
+            "audit artifacts present and hashes match" if not audit_bad else f"{audit_bad[:10]}")
+        for check in audit_summary.get("checks", []) if isinstance(audit_summary.get("checks"), list) else []:
+            rec(
+                f"liquidity_audit_{check.get('check')}",
+                str(check.get("status", "FAIL")),
+                str(check.get("detail", "")),
+            )
 
     validation_path.parent.mkdir(parents=True, exist_ok=True)
     write_csv(validation_path, ["check", "status", "detail"], checks)
@@ -360,10 +471,32 @@ def main() -> int:  # noqa: C901
             for name in (
                 "prices_adjclose.csv", "returns_panel.csv", "fetch_results.csv", "price_snapshot.json",
                 "split_events.csv", "data_quality_review.csv",
+                "ib_spread_samples.csv", "spread_snapshot.csv", "spread_snapshot_meta.json",
+                "liquidity_audit.csv", "liquidity_audit_by_sector.csv", "liquidity_audit_summary.json",
                 "risk_coverage.csv", "covariance.csv", "covariance_period.csv", "covariance_meta.json",
                 "return_outliers.csv", "correlation_clusters.csv", "validation/risk_panel_validation.csv",
             )
             if (risk_dir / name).exists()
+            and (
+                liquidity_enabled
+                or name not in {
+                    "ib_spread_samples.csv",
+                    "spread_snapshot.csv",
+                    "spread_snapshot_meta.json",
+                    "liquidity_audit.csv",
+                    "liquidity_audit_by_sector.csv",
+                    "liquidity_audit_summary.json",
+                }
+            )
+        },
+        "liquidity_panel": {
+            "panel_active": liquidity_enabled,
+            "enhanced_intraday_enabled": cfg_get(config, "liquidity_panel.enhanced_intraday_enabled", False),
+            "spread_source": cfg_get(config, "transaction_costs.spread_source", "auto"),
+            "provider": cfg_get(config, "liquidity_panel.provider", "ibkr_historical_bid_ask"),
+            "max_universe_fallback_fraction": cfg_get(config, "liquidity_panel.max_universe_fallback_fraction", 0.10),
+            "max_fallback_fraction": cfg_get(config, "liquidity_panel.max_fallback_fraction", 0.10),
+            "max_stale_liquidity_days": cfg_get(config, "liquidity_panel.max_stale_liquidity_days", 5),
         },
         "checks": checks,
     }

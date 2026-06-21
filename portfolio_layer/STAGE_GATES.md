@@ -36,7 +36,7 @@ Staging_Scalper_System/portfolio_layer/
   core/        contracts.py, paths.py, logging_utils.py
   scores/      01_collect, 02_calibrate, 03_validate
   risk/        04_return_panel, 05_covariance, 06_validate
-  costs/       07_cost_turnover_model
+  costs/       12_build_trade_list, 13_build_cost_model, 14_apply_no_trade_bands, 15_validate_cost_model
   optimizer/   tier1_portfolio_optimizer.py, tier1_common.py, 08_run_optimizer   (vendored)
   rotation/    sector_rotation_selector.py, foreign_market_evaluator.py,
                rotation_timeseries.py, 09_build_rotation_signals             (vendored)
@@ -225,30 +225,130 @@ own refresh scripts, but it lives **outside** the core portfolio layer.
 
 **Goal:** a working, risk-aware portfolio from AQR scores alone — the baseline and first shippable value.
 
-**Build:** copy `tier1_portfolio_optimizer.py` + `tier1_common.py` into `optimizer/`, re-root all paths;
-`optimizer/08_run_portfolio_optimizer.py` wrapper feeding `stocks_scores` (calibrated `final_score` → BL
-view) + Stage-2 covariance; minimal `backtest/15_run_portfolio_backtest.py`.
+**Optimizer universe policy (LOCKED):** the optimizer sizes only names with **`investable_eligible=1`
+AND `risk_eligible=1`** (Stage 1 selection gate ∩ Stage 2 risk-data gate). Any name with
+`risk_eligible=0` is **excluded from sizing** and surfaced in a `risk_excluded_candidates.csv`
+(a.k.a. `held_no_risk_data`) report — selectable by score, but not sized until it has risk history.
+**Do NOT** zero-weight risk-ineligible names inside the optimizer, and **do NOT** invent prior-hold
+behavior — that waits for the holdings ledger (Stage 8+). This is the correct default pre-ledger.
+
+**Universe (refined):** sized names are `investable_eligible=1 AND risk_eligible=1 AND role=scored AND
+ticker ∈ covariance.csv`. Benchmarks/ETFs are diagnostics/replay context only, never optimization
+candidates. `risk_eligible=0` eligible names → `risk_excluded_candidates.csv` (may be empty).
+
+**Covariance (unambiguous):** Stage 3 **injects the Stage 2 annualized `risk/covariance.csv` directly**;
+it does NOT let vendored tier1 rebuild covariance from prices. `prices_adjclose.csv`/`returns_panel.csv`
+are used only for the report-only replay.
+
+**Expected returns:** `mu_used = final_score * score_confidence` (both annualized; configurable).
+
+**Build (implemented):** `tier1_portfolio_optimizer.py` + `tier1_common.py` vendored into `optimizer/`
+(re-rooted, independence-gated) for later BL use; the Stage 3 baseline uses a thin long-only
+mean-variance solver `optimizer/optimizer_core.py` (cvxpy, injected Σ). Scripts:
+`optimizer/09_run_portfolio_optimizer.py` (book + `risk_excluded_candidates.csv` + `optimizer_meta.json`),
+`optimizer/10_validate_optimizer_outputs.py` (gates + provenance-sealed `optimizer_manifest.json`),
+`backtest/11_run_static_baseline_replay.py` (**static trailing replay diagnostic — NOT an OOS backtest**;
+true walk-forward baseline is Stage 11).
 
 **Acceptance tests:**
-- Optimizer runs end-to-end on real `stocks_scores` + covariance; weights sum to target gross/net with
-  all constraints satisfied (position caps, long/short policy).
-- Weights are monotonic-ish in `final_score` within a sector (higher alpha → higher weight, risk-adjusted).
-- Backtest of the AQR-only book produces a sensible equity curve over the holdout; Sharpe/Calmar/turnover
-  recorded as the **baseline** all later stages must beat.
-- Output schema is stable and versioned (weights + low/high bands per name).
+- Optimizer universe == `{investable_eligible=1} ∩ {risk_eligible=1} ∩ {role=scored} ∩ {in covariance}`;
+  every excluded eligible name in `risk_excluded_candidates.csv` and **nowhere** in the weight vector.
+- Weights valid: long-only, `≤ max_weight_per_name`, sum to `gross_exposure` (within tolerance).
+- **Positive `mu_used`↔active-weight relationship** (Spearman > 0); negative-α holdings allowed as
+  diversifiers but reported (NOT a monotonic-weight gate — covariance/caps break monotonicity).
+- Covariance injected from Stage 2 (meta `covariance_sha256` matches the Stage 2 artifact; never rebuilt).
+- Solver returns optimal; solver name/status/objective/attempts recorded.
+- Manifest hashes scores, coverage, covariance, Stage 1 & Stage 2 manifests, optimizer config, and the
+  vendored optimizer source — fully reproducible.
+- Static replay is labeled lookahead/diagnostic; metrics are context, **not** a promotion baseline.
 
-## Stage 4 — Transaction-cost & turnover model
+## Stage 4 — Transaction-cost & turnover overlay (flat commission, AUM-aware)
 
-**Goal:** make cost a first-class input before adding any faster signal.
+**Goal:** a trade-list + cost + cash-residual overlay over the Stage 3 book, so the baseline is reported
+**net of realistic cost**. **Stage 3 is unchanged** — Stage 4 is an execution/cost layer on top.
 
-**Build:** `costs/07_build_cost_turnover_model.py` (per-name cost from spread/ADV/vol + market-impact
-term); **no-trade bands** integrated into the optimizer wrapper.
+**Decisive fact — flat per-order commission ⇒ cost is dollar-denominated and AUM-dependent.** Commission
+is **$1.00–$1.25 per order**, where **one name · one side = one order** (buy GMED = 1, sell GMED = 1,
+round-trip = 2). At a given AUM the commission as a fraction of a trade depends on the trade's dollar
+size, so AUM is a **required** input.
+
+**Required inputs (no silent defaults):** `--aum` / config `transaction_costs.aum_usd` (= 300,000);
+commission `{low 1.00, base 1.125, worst_case 1.25}` (base for the reported/sealed number, **worst_case
+for conservative trade/no-trade decisions**); `rebalance_horizon_days` (default 21; sensitivity at 10/63);
+optional `--prior-weights` (default = **cash**, so a first build is one-way buys only).
+
+**Cost model (per traded name, per side):**
+```
+trade_cost_$ = commission_per_order                          # flat, exact
+             + half_spread_bps × |trade_notional|             # provisional config default until bid/ask exists
+             + impact_bps(|trade_notional|, ADV) × |trade_notional|   # "none" until volume is fetched (deferred)
+cost_weight_drag = Σ trade_cost_$ / AUM
+```
+Commission = **exact**. Spread has two modes:
+- Default: `transaction_costs.half_spread_bps_default` (currently 5 bps), no broker dependency.
+- Enhanced: `liquidity_panel.enhanced_intraday_enabled=true` collects IBKR historical BID_ASK 5-minute
+  bars in the overnight run, samples configured intraday times, writes `risk/ib_spread_samples.csv`,
+  `risk/spread_snapshot.csv`, and `risk/spread_snapshot_meta.json`, and upserts them into the
+  portfolio-owned SQLite DB. Stage 4 then consumes the sealed per-ticker half-spread snapshot. If the
+  exact as-of day is missing, the panel uses the latest available sample within
+  `max_stale_liquidity_days`; only tickers with no valid recent sample fall back to the configured 5 bps.
+
+ADV/impact remains a deferred refinement (`impact_model: none` until volume/impact data exists).
+
+**One-way vs round-trip (explicit):** first build from cash → **one-way buy cost only**; rebalance →
+one-way cost of each executed buy/sell delta; **round-trip cost is a diagnostic, never the default deducted
+from the current run.**
+
+**Refinement A — utility-aware (covariance-aware) no-trade bands (rebalance only, deferred by default).**
+Because Stage 1 score-to-alpha magnitudes are provisional, Stage 4 must **not** suppress trades using
+`mu_used` unless `transaction_costs.enable_provisional_mu_no_trade=true` is explicitly set for research.
+The production default is cost-only execution/review until Stage 11 calibrates score snapshots to realized
+forward returns. Once calibrated, compare the **period** utility gain to the one-time cost with
+`k = rebalance_horizon_days / 252`:
+```
+utility_period(w) = k · [ mu'w − 0.5·gamma·w'Σw ]
+execute a rebalance trade only if  utility_period(after) − utility_period(before) > cost_weight_drag + buffer
+```
+The calibrated no-trade band therefore consumes `target_weights.csv`, prior/current weights,
+realized-return-calibrated expected returns, Stage 2/11 covariance, and the AUM/cost config — **not alpha alone**.
+
+**Refinement B — AUM-aware minimum economic position filter (applies even on the first build).** Stage 3's
+`min_weight_to_hold` (5 bps) is deliberately AUM-blind; Stage 4 asks "is the position big enough to justify
+a flat order fee?" `position_notional = target_weight × AUM`; drop a position to **CASH** when the
+commission is too large a fraction of it. Distinct from rebalance no-trade bands; both route residual to CASH.
+
+**CASH handling (required):** suppressed/dropped weight goes to an explicit **CASH** line in
+`cost_adjusted_target_weights.csv`. Gate: `sum(asset_weights) + cash_weight == gross_exposure`.
+
+**Build (renumbered after Stage 3's 09/10/11):**
+- `costs/12_build_trade_list.py` — prior (cash default) vs target → trades (ticker, prior_w, target_w,
+  delta_w, trade_notional, side, n_orders).
+- Optional when enhanced spread is enabled: `risk/05c_collect_ib_historical_spread_samples.py` after
+  the risk panel is built. Its universe is explicit via `liquidity_panel.universe_source`; the project
+  default is `risk_eligible_scores`, so it samples the full scored/risk-eligible portfolio universe.
+- `risk/05d_audit_liquidity_panel.py` enriches the spread snapshot with score/risk/optimizer/trade context
+  and writes `liquidity_audit.csv`, `liquidity_audit_by_sector.csv`, and `liquidity_audit_summary.json`.
+  Extreme spreads are surfaced as WARN/review items unless they exceed the hard data-quality fail threshold.
+  Do **not** compare spreads to `final_score`/`mu_used` here; score-to-alpha magnitudes are provisional
+  until Stage 11 maps score snapshots to realized forward returns.
+- `costs/13_build_cost_model.py` — trades + AUM + commission/spread/impact → `cost_report.csv` (per-name
+  commission/spread/impact/total_$ + cost_bps) + totals.
+- `costs/14_apply_no_trade_bands.py` — min-economic-position filter (first build) + utility-aware no-trade
+  suppression (rebalance) + CASH residual → `cost_adjusted_target_weights.csv`.
+- `costs/15_validate_cost_model.py` — gates + provenance-sealed `cost_manifest.json`.
+- `backtest/16_run_net_static_replay.py` — net-of-(one-way)-cost replay; **still diagnostic/in-sample**.
 
 **Acceptance tests:**
-- Backtests report **gross and net-of-cost** returns; the gap is non-trivial and scales with turnover.
-- No-trade bands measurably cut turnover vs Stage 3 with small net-return loss (band sensitivity curve produced).
-- Cost estimates are sane against a manual benchmark on liquid vs illiquid names.
-- Net-of-cost AQR-only baseline is locked as the official benchmark for all subsequent ablations.
+- AUM is required (run fails without `--aum`/config); commission applied as **flat $/order**, not bps.
+- `sum(asset_weights) + cash_weight == gross_exposure`.
+- **Both gross and net reported**, and **commission-in-bps scales inversely with AUM** (the flat-fee
+  signature) — NOT "the gap is non-trivial" (at high AUM the gap is correctly trivial).
+- One-way cost used for current execution; round-trip reported only as a diagnostic.
+- No-trade bands (rebalance) measurably cut turnover with the utility>cost rule; sensitivity at 10/21/63 days.
+- Cost matches a hand-calc on a sample (e.g., 34 buys × $1.125 = $38.25).
+- `cost_manifest.json` hashes AUM, commission/horizon assumptions, `target_weights.csv`, `covariance.csv`,
+  `stocks_scores.csv`, and the Stage 3 `optimizer_manifest.json` (which must be acceptance=PASS, hash-matched).
+- Net replay labeled lookahead/diagnostic — the official OOS net baseline is **Stage 11**.
 
 ## Stage 5 — Tactical rotation sleeve
 
@@ -425,6 +525,9 @@ tickers + benchmarks against the sectors' own series.
   survivorship gap); the live Stage 2 panel is explicitly *not* used for historical backtests.
 - Walk-forward runs `stocks-only / +rotation / +macro / +forecast/hedge / +sleeves+exits` end-to-end with
   no look-ahead (PIT enforced at every stage).
+- Score snapshots are mapped to realized forward returns before any alpha-vs-cost metric is used:
+  implement a real spread/commission-vs-realized-forward-alpha diagnostic here, replacing the intentionally
+  deferred Stage 2.5 `final_score`/`mu_used` comparison.
 - **Full stack beats net-of-cost AQR-only baseline on out-of-sample information ratio** (Calmar and max
   drawdown also reported). If it does not, the simpler configuration is promoted instead.
 - Lockbox ledger is sealed and append-only; a tamper/look-ahead probe fails the build if violated.

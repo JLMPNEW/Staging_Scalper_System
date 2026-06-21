@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import tempfile
@@ -164,6 +165,9 @@ def expected_alpha(native_score: float, *, neutral: float, scale: float, expecte
     +expected_alpha_at_full. Provisional magnitudes per sector; empirical IC re-calibration against the
     Stage 2 return panel refines the slopes later. The transform preserves each sector's own rank-IC sign.
     """
+    values = (native_score, neutral, scale, expected_alpha_at_full)
+    if not all(math.isfinite(v) for v in values):
+        raise ValueError(f"expected_alpha inputs must be finite: {values}")
     if scale == 0:
         return 0.0
     return expected_alpha_at_full * (native_score - neutral) / scale
@@ -171,7 +175,8 @@ def expected_alpha(native_score: float, *, neutral: float, scale: float, expecte
 
 def rating_for_percentile(pct: float, bands: dict[str, float]) -> str:
     for label in ("strong_buy", "buy", "hold", "reduce", "avoid"):
-        if label in bands and pct >= float(bands[label]):
+        threshold = _f(bands[label]) if label in bands else None
+        if threshold is not None and pct >= threshold:
             return label
     return "avoid"
 
@@ -280,7 +285,10 @@ def upsert_stocks_scores(conn: sqlite3.Connection, run_as_of: str, rows: Sequenc
 
 def _f(value: Any) -> float | None:
     try:
-        return None if value is None or value == "" else float(value)
+        if value is None or str(value).strip() == "":
+            return None
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
 

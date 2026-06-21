@@ -9,6 +9,7 @@ Adapters read files only. They never import a sector package or open a sector DB
 """
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Any, Callable
@@ -19,7 +20,10 @@ from portfolio_layer.core.contracts import read_csv
 
 def _f(value: Any) -> float | None:
     try:
-        return None if value is None or str(value).strip() == "" else float(value)
+        if value is None or str(value).strip() == "":
+            return None
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
 

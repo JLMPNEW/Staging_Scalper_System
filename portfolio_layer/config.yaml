@@ -100,14 +100,18 @@ risk_panel:
   ticker_aliases:                                   # contract ticker -> active market-data symbol
     PSTG:
       active_ticker: P
+      predecessor_ticker: PSTG
       effective_date: "2026-04-17"
+      price_history_csv: "data/price_lineage_p.csv"
       issuer_id: "CIK0001474432"
-      reason: "Pure Storage/Everpure ticker migration; keep Stage 1 contract ticker stable"
+      reason: "Pure Storage/Everpure same-issuer ticker migration; stitch PSTG history into active P"
     P:
       active_ticker: P
+      predecessor_ticker: PSTG
       effective_date: "2026-04-17"
+      price_history_csv: "data/price_lineage_p.csv"
       issuer_id: "CIK0001474432"
-      reason: "Pure Storage/Everpure active ticker; floor reused single-letter history"
+      reason: "Pure Storage/Everpure active ticker; stitch PSTG history before P effective date"
   benchmark_tickers: [SPY, QQQ, SMH, SOXX, XBI, XLK, XLV, XLF, XLE, XLI, XLP, XLY, XLU, XLB, XLRE, XLC]
   hedge_rotation_etfs: [IGV, IHI, MCHI, FXI, INDA, EWZ, EWG, EWY, EWT, IEMG]
   sector_etf_map:                                  # source_pipeline -> shrinkage-target ETF
@@ -125,3 +129,64 @@ risk_panel:
     request_timeout_sec: 20
     max_retries: 3
     user_agent: "portfolio_layer/0.1 (+research)"
+
+# Optional Stage 2.5 - intraday liquidity panel.
+# When the enhanced panel is inactive, Stage 4 uses transaction_costs.half_spread_bps_default.
+# When enabled, the overnight process connects to IB/TWS or IB Gateway and requests historical BID_ASK
+# 5-minute bars, then stores sampled half-spreads as CSV artifacts and in the portfolio-owned SQLite DB.
+liquidity_panel:
+  enhanced_intraday_enabled: true
+  provider: "ibkr_historical_bid_ask"
+  universe_source: "risk_eligible_scores"   # risk_eligible_scores | investable_scores | target_weights | trade_list | auto
+  bar_size: "5 mins"
+  duration_days: 5                         # permits backfill if one overnight run is missed
+  use_rth: true
+  sample_times_et: ["11:00", "13:30", "15:30"]
+  max_sample_lag_minutes: 12
+  max_stale_liquidity_days: 5              # use latest available sample within this window before falling back
+  min_valid_samples: 2
+  fallback_half_spread_bps: 5.0             # used only when fallback is explicitly allowed
+  allow_fallback_to_default: true
+  max_universe_fallback_fraction: 0.10      # max share of full liquidity universe allowed to use fallback
+  max_fallback_fraction: 0.10               # max share of traded names allowed to use fallback in Stage 4
+  request_pause_sec: 2.0
+  max_retries: 3
+  ib:
+    host: "127.0.0.1"
+    port: 7497                              # TWS paper default; use 7496 for live TWS if appropriate
+    client_id: 41
+  audit:
+    half_spread_warn_bps: 50.0              # surfaced for review; not an optimizer exclusion
+    half_spread_fail_bps: 1000.0            # hard data-quality failure
+    trade_weighted_half_spread_warn_bps: 20.0
+    trade_weighted_half_spread_fail_bps: 100.0
+
+# Stage 3 - AQR-only baseline book (long-only mean-variance on the INJECTED Stage 2 covariance).
+optimizer:
+  objective: "mean_variance"
+  long_only: true
+  covariance_source: "stage2"            # inject Stage 2 risk/covariance.csv; never rebuild from prices
+  use_confidence_adjusted_mu: true        # mu_used = final_score * score_confidence (both annualized)
+  risk_aversion: 5.0                       # gamma in maximize mu'w - 0.5*gamma*w'Sigma*w
+  gross_exposure: 1.0                      # fully invested, long-only
+  max_weight_per_name: 0.05               # per-name cap
+  min_weight_to_hold: 0.0005              # drop dust weights below this then renormalize
+  solver: "ECOS"                           # fallback order: ECOS -> OSQP -> SCS
+  sensitivity_band_gammas: [2.5, 5.0, 10.0]  # per-name weight band = min/max across these risk-aversions
+
+# Stage 4 - transaction-cost & turnover overlay (flat per-order commission, AUM-aware). Stage 3 unchanged.
+transaction_costs:
+  aum_usd: 300000                          # REQUIRED (CLI --aum overrides); flat commission is AUM-dependent
+  commission_per_order:                    # one name . one side = one order (buy=1, sell=1)
+    low: 1.00
+    base: 1.125                            # reported/sealed assumption
+    worst_case: 1.25                       # used for conservative trade/no-trade decisions
+  rebalance_horizon_days: 21               # default; sensitivity reported at 10 / 21 / 63
+  horizon_sensitivity_days: [10, 21, 63]
+  no_trade_buffer_drag: 0.0                # extra buffer added to cost in the utility>cost test (weight units)
+  enable_provisional_mu_no_trade: false    # Stage 11 turns on realized-alpha-calibrated utility gating
+  half_spread_bps_default: 5.0             # provisional (config) until bid/ask data exists
+  spread_source: "auto"                    # auto | config_default | liquidity_panel
+  impact_model: "none"                     # none | sqrt_adv (deferred; needs volume)
+  min_position_commission_fraction: 0.005  # drop position to CASH if commission > this fraction of its notional
+  decision_commission: "worst_case"        # which commission drives trade/no-trade economics

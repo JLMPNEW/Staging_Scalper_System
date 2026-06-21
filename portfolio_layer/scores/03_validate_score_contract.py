@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sys
 from datetime import date, timezone, datetime
 from pathlib import Path
@@ -19,7 +20,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
+from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
     CONTRACT_FIELDS, DEFAULT_RATING_BANDS, contract_version, fail_if_exists, percentiles_within,
     rating_for_percentile, read_csv, sha256_file, write_csv, write_manifest,
@@ -62,7 +63,8 @@ def parse_float(value: object) -> float | None:
     try:
         if value is None or str(value).strip() == "":
             return None
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
 
@@ -190,10 +192,11 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         for r in srows:
             native = parse_float(r.get("native_score"))
             if native is None:
+                bad_pct_rating.append(f"{r.get('ticker', '<missing>')}:{pipe}:native_score_unparseable")
                 continue
             native_values.append(native)
             valid_rows.append(r)
-        if len(valid_rows) != len(srows):
+        if not valid_rows:
             continue
         for r, pct in zip(valid_rows, percentiles_within(native_values)):
             expected_pct = round(pct, 4)
@@ -270,10 +273,10 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
     duplicate_rows = read_csv(duplicate_path) if duplicate_path.exists() else []
     per_sector = {}
     for pipe, srows in sorted(by_pipe_rows.items()):
-        finals = [float(r["final_score"]) for r in srows]
+        finals = [v for v in (parse_float(r.get("final_score")) for r in srows) if v is not None]
         per_sector[pipe] = {
             "rows": len(srows),
-            "eligible": sum(int(r["investable_eligible"]) for r in srows),
+            "eligible": sum(1 for r in srows if str(r.get("investable_eligible", "")).strip() == "1"),
             "source_asof": next((r["source_asof_date"] for r in srows), ""),
             "final_score_min": round(min(finals), 6) if finals else None,
             "final_score_max": round(max(finals), 6) if finals else None,
@@ -293,6 +296,19 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
             "sha256": sha256_file(duplicate_path),
             "rows": len(duplicate_rows),
         }
+    provenance = {
+        "config_yaml": {"path": str(config_path), "sha256": sha256_file(config_path)},
+    }
+    ov_rel = cfg_get(config, "score_contract.canonical_pipeline_overrides_csv", None)
+    if ov_rel is None:
+        ov_rel = cfg_get(config, "score_contract.canonical_sector_overrides_csv", None)
+    if ov_rel:
+        ov_path = resolve_path(ov_rel, base_dir=config_path.parent)
+        provenance["canonical_overrides_csv"] = {
+            "path": str(ov_path),
+            "exists": ov_path.exists(),
+            "sha256": sha256_file(ov_path) if ov_path.exists() else "",
+        }
     manifest = {
         "run_as_of": run_as_of,
         "contract_version": score_version,
@@ -302,6 +318,7 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         "hard_gate_acceptance": "PASS" if passed else "FAIL",
         "deferred_checks": [c["check"] for c in checks if c["status"] == "DEFERRED"],
         "files": files,
+        "provenance": provenance,
         "duplicate_resolution": {
             "duplicate_rows": len(duplicate_rows),
             "cross_sector_duplicate_rows": sum(

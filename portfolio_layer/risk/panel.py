@@ -47,6 +47,69 @@ def assemble_prices(series_by_ticker: dict[str, dict[str, float]], calendar: lis
     return frame
 
 
+def coverage_stats(prices: pd.DataFrame, ticker: str, panel_end: str | None = None) -> dict[str, str | int | float]:
+    """Coverage stats from the aligned price panel, measured through the panel right edge."""
+    panel_end = panel_end or (str(prices.index[-1]) if not prices.empty else "")
+    if ticker not in prices.columns:
+        return {
+            "observation_count": 0,
+            "missing_day_count": prices.shape[0],
+            "right_edge_missing_day_count": prices.shape[0],
+            "missing_day_fraction": 1.0,
+            "start_date": "",
+            "end_date": "",
+        }
+    col = prices[ticker]
+    obs = int(col.notna().sum())
+    if obs == 0:
+        return {
+            "observation_count": 0,
+            "missing_day_count": prices.shape[0],
+            "right_edge_missing_day_count": prices.shape[0],
+            "missing_day_fraction": 1.0,
+            "start_date": "",
+            "end_date": "",
+        }
+    present = col.dropna()
+    first, last = str(present.index[0]), str(present.index[-1])
+    span = prices.loc[first:panel_end].shape[0] if panel_end else prices.loc[first:].shape[0]
+    missing = max(0, span - obs)
+    right_edge_missing = max(0, prices.loc[last:panel_end].shape[0] - 1) if panel_end else 0
+    return {
+        "observation_count": obs,
+        "missing_day_count": missing,
+        "right_edge_missing_day_count": right_edge_missing,
+        "missing_day_fraction": round(missing / span, 4) if span else 0.0,
+        "start_date": first,
+        "end_date": last,
+    }
+
+
+def classify_coverage(
+    stats: dict[str, str | int | float],
+    *,
+    min_direct: int,
+    hard_floor: int,
+    max_gap_frac: float,
+    max_stale_days: int,
+    fetch_status: str = "missing",
+) -> tuple[str, int, str]:
+    """Return (risk_status, risk_eligible, risk_reason) for one ticker."""
+    obs = int(stats["observation_count"])
+    gap = float(stats["missing_day_fraction"])
+    right_edge_missing = int(stats["right_edge_missing_day_count"])
+    last = str(stats["end_date"])
+    if obs == 0:
+        return "excluded", 0, f"no_price_data:{fetch_status or 'missing'}"
+    if right_edge_missing > max_stale_days:
+        return "excluded", 0, f"stale_right_edge:{last}"
+    if obs < hard_floor:
+        return "excluded", 0, "below_hard_floor"
+    if obs < min_direct or gap > max_gap_frac:
+        return "shrunk", 1, "partial_history" if obs < min_direct else "high_internal_gaps"
+    return "direct", 1, "direct"
+
+
 def to_returns(prices: pd.DataFrame, frequency: str) -> pd.DataFrame:
     """Simple returns on the aligned panel. Missing bars stay NaN — never fabricated as zero."""
     px = prices
