@@ -46,6 +46,7 @@ med_devices/secrets*.local.yaml
 tmpomvpuh6h/
 *.xlsx
 *.json
+!pyrightconfig.json
 !pyrightconfig.biotech.json
 
 # --- CSVs: ignore all by default ---

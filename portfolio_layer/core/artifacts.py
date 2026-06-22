@@ -40,3 +40,21 @@ def invalidate_cost_outputs_after_spread_change(run_dir: Path) -> None:
         costs_dir / "net_static_replay_metrics.json",
     ])
     clear_dir_files(costs_dir / "validation")
+
+
+def invalidate_rotation_outputs_after_signal_change(rotation_dir: Path) -> None:
+    """Clear Stage 5 validation/diagnostic artifacts that depend on rotation signals."""
+    unlink_if_exists([
+        rotation_dir / "rotation_manifest.json",
+        rotation_dir / "rotation_ablation_metrics.json",
+        rotation_dir / "rotation_ablation_weights.csv",
+    ])
+    clear_dir_files(rotation_dir / "validation")
+
+
+def invalidate_rotation_outputs_after_validation(rotation_dir: Path) -> None:
+    """Clear Stage 5 diagnostics that depend on the sealed rotation manifest."""
+    unlink_if_exists([
+        rotation_dir / "rotation_ablation_metrics.json",
+        rotation_dir / "rotation_ablation_weights.csv",
+    ])

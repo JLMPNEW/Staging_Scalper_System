@@ -8,6 +8,7 @@ import logging
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import cast
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +52,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--as-of", type=iso_date_arg, default=None)
     p.add_argument("--force", action="store_true")
     return p.parse_args()
+
+
+def _series_col(df: pd.DataFrame, col: str) -> pd.Series:
+    values = df[col]
+    if isinstance(values, pd.DataFrame):
+        values = values.iloc[:, 0]
+    return cast(pd.Series, pd.to_numeric(values, errors="coerce"))
 
 
 def main() -> int:  # noqa: C901
@@ -124,15 +132,17 @@ def main() -> int:  # noqa: C901
     fabricated = []
     mismatch = []
     for ticker in returns.columns:
-        actual = returns[ticker]
-        expected = expected_returns[ticker]
+        ticker_name = str(ticker)
+        actual = _series_col(returns, ticker_name)
+        expected = _series_col(expected_returns, ticker_name)
         bad_fill = actual.notna() & expected.isna()
         if bad_fill.any():
-            fabricated.append(f"{ticker}:{list(actual.index[bad_fill])[:3]}")
+            bad_dates = [str(idx) for idx, is_bad in bad_fill.items() if bool(is_bad)]
+            fabricated.append(f"{ticker_name}:{bad_dates[:3]}")
         both = actual.notna() & expected.notna()
-        diff = (actual[both] - expected[both]).abs()
+        diff = cast(pd.Series, actual.loc[both] - expected.loc[both]).abs()
         if (diff > 1e-12).any():
-            mismatch.append(f"{ticker}:max_diff={float(diff.max())}")
+            mismatch.append(f"{ticker_name}:max_diff={float(diff.max())}")
     rec("returns_match_no_fill_prices", "PASS" if not fabricated and not mismatch else "FAIL",
         "returns recompute from prices with fill_method=None" if not fabricated and not mismatch else (
             f"fabricated={fabricated[:5]} mismatch={mismatch[:5]}"

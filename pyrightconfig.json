@@ -1,0 +1,6 @@
+{
+  "include": ["portfolio_layer"],
+  "ignore": ["portfolio_layer/optimizer/tier1_portfolio_optimizer.py"],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic"
+}

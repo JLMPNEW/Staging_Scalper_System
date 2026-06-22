@@ -9,6 +9,7 @@ import sys
 from collections import Counter
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -235,7 +236,7 @@ def main() -> int:  # noqa: C901
     valid_pairs = [(mu, wt, ticker) for mu, wt, ticker in held_pairs if mu is not None and wt is not None]
     mu = np.array([p[0] for p in valid_pairs], dtype=float)
     wh = np.array([p[1] for p in valid_pairs], dtype=float)
-    rho = float(spearmanr(mu, wh).correlation) if len(valid_pairs) > 2 else float("nan")
+    rho = float(cast(Any, spearmanr(mu, wh)).correlation) if len(valid_pairs) > 2 else float("nan")
     neg_mu_held = [ticker for mu_val, _, ticker in valid_pairs if float(mu_val) < 0]
     ok_rel = (np.isnan(rho) or rho > 0)
     rec(

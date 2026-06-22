@@ -8,7 +8,6 @@ weights, and trade notionals so Stage 4 cost changes are explainable.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import math
 import statistics
@@ -16,7 +15,7 @@ import sys
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]

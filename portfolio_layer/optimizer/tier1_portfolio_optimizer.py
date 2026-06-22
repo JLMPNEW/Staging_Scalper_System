@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 
 import numpy as np
 import pandas as pd
-from portfolio_layer.optimizer.tier1_common import _as_bool, _get_tier1_cfg
+from portfolio_layer.optimizer.tier1_common import _get_tier1_cfg
 
 # Risk / clustering
 from scipy.cluster.hierarchy import linkage, fcluster
@@ -3138,7 +3138,6 @@ def compute_weight_bands(
 
     # Temporarily force single-mode to isolate scenario effect
     cfg_single = copy.deepcopy(cfg)
-    rcfg = _require_cfg_section(cfg, "risk")
     cfg_single["risk"]["robust_mode"] = "single"
 
     w_solutions = []

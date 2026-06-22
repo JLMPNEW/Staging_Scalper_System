@@ -63,7 +63,7 @@ def parse_float(value: object) -> float | None:
     try:
         if value is None or str(value).strip() == "":
             return None
-        parsed = float(value)
+        parsed = float(str(value).strip())
         return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
@@ -296,7 +296,7 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
             "sha256": sha256_file(duplicate_path),
             "rows": len(duplicate_rows),
         }
-    provenance = {
+    provenance: dict[str, dict[str, object]] = {
         "config_yaml": {"path": str(config_path), "sha256": sha256_file(config_path)},
     }
     ov_rel = cfg_get(config, "score_contract.canonical_pipeline_overrides_csv", None)

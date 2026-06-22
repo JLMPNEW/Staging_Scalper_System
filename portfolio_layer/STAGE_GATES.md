@@ -38,8 +38,8 @@ Staging_Scalper_System/portfolio_layer/
   risk/        04_return_panel, 05_covariance, 06_validate
   costs/       12_build_trade_list, 13_build_cost_model, 14_apply_no_trade_bands, 15_validate_cost_model
   optimizer/   tier1_portfolio_optimizer.py, tier1_common.py, 08_run_optimizer   (vendored)
-  rotation/    sector_rotation_selector.py, foreign_market_evaluator.py,
-               rotation_timeseries.py, 09_build_rotation_signals             (vendored)
+  rotation/    rotation_timeseries.py, sector_rotation_selector.py, foreign_market_evaluator.py,
+               17_build_rotation_signals, 18_validate_rotation_signals, 19_run_rotation_ablation_replay (clean)
   macro/       <migrated MacroLayer subtree + macro_serving.sqlite>          (vendored)
   features/    65_pit_feature_store, 65_data_routing                         (Stage 6.5)
   forecast/    66_define_targets, 67_train_models, 67_calibrate              (Stage 6.6-6.7)
@@ -350,21 +350,71 @@ commission is too large a fraction of it. Distinct from rebalance no-trade bands
   `stocks_scores.csv`, and the Stage 3 `optimizer_manifest.json` (which must be acceptance=PASS, hash-matched).
 - Net replay labeled lookahead/diagnostic — the official OOS net baseline is **Stage 11**.
 
-## Stage 5 — Tactical rotation sleeve
+## Stage 5 — Tactical rotation sleeve (SHADOW-ONLY) — IMPLEMENTED
 
-**Goal:** add the fast (1–2wk) money-flow tilt across sector and foreign ETFs.
+**Goal:** the fast (1–2 wk) money-flow tilt across sector ETFs (and foreign ETFs, budget held at 0). The
+first time-series/regime overlay over the AQR book. **Build order ≠ authority order:** rotation is built
+first (self-contained on the sealed Stage 2 panel, zero external deps), but in the final fusion (Stage 7)
+it is a **bounded tilt *under* the macro governor**, never above it.
 
-**Build:** vendor `sector_rotation_selector.py`, `foreign_market_evaluator.py`, `rotation_timeseries.py`
-into `rotation/`; `rotation/09_build_rotation_signals.py` emits `sector_rotation_csv` + `foreign_etfs_csv`.
+**Hard rule — shadow-only until Stage 7/Stage 11.** Stage 5 generates + validates signals and runs a
+diagnostic ablation. It **does not touch the live book**: `rotation.enabled_in_production: false`, Stage 3
+`target_weights.csv` and Stage 4 cost-adjusted book remain byte-identical, and the stage writes only under
+`rotation/`. Promotion (enabling the tilt in production) waits for the Stage 7 BL fusion + the Stage 11 OOS
+walk-forward — never on the in-sample ablation here.
 
-**Acceptance tests:**
-- Rotation features compute on the Staging price panel; sector/foreign tables match the optimizer's
-  expected input schema exactly.
-- `State`/`ScorePct` behave correctly on known historical rotations (e.g., energy 2022 ranks top; a
-  known downtrend is gated out by the absolute-trend filter).
-- Ablation: **AQR + rotation** vs AQR-only, net of cost, on the holdout — rotation must not degrade net
-  Sharpe (improvement is the goal; non-degradation is the gate).
-- Rotation tilts at the margin only (bounded magnitude); it cannot flip a core long to a short.
+**Build (clean re-implementation, NOT vendored from PROD).** PROD's rotation source is unavailable and
+PROD is off-limits (independence #2), so the logic is re-implemented from the optimizer's known contract +
+documented design. Modules (pure, deterministic, PIT): `rotation/rotation_timeseries.py` (vol-normalized
+multi-horizon momentum + absolute-trend state), `rotation/sector_rotation_selector.py`,
+`rotation/foreign_market_evaluator.py`. Scripts: `rotation/17_build_rotation_signals.py`,
+`rotation/18_validate_rotation_signals.py`, `rotation/19_run_rotation_ablation_replay.py`.
+
+**Inputs:** only the sealed Stage 2 panel (`risk/prices_adjclose.csv`, `returns_panel.csv`) — no new
+fetch, fully PIT — plus `risk_panel.sector_etf_map` and the `rotation:` config block.
+
+**Optimizer contract (verified against `optimizer/tier1_portfolio_optimizer.py`):**
+- Sector file requires `SectorName, ScorePct, State`. **`SectorName` is a join key** — the optimizer maps
+  each stock's sector → `SectorName` to attach `ScorePct`/`State`. Our 5 sleeves collapse to only 2 GICS
+  sectors, so **`SectorName` = `source_pipeline`** (the sleeve), and **Stage 7 must join stocks on
+  `source_pipeline`** (`cfg.sector.stock_to_sectorname`). Sector `State ∈ {Positive, Neutral, Negative}`
+  (the optimizer's default multiplier keys — other tokens are silently ignored).
+- Foreign file requires `Ticker, MarketName, Score, ScorePct, State`; `Score` = raw composite,
+  `ScorePct` = percentile; foreign `State ∈ {Eligible, Avoid}`.
+- Stage 5 emits **both** a canonical audit CSV (snake_case) and an exact-contract `*_optimizer.csv`.
+
+**Tilt (ablation only):** bounded multiplicative scaling of a sleeve's aggregate weight,
+`mult = clip(f(ScorePct), [0.7, 1.3])`, capped at 1.0 when the absolute-trend gate fails (never tilt
+*into* a downtrend); renormalize to gross and re-impose the Stage 3 `max_weight_per_name`. Long-only and
+gross preserved; a tilt can never create a short. The `max_sector_budget_shift` cap is validated on the
+realized post-projection book; it is not assumed to follow analytically from the multiplier bounds.
+
+**Acceptance gates (hard — all PASS, WARN non-blocking):**
+1. **independence_no_prod_ref** — no PROD path in rotation logic/scripts (Stage 0 AST gate is authoritative).
+2. **pit_no_lookahead** — panel right edge ≤ as_of and matches the sealed meta.
+3. **optimizer_contract_schema** — `*_optimizer.csv` exact columns; `State` ∈ enum; `ScorePct ∈ [0,100]`,
+   `Score` numeric.
+4. **sectorname_mapping_bijective** — `SectorName` set == `source_pipeline` set in `stocks_scores.csv`,
+   1:1 with `sector_etf_map`, no dup/missing.
+5. **etf_panel_coverage** — every rotation ETF present in the Stage 2 panel with ≥ `ma_days+slope` history
+   and a non-stale right edge.
+6. **bounded_tilt** — multiplier ∈ `[mult_min, mult_max]`; downtrend capped at 1.0; realized
+   post-projection sector-budget shift ≤ `max_sector_budget_shift`.
+7. **canonical_optimizer_consistent** — optimizer rows mirror canonical; `State` derivation correct
+   (downtrend ⇒ Negative).
+8. **foreign_budget_zero** — `foreign.applied_budget == 0` (locked until Stage 6).
+9. **deterministic_rebuild** — rebuilding sector and foreign signals from the same sealed panel + config
+   reproduces the sealed artifacts.
+10. **shadow_only_non_destructive** — production disabled; Stage 3 `target_weights.csv` + Stage 4 adjusted
+    book still match their sealed hashes (rotation changed nothing).
+11. **rotation_artifacts_reproducible** — meta file hashes match disk; manifest sealed.
+
+**Reported diagnostic (WARN-only, never gates/promotes):** `19_run_rotation_ablation_replay.py` — AQR-only
+vs AQR+rotation, net of per-name cost over a trailing window. It recomputes the one-way establishment cost
+for the exact Stage 3 raw `target_weights.csv` book being replayed, then charges the *incremental* turnover
+(AQR→tilted). Records net Sharpe of both, the delta, turnover, establishment-cost bps, and incremental-cost
+bps. WARN if net Sharpe degrades beyond tolerance. Single-snapshot/lookahead by construction — the real OOS
+promotion test is Stage 11.
 
 ## Stage 6 — MacroLayer migration
 

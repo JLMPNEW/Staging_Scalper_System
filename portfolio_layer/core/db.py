@@ -91,6 +91,8 @@ def start_run(conn: sqlite3.Connection, *, run_type: str, input_path: Path | str
             """,
             (run_type, now, str(input_path or ""), now),
         )
+    if cur.lastrowid is None:
+        raise RuntimeError("SQLite did not return a run_id for inserted run")
     return int(cur.lastrowid)
 
 

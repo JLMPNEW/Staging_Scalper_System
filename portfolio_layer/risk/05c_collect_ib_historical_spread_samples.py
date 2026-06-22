@@ -332,7 +332,7 @@ def _collect_from_ib(
     duration_days = max(1, int(lc.get("duration_days", 5)))
     duration = f"{duration_days} D"
     bar_size = str(lc.get("bar_size", "5 mins"))
-    use_rth = 1 if bool(lc.get("use_rth", True)) else 0
+    use_rth = bool(lc.get("use_rth", True))
     pause = max(0.0, float(lc.get("request_pause_sec", 2.0)))
     retries = max(1, int(lc.get("max_retries", 3)))
     max_lag = max(0.0, float(lc.get("max_sample_lag_minutes", 12)))

@@ -14,6 +14,7 @@ import logging
 import sys
 from datetime import date
 from pathlib import Path
+from typing import cast
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -62,9 +63,20 @@ def unlink_artifacts(paths: list[Path]) -> None:
             path.unlink()
 
 
+def _series_col(df: pd.DataFrame, col: str) -> pd.Series:
+    values = df[col]
+    if isinstance(values, pd.DataFrame):
+        values = values.iloc[:, 0]
+    return cast(pd.Series, pd.to_numeric(values, errors="coerce"))
+
+
+def _frame_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    return cast(pd.DataFrame, df.loc[:, cols])
+
+
 def _pairwise_linear(returns_df: "pd.DataFrame", intensity: float) -> tuple[np.ndarray, str]:
     """Pairwise sample covariance (full overlap per pair) shrunk linearly toward its diagonal."""
-    sample = returns_df.cov().values
+    sample = returns_df.cov().to_numpy(dtype=float)
     # Any pair with no overlap -> 0 covariance; diagonal must stay positive.
     sample = np.nan_to_num(sample, nan=0.0)
     diag = np.diag(np.diag(sample))
@@ -134,9 +146,17 @@ def main() -> int:  # noqa: C901
         sorted(outlier_rows, key=lambda r: (str(r["ticker"]), str(r["date"]))),
     )
     coverage = read_csv(coverage_path)
-    direct = [r["ticker"] for r in coverage if r["risk_status"] == "direct" and r["ticker"] in returns_for_cov.columns]
-    shrunk = [r["ticker"] for r in coverage if r["risk_status"] == "shrunk" and r["ticker"] in returns_for_cov.columns]
-    target_by = {r["ticker"]: (r["shrinkage_target"] or fallback_etf).upper() for r in coverage}
+    direct: list[str] = [
+        str(r["ticker"])
+        for r in coverage
+        if r["risk_status"] == "direct" and r["ticker"] in returns_for_cov.columns
+    ]
+    shrunk: list[str] = [
+        str(r["ticker"])
+        for r in coverage
+        if r["risk_status"] == "shrunk" and r["ticker"] in returns_for_cov.columns
+    ]
+    target_by = {str(r["ticker"]): str(r["shrinkage_target"] or fallback_etf).upper() for r in coverage}
     if not direct:
         LOGGER.error("No direct-history names to anchor the covariance estimate")
         return 1
@@ -148,16 +168,16 @@ def main() -> int:  # noqa: C901
     intensity = float(cfg_get(config, "risk_panel.shrinkage_intensity", 0.10))
     complete_case_rows = 0
     if method in ("ledoit_wolf", "oas"):
-        R = returns_for_cov[direct].dropna(how="any")
+        R = _frame_cols(returns_for_cov, direct).dropna(how="any")
         complete_case_rows = len(R)
         if len(R) >= len(direct):
-            cov_d = (LedoitWolf() if method == "ledoit_wolf" else OAS()).fit(R.values).covariance_
+            cov_d = (LedoitWolf() if method == "ledoit_wolf" else OAS()).fit(R.to_numpy(dtype=float)).covariance_
             used_method = f"{method}_complete_case(rows={len(R)})"
         else:
             LOGGER.warning("complete-case rows %d < names %d; falling back to pairwise_linear", len(R), len(direct))
-            cov_d, used_method = _pairwise_linear(returns_for_cov[direct], intensity)
+            cov_d, used_method = _pairwise_linear(_frame_cols(returns_for_cov, direct), intensity)
     else:
-        cov_d, used_method = _pairwise_linear(returns_for_cov[direct], intensity)
+        cov_d, used_method = _pairwise_linear(_frame_cols(returns_for_cov, direct), intensity)
     LOGGER.info("Direct block: %d names via %s", len(direct), used_method)
     pos = {name: i for i, name in enumerate(direct)}
 
@@ -175,11 +195,11 @@ def main() -> int:  # noqa: C901
             etf = fallback_etf
         if etf not in pos:
             continue
-        pair = returns_for_cov[[s, etf]].dropna()
+        pair = _frame_cols(returns_for_cov, [s, etf]).dropna()
         if len(pair) < 2:
             continue
-        x = pair[etf].values
-        y = pair[s].values
+        x = _series_col(pair, etf).to_numpy(dtype=float)
+        y = _series_col(pair, s).to_numpy(dtype=float)
         var_e = float(np.var(x, ddof=1))
         beta = float(np.cov(x, y, ddof=1)[0, 1] / var_e) if var_e > 0 else 0.0
         idio = float(np.var(y - beta * x, ddof=1))
@@ -187,7 +207,7 @@ def main() -> int:  # noqa: C901
     for s in shrunk:
         if s not in betas:
             # no usable overlap: pure idiosyncratic from own returns
-            v = float(np.var(returns_for_cov[s].dropna().values, ddof=1))
+            v = float(np.var(_series_col(returns_for_cov, s).dropna().to_numpy(dtype=float), ddof=1))
             C[idx[s], idx[s]] = max(v, 1e-10)
             continue
         etf_s, beta_s, idio_s = betas[s]
@@ -214,12 +234,12 @@ def main() -> int:  # noqa: C901
     min_eig = float(eigvals.min())
     condition = safe_cond(C_fixed)
 
-    period_cov_df = pd.DataFrame(C_period_fixed, index=names, columns=names)
-    period_cov_df.index.name = "ticker"
+    index_labels = pd.Index(names, name="ticker")
+    column_labels = pd.Index(names)
+    period_cov_df = pd.DataFrame(C_period_fixed, index=index_labels, columns=column_labels)
     period_cov_df.to_csv(period_cov_path, lineterminator="\n")
 
-    cov_df = pd.DataFrame(C_fixed, index=names, columns=names)
-    cov_df.index.name = "ticker"
+    cov_df = pd.DataFrame(C_fixed, index=index_labels, columns=column_labels)
     cov_df.to_csv(cov_path, lineterminator="\n")
 
     # Hierarchical clusters from correlation distance (clustering-sanity gate).

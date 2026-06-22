@@ -78,7 +78,7 @@ def _forbidden_sector_packages() -> set[str]:
     Derived dynamically from the project tree so a *future* sector package is covered without editing
     this validator; the hard-coded list is kept as a floor.
     """
-    forbidden = set(FORBIDDEN_TOP_LEVEL)
+    forbidden: set[str] = set(FORBIDDEN_TOP_LEVEL)
     for child in PROJECT_ROOT.iterdir():
         if not child.is_dir() or child.name == PACKAGE_ROOT.name or child.name.startswith("."):
             continue
@@ -109,7 +109,9 @@ def test_no_forbidden_sector_imports() -> tuple[bool, str]:
                 roots = [node.module.split(".")[0]]
             for root in roots:
                 if root in forbidden:
-                    offenders.append(f"{path.relative_to(PROJECT_ROOT)}:{node.lineno} imports '{root}'")
+                    offenders.append(
+                        f"{path.relative_to(PROJECT_ROOT)}:{getattr(node, 'lineno', 0)} imports '{root}'"
+                    )
     if offenders:
         return False, f"forbidden sector imports: {offenders}"
     return True, f"no imports of {len(forbidden)} sibling sector packages across package source"

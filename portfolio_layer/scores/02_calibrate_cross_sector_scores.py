@@ -67,7 +67,8 @@ def staleness_days(run_as_of: str, source_asof: str) -> int | None:
 
 def parse_finite(value: object, label: str) -> float:
     try:
-        parsed = float(value) if value is not None and str(value).strip() != "" else float("nan")
+        raw = str(value).strip() if value is not None else ""
+        parsed = float(raw) if raw else float("nan")
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label} must be numeric, got {value!r}") from exc
     if not math.isfinite(parsed):

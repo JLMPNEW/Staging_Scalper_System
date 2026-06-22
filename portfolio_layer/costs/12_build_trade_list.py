@@ -18,7 +18,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
+from portfolio_layer.core.config import load_yaml  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402

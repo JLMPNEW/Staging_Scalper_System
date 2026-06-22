@@ -14,6 +14,7 @@ import logging
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import cast
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +50,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--as-of", type=iso_date_arg, default=None)
     p.add_argument("--force", action="store_true")
     return p.parse_args()
+
+
+def _series_col(df: pd.DataFrame, col: str) -> pd.Series:
+    values = df[col]
+    if isinstance(values, pd.DataFrame):
+        values = values.iloc[:, 0]
+    return cast(pd.Series, pd.to_numeric(values, errors="coerce"))
+
+
+def _frame_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    return cast(pd.DataFrame, df.loc[:, cols])
 
 
 def perf_stats(returns: pd.Series, periods_per_year: int = 252) -> dict[str, float]:
@@ -113,14 +125,18 @@ def main() -> int:
     w = w / w.sum()  # renormalize to held names present in the panel
 
     # Complete-case window across held names (a held shrunk name trims the early window).
-    R = returns[held].dropna(how="any")
+    R = _frame_cols(returns, held).dropna(how="any")
     if R.empty:
         LOGGER.error("No complete-case replay window across %d held names", len(held))
         return 1
     port = R.to_numpy() @ w.reindex(R.columns).to_numpy()
     port_ret = pd.Series(port, index=R.index)
-    eqw_ret = R.mean(axis=1)
-    bench_ret = returns[benchmark].reindex(R.index) if benchmark in returns.columns else pd.Series(index=R.index, dtype=float)
+    eqw_ret = cast(pd.Series, R.mean(axis=1))
+    bench_ret = (
+        _series_col(returns, benchmark).reindex(R.index)
+        if benchmark in returns.columns
+        else pd.Series(index=R.index, dtype=float)
+    )
 
     metrics = {
         "run_as_of": run_as_of,

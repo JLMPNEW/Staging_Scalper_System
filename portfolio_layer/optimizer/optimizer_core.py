@@ -159,7 +159,9 @@ def solve_long_only_mv(
             continue
         attempts.append(f"{candidate}:{problem.status}")
         if problem.status in ("optimal", "optimal_inaccurate") and w.value is not None:
-            status, used, obj_val = problem.status, candidate, float(problem.value)
+            value = problem.value
+            status, used = problem.status, candidate
+            obj_val = float(str(value)) if value is not None else None
             break
 
     weights = np.clip(np.asarray(w.value, dtype=float).flatten(), 0.0, None) if w.value is not None else np.zeros(n)
