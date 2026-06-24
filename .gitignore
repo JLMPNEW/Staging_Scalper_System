@@ -63,8 +63,15 @@ tmpomvpuh6h/
 !med_devices/data/fda_manufacturer_overrides.csv
 !med_devices/data/fda_regulatory_review_overrides.csv
 !portfolio_layer/data/*.csv
+!portfolio_layer/MacroLayer/*.csv
 !SEC_fundamentals/sec_issuer_metric_override_seed.csv
 !SEC_fundamentals/sec_metric_mapping_full.csv
+
+# --- Portfolio MacroLayer generated artifacts ---
+portfolio_layer/MacroLayer/backups/
+portfolio_layer/MacroLayer/cache/
+portfolio_layer/MacroLayer/logs/
+portfolio_layer/MacroLayer/out/
 
 # --- OS / IDE ---
 .DS_Store

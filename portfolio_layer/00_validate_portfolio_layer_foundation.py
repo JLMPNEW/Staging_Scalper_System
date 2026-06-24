@@ -37,9 +37,12 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 FORBIDDEN_TOP_LEVEL = ("technology", "biotech_index", "med_devices", "SEC_FORM4_Runner", "ticker_mapping")
 PROD_MARKER = "PROD_Scalper_System"
 # Real coupling = a filesystem path into PROD or an import of a PROD module, not prose that
-# merely names the boundary. Match the marker only when adjacent to a path separator or import.
+# merely names the boundary. Match PROD only when it is a path component, or the legacy marker
+# when adjacent to a path separator/import.
 PROD_COUPLING_RE = re.compile(
-    r"[\\/]PROD_Scalper_System|PROD_Scalper_System[\\/]|(?:from|import)\s+PROD_Scalper_System"
+    r"(?i)(?:[A-Za-z]:)?[\\/][^\r\n\"']*[\\/]PROD[\\/]"
+    r"|[\\/]PROD_Scalper_System|PROD_Scalper_System[\\/]"
+    r"|^\s*(?:from|import)\s+(?:PROD_Scalper_System|PROD)\b"
 )
 REQUIRED_TABLES = ("runs", "data_quality_issues")
 

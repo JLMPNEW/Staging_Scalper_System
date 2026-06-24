@@ -1,0 +1,7 @@
+metric_key,source_name,release_family,cadence_rule,publication_lag_days,timezone,notes
+us_ads_index,phillyfed_ads,ADS business conditions,ad hoc with component updates,0,America/New_York,Current ADS vintage updates whenever underlying component releases change the index.
+us_nonfarm_payrolls,fred_alfred,Employment Situation,monthly first Friday,7,America/New_York,Release-family seed only; wire exact calendar integration later.
+us_unemployment_rate,fred_alfred,Employment Situation,monthly first Friday,7,America/New_York,Release-family seed only; wire exact calendar integration later.
+us_headline_cpi,fred_alfred,Consumer Price Index,monthly mid-month,14,America/New_York,Release-family seed only; wire exact calendar integration later.
+us_headline_pce,fred_alfred,Personal Income and Outlays,monthly end-month,30,America/New_York,Release-family seed only; wire exact calendar integration later.
+us_real_gdp,fred_alfred,Gross Domestic Product,quarterly advance-second-third,30,America/New_York,Release-family seed only; wire exact calendar integration later.

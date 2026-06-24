@@ -4,7 +4,7 @@ paths:
   database_path: "${PORTFOLIO_LAYER_DB_DIR:-db}/portfolio_layer.sqlite"
   output_dir: "output"
   cache_dir: "output/cache"
-  macro_serving_db_path: "macro/macro_serving.sqlite"
+  macro_serving_db_path: "MacroLayer/macro_serving.sqlite"
 
 runtime:
   sqlite_timeout_sec: 120.0
@@ -128,6 +128,8 @@ risk_panel:
     max_workers: 10
     request_timeout_sec: 20
     max_retries: 3
+    master_calendar_retry_attempts: 3        # extra targeted retries if SPY/primary calendar failed in batch
+    master_calendar_retry_sleep_sec: 5.0
     user_agent: "portfolio_layer/0.1 (+research)"
 
 # Optional Stage 2.5 - intraday liquidity panel.
@@ -225,3 +227,97 @@ rotation:
   ablation_window_days: 126                 # trailing window for the diagnostic net-of-cost replay (19)
   ablation_min_trade_notional_usd: 1.0      # do not charge flat commission on numerical dust deltas
   net_sharpe_degradation_tolerance: 0.0     # diagnostic status WARN if AQR+rotation degrades beyond this
+
+# Stage 6 - macro regime / macro-fit contract (SHADOW-ONLY).
+# MacroLayer remains a vendored independent engine under portfolio_layer/MacroLayer. Stage 6 adapts its
+# serving DB into portfolio-native artifacts keyed to the five source_pipeline sleeves. It never overwrites
+# Stage 1 stocks_scores.csv or Stage 3/4/5 live-book artifacts; Stage 7 consumes the sealed macro contract.
+macro:
+  enabled_in_production: false
+  vendor_root: "MacroLayer"
+  freshness_tolerance_days:
+    regime: 5
+    country_fit: 30
+    sector_fit: 30
+    industry_fit: 30
+    industry_aggregate_fit: 30
+    stock_fit: 30
+    foreign_budget: 30
+    foreign_candidates: 30
+  max_stock_fallback_fraction: 0.50          # max share of stocks_scores names allowed to use sleeve fallback
+  max_eligible_stock_fallback_fraction: 0.40 # max share of investable_eligible names allowed to use sleeve fallback
+  require_all_sleeves: true
+  stock_fallback_policy: "stock_then_industry_then_aggregate_then_sector"
+  sleeve_taxonomy:
+    biotech:
+      macro_sector_fallback: "Healthcare"
+      industries: ["Biotechnology", "Diagnostics & Research", "Drug Manufacturers - General", "Drug Manufacturers - Specialty & Generic"]
+      industry_aggregates: ["Healthcare: Biopharma & Research Tools"]
+    med_devices:
+      macro_sector_fallback: "Healthcare"
+      industries: ["Medical Devices", "Medical Instruments & Supplies"]
+      industry_aggregates: ["Healthcare: Providers, Plans, MedTech & Distribution"]
+    semiconductors:
+      macro_sector_fallback: "Technology"
+      industries: ["Semiconductors", "Semiconductor Equipment & Materials"]
+      industry_aggregates: ["Semiconductors & Electronic Components"]
+    software_infrastructure:
+      macro_sector_fallback: "Technology"
+      industries: ["Software - Infrastructure", "Software - Application", "Information Technology Services"]
+      industry_aggregates: ["Software & IT Services"]
+    technology_hardware:
+      macro_sector_fallback: "Technology"
+      industries: ["Computer Hardware", "Consumer Electronics", "Communication Equipment", "Electronic Components", "Scientific & Technical Instruments"]
+      industry_aggregates: ["Tech Hardware & Instruments"]
+
+# Stage 7 - Black-Litterman fusion (SHADOW-ONLY adapter over the vendored optimizer).
+# Units = annualized (option B): only Stage 1 final_score becomes an expected-return view; rating/state/
+# regime adjust confidence/gross/budgets/multipliers, never injected as returns. The generated tier1 config
+# derives its return frequency from Stage 2 covariance metadata, so annual alpha and annual covariance are
+# converted into the same optimizer period.
+black_litterman_fusion:
+  enabled_in_production: false
+  tau: 0.05
+  delta: 2.5                                # equilibrium prior pi = delta * Sigma * w_bench
+  return_space: "excess"                    # no explicit CASH asset in the Stage 7 baseline
+  alpha_units_policy: "B_annualized_calibrated"   # preserve Stage 1 calibrated annual alpha (no z-rescale)
+  base_gross_exposure: 1.0
+  max_weight_per_name: 0.05
+  confidence_by_rating:                     # rating -> BL view confidence (-> Omega); NOT a return
+    strong_buy: 0.90
+    buy: 0.70
+    hold: 0.50
+    reduce: 0.35
+    avoid: 0.20
+  min_confidence: 0.15
+  max_confidence: 0.95
+  score_confidence_boost: 0.10
+  sector_state_alpha_multipliers:           # rotation State -> bounded sector alpha tilt (NOT a return)
+    Positive: 1.0
+    Neutral: 0.0
+    Negative: -0.5
+  sector_alpha_scale_annual: 0.03           # annual magnitude of the rotation/macro sector tilt
+  macro_sector_baseline_source: "strategic_weights"  # strategic_weights | stage3_weights | eligible_count
+  strategic_sector_weights:                 # neutral sleeve policy before bounded macro/rotation tilts
+    biotech: 0.30
+    med_devices: 0.10
+    semiconductors: 0.25
+    software_infrastructure: 0.20
+    technology_hardware: 0.15
+  benchmark_within_sector_source: "equal"   # equal | stage3_weights; ticker-level BL prior inside each sleeve
+  macro_sector_shift_mode: "relative_with_floor"
+  macro_sector_max_shift: 0.10              # absolute safety cap on |shift| before projection
+  macro_sector_max_relative_shift: 0.50     # max |shift| as a fraction of the chosen sleeve baseline
+  macro_sector_min_weight_floor: 0.005      # small sleeve floor; bounded by baseline to avoid artificial new budget
+  macro_sector_shift_scale: 0.05            # macro_fit_z -> budget shift (pre-clip)
+  macro_sector_cap_band: 0.03               # tier1 sector exposure band around macro-shifted benchmark weights
+  regime_to_gross_scalar:                   # macro regime -> gross-exposure multiplier
+    EXPANSION: 1.00
+    RECOVERY: 1.00
+    SLOW_GROWTH: 0.85
+    STAGFLATION: 0.70
+    CONTRACTION: 0.50
+    CRISIS: 0.40
+    default: 0.85
+  foreign_activation_policy: "respect_active_flag"   # allocate foreign only if macro active_flag==1
+  cost_overlay_namespace: "blacklitterman"

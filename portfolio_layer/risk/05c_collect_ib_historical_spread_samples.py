@@ -84,6 +84,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Use an existing ib_spread_samples-format CSV instead of connecting to IB (test/recovery mode).",
     )
+    p.add_argument(
+        "--universe-source",
+        choices=["risk_eligible_scores", "investable_scores", "target_weights", "trade_list", "auto"],
+        default=None,
+        help="Override liquidity_panel.universe_source for this run only.",
+    )
     return p.parse_args()
 
 
@@ -270,8 +276,8 @@ def _tickers_from_scores(run_dir: Path, *, risk_eligible_only: bool) -> list[str
     return sorted(score_tickers & risk_tickers)
 
 
-def _load_universe(run_dir: Path, config: dict[str, Any]) -> tuple[list[str], str]:
-    mode = str(cfg_get(config, "liquidity_panel.universe_source", "risk_eligible_scores")).strip().lower()
+def _load_universe(run_dir: Path, config: dict[str, Any], override: str | None = None) -> tuple[list[str], str]:
+    mode = str(override or cfg_get(config, "liquidity_panel.universe_source", "risk_eligible_scores")).strip().lower()
     allowed = {"risk_eligible_scores", "investable_scores", "target_weights", "trade_list", "auto"}
     if mode not in allowed:
         raise ValueError(f"liquidity_panel.universe_source must be one of {sorted(allowed)}, got {mode!r}")
@@ -452,7 +458,7 @@ def main() -> int:  # noqa: C901
         max_stale_days = int(cfg_get(config, "liquidity_panel.max_stale_liquidity_days", 5))
         max_half_spread = liquidity_half_spread_fail_bps(config)
         allow_fallback = bool(cfg_get(config, "liquidity_panel.allow_fallback_to_default", True))
-        tickers, universe_source = _load_universe(run_dir, config)
+        tickers, universe_source = _load_universe(run_dir, config, args.universe_source)
     except (ValueError, FileNotFoundError) as exc:
         LOGGER.error("%s", exc)
         return 1

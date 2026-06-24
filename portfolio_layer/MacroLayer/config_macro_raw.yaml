@@ -1,0 +1,383 @@
+macro_raw:
+  db_path: "MacroLayer/macro_raw.sqlite"
+  serving_db_path: "MacroLayer/macro_serving.sqlite"
+  registry_csv: "MacroLayer/macro_metric_registry_full.csv"
+  metric_policy_csv: "MacroLayer/macro_metric_policy.csv"
+  feature_policy_csv: "MacroLayer/macro_feature_policy.csv"
+  composite_policy_csv: "MacroLayer/macro_composite_policy.csv"
+  country_metadata_csv: "MacroLayer/macro_country_metadata_seed.csv"
+  release_calendar_csv: "MacroLayer/macro_release_calendar_seed.csv"
+  run_mode: "daily"
+  as_of_date: null
+
+  serving:
+    pit_workers: 2
+    feature_workers: 2
+
+  probability_layer:
+    calibration_min_months: 36
+    calibration_min_positive_months: 6
+    calibration_min_negative_months: 6
+    ridge_penalty: 2.5
+    logloss_clip: 0.000001
+    output_probability_floor: 0.02
+
+  regime_layer:
+    transition_bias_deadband: 0.05
+    smoothing:
+      transition_prior_strength: 24.0
+      persistence_weight: 6.0
+      adjacent_weight: 1.5
+      opposite_weight: 0.35
+      current_blend: 0.35
+      next_blend: 0.35
+    decision:
+      decision_frequency: W-FRI
+      min_top_probability: 0.50
+      min_confidence: 0.10
+      switch_margin: 0.05
+      confirm_periods: 2
+
+  industry_macro_layer:
+    cadence: "W-FRI"
+    source_mode: "hybrid"
+    backtest_config_path: "BackTest/config_backtest.yaml"
+    strategy_key: "mf_wf"
+    production_output_root: "output"
+    production_file_glob: "tier1_optimizer_universe_*.csv"
+    sec_snapshot_enabled: false
+    sec_db_path: null
+    sec_snapshot_table: "sec_fundamental_snapshot_filled_security_t1_resolved"
+    sec_snapshot_start_date: "2020-01-01"
+    sec_snapshot_end_date: null
+    output_dir: "MacroLayer/out/industry_macro"
+    min_industry_members: 4
+    min_aggregate_members: 8
+    min_sector_members: 12
+    lookback_weeks: 52
+    half_life_weeks: 13.0
+    min_effective_history_weeks: 12.0
+    empirical_weight_cap: 0.35
+    regime_weight: 0.75
+    shock_weight: 0.25
+    industry_weight: 0.50
+    industry_aggregate_weight: 0.30
+    sector_weight: 0.20
+
+  country_macro_layer:
+    output_dir: "MacroLayer/out/country_macro"
+    global_regime_weight: 0.35
+    local_macro_weight: 0.40
+    external_shock_weight: 0.25
+    current_regime_weight: 0.70
+    next_regime_weight: 0.30
+    confidence_adjustment_power: 1.0
+    min_rank_confidence: 0.35
+    class_confidence:
+      A_full: 1.00
+      B_partial: 0.78
+      C_fallback: 0.62
+      MULTI: 0.55
+    fallback_penalty:
+      A_full: 1.00
+      B_partial: 0.90
+      C_fallback: 0.80
+      MULTI: 0.70
+    feature_group_weights:
+      growth_now: 0.35
+      growth_lead: 0.35
+      inflation_now: 0.30
+
+  stock_macro_overlay:
+    output_dir: "MacroLayer/out/stock_macro_overlay"
+    cadence: "W-FRI"
+    score_source:
+      mode: "inherit_industry_macro_layer"
+      include_base_optimizer_ineligible: true
+      base_score_column: "Score"
+      rating_column: "Rating"
+      company_column: "Company"
+      base_optimizer_eligible_column: "BaseOptimizerEligible"
+      earnings_blocked_column: "EarningsBlocked_7D"
+    macro_fit_weights:
+      industry_macro_fit: 0.55
+      sector_macro_fit: 0.20
+      shock_fit: 0.25
+    shock_fit:
+      industry_shock_prior_weight: 0.70
+      sector_shock_prior_weight: 0.30
+      clip_min: -3.0
+      clip_max: 3.0
+    selection_score_weights:
+      base_stock_z: 0.95
+      macro_stock_fit_z: 0.05
+      sector_tactical_lift_z: 0.00
+    weight_score_weights:
+      base_stock_z: 0.85
+      macro_stock_fit_z: 0.15
+      sector_tactical_lift_z: 0.00
+    selection_validation:
+      enabled: false
+      signal_column: "macro_stock_fit_z"
+      lookback_periods: 52
+      min_periods: 26
+      min_observations: 500
+      min_spearman: 0.05
+      fallback_multiplier: 0.0
+      apply_to_selection: true
+      apply_to_weight: true
+    zscore:
+      scope: "as_of_date"
+      min_std: 0.000001
+      component_clip: 3.0
+      final_score_clip: 5.0
+    sector_tactical:
+      enabled: true
+      output_root: "output"
+      file_glob: "sector_rotation_latest_*.csv"
+      date_source: "parent_directory"
+      sector_name_column: "SectorName"
+      score_column: "ScorePct"
+      state_column: "State"
+      stale_after_days: 14
+      missing_policy: "neutral"
+      neutral_value: 0.0
+      stock_sector_to_rotation_sector:
+        "Technology": "Technology"
+        "Healthcare": "Health Care"
+        "Financial Services": "Financials"
+        "Consumer Cyclical": "Consumer Discretionary"
+        "Consumer Defensive": "Consumer Staples"
+        "Industrials": "Industrials"
+        "Real Estate": "REITs"
+        "Utilities": "Utilities"
+        "Basic Materials": "Materials"
+        "Materials": "Materials"
+        "Communication Services": "Communication"
+        "Energy": "Energy"
+    flags:
+      macro_favored_z_threshold: 0.50
+      macro_adverse_z_threshold: -0.50
+    acceptance:
+      min_latest_rows: 1000
+      min_latest_eligible_rows: 100
+      max_null_score_share: 0.0
+      min_selection_score_std: 0.05
+      min_weight_score_std: 0.05
+      min_macro_fit_std: 0.05
+      min_rank_correlation_shift: 0.0
+      favored_selection_lift_min: 0.005
+      adverse_selection_lift_max: -0.005
+      require_favored_adverse_lift: false
+
+  portfolio_input_layer:
+    output_dir: "MacroLayer/out/portfolio_inputs"
+    build_scope: "all"   # all or latest
+    macro_overlay_enabled: true
+    stock:
+      enabled: true
+      require_stock_macro_coverage: false
+      include_base_optimizer_ineligible: true
+      final_score_mode: "selection_score_rescaled"
+      final_score_center: 50.0
+      final_score_scale: 10.0
+      final_score_min: 0.0
+      final_score_max: 100.0
+      state_when_eligible: "Eligible"
+      state_when_ineligible: "Ineligible"
+      optimizer_csv_name: "tier1_optimizer_universe_macro_latest.csv"
+    foreign:
+      enabled: true
+      source_output_root: "output"
+      source_file_glob: "foreign_rotation_latest_*.csv"
+      date_source: "parent_directory"
+      stale_after_days: 14
+      tactical_score_column: "ScorePct"
+      state_column: "State"
+      selected_top_m_column: "SelectedTopM"
+      market_name_column: "MarketName"
+      eligible_states: ["Eligible"]
+      require_selected_top_m: false
+      min_country_confidence: 0.35
+      min_fused_alpha: 0.0
+      state_when_eligible: "Eligible"
+      state_when_ineligible: "Avoid"
+      fused_alpha_weights:
+        tactical_z: 0.55
+        confidence_adjusted_country_macro_fit_z: 0.35
+        agreement_z: 0.10
+      score_pct_method: "percentile"
+      optimizer_csv_name: "foreign_rotation_macro_latest.csv"
+    combined:
+      optimizer_csv_name: "portfolio_inputs_macro_latest.csv"
+    acceptance:
+      min_latest_stock_rows: 1000
+      min_latest_stock_eligible_rows: 100
+      max_latest_null_score_share: 0.0
+      min_latest_selection_score_std: 0.05
+      min_latest_weight_score_std: 0.05
+      max_foreign_required: false
+
+  stock_sleeve_target_layer:
+    output_dir: "MacroLayer/out/stock_sleeve_targets"
+    build_scope: "all"   # all or latest
+    eligible_state: "Eligible"
+    require_stock_macro_coverage: true
+    opportunity:
+      score_column: "weight_score"
+      top_n: 5
+      min_eligible_members: 1
+      transform: "softplus"
+      softplus_beta: 1.0
+    macro:
+      score_column: "industry_macro_fit"
+      transform: "softplus"
+      softplus_beta: 1.0
+      fallback_value: 0.0
+    target:
+      equal_weight_blend: 0.15
+      max_industry_weight: 0.08
+      min_target_weight: 0.0
+      renormalize_after_caps: true
+    bands:
+      industry_abs_width: 0.010
+      industry_rel_width: 0.35
+      industry_min_width: 0.005
+      sector_abs_width: 0.030
+      sector_rel_width: 0.30
+      sector_min_width: 0.010
+      max_sector_weight: 0.35
+    exports:
+      industry_csv_name: "stock_industry_targets_latest.csv"
+      sector_csv_name: "stock_sector_targets_latest.csv"
+      summary_csv_name: "stock_sleeve_target_summary_latest.csv"
+    acceptance:
+      min_latest_industries: 25
+      min_latest_targetable_industries: 20
+      min_latest_sectors: 8
+      min_effective_industry_count: 12
+      target_sum_tolerance: 0.000001
+      max_industry_weight: 0.08
+      max_sector_weight: 0.35
+
+  foreign_sleeve_budget_layer:
+    output_dir: "MacroLayer/out/foreign_sleeve_budget"
+    build_scope: "all"   # all or latest
+    enabled: true
+    eligible_state: "Eligible"
+    candidate:
+      require_positive_alpha: true
+      min_country_confidence: 0.35
+      min_fused_alpha: 0.0
+      max_candidates: 5
+      min_selected_candidates: 2
+    budget:
+      min_budget: 0.05
+      max_budget: 0.20
+      activation_score_threshold: 0.25
+      full_budget_score_threshold: 1.00
+      activation_top_n: 3
+      confidence_power: 1.0
+    weights:
+      method: "softmax"
+      softmax_beta: 1.0
+      max_single_etf_sleeve_weight: 0.60
+      renormalize_after_caps: true
+    exports:
+      budget_csv_name: "foreign_sleeve_budget_latest.csv"
+      candidate_csv_name: "foreign_sleeve_candidates_latest.csv"
+    acceptance:
+      max_budget: 0.20
+      min_active_selected_candidates: 2
+      max_single_etf_sleeve_weight: 0.60
+      budget_sum_tolerance: 0.000001
+      active_budget_min: 0.05
+
+  optimizer_integration_layer:
+    enabled: false
+    output_dir: "MacroLayer/out/final_optimizer"
+    base_config_path: "config.yaml"
+    fail_hard: true
+    price_overlay:
+      enabled: false
+      source: "ibkr_rotation"
+      fail_hard: true
+      # null => use the optimizer return start date.
+      lookback_start: null
+    cases:
+      - name: "baseline_no_macro"
+        macro_enabled: false
+        foreign_enabled: true
+        long_short_enabled: false
+      - name: "macro_full"
+        macro_enabled: true
+        foreign_enabled: true
+        long_short_enabled: false
+      - name: "macro_stocks_only"
+        macro_enabled: true
+        foreign_enabled: false
+        long_short_enabled: false
+    acceptance:
+      weight_sum_tolerance: 0.000001
+      max_foreign_budget_breach: 0.000001
+      max_target_band_breach: 0.000001
+
+  shadow_validation_layer:
+    output_dir: "MacroLayer/out/shadow_backtest"
+    base_config_path: "config.yaml"
+    backtest_config_path: "BackTest/config_backtest.yaml"
+    price_cache_path: null
+    benchmark_ticker: "SPY"
+    start_date: null
+    end_date: null
+    holding_period_trading_days: 5
+    cash_weight: 0.20
+    max_us_stocks: 25
+    cases:
+      - "baseline_no_macro"
+      - "macro_stocks_only"
+      - "macro_full"
+    selection:
+      enforce_rating_quotas: true
+      require_base_optimizer_eligible: true
+      exclude_earnings_blocked: true
+      macro_required_state: "Eligible"
+      stock_weight_method: "equal"
+    foreign:
+      use_stage12c_candidate_weights: true
+      max_foreign_weight: 0.20
+
+  request:
+    timeout_seconds: 60
+    max_retries: 3
+    backoff_base_seconds: 1.0
+    backoff_cap_seconds: 30.0
+    user_agent: "macro-raw-ingestor/1.0"
+
+  sources:
+    fred_alfred:
+      api_key: ""
+      api_key_env: "FRED_API_KEY"
+      max_workers: 1
+      min_interval_seconds: 1.0
+    phillyfed_ads:
+      page_url: "https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/ads"
+      max_workers: 1
+      min_interval_seconds: 0.0
+    oecd_sdmx:
+      base_url: "https://sdmx.oecd.org/public/rest/data"
+      cache_dir: "MacroLayer/cache/oecd"
+      cache_max_age_hours: 24.0
+      max_workers: 1
+      min_interval_seconds: 75.0
+    eia_seriesid:
+      api_key: ""
+      api_key_env: "EIA_API_KEY"
+      base_url: "https://api.eia.gov/v2/seriesid"
+      max_workers: 2
+      min_interval_seconds: 0.35
+    imf_sdmx:
+      enabled: false
+      base_url: ""
+      max_workers: 2
+      min_interval_seconds: 0.5

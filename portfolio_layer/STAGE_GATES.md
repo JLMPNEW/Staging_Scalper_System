@@ -40,7 +40,9 @@ Staging_Scalper_System/portfolio_layer/
   optimizer/   tier1_portfolio_optimizer.py, tier1_common.py, 08_run_optimizer   (vendored)
   rotation/    rotation_timeseries.py, sector_rotation_selector.py, foreign_market_evaluator.py,
                17_build_rotation_signals, 18_validate_rotation_signals, 19_run_rotation_ablation_replay (clean)
-  macro/       <migrated MacroLayer subtree + macro_serving.sqlite>          (vendored)
+  MacroLayer/  vendored macro engine + macro_raw.sqlite/macro_serving.sqlite (independent)
+  macro/       Stage 6 adapter: 20_run_macro_serving, 21_build_macro_contract,
+               22_validate_macro_contract
   features/    65_pit_feature_store, 65_data_routing                         (Stage 6.5)
   forecast/    66_define_targets, 67_train_models, 67_calibrate              (Stage 6.6-6.7)
   blacklitterman/  10_build_bl_views
@@ -416,21 +418,58 @@ for the exact Stage 3 raw `target_weights.csv` book being replayed, then charges
 bps. WARN if net Sharpe degrades beyond tolerance. Single-snapshot/lookahead by construction — the real OOS
 promotion test is Stage 11.
 
-## Stage 6 — MacroLayer migration
+## Stage 6 - MacroLayer contract adapter
 
-**Goal:** migrate the regime/fit engine with its own serving DB and connectors, fully Staging-rooted.
+**Goal:** expose the vendored MacroLayer regime/fit engine to the portfolio layer through a sealed,
+portfolio-native contract. MacroLayer remains an independent Staging-owned data engine under
+`portfolio_layer/MacroLayer`; `portfolio_layer/macro/` is the adapter boundary.
 
-**Build:** copy MacroLayer subtree → `macro/`; re-root `config_macro_raw.yaml`, DB paths, `out/` dirs;
-wire API keys via env; run the serving DAG up through regime decision, industry/sector fit, country fit,
-stock overlay.
+**Design decision:** Stage 6 does **not** let MacroLayer overwrite `stocks_scores.csv`, Stage 3 optimizer
+inputs, or any live book artifact. Macro data flows forward only as sealed artifacts under
+`runs/<as_of>/macro/`, consumed later by Stage 7.
+
+**Taxonomy rule:** MacroLayer's native sector tables use the broad Yahoo/GICS-like taxonomy. The portfolio
+join key is the five-sleeve `source_pipeline` domain from Stage 1:
+`biotech`, `med_devices`, `semiconductors`, `software_infrastructure`, `technology_hardware`.
+Stage 6 maps MacroLayer industry/aggregate/sector fits to those sleeves through
+`macro.sleeve_taxonomy`, with an explicit fallback ladder:
+`industry -> industry_aggregate -> macro_sector_fallback`. Every fallback is recorded.
+
+**PIT rule:** every MacroLayer table is queried as `MAX(as_of_date) <= run_as_of`. The adapter may use a
+newer MacroLayer DB seed, but it must never consume rows after the portfolio run's as-of date.
+
+**Build:**
+1. `MacroLayer/00_validate_macro_layer_foundation.py` - foundation check for the vendored engine.
+2. `macro/20_run_macro_serving.py` - optional convenience runner for the vendored serving DAG; always
+   passes `--skip-final-optimizer` so legacy MacroLayer optimizer integration cannot write portfolio
+   artifacts.
+3. `macro/21_build_macro_contract.py` - read-only serving-DB adapter that emits:
+   `macro_regime.csv`, `macro_sector_fit.csv`, `macro_stock_overlay.csv`, `macro_country_fit.csv`,
+   `macro_foreign_budget.csv`, `macro_foreign_candidates.csv`, and `macro_contract_meta.json`.
+4. `macro/22_validate_macro_contract.py` - acceptance gates + sealed `macro_manifest.json`.
 
 **Acceptance tests:**
-- Macro raw + serving pipelines run end-to-end writing to `macro/macro_serving.sqlite` (no PROD paths,
-  verified by scan).
-- `macro_regime_decision_daily`, `sector_macro_fit_daily`, `country_macro_fit_daily`,
-  `stock_macro_fit_daily` materialize for current dates.
-- Known stress windows (2008, 2020, 2022 rate-hike) classify into risk-off / contraction regimes.
-- Macro `check_*` diagnostics pass at parity with PROD on overlapping history (allowing for data vintage).
+- **independence_shadow_only** - macro wrapper has no PROD path token; `macro.enabled_in_production=false`.
+- **macro_contract_schema** - all Stage 6 CSVs expose exact schemas expected by Stage 7.
+- **stage1_contract_unchanged** - `stocks_scores.csv` still matches the sealed Stage 1 manifest and the
+  macro build metadata pins the same hash.
+- **pit_no_future_macro_dates** - all row-level `macro_as_of_date` values and meta source dates are
+  `<= run_as_of`.
+- **macro_freshness_within_tolerance** - regime, country, sector/industry/aggregate, stock overlay, and
+  foreign budget/candidate data are within configured staleness tolerances.
+- **sleeve_taxonomy_matches_scores** - `macro_sector_fit.source_pipeline` exactly equals the Stage 1
+  source_pipeline set; no broad-sector joins.
+- **stock_overlay_coverage_and_fallback** - every Stage 1 ticker appears exactly once; fallback fraction
+  is bounded separately for all names and investable-eligible names.
+- **stage7_contract_surface** - sector target weights + macro fits + foreign budget fields are numeric and
+  the sleeve target weights sum to 1.
+- **macro_meta_reproducible** - metadata hashes current inputs (including `macro_serving.sqlite`),
+  sources, and CSV artifacts.
+- **no_legacy_macro_optimizer_outputs** - Stage 6 writes only `runs/<as_of>/macro/` artifacts; legacy
+  MacroLayer optimizer outputs are absent from the portfolio run.
+
+Known-stress regime checks (2008 GFC, 2020 COVID, 2022 rate-hike) remain MacroLayer engine diagnostics;
+they are not a substitute for the Stage 6 contract gates.
 
 ## Stage 6.5 — Unified PIT feature store & data routing
 
@@ -482,22 +521,94 @@ before anything deep; few economically-motivated features); purged & embargoed w
   does not, it stays shadow-only and the rules are retained.
 - Volatility and drawdown-probability forecasts show genuine skill (Brier/CRPS beats climatology baseline).
 
-## Stage 7 — Black-Litterman integration: macro views + sector budgets
+## Stage 7 — Black-Litterman fusion: macro views + sector budgets (SHADOW-ONLY adapter)
 
-**Goal:** fuse calibrated alpha (views) with regime-driven sector budgets and forecast-driven exposure.
+**Goal:** fuse everything built so far into one book — AQR calibrated alpha (Stage 1) as BL **views**,
+macro regime/sector fit (Stage 6) as the **governor** (gross scaling + sector budgets), rotation State
+(Stage 5) as a **bounded tilt within** those budgets, on the injected Stage 2 covariance, then net of the
+Stage 4 cost model. **Stage 7 is an explicit sealed adapter/fusion layer, not a loose call into the
+vendored optimizer.** It stays **shadow-only**; promotion to the live book waits for Stage 11 OOS.
 
-**Build:** `blacklitterman/10_build_bl_views.py` mapping calibrated `final_score` → BL views, macro sector
-fit → sector tilt/budget constraints, and forecast regime/vol → gross-exposure scaling + view confidence.
+**Current implementation correction:** Stage 7 injects the sealed Stage 2 covariance into tier1, de-annualized
+to tier1's return period, and uses the sealed Stage 2 price panel only as a run-local diagnostic/input
+artifact. `23_build_bl_inputs.py` generates a
+tier1-native `stocks_scores_csv`, a ticker-level `bl_benchmark_weights.csv`, and a run-local sealed tier1
+config. Annual alpha views are consumed through an explicit absolute-alpha mode; they are not z-scored and
+rescaled. Sleeve-level sector budgets start from `strategic_sector_weights` by default, not Stage 3 realized
+weights; ticker-level benchmark weights are neutral/equal inside each sleeve by default, with Stage 3
+distribution available only as an explicit config option. Macro sector shifts use absolute and relative caps
+plus a small sleeve floor, so tiny sleeves are not
+silently eliminated by a single adverse macro score.
 
-**Acceptance tests:**
-- BL posterior blends calibrated views with the equilibrium prior; views are expected-return units (no
-  ordinal-rank contamination — verified).
-- Inter-sector weight differences are driven by **macro sector budgets**, not raw cross-sector score
-  comparison (shuffling cross-sector score *levels* while holding within-sector ranks leaves sector
-  budgets unchanged).
-- Risk-off regime / high forecast drawdown probability measurably reduces gross exposure (exposure-vs-
-  regime curve produced).
-- Full ablation (`baseline / macro-full / stocks-only`) runs and is reported net of cost vs baseline.
+**Authority hierarchy realized in tier1's own machinery** (verified against `tier1_portfolio_optimizer`):
+macro = the **prior/budget** → `benchmark_sector_weights` drives `π = δ·Σ·w_bench`; rotation = the
+**bounded tilt** → `SectorState` × `sector_state_alpha_multipliers`; AQR alpha = per-name **absolute view**
+(`P=I`, `q = π + alpha`, `μ_BL = posterior(π,Σ,P,q,Ω,τ)`).
+
+**UNITS — locked option B (annualized).** BL views are **annualized return units**, matching the Stage 2
+**annualized** covariance. `final_score` (already annual-return decimals, observed range ≈ [−0.20, +0.10])
+is the only thing that becomes an expected-return view. `rating`, `score_confidence`, `ScorePct`, rotation
+`State`, and macro regime are **NOT returns** — they only adjust **confidence (Ω), gross exposure, sector
+budgets, or alpha multipliers**. The generated tier1 config derives `returns.frequency` from the Stage 2
+covariance metadata and de-annualizes both annual covariance and annual alpha into that same optimizer
+period. A hard gate asserts `covariance_meta.annualization_factor == periods_per_year(returns.frequency)`.
+The view path must preserve the calibrated alpha (no z-score-and-rescale that discards magnitude).
+
+**Adapter mapping (sealed inputs → tier1 hooks):**
+| Sealed source | tier1 hook | Role |
+|---|---|---|
+| Stage 1 `final_score` | `SignalScore` (annual alpha view) | per-name absolute view |
+| Stage 1 `rating` | `confidence_by_rating` → Ω | view confidence |
+| Stage 6 sector budget = **Stage 3 sleeve wt + bounded macro_fit shift** | sector-targets CSV → `benchmark_sector_weights` → π | sector budget (governor) |
+| Stage 5 rotation `State` | `SectorState` → `sector_state_alpha_multipliers` | bounded sector tilt |
+| Stage 6 `regime` | `gross_exposure × regime_scalar` | gross scaling |
+| Stage 6 foreign budget (`active_flag`-gated) | `region_budgets.FOREIGN.{min,max}` | foreign cap |
+| Stage 6 `stock_overlay` | **diagnostic only** (≤ small conf haircut) | cautious (33–36% fallback) |
+| Stage 2 `covariance` | injected Σ | risk |
+
+Sector budget = `renorm(clip(stage3_sleeve_wt + bounded_shift(macro_fit_z), ±max_sector_shift))` —
+**Stage 6 `target_weight` is the neutral Stage-3 baseline, not a macro-optimized allocation**; macro shifts
+it within a cap. Foreign honors `active_flag` (currently 0 → stays 0).
+
+**Build — 4 sealed scripts (`blacklitterman/`):**
+- `23_build_bl_inputs.py` — adapter: from sealed Stages 1/2/3/5/6 emit `bl_views.csv`,
+  `bl_sector_targets_optimizer.csv`, `bl_foreign_budget_optimizer.csv`, and a **generated, sealed**
+  `bl_optimizer_config.yaml` (tier1 config whose `macro_optimizer_integration.inputs` point **only at
+  run-local sealed files** — never `MacroLayer/macro_serving.sqlite`, never PROD) + `bl_inputs_meta.json`.
+  Includes **contract-probe + pre-solve feasibility checks** (below). **First build stops here for review.**
+- `24_run_bl_optimizer.py` — run vendored tier1 on the sealed adapter config + injected Σ →
+  `bl_target_weights.csv`, `bl_optimizer_summary.csv`, `bl_optimizer_meta.json`, and a hard validation CSV
+  that verifies realized `cash_weight` / `risky_gross_exposure` match the macro-regime budget.
+- `25_apply_bl_cost_overlay.py` — rerun the Stage 4 cost model + latest liquidity snapshot against the fused
+  book → namespaced `bl_cost_adjusted_target_weights.csv` (baseline Stage 4 untouched).
+- `26_validate_bl_fusion.py` — gates + sealed `bl_manifest.json`.
+
+**Contract-probe + feasibility checks (in `23`, before any solve):**
+- Upstream manifests (1,2,3,5,6 + liquidity if used) `acceptance==PASS` and hash-match.
+- `sector_name` join key == `source_pipeline` set (bijective); every view ticker ∈ covariance index;
+  covariance universe aligns with the optimization universe exactly.
+- Optimizer input columns match tier1 loaders (sector targets `{sector_name,target_weight}`; foreign
+  `{Ticker,MarketName,Score,ScorePct,State}`; views carry SignalScore/Rating/SectorState).
+- Sector budgets sum to gross; FOREIGN ⊆ gross; per-name caps can satisfy each budget
+  (`budget_s ≤ n_s·max_weight`); no risk-ineligible name required by a budget.
+- Generated config references only run-local sealed files (scan: no MacroLayer DB, no PROD, no abs paths).
+- Units: `final_score` finite annual decimals; `covariance_units=="annualized"`; Stage 2 annualization factor
+  matches the generated tier1 return frequency.
+
+**Acceptance gates (hard; WARN non-blocking):** upstream-sealed-&-current · no-direct-MacroLayer-DB-read ·
+independence/PIT · join-completeness + covariance alignment · BL sanity (views finite, Ω positive &
+bounded, no-views ⇒ posterior recovers π, **units annualized**) · hierarchy (sector exposures within macro
+budgets, rotation ⊆ budget, FOREIGN ≤ country-fit budget, `gross==base×regime_scalar`) · conservation
+(long-only, Σw=gross, caps) · cost-adjusted book reproducible · **baseline Stage 3/4 byte-unchanged** ·
+`enabled_in_production:false` · determinism/provenance.
+
+**Reported diagnostic (WARN-only, never promotes):** fused book vs Stage 3 AQR-only, net of Stage 4 cost.
+Promotion to the live/default book is **deferred to Stage 11** (OOS walk-forward + lockbox). First test
+case = the fully sealed **2026-06-18** run.
+
+**Config:** `black_litterman_fusion:` block pins `tau`, `delta`, `return_space`, alpha units policy
+(B), `confidence_by_rating`/min/max/boost, `sector_state_alpha_multipliers`, `regime_to_gross_scalar` map,
+`macro_sector_max_shift`, `foreign_activation_policy`, `cost_overlay_namespace`, `enabled_in_production:false`.
 
 ## Stage 7.5 — Hedging / actuation overlay
 

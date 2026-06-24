@@ -34,7 +34,7 @@ def resolve_runtime_paths(config: dict[str, Any], config_path: Path) -> RuntimeP
         output_dir=resolve_path(cfg_get(config, "paths.output_dir", "output"), base_dir=base_dir),
         cache_dir=resolve_path(cfg_get(config, "paths.cache_dir", "output/cache"), base_dir=base_dir),
         macro_serving_db_path=resolve_path(
-            cfg_get(config, "paths.macro_serving_db_path", "macro/macro_serving.sqlite"),
+            cfg_get(config, "paths.macro_serving_db_path", "MacroLayer/macro_serving.sqlite"),
             base_dir=base_dir,
         ),
     )

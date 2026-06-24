@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -388,6 +389,8 @@ def main() -> int:
     ua = str(fetch_cfg.get("user_agent", "portfolio_layer/0.1"))
     timeout = float(fetch_cfg.get("request_timeout_sec", 20))
     retries = int(fetch_cfg.get("max_retries", 3))
+    master_retry_attempts = max(0, int(fetch_cfg.get("master_calendar_retry_attempts", 3)))
+    master_retry_sleep_sec = max(0.0, float(fetch_cfg.get("master_calendar_retry_sleep_sec", 5.0)))
     workers = int(fetch_cfg.get("max_workers", 10))
     enable_stooq = bool(fetch_cfg.get("enable_stooq_fallback", True))
     price_cache_dir = paths.cache_dir / "risk_prices"
@@ -643,6 +646,63 @@ def main() -> int:
                 "first": bars[0][0] if bars else "", "last": bars[-1][0] if bars else "",
             })
 
+    if master_ticker not in series_by_ticker and master_retry_attempts > 0:
+        LOGGER.warning(
+            "Master calendar ticker %s failed in batch; retrying it serially up to %d time(s)",
+            master_ticker,
+            master_retry_attempts,
+        )
+        retry_row: dict | None = None
+        for attempt in range(1, master_retry_attempts + 1):
+            if master_retry_sleep_sec > 0:
+                time.sleep(master_retry_sleep_sec)
+            (
+                bars,
+                split_events,
+                status,
+                provider,
+                source_symbol,
+                query_symbol,
+                alias_applied,
+                alias_effective_date,
+                alias_issuer_id,
+                alias_reason,
+            ) = fetch_one(master_ticker)
+            bars = [(d, v) for d, v in bars if d <= run_as_of]
+            retry_row = {
+                "ticker": master_ticker,
+                "status": status,
+                "provider": f"{provider};master_calendar_retry_attempt={attempt}" if provider else "",
+                "source_symbol": source_symbol,
+                "query_symbol": query_symbol,
+                "alias_applied": int(alias_applied),
+                "alias_effective_date": alias_effective_date,
+                "alias_issuer_id": alias_issuer_id,
+                "alias_reason": alias_reason,
+                "rows": len(bars),
+                "first": bars[0][0] if bars else "",
+                "last": bars[-1][0] if bars else "",
+            }
+            if status == "ok" and bars:
+                series_by_ticker[master_ticker] = dict(bars)
+                for row in split_events:
+                    split_rows.append({
+                        "ticker": master_ticker,
+                        "query_symbol": row.get("_query_symbol", query_symbol),
+                        "source_symbol": row.get("_source_symbol", source_symbol),
+                        "provider": row.get("_provider", provider),
+                        "split_date": row["split_date"],
+                        "numerator": row.get("numerator", ""),
+                        "denominator": row.get("denominator", ""),
+                        "split_ratio": row.get("split_ratio", ""),
+                    })
+                LOGGER.info("Master calendar retry succeeded for %s on attempt %d", master_ticker, attempt)
+                break
+            LOGGER.warning("Master calendar retry %d/%d failed for %s: %s", attempt, master_retry_attempts, master_ticker, status)
+        if retry_row is not None:
+            fetch_rows = [row for row in fetch_rows if row["ticker"] != master_ticker]
+            fetch_rows.append(retry_row)
+
     if master_ticker not in series_by_ticker:
         LOGGER.error("Master calendar ticker %s failed to fetch; cannot align panel", master_ticker)
         return 1
@@ -687,6 +747,8 @@ def main() -> int:
         "fetch_timestamp": fetched_at,
         "run_as_of": run_as_of,
         "master_calendar_ticker": master_ticker,
+        "master_calendar_retry_attempts": master_retry_attempts,
+        "master_calendar_retry_sleep_sec": master_retry_sleep_sec,
         "covariance_frequency": frequency,
         "lookback_trading_days": lookback,
         "start_date": start.isoformat(),

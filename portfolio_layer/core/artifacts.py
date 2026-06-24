@@ -58,3 +58,11 @@ def invalidate_rotation_outputs_after_validation(rotation_dir: Path) -> None:
         rotation_dir / "rotation_ablation_metrics.json",
         rotation_dir / "rotation_ablation_weights.csv",
     ])
+
+
+def invalidate_macro_outputs_after_contract_change(macro_dir: Path) -> None:
+    """Clear Stage 6 validation artifacts that depend on macro contract CSVs."""
+    unlink_if_exists([
+        macro_dir / "macro_manifest.json",
+    ])
+    clear_dir_files(macro_dir / "validation")

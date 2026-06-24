@@ -176,6 +176,13 @@ def _resolve_cfg_path(path: str, cfg: Dict[str, Any], cfg_path: Optional[Path]) 
     return str(p.resolve())
 
 
+def _uses_precomputed_covariance(cfg: Dict[str, Any]) -> bool:
+    rcfg = cfg.get("risk", {}) or {}
+    source = str(rcfg.get("covariance_source", "")).strip().lower()
+    raw_path = rcfg.get("covariance_csv", (cfg.get("paths", {}) or {}).get("covariance_csv", ""))
+    return source in {"stage2_covariance_csv", "precomputed_csv", "csv"} and str(raw_path).strip() != ""
+
+
 def zscore(x: pd.Series) -> pd.Series:
     x = x.astype(float)
     if len(x) == 0:
@@ -714,6 +721,11 @@ RATING_ORDER = ["Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"]
 def select_us_long_only(stocks: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
     ucfg = _require_cfg_section(cfg, "universe")
     blcfg = cfg.get("black_litterman", {}) or {}
+    if bool(ucfg.get("include_all_stocks_long_only", False)):
+        out = stocks.copy()
+        out["Sleeve"] = "US"
+        return out
+
     max_n = int(ucfg.get("max_us_stocks_long_only", 0))
     quotas: Dict[str, int] = ucfg.get("per_rating_quota_long_only", {}) or {}
 
@@ -1322,6 +1334,10 @@ def build_cov_scenarios(
     include_bootstrap: bool = True
 ) -> List[CovScenario]:
     rcfg = _require_cfg_section(cfg, "risk")
+    precomputed = _load_precomputed_covariance_for_returns(rets, cfg)
+    if precomputed is not None:
+        return precomputed
+
     scenarios_cfg = (rcfg.get("scenarios", {}) or {})
     shrink_method = rcfg.get("shrinkage", "manual")
     manual_delta = float(rcfg.get("manual_shrink_delta", 0.2))
@@ -1443,6 +1459,45 @@ def build_cov_scenarios(
             scenarios.append(CovScenario(f"Kendall_boot{b+1:02d}", covKb))
 
     return scenarios
+
+
+def _load_precomputed_covariance_for_returns(rets: pd.DataFrame, cfg: Dict[str, Any]) -> Optional[List[CovScenario]]:
+    if not _uses_precomputed_covariance(cfg):
+        return None
+    rcfg = _require_cfg_section(cfg, "risk")
+    cfg_path = _cfg_path_from_cfg(cfg)
+    raw_path = rcfg.get("covariance_csv", (cfg.get("paths", {}) or {}).get("covariance_csv", ""))
+    cov_path = _resolve_cfg_path(str(raw_path), cfg, cfg_path)
+    cov_df = pd.read_csv(cov_path, index_col=0)
+    cov_df.index = cov_df.index.astype(str).str.upper().str.strip()
+    cov_df.columns = cov_df.columns.astype(str).str.upper().str.strip()
+
+    tickers = [str(c).upper().strip() for c in rets.columns.tolist()]
+    if not tickers:
+        raise ValueError("Precomputed covariance requested, but returns/assets ticker order is empty.")
+    missing = sorted(set(tickers) - set(cov_df.index)) + sorted(set(tickers) - set(cov_df.columns))
+    if missing:
+        raise ValueError(f"Precomputed covariance missing optimizer tickers: {sorted(set(missing))[:20]}")
+
+    cov = cov_df.loc[tickers, tickers].to_numpy(dtype=float)
+    if not np.isfinite(cov).all():
+        raise ValueError("Precomputed covariance contains non-finite values after ticker alignment.")
+    cov = symmetrize(cov)
+
+    units = str(rcfg.get("covariance_units", "annualized")).strip().lower()
+    if units in {"annual", "annualized", "per_year", "yearly"}:
+        ppy = periods_per_year(str((_require_cfg_section(cfg, "returns")).get("frequency", "D")))
+        cov = cov / float(ppy)
+    elif units not in {"period", "per_period", "daily", "weekly", "monthly"}:
+        raise ValueError(f"Unknown risk.covariance_units={units!r} for precomputed covariance.")
+
+    eig_floor = float(rcfg.get("psd_eigen_floor", 1e-8))
+    cov = nearest_psd_cov(cov, eig_floor=eig_floor)
+    max_cond = float(rcfg.get("max_cov_condition", 1e12))
+    cond = _safe_cond(cov)
+    if (not math.isfinite(cond)) or cond > max_cond:
+        raise ValueError(f"Precomputed covariance condition number {cond:.3e} exceeds max_cov_condition={max_cond:.3e}.")
+    return [CovScenario("Stage2_precomputed", cov)]
 
 
 # --------------------------
@@ -1637,7 +1692,9 @@ def build_bl_inputs(
         rf_p = float(cash_period_return)
         pi = pi_excess + rf_p
 
-    # Build alpha from score signals
+    # Build alpha from score signals. The default legacy mode z-scores FinalScore and rescales it.
+    # Stage 7 can request absolute annual alpha so calibrated expected-return magnitudes are preserved.
+    alpha_mode = str(bl.get("alpha_input_mode", "zscore_scaled")).strip().lower()
     alpha_scale_p = annual_to_period_rate(float(bl.get("alpha_scale_annual", 0.06)), ppy)
     sector_alpha_p = annual_to_period_rate(float(bl.get("sector_alpha_scale_annual", 0.03)), ppy)
     foreign_alpha_p = annual_to_period_rate(float(bl.get("foreign_alpha_scale_annual", 0.03)), ppy)
@@ -1653,7 +1710,17 @@ def build_bl_inputs(
     else:
         score_z = zscore(assets["SignalScore"])
 
-    alpha = alpha_scale_p * score_z.to_numpy(dtype=float)
+    if alpha_mode in {"absolute_annual", "annual_alpha", "absolute"}:
+        alpha_col = str(bl.get("alpha_column", "ExpectedAlphaAnnual")).strip() or "ExpectedAlphaAnnual"
+        if alpha_col not in assets.columns:
+            raise ValueError(f"black_litterman.alpha_input_mode={alpha_mode!r} requires assets column {alpha_col!r}.")
+        alpha_ann = pd.to_numeric(assets[alpha_col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        if alpha_ann.isna().any():
+            bad = assets.loc[alpha_ann.isna(), "Ticker"].astype(str).head(10).tolist()
+            raise ValueError(f"{alpha_col} contains non-finite annual alpha values. Sample tickers: {bad}")
+        alpha = np.array([annual_to_period_rate(float(v), ppy) for v in alpha_ann.to_numpy(dtype=float)], dtype=float)
+    else:
+        alpha = alpha_scale_p * score_z.to_numpy(dtype=float)
 
     # Optional sector signal contribution
     if bool(bl.get("include_sector_in_alpha", True)) and "SectorScoreZ" in assets.columns:
@@ -1705,6 +1772,10 @@ def build_bl_inputs(
             fallback_conf,
         )
     c0 = np.array([float(conf_by_rating.get(r, fallback_conf)) for r in ratings], dtype=float)
+    if bool(bl.get("use_score_confidence_in_omega", False)) and "ScoreConfidence" in assets.columns:
+        score_conf = pd.to_numeric(assets["ScoreConfidence"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        score_conf = score_conf.fillna(0.0).clip(lower=0.0, upper=1.0).to_numpy(dtype=float)
+        c0 = c0 * score_conf
     conf = c0 + boost * np.abs(score_z.to_numpy(dtype=float))
     conf = np.clip(conf, min_conf, max_conf)
 
@@ -2996,6 +3067,11 @@ def solve_portfolio(
         "exp_return_contrib_period_us_net": float(us_mu @ us_w) if idx_us else 0.0,
         "exp_return_contrib_period_foreign_net": float(fx_mu @ fx_w) if idx_foreign else 0.0,
         "exp_return_contrib_period_cash": float(cash_period_return * cash_w),
+        "net_exposure_us": float(us_w.sum()) if idx_us else 0.0,
+        "net_exposure_foreign": float(fx_w.sum()) if idx_foreign else 0.0,
+        "cash_weight": float(cash_w),
+        "risky_gross_exposure": float(np.abs(w_opt[:n_risky]).sum()),
+        "portfolio_sum_weight": float(w_opt.sum()),
     })
     if is_long_short:
         us_long = np.maximum(us_w, 0.0)
@@ -3280,6 +3356,9 @@ def build_assets_table(
         "SectorName", "IndustryAggregateName", "IndustryName", "SectorScorePct", "SectorState", "LS_Book",
         "NextEarningsDate", "EarningsDaysAhead", "EarningsDaysAheadAsOf", "EarningsFilterNote",
     ]
+    for optional_col in ("ExpectedAlphaAnnual", "ScoreConfidence", "SourcePipeline"):
+        if optional_col in us.columns and optional_col not in us_cols:
+            us_cols.append(optional_col)
     if "_FullUniverseZ" in us.columns:
         us_cols.append("_FullUniverseZ")
     fx_cols = [
@@ -3491,13 +3570,29 @@ def run_end_to_end_from_cfg(
     # Compute returns for each portfolio universe separately (so selection differs)
     def get_rets_for_assets(assets: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         tickers = assets["Ticker"].tolist()
-        rets = provider.get_returns(
-            tickers=tickers,
-            start=start_str,
-            end=end_str,
-            freq=str(rc.get("frequency", "W-FRI")),
-            log_returns=bool(rc.get("log_returns", True)),
-        )
+        try:
+            rets = provider.get_returns(
+                tickers=tickers,
+                start=start_str,
+                end=end_str,
+                freq=str(rc.get("frequency", "W-FRI")),
+                log_returns=bool(rc.get("log_returns", True)),
+            )
+        except Exception:
+            if not _uses_precomputed_covariance(cfg):
+                raise
+            logger.warning(
+                "Returns provider failed, but precomputed covariance is active; continuing with empty diagnostic returns.",
+                exc_info=True,
+            )
+            rets = pd.DataFrame(columns=tickers)
+        if _uses_precomputed_covariance(cfg):
+            for t in tickers:
+                if t not in rets.columns:
+                    rets[t] = np.nan
+            rets = rets.loc[:, tickers].copy()
+            return assets.copy().reset_index(drop=True), rets
+
         rets = clean_returns_df(rets, cfg)
         # Align assets to returns columns (drop missing)
         common = [t for t in tickers if t in rets.columns]
