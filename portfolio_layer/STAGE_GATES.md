@@ -35,20 +35,25 @@ Staging_Scalper_System/portfolio_layer/
   db/portfolio_layer.sqlite        # layer DB (scores, risk, weights, ledger); generated, gitignored
   core/        contracts.py, paths.py, logging_utils.py
   scores/      01_collect, 02_calibrate, 03_validate
-  risk/        04_return_panel, 05_covariance, 06_validate
+  risk/        04_check_risk_readiness, 05_build_return_panel, 05c/05d liquidity,
+               06_build_risk_coverage, 07_build_covariance_model, 08_validate_risk_panel
   costs/       12_build_trade_list, 13_build_cost_model, 14_apply_no_trade_bands, 15_validate_cost_model
-  optimizer/   tier1_portfolio_optimizer.py, tier1_common.py, 08_run_optimizer   (vendored)
+  optimizer/   tier1_portfolio_optimizer.py, tier1_common.py, 09_run_portfolio_optimizer,
+               10_validate_optimizer_outputs   (vendored)
   rotation/    rotation_timeseries.py, sector_rotation_selector.py, foreign_market_evaluator.py,
                17_build_rotation_signals, 18_validate_rotation_signals, 19_run_rotation_ablation_replay (clean)
   MacroLayer/  vendored macro engine + macro_raw.sqlite/macro_serving.sqlite (independent)
   macro/       Stage 6 adapter: 20_run_macro_serving, 21_build_macro_contract,
                22_validate_macro_contract
-  features/    65_pit_feature_store, 65_data_routing                         (Stage 6.5)
-  forecast/    66_define_targets, 67_train_models, 67_calibrate              (Stage 6.6-6.7)
-  blacklitterman/  10_build_bl_views
-  hedging/     75_run_hedging_overlay                                        (Stage 7.5)
-  sleeves/     11_build_sleeves, 12_apply_risk_budgets
-  exits/       13_run_exit_engine
+  research/    65_pit_snapshot_store, 66_define_calibration_targets           (Stage 11 infra)
+  forecast/    67_train_models, 67_calibrate                                  (deferred; only if Stage 11 justifies ML)
+  blacklitterman/  23_build_bl_inputs, 24_run_bl_optimizer, 25_apply_bl_cost_overlay,
+                   26_validate_bl_fusion
+  hedging/     75_run_hedging_overlay                                        (deferred; tested inside Stage 11)
+  sleeves/     27_build_sleeve_framework, 28_apply_risk_budgets, 29_validate_sleeves
+  ledger/      30_import_ib_activity_statement, 31_build_holdings_ledger,
+               32_validate_holdings_ledger                                  (Stage 8.5)
+  exits/       33_build_exit_signals, 34_apply_exits, 35_validate_exits
   payout/      14_build_payout_liability
   backtest/    15_backtest, 16_ablation_walkforward, 17_lockbox_ledger
   orchestration/ 18_run_pipeline, 19_risk_governor
@@ -66,18 +71,18 @@ Every sector pipeline emits this, identical schema, one as-of date per run:
 | `final_score` | **calibrated expected forward alpha** (excess vs sector benchmark), common units |
 | `rating` | bucketed rating, identical definition across sectors |
 | `score_confidence` | calibration confidence / coverage haircut |
-| `investable_eligible` | 0/1 **hard gate** carried from the sector's native safety/quality gate (med: `passed_tier1_safety_gate`; tech: `rank_ready_flag`/`calibration_eligible_flag`; biotech: its own gate). The optimizer ranks/sizes **only eligible names** — never top raw score. |
+| `investable_eligible` | 0/1 **hard gate** carried from the sector's native portfolio candidate gate (med: `portfolio_candidate_gate`; tech: `rank_ready_flag`/`calibration_eligible_flag`; biotech: its own gate). The optimizer ranks/sizes **only eligible names** — never top raw score. |
 | `eligibility_reason` | provenance for the gate decision (why eligible/excluded) |
 | `source_pipeline`, `score_version` | provenance |
 
 This is exactly what `tier1_portfolio_optimizer` already consumes — the join is a contract, not a code merge.
 
-**Eligibility semantics (decided):** a sector hands the portfolio layer its *safety/quality-gate-eligible*
+**Eligibility semantics (decided):** a sector hands the portfolio layer its *portfolio-candidate-eligible*
 set, not its own final pick list. The sector vouches that a name is safe/eligible; cross-sector
 *selection and sizing* is the portfolio layer's job. The eligible set is therefore a **superset** of
-the sector's internal final list (e.g. med Tier 1 ⊆ med safety-gate-eligible), and the validate gate
-asserts that containment. Headline score per sector: med = `composite_score` (= `raw_composite_score`,
-IC tilt already baked in via `replace_raw`); tech family = `final_score`; `ic_tilted_composite_score`
+the sector's internal final list (e.g. med Tier 1 ⊆ med `portfolio_candidate_gate`), and the validate gate
+asserts that containment. Headline score per sector: med = `portfolio_candidate_score` when present
+(otherwise `composite_score`; IC tilt already baked in via `replace_raw`); tech family = `final_score`; `ic_tilted_composite_score`
 and `safe_core_score` are audit-only and must never drive reranking.
 
 ---
@@ -115,9 +120,9 @@ calibration); `scores/03_validate_score_contract.py`.
 - Cross-sector parity: equal `final_score` in two sectors implies statistically indistinguishable
   realized forward alpha (calibration-parity test passes within tolerance). This empirical gate is
   reported as deferred until Stage 2 return data exists; Stage 1 may only pass hard schema/PIT gates.
-- `investable_eligible` is populated from each sector's native safety/quality gate; ineligible names
+- `investable_eligible` is populated from each sector's native portfolio candidate gate; ineligible names
   are excluded from optimizer input. The eligible set is a superset of the sector's own final pick
-  list (med Tier 1 ⊆ med safety-gate-eligible), asserted by the validate gate.
+  list (med Tier 1 ⊆ med `portfolio_candidate_gate`), asserted by the validate gate.
 - Duplicate tickers across sectors are detected and resolved deterministically.
 
 ## Stage 2 — Unified cross-sector risk panel (live/current book)
@@ -141,7 +146,7 @@ shrinkage/exclusion for optimizer risk sizing."
 **Universe:** the **final `stocks_scores.csv`** (post-duplicate-resolution → one row per ticker, e.g.
 BSX gets exactly one price series), restricted to `investable_eligible=1`, **plus** benchmarks / hedges /
 rotation ETFs (SPY, QQQ, SMH, SOXX, XBI, sector SPDRs, foreign ETFs). Held-but-now-ineligible names are
-added once a holdings ledger exists (Stage 8+).
+added once a holdings ledger exists (Stage 8.5+).
 
 **Config (`score_contract` peer block `risk_panel`):** `lookback_trading_days` (e.g. 504),
 `min_direct_history_days`, `hard_floor_history_days`, `benchmark_tickers`, `sector_etf_map` (sector →
@@ -232,7 +237,7 @@ AND `risk_eligible=1`** (Stage 1 selection gate ∩ Stage 2 risk-data gate). Any
 `risk_eligible=0` is **excluded from sizing** and surfaced in a `risk_excluded_candidates.csv`
 (a.k.a. `held_no_risk_data`) report — selectable by score, but not sized until it has risk history.
 **Do NOT** zero-weight risk-ineligible names inside the optimizer, and **do NOT** invent prior-hold
-behavior — that waits for the holdings ledger (Stage 8+). This is the correct default pre-ledger.
+behavior — that waits for the holdings ledger (Stage 8.5+). This is the correct default pre-ledger.
 
 **Universe (refined):** sized names are `investable_eligible=1 AND risk_eligible=1 AND role=scored AND
 ticker ∈ covariance.csv`. Benchmarks/ETFs are diagnostics/replay context only, never optimization
@@ -471,55 +476,25 @@ newer MacroLayer DB seed, but it must never consume rows after the portfolio run
 Known-stress regime checks (2008 GFC, 2020 COVID, 2022 rate-hike) remain MacroLayer engine diagnostics;
 they are not a substitute for the Stage 6 contract gates.
 
-## Stage 6.5 — Unified PIT feature store & data routing
+## Deferred Research Modules 6.5-6.7 - Folded Into Stage 11
 
-**Goal:** a vintage-correct feature store combining macro + market-internal + routed alternative data.
+These are **not prerequisites** for Stages 7-8 and should not be built as standalone forecast layers now.
+The immediate bottleneck is empirical calibration of the existing `final_score` contract, not ML. The useful
+parts of 6.5/6.6 become **Stage 11 research infrastructure**:
 
-**Build:** `features/65_pit_feature_store.py` (point-in-time panel using ALFRED/PIT vintages);
-`features/65_data_routing.py` (explicit routing table). New alt-data connectors added selectively:
-- **Timing/regime → macro layer:** BEA, BLS (CPI/PPI/JOLTS), Census aggregates, Treasury FiscalData,
-  World Bank/IMF/OECD.
-- **Sector demand/fundamental → sector pipelines (alpha, not timing):** USAspending (federal IT/cloud/
-  cyber obligations), SAM.gov (forward solicitations), NSF awards, EIA electricity (datacenter/AI power).
+- **6.5 narrowed:** build a PIT score/snapshot store, not a broad feature store. Required history:
+  `as_of_date`, `ticker`, `source_pipeline`, `native_score`, `final_score`, `rating`, `score_confidence`,
+  eligibility/risk status, sector/sleeve membership, regime label, rotation state, and sealed source hashes.
+- **6.6 narrowed:** define only the calibration targets Stage 11 needs first:
+  `forward_return_21d`, `forward_return_63d`, `forward_return_126d`,
+  `forward_excess_return_vs_sector`, `drawdown_next_63d`, and `regime_at_snapshot`.
+- **6.7 deferred:** ML forecasting / calibrated probability models are built only after Stage 11 proves the
+  score snapshots have stable realized payoff and a rule-based OOS baseline exists. The model must beat the
+  existing MacroLayer / BL / sleeve stack out-of-sample, net of cost, or it remains shadow-only.
 
-**Acceptance tests:**
-- Every feature carries a vintage/as-of; a leakage probe confirms **no revised values** appear in any
-  training window (point-in-time integrity).
-- Routing is enforced: sector-demand feeds land in sector pipelines, not the macro forecaster; a test
-  asserts no quarterly-macro feature is exposed to the 1–2wk model.
-- Each new connector has freshness/coverage QA and is gated on orthogonality (incremental correlation
-  below threshold vs existing features) before inclusion.
-- Highest-priority orthogonal sources (EIA datacenter power, SAM.gov/USAspending forward IT demand)
-  ingest and pass QA.
-
-## Stage 6.6 — Forecast targets & labels
-
-**Goal:** define what the forecaster predicts — risk, not price.
-
-**Build:** `forecast/66_define_targets.py` producing horizon-matched labels: realized volatility,
-`P(drawdown > X%)`, regime-transition probability, return-distribution quantiles — at 1w/2w/1m/3m.
-
-**Acceptance tests:**
-- All labels are computable point-in-time with no look-ahead; horizon→data mapping enforced (1–2wk uses
-  market-internal data only; 1–3m may use macro).
-- Targets are probabilistic/distributional — **no point price-level target exists** in the schema.
-- Label leakage probe (overlapping-horizon contamination) passes under purged construction.
-
-## Stage 6.7 — ML forecasting models
-
-**Goal:** calibrated probabilistic forecasts that beat the existing rule-based regime.
-
-**Build:** `forecast/67_train_models.py` (regularized models — penalized logistic / gradient boosting
-before anything deep; few economically-motivated features); purged & embargoed walk-forward CV;
-`forecast/67_calibrate.py` (probability calibration + confidence intervals).
-
-**Acceptance tests:**
-- Forecasts are calibrated: reliability curve within tolerance; intervals have correct empirical coverage.
-- Validation uses **purged & embargoed walk-forward CV**; deflated Sharpe / multiple-testing correction
-  applied to any signal search.
-- **Gate:** the model beats the rule-based MacroLayer regime decision out-of-sample, net of cost. If it
-  does not, it stays shadow-only and the rules are retained.
-- Volatility and drawdown-probability forecasts show genuine skill (Brier/CRPS beats climatology baseline).
+The broader feature-routing ideas remain valid later: macro/timing data belongs in the macro/forecast layer;
+sector-demand/fundamental data belongs in sector pipelines. But new connectors and ML forecasts should wait
+until Stage 11 has enough PIT history to test them without overfitting.
 
 ## Stage 7 — Black-Litterman fusion: macro views + sector budgets (SHADOW-ONLY adapter)
 
@@ -610,43 +585,147 @@ case = the fully sealed **2026-06-18** run.
 (B), `confidence_by_rating`/min/max/boost, `sector_state_alpha_multipliers`, `regime_to_gross_scalar` map,
 `macro_sector_max_shift`, `foreign_activation_policy`, `cost_overlay_namespace`, `enabled_in_production:false`.
 
-## Stage 7.5 — Hedging / actuation overlay
+## Deferred Module 7.5 - Hedging / Actuation Overlay
 
-**Goal:** translate a forecast downturn into action — scale down, hedge, or rotate defensive.
+Hedging is **not needed before Stage 11**. The base fused/sleeved book should first prove its OOS behavior
+without adding another moving part. Stage 7.5 remains a candidate module tested inside Stage 11 after the
+walk-forward harness exists.
 
-**Build:** `hedging/75_run_hedging_overlay.py` mapping forecast drawdown probability / risk-off signal to
-gross-exposure reduction, index put protection, or inverse/defensive rotation, with hedge cost modeled.
+Candidate actions: gross-exposure reduction, index put protection, inverse/defensive ETFs, or defensive
+rotation. Any hedge must be costed explicitly and compared against the unhedged Stage 7/8 book net of hedge
+cost. If it does not improve OOS tail metrics without unacceptable return drag, it remains shadow-only.
+
+## Stage 8 — Multi-horizon sleeves + risk-allocation engine (SHADOW-ONLY)
+
+**Goal:** take the *sealed* Stage 7 cost-adjusted fused book and re-allocate its **risk** (not capital) —
+factor-neutralized, diversified into many low-correlation bets, with risk placed where the information
+ratio is highest — partitioned into horizon sleeves with regime-conditional risk budgets and a drawdown
+throttle. It is a **risk-allocation engine, not risk accounting**: the Rentech part is *where* the risk
+goes, not just measuring it. **Shadow-only**: it emits a *proposal*, never mutates the Stage 7 book.
+
+**Where it sits:** consumes the sealed Stage 7 manifest + `blacklitterman/costs/bl_cost_adjusted_target_weights.csv`
+(hash-verified, not just read), joined to sealed metadata (`bl_target_weights.csv` SectorName/Rating;
+`stocks_scores.csv` `final_score`/`score_confidence`/`source_pipeline`) and the Stage 2 **annualized**
+`covariance.csv`. It does **not** select new names and introduces no new tickers.
+
+**Risk model (all from the sealed Σ — no new regression):** `covariance.csv` is 419×419 and already
+contains the **SPY + 5 sleeve ETFs**, so a multi-factor model falls straight out of Σ:
+`Ω_f = Σ[F,F]`, betas `B = Σ[A,F]·Ω_f⁻¹`, systematic `BΩ_fB'`, idiosyncratic `D = diag(Σ[A,A] − BΩ_fB')`.
+- **Per-name risk contribution** `RCᵢ = wᵢ(Σw)ᵢ / w'Σw` (non-CASH only; CASH excluded from Σ/RC).
+- **Factor risk decomposition** → systematic vs idiosyncratic share + per-factor (market, each sleeve) share.
+- **Effective number of bets (Meucci/PCA):** `Σ=EΛE'`, `v=E'w`, `p_k=v_k²λ_k/(w'Σw)`, **ENB=exp(−Σ p_k ln p_k)**.
+
+**Rentech-style allocation principles (what makes it more than vol budgeting):**
+1. **Factor-neutralized:** keep risk **idiosyncratic-dominated** — cap market-beta and each sector-factor
+   risk share; the book is paid for *stock selection*, not unintended factor beta.
+2. **Risk where the edge is (Euler/IR):** at a risk-efficient book marginal risk ∝ marginal alpha; within a
+   sleeve the neutral is **equal risk contribution (risk parity), tilted by IR = `final_scoreᵢ/σᵢ`**;
+   positions paying risk without alpha justification are flagged/trimmed.
+3. **Diversification as an objective:** gate on **ENB ≥ floor** — many small, low-correlation bets, not a
+   few big ones that weight caps alone would miss.
+4. **Cross-sleeve joint risk:** budget against the **full joint Σ** (sleeves are correlated; total risk ≠ Σ
+   of sleeve risks).
+5. **Regime-conditional budgets:** sleeve risk budgets are a function of the Stage 6 regime (risk-off cuts
+   the speculative/`medium_rotation` budget, raises `long_core`).
+6. **Continuous drawdown/Kelly throttle:** `scale = clip(1 − dd/dd_limit, 0, 1)·(σ_target/σ_realized)` —
+   **Phase 1 = simulated/diagnostic only** (no persisted state); Phase 2 persists `sleeve_state`.
+7. **Cost/capacity aware:** higher-turnover sleeves penalized by Stage-4 cost; **ADV/capacity caps are the
+   one genuinely deferred piece** (no volume data) — flagged, never faked.
+
+**Sleeves (PIT, exactly one per held name, auditable reason):**
+- `short_catalyst` (1–3 mo) — **DISABLED in Phase 1**; requires the formal event contract
+  `events/catalyst_events.csv` (`ticker,event_type,event_date,event_asof_date,source_pipeline,confidence,
+  source_artifact,source_sha256`; gate `event_asof_date ≤ run_as_of`). Absent ⇒ **WARN + disable**, never
+  `final_score`-faked.
+- `medium_rotation` — held names whose sleeve has Stage 5 rotation `State==Positive`.
+- `long_core` — remaining names, driven by `final_score`.
+
+**Phase-1 gross policy:** Stage 8 **re-allocates risk composition at the existing gross** — it does **not**
+re-scale gross or set a live `σ_target` (Stage 6/7 own gross via regime). Explicit vol-targeting is Phase 2.
+
+**Build (`sleeves/`, clean):**
+- `sleeves/risk_model.py` — RC, Σ-based factor decomposition, ENB, betas, IR (pure functions).
+- `27_build_sleeve_framework.py` — sleeve assignments + risk diagnostics (RC/factor/ENB) on the Stage 7
+  book → `sleeve_assignments.csv` + `risk_model_meta.json`.
+- `28_apply_risk_budgets.py` — IR-tilted risk-parity within sleeve + regime-conditional sleeve budgets,
+  iterative **scale→project** (capped-simplex, long-only, per-name + sleeve caps, residual→CASH; fail
+  closed if infeasible) → `sleeve_adjusted_target_weights.csv`, `sleeve_risk_budget.csv`,
+  `factor_risk_decomposition.csv`, `effective_bets.json`.
+- `29_validate_sleeves.py` — gates + sealed `sleeve_manifest.json`.
+- `30_run_sleeve_ablation_replay.py` (optional, WARN-only diagnostic).
+
+**Acceptance gates (hard; WARN non-blocking):**
+- **Stage 7 sealed & current** — `bl_manifest.json` acceptance PASS + cost-adjusted book hash verified;
+  **no new tickers**; every held non-CASH ticker ∈ covariance; **cov hash == sealed Stage 2**.
+- **Partition** — each held name → exactly one sleeve, complete + disjoint, auditable reason.
+- **RC guards** — `w'Σw > eps`, no NaN/inf RC, per-name risk-contribution cap respected; concentration probe
+  (inject one huge alpha) is capped.
+- **Factor-neutral** — market-beta and each sector-factor share ≤ caps as hard gates; idiosyncratic share floor
+  is WARN-only in Phase 1 because the upstream two-GICS book limits what reweighting can achieve.
+- **Diversification** — `ENB` must not worsen as a hard gate; absolute `ENB ≥ floor` is WARN-only in Phase 1.
+- **IR consistency** — risk concentrated where IR is highest (no large un-alpha'd RC outliers; WARN if borderline).
+- **Conservation / no-add-risk** — weights (incl. CASH) sum to 1; **risky gross ≤ Stage-7 cost-adjusted
+  risky gross**; **cash ≥ Stage-7 cash** unless explicitly overridden; long-only; per-name + sleeve caps.
+- **Shadow-only / non-destructive** — Stage 7 (and Stage 3/4) artifacts byte-unchanged;
+  `enabled_in_production:false`; writes only under `runs/<as_of>/sleeves/`.
+- **Determinism / provenance** — sealed manifest hashing Σ, Stage 7 inputs, config, sources.
+
+**Reported diagnostic (WARN-only, never promotes):** sleeve-adjusted vs Stage 7 fused, net of cost.
+Promotion (re-cost the proposal / go live) waits for Stage 11 OOS.
+
+**Phase 1 (now):** `long_core` + `medium_rotation`, factor/ENB/IR/regime budgets, simulated throttle,
+shadow proposal — no Stage 7 mutation, no cost-overlay invalidation. **Phase 2:** the catalyst event
+surface + horizon-matched short-window Σ for it; persistent drawdown state; ADV/capacity caps; cost overlay
+on a promoted proposal.
+
+## Stage 8.5 — Holdings ledger + broker statement ingestion
+
+**Goal:** make the portfolio layer stateful before exits/payouts. The raw source is a sealed IB Activity
+Statement CSV saved under `IB_reports/`; the core pipeline does **not** connect to live IB. One-day and
+date-range reports are both valid inputs, so missed daily runs can be caught up with a wider statement.
+
+**Build:** `ledger/30_import_ib_activity_statement.py` parses the IB multi-section CSV into normalized
+run-local CSVs; `ledger/31_build_holdings_ledger.py` loads the artifacts into the portfolio-owned SQLite
+DB and builds `holding_lots.csv` + `holding_state.csv`; `ledger/32_validate_holdings_ledger.py` seals
+`ledger_manifest.json`.
+
+**Tables:** broker statement sources, open positions, net stock positions, trades/fills, instruments,
+cash report, dividends, cash movements, fees, securities lending, holdings lots, current holding state,
+and reconciliation checks.
+
+**Bootstrap policy:** reconstruct current stock lots from report trades and IB aggregate cost basis. If a
+position predates the report window, create an explicit inferred pre-report lot only when reconciled to
+IB aggregate quantity/basis; any manual entry date is stored in provenance. Current known override:
+`FISV` 100 shares entered `2025-10-29`, basis inferred from IB aggregate cost basis. Lent shares do not
+reduce exposure; lending is stored separately (e.g. BDX uses shares-at-IB for exposure, not net shares).
 
 **Acceptance tests:**
-- A forecast risk-off event triggers the configured hedge in backtest.
-- The hedged book shows lower max drawdown than the unhedged book with an acceptable net-return cost.
-- Hedge cost (premium/slippage) is explicitly modeled and netted in all reported results.
-- Ablation: hedging improves Calmar / tail metrics vs the un-hedged Stage 7 book.
+- Raw IB CSV hash matches the sealed import; source period/end date and account metadata are recorded.
+- Normalized CSV hashes match the build metadata; SQLite row counts match sealed CSV artifacts.
+- Current holdings reconcile to IB open positions; stock lots reconcile to current quantity and cost basis.
+- Trade keys are unique/idempotent and include the raw statement `source_row`, so value-identical fills
+  inside one statement cannot collide; reprocessing the same CSV replaces rows instead of duplicating them.
+- Instruments and cash/NAV data are present; securities lending is separated from portfolio exposure.
+- `enabled_in_production:false`; no live IB/TWS connection in the core stage.
 
-## Stage 8 — Multi-horizon sleeves + risk budgeting
-
-**Goal:** partition the book into horizon sleeves with risk (not capital) budgets and per-sleeve
-drawdown limits.
-
-**Build:** `sleeves/11_build_sleeve_framework.py` (assign names to short-catalyst / medium / long-AQR
-sleeves by driving signal); `sleeves/12_apply_risk_budgets.py` (vol-contribution budget per sleeve,
-risk-contribution caps, sleeve caps, pod-style per-sleeve drawdown throttle).
-
-**Acceptance tests:**
-- Each position maps to exactly one sleeve with an auditable reason; the AQR factor score drives the long
-  (6–18mo) sleeve, catalysts (e.g., FDA AdCom dates) drive the short (1–3mo) sleeve.
-- Sleeve allocations are by **vol contribution**, not capital — the speculative sleeve's capital share is
-  below its equal-capital share.
-- No single name exceeds its risk-contribution cap (% of portfolio variance); a concentration probe (one
-  huge alpha) is correctly capped.
-- A simulated sleeve drawdown beyond its limit automatically throttles that sleeve's risk budget at the
-  next rebalance.
+**Known ledger limits before Stage 9:**
+- Overlapping date-range statements may repeat the same trade under different raw-source hashes unless a
+  future IB report includes a stable execution ID; Stage 9 should consume one sealed ledger run, not merge
+  overlapping broker statements naively.
+- Lot-level cost basis is reconciled to IB aggregate basis. If a corporate action or wash-sale adjustment
+  creates a trade-vs-aggregate residual, the aggregate is authoritative and the residual is attached to the
+  last lot; aggregate P&L is correct, while per-lot P&L remains an audited approximation.
 
 ## Stage 9 — Exit engine
 
 **Goal:** systematic, sleeve-specific exits beyond optimizer rebalancing.
 
-**Build:** `exits/13_run_exit_engine.py` implementing signal-decay exit (AQR), time-stop (catalyst sleeve,
+**Prerequisite:** consumes the sealed Stage 8.5 holdings ledger. The exit run must explicitly stamp the
+portfolio target as-of date and the ledger as-of date; an equal-date run is preferred, but a later broker
+ledger may be accepted for current-holdings exits only when the PIT rule is documented in the manifest.
+
+**Build:** `exits/33_build_exit_signals.py`, `exits/34_apply_exits.py`,
+`exits/35_validate_exits.py` implementing signal-decay exit (AQR), time-stop (catalyst sleeve,
 event-date driven), vol/ATR stop (speculative), trim-to-target profit-taking, cost-aware no-trade bands.
 
 **Acceptance tests:**
@@ -673,19 +752,47 @@ constraint, harvest-staggering so realized gains spread over time).
 
 **Goal:** the rigorous gate wrapping the combined system; lockbox period untouched until final.
 
-**Build:** `backtest/16_run_ablation_walkforward.py` (walk-forward across all ablations);
-`backtest/17_publish_lockbox_ledger.py` (sealed out-of-sample ledger);
-`backtest/15b_build_survivorship_panel.py` — the **survivorship-complete** return panel (this is where
-delisted/Norgate history becomes **mandatory**, unlike Stage 2's live-only panel). Source decision to
-make here: self-ingest delisted history into the layer vs. consume each sector's *published* delisted
-price export — never a live sector-DB read. Include a cross-check audit reconciling a sample of overlap
-tickers + benchmarks against the sectors' own series.
+**Build - optimal Stage 11 sequence:**
+- `backtest/15b_build_survivorship_panel.py` - the **survivorship-complete** return panel. Delisted/Norgate
+  history is mandatory here, unlike Stage 2's live-only panel. Source decision: self-ingest delisted history
+  into the layer vs. consume each sector's *published* delisted-price export - never a live sector-DB read.
+- `research/65_build_pit_score_snapshot_store.py` - PIT snapshot history for score calibration: score rows,
+  eligibility/risk status, sector/sleeve membership, regime label, rotation state, and sealed source hashes.
+- `research/66_define_calibration_targets.py` - forward-return targets needed first:
+  `forward_return_21d`, `forward_return_63d`, `forward_return_126d`,
+  `forward_excess_return_vs_sector`, `drawdown_next_63d`, and `regime_at_snapshot`.
+- `backtest/16_run_ablation_walkforward.py` - walk-forward across the existing rule-based stack:
+  AQR-only, +rotation, +macro/BL, +sleeves, +exits, net of cost.
+- `backtest/17_publish_lockbox_ledger.py` - sealed out-of-sample ledger.
+
+Only after those pass should optional modules be tested: `forecast/67_train_models.py` /
+`forecast/67_calibrate.py` for ML forecasting, and `hedging/75_run_hedging_overlay.py` for hedging. They are
+compared inside Stage 11 and remain shadow-only unless they beat the simpler stack OOS net of cost.
+
+**Empirical alpha calibration note (core Stage 11 item, not a Stage 1 replacement today):** the current
+Stage 1 score-to-expected-alpha slopes are provisional and remain shadow-only until enough PIT score
+history exists. Stage 11 must add the institutional calibration module:
+1. Build score snapshot history.
+2. Join each snapshot to forward returns.
+3. Standardize scores within sector and date.
+4. Estimate payoff slopes by sector, horizon, and regime.
+5. Use ridge/elastic-net shrinkage.
+6. Add Bayesian shrinkage toward zero.
+7. Validate with walk-forward / purged OOS tests.
+8. Emit calibrated alpha slopes + confidence intervals.
+9. Feed those back into Stage 1 / Stage 7.
+
+Decision framing to preserve: same direction as the current architecture - yes; better than provisional
+slopes once enough history exists - yes; better than replacing the current staged implementation today - no,
+because it requires historical PIT score snapshots we do not yet have. It should become a core Stage 11
+calibration module, not a premature Stage 1 rewrite.
 
 **Acceptance tests:**
 - A survivorship-bias probe confirms delisted/halted tickers are present in the backtest panel (no
   survivorship gap); the live Stage 2 panel is explicitly *not* used for historical backtests.
-- Walk-forward runs `stocks-only / +rotation / +macro / +forecast/hedge / +sleeves+exits` end-to-end with
-  no look-ahead (PIT enforced at every stage).
+- Walk-forward first runs the **existing rule-based stack**:
+  `stocks-only / +rotation / +macro+BL / +sleeves / +exits`, with no look-ahead.
+  `+forecast` and `+hedge` are optional comparison arms only after the PIT calibration harness exists.
 - Score snapshots are mapped to realized forward returns before any alpha-vs-cost metric is used:
   implement a real spread/commission-vs-realized-forward-alpha diagnostic here, replacing the intentionally
   deferred Stage 2.5 `final_score`/`mu_used` comparison.
@@ -693,21 +800,25 @@ tickers + benchmarks against the sectors' own series.
   drawdown also reported). If it does not, the simpler configuration is promoted instead.
 - Lockbox ledger is sealed and append-only; a tamper/look-ahead probe fails the build if violated.
 - Results are benchmarked against SPY/sector-ETF beta and a risk-parity baseline (context, not gate).
+- ML forecasting and hedging are promoted only if their Stage 11 comparison beats the simpler rule-based
+  stack out-of-sample, net of cost; otherwise they stay shadow-only or unbuilt.
 
 ## Stage 12 — Orchestration, multi-timescale rebalance, risk governor
 
 **Goal:** one production pipeline with strategic (monthly) + tactical (weekly) cadences and a
 portfolio-level kill-switch.
 
-**Build:** `orchestration/18_run_portfolio_pipeline.py` (DAG: scores → risk → costs → features → forecast
-→ rotation → macro → BL → hedge → optimize → sleeves → exits → payout);
-`orchestration/19_run_risk_governor.py` (drawdown circuit-breaker + regime/forecast kill-switch).
+**Build:** `orchestration/18_run_portfolio_pipeline.py` core DAG:
+`scores -> risk -> liquidity/costs -> rotation -> macro -> BL -> sleeves -> exits -> payout`.
+Optional branches (`forecast`, `hedging`) are disabled unless Stage 11 OOS validation promotes them.
+`orchestration/19_run_risk_governor.py` handles drawdown circuit-breaker + regime kill-switch using the
+rule-based stack first; ML/hedging governors are later optional plugins, not baseline dependencies.
 
 **Acceptance tests:**
 - One command rebuilds the full book consistently; strategic vs tactical cadences run on schedule without
   churning the core book on tactical noise (turnover attribution by cadence).
-- Risk governor cuts gross exposure on a simulated drawdown breach and on a risk-off regime/forecast flip;
-  recovery re-risks correctly.
+- Risk governor cuts gross exposure on a simulated drawdown breach and on a rule-based risk-off regime flip;
+  recovery re-risks correctly. Forecast-driven cuts are optional only after Stage 11 promotion.
 - Full pipeline is idempotent and PIT-consistent across all sectors at a single as-of date.
 - End-to-end dry-run on current data produces a deployable target book with full provenance.
 
@@ -719,8 +830,9 @@ portfolio-level kill-switch.
   net of cost, out-of-sample? Non-improving layers stay shadow-only.
 - The lockbox window is defined once (Stage 11) and never inspected during development.
 - Shadow-mode first for each new signal, consistent with how FDA features were staged in biotech.
-- Forecasting (6.5–6.7) carries the highest overfitting risk: few features, regularization first,
-  purged/embargoed CV, deflated Sharpe, and PIT vintages are mandatory, not optional.
+- Forecasting carries the highest overfitting risk. Do not build it before Stage 11 has PIT score snapshots,
+  realized forward-return targets, and a rule-based OOS baseline. If built later: few features,
+  regularization first, purged/embargoed CV, deflated Sharpe, and PIT vintages are mandatory.
 
 ## Decisions to confirm before Stage 3 (sensible defaults assumed)
 
@@ -729,11 +841,12 @@ portfolio-level kill-switch.
 3. **Payout cadence & target range.** *Default: quarterly, range-based, buffer-funded.*
 4. **Foreign ETF sleeve on at launch?** *Default: build it (Stage 5), budget held at zero until macro
    country-fit is live (Stage 6).*
-5. **Hedging instrument.** *Default: gross-exposure reduction + index puts; inverse ETFs optional.*
+5. **Hedging instrument.** *Deferred until Stage 11; default comparison candidates are gross-exposure reduction + index puts, with inverse ETFs optional.*
 
 ## Sequencing note
 
-Build value first, plumbing later, forecasting last. Stages 0–4 give a working, cost-aware, risk-managed
-AQR book. Stages 5–7 add timing and allocation. Stages 6.5–7.5 add the statistical forecasting brain and
-hedging — deliberately late, after the ablation harness exists, because they carry the highest risk of
-self-deception. Stages 8–12 add sleeves, exits, payout, validation, and orchestration.
+Build value first, plumbing later, forecasting last. Stages 0-4 give a working, cost-aware, risk-managed
+AQR book. Stages 5-8 add timing, macro/BL allocation, cost-adjusted fusion, and sleeve risk budgeting.
+Stage 9/10 add exits and payout mechanics if still needed. Stage 11 then builds the PIT snapshot/target
+infrastructure, empirical alpha calibration, and OOS promotion harness. ML forecasting and hedging are tested
+only after that harness exists and are promoted only if they beat the simpler rule-based stack net of cost.

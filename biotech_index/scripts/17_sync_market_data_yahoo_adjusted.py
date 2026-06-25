@@ -733,6 +733,7 @@ def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], 
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(asof_date, company_id, source) DO UPDATE SET
+                    ticker = excluded.ticker,
                     last_price = excluded.last_price, close_price = excluded.close_price, market_cap = excluded.market_cap,
                     shares_outstanding = excluded.shares_outstanding, avg_volume_20d = excluded.avg_volume_20d,
                     avg_dollar_volume_20d = excluded.avg_dollar_volume_20d, fifty_two_week_high = excluded.fifty_two_week_high,
@@ -791,6 +792,7 @@ def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], 
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(asof_date, company_id, source) DO UPDATE SET
+                    ticker = excluded.ticker,
                     close_price = excluded.close_price, market_cap = excluded.market_cap, shares_outstanding = excluded.shares_outstanding,
                     price_vs_200d_pct = excluded.price_vs_200d_pct, return_1m_pct = excluded.return_1m_pct,
                     return_3m_pct = excluded.return_3m_pct, xbi_return_3m_pct = excluded.xbi_return_3m_pct,
@@ -856,6 +858,7 @@ def load_current_feature_csv_rows(conn: sqlite3.Connection, companies: list[Comp
         rows.sort(key=lambda row: (company_order.get(int(row.get("company_id") or 0), len(company_order)), str(row.get("ticker") or "")))
         return rows
     company_names = {company.company_id: company.company_name for company in companies}
+    company_tickers = {company.company_id: company.ticker for company in companies}
     company_order = {company.company_id: idx for idx, company in enumerate(companies)}
     placeholders = ",".join("?" for _ in company_names)
     fields = [field for field in CSV_FIELDNAMES if field not in {"company_name", "company_id"}]
@@ -870,7 +873,9 @@ def load_current_feature_csv_rows(conn: sqlite3.Connection, companies: list[Comp
     out: list[dict[str, Any]] = []
     for row in rows:
         data = dict(row)
-        data["company_name"] = company_names.get(int(data["company_id"]), "")
+        company_id = int(data["company_id"])
+        data["ticker"] = company_tickers.get(company_id, data.get("ticker", ""))
+        data["company_name"] = company_names.get(company_id, "")
         out.append(data)
     out.sort(key=lambda row: (company_order.get(int(row.get("company_id") or 0), len(company_order)), str(row.get("ticker") or "")))
     return out

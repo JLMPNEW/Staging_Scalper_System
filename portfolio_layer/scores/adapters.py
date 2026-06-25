@@ -3,7 +3,7 @@
 Three shapes cover all sub-sectors:
   - tech_family : semiconductors, software_infrastructure, technology_hardware (shared `final_score`)
   - biotech     : biotech_index daily scores (headline named by `production_rank_score_field`)
-  - med_devices : med_device daily composite scores
+  - med_devices : med_device daily composite scores gated by `portfolio_candidate_gate`
 
 Adapters read files only. They never import a sector package or open a sector DB.
 """
@@ -144,14 +144,20 @@ def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[Cano
 
 
 def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[CanonicalScore]:
+    if rows and "portfolio_candidate_gate" not in rows[0]:
+        raise ValueError("med_devices score file must include portfolio_candidate_gate")
     out: list[CanonicalScore] = []
     for r in rows:
         ticker = str(r.get("ticker", "")).strip().upper()
-        native = _f(r.get("composite_score"))
+        native = _f(r.get("portfolio_candidate_score") or r.get("composite_score"))
         if not ticker or native is None:
             continue
-        eligible = _truthy(r.get("passed_tier1_safety_gate"))
-        reason = "ok" if eligible else "failed_tier1_safety_gate"
+        eligible = _truthy(r.get("portfolio_candidate_gate"))
+        reason = (
+            "ok"
+            if eligible
+            else str(r.get("portfolio_candidate_reason") or "failed_portfolio_candidate_gate").strip()
+        )
         industry = str(r.get("subsector", "")).strip() or str(cfg["industry"])
         completeness = _f(r.get("data_completeness_score"))
         conf = _confidence(completeness, denominator=100.0)

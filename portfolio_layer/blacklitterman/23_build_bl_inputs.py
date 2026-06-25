@@ -260,6 +260,16 @@ def main() -> int:  # noqa: C901
             out_dir / "optimizer" / "weights_long_short.csv",
             out_dir / "optimizer" / "weights_user_portfolio.csv",
             out_dir / "optimizer" / "optimization_results.csv",
+            out_dir / "costs" / "bl_trade_list.csv",
+            out_dir / "costs" / "bl_trade_list_meta.json",
+            out_dir / "costs" / "bl_cost_report.csv",
+            out_dir / "costs" / "bl_cost_summary.json",
+            out_dir / "costs" / "bl_cost_adjusted_target_weights.csv",
+            out_dir / "costs" / "bl_no_trade_decisions.csv",
+            out_dir / "costs" / "bl_cost_meta.json",
+            out_dir / "bl_net_static_replay_metrics.json",
+            out_dir / "bl_manifest.json",
+            out_dir / "validation" / "bl_fusion_validation.csv",
         ]
         for p in list(out.values()) + [probe_path, *downstream]:
             if p.exists():

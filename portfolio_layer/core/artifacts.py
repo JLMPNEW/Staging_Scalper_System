@@ -31,6 +31,8 @@ def invalidate_risk_outputs_after_spread_change(risk_dir: Path) -> None:
 def invalidate_cost_outputs_after_spread_change(run_dir: Path) -> None:
     """Clear Stage 4 artifacts that depend on the liquidity spread snapshot."""
     costs_dir = run_dir / "costs"
+    bl_dir = run_dir / "blacklitterman"
+    bl_costs_dir = bl_dir / "costs"
     unlink_if_exists([
         costs_dir / "cost_report.csv",
         costs_dir / "cost_summary.json",
@@ -38,6 +40,16 @@ def invalidate_cost_outputs_after_spread_change(run_dir: Path) -> None:
         costs_dir / "no_trade_decisions.csv",
         costs_dir / "cost_manifest.json",
         costs_dir / "net_static_replay_metrics.json",
+        bl_costs_dir / "bl_trade_list.csv",
+        bl_costs_dir / "bl_trade_list_meta.json",
+        bl_costs_dir / "bl_cost_report.csv",
+        bl_costs_dir / "bl_cost_summary.json",
+        bl_costs_dir / "bl_cost_adjusted_target_weights.csv",
+        bl_costs_dir / "bl_no_trade_decisions.csv",
+        bl_costs_dir / "bl_cost_meta.json",
+        bl_dir / "bl_manifest.json",
+        bl_dir / "bl_net_static_replay_metrics.json",
+        bl_dir / "validation" / "bl_fusion_validation.csv",
     ])
     clear_dir_files(costs_dir / "validation")
 

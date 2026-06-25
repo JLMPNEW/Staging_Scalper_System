@@ -160,7 +160,19 @@ def main() -> int:  # noqa: C901
         native_dir / "weights_user_portfolio.csv",
         native_dir / "optimization_results.csv",
     ]
-    output_paths = [target_path, summary_path, validation_path, meta_path, *native_outputs]
+    downstream = [
+        bl_dir / "costs" / "bl_trade_list.csv",
+        bl_dir / "costs" / "bl_trade_list_meta.json",
+        bl_dir / "costs" / "bl_cost_report.csv",
+        bl_dir / "costs" / "bl_cost_summary.json",
+        bl_dir / "costs" / "bl_cost_adjusted_target_weights.csv",
+        bl_dir / "costs" / "bl_no_trade_decisions.csv",
+        bl_dir / "costs" / "bl_cost_meta.json",
+        bl_dir / "bl_net_static_replay_metrics.json",
+        bl_dir / "bl_manifest.json",
+        bl_dir / "validation" / "bl_fusion_validation.csv",
+    ]
+    output_paths = [target_path, summary_path, validation_path, meta_path, *native_outputs, *downstream]
     if args.force:
         for path in output_paths:
             if path.exists():

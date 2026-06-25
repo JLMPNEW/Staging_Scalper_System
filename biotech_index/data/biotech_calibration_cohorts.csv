@@ -411,3 +411,93 @@ VANI,platform_partnered_modality_pipeline,added from current scoring universe; i
 VCYT,commercial_profitable_quality_or_mature,added from current scoring universe; commercial diagnostics quality/mature driver
 WHWK,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative pipeline
 XBIT,early_clinical_speculative_or_single_asset_pipeline,added from current scoring universe; clinical-stage speculative pipeline
+AARD,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; narrow early clinical therapeutic pipeline
+ACHV,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; late-stage registrational therapeutic driver
+ACTU,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; phase 2/3 oncology development driver
+ACXP,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; narrow clinical-stage anti-infective pipeline
+ADIL,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative therapeutic pipeline
+AEON,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative therapeutic pipeline
+AGEN,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; immuno-oncology platform and partnered pipeline driver
+ALGS,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; clinical-stage therapeutic pipeline
+ANVS,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; late-stage neurodegeneration development driver
+APVO,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; narrow clinical therapeutic pipeline
+ARMP,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative anti-infective pipeline
+ATOS,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; late clinical therapeutic catalyst driver
+BCTX,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; phase 2/3 oncology development driver
+BDRX,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; collaborator-heavy speculative pipeline
+BIVI,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; late-stage neurodegeneration development driver
+BOLT,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; immuno-oncology modality platform pipeline driver
+CANF,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; multi-program phase 2/3 therapeutic driver
+CLLS,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; gene-editing and cell-therapy platform driver
+CLRB,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; late clinical oncology development driver
+CNSP,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; single-asset clinical therapeutic pipeline
+COCP,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; narrow clinical anti-viral pipeline
+CRDF,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; phase 2/3 oncology development driver
+CRIS,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; late clinical oncology development driver
+CRVO,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; collaborator-heavy clinical pipeline
+CYCN,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative therapeutic pipeline
+DBVT,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; registrational allergy therapeutic driver
+DERM,commercial_turnaround_or_unprofitable_growth,added from 2026-06-24 scoring universe; commercial dermatology execution driver
+DNTH,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; multi-program phase 2/3 therapeutic driver
+DRMA,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative therapeutic pipeline
+DWTX,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; narrow clinical therapeutic pipeline
+ENTX,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; oral biologics delivery platform driver
+FBLG,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; narrow early clinical therapeutic pipeline
+FTH,late_clinical_pivotal_or_registrational,successor ticker for SNSE/Faeth Therapeutics; retain late clinical calibration cohort
+GALT,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; late clinical liver-disease development driver
+GANX,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; early clinical therapeutic pipeline
+GENB,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; biologics platform and multi-program pipeline driver
+GLSI,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; late clinical immunotherapy development driver
+GNLX,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; phase 2/3 oncology development driver
+GNPX,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; gene-therapy platform pipeline driver
+GRI,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative therapeutic pipeline
+HOTH,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative therapeutic pipeline
+HUMA,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; registrational regenerative medicine driver
+HURA,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; early clinical therapeutic pipeline
+ICU,commercial_turnaround_or_unprofitable_growth,added from 2026-06-24 scoring universe; emerging commercial device/therapeutic execution driver
+IMNN,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; DNA-mediated immunotherapy platform driver
+INAB,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; cell-therapy modality platform driver
+INDP,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; single-asset clinical therapeutic pipeline
+INMB,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; immune-modulation platform pipeline driver
+INTS,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; narrow clinical oncology pipeline
+KZR,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative therapeutic pipeline
+LIXT,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; single-asset clinical oncology pipeline
+LPCN,commercial_turnaround_or_unprofitable_growth,added from 2026-06-24 scoring universe; commercial/relaunch execution driver
+LSTA,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative clinical oncology pipeline
+MBIO,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; cell-therapy platform pipeline driver
+MCRB,commercial_turnaround_or_unprofitable_growth,added from 2026-06-24 scoring universe; commercial transition and pipeline execution driver
+MRKR,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; cell-therapy platform pipeline driver
+NCNA,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; nucleotide/prodrug modality platform driver
+NTHI,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; phase 2/3 oncology development driver
+NXTC,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; clinical-stage therapeutic pipeline
+OCGN,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; late clinical ocular/gene-therapy catalyst driver
+OGEN,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; single-asset clinical therapeutic pipeline
+ONCY,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; oncolytic-virus modality platform driver
+PCSA,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; narrow clinical therapeutic pipeline
+PHIO,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative therapeutic pipeline
+PLYX,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; narrow clinical therapeutic pipeline
+PPBT,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; collaborator-heavy speculative oncology pipeline
+PRTC,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; partnered platform and pipeline optionality driver
+PTN,commercial_turnaround_or_unprofitable_growth,added from 2026-06-24 scoring universe; commercial therapeutic execution driver
+PULM,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; narrow respiratory clinical pipeline
+PYPD,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative therapeutic pipeline
+PYXS,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; antibody-drug conjugate oncology platform driver
+RCEL,commercial_turnaround_or_unprofitable_growth,added from 2026-06-24 scoring universe; commercial regenerative-device execution driver
+REVB,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative therapeutic pipeline
+RLYB,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative rare-disease pipeline
+RNAZ,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; single-asset RNA therapeutic pipeline
+RNTX,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; narrow clinical therapeutic pipeline
+SLGL,commercial_profitable_quality_or_mature,added from 2026-06-24 scoring universe; commercial dermatology profitable-quality driver
+SNGX,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; narrow clinical therapeutic pipeline
+SNTI,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; synthetic-biology/cell-therapy platform driver
+SPRB,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative endocrine therapeutic pipeline
+SPRO,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; late clinical anti-infective development driver
+TIL,platform_partnered_modality_pipeline,added from 2026-06-24 scoring universe; cell-therapy platform pipeline driver
+TNXP,commercial_turnaround_or_unprofitable_growth,added from 2026-06-24 scoring universe; commercial launch and clinical execution driver
+TPST,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; phase 2/3 oncology development driver
+TRAW,late_clinical_pivotal_or_registrational,added from 2026-06-24 scoring universe; phase 2/3 therapeutic development driver
+TTRX,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; narrow clinical therapeutic pipeline
+TVRD,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; early clinical oncology/fibrosis pipeline
+VERU,commercial_turnaround_or_unprofitable_growth,added from 2026-06-24 scoring universe; commercial/clinical turnaround driver
+VRCA,commercial_turnaround_or_unprofitable_growth,added from 2026-06-24 scoring universe; commercial dermatology execution driver
+XBIO,early_clinical_speculative_or_single_asset_pipeline,added from 2026-06-24 scoring universe; speculative therapeutic pipeline

@@ -169,6 +169,11 @@ def latest_feature_date(conn: sqlite3.Connection) -> str:
     return asof
 
 
+def load_inactive_company_tickers(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("SELECT ticker FROM companies WHERE COALESCE(is_active, 0) <= 0").fetchall()
+    return {ticker for row in rows if (ticker := normalize_ticker(row["ticker"]))}
+
+
 def load_base_rows(conn: sqlite3.Connection, asof_date: str, ticker_filter: set[str], max_companies: int) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -722,6 +727,15 @@ def main() -> None:
             if effective_asof_obj is None:
                 raise ValueError(f"Invalid resolved asof_date: {asof_date}")
             run_id = start_run(conn, run_type="build_multibagger_features", input_path=db_path)
+            inactive_expected_tickers = scoring_tickers.intersection(load_inactive_company_tickers(conn))
+            if inactive_expected_tickers:
+                LOGGER.warning(
+                    "Excluding %d inactive/delisted final-universe ticker(s) from multibagger coverage: %s",
+                    len(inactive_expected_tickers),
+                    ",".join(sorted(inactive_expected_tickers)[:25])
+                    + (f"...(+{len(inactive_expected_tickers) - 25})" if len(inactive_expected_tickers) > 25 else ""),
+                )
+                scoring_tickers = scoring_tickers - inactive_expected_tickers
             base_rows = load_base_rows(conn, asof_date, ticker_filter, args.max_companies)
             validate_nonempty_selection(count=len(base_rows), context="multibagger feature build", subset_mode=subset_mode)
             loaded_tickers = [str(row["ticker"]) for row in base_rows]

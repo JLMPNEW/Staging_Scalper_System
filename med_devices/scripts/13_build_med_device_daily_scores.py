@@ -155,6 +155,10 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "tier1_safety_status": "TEXT DEFAULT ''",
     "tier1_safety_reason": "TEXT DEFAULT ''",
     "passed_tier1_safety_gate": "INTEGER DEFAULT 1",
+    "portfolio_candidate_gate": "INTEGER DEFAULT 0",
+    "portfolio_candidate_status": "TEXT DEFAULT ''",
+    "portfolio_candidate_reason": "TEXT DEFAULT ''",
+    "portfolio_candidate_score": "REAL DEFAULT 0.0",
     "safe_core_score": "REAL DEFAULT 0.0",
     "safe_core_percentile": "REAL DEFAULT 0.0",
     "safe_core_cohort_percentile": "REAL DEFAULT 0.0",
@@ -305,6 +309,10 @@ FIELDNAMES = [
     "tier1_safety_status",
     "tier1_safety_reason",
     "passed_tier1_safety_gate",
+    "portfolio_candidate_gate",
+    "portfolio_candidate_status",
+    "portfolio_candidate_reason",
+    "portfolio_candidate_score",
     "safe_core_score",
     "safe_core_percentile",
     "safe_core_cohort_percentile",
@@ -505,6 +513,10 @@ class ScoreRow:
     tier1_safety_status: str = TIER1_SAFETY_STATUS_PASS
     tier1_safety_reason: str = ""
     passed_tier1_safety_gate: int = 1
+    portfolio_candidate_gate: int = 0
+    portfolio_candidate_status: str = ""
+    portfolio_candidate_reason: str = ""
+    portfolio_candidate_score: float = 0.0
     safe_core_score: float = 0.0
     safe_core_percentile: float = 0.0
     safe_core_cohort_percentile: float = 0.0
@@ -3432,6 +3444,125 @@ def safe_core_percentile_rank(rows: list[ScoreRow]) -> None:
             )
 
 
+def csv_set(raw: object) -> set[str]:
+    return {part.strip() for part in str(raw or "").split(",") if part.strip()}
+
+
+def row_passes_min_gate(row: ScoreRow, field: str, threshold: float | None) -> bool:
+    if threshold is None:
+        return True
+    value = to_float(getattr(row, field, None))
+    return value is not None and value >= threshold
+
+
+def row_passes_max_gate(row: ScoreRow, field: str, threshold: float | None) -> bool:
+    if threshold is None:
+        return True
+    value = to_float(getattr(row, field, None))
+    return value is not None and value <= threshold
+
+
+def calibrated_baseline_candidate_status(
+    row: ScoreRow,
+    *,
+    config: dict[str, Any],
+    gates: dict[str, float],
+) -> tuple[str, str] | None:
+    production_cohorts = csv_set(cfg_get(config, "calibration.calibrated_baseline.production_seed_cohorts", ""))
+    watchlist_cohorts = csv_set(cfg_get(config, "calibration.calibrated_baseline.watchlist_seed_cohorts", ""))
+    cohort = row.calibration_cohort.strip()
+    if cohort not in production_cohorts and cohort not in watchlist_cohorts:
+        return None
+    if row.classification in {"manual_review_regulatory_risk", "avoid_confirmed_regulatory_risk", "data_review_required", "avoid"}:
+        return None
+    if not row.passed_fda_manual_review_gate or row.hard_red_flag:
+        return None
+    min_checks = [
+        ("raw_composite_score", "composite_min"),
+        ("cohort_percentile", "cohort_percentile_min"),
+        ("fundamental_quality_score", "fundamental_quality_min"),
+        ("durable_growth_score", "durable_growth_min"),
+        ("fda_product_score", "fda_product_min"),
+        ("reimbursement_score", "reimbursement_min"),
+        ("valuation_score", "valuation_min"),
+        ("technical_entry_score", "technical_entry_min"),
+        ("data_completeness_score", "data_completeness_min"),
+    ]
+    for field, gate_key in min_checks:
+        if not row_passes_min_gate(row, field, gates.get(gate_key)):
+            return None
+    if not row_passes_max_gate(row, "value_trap_score", gates.get("value_trap_max")):
+        return None
+    status = "calibrated_baseline" if cohort in production_cohorts else "calibrated_watchlist_baseline"
+    reason = "final_investability_pass" if row.final_investability_gate else "baseline_gate_pass_not_tier1"
+    return status, reason
+
+
+def portfolio_candidate_hard_exclusion(row: ScoreRow, *, gates: dict[str, float]) -> str | None:
+    if row.classification in {"manual_review_regulatory_risk", "avoid_confirmed_regulatory_risk", "data_review_required", "avoid"}:
+        return f"classification_{row.classification}"
+    if row.calibration_status == CALIBRATION_STATUS_EXCLUDED_FROM_TIER1:
+        return "excluded_from_tier1"
+    if not row.passed_data_quality_gate:
+        return "data_quality_below_gate"
+    if not row.passed_liquidity_gate:
+        return "liquidity_below_gate"
+    if not row.passed_fda_manual_review_gate or row.hard_red_flag:
+        return "fda_manual_review_or_hard_red"
+    if row.value_trap_score >= gates.get("value_trap_hard_max", 85.0):
+        return "value_trap_hard_gate"
+    safety_reasons = {part for part in row.tier1_safety_reason.split(";") if part}
+    if "single_product_risk" in safety_reasons:
+        return "single_product_risk"
+    if "binary_event_risk" in safety_reasons:
+        return "binary_event_risk"
+    return None
+
+
+def apply_portfolio_candidate_policy(
+    row: ScoreRow,
+    *,
+    config: dict[str, Any],
+    gates: dict[str, float],
+) -> None:
+    baseline_status = calibrated_baseline_candidate_status(row, config=config, gates=gates)
+    sources: list[str] = []
+    if row.final_investability_gate:
+        sources.append("final_investability")
+    if row.passed_safe_core_gate:
+        sources.append("safe_core")
+    if baseline_status is not None:
+        sources.append(baseline_status[0])
+
+    hard_exclusion = portfolio_candidate_hard_exclusion(row, gates=gates)
+    row.portfolio_candidate_score = round(clamp(row.composite_score), 2)
+    if hard_exclusion is not None:
+        row.portfolio_candidate_gate = 0
+        row.portfolio_candidate_status = "excluded"
+        source_text = ",".join(sources) if sources else "none"
+        row.portfolio_candidate_reason = f"{hard_exclusion};sources={source_text}"
+        return
+    if not sources:
+        row.portfolio_candidate_gate = 0
+        row.portfolio_candidate_status = "not_candidate"
+        row.portfolio_candidate_reason = "no_portfolio_candidate_source"
+        return
+
+    row.portfolio_candidate_gate = 1
+    if row.classification == "tier_1_long_candidate":
+        row.portfolio_candidate_status = "tier1"
+    elif baseline_status is not None:
+        row.portfolio_candidate_status = baseline_status[0]
+    elif row.passed_safe_core_gate or row.final_investability_gate:
+        row.portfolio_candidate_status = "safe_core"
+    else:
+        row.portfolio_candidate_status = "portfolio_candidate"
+    reason_parts = [f"sources={','.join(sources)}"]
+    if baseline_status is not None:
+        reason_parts.append(f"baseline_reason={baseline_status[1]}")
+    row.portfolio_candidate_reason = ";".join(reason_parts)
+
+
 def tier1_safety_reasons(row: ScoreRow, policy: Tier1SafetyPolicy) -> list[str]:
     if not policy.enabled:
         return []
@@ -4465,9 +4596,10 @@ def build_rows(
         row.safe_core_model_version = "safe_core_v1_quality_value_risk_shadow"
     safe_core_percentile_rank(rows)
     for row in rows:
+        row_gates = gates_for_row(row, gates, gate_profiles, cohort_profile_alias_map)
         classify(
             row,
-            gates=gates_for_row(row, gates, gate_profiles, cohort_profile_alias_map),
+            gates=row_gates,
             technical_policy=technical_policy_for_row(
                 row,
                 default_technical_policy,
@@ -4488,6 +4620,7 @@ def build_rows(
                 cohort_profile_alias_map,
             ),
         )
+        apply_portfolio_candidate_policy(row, config=config, gates=row_gates)
         apply_pullback_candidate_tag(
             row,
             profile_for_cohort(row.calibration_cohort, pullback_candidate_profiles, cohort_profile_alias_map),
@@ -4556,6 +4689,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "tier1_safety_status",
         "tier1_safety_reason",
         "passed_tier1_safety_gate",
+        "portfolio_candidate_gate",
+        "portfolio_candidate_status",
+        "portfolio_candidate_reason",
+        "portfolio_candidate_score",
         "safe_core_score",
         "safe_core_percentile",
         "safe_core_cohort_percentile",
@@ -4767,6 +4904,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.tier1_safety_status,
                 row.tier1_safety_reason,
                 row.passed_tier1_safety_gate,
+                row.portfolio_candidate_gate,
+                row.portfolio_candidate_status,
+                row.portfolio_candidate_reason,
+                row.portfolio_candidate_score,
                 row.safe_core_score,
                 row.safe_core_percentile,
                 row.safe_core_cohort_percentile,

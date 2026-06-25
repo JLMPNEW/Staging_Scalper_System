@@ -1,0 +1,5 @@
+old_ticker,new_ticker,effective_date,action,retain_in_biotech,successor_company_name,successor_listing_status,reason_codes,notes
+SNSE,FTH,2026-06-16,ticker_change,true,"Faeth Therapeutics, Inc.",active,ticker_change_successor;reverse_acquisition,"Sensei Biotherapeutics changed control/name to Faeth Therapeutics and began trading as FTH; preserve company identity and pre-change history through the same company_id."
+HOTH,RKTO,2026-05-28,ticker_change,false,"Rocket One Inc.",active,ticker_change_non_biotech_pivot,"Hoth Therapeutics changed ticker/name after a strategic pivot into AI semiconductor hardware; do not retain successor in biotech scoring."
+KZR,AUPH,2026-05-12,acquired,false,"Aurinia Pharmaceuticals Inc.",active,acquired_delisted_non_public,"Kezar was acquired by Aurinia; archive KZR and do not merge KZR series into AUPH scoring."
+PRTC,,2026-04-30,adr_delisted,false,"PureTech Health plc",adr_delisted,adr_delisted,"PureTech Health plc Nasdaq ADR was delisted/retired; do not confuse with active PRCT Procept BioRobotics."

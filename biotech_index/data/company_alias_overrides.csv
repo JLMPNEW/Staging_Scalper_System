@@ -1,4 +1,9 @@
 ticker,alias,source,confidence,notes
+FTH,SNSE,ticker_change_predecessor,1.0,Former ticker for Sensei Biotherapeutics before Faeth Therapeutics ticker change
+FTH,Sensei Biotherapeutics,ticker_change_predecessor,0.95,Former issuer/company name before Faeth Therapeutics transaction
+FTH,Sensei Biotherapeutics Inc,ticker_change_predecessor,0.95,Former issuer/company name before Faeth Therapeutics transaction
+FTH,Faeth Therapeutics,manual_sponsor_alias,0.95,Successor operating/company name
+FTH,Faeth Therapeutics Inc,manual_sponsor_alias,0.95,Successor issuer/company name
 ABSI,Absci,manual_sponsor_alias,0.95,Common sponsor/company short name
 AGMB,Agomab Therapeutics,manual_sponsor_alias,0.95,CTGov sponsor commonly omits NV suffix
 FBIO,Avenue Therapeutics,manual_parent_subsidiary,0.85,Fortress Biotech subsidiary/program company

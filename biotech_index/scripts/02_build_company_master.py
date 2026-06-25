@@ -50,6 +50,19 @@ class ScreenCompany:
     source: str
 
 
+@dataclass(frozen=True)
+class TickerAction:
+    old_ticker: str
+    new_ticker: str
+    effective_date: str
+    action: str
+    retain_in_biotech: bool
+    successor_company_name: str
+    successor_listing_status: str
+    reason_codes: str
+    notes: str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build persistent biotech company master and aliases from screen output.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -58,6 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None, help="Override SQLite database path.")
     parser.add_argument("--alias-overrides", type=Path, default=None, help="Optional manual alias overrides CSV.")
     parser.add_argument("--status-overrides", type=Path, default=None, help="Optional company status overrides CSV.")
+    parser.add_argument("--ticker-actions", type=Path, default=None, help="Optional point-in-time ticker action CSV.")
     return parser.parse_args()
 
 
@@ -186,8 +200,106 @@ def load_status_overrides(path: Optional[Path]) -> dict[str, dict[str, str]]:
     return overrides
 
 
+def load_ticker_actions(path: Optional[Path]) -> list[TickerAction]:
+    if path is None or not path.exists():
+        return []
+    actions: list[TickerAction] = []
+    for row in read_csv_flexible(path):
+        old_ticker = normalize_ticker(row_get(row, "old_ticker", "OldTicker", "ticker"))
+        new_ticker = normalize_ticker(row_get(row, "new_ticker", "NewTicker", "successor_ticker"))
+        effective_date = row_get(row, "effective_date", "EffectiveDate")
+        action = row_get(row, "action", "Action").lower()
+        if not old_ticker or not action:
+            continue
+        if action == "ticker_change" and not new_ticker:
+            raise ValueError(f"Ticker action row for {old_ticker} is missing new_ticker")
+        if effective_date:
+            parse_date(effective_date)
+        actions.append(
+            TickerAction(
+                old_ticker=old_ticker,
+                new_ticker=new_ticker,
+                effective_date=effective_date,
+                action=action,
+                retain_in_biotech=as_bool(row_get(row, "retain_in_biotech", "RetainInBiotech")),
+                successor_company_name=row_get(row, "successor_company_name", "SuccessorCompanyName"),
+                successor_listing_status=row_get(row, "successor_listing_status", "SuccessorListingStatus", "listing_status"),
+                reason_codes=row_get(row, "reason_codes", "ReasonCodes"),
+                notes=row_get(row, "notes", "Notes"),
+            )
+        )
+    return actions
+
+
 def as_bool(raw: object) -> bool:
     return str(raw or "").strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
+def ticker_action_is_effective(action: TickerAction, *, asof_date: str) -> bool:
+    return not action.effective_date or action.effective_date <= asof_date
+
+
+def synthesize_successor_companies(
+    companies: list[ScreenCompany],
+    actions: list[TickerAction],
+    *,
+    asof_date: str,
+) -> list[ScreenCompany]:
+    """Add active successor tickers while leaving stale predecessor rows removable.
+
+    True ticker changes should retain the same economic issuer in downstream
+    tables.  The predecessor row is still processed normally, usually with a
+    manual-exclude status override, so stale tickers do not remain active.
+    """
+    by_ticker = {company.ticker: company for company in companies}
+    out = list(companies)
+    for action in actions:
+        if (
+            action.action != "ticker_change"
+            or not action.retain_in_biotech
+            or not ticker_action_is_effective(action, asof_date=asof_date)
+            or action.new_ticker in by_ticker
+        ):
+            continue
+        source = by_ticker.get(action.old_ticker)
+        if source is None:
+            LOGGER.warning(
+                "Ticker action %s->%s is effective but predecessor is absent from screen; "
+                "protecting an existing successor requires a status override.",
+                action.old_ticker,
+                action.new_ticker,
+            )
+            continue
+        reason_codes = ";".join(
+            part
+            for part in (
+                action.reason_codes or "ticker_change_successor",
+                f"predecessor:{action.old_ticker}",
+            )
+            if part
+        )
+        successor = replace(
+            source,
+            ticker=action.new_ticker,
+            company_name=action.successor_company_name or source.company_name,
+            listing_status=action.successor_listing_status or "active",
+            manual_include="true",
+            manual_exclude="",
+            manual_review=source.manual_review or "true",
+            decision="keep",
+            reason_codes=reason_codes,
+            notes=action.notes or f"Successor ticker for {action.old_ticker}",
+            source="ticker_action",
+        )
+        out.append(successor)
+        by_ticker[action.new_ticker] = successor
+        LOGGER.info(
+            "Synthesized active successor ticker %s from predecessor %s effective %s",
+            action.new_ticker,
+            action.old_ticker,
+            action.effective_date,
+        )
+    return out
 
 
 def override_protects_absent_ticker(override: dict[str, str], *, active_decisions: set[str]) -> bool:
@@ -291,6 +403,77 @@ def upsert_company(conn: Any, company: ScreenCompany, *, active_decisions: set[s
     if row is None:
         raise RuntimeError(f"Company upsert failed for {company.ticker}")
     return int(row["company_id"])
+
+
+def prepare_successor_ticker_renames(conn: Any, actions: list[TickerAction], *, asof_date: str) -> int:
+    """Rename existing company rows for true ticker changes before upsert.
+
+    This preserves company_id-linked history such as SEC filings, companyfacts,
+    Form 4, CTGov links, and historical daily features.  A stale predecessor row
+    may be recreated as inactive by the normal status-override path afterward.
+    """
+    rename_count = 0
+    now = utc_now()
+    for action in actions:
+        if (
+            action.action != "ticker_change"
+            or not action.retain_in_biotech
+            or not ticker_action_is_effective(action, asof_date=asof_date)
+        ):
+            continue
+        old_row = conn.execute(
+            "SELECT company_id, ticker FROM companies WHERE ticker = ?",
+            (action.old_ticker,),
+        ).fetchone()
+        if old_row is None:
+            continue
+        new_row = conn.execute(
+            "SELECT company_id, ticker FROM companies WHERE ticker = ?",
+            (action.new_ticker,),
+        ).fetchone()
+        if new_row is not None and int(new_row["company_id"]) != int(old_row["company_id"]):
+            LOGGER.warning(
+                "Skipping ticker rename %s->%s because successor ticker already exists as company_id=%s",
+                action.old_ticker,
+                action.new_ticker,
+                new_row["company_id"],
+            )
+            continue
+        conn.execute(
+            """
+            UPDATE companies
+            SET ticker = ?,
+                company_name = COALESCE(NULLIF(?, ''), company_name),
+                listing_status = COALESCE(NULLIF(?, ''), listing_status),
+                manual_include = 'true',
+                manual_exclude = '',
+                manual_review = COALESCE(NULLIF(manual_review, ''), 'true'),
+                universe_status = 'keep',
+                is_active = 1,
+                reason_codes = COALESCE(NULLIF(?, ''), reason_codes),
+                notes = COALESCE(NULLIF(?, ''), notes),
+                updated_at = ?
+            WHERE company_id = ?
+            """,
+            (
+                action.new_ticker,
+                action.successor_company_name,
+                action.successor_listing_status,
+                action.reason_codes or "ticker_change_successor",
+                action.notes,
+                now,
+                int(old_row["company_id"]),
+            ),
+        )
+        rename_count += 1
+        LOGGER.info(
+            "Renamed company_id=%s ticker %s->%s effective %s to preserve issuer history",
+            old_row["company_id"],
+            action.old_ticker,
+            action.new_ticker,
+            action.effective_date,
+        )
+    return rename_count
 
 
 def insert_alias(conn: Any, *, company_id: int, alias: AliasCandidate) -> None:
@@ -415,6 +598,11 @@ def main() -> None:
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     alias_path = args.alias_overrides.expanduser().resolve() if args.alias_overrides else resolve_optional_path(cfg_get(config, "paths.manual_alias_overrides_csv"), base_dir=base_dir)
     status_path = args.status_overrides.expanduser().resolve() if args.status_overrides else resolve_optional_path(cfg_get(config, "paths.company_status_overrides_csv"), base_dir=base_dir)
+    ticker_actions_path = (
+        args.ticker_actions.expanduser().resolve()
+        if args.ticker_actions
+        else resolve_optional_path(cfg_get(config, "paths.company_ticker_actions_csv"), base_dir=base_dir)
+    )
     active_decisions = {x.lower() for x in normalize_string_list(cfg_get(config, "company_master.active_decisions"), ["keep", "review"])}
     store_decisions = {x.lower() for x in normalize_string_list(cfg_get(config, "company_master.store_decisions"), ["keep", "review", "remove"])}
     deactivate_absent = str(cfg_get(config, "company_master.deactivate_absent_from_screen", True)).strip().lower() in {
@@ -432,11 +620,15 @@ def main() -> None:
     companies = parse_screen_rows(screen_path, store_decisions=store_decisions)
     manual_aliases = load_manual_aliases(alias_path)
     status_overrides = load_status_overrides(status_path)
+    ticker_actions = load_ticker_actions(ticker_actions_path)
+    companies = synthesize_successor_companies(companies, ticker_actions, asof_date=history_asof_date)
     LOGGER.info("Loaded %d screen companies from %s", len(companies), screen_path)
     if alias_path and alias_path.exists():
         LOGGER.info("Loaded manual aliases from %s", alias_path)
     if status_path and status_path.exists():
         LOGGER.info("Loaded %d company status override(s) from %s", len(status_overrides), status_path)
+    if ticker_actions_path and ticker_actions_path.exists():
+        LOGGER.info("Loaded %d company ticker action(s) from %s", len(ticker_actions), ticker_actions_path)
     protected_override_tickers = {
         ticker
         for ticker, override in status_overrides.items()
@@ -462,6 +654,7 @@ def main() -> None:
             alias_rows: list[tuple[Any, ...]] = []
             alias_now = utc_now()
             with conn:
+                prepare_successor_ticker_renames(conn, ticker_actions, asof_date=history_asof_date)
                 for company in companies:
                     company = apply_status_override(company, status_overrides)
                     company_id = upsert_company(conn, company, active_decisions=active_decisions)

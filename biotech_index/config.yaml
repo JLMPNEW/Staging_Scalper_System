@@ -2,6 +2,7 @@ paths:
   screen_results_csv: "../output/preload_biotech_screen/biotech_screen_results_all.csv"
   manual_alias_overrides_csv: "data/company_alias_overrides.csv"
   company_status_overrides_csv: "data/company_status_overrides.csv"
+  company_ticker_actions_csv: "data/company_ticker_actions.csv"
   database_path: "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/biotech_index.sqlite"
 
 market_positioning:
