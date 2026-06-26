@@ -48,7 +48,7 @@ CONTRACT_FIELDS = [
     "industry_aggregate",
     "final_score",               # calibrated expected forward alpha (annualized fraction)
     "rating",
-    "within_sector_percentile",
+    "within_sector_percentile",  # legacy name; percentile is computed within source_pipeline/sleeve
     "score_confidence",
     "investable_eligible",
     "eligibility_reason",
@@ -179,6 +179,29 @@ def rating_for_percentile(pct: float, bands: dict[str, float]) -> str:
         if threshold is not None and pct >= threshold:
             return label
     return "avoid"
+
+
+def validate_rating_bands(bands: dict[str, Any]) -> list[str]:
+    """Validate percentile rating thresholds before they are used for ranking/exit labels."""
+    labels = ("strong_buy", "buy", "hold", "reduce", "avoid")
+    errors: list[str] = []
+    values: dict[str, float] = {}
+    for label in labels:
+        if label not in bands:
+            errors.append(f"missing:{label}")
+            continue
+        value = _f(bands.get(label))
+        if value is None:
+            errors.append(f"non_numeric:{label}={bands.get(label)!r}")
+            continue
+        if not 0.0 <= value <= 100.0:
+            errors.append(f"out_of_range:{label}={value}")
+            continue
+        values[label] = value
+    for higher, lower in zip(labels, labels[1:]):
+        if higher in values and lower in values and values[higher] < values[lower]:
+            errors.append(f"not_descending:{higher}={values[higher]} < {lower}={values[lower]}")
+    return errors
 
 
 def percentiles_within(values: Sequence[float]) -> list[float]:

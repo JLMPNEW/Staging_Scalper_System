@@ -194,7 +194,7 @@ technology_hardware_portfolio_backtest:
       short_quantile: 0.20
 
 semiconductor_dashboard_reports:
-  output_dir: "../output/technology_reports/dashboard"
+  output_dir: "../output/technology_reports/semi_dashboard"
   backtest_summary_csv: "../output/technology_reports/backtests/semiconductor_portfolio_backtest_summary.csv"
   stage7_source_id: "semiconductor_calibrated_score_v1"
   baseline_feature_source_id: "semiconductor_scoring_contract"

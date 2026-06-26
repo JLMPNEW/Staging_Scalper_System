@@ -96,12 +96,85 @@ def _trade_sort_key(row: dict[str, str]) -> tuple[str, int]:
     return (row.get("date_time", ""), int(_f(row.get("source_row"))))
 
 
+def _previous_ledger_inputs(runs_root: Path, run_as_of: str) -> tuple[str | None, Path | None, Path | None]:
+    cutoff = date.fromisoformat(run_as_of)
+    candidates: list[tuple[date, Path, Path]] = []
+    children = runs_root.iterdir() if runs_root.exists() else []
+    for child in children:
+        if not child.is_dir():
+            continue
+        try:
+            child_date = date.fromisoformat(child.name)
+        except ValueError:
+            continue
+        if child_date >= cutoff:
+            continue
+        ledger_dir = child / "ledger"
+        manifest_path = ledger_dir / "ledger_manifest.json"
+        lots_path = ledger_dir / "holding_lots.csv"
+        if not manifest_path.exists() or not lots_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if manifest.get("acceptance") != "PASS":
+            continue
+        candidates.append((child_date, manifest_path, lots_path))
+    if not candidates:
+        return None, None, None
+    previous_date, manifest_path, lots_path = max(candidates, key=lambda item: item[0])
+    return previous_date.isoformat(), manifest_path, lots_path
+
+
+def _seed_lots_from_previous(
+    prior_lots: list[dict[str, str]],
+    *,
+    asset_category: str,
+    tracked_symbols: set[str],
+    prior_as_of: str | None,
+) -> dict[str, list[dict[str, Any]]]:
+    seeded: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in prior_lots:
+        if row.get("asset_category") != asset_category:
+            continue
+        symbol = str(row.get("symbol", "")).strip().upper()
+        if not symbol or symbol not in tracked_symbols:
+            continue
+        qty = _f(row.get("quantity"))
+        if abs(qty) <= 1e-12:
+            continue
+        basis = _f(row.get("cost_basis"))
+        provenance = str(row.get("provenance", ""))
+        carry_provenance = (
+            f"carried_forward_from_ledger={prior_as_of};"
+            f"prior_lot_id={row.get('lot_id', '')};"
+            f"prior_source={row.get('source', '')};"
+            f"prior_source_sha256={row.get('source_sha256', '')}"
+        )
+        if provenance:
+            carry_provenance += f";prior_provenance={provenance}"
+        seeded[symbol].append({
+            "lot_id": str(row.get("lot_id", "")),
+            "quantity": qty,
+            "entry_date": str(row.get("entry_date", "")),
+            "cost_basis": basis,
+            "entry_date_unknown": int(_f(row.get("entry_date_unknown"))),
+            "source": str(row.get("source", "")) or "carried_forward_lot",
+            "provenance": carry_provenance,
+        })
+    return seeded
+
+
 def _stock_trade_lots(
     trades: list[dict[str, str]],
     *,
     tracked_symbols: set[str],
+    seed_lots: dict[str, list[dict[str, Any]]] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[str], list[str]]:
     lots: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for symbol, seed_rows in (seed_lots or {}).items():
+        lots[symbol].extend(dict(row) for row in seed_rows)
     issues: list[str] = []
     ignored_closed: list[str] = []
     stock_trades = sorted((r for r in trades if r.get("asset_category") == "Stocks"), key=_trade_sort_key)
@@ -168,8 +241,20 @@ def _build_stock_holding_lots(
     open_stocks: dict[str, dict[str, str]],
     trades: list[dict[str, str]],
     overrides: dict[str, list[dict[str, Any]]],
+    prior_lots: list[dict[str, str]],
+    prior_as_of: str | None,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    lots_by_symbol, trade_issues, ignored_closed = _stock_trade_lots(trades, tracked_symbols=set(open_stocks))
+    seed_lots = _seed_lots_from_previous(
+        prior_lots,
+        asset_category="Stocks",
+        tracked_symbols=set(open_stocks),
+        prior_as_of=prior_as_of,
+    )
+    lots_by_symbol, trade_issues, ignored_closed = _stock_trade_lots(
+        trades,
+        tracked_symbols=set(open_stocks),
+        seed_lots=seed_lots,
+    )
     lots_out: list[dict[str, str]] = []
     recs: list[dict[str, str]] = []
     pre_report: list[str] = []
@@ -255,10 +340,20 @@ def _build_stock_holding_lots(
         "no unknown pre-report stock lots" if not pre_report else "; ".join(pre_report[:8]))
     rec("manual_lot_overrides_applied", "PASS" if manual_used else "WARN",
         "; ".join(manual_used) if manual_used else "no manual lot overrides were required/applied")
+    carried = sum(len(rows) for rows in seed_lots.values())
+    rec("prior_stock_lots_carried_forward", "PASS" if carried else "WARN",
+        f"carried_lots={carried} from prior_as_of={prior_as_of}" if carried else "no prior stock lots carried forward")
     return lots_out, recs
 
 
-def _build_option_lots(run_as_of: str, source_sha: str, open_options: dict[str, dict[str, str]], trades: list[dict[str, str]]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+def _build_option_lots(
+    run_as_of: str,
+    source_sha: str,
+    open_options: dict[str, dict[str, str]],
+    trades: list[dict[str, str]],
+    prior_lots: list[dict[str, str]],
+    prior_as_of: str | None,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     qty_by_symbol: dict[str, float] = defaultdict(float)
     first_date: dict[str, str] = {}
     for row in sorted((r for r in trades if r.get("asset_category") == "Equity and Index Options"), key=_trade_sort_key):
@@ -268,12 +363,31 @@ def _build_option_lots(run_as_of: str, source_sha: str, open_options: dict[str, 
             continue
         qty_by_symbol[symbol] += qty
         first_date.setdefault(symbol, str(row.get("trade_date", "")))
+    prior_options = _seed_lots_from_previous(
+        prior_lots,
+        asset_category="Equity and Index Options",
+        tracked_symbols=set(open_options),
+        prior_as_of=prior_as_of,
+    )
 
     lots: list[dict[str, str]] = []
     mismatches: list[str] = []
     for symbol, pos in sorted(open_options.items()):
         qty = _f(pos.get("quantity"))
-        if abs(qty_by_symbol.get(symbol, 0.0) - qty) > 1e-6:
+        prior_rows = prior_options.get(symbol, [])
+        prior_qty = sum(float(row["quantity"]) for row in prior_rows)
+        expected_qty = prior_qty + qty_by_symbol.get(symbol, 0.0)
+        if prior_rows:
+            entry_date = str(prior_rows[0].get("entry_date", ""))
+            entry_unknown = int(prior_rows[0].get("entry_date_unknown", 0))
+            provenance = f"option lot carried forward from prior_as_of={prior_as_of}; current aggregate from IB open position"
+            if abs(expected_qty - qty) > 1e-6:
+                mismatches.append(f"{symbol}:prior_plus_trades={expected_qty:.6g},open={qty:.6g}")
+        else:
+            entry_date = first_date.get(symbol, "")
+            entry_unknown = 0 if entry_date else 1
+            provenance = "option aggregate lot from IB open position; trade history used for quantity check"
+        if not prior_rows and abs(qty_by_symbol.get(symbol, 0.0) - qty) > 1e-6:
             mismatches.append(f"{symbol}:trades={qty_by_symbol.get(symbol, 0.0):.6g},open={qty:.6g}")
         basis = _f(pos.get("cost_basis"))
         cost_price = basis / qty if abs(qty) > 1e-12 else 0.0
@@ -283,19 +397,19 @@ def _build_option_lots(run_as_of: str, source_sha: str, open_options: dict[str, 
             "symbol": symbol,
             "lot_id": f"{symbol}-OPEN-OPTION",
             "quantity": fmt_number(qty),
-            "entry_date": first_date.get(symbol, ""),
+            "entry_date": entry_date,
             "cost_basis": fmt_number(basis),
             "cost_price": fmt_number(cost_price),
-            "entry_date_unknown": "0" if first_date.get(symbol) else "1",
+            "entry_date_unknown": str(entry_unknown),
             "source": "ib_option_open_position",
-            "provenance": "option aggregate lot from IB open position; trade history used for quantity check",
+            "provenance": provenance,
             "source_sha256": source_sha,
         })
     rec = {
         "run_as_of": run_as_of,
         "check": "option_quantity_reconciles",
         "status": "PASS" if not mismatches else "FAIL",
-        "detail": "open options match period option trades" if not mismatches else "; ".join(mismatches[:8]),
+        "detail": "open options match prior ledger plus period option trades" if not mismatches else "; ".join(mismatches[:8]),
     }
     return lots, [rec]
 
@@ -429,6 +543,11 @@ def main() -> int:
     fees = read_csv(input_paths["broker_fees.csv"])
     securities_lending = read_csv(input_paths["broker_securities_lending.csv"])
 
+    prior_as_of, prior_manifest_path, prior_lots_path = _previous_ledger_inputs(runs_root, run_as_of)
+    prior_lots = read_csv(prior_lots_path) if prior_lots_path is not None else []
+    if prior_as_of:
+        LOGGER.info("Using prior sealed ledger %s as lot carry-forward seed", prior_as_of)
+
     overrides = _manual_overrides(config)
     open_stocks = _open_stock_positions(open_positions)
     open_options = _open_option_positions(open_positions)
@@ -438,8 +557,10 @@ def main() -> int:
         open_stocks=open_stocks,
         trades=trades,
         overrides=overrides,
+        prior_lots=prior_lots,
+        prior_as_of=prior_as_of,
     )
-    option_lots, option_recs = _build_option_lots(run_as_of, source_sha, open_options, trades)
+    option_lots, option_recs = _build_option_lots(run_as_of, source_sha, open_options, trades, prior_lots, prior_as_of)
     recs.extend(option_recs)
     recs.extend(_additional_reconciliations(
         run_as_of=run_as_of,
@@ -484,8 +605,17 @@ def main() -> int:
         "acceptance": "PASS" if passed else "FAIL",
         "db_path": str(db_path),
         "source_sha256": source_sha,
-        "input_paths": {name: str(path) for name, path in input_paths.items()},
-        "inputs_sha256": {name: sha256_file(path) for name, path in input_paths.items()},
+        "input_paths": {
+            **{name: str(path) for name, path in input_paths.items()},
+            **({"prior_ledger_manifest.json": str(prior_manifest_path)} if prior_manifest_path is not None else {}),
+            **({"prior_holding_lots.csv": str(prior_lots_path)} if prior_lots_path is not None else {}),
+        },
+        "inputs_sha256": {
+            **{name: sha256_file(path) for name, path in input_paths.items()},
+            **({"prior_ledger_manifest.json": sha256_file(prior_manifest_path)} if prior_manifest_path is not None else {}),
+            **({"prior_holding_lots.csv": sha256_file(prior_lots_path)} if prior_lots_path is not None else {}),
+        },
+        "prior_ledger_as_of": prior_as_of,
         "outputs_sha256": {name: sha256_file(path) for name, path in out_paths.items() if name != "ledger_build_meta.json"},
         "db_row_counts": db_counts,
         "row_counts": {

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import logging
 import shutil
+import sqlite3
 import sys
 from datetime import date
 from pathlib import Path
@@ -90,6 +91,16 @@ def refresh_collect_issues(conn, run_as_of: str, failures: list[dict[str, str]])
         )
 
 
+def clear_contract_rows(conn, run_as_of: str) -> None:
+    """Remove downstream DB contract rows when force-recollecting a run."""
+    try:
+        with conn:
+            conn.execute("DELETE FROM stocks_scores WHERE run_as_of_date = ?", (run_as_of,))
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+
+
 def main() -> int:
     configure_utc_logging()
     args = parse_args()
@@ -111,6 +122,11 @@ def main() -> int:
         LOGGER.error("No enabled sectors in score_contract.sectors")
         return 1
     min_successful = int(cfg_get(config, "score_contract.min_successful_sectors", len(sectors)))
+    required_pipelines = {
+        str(s.get("model_family", "unknown"))
+        for s in sectors
+        if bool(s.get("required", True))
+    }
 
     results = []
     raw_results = []
@@ -161,6 +177,30 @@ def main() -> int:
             )
         return 1
 
+    successful_pipelines = {r.source_pipeline for r in results}
+    missing_required = sorted(required_pipelines - successful_pipelines)
+    if missing_required:
+        issue_date = run_as_of or "unknown"
+        LOGGER.error("Required sectors missing or empty for %s: %s", issue_date, missing_required)
+        audit_failures = list(failures)
+        for pipeline in missing_required:
+            audit_failures.append({
+                "source_pipeline": pipeline,
+                "issue_type": "required_sector_missing",
+                "detail": f"required sector {pipeline} missing or empty for as_of={issue_date}",
+            })
+        with connect(db_path) as conn:
+            run_id = start_run(conn, run_type="collect_sector_scores", input_path=config_path)
+            refresh_collect_issues(conn, issue_date, audit_failures)
+            finish_run(
+                conn,
+                run_id=run_id,
+                status="failed",
+                row_count=0,
+                message=f"as_of={issue_date} missing_required={','.join(missing_required)}",
+            )
+        return 1
+
     if not run_as_of:
         LOGGER.error("Could not determine run as-of date (no source dates and no --as-of)")
         return 1
@@ -169,22 +209,23 @@ def main() -> int:
     except ValueError as exc:
         LOGGER.error("%s", exc)
         return 1
-    future_sources = []
+    future_sources: set[str] = set()
     for result in results:
-        if not result.source_asof_date:
-            future_sources.append(f"{result.source_pipeline}:missing_source_asof")
-            continue
-        try:
-            source_date = parse_iso_date(result.source_asof_date, label=f"{result.source_pipeline} source as-of")
-        except ValueError as exc:
-            future_sources.append(f"{result.source_pipeline}:invalid_source_asof:{exc}")
-            continue
-        if source_date > run_date:
-            future_sources.append(f"{result.source_pipeline}:{result.source_asof_date}")
+        for row in result.rows:
+            if not row.source_asof_date:
+                future_sources.add(f"{result.source_pipeline}:{row.ticker}:missing_source_asof")
+                continue
+            try:
+                source_date = parse_iso_date(row.source_asof_date, label=f"{result.source_pipeline} source as-of")
+            except ValueError as exc:
+                future_sources.add(f"{result.source_pipeline}:{row.ticker}:invalid_source_asof:{exc}")
+                continue
+            if source_date > run_date:
+                future_sources.add(f"{result.source_pipeline}:{row.ticker}:{row.source_asof_date}")
     if future_sources:
-        LOGGER.error("Refusing to collect future/missing source dates for run %s: %s", run_as_of, future_sources)
+        LOGGER.error("Refusing to collect future/missing source dates for run %s: %s", run_as_of, sorted(future_sources))
         audit_failures = list(failures)
-        for source in future_sources:
+        for source in sorted(future_sources):
             pipeline = source.split(":", 1)[0]
             audit_failures.append({
                 "source_pipeline": pipeline,
@@ -237,6 +278,8 @@ def main() -> int:
     n = write_csv(out_path, COLLECTED_FIELDS, collected)
 
     with connect(db_path) as conn:
+        if args.force:
+            clear_contract_rows(conn, run_as_of)
         run_id = start_run(conn, run_type="collect_sector_scores", input_path=config_path)
         refresh_collect_issues(conn, run_as_of, failures)
         finish_run(

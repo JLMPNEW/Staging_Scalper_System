@@ -3,7 +3,7 @@
 
 Targets regime-conditional sleeve risk budgets with IR-tilted risk parity within each sleeve, capped
 per-name risk contribution, long-only + per-name caps, and gross/cash held at the Stage 7 level (no added
-risk). Emits a proposal only; never mutates the Stage 7 book. Gross is NOT re-scaled (Stage 6/7 own it).
+risk). Emits a proposal only; never mutates the Stage 7 book. Gross is NOT re-scaled upward (Stage 6/7 own it).
 """
 from __future__ import annotations
 
@@ -30,10 +30,12 @@ from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 from portfolio_layer.sleeves.risk_model import (  # noqa: E402
     effective_number_of_bets,
+    enforce_rc_cap_to_cash,
     factor_decomposition,
     information_ratios,
     risk_contributions,
     solve_risk_budget,
+    sleeve_risk_bounds,
     throttle_scale,
 )
 
@@ -43,8 +45,11 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 SOURCE_FILES = ["risk_model.py", "27_build_sleeve_framework.py", "28_apply_risk_budgets.py"]
 WEIGHT_FIELDS = ["ticker", "weight", "sleeve", "source_pipeline", "prior_weight",
                  "target_risk_budget", "realized_risk_contribution"]
-BUDGET_FIELDS = ["sleeve", "n_names", "target_risk_share", "before_risk_share", "after_risk_share",
-                 "before_capital_share", "after_capital_share"]
+BUDGET_FIELDS = [
+    "sleeve", "n_names", "target_risk_share", "feasible_target_risk_share",
+    "feasible_min_risk_share", "feasible_max_risk_share", "before_risk_share", "after_risk_share",
+    "before_capital_share", "after_capital_share",
+]
 FACTOR_FIELDS = ["scope", "idiosyncratic_share", "systematic_share", "market_share", "max_sector_share"]
 
 
@@ -195,6 +200,7 @@ def main() -> int:  # noqa: C901
     rec("sleeve_framework_current", "PASS" if not bad27 else "FAIL",
         "27 accepted and assignments hash matches" if not bad27 else f"{bad27}")
     if bad27:
+        LOGGER.error("Stage 27 inputs stale (source/hash mismatch); re-run 27: %s", bad27)
         validation_path.parent.mkdir(parents=True, exist_ok=True)
         write_csv(validation_path, ["check", "status", "detail"], checks)
         return 1
@@ -239,7 +245,9 @@ def main() -> int:  # noqa: C901
 
     target_b = _target_risk_budget(members=members, sleeve_budgets=sleeve_budgets, ir=ir, tilt=tilt, rc_cap=rc_cap)
     weights = solve_risk_budget(cov, target_b, gross=invested_gross, max_weight=max_weight, max_iter=max_iter)
-    # any name pruned by the solver keeps zero; gross conserved by the solver, cash absorbs the residual
+    rc_enforcement = enforce_rc_cap_to_cash(weights, cov, rc_cap=rc_cap, max_iter=max_iter)
+    weights = rc_enforcement.weights
+    # any name pruned/trimmed keeps zero or lower weight; cash absorbs the residual
     realized_invested = sum(weights.values())
     final_cash = round(1.0 - realized_invested, 10)
 
@@ -259,6 +267,14 @@ def main() -> int:  # noqa: C901
 
     risk_before_s, capital_before_s = _sleeve_share(rc_before.rc, prior)
     risk_after_s, capital_after_s = _sleeve_share(rc_after.rc, weights)
+    feasible_bounds = sleeve_risk_bounds(
+        cov,
+        sleeve_of,
+        gross=invested_gross,
+        max_weight=max_weight,
+        rc_cap=rc_cap,
+        max_iter=max_iter,
+    )
 
     # ---- write artifacts ----
     sleeves_dir.mkdir(parents=True, exist_ok=True)
@@ -276,6 +292,13 @@ def main() -> int:  # noqa: C901
     budget_rows = [{
         "sleeve": s, "n_names": len(members.get(s, [])),
         "target_risk_share": round(sleeve_budgets.get(s, 0.0), 6),
+        "feasible_target_risk_share": round(
+            min(max(sleeve_budgets.get(s, 0.0), feasible_bounds.get(s, {}).get("min", 0.0)),
+                feasible_bounds.get(s, {}).get("max", 1.0)),
+            6,
+        ),
+        "feasible_min_risk_share": round(feasible_bounds.get(s, {}).get("min", 0.0), 6),
+        "feasible_max_risk_share": round(feasible_bounds.get(s, {}).get("max", 1.0), 6),
         "before_risk_share": round(risk_before_s.get(s, 0.0), 6),
         "after_risk_share": round(risk_after_s.get(s, 0.0), 6),
         "before_capital_share": round(capital_before_s.get(s, 0.0), 6),
@@ -327,11 +350,19 @@ def main() -> int:  # noqa: C901
     rec("no_added_gross", "PASS" if no_add_risk else "FAIL", f"after_gross={realized_invested:.6f}<=stage7={invested_gross:.6f}")
     cash_ok = final_cash + 1e-8 >= cash_weight
     rec("cash_preserved", "PASS" if cash_ok else "FAIL", f"cash={final_cash:.6f}>=stage7={cash_weight:.6f}")
-    gross_exact = abs(realized_invested - invested_gross) <= 1e-6
     rec(
-        "gross_preserved_without_throttle",
-        "PASS" if throttle_apply or gross_exact else "FAIL",
-        f"after_gross={realized_invested:.10f}; stage7_gross={invested_gross:.10f}; throttle_apply={throttle_apply}",
+        "gross_not_increased_after_rc_cap",
+        "PASS" if no_add_risk and cash_ok and sum_ok else "FAIL",
+        f"after_gross={realized_invested:.10f}; stage7_gross={invested_gross:.10f}; "
+        f"cash_added_by_rc_trim={rc_enforcement.cash_added:.10f}; throttle_apply={throttle_apply}",
+    )
+    rec(
+        "realized_rc_cap_enforced",
+        # Keep this tolerance aligned with enforce_rc_cap_to_cash() and the Stage 29 per_name_rc_cap gate.
+        "PASS" if rc_enforcement.converged and rc_enforcement.max_rc <= rc_cap + 1e-6 else "FAIL",
+        f"max_rc={rc_enforcement.max_rc:.6f}<=cap={rc_cap}; "
+        f"trimmed_names={len({str(r.get('ticker')) for r in rc_enforcement.trimmed})}; "
+        f"iterations={rc_enforcement.iterations}; cash_added={rc_enforcement.cash_added:.6f}",
     )
     no_new = set(weights).issubset(set(prior))
     rec("no_new_tickers", "PASS" if no_new else "FAIL", f"new={sorted(set(weights)-set(prior))[:8]}")
@@ -352,6 +383,14 @@ def main() -> int:  # noqa: C901
         "drawdown_throttle_simulation": simulated_throttle,
         "within_sleeve_ir_tilt": tilt,
         "per_name_risk_contribution_cap": rc_cap,
+        "rc_cap_enforcement": {
+            "converged": rc_enforcement.converged,
+            "iterations": rc_enforcement.iterations,
+            "cash_added": round(rc_enforcement.cash_added, 10),
+            "max_rc": round(rc_enforcement.max_rc, 10),
+            "trimmed": list(rc_enforcement.trimmed),
+        },
+        "sleeve_feasibility_bounds": feasible_bounds,
         "diagnostics": {
             "enb_before": enb_before["enb"], "enb_after": enb_after["enb"],
             "idio_before": round(factor_before["idiosyncratic_share"], 6),

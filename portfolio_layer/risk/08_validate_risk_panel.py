@@ -36,6 +36,16 @@ from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
 LOGGER = logging.getLogger("validate_risk_panel")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+NON_US_PRICE_SUFFIXES = {
+    ".AS", ".AX", ".BR", ".CO", ".DE", ".F", ".HE", ".HK", ".IR", ".KS", ".KQ", ".L", ".MI",
+    ".MX", ".OL", ".PA", ".SA", ".SI", ".SS", ".ST", ".SW", ".SZ", ".T", ".TO", ".TW", ".V",
+    ".VI", ".VX",
+}
+
+
+def _has_non_us_price_suffix(ticker: str) -> bool:
+    upper = ticker.strip().upper()
+    return any(upper.endswith(suffix) for suffix in NON_US_PRICE_SUFFIXES)
 
 
 def iso_date_arg(raw: str) -> str:
@@ -286,8 +296,30 @@ def main() -> int:  # noqa: C901
             f"missing/non-full: {bad_market}"
         ))
 
-    # 6. FX normalization (US universe / Yahoo USD) — informational
-    rec("fx_usd", "PASS", "universe is US-listed USD via Yahoo adjusted close")
+    # 6. FX normalization. Current Stage 2 supports US-listed USD instruments only; fail closed if a
+    #    non-US price suffix or explicit non-USD score currency enters the panel before FX handling exists.
+    non_us_suffix = sorted(str(t).upper() for t in prices.columns if _has_non_us_price_suffix(str(t)))
+    score_currency_fields = [r for r in scores if "currency" in r]
+    non_usd_scores = []
+    blank_currency = 0
+    for row in score_currency_fields:
+        ticker = str(row.get("ticker", "")).strip().upper()
+        currency = str(row.get("currency", "")).strip().upper()
+        if not ticker or ticker not in prices.columns:
+            continue
+        if not currency:
+            blank_currency += 1
+        elif currency != "USD":
+            non_usd_scores.append(f"{ticker}:{currency}")
+    fx_bad = non_us_suffix or non_usd_scores
+    currency_detail = (
+        f"score_currency_rows={len(score_currency_fields)} blank={blank_currency}"
+        if score_currency_fields
+        else "stocks_scores.csv has no currency column"
+    )
+    rec("fx_usd", "PASS" if not fx_bad else "FAIL",
+        f"US-listed suffix check ok; {currency_detail}"
+        if not fx_bad else f"non_us_suffix={non_us_suffix[:10]} non_usd_scores={non_usd_scores[:10]}")
 
     # 7. covariance PSD + condition number, recomputed from the artifact Stage 3 consumes.
     cov_square = covariance.shape[0] == covariance.shape[1]
@@ -381,10 +413,30 @@ def main() -> int:  # noqa: C901
     liquidity_audit_path = risk_dir / "liquidity_audit.csv"
     liquidity_sector_path = risk_dir / "liquidity_audit_by_sector.csv"
     liquidity_summary_path = risk_dir / "liquidity_audit_summary.json"
+    liquidity_paths = [
+        spread_samples_path,
+        spread_snapshot_path,
+        spread_meta_path,
+        liquidity_audit_path,
+        liquidity_sector_path,
+        liquidity_summary_path,
+    ]
     if liquidity_mode_error:
         rec("liquidity_panel_mode", "FAIL", liquidity_mode_error)
     elif not liquidity_enabled:
         rec("liquidity_panel_mode", "PASS", "enhanced spread panel inactive; Stage 4 uses config/default spread")
+    elif not any(path.exists() for path in liquidity_paths):
+        rec(
+            "liquidity_panel_mode",
+            "WARN",
+            "enhanced liquidity configured but Stage 2.5 artifacts are absent; core Stage 2 risk acceptance "
+            "does not require live IB/TWS",
+        )
+        rec(
+            "liquidity_audit_reproducible",
+            "WARN",
+            "Stage 2.5 liquidity audit not run; run 05c/05d before cost models that consume broker spreads",
+        )
     else:
         liquidity_bad = []
         spread_rows = {}

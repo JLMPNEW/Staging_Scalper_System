@@ -228,6 +228,7 @@ fda_manufacturer_id,manufacturer_name,ticker,company_id,confidence,mapping_metho
 9440,"TEI Biosciences, Inc.",IART,75,99,manual_override,TEI Biosciences tissue repair scaffold business was acquired by Integra LifeSciences; route FDA rows to IART
 10253,"TEI Biosciences",IART,75,99,manual_override,TEI Biosciences tissue repair scaffold business was acquired by Integra LifeSciences; route FDA rows to IART
 10630,"SURGICAL",,,0,out_of_universe,Generic/truncated manufacturer text fragment; explicit exclusion to prevent false SYK/ISRG attribution
+10631,"ALCON RESEARCH, LLC - ALCON PRECISION DEVICE",,,0,out_of_universe,Alcon surgical ophthalmic instrumentation facility; parent target ALC is outside the current med-device universe and must not be mapped to VTAK
 9005,"Celonova Biosciences, Inc.",,,0,out_of_universe,Private Celonova Biosciences entity; explicit exclusion from public med-device universe
 2427,"Kuros Biosciences B.V",,,0,out_of_universe,Kuros Swiss-listed parent KURN.SW is outside the current med-device universe
 4331,"Kuros Biosciences",,,0,out_of_universe,Kuros Swiss-listed parent KURN.SW is outside the current med-device universe
@@ -249,6 +250,8 @@ fda_manufacturer_id,manufacturer_name,ticker,company_id,confidence,mapping_metho
 6957,"Vivos Therapeutics, Inc. (Formerly Vivos Biotechnologies, I)",,,0,out_of_universe,VVOS is not in the current med-device universe; add VVOS before mapping this entity
 3993,"Alafair Biosciences, Inc.",,,0,out_of_universe,Private Alafair Biosciences soft-tissue repair developer; explicit exclusion from public med-device universe
 1651,"Alafair Biosciences",,,0,out_of_universe,Private Alafair Biosciences soft-tissue repair developer; explicit exclusion from public med-device universe
+10513,"89 NORTH",,,0,out_of_universe,Private Chroma Technology optical illumination subsidiary; explicit exclusion and must not be mapped to Philips
+7689,"3D Industrial Imaging Co., Ltd.",,,0,out_of_universe,Privately held international dental 3D imaging software/component provider; exclude under legal-ownership attribution and do not proxy to VREX
 4101,"DreaMed Diabetes, Ltd.",,,0,out_of_universe,Private AI insulin optimization software developer; explicit exclusion from public med-device universe
 2050,"Ihealth Labs, Inc.",,,0,out_of_universe,Private consumer digital-health manufacturer; explicit exclusion from public med-device universe
 5670,"Peca Labs",,,0,out_of_universe,Private cardiovascular conduit developer; explicit exclusion from public med-device universe
@@ -315,3 +318,28 @@ fda_manufacturer_id,manufacturer_name,ticker,company_id,confidence,mapping_metho
 3859,"Akili Interactive Labs, Inc.",,,0,out_of_universe,Akili delisted after acquisition by Virtual Therapeutics; explicit exclusion from active public med-device universe
 1424,"Fresenius Medical Care North America",,,0,out_of_universe,FMS North America clinical services division excluded from pure medical-device instrument benchmarks
 4384,"Sun Pharmaceutical Industries, Inc.",,,0,out_of_universe,India-listed generic pharmaceutical manufacturer outside current med-device universe
+10643,"MICRO THERAPEUTICS, INC. DBA EV3",MDT,,99,manual_override,ev3/Covidien neurovascular portfolio belongs to Medtronic after Covidien acquisition; must not be mapped to CATX
+9102,"Micro Therapeutics,  Inc.",MDT,,99,manual_override,ev3/Covidien neurovascular portfolio belongs to Medtronic after Covidien acquisition; must not be mapped to CATX
+3728,"WEST PHARMA. SERVICES IL, LTD",WST,,99,manual_override,West Pharmaceutical Services international manufacturing facility; must not be mapped to ATR
+9321,"Randox Laboratories Ltd.",,,0,out_of_universe,Private UK clinical diagnostics group; explicit exclusion and must not be mapped to PHG
+1106,"Meridian Bioscience Inc",,,0,out_of_universe,Meridian Bioscience was acquired by SD Biosensor/SJL Partners and taken private; explicit exclusion and must not be mapped to TWST
+9557,"Shanghai United Imaging Healthcare Co., Ltd.",,,0,out_of_universe,Shanghai United Imaging parent trades on SSE STAR market and is outside the current med-device universe; do not proxy to VREX
+3653,"Deerfield Imaging, Inc.",,,0,out_of_universe,Deerfield Imaging/IMRIS is private after Deerfield Management transaction; explicit exclusion and must not be mapped to VREX
+10222,"Zimmer Dental Inc",,,0,out_of_universe,Zimmer Dental was divested through ZimVie and sold to private equity; exclude from ZBH footprint
+2399,"Owens & Minor (O&M) Halyard, Inc.",,,0,out_of_universe,Halyard surgical consumables/infection-prevention business belongs to Owens & Minor; OMI is outside the current med-device universe; do not map to AVNS
+8976,"Djo Global",ENOV,,99,manual_override,DJO Global lineage belongs to Enovis after Colfax/Enovis restructuring
+8995,"Envoy Medical Corporation",,,0,out_of_universe,Envoy Medical active parent COCH is not in the current med-device universe; add COCH before mapping this entity and do not map to FEED
+1821,"Anika Therapeutics, Inc.",,,0,out_of_universe,Anika active parent ANIK is not in the current med-device universe; add ANIK before mapping this entity and do not map to CATX
+1012,"Medical Action Industries, Inc. 306",,,0,out_of_universe,Medical Action Industries belongs to Owens & Minor; OMI is outside the current med-device universe; do not map to MDLN
+1166,"Medical Action Industries Inc",,,0,out_of_universe,Medical Action Industries belongs to Owens & Minor; OMI is outside the current med-device universe; do not map to MDLN
+8918,"Infusyn Therapeutics, LLC",,,0,out_of_universe,Private Flowonix/Prometra infusion-pump operating entity; explicit exclusion and must not be mapped to CATX
+10002,"Radiometer America Inc",DHR,,99,manual_override,Radiometer blood-gas diagnostics subsidiary belongs to Danaher; must not be mapped to PHG
+10640,"FRESENIUS VIAL S.A.S",,,0,out_of_universe,Fresenius Vial belongs to Fresenius SE/Fresenius Kabi parent FSNUY rather than FMS; FSNUY is outside the current med-device universe
+1134,"COCHLEAR BONE ANCHORED SOLUTIONS AB",,,0,out_of_universe,Cochlear Baha operating entity belongs to Cochlear Limited CHENY/COH.AX outside the current med-device universe; do not map to SIBN
+10433,"MEDTECH SAS",ZBH,,99,manual_override,ROSA Brain recall manufacturer belongs to Zimmer Biomet robotics footprint; must not map to SMTI via generic MedTech token
+9668,"MEDTECH SAS 900 Rue Du Mas De Verchant Montpellier France",ZBH,,99,manual_override,ROSA Brain manufacturer/address variant belongs to Zimmer Biomet robotics footprint; must not map to SMTI
+10224,"MEDTECH SAS Parc Euromedecine Batiment",ZBH,,99,manual_override,ROSA Brain manufacturer/address variant belongs to Zimmer Biomet robotics footprint; must not map to SMTI
+1121,"C.R. BARD, INC. (BASD) -3006260740",BDX,,99,manual_override,C.R. Bard was acquired by Becton Dickinson; high-volume Bard rows belong to BDX
+10637,"C.R. BARD INC. (COVINGTON) -1018233",BDX,,99,manual_override,C.R. Bard was acquired by Becton Dickinson; high-volume Bard rows belong to BDX
+1275,"GE MEDICAL SYSTEMS (CHINA) CO., LTD",GEHC,,99,manual_override,GE Medical Systems operating unit belongs to GE HealthCare; explicit override avoids generic GE token under-scoring
+468,"GE Medical Systems Ultrasound and Primary Care Diagnostics",GEHC,,99,manual_override,GE Medical Systems ultrasound and primary care diagnostics operating unit belongs to GE HealthCare

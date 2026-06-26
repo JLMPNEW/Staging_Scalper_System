@@ -210,7 +210,7 @@ Stage 10 publishes static semiconductor reports from the latest production Stage
 python technology\semiconductors\scripts\10b_publish_semiconductor_dashboard_reports.py
 ```
 
-It writes the final rank table, company scorecards, cohort summary, risk flags, review queue, overlay summary, manifest, and a static `index.html` to `output/technology_reports/dashboard/`. These reports are read-only publishing artifacts; they do not write new model scores to the database.
+It writes the final rank table, company scorecards, cohort summary, risk flags, review queue, overlay summary, manifest, and a static `index.html` to `output/technology_reports/semi_dashboard/`. These reports are read-only publishing artifacts; they do not write new model scores to the database. The latest files remain at the stable dashboard path and each run also snapshots the same files under an `asof_date` subfolder.
 
 ## Governance Lockbox And Signal Registry
 

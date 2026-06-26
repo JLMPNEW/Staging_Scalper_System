@@ -694,6 +694,11 @@ biotech_scoring:
   output_dir: "../output/biotech_index_reports"
   output_csv: "biotech_daily_scores.csv"
   taxonomy_overrides_csv: "data/biotech_taxonomy_overrides.csv"
+  model_metadata:
+    model_family: "biotech_tier1_allocation_discovery"
+    model_version: "biotech_tier1_v20260624"
+    score_model_version: "biotech_opportunity_score_core_structural_veto_v20260624"
+    scoring_contract_version: "biotech_daily_scores_contract_v1"
   calibration_cohorts:
     enabled: true
     version: "calibration_cohort_v1_robust_5bucket_20260606"

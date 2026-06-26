@@ -11,6 +11,7 @@ import argparse
 import logging
 import math
 import sys
+from statistics import median
 from datetime import date
 from pathlib import Path
 
@@ -23,7 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
     CONTRACT_FIELDS, DEFAULT_RATING_BANDS, contract_version, expected_alpha, fail_if_exists,
-    percentiles_within, rating_for_percentile, read_csv, upsert_stocks_scores, write_csv,
+    percentiles_within, rating_for_percentile, read_csv, upsert_stocks_scores, validate_rating_bands, write_csv,
 )
 from portfolio_layer.core.db import add_issue, connect, finish_run, start_run  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
@@ -74,6 +75,20 @@ def parse_finite(value: object, label: str) -> float:
     if not math.isfinite(parsed):
         raise ValueError(f"{label} must be finite, got {value!r}")
     return parsed
+
+
+def resolve_calibration_anchor(value: object, label: str, rows: list[dict[str, str]]) -> float:
+    """Resolve numeric calibration anchors; `median` centers each sector on its current scored population."""
+    raw = str(value).strip().lower() if value is not None else ""
+    if raw == "median":
+        values = [
+            parsed
+            for parsed in (parse_finite(r.get("native_score"), f"{label}:native_score") for r in rows)
+        ]
+        if not values:
+            raise ValueError(f"{label}=median requires at least one finite native_score")
+        return float(median(values))
+    return parse_finite(value, label)
 
 
 def assign_percentiles_and_ratings(rows: list[dict], bands: dict[str, float]) -> None:
@@ -132,7 +147,24 @@ def main() -> int:
         str(s["model_family"]): dict(s.get("calibration", {}))
         for s in cfg_get(config, "score_contract.sectors", [])
     }
+    global_native_range = dict(cfg_get(config, "score_contract.native_score_range", {}) or {})
+    native_range_by_family = {
+        str(s["model_family"]): {**global_native_range, **dict(s.get("native_score_range", {}) or {})}
+        for s in cfg_get(config, "score_contract.sectors", [])
+    }
     bands = {**DEFAULT_RATING_BANDS, **cfg_get(config, "score_contract.rating_bands", {})}
+    band_errors = validate_rating_bands(bands)
+    if band_errors:
+        LOGGER.error("Invalid score_contract.rating_bands: %s", band_errors)
+        return 1
+    try:
+        max_abs_expected_alpha = parse_finite(
+            cfg_get(config, "score_contract.max_abs_expected_alpha", 1.0),
+            "score_contract.max_abs_expected_alpha",
+        )
+    except ValueError as exc:
+        LOGGER.error("%s", exc)
+        return 1
 
     # Optional canonical-pipeline overrides (ticker -> source_pipeline) to settle cross-sector duplicates.
     overrides: dict[str, str] = {}
@@ -155,19 +187,34 @@ def main() -> int:
     by_pipeline: dict[str, list[dict]] = {}
     for row in collected:
         by_pipeline.setdefault(row["source_pipeline"], []).append(row)
+    unknown_pipelines = sorted(set(by_pipeline) - set(calib_by_family))
+    if unknown_pipelines:
+        LOGGER.error("Unknown source_pipeline values in collected_scores.csv: %s", unknown_pipelines)
+        return 1
 
     contract_rows: list[dict] = []
     for pipeline, rows in by_pipeline.items():
         calib = calib_by_family.get(pipeline, {})
         try:
-            neutral = parse_finite(calib.get("neutral", 50.0), f"{pipeline}:calibration.neutral")
+            neutral = resolve_calibration_anchor(calib.get("neutral", 50.0), f"{pipeline}:calibration.neutral", rows)
             scale = parse_finite(calib.get("scale", 50.0), f"{pipeline}:calibration.scale")
             alpha_full = parse_finite(
                 calib.get("expected_alpha_at_full", 0.15),
                 f"{pipeline}:calibration.expected_alpha_at_full",
             )
+            native_min = parse_finite(
+                native_range_by_family.get(pipeline, {}).get("min", 0.0),
+                f"{pipeline}:native_score_range.min",
+            )
+            native_max = parse_finite(
+                native_range_by_family.get(pipeline, {}).get("max", 100.0),
+                f"{pipeline}:native_score_range.max",
+            )
         except ValueError as exc:
             LOGGER.error("%s", exc)
+            return 1
+        if native_min > native_max:
+            LOGGER.error("%s native_score_range min %.6f exceeds max %.6f", pipeline, native_min, native_max)
             return 1
         for r in rows:
             ticker = str(r.get("ticker", "<missing>"))
@@ -182,6 +229,25 @@ def main() -> int:
                 )
             except ValueError as exc:
                 LOGGER.error("%s", exc)
+                return 1
+            if native < native_min or native > native_max:
+                LOGGER.error(
+                    "%s:%s native_score %.6f outside configured range [%.6f, %.6f]",
+                    pipeline,
+                    ticker,
+                    native,
+                    native_min,
+                    native_max,
+                )
+                return 1
+            if abs(final_score) > max_abs_expected_alpha:
+                LOGGER.error(
+                    "%s:%s final_score %.6f exceeds max_abs_expected_alpha %.6f",
+                    pipeline,
+                    ticker,
+                    final_score,
+                    max_abs_expected_alpha,
+                )
                 return 1
             contract_rows.append({
                 "as_of_date": run_as_of, "ticker": r["ticker"], "source_pipeline": pipeline,

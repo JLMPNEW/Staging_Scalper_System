@@ -347,11 +347,14 @@ Goal: run the complete model reliably.
 
 Build:
 
-- Orchestrator script.
-- Step-level timing.
-- Partial-run handling.
+- Orchestrator script: `med_devices/scripts/71_run_med_device_refresh_pipeline.py`.
+- Step-level timing and JSON/CSV manifests.
+- Run-specific archived manifests plus fixed latest manifest pointers.
+- Resume handling that can skip previously passed steps and retry failed steps.
+- Partial-run handling with `--from-step`, `--to-step`, `--only`, and `--skip-step`.
 - Freshness preflight for IB, Yahoo fallback, SEC, FDA, CMS.
-- Final validation.
+- Final automated production QA gate.
+- FDA manufacturer mapping governance audit after linker rebuilds.
 - Snapshot output copies.
 
 Acceptance tests:
@@ -359,7 +362,9 @@ Acceptance tests:
 - Full daily pipeline can run from clean inputs for a chosen as-of date.
 - Failed critical steps stop downstream scoring.
 - Noncritical fallback use is logged and visible.
-- Final validation checks row coverage, required columns, source freshness, and report generation.
+- `--resume` can restart a failed run without rerunning already passed steps.
+- FDA mapping governance reports `ambiguous=0`, high-volume unmapped manufacturers at the configured threshold, and no inactive-ticker override targets.
+- Final production QA checks row coverage, required columns, duplicate tickers, inactive tickers, source freshness, FDA mapping criticals, and report generation.
 - Re-running the same as-of date is idempotent.
 
 ## Stage 16 - Governance, Analyst Review, And Portfolio Workflow
@@ -370,6 +375,7 @@ Build:
 
 - Manual override log.
 - Analyst review queue.
+- Calibration refresh cadence audit.
 - Investment memo generator.
 - Position eligibility gates.
 - Kill criteria and event-risk calendar.
@@ -379,6 +385,8 @@ Acceptance tests:
 
 - Manual overrides include reason, owner, timestamp, active flag, and expiration/review date.
 - Top candidates with FDA/reimbursement red flags require analyst approval.
+- Analyst review queue is regenerated each run with priority, category, reason, and open decision fields.
+- Calibration governance flags stale backfill, IC, promotion, Optuna, safe-core, and baseline artifacts without silently changing production policy.
 - Start-position rule is reproducible from stored scores and flags.
 - Model weight/config changes are version-controlled.
 - Live score changes and manual overrides are auditable.

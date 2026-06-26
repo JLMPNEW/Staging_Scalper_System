@@ -702,6 +702,24 @@ def tier1_production_baseline(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def scoring_model_metadata(config: dict[str, Any], production_baseline: dict[str, Any]) -> dict[str, str]:
+    """Stable score-contract labels written to score outputs for audit joins."""
+    meta = cfg_get(config, "biotech_scoring.model_metadata", {}) or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    score_model = str(production_baseline.get("score_model") or "biotech_opportunity_score").strip()
+    selection_policy = str(production_baseline.get("selection_policy") or "unversioned_policy").strip()
+    candidate_id = str(production_baseline.get("candidate_id") or "current_config").strip()
+    return {
+        "score_model_version": str(
+            meta.get("score_model_version") or f"{score_model}_{selection_policy}_{candidate_id}"
+        ).strip(),
+        "model_family": str(meta.get("model_family") or "biotech_tier1_allocation_discovery").strip(),
+        "model_version": str(meta.get("model_version") or candidate_id).strip(),
+        "scoring_contract_version": str(meta.get("scoring_contract_version") or "biotech_daily_scores_contract_v1").strip(),
+    }
+
+
 def production_policy_settings(config: dict[str, Any]) -> dict[str, Any]:
     def policy_float(key: str, default: object, *, min_value: float = 0.0, max_value: float = 100.0) -> float:
         value = float(cfg_get(config, f"biotech_scoring.production_policy.{key}", default))
@@ -1321,7 +1339,7 @@ def load_feature_rows(conn: sqlite3.Connection, asof_date: str) -> list[dict[str
         SELECT
             f.asof_date, f.company_id, f.catalyst_score_raw, f.credibility_score_raw,
             f.financial_quality_score_raw, f.risk_score_raw, f.momentum_score_raw, f.feature_json,
-            c.ticker, c.company_name
+            c.ticker, c.company_name, c.sector, c.industry, c.industry_aggregate, c.country, c.currency
         FROM daily_features f
         JOIN companies c ON c.company_id = f.company_id
         WHERE f.asof_date = ?
@@ -1651,6 +1669,7 @@ def score_rows(
     growth_drag_curve = configured_growth_drag_curve(config)
     core_veto_settings = core_structural_veto_settings(config)
     production_baseline = tier1_production_baseline(config)
+    model_metadata = scoring_model_metadata(config, production_baseline)
     policy_settings = production_policy_settings(config)
     commercial_risk_settings = commercial_risk_overlay_settings(config)
     rank_cap_settings = rank_quality_cap_settings(config)
@@ -2585,6 +2604,15 @@ def score_rows(
                 "company_id": company_id,
                 "ticker": row["ticker"],
                 "company_name": row["company_name"],
+                "sector": row.get("sector") or "",
+                "industry": row.get("industry") or "",
+                "subsector": row.get("industry_aggregate") or "",
+                "country": row.get("country") or "",
+                "currency": row.get("currency") or "",
+                "score_model_version": model_metadata["score_model_version"],
+                "model_family": model_metadata["model_family"],
+                "model_version": model_metadata["model_version"],
+                "scoring_contract_version": model_metadata["scoring_contract_version"],
                 "catalyst_score": round(catalyst, 4),
                 "credibility_score": round(credibility, 4),
                 "financial_quality_score": round(financial_quality, 4),
@@ -2875,6 +2903,15 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "company_id",
         "ticker",
         "company_name",
+        "sector",
+        "industry",
+        "subsector",
+        "country",
+        "currency",
+        "score_model_version",
+        "model_family",
+        "model_version",
+        "scoring_contract_version",
         "catalyst_score",
         "credibility_score",
         "financial_quality_score",
@@ -3117,6 +3154,15 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "asof_date",
         "ticker",
         "company_name",
+        "sector",
+        "industry",
+        "subsector",
+        "country",
+        "currency",
+        "score_model_version",
+        "model_family",
+        "model_version",
+        "scoring_contract_version",
         "tier1_production_score_model",
         "tier1_selection_policy",
         "alpha_multibagger_role",
@@ -3276,6 +3322,15 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "company_id",
         "ticker",
         "company_name",
+        "sector",
+        "industry",
+        "subsector",
+        "country",
+        "currency",
+        "score_model_version",
+        "model_family",
+        "model_version",
+        "scoring_contract_version",
         "bucket",
         "opportunity_score",
         "allocation_opportunity_score",

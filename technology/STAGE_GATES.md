@@ -251,7 +251,7 @@ Acceptance tests:
 - Company scorecards include component scores, quality status, review reason, cohort, and source links where available.
 - Cohort summaries, risk flags, review queue, and overlay summaries are written.
 - Stage 9 backtest summary is linked into the dashboard manifest when available.
-- A static `index.html` is written under `output/technology_reports/dashboard/`.
+- A static `index.html` is written under `output/technology_reports/semi_dashboard/`, with dated snapshot copies under each run's `asof_date` subfolder.
 - Dashboard publishing is read-only with respect to model scores and source data.
 
 ## Stage 10B - Governance Lockbox And Signal Registry

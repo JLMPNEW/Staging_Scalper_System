@@ -113,6 +113,7 @@ Load and score the first FDA/reimbursement layers:
 ```powershell
 python med_devices\scripts\08_sync_med_device_fda_core.py --allow-partial
 python med_devices\scripts\09_link_med_device_fda_to_companies.py
+python med_devices\scripts\70_audit_med_device_fda_mapping_governance.py
 python med_devices\scripts\10_build_med_device_fda_features.py
 python med_devices\scripts\14_sync_med_device_cms_reimbursement.py --allow-partial
 python med_devices\scripts\15_link_med_device_reimbursement_to_companies.py
@@ -126,3 +127,45 @@ openFDA page fetches are bounded by `fda_core_ingestion.parallel_workers`; raw a
 CMS detail HCPCS fetches are bounded by `cms_reimbursement_ingestion.detail_parallel_workers`; payment-file ZIP downloads are cached at the configured `path`, and SQLite writes remain serialized.
 Reimbursement mapping uses policy-text alias matches, FDA device-name descriptor matches against HCPCS descriptions, and optional manual mappings in `med_devices/data/reimbursement_mapping_overrides.csv`. CLFS and ASC payment-file entries are present but disabled because the CMS downloads route through the CMS/AMA license workflow.
 The final daily scoring script writes the multi-sleeve composite into `med_device_daily_scores`.
+
+Run the production refresh orchestrator for routine daily updates:
+
+```powershell
+python med_devices\scripts\71_run_med_device_refresh_pipeline.py --asof 2026-06-25
+```
+
+Useful operational modes:
+
+```powershell
+python med_devices\scripts\71_run_med_device_refresh_pipeline.py --asof 2026-06-25 --dry-run
+python med_devices\scripts\71_run_med_device_refresh_pipeline.py --asof 2026-06-25 --skip-network
+python med_devices\scripts\71_run_med_device_refresh_pipeline.py --asof 2026-06-25 --from-step 13_build_daily_scores
+python med_devices\scripts\71_run_med_device_refresh_pipeline.py --asof 2026-06-25 --resume
+python med_devices\scripts\71_run_med_device_refresh_pipeline.py --list-steps
+```
+
+The orchestrator writes step logs, run-specific archived manifests, and fixed "latest" manifest pointers under `output/med_devices_reports/orchestration`. Resume mode reads the latest manifest by default and skips previously passed steps. Network-heavy external feeds are marked optional by default; core derived features, final scoring, review-pack publication, analyst review queue generation, and the final production QA gate are critical. The calibration-governance audit is emitted on every run but is nonblocking by default because it tracks maintenance cadence rather than daily output correctness.
+
+Routine production QA and review artifacts are written to:
+
+- `output/med_devices_reports/production_qa/med_device_production_qa_latest.json`
+- `output/med_devices_reports/production_qa/med_device_production_qa_latest.csv`
+- `output/med_devices_reports/analyst_review/med_device_analyst_review_queue_latest.csv`
+- `output/med_devices_reports/calibration/med_device_calibration_governance.csv`
+
+The analyst review process is governed by `ANALYST_REVIEW_WORKFLOW.md`. Phase 1 is audit-only: decisions in `med_devices/data/analyst_review_decisions.csv` are validated and surfaced in score outputs, but they do not change portfolio candidate gates while `med_devices_analyst_review.enable_portfolio_overrides` is `false`.
+
+### FDA Mapping Governance
+
+`med_devices/data/fda_manufacturer_overrides.csv` is the production source of truth for reviewed FDA manufacturer parent mappings. The linker runs `fda_mapping_governance` automatically after rebuilding `med_device_fda_entity_mapping.csv`; the standalone audit command above can also be run directly.
+
+Allowed manual override statuses are:
+
+- `manual_override` / `mapped`: route to an active med-devices universe company.
+- `out_of_universe`: reviewed public/private/international parent outside the active investable universe.
+- `private_excluded`: private entity with no active public parent.
+- `international_excluded`: public foreign listing outside the current execution universe.
+- `inactive_or_delisted`: inactive, acquired, or delisted ticker.
+- `do_not_map`, `non_us_traded_parent`, `not_in_investible_universe`: legacy explicit exclusion aliases.
+
+The governance audit writes `output/med_devices_reports/fda_mapping_review_queue.csv` and fails production refreshes on critical issues such as ambiguous mappings, high-volume unmapped manufacturers, mappings below the production confidence floor, mappings to inactive tickers, invalid override statuses, and regression-case failures for known false-positive traps.

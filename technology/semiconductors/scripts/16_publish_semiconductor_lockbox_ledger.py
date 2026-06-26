@@ -412,7 +412,7 @@ def main() -> int:
         base_dir=base_dir,
     )
     dashboard_dir = resolve_path(
-        cfg_get(config, "semiconductor_dashboard_reports.output_dir", "../output/technology_reports/dashboard"),
+        cfg_get(config, "semiconductor_dashboard_reports.output_dir", "../output/technology_reports/semi_dashboard"),
         base_dir=base_dir,
     )
     audit_dir = resolve_path("../output/technology_reports/audits", base_dir=base_dir)

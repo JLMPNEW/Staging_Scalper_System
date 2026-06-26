@@ -33,6 +33,7 @@ def check_stage1_readiness(
     run_as_of: str,
     *,
     staleness_tolerance: int,
+    per_pipeline_staleness_tolerance: dict[str, int] | None = None,
     expected_pipelines: list[str] | None = None,
     stale_status: str = "FAIL",
 ) -> list[dict[str, str]]:
@@ -76,16 +77,26 @@ def check_stage1_readiness(
             "all enabled sectors present in sealed manifest" if not missing else f"missing sectors: {missing}")
     stale = {}
     for pipe, info in per_sector.items():
+        tolerance = (
+            per_pipeline_staleness_tolerance.get(str(pipe), staleness_tolerance)
+            if per_pipeline_staleness_tolerance
+            else staleness_tolerance
+        )
         d = _staleness(run_as_of, str(info.get("source_asof", "")))
-        if d is None or d > staleness_tolerance or d < 0:
-            stale[pipe] = d
+        if d is None or d > tolerance or d < 0:
+            stale[pipe] = {"staleness_days": d, "tolerance_days": tolerance}
     status = "PASS" if not stale else stale_status.upper()
+    tolerance_detail = (
+        f"per-pipeline={dict(sorted(per_pipeline_staleness_tolerance.items()))}"
+        if per_pipeline_staleness_tolerance
+        else f"tolerance={staleness_tolerance}d"
+    )
     rec(
         "source_staleness_within_tolerance",
         status,
-        f"tolerance={staleness_tolerance}d; out-of-tolerance={stale}"
+        f"{tolerance_detail}; out-of-tolerance={stale}"
         if stale
-        else f"all within {staleness_tolerance}d",
+        else f"all within {tolerance_detail}",
     )
     return checks
 

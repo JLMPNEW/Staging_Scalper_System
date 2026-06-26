@@ -367,6 +367,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", type=str, default="")
     parser.add_argument("--tickers", type=str, default="")
     parser.add_argument("--max-tickers", type=int, default=0)
+    parser.add_argument("--include-historical-members", action="store_true")
     return parser.parse_args()
 
 
@@ -654,7 +655,14 @@ def latest_asof(conn: Any) -> str:
     return asof or datetime.now(timezone.utc).date().isoformat()
 
 
-def load_companies(conn: Any, *, ticker_filter: set[str], max_tickers: int) -> list[Company]:
+def load_companies(
+    conn: Any,
+    *,
+    asof: date,
+    ticker_filter: set[str],
+    max_tickers: int,
+    include_historical_members: bool,
+) -> list[Company]:
     if table_exists(conn, "dim_company_model_taxonomy"):
         rows = conn.execute(
             """
@@ -663,17 +671,37 @@ def load_companies(conn: Any, *, ticker_filter: set[str], max_tickers: int) -> l
             FROM dim_company c
             LEFT JOIN dim_company_model_taxonomy t ON t.company_id = c.company_id
             WHERE c.is_active = 1
+               OR (? = 1 AND EXISTS (
+                    SELECT 1
+                    FROM dim_universe_membership m
+                    WHERE m.company_id = c.company_id
+                      AND m.model_family = 'med_devices'
+                      AND m.point_in_time_flag = 1
+                      AND m.start_date <= ?
+                      AND (m.end_date IS NULL OR m.end_date >= ?)
+               ))
             ORDER BY c.ticker
-            """
+            """,
+            (1 if include_historical_members else 0, asof.isoformat(), asof.isoformat()),
         ).fetchall()
     else:
         rows = conn.execute(
             """
             SELECT company_id, ticker, company_name, '' AS calibration_cohort
-            FROM dim_company
-            WHERE is_active = 1
+            FROM dim_company c
+            WHERE c.is_active = 1
+               OR (? = 1 AND EXISTS (
+                    SELECT 1
+                    FROM dim_universe_membership m
+                    WHERE m.company_id = c.company_id
+                      AND m.model_family = 'med_devices'
+                      AND m.point_in_time_flag = 1
+                      AND m.start_date <= ?
+                      AND (m.end_date IS NULL OR m.end_date >= ?)
+               ))
             ORDER BY ticker
-            """
+            """,
+            (1 if include_historical_members else 0, asof.isoformat(), asof.isoformat()),
         ).fetchall()
     out: list[Company] = []
     for row in rows:
@@ -2430,9 +2458,15 @@ def main() -> None:
         asof = parse_date(asof_text)
         if asof is None:
             raise ValueError(f"Invalid as-of date: {asof_text}")
-        companies = load_companies(conn, ticker_filter=ticker_filter, max_tickers=int(args.max_tickers))
+        companies = load_companies(
+            conn,
+            asof=asof,
+            ticker_filter=ticker_filter,
+            max_tickers=int(args.max_tickers),
+            include_historical_members=bool(args.include_historical_members),
+        )
         if not companies:
-            raise ValueError("No active companies selected")
+            raise ValueError("No active or point-in-time historical companies selected")
         run_id = start_run(conn, run_type="build_med_device_fda_features", input_path=config_path)
         try:
             canonical_count = refresh_canonical_recalls(conn)

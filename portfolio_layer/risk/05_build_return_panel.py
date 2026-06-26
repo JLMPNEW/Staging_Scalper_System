@@ -234,7 +234,11 @@ def write_cached_bars(
         "split_events": split_events,
         "bars": [{"date": d, "adjclose": v} for d, v in bars],
     }
-    write_manifest(cache_path(cache_dir, ticker), payload)
+    path = cache_path(cache_dir, ticker)
+    try:
+        write_manifest(path, payload)
+    except OSError as exc:
+        LOGGER.warning("Skipping price-cache update for %s at %s: %s", ticker, path, exc)
 
 
 def load_existing_price_seed(path: Path, *, end: date) -> dict[str, list[tuple[str, float]]]:
@@ -320,16 +324,20 @@ def main() -> int:
         return 1
 
     tolerance = int(cfg_get(config, "score_contract.staleness_tolerance_days", 10))
-    expected = [
-        str(s["model_family"])
-        for s in cfg_get(config, "score_contract.sectors", [])
-        if bool(s.get("enabled", True))
-    ]
+    expected = []
+    per_pipeline_tolerance = {}
+    for sector in cfg_get(config, "score_contract.sectors", []):
+        if not bool(sector.get("enabled", True)):
+            continue
+        pipe = str(sector["model_family"])
+        expected.append(pipe)
+        per_pipeline_tolerance[pipe] = int(sector.get("staleness_tolerance_days", tolerance))
     stale_status = str(cfg_get(config, "risk_panel.readiness_stale_status", "FAIL"))
     readiness = check_stage1_readiness(
         runs_root,
         run_as_of,
         staleness_tolerance=tolerance,
+        per_pipeline_staleness_tolerance=per_pipeline_tolerance,
         expected_pipelines=expected,
         stale_status=stale_status,
     )

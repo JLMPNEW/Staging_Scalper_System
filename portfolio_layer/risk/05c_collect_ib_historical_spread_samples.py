@@ -348,8 +348,12 @@ def _collect_from_ib(
     ib = IB()
     rows: list[dict[str, Any]] = []
     try:
+        logging.getLogger("ib_insync").setLevel(logging.WARNING)
         ib.connect(host, port, clientId=client_id, timeout=20)
-        for ticker in tickers:
+        total = len(tickers)
+        for index, ticker in enumerate(tickers, start=1):
+            if index == 1 or index % 25 == 0 or index == total:
+                LOGGER.info("IB BID_ASK collection progress: %d/%d (%s)", index, total, ticker)
             query_symbol, _alias = active_symbol_for_ticker(config, ticker, as_of)
             ib_symbol = query_symbol.replace(".", " ")
             contract = Stock(ib_symbol, "SMART", "USD")

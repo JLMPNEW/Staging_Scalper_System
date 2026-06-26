@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -19,6 +20,16 @@ class RiskContribs:
     annual_vol: float
     rc: dict[str, float]          # risk-contribution share per ticker (sums to 1)
     sigma: dict[str, float]       # standalone annual vol per ticker (sqrt(Sigma_ii))
+
+
+@dataclass(frozen=True)
+class RcCapEnforcement:
+    weights: dict[str, float]
+    converged: bool
+    iterations: int
+    cash_added: float
+    max_rc: float
+    trimmed: tuple[dict[str, Any], ...]
 
 
 def aligned_cov(cov: pd.DataFrame, tickers: list[str]) -> np.ndarray:
@@ -226,3 +237,112 @@ def solve_risk_budget(
             break
         w[free] = w[free] + deficit * (w[free] / free_sum)
     return {t: float(w[i]) for i, t in enumerate(tickers) if w[i] > 0.0}
+
+
+def enforce_rc_cap_to_cash(
+    weights: dict[str, float],
+    cov: pd.DataFrame,
+    *,
+    rc_cap: float,
+    tol: float = 1e-6,
+    max_iter: int = 64,
+) -> RcCapEnforcement:
+    """Trim realized risk-contribution cap breaches to CASH.
+
+    The risk-budget solver caps target RC budgets, but realized RC can drift when the covariance and
+    weight caps bind. This function enforces the realized cap directly. Freed weight is not
+    redistributed to other risky names, so the operation only de-risks the proposal.
+    """
+    cap = float(rc_cap)
+    if not math.isfinite(cap) or cap <= 0.0:
+        raise ValueError(f"rc_cap must be positive and finite, got {rc_cap}")
+    current = {str(t): float(w) for t, w in weights.items() if float(w) > 0.0}
+    if not current:
+        raise ValueError("cannot enforce RC cap on an empty risky book")
+
+    initial_gross = sum(current.values())
+    records: list[dict[str, Any]] = []
+    max_rc = 0.0
+    converged = False
+    iterations = 0
+    for iterations in range(1, max(1, int(max_iter)) + 1):
+        rc = risk_contributions(current, cov).rc
+        over = [(ticker, share) for ticker, share in sorted(rc.items()) if share > cap + tol]
+        max_rc = max(rc.values()) if rc else 0.0
+        if not over:
+            converged = True
+            break
+        for ticker, share in over:
+            before = current.get(ticker, 0.0)
+            if before <= 0.0:
+                continue
+            scale = math.sqrt(cap / share)
+            scale = min(1.0, max(0.0, scale))
+            after = before * scale
+            if before - after <= 1e-14:
+                after = before * 0.999
+            current[ticker] = after
+            records.append({
+                "iteration": float(iterations),
+                "ticker": ticker,
+                "rc_before": float(share),
+                "weight_before": float(before),
+                "weight_after": float(after),
+                "weight_trimmed": float(before - after),
+            })
+        current = {ticker: weight for ticker, weight in current.items() if weight > 1e-12}
+        if not current:
+            break
+    if current:
+        rc_final = risk_contributions(current, cov).rc
+        max_rc = max(rc_final.values())
+        converged = converged or max_rc <= cap + tol
+
+    final_gross = sum(current.values())
+    return RcCapEnforcement(
+        weights=current,
+        converged=converged,
+        iterations=iterations,
+        cash_added=max(0.0, initial_gross - final_gross),
+        max_rc=float(max_rc),
+        trimmed=tuple(records),
+    )
+
+
+def sleeve_risk_bounds(
+    cov: pd.DataFrame,
+    sleeve_of: dict[str, str],
+    *,
+    gross: float,
+    max_weight: float,
+    rc_cap: float,
+    max_iter: int = 50,
+    eps_budget: float = 1e-6,
+) -> dict[str, dict[str, float]]:
+    """Estimate feasible min/max sleeve RC shares under current names, caps, and Sigma.
+
+    Bounds are solver-based diagnostics: for each sleeve, solve toward an extreme budget that strongly
+    favors or disfavors that sleeve, then enforce realized per-name RC caps to CASH and measure the
+    resulting sleeve RC share.
+    """
+    tickers = sorted(t for t, sleeve in sleeve_of.items() if sleeve)
+    sleeves = sorted({sleeve for sleeve in sleeve_of.values() if sleeve})
+    if not tickers or not sleeves:
+        return {}
+
+    out: dict[str, dict[str, float]] = {}
+    for sleeve in sleeves:
+        shares: dict[str, float] = {}
+        for label, favor in (("min", False), ("max", True)):
+            budgets = {
+                ticker: (1.0 if (sleeve_of[ticker] == sleeve) == favor else eps_budget)
+                for ticker in tickers
+            }
+            weights = solve_risk_budget(cov, budgets, gross=gross, max_weight=max_weight, max_iter=max_iter)
+            enforced = enforce_rc_cap_to_cash(weights, cov, rc_cap=rc_cap, max_iter=max_iter)
+            rc = risk_contributions(enforced.weights, cov).rc
+            shares[label] = float(sum(share for ticker, share in rc.items() if sleeve_of.get(ticker) == sleeve))
+        lo = min(shares["min"], shares["max"])
+        hi = max(shares["min"], shares["max"])
+        out[sleeve] = {"min": lo, "max": hi}
+    return out

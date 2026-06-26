@@ -7,6 +7,7 @@ import csv
 import html
 import json
 import math
+import shutil
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -32,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--asof", default="", help="Dashboard as-of date. Defaults to latest Stage 7 output.")
     return parser.parse_args()
 
 
@@ -107,8 +109,15 @@ def latest_filings(conn: sqlite3.Connection, source_id: str) -> dict[str, dict[s
     return out
 
 
-def load_latest_score_rows(conn: sqlite3.Connection, *, source_id: str, baseline_source: str, model_family: str) -> list[dict[str, Any]]:
-    asof = scalar(
+def load_latest_score_rows(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    baseline_source: str,
+    model_family: str,
+    asof: str = "",
+) -> list[dict[str, Any]]:
+    asof = asof.strip() or scalar(
         conn,
         """
         SELECT MAX(asof_date)
@@ -124,6 +133,9 @@ def load_latest_score_rows(conn: sqlite3.Connection, *, source_id: str, baseline
         """
         SELECT o.ticker,
                o.asof_date,
+               o.source_id AS score_model_version,
+               o.model_family,
+               o.model_version,
                o.final_rank,
                o.final_percentile,
                o.final_score,
@@ -134,26 +146,55 @@ def load_latest_score_rows(conn: sqlite3.Connection, *, source_id: str, baseline
                o.calibration_eligible_flag,
                o.model_status,
                o.review_reason,
+               c.company_name,
+               c.sector,
+               c.industry,
+               c.subsector,
+               c.country,
+               c.currency,
                i.calibration_cohort_id,
                i.calibration_cohort,
+               i.scoring_contract_version,
                i.latest_price,
                i.market_cap,
                i.revenue_yoy_growth,
+               i.gross_profit_yoy_growth,
+               i.operating_income_yoy_growth,
+               i.free_cash_flow_yoy_growth,
+               i.revenue_acceleration,
                i.gross_margin,
                i.operating_margin,
                i.fcf_margin,
+               i.fcf_to_net_income,
+               i.net_cash_to_assets,
+               i.sbc_pct_revenue,
+               i.r_and_d_pct_revenue,
+               i.share_count_yoy_growth,
+               i.inventory_days,
                i.fcf_yield,
                i.ev_gross_profit,
+               i.ev_operating_income,
                i.ret_3m,
                i.ret_12m_ex_1m,
+               i.rel_strength_bench_3m,
                i.realized_vol_60d,
                i.max_drawdown_12m,
+               i.distance_from_52w_high,
                i.avg_dollar_volume_60d,
                i.low_liquidity_flag,
+               i.insider_net_value_90d,
+               i.insider_cluster_buyers_90d,
+               i.institutional_ownership_delta_pct,
                i.latest_short_interest_pct_float,
                i.short_interest_change_3m,
                i.latest_days_to_cover,
                i.latest_borrow_fee_rate,
+               i.market_quality,
+               i.financial_quality,
+               i.positioning_quality,
+               i.core_available_component_count,
+               i.core_missing_component_count,
+               i.core_data_quality_confidence,
                i.sector_cycle_score,
                i.big_tech_capex_score,
                i.sector_overlay_quality
@@ -163,6 +204,8 @@ def load_latest_score_rows(conn: sqlite3.Connection, *, source_id: str, baseline
          AND i.asof_date = o.asof_date
          AND i.model_family = o.model_family
          AND i.source_id = ?
+        LEFT JOIN dim_company c
+          ON c.ticker = o.ticker
         WHERE o.source_id = ?
           AND o.model_family = ?
           AND o.asof_date = ?
@@ -199,6 +242,16 @@ def rank_table(rows: list[dict[str, Any]], components: dict[str, dict[str, dict[
         item = {
             "ticker": ticker,
             "asof_date": row.get("asof_date"),
+            "score_model_version": row.get("score_model_version"),
+            "model_family": row.get("model_family"),
+            "model_version": row.get("model_version"),
+            "scoring_contract_version": row.get("scoring_contract_version"),
+            "company_name": row.get("company_name"),
+            "sector": row.get("sector"),
+            "industry": row.get("industry"),
+            "subsector": row.get("subsector"),
+            "country": row.get("country"),
+            "currency": row.get("currency"),
             "final_rank": row.get("final_rank"),
             "final_percentile": row.get("final_percentile"),
             "final_score": row.get("final_score"),
@@ -206,9 +259,51 @@ def rank_table(rows: list[dict[str, Any]], components: dict[str, dict[str, dict[
             "sector_overlay_score": row.get("sector_overlay_score"),
             "data_quality_confidence": row.get("data_quality_confidence"),
             "rank_ready_flag": row.get("rank_ready_flag"),
+            "calibration_eligible_flag": row.get("calibration_eligible_flag"),
             "model_status": row.get("model_status"),
+            "review_reason": row.get("review_reason"),
             "calibration_cohort_id": row.get("calibration_cohort_id"),
             "calibration_cohort": row.get("calibration_cohort"),
+            "market_cap": row.get("market_cap"),
+            "latest_price": row.get("latest_price"),
+            "revenue_yoy_growth": row.get("revenue_yoy_growth"),
+            "gross_profit_yoy_growth": row.get("gross_profit_yoy_growth"),
+            "operating_income_yoy_growth": row.get("operating_income_yoy_growth"),
+            "free_cash_flow_yoy_growth": row.get("free_cash_flow_yoy_growth"),
+            "revenue_acceleration": row.get("revenue_acceleration"),
+            "gross_margin": row.get("gross_margin"),
+            "operating_margin": row.get("operating_margin"),
+            "fcf_margin": row.get("fcf_margin"),
+            "fcf_to_net_income": row.get("fcf_to_net_income"),
+            "net_cash_to_assets": row.get("net_cash_to_assets"),
+            "sbc_pct_revenue": row.get("sbc_pct_revenue"),
+            "r_and_d_pct_revenue": row.get("r_and_d_pct_revenue"),
+            "share_count_yoy_growth": row.get("share_count_yoy_growth"),
+            "inventory_days": row.get("inventory_days"),
+            "fcf_yield": row.get("fcf_yield"),
+            "ev_gross_profit": row.get("ev_gross_profit"),
+            "ev_operating_income": row.get("ev_operating_income"),
+            "ret_3m": row.get("ret_3m"),
+            "ret_12m_ex_1m": row.get("ret_12m_ex_1m"),
+            "rel_strength_bench_3m": row.get("rel_strength_bench_3m"),
+            "realized_vol_60d": row.get("realized_vol_60d"),
+            "max_drawdown_12m": row.get("max_drawdown_12m"),
+            "distance_from_52w_high": row.get("distance_from_52w_high"),
+            "avg_dollar_volume_60d": row.get("avg_dollar_volume_60d"),
+            "low_liquidity_flag": row.get("low_liquidity_flag"),
+            "insider_net_value_90d": row.get("insider_net_value_90d"),
+            "insider_cluster_buyers_90d": row.get("insider_cluster_buyers_90d"),
+            "institutional_ownership_delta_pct": row.get("institutional_ownership_delta_pct"),
+            "latest_short_interest_pct_float": row.get("latest_short_interest_pct_float"),
+            "short_interest_change_3m": row.get("short_interest_change_3m"),
+            "latest_days_to_cover": row.get("latest_days_to_cover"),
+            "latest_borrow_fee_rate": row.get("latest_borrow_fee_rate"),
+            "market_quality": row.get("market_quality"),
+            "financial_quality": row.get("financial_quality"),
+            "positioning_quality": row.get("positioning_quality"),
+            "core_available_component_count": row.get("core_available_component_count"),
+            "core_missing_component_count": row.get("core_missing_component_count"),
+            "core_data_quality_confidence": row.get("core_data_quality_confidence"),
             "latest_sec_form": filings.get(ticker, {}).get("form_type", ""),
             "latest_sec_filing_date": filings.get(ticker, {}).get("filing_date", ""),
             "latest_sec_url": sec_url(filings.get(ticker)),
@@ -220,6 +315,22 @@ def rank_table(rows: list[dict[str, Any]], components: dict[str, dict[str, dict[
             item[f"{component}_status"] = comp.get("component_status", "")
         out.append(item)
     return out
+
+
+def snapshot_outputs(output_dir: Path, asof: str, outputs: dict[str, Path], *, manifest_key: str) -> tuple[Path, dict[str, str]]:
+    if output_dir.name == asof:
+        return output_dir, {key: str(path) for key, path in outputs.items()}
+    snapshot_dir = output_dir / asof
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_map: dict[str, str] = {}
+    for key, path in outputs.items():
+        if key == manifest_key or not path.exists() or not path.is_file():
+            continue
+        target = snapshot_dir / path.name
+        shutil.copy2(path, target)
+        snapshot_map[key] = str(target)
+    snapshot_map[manifest_key] = str(snapshot_dir / outputs[manifest_key].name)
+    return snapshot_dir, snapshot_map
 
 
 def cohort_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -436,7 +547,7 @@ def main() -> int:
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_dir = args.output_dir.expanduser().resolve() if args.output_dir else resolve_path(
-        cfg_get(config, f"{CONFIG_KEY}.output_dir", "../output/technology_reports/dashboard"),
+        cfg_get(config, f"{CONFIG_KEY}.output_dir", "../output/technology_reports/semi_dashboard"),
         base_dir=base_dir,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -446,7 +557,13 @@ def main() -> int:
     filing_source = str(cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions"))
 
     with readonly_connect(db_path) as conn:
-        score_rows = load_latest_score_rows(conn, source_id=stage7_source, baseline_source=baseline_source, model_family=model_family)
+        score_rows = load_latest_score_rows(
+            conn,
+            source_id=stage7_source,
+            baseline_source=baseline_source,
+            model_family=model_family,
+            asof=str(args.asof or ""),
+        )
         if not score_rows:
             raise RuntimeError("No Stage 7 model output rows found for dashboard publishing.")
         asof = str(score_rows[0]["asof_date"])
@@ -461,14 +578,24 @@ def main() -> int:
     backtest_path = resolve_path(cfg_get(config, f"{CONFIG_KEY}.backtest_summary_csv"), base_dir=base_dir)
     backtest_rows = read_csv_rows(backtest_path)
 
-    write_csv(output_dir / "semiconductor_final_rank_table.csv", ranks)
-    write_csv(output_dir / "semiconductor_company_scorecards.csv", ranks)
-    write_csv(output_dir / "semiconductor_cohort_rank_summary.csv", cohorts)
-    write_csv(output_dir / "semiconductor_risk_flags.csv", flags)
-    write_csv(output_dir / "semiconductor_review_queue.csv", queue)
-    write_csv(output_dir / "semiconductor_overlay_summary.csv", overlay_rows)
+    outputs = {
+        "rank_table": output_dir / "semiconductor_final_rank_table.csv",
+        "scorecards": output_dir / "semiconductor_company_scorecards.csv",
+        "cohort_summary": output_dir / "semiconductor_cohort_rank_summary.csv",
+        "risk_flags": output_dir / "semiconductor_risk_flags.csv",
+        "review_queue": output_dir / "semiconductor_review_queue.csv",
+        "overlay_summary": output_dir / "semiconductor_overlay_summary.csv",
+        "html": output_dir / "index.html",
+        "manifest": output_dir / "semiconductor_dashboard_manifest.json",
+    }
+    write_csv(outputs["rank_table"], ranks)
+    write_csv(outputs["scorecards"], ranks)
+    write_csv(outputs["cohort_summary"], cohorts)
+    write_csv(outputs["risk_flags"], flags)
+    write_csv(outputs["review_queue"], queue)
+    write_csv(outputs["overlay_summary"], overlay_rows)
     write_html(
-        output_dir / "index.html",
+        outputs["html"],
         rank_rows=ranks,
         cohort_rows=cohorts,
         backtest_rows=backtest_rows,
@@ -477,6 +604,7 @@ def main() -> int:
         top_n=int(cfg_get(config, f"{CONFIG_KEY}.top_rank_rows_in_html", 25)),
         review_n=int(cfg_get(config, f"{CONFIG_KEY}.max_review_rows_in_html", 50)),
     )
+    snapshot_dir, snapshot_map = snapshot_outputs(output_dir, asof, outputs, manifest_key="manifest")
     manifest = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "database_path": str(db_path),
@@ -487,17 +615,14 @@ def main() -> int:
         "risk_flags": len(flags),
         "review_queue_rows": len(queue),
         "backtest_summary_rows": len(backtest_rows),
-        "outputs": {
-            "rank_table": str(output_dir / "semiconductor_final_rank_table.csv"),
-            "scorecards": str(output_dir / "semiconductor_company_scorecards.csv"),
-            "cohort_summary": str(output_dir / "semiconductor_cohort_rank_summary.csv"),
-            "risk_flags": str(output_dir / "semiconductor_risk_flags.csv"),
-            "review_queue": str(output_dir / "semiconductor_review_queue.csv"),
-            "overlay_summary": str(output_dir / "semiconductor_overlay_summary.csv"),
-            "html": str(output_dir / "index.html"),
-        },
+        "outputs": {key: str(path) for key, path in outputs.items() if key != "manifest"},
+        "snapshot_dir": str(snapshot_dir),
+        "snapshot_outputs": snapshot_map,
     }
-    (output_dir / "semiconductor_dashboard_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    outputs["manifest"].write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    manifest_copy = snapshot_dir / outputs["manifest"].name
+    if outputs["manifest"].resolve() != manifest_copy.resolve():
+        shutil.copy2(outputs["manifest"], manifest_copy)
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0
 

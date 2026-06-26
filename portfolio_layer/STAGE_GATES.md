@@ -67,9 +67,10 @@ Every sector pipeline emits this, identical schema, one as-of date per run:
 | column | meaning |
 |---|---|
 | `as_of_date` | point-in-time date of the score |
-| `ticker`, `sector`, `industry`, `industry_aggregate` | identity / taxonomy |
+| `ticker`, `sector`, `industry`, `industry_aggregate` | identity / taxonomy. `industry_aggregate` is the normalized grouping key; `industry` is descriptive and may carry cohort/subsector semantics by source pipeline. |
 | `final_score` | **calibrated expected forward alpha** (excess vs sector benchmark), common units |
-| `rating` | bucketed rating, identical definition across sectors |
+| `within_sector_percentile` | legacy field name; computed within `source_pipeline`/sleeve, not broad GICS sector |
+| `rating` | `within_sector_percentile` bucket; useful for display/confidence context, not an absolute cross-sector exit trigger |
 | `score_confidence` | calibration confidence / coverage haircut |
 | `investable_eligible` | 0/1 **hard gate** carried from the sector's native portfolio candidate gate (med: `portfolio_candidate_gate`; tech: `rank_ready_flag`/`calibration_eligible_flag`; biotech: its own gate). The optimizer ranks/sizes **only eligible names** — never top raw score. |
 | `eligibility_reason` | provenance for the gate decision (why eligible/excluded) |
@@ -80,8 +81,10 @@ This is exactly what `tier1_portfolio_optimizer` already consumes — the join i
 **Eligibility semantics (decided):** a sector hands the portfolio layer its *portfolio-candidate-eligible*
 set, not its own final pick list. The sector vouches that a name is safe/eligible; cross-sector
 *selection and sizing* is the portfolio layer's job. The eligible set is therefore a **superset** of
-the sector's internal final list (e.g. med Tier 1 ⊆ med `portfolio_candidate_gate`), and the validate gate
-asserts that containment. Headline score per sector: med = `portfolio_candidate_score` when present
+the sector's internal final list (e.g. med Tier 1 is expected to be contained in med
+`portfolio_candidate_gate`). Stage 1 validates that the published gate is present and carried through; a
+true containment check requires each sector to publish its internal final pick list as a separate artifact.
+Headline score per sector: med = `portfolio_candidate_score` when present
 (otherwise `composite_score`; IC tilt already baked in via `replace_raw`); tech family = `final_score`; `ic_tilted_composite_score`
 and `safe_core_score` are audit-only and must never drive reranking.
 
@@ -121,9 +124,11 @@ calibration); `scores/03_validate_score_contract.py`.
   realized forward alpha (calibration-parity test passes within tolerance). This empirical gate is
   reported as deferred until Stage 2 return data exists; Stage 1 may only pass hard schema/PIT gates.
 - `investable_eligible` is populated from each sector's native portfolio candidate gate; ineligible names
-  are excluded from optimizer input. The eligible set is a superset of the sector's own final pick
-  list (med Tier 1 ⊆ med `portfolio_candidate_gate`), asserted by the validate gate.
-- Duplicate tickers across sectors are detected and resolved deterministically.
+  are excluded from optimizer input. Stage 1 validates the published gate is present and populated; if a
+  sector also publishes an internal final pick-list artifact, a later containment gate can assert that it is
+  a subset of the published eligible set.
+- Duplicate tickers across sectors are detected and resolved deterministically; any duplicate not covered by
+  a canonical override is WARNed for curation rather than silently trusted.
 
 ## Stage 2 — Unified cross-sector risk panel (live/current book)
 
@@ -187,6 +192,13 @@ contract ticker, query symbol, provider source symbol, effective date, issuer id
    risk utilities).
 6. `risk/08_validate_risk_panel.py` — acceptance gates + sealed manifest with hashes.
 
+**Optional Stage 2.5 liquidity build:** `risk/05c_collect_ib_historical_spread_samples.py` and
+`risk/05d_audit_liquidity_panel.py` are broker-dependent spread/liquidity steps, not prerequisites for
+the core Stage 2 covariance panel. If their artifacts exist, `08_validate_risk_panel.py` validates and
+hashes them; if they are absent, Stage 2 records a WARN and still accepts the risk panel. Stage 4/7 cost
+overlays are the first stages that require those artifacts when `transaction_costs.spread_source` resolves
+to `liquidity_panel`.
+
 **Risk coverage artifact (`risk_coverage.csv`, one row per ticker):** `ticker`, `source_pipeline`,
 `score_eligible` (= Stage 1 `investable_eligible`), `risk_status` (`direct`|`shrunk`|`excluded`),
 `risk_eligible`, `observation_count`, `missing_day_count`, `missing_day_fraction`, `start_date`,
@@ -222,8 +234,9 @@ contract ticker, query symbol, provider source symbol, effective date, issuer id
 **Readiness precondition — gate on the sealed Stage 1 run, not sector internals:**
 `04_check_risk_readiness.py` verifies, for the target as-of: (1) `stocks_scores.csv` exists; (2) the
 Stage 1 `manifest.json` `hard_gate_acceptance == PASS`; (3) the on-disk `stocks_scores.csv` sha256
-matches the manifest hash (no stale/tampered downstream artifact); (4) source staleness within tolerance
-(from manifest `per_sector` source dates); (5) every enabled sector is present in the sealed manifest.
+matches the manifest hash (no stale/tampered downstream artifact); (4) source staleness within each
+sector's configured tolerance (from manifest `per_sector` source dates); (5) every enabled sector is present
+in the sealed manifest.
 It **fails or warns naming the offending sector** according to `readiness_stale_status` and does
 **not** re-run or deeply inspect sector pipelines. A separate convenience launcher MAY call the sectors'
 own refresh scripts, but it lives **outside** the core portfolio layer.
@@ -640,16 +653,19 @@ contains the **SPY + 5 sleeve ETFs**, so a multi-factor model falls straight out
 - `medium_rotation` — held names whose sleeve has Stage 5 rotation `State==Positive`.
 - `long_core` — remaining names, driven by `final_score`.
 
-**Phase-1 gross policy:** Stage 8 **re-allocates risk composition at the existing gross** — it does **not**
-re-scale gross or set a live `σ_target` (Stage 6/7 own gross via regime). Explicit vol-targeting is Phase 2.
+**Phase-1 gross policy:** Stage 8 **re-allocates risk composition without increasing Stage-7 gross**. If a
+realized risk-contribution cap binds, the excess weight is trimmed to CASH (de-risking); Stage 8 does **not**
+scale gross upward or set a live `σ_target` (Stage 6/7 own gross via regime). Explicit vol-targeting is Phase 2.
 
 **Build (`sleeves/`, clean):**
-- `sleeves/risk_model.py` — RC, Σ-based factor decomposition, ENB, betas, IR (pure functions).
+- `sleeves/risk_model.py` — RC, Σ-based factor decomposition, ENB, betas, IR, realized RC-cap trimming,
+  sleeve feasibility bounds (pure functions).
 - `27_build_sleeve_framework.py` — sleeve assignments + risk diagnostics (RC/factor/ENB) on the Stage 7
   book → `sleeve_assignments.csv` + `risk_model_meta.json`.
 - `28_apply_risk_budgets.py` — IR-tilted risk-parity within sleeve + regime-conditional sleeve budgets,
-  iterative **scale→project** (capped-simplex, long-only, per-name + sleeve caps, residual→CASH; fail
-  closed if infeasible) → `sleeve_adjusted_target_weights.csv`, `sleeve_risk_budget.csv`,
+  iterative **scale→project**, realized RC-cap enforcement by deterministic trim-to-CASH, and feasible
+  sleeve-risk diagnostics (capped-simplex, long-only, per-name + sleeve caps, residual→CASH; fail closed
+  on unsafe/infeasible books) → `sleeve_adjusted_target_weights.csv`, `sleeve_risk_budget.csv`,
   `factor_risk_decomposition.csv`, `effective_bets.json`.
 - `29_validate_sleeves.py` — gates + sealed `sleeve_manifest.json`.
 - `30_run_sleeve_ablation_replay.py` (optional, WARN-only diagnostic).
@@ -658,14 +674,18 @@ re-scale gross or set a live `σ_target` (Stage 6/7 own gross via regime). Expli
 - **Stage 7 sealed & current** — `bl_manifest.json` acceptance PASS + cost-adjusted book hash verified;
   **no new tickers**; every held non-CASH ticker ∈ covariance; **cov hash == sealed Stage 2**.
 - **Partition** — each held name → exactly one sleeve, complete + disjoint, auditable reason.
-- **RC guards** — `w'Σw > eps`, no NaN/inf RC, per-name risk-contribution cap respected; concentration probe
-  (inject one huge alpha) is capped.
+- **RC guards** — `w'Σw > eps`, no NaN/inf RC, realized per-name risk-contribution cap enforced; any cap
+  trim moves to CASH, never to another risky name; concentration probe (inject one huge alpha) is capped.
+- **Sleeve budgets** — realized sleeve RC shares must be within band of the **feasible clipped** regime
+  budget (`clip(raw_budget, feasible_min, feasible_max)`); distance from the raw aspirational budget is
+  reported as WARN-only when caps/universe concentration make it unreachable.
 - **Factor-neutral** — market-beta and each sector-factor share ≤ caps as hard gates; idiosyncratic share floor
   is WARN-only in Phase 1 because the upstream two-GICS book limits what reweighting can achieve.
 - **Diversification** — `ENB` must not worsen as a hard gate; absolute `ENB ≥ floor` is WARN-only in Phase 1.
 - **IR consistency** — risk concentrated where IR is highest (no large un-alpha'd RC outliers; WARN if borderline).
 - **Conservation / no-add-risk** — weights (incl. CASH) sum to 1; **risky gross ≤ Stage-7 cost-adjusted
-  risky gross**; **cash ≥ Stage-7 cash** unless explicitly overridden; long-only; per-name + sleeve caps.
+  risky gross**; **cash ≥ Stage-7 cash** unless explicitly overridden; exact risky-gross equality is not
+  required when RC-cap trimming de-risks the book; long-only; per-name + sleeve caps.
 - **Shadow-only / non-destructive** — Stage 7 (and Stage 3/4) artifacts byte-unchanged;
   `enabled_in_production:false`; writes only under `runs/<as_of>/sleeves/`.
 - **Determinism / provenance** — sealed manifest hashing Σ, Stage 7 inputs, config, sources.
@@ -718,22 +738,61 @@ reduce exposure; lending is stored separately (e.g. BDX uses shares-at-IB for ex
 
 ## Stage 9 — Exit engine
 
-**Goal:** systematic, sleeve-specific exits beyond optimizer rebalancing.
+**Goal:** systematic, sleeve-specific exits over the **actual ledger holdings**. Stage 9 is not a
+fresh-from-cash rebalance and does not force the broker book into the Stage 8 target. It decides which
+currently held equity positions should be kept, reviewed, soft-exited, or hard-exited; target-book gaps are
+reported only as diagnostics.
 
 **Prerequisite:** consumes the sealed Stage 8.5 holdings ledger. The exit run must explicitly stamp the
 portfolio target as-of date and the ledger as-of date; an equal-date run is preferred, but a later broker
 ledger may be accepted for current-holdings exits only when the PIT rule is documented in the manifest.
+Default PIT rule: `signal_as_of <= ledger_as_of`, using the latest sealed score/risk stack on or before the
+ledger date.
 
 **Build:** `exits/33_build_exit_signals.py`, `exits/34_apply_exits.py`,
-`exits/35_validate_exits.py` implementing signal-decay exit (AQR), time-stop (catalyst sleeve,
-event-date driven), vol/ATR stop (speculative), trim-to-target profit-taking, cost-aware no-trade bands.
+`exits/35_validate_exits.py`.
+
+**Phase 1 scope:**
+- Equities only: every actual stock holding gets exactly one decision.
+- Options are emitted to `unsupported_positions.csv` as `unsupported_phase1`, never traded.
+- Securities lending does not reduce exposure; exits use owned shares from the ledger state.
+- Held-but-not-scored names default to `review`/keep (no score-decay sale is possible).
+- Scored but no-longer-investable names become `soft_exit` candidates, not hard forced sales.
+- Scored + investable names use absolute `final_score` signal-decay thresholds for hard/soft exits; low
+  confidence, weak score, large loss, or concentration become review flags. Within-sector `rating` is context
+  only unless a legacy fallback is explicitly enabled.
+- `events/catalyst_events.csv` is absent in Phase 1, so catalyst time-stops are WARN+disabled.
+- Stage 8 target overlap/gap is reported in `target_gap_report.csv`; no buy orders are generated.
+- Output is an **exit recommendation list** (`exit_actions.csv`) plus diagnostics, not a conserved
+  reweighted target book. Exited weight flows to CASH only in the later Stage 12 transition/orchestration
+  layer once actual trading, no-trade bands, and target reconciliation are applied together.
+- `estimated_realized_pl` is proportional to current unrealized P&L in Phase 1. Lot-level FIFO/tax-aware
+  realized P&L is deferred to Phase 2 / Stage 12 execution planning.
 
 **Acceptance tests:**
-- Signal-decay exits trigger when calibrated score leaves the top quantile; price-only moves do **not**
-  force-exit a value position (no harmful fixed stop on the AQR sleeve).
-- Catalyst positions time-stop at/after event resolution regardless of P&L.
-- Speculative vol-stops cap per-trade loss at the configured fraction of sleeve risk budget on a stress replay.
-- Ablation: exit engine improves Calmar / reduces max drawdown vs Stage 8 without materially cutting net return.
+- Stage 8.5 ledger manifest PASS and hashes current; Stage 1 signal manifest hard gates PASS and
+  `signal_as_of <= ledger_as_of`.
+- Every actual equity holding appears exactly once in `exit_signals.csv` and `exit_actions.csv`.
+- Held-but-not-scored names are not force-sold by score logic.
+- Price-only moves with intact score do not force an exit; a synthetic scored/investable large-loss probe
+  must produce keep/review, not soft/hard exit.
+- No options or target-only names appear in tradable exit actions.
+- No generated action is a buy; Stage 9 only proposes exits/reviews on actual holdings.
+- Deterministic rebuild and sealed `exit_manifest.json` with config/source/input/output hashes.
+- WARN-only diagnostics: target gap vs Stage 8, disabled catalyst events, and any not-scored/not-eligible
+  coverage gaps.
+
+**Carry-forward bookkeeping after Phase 1:**
+- Lot-level FIFO/tax-aware realized P&L is still deferred; Phase 1 `estimated_realized_pl` is only a
+  proportional shadow estimate.
+- The "no harmful AQR price-stop" rule is now a formal synthetic gate: intact scored/investable positions
+  with large price-only losses may become `review`, never a forced exit.
+- A conserved `exit_adjusted_target_weights.csv` is intentionally absent in Phase 1. Materializing exits
+  into CASH and proving weight conservation belongs in Stage 12 transition/orchestration, where exits,
+  no-trade bands, costs, and target reconciliation are applied together.
+- Current blue-chip health-care soft-exits are policy-dependent on the upstream `med_devices`
+  `portfolio_candidate_gate` quality. That dependency is acceptable while shadow-only, but Stage 11/12
+  promotion should audit whether the eligibility gate is too aggressive before any automatic sale.
 
 ## Stage 10 — Payout / liability layer
 

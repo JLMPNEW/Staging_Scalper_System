@@ -168,6 +168,27 @@ CREATE TABLE IF NOT EXISTS dim_company_model_taxonomy (
     FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS dim_universe_membership (
+    membership_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    model_family TEXT NOT NULL DEFAULT 'med_devices',
+    membership_source_id TEXT NOT NULL,
+    membership_basis TEXT,
+    start_date TEXT NOT NULL,
+    end_date TEXT,
+    membership_status TEXT NOT NULL,
+    is_current_member INTEGER NOT NULL DEFAULT 0,
+    point_in_time_flag INTEGER NOT NULL DEFAULT 1,
+    confidence REAL NOT NULL DEFAULT 0.0,
+    reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE,
+    FOREIGN KEY (membership_source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT,
+    UNIQUE(ticker, model_family, membership_source_id, start_date)
+);
+
 CREATE TABLE IF NOT EXISTS dim_fda_manufacturer (
     fda_manufacturer_id INTEGER PRIMARY KEY AUTOINCREMENT,
     manufacturer_name TEXT NOT NULL,
@@ -1045,6 +1066,14 @@ CREATE TABLE IF NOT EXISTS feature_insider_activity (
 CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     asof_date TEXT NOT NULL,
     company_id INTEGER NOT NULL,
+    score_model_version TEXT DEFAULT '',
+    model_family TEXT DEFAULT '',
+    model_version TEXT DEFAULT '',
+    scoring_contract_version TEXT DEFAULT '',
+    sector TEXT DEFAULT '',
+    industry TEXT DEFAULT '',
+    country TEXT DEFAULT '',
+    currency TEXT DEFAULT '',
     scoring_model_version TEXT,
     composite_score REAL,
     raw_composite_score REAL,
@@ -1065,6 +1094,11 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     portfolio_candidate_status TEXT DEFAULT '',
     portfolio_candidate_reason TEXT DEFAULT '',
     portfolio_candidate_score REAL DEFAULT 0.0,
+    analyst_review_decision TEXT DEFAULT '',
+    analyst_review_reason TEXT DEFAULT '',
+    analyst_review_owner TEXT DEFAULT '',
+    analyst_review_expires_at TEXT DEFAULT '',
+    analyst_portfolio_override_applied INTEGER DEFAULT 0,
     safe_core_score REAL DEFAULT 0.0,
     safe_core_percentile REAL DEFAULT 0.0,
     safe_core_cohort_percentile REAL DEFAULT 0.0,
@@ -1270,6 +1304,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_dim_company_alias_unique
 ON dim_company_alias(company_id, alias_norm, COALESCE(source_id, 'manual'));
 CREATE INDEX IF NOT EXISTS idx_company_model_taxonomy_cohort
 ON dim_company_model_taxonomy(calibration_cohort);
+CREATE INDEX IF NOT EXISTS idx_dim_universe_membership_model_dates
+ON dim_universe_membership(model_family, start_date, end_date, membership_status);
+CREATE INDEX IF NOT EXISTS idx_dim_universe_membership_ticker_model
+ON dim_universe_membership(ticker, model_family);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dim_fda_manufacturer_unique
 ON dim_fda_manufacturer(manufacturer_name_norm, COALESCE(fei_number, ''));
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dim_reimbursement_code_unique
@@ -1626,6 +1664,11 @@ def init_db(conn: sqlite3.Connection) -> None:
             "portfolio_candidate_status": "TEXT",
             "portfolio_candidate_reason": "TEXT",
             "portfolio_candidate_score": "REAL",
+            "analyst_review_decision": "TEXT",
+            "analyst_review_reason": "TEXT",
+            "analyst_review_owner": "TEXT",
+            "analyst_review_expires_at": "TEXT",
+            "analyst_portfolio_override_applied": "INTEGER",
             "safe_core_score": "REAL",
             "safe_core_percentile": "REAL",
             "safe_core_cohort_percentile": "REAL",

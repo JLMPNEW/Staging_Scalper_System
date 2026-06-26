@@ -33,6 +33,7 @@ from portfolio_layer.sleeves.risk_model import (  # noqa: E402
     effective_number_of_bets,
     factor_decomposition,
     risk_contributions,
+    sleeve_risk_bounds,
     throttle_scale,
 )
 
@@ -237,9 +238,6 @@ def main() -> int:  # noqa: C901
         cons_bad.append(f"weight>cap_{max_weight}")
     if invested > prior_gross + 1e-6:
         cons_bad.append(f"added_gross={invested:.6f}>{prior_gross:.6f}")
-    throttle_apply = bool(cfg_get(config, "sleeves.drawdown_throttle.apply", False))
-    if not throttle_apply and abs(invested - prior_gross) > 1e-6:
-        cons_bad.append(f"gross_not_preserved={invested:.6f}!={prior_gross:.6f}")
     stage7_cash = _f(meta28.get("cash_before")) or 0.0
     if cash_after + 1e-8 < stage7_cash:
         cons_bad.append(f"cash={cash_after:.6f}<stage7={stage7_cash:.6f}")
@@ -248,18 +246,51 @@ def main() -> int:  # noqa: C901
 
     # 5. per-name RC cap.
     rc_max = max(rc_after.rc.values())
+    # Keep this tolerance aligned with 28_apply_risk_budgets and enforce_rc_cap_to_cash().
     rec("per_name_rc_cap", "PASS" if rc_max <= rc_cap + 1e-6 else "FAIL",
         f"rc_max={rc_max:.6f}<=cap={rc_cap}")
 
-    # 6. sleeve risk shares within +/- band of regime budget.
+    # 6. sleeve risk shares within +/- band of the feasible clipped regime budget.
     budgets = dict((meta27.get("regime") or {}).get("sleeve_risk_budgets") or {})
     after_share: dict[str, float] = {}
     for t, share in rc_after.rc.items():
         after_share[sleeve_of.get(t, "")] = after_share.get(sleeve_of.get(t, ""), 0.0) + share
-    sleeve_bad = [f"{s}:{after_share.get(s, 0.0):.4f}!~{budgets.get(s, 0.0):.4f}"
-                  for s in budgets if budgets.get(s, 0.0) > 0 and abs(after_share.get(s, 0.0) - budgets.get(s, 0.0)) > band + 1e-6]
+    max_iter = int(_f(cfg_get(config, "sleeves.projection.max_iterations", 50)) or 50)
+    feasible_bounds = sleeve_risk_bounds(
+        cov,
+        sleeve_of,
+        gross=prior_gross,
+        max_weight=max_weight,
+        rc_cap=rc_cap,
+        max_iter=max_iter,
+    )
+    feasible_targets: dict[str, float] = {}
+    sleeve_bad = []
+    aspirational_miss = []
+    for sleeve, target in budgets.items():
+        target = float(target or 0.0)
+        if target <= 0:
+            continue
+        bounds = feasible_bounds.get(sleeve, {"min": 0.0, "max": 1.0})
+        feasible = min(max(target, bounds["min"]), bounds["max"])
+        feasible_targets[sleeve] = feasible
+        realized = after_share.get(sleeve, 0.0)
+        if abs(realized - feasible) > band + 1e-6:
+            sleeve_bad.append(
+                f"{sleeve}:{realized:.4f}!~feasible={feasible:.4f}"
+                f"[{bounds['min']:.4f},{bounds['max']:.4f}] target={target:.4f}"
+            )
+        if abs(realized - target) > band + 1e-6:
+            aspirational_miss.append(
+                f"{sleeve}:realized={realized:.4f},target={target:.4f},"
+                f"feasible={feasible:.4f},bounds=[{bounds['min']:.4f},{bounds['max']:.4f}]"
+            )
     rec("sleeve_risk_within_band", "PASS" if not sleeve_bad else "FAIL",
-        f"sleeves within +/-{band} of budget" if not sleeve_bad else f"{sleeve_bad[:8]}")
+        f"sleeves within +/-{band} of feasible clipped budgets"
+        if not sleeve_bad else f"{sleeve_bad[:8]}")
+    rec("sleeve_risk_aspirational_target", "PASS" if not aspirational_miss else "WARN",
+        f"realized sleeve risk within +/-{band} of raw targets"
+        if not aspirational_miss else f"{aspirational_miss[:8]}")
 
     # 7. IR consistency: large RC without proportional IR is a diagnostic warning, not a hard gate.
     z_limit = _f(cfg_get(config, "sleeves.ir_outlier_z", 3.0)) or 3.0
@@ -380,6 +411,13 @@ def main() -> int:  # noqa: C901
             "enb_before": round(enb_before, 4), "enb_after": round(enb_after, 4),
             "idio_before": round(factor_before["idiosyncratic_share"], 6), "idio_after": round(factor_after["idiosyncratic_share"], 6),
             "rc_max_after": round(rc_max, 6), "invested_gross": round(invested, 6), "cash": round(cash_after, 6),
+            "sleeve_realized": {s: round(after_share.get(s, 0.0), 6) for s in sorted(after_share)},
+            "sleeve_targets": {s: round(float(v or 0.0), 6) for s, v in sorted(budgets.items())},
+            "sleeve_feasible_targets": {s: round(v, 6) for s, v in sorted(feasible_targets.items())},
+            "sleeve_feasibility_bounds": {
+                s: {"min": round(v.get("min", 0.0), 6), "max": round(v.get("max", 1.0), 6)}
+                for s, v in sorted(feasible_bounds.items())
+            },
         },
         "checks": checks,
         "provenance_sha256": {n: sha256_file(p) for n, p in provenance.items() if p.exists()},

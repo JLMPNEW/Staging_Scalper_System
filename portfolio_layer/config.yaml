@@ -17,7 +17,9 @@ score_contract:
   contract_version: "stocks_scores_v1"
   sector_output_root: "../output"        # repo-level output/ tree (relative to this config)
   staleness_tolerance_days: 10
-  min_successful_sectors: 4              # fail collection if fewer enabled sectors publish usable rows
+  min_successful_sectors: 5              # fail collection if fewer enabled sectors publish usable rows
+  native_score_range: {min: 0.0, max: 100.0}
+  max_abs_expected_alpha: 1.0             # hard sanity bound for calibrated final_score annual alpha
   # When a ticker is scored by >1 sector, force it to its canonical source pipeline before the
   # confidence/order tie-break (keeps sector pipelines untouched). ticker -> canonical_pipeline.
   canonical_pipeline_overrides_csv: "data/canonical_sector_overrides.csv"
@@ -31,48 +33,59 @@ score_contract:
     - model_family: semiconductors
       adapter: tech_family
       enabled: true
+      required: true
+      staleness_tolerance_days: 3
       sector: "Information Technology"
       industry: "Semiconductors"
       industry_aggregate: "Semiconductors & Semiconductor Equipment"
-      file_mode: flat
-      file_path: "technology_reports/scoring/semiconductor_stage7_calibrated_scores.csv"
-      calibration: {neutral: 50.0, scale: 50.0, expected_alpha_at_full: 0.15}
+      file_mode: dated
+      file_path: "technology_reports/semi_dashboard/{yyyy-mm-dd}/semiconductor_final_rank_table.csv"
+      calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
     - model_family: software_infrastructure
       adapter: tech_family
       enabled: true
+      required: true
+      staleness_tolerance_days: 3
       sector: "Information Technology"
       industry: "Software"
       industry_aggregate: "Software & Services"
-      file_mode: flat
-      file_path: "technology_reports/software_infrastructure/scoring/software_infrastructure_production_calibrated_scores.csv"
-      calibration: {neutral: 50.0, scale: 50.0, expected_alpha_at_full: 0.15}
+      file_mode: dated
+      file_path: "technology_reports/software_infrastructure/dashboard/{yyyy-mm-dd}/software_infrastructure_final_rank_table.csv"
+      calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
     - model_family: technology_hardware
       adapter: tech_family
       enabled: true
+      required: true
+      staleness_tolerance_days: 3
       sector: "Information Technology"
       industry: "Technology Hardware"
       industry_aggregate: "Technology Hardware & Equipment"
-      file_mode: flat
-      file_path: "technology_reports/technology_hardware/scoring/technology_hardware_stage7_calibrated_scores.csv"
-      calibration: {neutral: 50.0, scale: 50.0, expected_alpha_at_full: 0.15}
+      file_mode: dated
+      file_path: "technology_reports/technology_hardware/dashboard/{yyyy-mm-dd}/technology_hardware_final_rank_table.csv"
+      calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
     - model_family: biotech
       adapter: biotech
       enabled: true
+      required: true
+      staleness_tolerance_days: 3
       sector: "Health Care"
       industry: "Biotechnology"
       industry_aggregate: "Pharmaceuticals, Biotechnology & Life Sciences"
       file_mode: dated
       file_path: "biotech_index_reports/{yyyymmdd}/biotech_daily_scores.csv"
-      calibration: {neutral: 50.0, scale: 50.0, expected_alpha_at_full: 0.20}
+      zero_score_is_missing: true
+      calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.20}
     - model_family: med_devices
       adapter: med_devices
       enabled: true
+      required: true
+      staleness_tolerance_days: 3
       sector: "Health Care"
       industry: "Health Care Equipment"
       industry_aggregate: "Health Care Equipment & Services"
-      file_mode: flat
-      file_path: "med_devices_reports/med_device_daily_composite_scores.csv"
-      calibration: {neutral: 50.0, scale: 50.0, expected_alpha_at_full: 0.15}
+      file_mode: dated
+      file_path: "med_devices_reports/score_review_pack/{yyyy-mm-dd}/med_device_daily_composite_scores.csv"
+      calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
 
 # Stage 2 - live/current-book cross-sector risk panel (self-sourced, NOT survivorship history).
 risk_panel:
@@ -383,3 +396,33 @@ holdings_ledger:
         quantity: 100
         entry_date: "2025-10-29"
         reason: "User-confirmed entry date for pre-report FISV lot; basis inferred from IB aggregate cost basis."
+
+# Stage 9 - exit engine over ACTUAL ledger holdings (SHADOW-ONLY).
+# Phase 1 is equities-only and decides what to do with positions already held. It does not create buys
+# and does not force the actual book into the Stage 8 target; target gaps are diagnostic only.
+exit_engine:
+  enabled_in_production: false
+  phase: "phase1_actual_equity_holdings"
+  scope: "ledger_actual_holdings"
+  signal_source: "latest_sealed_scores_on_or_before_ledger"
+  max_signal_lag_days: 10
+  target_gap_source: "stage8_sleeve_proposal"     # diagnostic only; never generates buys in Stage 9
+  actions:
+    hard_exit_fraction: 1.0
+    soft_exit_fraction: 0.5
+  score_decay:
+    use_rating_for_exit: false
+    hard_exit_final_score_below: -0.15
+    soft_exit_final_score_below: -0.10
+    hard_exit_ratings: ["avoid"]     # legacy fallback only when use_rating_for_exit=true
+    soft_exit_ratings: ["reduce"]    # legacy fallback only when use_rating_for_exit=true
+    review_final_score_below: -0.05
+    min_score_confidence_review: 0.25
+  coverage_policy:
+    not_scored_action: "review"
+    scored_not_investable_action: "soft_exit"
+    option_action: "unsupported_phase1"
+  position_risk:
+    review_unrealized_loss_pct: -0.35
+    review_actual_weight_pct: 0.15
+  catalyst_events_csv: "events/catalyst_events.csv"  # absent => WARN+disable catalyst time-stops in Phase 1

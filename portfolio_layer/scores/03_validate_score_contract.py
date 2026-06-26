@@ -23,7 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
     CONTRACT_FIELDS, DEFAULT_RATING_BANDS, contract_version, fail_if_exists, percentiles_within,
-    rating_for_percentile, read_csv, sha256_file, write_csv, write_manifest,
+    rating_for_percentile, read_csv, sha256_file, validate_rating_bands, write_csv, write_manifest,
 )
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
@@ -100,19 +100,48 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         return 1
     validation_path = run_dir / "validation" / "score_contract_validation.csv"
     manifest_path = run_dir / "manifest.json"
+    duplicate_path = run_dir / "validation" / "duplicate_resolution.csv"
     try:
         fail_if_exists([validation_path, manifest_path], force=args.force)
     except FileExistsError as exc:
         LOGGER.error("%s", exc)
         return 1
     rows = read_csv(scores_path)
+    duplicate_rows = read_csv(duplicate_path) if duplicate_path.exists() else []
+    enabled_sectors = [s for s in cfg_get(config, "score_contract.sectors", []) if bool(s.get("enabled", True))]
+    expected_pipelines = {str(s.get("model_family", "")) for s in enabled_sectors if str(s.get("model_family", ""))}
+    required_pipelines = {
+        str(s.get("model_family", ""))
+        for s in enabled_sectors
+        if bool(s.get("required", True)) and str(s.get("model_family", ""))
+    }
+    global_native_range = dict(cfg_get(config, "score_contract.native_score_range", {}) or {})
+    native_range_by_pipeline = {
+        str(s.get("model_family", "")): {**global_native_range, **dict(s.get("native_score_range", {}) or {})}
+        for s in enabled_sectors
+        if str(s.get("model_family", ""))
+    }
     tolerance = int(cfg_get(config, "score_contract.staleness_tolerance_days", 10))
+    tolerance_by_pipeline = {
+        str(s.get("model_family", "")): int(s.get("staleness_tolerance_days", tolerance))
+        for s in enabled_sectors
+        if str(s.get("model_family", ""))
+    }
+    max_abs_expected_alpha = parse_float(cfg_get(config, "score_contract.max_abs_expected_alpha", 1.0)) or 1.0
     bands = {**DEFAULT_RATING_BANDS, **cfg_get(config, "score_contract.rating_bands", {})}
 
     checks: list[dict] = []
 
     def record(name: str, status: str, detail: str) -> None:
         checks.append({"check": name, "status": status, "detail": detail})
+
+    band_errors = validate_rating_bands(bands)
+    record(
+        "rating_bands_valid",
+        "PASS" if not band_errors else "FAIL",
+        "rating thresholds numeric, in range, and descending"
+        if not band_errors else f"invalid rating bands: {band_errors}",
+    )
 
     # 1. schema
     header = set(rows[0].keys()) if rows else set()
@@ -128,6 +157,22 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
     # 3. single as-of
     asofs = {r["as_of_date"] for r in rows}
     record("single_as_of", "PASS" if asofs == {run_as_of} else "FAIL", f"as_of values={sorted(asofs)}")
+
+    # 3b. required sector/pipeline presence
+    present_pipelines = {str(r.get("source_pipeline", "")).strip() for r in rows if str(r.get("source_pipeline", "")).strip()}
+    missing_required = sorted(required_pipelines - present_pipelines)
+    unexpected_pipelines = sorted(present_pipelines - expected_pipelines)
+    pipeline_bad = []
+    if missing_required:
+        pipeline_bad.append(f"missing_required={missing_required}")
+    if unexpected_pipelines:
+        pipeline_bad.append(f"unexpected={unexpected_pipelines}")
+    record(
+        "required_pipelines_present",
+        "PASS" if not pipeline_bad else "FAIL",
+        f"present={sorted(present_pipelines)}"
+        if not pipeline_bad else "; ".join(pipeline_bad),
+    )
 
     # 4. configured contract version
     versions = {str(r.get("score_version", "")).strip() for r in rows}
@@ -162,6 +207,40 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
     record("numeric_fields_valid", "PASS" if not bad_numeric else "FAIL",
            "numeric fields parse and ranges hold" if not bad_numeric else (
                f"{len(bad_numeric)} bad values; first={bad_numeric[:10]}"
+           ))
+
+    # 6b. expected-alpha magnitude sanity
+    bad_alpha = []
+    for r in rows:
+        final_score = parse_float(r.get("final_score"))
+        if final_score is not None and abs(final_score) > max_abs_expected_alpha:
+            bad_alpha.append(f"{r.get('ticker', '<missing>')}:{final_score}")
+    record("final_score_magnitude_sane", "PASS" if not bad_alpha else "FAIL",
+           f"|final_score| <= {max_abs_expected_alpha}" if not bad_alpha else (
+               f"{len(bad_alpha)} rows exceed {max_abs_expected_alpha}; first={bad_alpha[:10]}"
+           ))
+
+    # 6c. native score scale sanity
+    bad_native_range = []
+    for r in rows:
+        pipeline = str(r.get("source_pipeline", "")).strip()
+        native = parse_float(r.get("native_score"))
+        range_cfg = native_range_by_pipeline.get(pipeline, global_native_range)
+        native_min = parse_float(range_cfg.get("min", 0.0))
+        native_max = parse_float(range_cfg.get("max", 100.0))
+        if native is None or native_min is None or native_max is None:
+            bad_native_range.append(f"{r.get('ticker', '<missing>')}:{pipeline}:range_or_native_unparseable")
+            continue
+        if native_min > native_max:
+            bad_native_range.append(f"{pipeline}:range_min_gt_max:{native_min}>{native_max}")
+            continue
+        if native < native_min or native > native_max:
+            bad_native_range.append(
+                f"{r.get('ticker', '<missing>')}:{pipeline}:native={native} outside [{native_min},{native_max}]"
+            )
+    record("native_score_range_valid", "PASS" if not bad_native_range else "FAIL",
+           "all native scores within configured ranges" if not bad_native_range else (
+               f"{len(bad_native_range)} range errors; first={bad_native_range[:10]}"
            ))
 
     # 7. monotonic final_score vs native within sector
@@ -242,15 +321,43 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         d = int(d_float)
         if source_date > run_date or d < 0:
             future.append((r["source_pipeline"], r["ticker"], r.get("source_asof_date", ""), d))
-        if d > tolerance:
-            stale.append((r["source_pipeline"], d))
+        row_tolerance = tolerance_by_pipeline.get(str(r.get("source_pipeline", "")).strip(), tolerance)
+        if d > row_tolerance:
+            stale.append((r["source_pipeline"], d, row_tolerance))
     record("source_dates_valid", "PASS" if not bad_dates else "FAIL",
            "run/source dates parse" if not bad_dates else f"{len(bad_dates)} rows have invalid dates")
     record("no_future_sources", "PASS" if not future else "FAIL",
            "no source_asof_date is after run as_of" if not future else f"future rows: {future[:10]}")
-    worst = {p: max(d for pp, d in stale if pp == p) for p, _ in stale}
+    worst = {
+        p: {
+            "max_staleness_days": max(d for pp, d, _tol in stale if pp == p),
+            "tolerance_days": min(_tol for pp, _d, _tol in stale if pp == p),
+        }
+        for p, _d, _tol in stale
+    }
     record("staleness_within_tolerance", "PASS" if not stale else "WARN",
-           f"tolerance={tolerance}d; over-tolerance sectors={worst}" if stale else f"all within {tolerance}d")
+           f"default_tolerance={tolerance}d; over-tolerance sectors={worst}" if stale else (
+               f"all within configured per-sector tolerances (default={tolerance}d)"
+           ))
+
+    # 10b. cross-sector duplicates should be curated by canonical override, not silent confidence parity.
+    if duplicate_path.exists():
+        uncurated_cross_duplicates = [
+            r for r in duplicate_rows
+            if r.get("duplicate_type") == "cross_sector" and r.get("method") == "confidence_then_config_order"
+        ]
+        record(
+            "cross_sector_duplicates_curated",
+            "PASS" if not uncurated_cross_duplicates else "WARN",
+            "all cross-sector duplicate tickers resolved by canonical override"
+            if not uncurated_cross_duplicates
+            else (
+                f"{len(uncurated_cross_duplicates)} cross-sector duplicates resolved by confidence/order; "
+                f"tickers={[r.get('ticker') for r in uncurated_cross_duplicates[:10]]}"
+            ),
+        )
+    else:
+        record("cross_sector_duplicates_curated", "WARN", "duplicate_resolution.csv missing; curation not verified")
 
     # 11/12. deferred to Stage 2 (need realized-return panel)
     record("cross_sector_parity", "DEFERRED", "equal-final_score -> equal realized alpha needs Stage 2 return panel")
@@ -269,8 +376,6 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         else {}
     )
     collected_path = run_dir / "collected_scores.csv"
-    duplicate_path = run_dir / "validation" / "duplicate_resolution.csv"
-    duplicate_rows = read_csv(duplicate_path) if duplicate_path.exists() else []
     per_sector = {}
     for pipe, srows in sorted(by_pipe_rows.items()):
         finals = [v for v in (parse_float(r.get("final_score")) for r in srows) if v is not None]

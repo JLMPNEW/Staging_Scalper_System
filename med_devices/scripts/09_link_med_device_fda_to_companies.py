@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from med_devices.core.fda_mapping_governance import DEFAULT_EXCLUDED_METHODS, audit_fda_mapping_governance  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.text_norm import normalize_org_name, normalize_submission_identifier, normalize_ticker  # noqa: E402
 
@@ -47,6 +48,7 @@ STOP_TOKENS = {
     "LIFE",
     "MED",
     "MEDICAL",
+    "MEDTECH",
     "MOLECULAR",
     "OF",
     "PRODUCT",
@@ -61,6 +63,8 @@ STOP_TOKENS = {
     "SYSTEM",
     "SYSTEMS",
     "TECH",
+    "THERAPEUTIC",
+    "THERAPEUTICS",
     "TECHNOLOGIES",
     "TECHNOLOGY",
     "THE",
@@ -138,12 +142,7 @@ ALIAS_SOURCE_PRIORITY = {
     "company_name": 2,
     "ticker": 1,
 }
-EXCLUDED_MAPPING_METHODS = {
-    "do_not_map",
-    "non_us_traded_parent",
-    "not_in_investible_universe",
-    "out_of_universe",
-}
+EXCLUDED_MAPPING_METHODS = set(DEFAULT_EXCLUDED_METHODS)
 
 
 @dataclass(frozen=True)
@@ -236,6 +235,17 @@ def strip_suffixes(norm_name: str) -> str:
             tokens.pop()
             changed = True
     return " ".join(tokens)
+
+
+def config_bool(raw: object, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "enabled", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
+        return False
+    return default
 
 
 def split_alias_fragments(raw: str) -> list[str]:
@@ -523,9 +533,11 @@ def edit_distance(left: str, right: str) -> int:
 def whole_word_substring(left: str, right: str) -> bool:
     if len(left) < 6 or len(right) < 6:
         return False
-    return bool(re.search(rf"(^|\s){re.escape(left)}($|\s)", right)) or bool(
-        re.search(rf"(^|\s){re.escape(right)}($|\s)", left)
-    )
+    if bool(re.search(rf"(^|\s){re.escape(left)}($|\s)", right)):
+        return any(strong_token(token) for token in name_tokens(left))
+    if bool(re.search(rf"(^|\s){re.escape(right)}($|\s)", left)):
+        return any(strong_token(token) for token in name_tokens(right))
+    return False
 
 
 def score_alias(manufacturer_name: str, alias: CompanyAlias, *, token_score_weight: float) -> tuple[float, str]:
@@ -1301,11 +1313,29 @@ def main() -> None:
                     "unconfirmed_approval_rows": 0,
                 }
             write_csv(output_csv, rows)
+            governance_result = None
+            if config_bool(cfg_get(config, "fda_mapping_governance.run_after_linking", True), True):
+                governance_result = audit_fda_mapping_governance(
+                    conn,
+                    config=config,
+                    base_dir=base_dir,
+                    mapping_csv=output_csv,
+                )
+                if (
+                    config_bool(cfg_get(config, "fda_mapping_governance.fail_on_critical", True), True)
+                    and governance_result.critical_count > 0
+                ):
+                    raise RuntimeError(
+                        "FDA mapping governance audit failed: "
+                        f"critical={governance_result.critical_count} output={governance_result.output_csv}"
+                    )
             message = (
                 f"manufacturers={len(rows)} mapped={mapped} ambiguous={ambiguous} "
                 f"high_volume_unmapped={high_volume_unmapped_count} aliases={len(aliases)} "
                 f"manual_overrides={len(manual_overrides)} footprint_links={footprint_link_counts} "
                 f"product_line_links={product_line_link_counts} "
+                f"mapping_governance_critical={governance_result.critical_count if governance_result else 'not_run'} "
+                f"mapping_governance_warnings={governance_result.warning_count if governance_result else 'not_run'} "
                 f"min_confidence={min_confidence} output={output_csv}"
             )
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=message)

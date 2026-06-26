@@ -57,16 +57,20 @@ def main() -> int:
         LOGGER.error("No sealed Stage 1 run (manifest.json) found under %s", runs_root)
         return 1
     tolerance = int(cfg_get(config, "score_contract.staleness_tolerance_days", 10))
-    expected = [
-        str(s["model_family"])
-        for s in cfg_get(config, "score_contract.sectors", [])
-        if bool(s.get("enabled", True))
-    ]
+    expected = []
+    per_pipeline_tolerance = {}
+    for sector in cfg_get(config, "score_contract.sectors", []):
+        if not bool(sector.get("enabled", True)):
+            continue
+        pipe = str(sector["model_family"])
+        expected.append(pipe)
+        per_pipeline_tolerance[pipe] = int(sector.get("staleness_tolerance_days", tolerance))
     stale_status = str(cfg_get(config, "risk_panel.readiness_stale_status", "FAIL"))
     checks = check_stage1_readiness(
         runs_root,
         run_as_of,
         staleness_tolerance=tolerance,
+        per_pipeline_staleness_tolerance=per_pipeline_tolerance,
         expected_pipelines=expected,
         stale_status=stale_status,
     )

@@ -29,7 +29,20 @@ def _f(value: Any) -> float | None:
 
 
 def _truthy(value: Any) -> bool:
-    return str(value).strip().lower() in ("1", "1.0", "true", "yes", "y", "t")
+    text = str(value).strip().lower()
+    if text in ("1", "1.0", "true", "yes", "y", "t"):
+        return True
+    if text in ("", "0", "0.0", "false", "no", "n", "f", "none", "null", "nan"):
+        return False
+    numeric = _f(text)
+    if numeric is not None:
+        return numeric != 0.0
+    normalized = re.sub(r"[^a-z]", "", text)
+    if normalized in ("true", "yes", "y", "t"):
+        return True
+    if normalized in ("false", "no", "n", "f"):
+        return False
+    return False
 
 
 def _dominant(rows: list[dict[str, str]], column: str, default: str = "") -> str:
@@ -43,7 +56,19 @@ def _dominant(rows: list[dict[str, str]], column: str, default: str = "") -> str
     return max(counts, key=lambda value: (counts[value], value))
 
 
-def _confidence(value: Any, *, default: float = 1.0, denominator: float | None = None) -> float:
+def _first_text(row: dict[str, str], columns: tuple[str, ...]) -> str:
+    for column in columns:
+        value = str(row.get(column, "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def _source_asof(row: dict[str, str]) -> str:
+    return _first_text(row, ("asof_date", "as_of_date", "snapshot_date", "score_asof_date"))
+
+
+def _confidence(value: Any, *, default: float = 0.5, denominator: float | None = None) -> float:
     raw = _f(value)
     if raw is None:
         return default
@@ -59,15 +84,27 @@ def _resolve_file(cfg: dict[str, Any], root: Path, run_as_of: str | None) -> Pat
     if mode == "flat":
         return (root / rel).resolve()
     if mode == "dated":
-        # The {yyyymmdd} token occupies one whole path segment (the dated folder name).
+        # The date token occupies one whole path segment (the dated folder name).
+        # Existing biotech outputs use YYYYMMDD; newer technology snapshots use YYYY-MM-DD.
         parts = rel.split("/")
-        idx = next((i for i, p in enumerate(parts) if "{yyyymmdd}" in p), -1)
+        token = ""
+        idx = -1
+        for i, p in enumerate(parts):
+            if "{yyyymmdd}" in p:
+                token = "{yyyymmdd}"
+                idx = i
+                break
+            if "{yyyy-mm-dd}" in p:
+                token = "{yyyy-mm-dd}"
+                idx = i
+                break
         if idx < 0:
-            raise ValueError(f"dated file_path must contain {{yyyymmdd}}: {rel}")
+            raise ValueError(f"dated file_path must contain {{yyyymmdd}} or {{yyyy-mm-dd}}: {rel}")
         parent_dir = root.joinpath(*parts[:idx]) if idx else root
-        seg_prefix, _, seg_suffix = parts[idx].partition("{yyyymmdd}")
+        seg_prefix, _, seg_suffix = parts[idx].partition(token)
         remainder = parts[idx + 1:]
-        pattern = re.compile(rf"{re.escape(seg_prefix)}(\d{{8}}){re.escape(seg_suffix)}$")
+        date_re = r"(\d{8})" if token == "{yyyymmdd}" else r"(\d{4}-\d{2}-\d{2})"
+        pattern = re.compile(rf"{re.escape(seg_prefix)}{date_re}{re.escape(seg_suffix)}$")
         candidates: list[tuple[str, Path]] = []
         if parent_dir.exists():
             for child in parent_dir.iterdir():
@@ -76,7 +113,7 @@ def _resolve_file(cfg: dict[str, Any], root: Path, run_as_of: str | None) -> Pat
                     continue
                 target_file = child.joinpath(*remainder) if remainder else child
                 if target_file.exists():
-                    candidates.append((m.group(1), target_file.resolve()))
+                    candidates.append((m.group(1).replace("-", ""), target_file.resolve()))
         if not candidates:
             raise FileNotFoundError(f"No dated score file found for pattern {rel} under {parent_dir}")
         target = run_as_of.replace("-", "") if run_as_of else None
@@ -101,7 +138,7 @@ def _adapt_tech_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
             continue
         rank_ready = _truthy(r.get("rank_ready_flag"))
         calib_ok = _truthy(r.get("calibration_eligible_flag"))
-        complete = str(r.get("model_status", "")).strip().lower() in ("", "complete")
+        complete = str(r.get("model_status", "")).strip().lower() == "complete"
         eligible = rank_ready and calib_ok and complete
         reason = "ok" if eligible else (
             "not_rank_ready" if not rank_ready else
@@ -113,18 +150,28 @@ def _adapt_tech_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
             industry_aggregate=str(cfg["industry_aggregate"]), native_score=native,
             investable_eligible=int(eligible), eligibility_reason=reason,
             score_confidence=_confidence(r.get("data_quality_confidence")),
-            source_asof_date=str(r.get("asof_date", "")).strip(),
+            source_asof_date=_source_asof(r),
         ))
     return out
 
 
 def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[CanonicalScore]:
-    score_field = _dominant(rows, "production_rank_score_field", default="opportunity_score")
+    score_fields = {
+        str(row.get("production_rank_score_field", "")).strip()
+        for row in rows
+        if str(row.get("production_rank_score_field", "")).strip()
+    }
+    if len(score_fields) > 1:
+        raise ValueError(f"biotech production_rank_score_field must be unanimous; found={sorted(score_fields)}")
+    score_field = next(iter(score_fields), "opportunity_score")
+    zero_is_missing = bool(cfg.get("zero_score_is_missing", score_field in {"opportunity_score", "production_rank_score"}))
     out: list[CanonicalScore] = []
     for r in rows:
         ticker = str(r.get("ticker", "")).strip().upper()
         native = _f(r.get(score_field))
         if not ticker or native is None:
+            continue
+        if zero_is_missing and native == 0.0:
             continue
         investible = _truthy(r.get("biotech_cohort_investible_flag"))
         vetoed = _truthy(r.get("core_structural_veto_flag"))
@@ -138,7 +185,7 @@ def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[Cano
             industry_aggregate=str(cfg["industry_aggregate"]), native_score=native,
             investable_eligible=int(eligible), eligibility_reason=reason,
             score_confidence=conf,
-            source_asof_date=str(r.get("asof_date", "")).strip(),
+            source_asof_date=_source_asof(r),
         ))
     return out
 
@@ -146,6 +193,23 @@ def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[Cano
 def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[CanonicalScore]:
     if rows and "portfolio_candidate_gate" not in rows[0]:
         raise ValueError("med_devices score file must include portfolio_candidate_gate")
+    explicit_confidence_field = next(
+        (
+            field
+            for field in ("score_confidence", "portfolio_score_confidence", "model_confidence")
+            if rows and field in rows[0]
+        ),
+        "",
+    )
+    completeness_values = [
+        value
+        for value in (_f(r.get("data_completeness_score")) for r in rows)
+        if value is not None
+    ]
+    constant_completeness = (
+        bool(completeness_values)
+        and len({round(value, 8) for value in completeness_values}) == 1
+    )
     out: list[CanonicalScore] = []
     for r in rows:
         ticker = str(r.get("ticker", "")).strip().upper()
@@ -159,14 +223,19 @@ def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
             else str(r.get("portfolio_candidate_reason") or "failed_portfolio_candidate_gate").strip()
         )
         industry = str(r.get("subsector", "")).strip() or str(cfg["industry"])
-        completeness = _f(r.get("data_completeness_score"))
-        conf = _confidence(completeness, denominator=100.0)
+        if explicit_confidence_field:
+            conf = _confidence(r.get(explicit_confidence_field))
+        elif constant_completeness:
+            # A constant 100% completeness field is not a cross-sector-comparable confidence signal.
+            conf = 0.5
+        else:
+            conf = _confidence(r.get("data_completeness_score"), denominator=100.0)
         out.append(CanonicalScore(
             ticker=ticker, source_pipeline=str(cfg["model_family"]),
             sector=str(cfg["sector"]), industry=industry,
             industry_aggregate=str(cfg["industry_aggregate"]), native_score=native,
             investable_eligible=int(eligible), eligibility_reason=reason,
-            score_confidence=conf, source_asof_date=str(r.get("asof_date", "")).strip(),
+            score_confidence=conf, source_asof_date=_source_asof(r),
         ))
     return out
 

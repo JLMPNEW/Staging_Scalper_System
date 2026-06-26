@@ -8,6 +8,7 @@ weights, and trade notionals so Stage 4 cost changes are explainable.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
 import statistics
@@ -154,9 +155,25 @@ def _expected_liquidity_universe(run_dir: Path) -> set[str]:
         for r in read_csv(run_dir / "stocks_scores.csv")
         if str(r.get("ticker", "")).strip() and str(r.get("investable_eligible", "")).strip() == "1"
     }
+    meta_path = run_dir / "risk" / "spread_snapshot_meta.json"
+    universe_source = ""
+    if meta_path.exists():
+        try:
+            with meta_path.open("r", encoding="utf-8") as handle:
+                meta = json.load(handle)
+            universe_source = str(meta.get("universe_source", "")).strip().lower()
+        except (OSError, json.JSONDecodeError):
+            universe_source = ""
+    if "stocks_scores.csv:investable_eligible" in universe_source or "investable_scores" in universe_source:
+        return scores
+
+    coverage_path = run_dir / "risk" / "risk_coverage.csv"
+    if not coverage_path.exists():
+        return scores
+
     coverage = {
         str(r.get("ticker", "")).strip().upper()
-        for r in read_csv(run_dir / "risk" / "risk_coverage.csv")
+        for r in read_csv(coverage_path)
         if (
             str(r.get("ticker", "")).strip()
             and str(r.get("role", "")).strip() == "scored"

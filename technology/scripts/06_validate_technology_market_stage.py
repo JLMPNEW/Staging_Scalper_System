@@ -220,7 +220,7 @@ def validate() -> int:
         if corporate_actions == 0:
             errors.append(f"No corporate actions loaded for source_id={source_id}")
 
-        feature_asof = value(
+        feature_asof = args.asof.strip() or value(
             conn,
             "SELECT MAX(asof_date) FROM feature_market_technical WHERE source_id = ? AND model_family = ?",
             (source_id, model_family),

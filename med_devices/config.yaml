@@ -6,11 +6,94 @@ paths:
 runtime:
   sqlite_timeout_sec: 30.0
 
+med_devices_refresh_pipeline:
+  output_dir: "../output/med_devices_reports/orchestration"
+  optional_external_steps:
+    - 53_sync_ibkr_borrow
+    - 55_sync_finra_short_volume
+    - 65_update_finra_short_interest
+    - 62_update_sec13f_positioning
+    - 61_import_positioning
+    - 63_rebuild_sec13f_common_shares
+    - 68_update_form4_canonical
+    - 67_audit_external_positioning
+    - 73_audit_calibration_governance
+  required_output_columns:
+    - asof_date
+    - ticker
+    - portfolio_candidate_gate
+    - portfolio_candidate_score
+    - composite_score
+    - safe_core_score
+    - ic_tilted_composite_score
+    - calibration_cohort
+    - classification
+    - score_model_version
+    - model_family
+    - model_version
+    - scoring_contract_version
+    - sector
+    - industry
+    - country
+    - currency
+    - analyst_review_decision
+    - analyst_review_reason
+    - analyst_review_owner
+    - analyst_review_expires_at
+    - analyst_portfolio_override_applied
+
+med_devices_production_qa:
+  output_dir: "../output/med_devices_reports/production_qa"
+  min_score_rows_pct_of_active: 0.95
+  min_portfolio_candidates: 1
+  max_feature_staleness_days: 7
+  fail_on_warnings: false
+  review_pack_required_files:
+    - med_device_daily_composite_scores.csv
+    - med_device_score_review_all.csv
+    - med_device_score_review_top25.csv
+    - med_device_score_review_portfolio_candidates.csv
+    - med_device_score_review_calibrated_baseline.csv
+    - med_device_score_review_safe_core.csv
+    - med_device_score_review_tier1.csv
+    - med_device_score_review_pack.md
+
+med_devices_calibration_governance:
+  output_csv: "../output/med_devices_reports/calibration/med_device_calibration_governance.csv"
+  output_json: "../output/med_devices_reports/calibration/med_device_calibration_governance.json"
+  fail_on_stale: false
+  max_days_since_historical_backfill: 30
+  max_days_since_component_ic: 30
+  max_days_since_component_promotion_review: 30
+  max_days_since_policy_recommendations: 30
+  max_days_since_optuna: 60
+  max_days_since_safe_core_thresholds: 60
+  max_days_since_baseline_freeze: 90
+
+med_devices_analyst_review:
+  output_dir: "../output/med_devices_reports/analyst_review"
+  decisions_csv: "data/analyst_review_decisions.csv"
+  decision_change_log_csv: "data/analyst_review_decision_log.csv"
+  expiration_warning_days: 14
+  enable_portfolio_overrides: false
+  high_score_threshold: 70.0
+  priority_score_threshold: 75.0
+  include_portfolio_candidates: false
+  allowed_decisions:
+    - approve
+    - reject
+    - watchlist
+    - data_fix_needed
+    - defer
+
 source_registry:
   path: "data/free_source_registry.yaml"
 
 med_devices_universe:
   seed_csv: "../ticker_mapping/med_dev_tickers_clean_keep.csv"
+  historical_membership_csv: "data/med_device_historical_membership.csv"
+  historical_membership_source_id: "med_device_historical_membership_seed"
+  min_historical_membership_tickers: 35
   market_cap_min: 250000000
   avg_dollar_volume_60d_min: 1000000
   include_us_listed_only: true
@@ -514,6 +597,36 @@ fda_entity_linking:
   max_candidate_summary: 5
   high_volume_unmapped_record_threshold: 50
   update_fact_company_ids: true
+
+fda_mapping_governance:
+  run_after_linking: true
+  fail_on_critical: true
+  source_mapping_csv: "../output/med_devices_reports/med_device_fda_entity_mapping.csv"
+  output_csv: "../output/med_devices_reports/fda_mapping_review_queue.csv"
+  manual_overrides_csv: "data/fda_manufacturer_overrides.csv"
+  regression_cases_csv: "data/fda_mapping_regression_cases.csv"
+  min_mapped_confidence: 75.0
+  low_confidence_review_threshold: 90.0
+  max_ambiguous: 0
+  max_high_volume_unmapped: 0
+  allowed_override_methods:
+    - manual_override
+    - mapped
+    - out_of_universe
+    - do_not_map
+    - non_us_traded_parent
+    - not_in_investible_universe
+    - private_excluded
+    - international_excluded
+    - inactive_or_delisted
+  excluded_override_methods:
+    - out_of_universe
+    - do_not_map
+    - non_us_traded_parent
+    - not_in_investible_universe
+    - private_excluded
+    - international_excluded
+    - inactive_or_delisted
 
 technical_features:
   output_csv: "../output/med_devices_reports/med_device_technical_entry_features.csv"
@@ -1025,7 +1138,9 @@ market_positioning_update:
     force_reprocess_archives: false
 
 scoring:
+  model_family: "med_devices"
   model_version: "med_device_score_v22_2026_06_support_guarded_calibration"
+  scoring_contract_version: "stocks_scores_v1"
   output_csv: "../output/med_devices_reports/med_device_daily_composite_scores.csv"
   review_pack_dir: "../output/med_devices_reports/score_review_pack"
   backtest_output_csv: "../output/med_devices_reports/med_device_score_backtest.csv"
@@ -1636,6 +1751,7 @@ historical_backfill:
   weekday: "friday"
   stages: "financial,fda,reimbursement,technical,borrow,short_interest,institutional_flow,insider_activity,scores"
   horizons: "30,60,120"
+  include_historical_members: true
   skip_existing: false
   run_backtest: true
   run_calibration: true

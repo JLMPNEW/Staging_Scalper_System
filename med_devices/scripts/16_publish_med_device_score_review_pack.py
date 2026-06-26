@@ -25,9 +25,17 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 SCORE_FIELDS = [
     "asof_date",
     "scoring_model_version",
+    "score_model_version",
+    "model_family",
+    "model_version",
+    "scoring_contract_version",
     "rank",
     "ticker",
     "company_name",
+    "sector",
+    "industry",
+    "country",
+    "currency",
     "subsector",
     "calibration_cohort",
     "calibration_status",
@@ -45,6 +53,11 @@ SCORE_FIELDS = [
     "portfolio_candidate_status",
     "portfolio_candidate_reason",
     "portfolio_candidate_score",
+    "analyst_review_decision",
+    "analyst_review_reason",
+    "analyst_review_owner",
+    "analyst_review_expires_at",
+    "analyst_portfolio_override_applied",
     "safe_core_score",
     "safe_core_percentile",
     "safe_core_cohort_percentile",
@@ -492,6 +505,8 @@ def calibrated_baseline_candidate_status(row: dict[str, Any], config: dict[str, 
 def calibrated_baseline_candidates(rows: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in rows:
+        if int(row.get("portfolio_candidate_gate") or 0) != 1:
+            continue
         status = calibrated_baseline_candidate_status(row, config)
         if status is None:
             continue
@@ -558,6 +573,7 @@ def write_markdown(
     rows: list[dict[str, Any]],
     counts: list[dict[str, Any]],
     reimbursement_counts: list[dict[str, Any]],
+    portfolio_candidates: list[dict[str, Any]],
     baseline_candidates: list[dict[str, Any]],
     asof: str,
 ) -> None:
@@ -638,6 +654,17 @@ def write_markdown(
         "",
         "## Tier-1 Long Candidates",
         *(line_items(tier1) or ["- None"]),
+        "",
+        "## Portfolio Candidate Universe",
+        *(
+            [
+                f"- {row.get('rank')}. {row.get('ticker')} "
+                f"score={first_float(row.get('portfolio_candidate_score'), row.get('composite_score')):.2f} "
+                f"status={row.get('portfolio_candidate_status') or ''} "
+                f"decision={row.get('analyst_review_decision') or ''}"
+                for row in portfolio_candidates[:25]
+            ] or ["- None"]
+        ),
         "",
         "## Calibrated Baseline Candidates",
         *(
@@ -794,6 +821,10 @@ def main() -> None:
             if row["classification"] in {"manual_review_regulatory_risk", "avoid_confirmed_regulatory_risk"}
             or str(row["fda_review_state"] or "").strip().lower() in REGULATORY_RISK_STATES
         ]
+        portfolio_candidates = sorted(
+            [row for row in clean_rows if int(row.get("portfolio_candidate_gate") or 0) == 1],
+            key=lambda item: (-first_float(item.get("portfolio_candidate_score"), item.get("composite_score")), int(item.get("rank") or 999999)),
+        )
         top25 = clean_rows[:25]
         bottom25 = list(reversed(clean_rows[-25:]))
         baseline_candidates = calibrated_baseline_candidates(clean_rows, config)
@@ -801,6 +832,7 @@ def main() -> None:
         write_csv(output_dir / "med_device_daily_composite_scores.csv", clean_rows, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_all.csv", clean_rows, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_tier1.csv", tier1, SCORE_FIELDS)
+        write_csv(output_dir / "med_device_score_review_portfolio_candidates.csv", portfolio_candidates, SCORE_FIELDS)
         write_csv(
             output_dir / "med_device_score_review_calibrated_baseline.csv",
             baseline_candidates,
@@ -829,12 +861,14 @@ def main() -> None:
             rows=clean_rows,
             counts=counts,
             reimbursement_counts=reimbursement_counts,
+            portfolio_candidates=portfolio_candidates,
             baseline_candidates=baseline_candidates,
             asof=asof,
         )
         print(
             f"review_pack_dir={output_dir} asof={asof} rows={len(rows)} "
             f"tier1={len(tier1)} safe_core={len(safe_core)} "
+            f"portfolio_candidates={len(portfolio_candidates)} "
             f"calibrated_baseline={len(baseline_candidates)} "
             f"safe_core_watchlist={len(safe_core_watchlist)} "
             f"special_situation_binary_risk={len(special_situations)} "

@@ -8,7 +8,7 @@ import logging
 import math
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from med_devices.core import analyst_review as analyst_review_core  # noqa: E402
 from med_devices.core.config import DEFAULT_NEUTRAL_SCORE, cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.fda_states import MANUAL_FDA_REVIEW_STATES  # noqa: E402
@@ -144,6 +145,14 @@ TIER1_TEMPLATE_ROLES = {
     TIER1_TEMPLATE_ROLE_RESEARCH,
 }
 OPTIONAL_DAILY_SCORE_COLUMNS = {
+    "score_model_version": "TEXT DEFAULT ''",
+    "model_family": "TEXT DEFAULT ''",
+    "model_version": "TEXT DEFAULT ''",
+    "scoring_contract_version": "TEXT DEFAULT ''",
+    "sector": "TEXT DEFAULT ''",
+    "industry": "TEXT DEFAULT ''",
+    "country": "TEXT DEFAULT ''",
+    "currency": "TEXT DEFAULT ''",
     "calibration_status": "TEXT DEFAULT 'production_eligible'",
     "calibration_status_reason": "TEXT DEFAULT ''",
     "cohort_score_template_id": "TEXT DEFAULT ''",
@@ -159,6 +168,11 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "portfolio_candidate_status": "TEXT DEFAULT ''",
     "portfolio_candidate_reason": "TEXT DEFAULT ''",
     "portfolio_candidate_score": "REAL DEFAULT 0.0",
+    "analyst_review_decision": "TEXT DEFAULT ''",
+    "analyst_review_reason": "TEXT DEFAULT ''",
+    "analyst_review_owner": "TEXT DEFAULT ''",
+    "analyst_review_expires_at": "TEXT DEFAULT ''",
+    "analyst_portfolio_override_applied": "INTEGER DEFAULT 0",
     "safe_core_score": "REAL DEFAULT 0.0",
     "safe_core_percentile": "REAL DEFAULT 0.0",
     "safe_core_cohort_percentile": "REAL DEFAULT 0.0",
@@ -289,10 +303,18 @@ ALLOWED_FEATURE_TABLES = {
 FIELDNAMES = [
     "asof_date",
     "scoring_model_version",
+    "score_model_version",
+    "model_family",
+    "model_version",
+    "scoring_contract_version",
     "rank",
     "company_id",
     "ticker",
     "company_name",
+    "sector",
+    "industry",
+    "country",
+    "currency",
     "subsector",
     "composite_score",
     "raw_composite_score",
@@ -313,6 +335,11 @@ FIELDNAMES = [
     "portfolio_candidate_status",
     "portfolio_candidate_reason",
     "portfolio_candidate_score",
+    "analyst_review_decision",
+    "analyst_review_reason",
+    "analyst_review_owner",
+    "analyst_review_expires_at",
+    "analyst_portfolio_override_applied",
     "safe_core_score",
     "safe_core_percentile",
     "safe_core_cohort_percentile",
@@ -493,11 +520,19 @@ FIELDNAMES = [
 class ScoreRow:
     asof_date: str
     scoring_model_version: str
+    score_model_version: str
+    model_family: str
+    model_version: str
+    scoring_contract_version: str
     rank: int
     company_id: int
     ticker: str
     company_name: str
     subsector: str
+    sector: str = ""
+    industry: str = ""
+    country: str = ""
+    currency: str = ""
     composite_score: float = 0.0
     raw_composite_score: float = 0.0
     composite_percentile: float = 0.0
@@ -517,6 +552,11 @@ class ScoreRow:
     portfolio_candidate_status: str = ""
     portfolio_candidate_reason: str = ""
     portfolio_candidate_score: float = 0.0
+    analyst_review_decision: str = ""
+    analyst_review_reason: str = ""
+    analyst_review_owner: str = ""
+    analyst_review_expires_at: str = ""
+    analyst_portfolio_override_applied: int = 0
     safe_core_score: float = 0.0
     safe_core_percentile: float = 0.0
     safe_core_cohort_percentile: float = 0.0
@@ -745,6 +785,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", type=str, default="")
     parser.add_argument("--tickers", type=str, default="")
     parser.add_argument("--max-tickers", type=int, default=0)
+    parser.add_argument("--include-historical-members", action="store_true")
     return parser.parse_args()
 
 
@@ -958,13 +999,35 @@ def load_ic_tilted_component_ics(policy: dict[str, Any]) -> dict[str, dict[str, 
     return out
 
 
-def load_financial_rows(conn: Any, *, asof: str, ticker_filter: set[str], max_tickers: int) -> list[dict[str, Any]]:
+def load_financial_rows(
+    conn: Any,
+    *,
+    asof: str,
+    ticker_filter: set[str],
+    max_tickers: int,
+    include_historical_members: bool,
+) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT f.*
+        SELECT f.*,
+               c.sector AS company_sector,
+               c.industry AS company_industry,
+               c.country AS company_country,
+               c.currency AS company_currency
         FROM feature_financial_valuation f
         JOIN dim_company c ON c.company_id = f.company_id
-        WHERE c.is_active = 1
+        WHERE (
+            c.is_active = 1
+            OR (? = 1 AND EXISTS (
+                SELECT 1
+                FROM dim_universe_membership m
+                WHERE m.company_id = c.company_id
+                  AND m.model_family = 'med_devices'
+                  AND m.point_in_time_flag = 1
+                  AND m.start_date <= ?
+                  AND (m.end_date IS NULL OR m.end_date >= ?)
+            ))
+        )
           AND f.asof_date = (
             SELECT MAX(asof_date)
             FROM feature_financial_valuation
@@ -972,7 +1035,7 @@ def load_financial_rows(conn: Any, *, asof: str, ticker_filter: set[str], max_ti
         )
         ORDER BY f.ticker
         """,
-        (asof,),
+        (1 if include_historical_members else 0, asof, asof, asof),
     ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -1080,7 +1143,10 @@ def load_company_model_risk_flags(conn: Any) -> dict[int, dict[str, Any]]:
     )
     for row in rows:
         item = dict(row)
-        company_id = int(item.get("company_id"))
+        company_id_raw = item.get("company_id")
+        if company_id_raw is None:
+            continue
+        company_id = int(company_id_raw)
         single_product = int_flag(item.get("single_product_risk_flag"))
         descriptor = " ".join(
             str(item.get(key) or "").strip().lower()
@@ -1718,6 +1784,8 @@ LIVE_REIMBURSEMENT_STATUSES = {
     "procedure_bundled_or_indirect",
     "capital_equipment_indirect",
     "diagnostics_lab_pathway",
+    "contracted_or_indirect",
+    "upstream_b2b_or_not_direct",
     "direct_code_no_payment_rate",
     "coverage_policy_only",
 }
@@ -3488,8 +3556,8 @@ def calibrated_baseline_candidate_status(
         ("technical_entry_score", "technical_entry_min"),
         ("data_completeness_score", "data_completeness_min"),
     ]
-    for field, gate_key in min_checks:
-        if not row_passes_min_gate(row, field, gates.get(gate_key)):
+    for score_field, gate_key in min_checks:
+        if not row_passes_min_gate(row, score_field, gates.get(gate_key)):
             return None
     if not row_passes_max_gate(row, "value_trap_score", gates.get("value_trap_max")):
         return None
@@ -3561,6 +3629,75 @@ def apply_portfolio_candidate_policy(
     if baseline_status is not None:
         reason_parts.append(f"baseline_reason={baseline_status[1]}")
     row.portfolio_candidate_reason = ";".join(reason_parts)
+
+
+def load_analyst_review_decisions_for_scoring(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+) -> list[analyst_review_core.AnalystReviewDecision]:
+    decision_path = resolve_path(
+        cfg_get(config, "med_devices_analyst_review.decisions_csv", "data/analyst_review_decisions.csv"),
+        base_dir=base_dir,
+    )
+    analyst_review_core.ensure_decision_file(decision_path)
+    decisions, issues = analyst_review_core.load_analyst_review_decisions(decision_path)
+    critical = [issue for issue in issues if str(issue.get("severity") or "").upper() == "CRITICAL"]
+    if critical:
+        details = "; ".join(
+            f"row={issue.get('row_number')} ticker={issue.get('ticker')} issue={issue.get('issue_type')}"
+            for issue in critical[:10]
+        )
+        raise ValueError(f"Invalid analyst review decision file {decision_path}: {details}")
+    return decisions
+
+
+def apply_analyst_review_decision(
+    row: ScoreRow,
+    *,
+    decisions: list[analyst_review_core.AnalystReviewDecision],
+    asof_date: date,
+    high_score_threshold: float,
+) -> None:
+    categories = set(
+        analyst_review_core.review_categories_for_item(
+            row,
+            high_score_threshold=high_score_threshold,
+            include_portfolio_candidates=True,
+        )
+    )
+    decision = analyst_review_core.effective_decision(
+        decisions,
+        ticker=row.ticker,
+        cohort=row.calibration_cohort,
+        review_categories=categories,
+        asof=asof_date,
+    )
+    if decision is None:
+        row.analyst_portfolio_override_applied = 0
+        return
+    row.analyst_review_decision = decision.decision
+    row.analyst_review_reason = decision.decision_reason
+    row.analyst_review_owner = decision.review_owner
+    row.analyst_review_expires_at = decision.expires_at
+    if decision.decision in {
+        analyst_review_core.DECISION_REJECT,
+        analyst_review_core.DECISION_DATA_FIX_NEEDED,
+    }:
+        previous_status = row.portfolio_candidate_status or "unset"
+        previous_reason = row.portfolio_candidate_reason or "none"
+        row.portfolio_candidate_gate = 0
+        row.portfolio_candidate_status = (
+            "analyst_rejected"
+            if decision.decision == analyst_review_core.DECISION_REJECT
+            else "analyst_data_fix_needed"
+        )
+        row.portfolio_candidate_reason = (
+            f"analyst_review_{decision.decision};"
+            f"previous_status={previous_status};"
+            f"previous_reason={previous_reason}"
+        )
+    row.analyst_portfolio_override_applied = 0
 
 
 def tier1_safety_reasons(row: ScoreRow, policy: Tier1SafetyPolicy) -> list[str]:
@@ -3998,8 +4135,15 @@ def build_rows(
     config_base_dir: Path,
     ticker_filter: set[str],
     max_tickers: int,
+    include_historical_members: bool,
 ) -> list[ScoreRow]:
-    financial_rows = load_financial_rows(conn, asof=asof, ticker_filter=ticker_filter, max_tickers=max_tickers)
+    financial_rows = load_financial_rows(
+        conn,
+        asof=asof,
+        ticker_filter=ticker_filter,
+        max_tickers=max_tickers,
+        include_historical_members=include_historical_members,
+    )
     fda_rows = load_latest_feature(conn, "feature_fda_product_risk", "fda_product_score", asof=asof)
     reimbursement_rows = load_latest_feature(conn, "feature_reimbursement", "score", asof=asof)
     technical_rows = load_latest_feature(conn, "feature_technical_entry", "technical_score", asof=asof)
@@ -4049,12 +4193,21 @@ def build_rows(
     pullback_candidate_profiles = cohort_pullback_candidate_profiles(config)
     default_tier1_safety_policy = tier1_safety_policy(config)
     tier1_safety_policy_profiles = cohort_tier1_safety_policy_profiles(config, default_tier1_safety_policy)
+    analyst_decisions = load_analyst_review_decisions_for_scoring(config, base_dir=config_base_dir)
+    analyst_review_high_score_threshold = float(
+        cfg_get(config, "med_devices_analyst_review.high_score_threshold", 70.0) or 70.0
+    )
+    analyst_review_asof_date = analyst_review_core.parse_date(asof) or analyst_review_core.utc_today()
     fda_source = fda_score_source(config)
     durable_source = durable_growth_score_source(config)
     technical_source = technical_composite_score_source(config)
     technical_entry_source = technical_entry_status_score_source(config)
     rank_composite = cfg_bool(config, "scoring.cross_sectional_composite_rank", True)
     model_version = str(cfg_get(config, "scoring.model_version", "med_device_score_v1") or "med_device_score_v1").strip()
+    model_family = str(cfg_get(config, "scoring.model_family", "med_devices") or "med_devices").strip()
+    scoring_contract_version = str(
+        cfg_get(config, "scoring.scoring_contract_version", "stocks_scores_v1") or "stocks_scores_v1"
+    ).strip()
     rows: list[ScoreRow] = []
     for item in financial_rows:
         company_id = int(item["company_id"])
@@ -4300,11 +4453,19 @@ def build_rows(
         row = ScoreRow(
             asof_date=asof,
             scoring_model_version=model_version,
+            score_model_version=model_version,
+            model_family=model_family,
+            model_version=model_version,
+            scoring_contract_version=scoring_contract_version,
             rank=0,
             company_id=company_id,
             ticker=normalize_ticker(item.get("ticker")),
             company_name=str(item.get("company_name") or ""),
             subsector=str(item.get("subsector") or ""),
+            sector=str(item.get("company_sector") or item.get("sector") or ""),
+            industry=str(item.get("company_industry") or item.get("industry") or ""),
+            country=str(item.get("company_country") or item.get("country") or ""),
+            currency=str(item.get("company_currency") or item.get("currency") or ""),
             calibration_cohort=cohort,
             calibration_status=calibration_status,
             calibration_status_reason=calibration_status_reason,
@@ -4621,6 +4782,12 @@ def build_rows(
             ),
         )
         apply_portfolio_candidate_policy(row, config=config, gates=row_gates)
+        apply_analyst_review_decision(
+            row,
+            decisions=analyst_decisions,
+            asof_date=analyst_review_asof_date,
+            high_score_threshold=analyst_review_high_score_threshold,
+        )
         apply_pullback_candidate_tag(
             row,
             profile_for_cohort(row.calibration_cohort, pullback_candidate_profiles, cohort_profile_alias_map),
@@ -4673,6 +4840,14 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
     columns = [
         "asof_date",
         "company_id",
+        "score_model_version",
+        "model_family",
+        "model_version",
+        "scoring_contract_version",
+        "sector",
+        "industry",
+        "country",
+        "currency",
         "scoring_model_version",
         "composite_score",
         "raw_composite_score",
@@ -4693,6 +4868,11 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "portfolio_candidate_status",
         "portfolio_candidate_reason",
         "portfolio_candidate_score",
+        "analyst_review_decision",
+        "analyst_review_reason",
+        "analyst_review_owner",
+        "analyst_review_expires_at",
+        "analyst_portfolio_override_applied",
         "safe_core_score",
         "safe_core_percentile",
         "safe_core_cohort_percentile",
@@ -4888,6 +5068,14 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
             (
                 row.asof_date,
                 row.company_id,
+                row.score_model_version,
+                row.model_family,
+                row.model_version,
+                row.scoring_contract_version,
+                row.sector,
+                row.industry,
+                row.country,
+                row.currency,
                 row.scoring_model_version,
                 row.composite_score,
                 row.raw_composite_score,
@@ -4908,6 +5096,11 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.portfolio_candidate_status,
                 row.portfolio_candidate_reason,
                 row.portfolio_candidate_score,
+                row.analyst_review_decision,
+                row.analyst_review_reason,
+                row.analyst_review_owner,
+                row.analyst_review_expires_at,
+                row.analyst_portfolio_override_applied,
                 row.safe_core_score,
                 row.safe_core_percentile,
                 row.safe_core_cohort_percentile,
@@ -5143,6 +5336,7 @@ def main() -> None:
                 config_base_dir=base_dir,
                 ticker_filter=ticker_filter,
                 max_tickers=int(args.max_tickers),
+                include_historical_members=bool(args.include_historical_members),
             )
             replace_asof = not ticker_filter and int(args.max_tickers) <= 0
             upserted = upsert_rows(conn, rows, replace_asof=replace_asof)

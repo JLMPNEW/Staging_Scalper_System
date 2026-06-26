@@ -8,6 +8,7 @@ import html
 import json
 import logging
 import math
+import shutil
 import sqlite3
 import sys
 from datetime import date, datetime, timezone
@@ -36,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--asof", default="", help="Dashboard as-of date. Defaults to latest production output.")
     return parser.parse_args()
 
 
@@ -119,8 +121,15 @@ def latest_filings(conn: sqlite3.Connection, source_id: str) -> dict[str, dict[s
     return out
 
 
-def load_latest_score_rows(conn: sqlite3.Connection, *, source_id: str, baseline_source_id: str, model_family: str) -> list[dict[str, Any]]:
-    asof = scalar(
+def load_latest_score_rows(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    baseline_source_id: str,
+    model_family: str,
+    asof: str = "",
+) -> list[dict[str, Any]]:
+    asof = asof.strip() or scalar(
         conn,
         "SELECT MAX(asof_date) FROM feature_scoring_model_output WHERE source_id = ? AND model_family = ?",
         (source_id, model_family),
@@ -132,6 +141,9 @@ def load_latest_score_rows(conn: sqlite3.Connection, *, source_id: str, baseline
         """
         SELECT o.ticker,
                o.asof_date,
+               o.source_id AS score_model_version,
+               o.model_family,
+               o.model_version,
                o.final_rank,
                o.final_percentile,
                o.final_score,
@@ -141,8 +153,15 @@ def load_latest_score_rows(conn: sqlite3.Connection, *, source_id: str, baseline
                o.calibration_eligible_flag,
                o.model_status,
                o.review_reason,
+               c.company_name,
+               c.sector,
+               c.industry,
+               c.subsector,
+               c.country,
+               c.currency,
                i.calibration_cohort_id,
                i.calibration_cohort,
+               i.scoring_contract_version,
                i.latest_price,
                i.market_cap,
                i.revenue_yoy_growth,
@@ -189,6 +208,8 @@ def load_latest_score_rows(conn: sqlite3.Connection, *, source_id: str, baseline
          AND i.asof_date = o.asof_date
          AND i.model_family = o.model_family
          AND i.source_id = ?
+        LEFT JOIN dim_company c
+          ON c.ticker = o.ticker
         WHERE o.source_id = ?
           AND o.model_family = ?
           AND o.asof_date = ?
@@ -227,6 +248,16 @@ def rank_table(rows: list[dict[str, Any]], components: dict[str, dict[str, dict[
         item = {
             "ticker": ticker,
             "asof_date": row.get("asof_date"),
+            "score_model_version": row.get("score_model_version"),
+            "model_family": row.get("model_family"),
+            "model_version": row.get("model_version"),
+            "scoring_contract_version": row.get("scoring_contract_version"),
+            "company_name": row.get("company_name"),
+            "sector": row.get("sector"),
+            "industry": row.get("industry"),
+            "subsector": row.get("subsector"),
+            "country": row.get("country"),
+            "currency": row.get("currency"),
             "final_rank": row.get("final_rank"),
             "final_percentile": row.get("final_percentile"),
             "final_score": row.get("final_score"),
@@ -266,6 +297,22 @@ def rank_table(rows: list[dict[str, Any]], components: dict[str, dict[str, dict[
             item[f"{component}_status"] = comp.get("component_status", "")
         out.append(item)
     return out
+
+
+def snapshot_outputs(output_dir: Path, asof: str, outputs: dict[str, Path], *, manifest_key: str) -> tuple[Path, dict[str, str]]:
+    if output_dir.name == asof:
+        return output_dir, {key: str(path) for key, path in outputs.items()}
+    snapshot_dir = output_dir / asof
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_map: dict[str, str] = {}
+    for key, path in outputs.items():
+        if key == manifest_key or not path.exists() or not path.is_file():
+            continue
+        target = snapshot_dir / path.name
+        shutil.copy2(path, target)
+        snapshot_map[key] = str(target)
+    snapshot_map[manifest_key] = str(snapshot_dir / outputs[manifest_key].name)
+    return snapshot_dir, snapshot_map
 
 
 def scorecards(rank_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -506,7 +553,13 @@ def main() -> int:
     filing_source = str(cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions"))
 
     with readonly_connect(db_path) as conn:
-        score_rows = load_latest_score_rows(conn, source_id=production_source, baseline_source_id=baseline_source, model_family=model_family)
+        score_rows = load_latest_score_rows(
+            conn,
+            source_id=production_source,
+            baseline_source_id=baseline_source,
+            model_family=model_family,
+            asof=str(args.asof or ""),
+        )
         if not score_rows:
             raise RuntimeError("No technology-hardware production model output rows found for dashboard publishing.")
         asof = str(score_rows[0]["asof_date"])
@@ -559,6 +612,7 @@ def main() -> int:
         top_n=int(cfg_get(config, f"{CONFIG_KEY}.top_rank_rows_in_html", 25)),
         review_n=int(cfg_get(config, f"{CONFIG_KEY}.max_review_rows_in_html", 50)),
     )
+    snapshot_dir, snapshot_map = snapshot_outputs(output_dir, asof, outputs, manifest_key="manifest")
 
     rank_ready_count = sum(1 for row in score_rows if safe_int(row.get("rank_ready_flag")) == 1)
     manifest = {
@@ -578,8 +632,13 @@ def main() -> int:
         "backtest_leader_rows": len(backtest_top),
         "stage8_candidate_rows": len(stage8_candidate_rows),
         "outputs": {key: str(path) for key, path in outputs.items() if key != "manifest"},
+        "snapshot_dir": str(snapshot_dir),
+        "snapshot_outputs": snapshot_map,
     }
     outputs["manifest"].write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    manifest_copy = snapshot_dir / outputs["manifest"].name
+    if outputs["manifest"].resolve() != manifest_copy.resolve():
+        shutil.copy2(outputs["manifest"], manifest_copy)
     LOGGER.info(
         "Stage 10 technology-hardware dashboard published: asof=%s rows=%d rank_ready=%d output=%s",
         asof,

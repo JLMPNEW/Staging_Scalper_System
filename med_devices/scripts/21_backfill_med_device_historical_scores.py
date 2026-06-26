@@ -56,6 +56,7 @@ class BackfillPolicy:
     weekday: str
     stages: list[str]
     horizons: list[int]
+    include_historical_members: bool
     skip_existing: bool
     run_backtest: bool
     run_calibration: bool
@@ -142,6 +143,7 @@ def policy_from_config(config: dict[str, Any], args: argparse.Namespace) -> Back
 
     horizon_text = args.horizons.strip() or str(cfg_get(config, "historical_backfill.horizons", "30,60,120"))
     horizons = parse_horizons(horizon_text)
+    include_historical_members = parse_bool(cfg_get(config, "historical_backfill.include_historical_members", False), False)
 
     run_backtest = (
         parse_bool(cfg_get(config, "historical_backfill.run_backtest", True), True)
@@ -169,6 +171,7 @@ def policy_from_config(config: dict[str, Any], args: argparse.Namespace) -> Back
         weekday=weekday,
         stages=stages,
         horizons=horizons,
+        include_historical_members=include_historical_members,
         skip_existing=skip_existing,
         run_backtest=run_backtest,
         run_calibration=run_calibration,
@@ -256,11 +259,20 @@ def run_command(command: list[str]) -> None:
     subprocess.run(command, cwd=PROJECT_ROOT, check=True)
 
 
-def run_stage(*, stage: str, asof: date, config_path: Path, db_path: Path | None) -> None:
+def run_stage(
+    *,
+    stage: str,
+    asof: date,
+    config_path: Path,
+    db_path: Path | None,
+    include_historical_members: bool,
+) -> None:
     script = PACKAGE_ROOT / "scripts" / STAGE_SCRIPTS[stage]
     command = [sys.executable, str(script), "--config", str(config_path), "--asof", asof.isoformat()]
     if db_path is not None:
         command.extend(["--db", str(db_path)])
+    if include_historical_members and stage in {"financial", "fda", "reimbursement", "technical", "scores"}:
+        command.append("--include-historical-members")
     run_command(command)
 
 
@@ -371,7 +383,13 @@ def main() -> None:
                     )
                     continue
             for stage in policy.stages:
-                run_stage(stage=stage, asof=asof, config_path=config_path, db_path=db_path)
+                run_stage(
+                    stage=stage,
+                    asof=asof,
+                    config_path=config_path,
+                    db_path=db_path,
+                    include_historical_members=policy.include_historical_members,
+                )
             manifest_rows.append(
                 {
                     "asof_date": asof.isoformat(),

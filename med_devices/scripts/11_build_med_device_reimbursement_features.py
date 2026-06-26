@@ -169,6 +169,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tickers", type=str, default="")
     parser.add_argument("--max-tickers", type=int, default=0)
     parser.add_argument("--billing-zip", type=str, default="")
+    parser.add_argument("--include-historical-members", action="store_true")
     return parser.parse_args()
 
 
@@ -251,14 +252,31 @@ def latest_asof(conn: Any) -> str:
     return asof or datetime.now(timezone.utc).date().isoformat()
 
 
-def load_companies(conn: Any, *, ticker_filter: set[str], max_tickers: int) -> list[Company]:
+def load_companies(
+    conn: Any,
+    *,
+    asof: str,
+    ticker_filter: set[str],
+    max_tickers: int,
+    include_historical_members: bool,
+) -> list[Company]:
     rows = conn.execute(
         """
         SELECT company_id, ticker, company_name
-        FROM dim_company
-        WHERE is_active = 1
+        FROM dim_company c
+        WHERE c.is_active = 1
+           OR (? = 1 AND EXISTS (
+                SELECT 1
+                FROM dim_universe_membership m
+                WHERE m.company_id = c.company_id
+                  AND m.model_family = 'med_devices'
+                  AND m.point_in_time_flag = 1
+                  AND m.start_date <= ?
+                  AND (m.end_date IS NULL OR m.end_date >= ?)
+           ))
         ORDER BY ticker
-        """
+        """,
+        (1 if include_historical_members else 0, asof, asof),
     ).fetchall()
     out: list[Company] = []
     for row in rows:
@@ -668,6 +686,50 @@ RECOGNIZED_BUNDLED_PAYMENT_STATUSES = {
     "upstream_b2b_no_clinical_code",
     "veterinary_no_cms",
 }
+PROCEDURE_INDIRECT_PAYMENT_STATUSES = {
+    "bundled_ipps",
+    "bundled_opps",
+    "bundled_opps_ipps",
+    "cash_fee_sched",
+    "cash_pay_or_out_of_pocket",
+    "cpt_category_iii",
+    "dental_or_cash_pay",
+    "ntap_add_on_payment",
+    "opo_cost_pass_through",
+    "opps_asp_passthrough",
+    "packaged_apc_asc",
+    "packaged_status_n",
+    "procedure_rate_mpfs",
+}
+CAPITAL_EQUIPMENT_PAYMENT_STATUSES = {
+    "facility_budget",
+    "hospital_overhead_budget",
+    "imaging_provider_mpfs_rates",
+    "system_budget",
+}
+DIAGNOSTICS_LAB_PAYMENT_STATUSES = {
+    "laboratory_overhead_no_direct_code",
+    "large_lab_clfs_array",
+}
+UPSTREAM_B2B_PAYMENT_STATUSES = {
+    "component_pricing_no_direct_cms",
+    "not_applicable_ruo_b2b",
+    "upstream_b2b_no_clinical_code",
+}
+CONTRACTED_INDIRECT_PAYMENT_STATUSES = {
+    "commercial_contract_no_cms",
+    "commercial_vision_or_cash_pay",
+    "enterprise_saas_no_clinical_code",
+    "external_report_mismatch_guard",
+    "jurisdictional_mac_priced",
+    "pharmacy_benefit_or_ncpdp",
+    "pharma_overhead",
+    "state_public_health_bundle",
+    "veterinary_no_cms",
+}
+DEVELOPMENTAL_NO_ACTIVE_BILLING_PAYMENT_STATUSES = {
+    "developmental_premarket_no_active_billing",
+}
 PROCEDURE_BUNDLED_STATUS_TOKENS = {
     "bundled",
     "packaged",
@@ -741,21 +803,33 @@ def finalize_reimbursement_evidence(row: ReimbursementFeatureRow) -> None:
     row.payment_rate_evidence = int(row.rate_row_count > 0 or row.regional_rate_status == "local_mac_rate_found")
     row.coverage_policy_evidence = int(row.policy_evidence_count > 0)
     row.procedure_bundled_flag = int(
-        status in RECOGNIZED_BUNDLED_PAYMENT_STATUSES
+        status in PROCEDURE_INDIRECT_PAYMENT_STATUSES
         or has_any_token(descriptor, PROCEDURE_BUNDLED_STATUS_TOKENS)
     )
-    row.capital_equipment_flag = int(has_any_token(descriptor, CAPITAL_EQUIPMENT_STATUS_TOKENS))
-    row.diagnostics_lab_flag = int(has_any_token(descriptor, DIAGNOSTICS_LAB_STATUS_TOKENS))
+    row.capital_equipment_flag = int(
+        status in CAPITAL_EQUIPMENT_PAYMENT_STATUSES
+        or has_any_token(descriptor, CAPITAL_EQUIPMENT_STATUS_TOKENS)
+    )
+    row.diagnostics_lab_flag = int(
+        status in DIAGNOSTICS_LAB_PAYMENT_STATUSES
+        or has_any_token(descriptor, DIAGNOSTICS_LAB_STATUS_TOKENS)
+    )
     if row.review_reason == "cms_reimbursement_data_not_loaded":
         row.reimbursement_status = "cms_data_not_loaded"
     elif row.payment_rate_evidence:
         row.reimbursement_status = "direct_payment_evidence"
-    elif row.procedure_bundled_flag:
-        row.reimbursement_status = "procedure_bundled_or_indirect"
-    elif row.capital_equipment_flag:
-        row.reimbursement_status = "capital_equipment_indirect"
     elif row.diagnostics_lab_flag:
         row.reimbursement_status = "diagnostics_lab_pathway"
+    elif row.capital_equipment_flag:
+        row.reimbursement_status = "capital_equipment_indirect"
+    elif status in UPSTREAM_B2B_PAYMENT_STATUSES:
+        row.reimbursement_status = "upstream_b2b_or_not_direct"
+    elif status in DEVELOPMENTAL_NO_ACTIVE_BILLING_PAYMENT_STATUSES:
+        row.reimbursement_status = "developmental_or_premarket_no_active_billing"
+    elif status in CONTRACTED_INDIRECT_PAYMENT_STATUSES:
+        row.reimbursement_status = "contracted_or_indirect"
+    elif row.procedure_bundled_flag:
+        row.reimbursement_status = "procedure_bundled_or_indirect"
     elif row.direct_code_evidence:
         row.reimbursement_status = "direct_code_no_payment_rate"
     elif row.coverage_policy_evidence:
@@ -1139,9 +1213,15 @@ def main() -> None:
         if parsed_asof is None:
             raise ValueError(f"Invalid as-of date: {args.asof}")
         asof = parsed_asof.isoformat()
-        companies = load_companies(conn, ticker_filter=ticker_filter, max_tickers=int(args.max_tickers))
+        companies = load_companies(
+            conn,
+            asof=asof,
+            ticker_filter=ticker_filter,
+            max_tickers=int(args.max_tickers),
+            include_historical_members=bool(args.include_historical_members),
+        )
         if not companies:
-            raise ValueError("No active companies selected")
+            raise ValueError("No active or point-in-time historical companies selected")
         run_id = start_run(conn, run_type="build_med_device_reimbursement_features", input_path=config_path)
         try:
             preflight_reimbursement_links(
