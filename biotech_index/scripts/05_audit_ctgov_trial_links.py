@@ -39,6 +39,17 @@ _RUN_CONTEXT: dict[str, Any] = {
     "finished": False,
 }
 MANUAL_VERDICTS = {"manual_keep", "manual_remove", "manual_review"}
+FORCE_ACTIVE_OUTCOME_STATUSES = {
+    "active_verified",
+    "active_program_owner",
+}
+NON_ACTIVE_MILESTONE_OUTCOME_STATUSES = {
+    "completed_recent_catalyst",
+    "regulatory_milestone",
+    "suspended_open_investigational_file",
+    "terminated_recent_catalyst",
+}
+MANUAL_PRIMARY_TRIAL_STATUSES = FORCE_ACTIVE_OUTCOME_STATUSES | NON_ACTIVE_MILESTONE_OUTCOME_STATUSES
 ROOT_CAUSE_CATEGORIES = {
     "entity_mapping_issue",
     "sponsor_alias_missing",
@@ -232,6 +243,62 @@ def apply_trial_status_override(evidence: dict[str, Any], overrides: dict[tuple[
         if suffix not in reasons:
             reasons.append(suffix)
         evidence["exclusion_reasons"] = ";".join(reasons)
+    elif status.lower() in FORCE_ACTIVE_OUTCOME_STATUSES:
+        evidence["overall_status"] = "ACTIVE_NOT_RECRUITING"
+        evidence["is_active_status"] = True
+        evidence["is_therapeutic"] = True
+        evidence["qualifying_trial"] = True
+        reasons = [
+            part
+            for part in split_codes(evidence.get("exclusion_reasons"))
+            if part not in {"completed_stale", "active_stale"}
+        ]
+        suffix = f"outcome_override:{status}" if status else "outcome_override"
+        if suffix not in reasons:
+            reasons.append(suffix)
+        evidence["exclusion_reasons"] = ";".join(reasons)
+        roles = {part.strip().lower() for part in str(evidence.get("match_roles") or "").split(";") if part.strip()}
+        try:
+            rank = int(evidence.get("phase_rank") or 0)
+        except (TypeError, ValueError):
+            rank = 0
+        if "lead" in roles:
+            floor = {3: 10.0, 2: 8.0, 1: 5.0, 4: 3.0}.get(rank, 3.0)
+        elif "program" in roles:
+            floor = {3: 9.0, 2: 7.0, 1: 5.0, 4: 3.0}.get(rank, 3.0)
+        elif "collaborator" in roles:
+            floor = {3: 2.0, 2: 1.0, 1: 0.5, 4: 0.5}.get(rank, 0.5)
+        else:
+            floor = 3.0
+        try:
+            current_score = float(evidence.get("trial_score") or 0.0)
+        except (TypeError, ValueError):
+            current_score = 0.0
+        evidence["trial_score"] = round(max(current_score, floor), 4)
+    elif status.lower() in NON_ACTIVE_MILESTONE_OUTCOME_STATUSES:
+        evidence["is_therapeutic"] = True
+        evidence["qualifying_trial"] = True
+        reasons = split_codes(evidence.get("exclusion_reasons"))
+        suffix = f"outcome_override:{status}" if status else "outcome_override"
+        if suffix not in reasons:
+            reasons.append(suffix)
+        evidence["exclusion_reasons"] = ";".join(reasons)
+        roles = {part.strip().lower() for part in str(evidence.get("match_roles") or "").split(";") if part.strip()}
+        try:
+            rank = int(evidence.get("phase_rank") or 0)
+        except (TypeError, ValueError):
+            rank = 0
+        if "lead" in roles:
+            floor = {3: 4.0, 2: 3.0, 1: 1.5, 4: 1.0}.get(rank, 1.0)
+        elif "program" in roles:
+            floor = {3: 3.0, 2: 2.0, 1: 1.0, 4: 0.5}.get(rank, 0.5)
+        else:
+            floor = 0.5
+        try:
+            current_score = float(evidence.get("trial_score") or 0.0)
+        except (TypeError, ValueError):
+            current_score = 0.0
+        evidence["trial_score"] = round(max(current_score, floor), 4)
     return evidence
 
 
@@ -977,7 +1044,46 @@ def build_manual_verification_rows(
     return verification_rows
 
 
-def apply_manual_decisions(rows: list[dict[str, Any]], manual_decisions: dict[str, dict[str, str]]) -> None:
+def apply_manual_primary_trial(
+    row: dict[str, Any],
+    *,
+    manual: dict[str, str],
+    evidence_by_key: dict[tuple[str, str], dict[str, Any]],
+) -> None:
+    """Promote a manually verified active NCT into the primary trial fields.
+
+    Manual keep decisions are not just universe decisions.  When the reviewer
+    identifies the material active trial, downstream feature building should use
+    that trial for catalyst clocks instead of the audit's default highest-score
+    historical row.
+    """
+    manual_status = str(manual.get("manual_verified_status") or "").strip().lower()
+    if not as_bool(manual.get("manual_verified_active_study")) and manual_status not in MANUAL_PRIMARY_TRIAL_STATUSES:
+        return
+    ticker = str(row.get("ticker") or "").strip().upper().replace(".", "-")
+    nct_id = str(manual.get("manual_verified_nct") or "").strip().upper()
+    if not ticker or not nct_id:
+        return
+    evidence = evidence_by_key.get((ticker, nct_id))
+    if not evidence:
+        row["manual_primary_nct_missing_from_evidence"] = True
+        return
+
+    row["primary_nct"] = evidence.get("nct_id", nct_id)
+    row["primary_trial_title"] = evidence.get("brief_title", "")
+    row["primary_trial_score"] = evidence.get("trial_score", "")
+    row["days_since_last_update"] = evidence.get("days_since_last_update", "")
+    row["is_pivotal"] = as_bool(evidence.get("is_pivotal"))
+    row["manual_primary_nct_override_applied"] = True
+
+
+def apply_manual_decisions(
+    rows: list[dict[str, Any]],
+    manual_decisions: dict[str, dict[str, str]],
+    *,
+    evidence_by_key: dict[tuple[str, str], dict[str, Any]] | None = None,
+) -> None:
+    evidence_by_key = evidence_by_key or {}
     for row in rows:
         ticker = str(row.get("ticker") or "").strip().upper().replace(".", "-")
         manual = manual_decisions.get(ticker, {})
@@ -1014,6 +1120,9 @@ def apply_manual_decisions(rows: list[dict[str, Any]], manual_decisions: dict[st
         row["manual_notes"] = manual.get("manual_notes", "")
         row["manual_reviewer"] = manual.get("manual_reviewer", "")
         row["manual_verified_date"] = manual.get("manual_verified_date", "")
+        row["manual_primary_nct_override_applied"] = False
+        row["manual_primary_nct_missing_from_evidence"] = False
+        apply_manual_primary_trial(row, manual=manual, evidence_by_key=evidence_by_key)
         row["root_cause_category"] = root_cause_category
         row["final_status"] = final_status
         row["final_status_reason"] = final_reason
@@ -1210,6 +1319,8 @@ def main() -> None:
         "manual_verdict",
         "manual_override_applied",
         "manual_verified_nct",
+        "manual_primary_nct_override_applied",
+        "manual_primary_nct_missing_from_evidence",
         "manual_verified_status",
         "manual_verified_phase",
         "manual_verified_study_type",
@@ -1289,7 +1400,15 @@ def main() -> None:
         for manual in manual_decisions.values()
         if str(manual.get("manual_verdict") or "").strip().lower() in MANUAL_VERDICTS
     )
-    apply_manual_decisions(audit_rows, manual_decisions)
+    evidence_by_key = {
+        (
+            str(row.get("ticker") or "").strip().upper().replace(".", "-"),
+            str(row.get("nct_id") or "").strip().upper(),
+        ): row
+        for row in evidence_rows
+        if str(row.get("ticker") or "").strip() and str(row.get("nct_id") or "").strip()
+    }
+    apply_manual_decisions(audit_rows, manual_decisions, evidence_by_key=evidence_by_key)
     manual_verification_rows = build_manual_verification_rows(audit_rows, manual_decisions)
     final_scoring_rows = [row for row in audit_rows if bool(row.get("scoring_include"))]
     clean_rows = [row for row in audit_rows if str(row.get("final_status") or "").lower() == "keep"]

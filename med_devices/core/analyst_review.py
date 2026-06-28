@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -125,6 +126,18 @@ def normalize_key(raw: object) -> str:
     return str(raw or "").strip().lower()
 
 
+def parse_allowed_decisions(raw: object) -> set[str]:
+    if raw is None:
+        return set(ALLOWED_ANALYST_DECISIONS)
+    if isinstance(raw, str):
+        values = {normalize_key(item) for item in raw.split(",") if normalize_key(item)}
+    elif isinstance(raw, Iterable):
+        values = {normalize_key(item) for item in raw if normalize_key(item)}
+    else:
+        values = set()
+    return values or set(ALLOWED_ANALYST_DECISIONS)
+
+
 def utc_today() -> date:
     return datetime.now(timezone.utc).date()
 
@@ -195,10 +208,28 @@ def load_analyst_review_decisions(
     path: Path,
     *,
     create_if_missing: bool = False,
+    allowed_decisions: set[str] | None = None,
 ) -> tuple[list[AnalystReviewDecision], list[dict[str, str]]]:
     fieldnames, rows = read_decision_payload(path, create_if_missing=create_if_missing)
+    allowed = set(allowed_decisions or ALLOWED_ANALYST_DECISIONS)
     decisions: list[AnalystReviewDecision] = []
     issues: list[dict[str, str]] = []
+    unsupported_allowed = sorted(allowed.difference(ALLOWED_ANALYST_DECISIONS))
+    if unsupported_allowed:
+        issues.append(
+            {
+                "severity": "CRITICAL",
+                "issue_type": "invalid_allowed_decisions_config",
+                "row_number": "0",
+                "ticker": "",
+                "decision": "",
+                "details": (
+                    "Configured analyst-review decisions are not supported by the current workflow: "
+                    + ",".join(unsupported_allowed)
+                ),
+            }
+        )
+    effective_allowed = allowed.intersection(ALLOWED_ANALYST_DECISIONS)
     missing_columns = [column for column in DECISION_FIELDNAMES if column not in fieldnames]
     if missing_columns:
         issues.append(
@@ -216,6 +247,17 @@ def load_analyst_review_decisions(
         decision = normalize_key(row.get("decision"))
         active = parse_bool(row.get("active"), False)
         allow_override = parse_bool(row.get("allow_portfolio_candidate_override"), False)
+        if active and not decision:
+            issues.append(
+                {
+                    "severity": "CRITICAL",
+                    "issue_type": "missing_decision",
+                    "row_number": str(row_number),
+                    "ticker": ticker,
+                    "decision": "",
+                    "details": "Active analyst-review rows must include a decision.",
+                }
+            )
         if not ticker:
             issues.append(
                 {
@@ -227,7 +269,7 @@ def load_analyst_review_decisions(
                     "details": "Decision rows must include a ticker.",
                 }
             )
-        if decision and decision not in ALLOWED_ANALYST_DECISIONS:
+        if decision and decision not in effective_allowed:
             issues.append(
                 {
                     "severity": "CRITICAL",
@@ -235,7 +277,7 @@ def load_analyst_review_decisions(
                     "row_number": str(row_number),
                     "ticker": ticker,
                     "decision": decision,
-                    "details": f"Allowed decisions: {','.join(sorted(ALLOWED_ANALYST_DECISIONS))}",
+                    "details": f"Allowed decisions: {','.join(sorted(effective_allowed))}",
                 }
             )
         if active and decision in {DECISION_APPROVE, DECISION_REJECT, DECISION_DATA_FIX_NEEDED}:
@@ -547,6 +589,10 @@ def float_or_zero(value: Any) -> float:
         return 0.0
 
 
+def is_blank(value: Any) -> bool:
+    return value is None or str(value).strip() == ""
+
+
 def review_categories_for_item(
     item: Any,
     *,
@@ -555,7 +601,10 @@ def review_categories_for_item(
 ) -> list[str]:
     categories: list[str] = []
     classification = str(value_from(item, "classification", "") or "").strip()
-    score = float_or_zero(value_from(item, "portfolio_candidate_score", value_from(item, "composite_score", 0.0)))
+    score_value = value_from(item, "portfolio_candidate_score")
+    if is_blank(score_value):
+        score_value = value_from(item, "composite_score", 0.0)
+    score = float_or_zero(score_value)
     if classification in MANUAL_REVIEW_CLASSES:
         categories.append(classification)
     if classification == "special_situation_or_binary_risk_watchlist":

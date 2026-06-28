@@ -8,6 +8,7 @@ import itertools
 import math
 import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from statistics import mean, median
 from typing import Any
@@ -165,6 +166,53 @@ def parse_int_list(raw: object, default: str) -> list[int]:
     return sorted(dict.fromkeys(values))
 
 
+def parse_date(raw: object) -> datetime | None:
+    text = str(raw or "").strip()[:10]
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def is_auto_date(raw: object) -> bool:
+    return str(raw or "").strip().lower() in {"", "auto", "latest", "latest_market_date", "auto_latest_complete"}
+
+
+def available_asof_dates(rows: list[dict[str, str]]) -> list[str]:
+    dates = {
+        str(row.get("asof_date") or "").strip()[:10]
+        for row in rows
+        if parse_date(row.get("asof_date")) is not None
+    }
+    return sorted(dates)
+
+
+def resolve_validation_window(config: dict[str, Any], rows: list[dict[str, str]], *, prefix: str) -> tuple[str, str]:
+    dates = available_asof_dates(rows)
+    if not dates:
+        raise ValueError("Cannot resolve safe-core validation window: input rows have no valid asof_date values.")
+    validation_start_raw = cfg_get(config, f"{prefix}.validation_start_asof", cfg_get(config, "calibration.validation_start_asof", "auto"))
+    validation_end_raw = cfg_get(config, f"{prefix}.validation_end_asof", cfg_get(config, "calibration.validation_end_asof", "auto"))
+    validation_window_asofs = max(1, int(cfg_get(config, f"{prefix}.validation_window_asofs", cfg_get(config, "calibration.validation_window_asofs", 26))))
+
+    validation_end = dates[-1] if is_auto_date(validation_end_raw) else str(validation_end_raw).strip()[:10]
+    eligible_dates = [item for item in dates if item <= validation_end]
+    if not eligible_dates:
+        raise ValueError(f"No safe-core calibration rows on or before validation_end_asof={validation_end}")
+    validation_start = (
+        eligible_dates[max(0, len(eligible_dates) - validation_window_asofs)]
+        if is_auto_date(validation_start_raw)
+        else str(validation_start_raw).strip()[:10]
+    )
+    if parse_date(validation_start) is None or parse_date(validation_end) is None:
+        raise ValueError(f"Invalid safe-core validation window: {validation_start}..{validation_end}")
+    if validation_start > validation_end:
+        raise ValueError(f"Invalid safe-core validation window ordering: {validation_start} > {validation_end}")
+    return validation_start, validation_end
+
+
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         return [dict(row) for row in csv.DictReader(handle)]
@@ -320,12 +368,14 @@ def validation_rows(
 
 
 def objective_score(metric: dict[str, Any], baseline_metric: dict[str, Any]) -> float:
+    worst_loss_penalty = min(0.0, float(metric["worst_loss"])) * 100.0 * 0.10
     return (
         float(metric["lcb"]) * 100.0 * 0.40
         + float(metric["median"]) * 100.0 * 0.25
         + float(metric["mean"]) * 100.0 * 0.15
         + (float(metric["hit_rate"]) - 0.50) * 20.0 * 0.10
         + (float(metric["lcb"]) - float(baseline_metric["lcb"])) * 100.0 * 0.10
+        + worst_loss_penalty
     )
 
 
@@ -620,18 +670,18 @@ def main() -> None:
     )
     if not horizons:
         horizons = available_horizons(rows)
-    validation_start = str(
-        cfg_get(config, f"{prefix}.validation_start_asof", cfg_get(config, "calibration.validation_start_asof", ""))
-        or ""
-    )[:10]
-    validation_end = str(
-        cfg_get(config, f"{prefix}.validation_end_asof", cfg_get(config, "calibration.validation_end_asof", ""))
-        or ""
-    )[:10]
-    if not validation_start or not validation_end:
-        raise ValueError("validation_start_asof and validation_end_asof are required")
+    if not horizons:
+        raise RuntimeError(f"No cohort_excess_return_<horizon>d columns found in {input_csv}")
+    validation_start, validation_end = resolve_validation_window(config, rows, prefix=prefix)
     value_trap_hard_max = float(cfg_get(config, "scoring.gates.value_trap_hard_max", 85.0))
     params_grid = grid_params(config)
+    max_grid_size = int(cfg_get(config, f"{prefix}.max_grid_size", 10000))
+    if max_grid_size > 0 and len(params_grid) > max_grid_size:
+        raise RuntimeError(
+            f"Safe-core threshold grid has {len(params_grid)} parameter sets, above max_grid_size={max_grid_size}. "
+            "Narrow candidate lists or raise calibration.safe_core_threshold_sensitivity.max_grid_size explicitly."
+        )
+    print(f"safe_core_threshold_grid_size={len(params_grid)}")
     min_validation_obs = int(cfg_get(config, f"{prefix}.min_validation_obs", 20))
     min_unique_tickers = int(cfg_get(config, f"{prefix}.min_unique_tickers", 3))
     min_lcb_excess = float(cfg_get(config, f"{prefix}.min_lcb_excess", 0.0))
@@ -669,7 +719,14 @@ def main() -> None:
                         require_lcb_delta_nonnegative=require_lcb_delta_nonnegative,
                     )
                 )
-    recs = recommendations(result_rows, cohorts=cohorts, horizon=max(horizons))
+    recommendation_horizon = int(
+        cfg_get(config, f"{prefix}.recommendation_horizon", cfg_get(config, "calibration.recommendation_horizon", max(horizons)))
+    )
+    if recommendation_horizon not in horizons:
+        raise ValueError(
+            f"safe-core recommendation_horizon={recommendation_horizon} is not in configured horizons={horizons}"
+        )
+    recs = recommendations(result_rows, cohorts=cohorts, horizon=recommendation_horizon)
     near_misses = current_near_misses(
         current_rows,
         min_score=float(cfg_get(config, f"{prefix}.current_near_miss_min_safe_core_score", 60.0)),
@@ -685,4 +742,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

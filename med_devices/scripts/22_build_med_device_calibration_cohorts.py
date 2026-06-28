@@ -24,6 +24,7 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 LOGGER = logging.getLogger("build_med_device_calibration_cohorts")
 FIELDNAMES = [
     "company_id",
+    "model_family",
     "ticker",
     "company_name",
     "primary_subsector_raw",
@@ -242,7 +243,6 @@ TICKER_HEURISTIC_UNIVERSE_TICKERS = (
 
 def is_implantable_interventional_cohort(cohort: str) -> bool:
     return cohort in {
-        "implantable_interventional_devices",
         IMPLANTABLE_DIRECT_PAYMENT_COHORT,
         IMPLANTABLE_PROCEDURE_BUNDLED_COHORT,
     }
@@ -261,6 +261,7 @@ def create_taxonomy_table(conn: Any) -> None:
         """
         CREATE TABLE IF NOT EXISTS dim_company_model_taxonomy (
             company_id INTEGER PRIMARY KEY,
+            model_family TEXT NOT NULL DEFAULT 'med_devices',
             ticker TEXT NOT NULL,
             company_name TEXT,
             primary_subsector_raw TEXT,
@@ -283,6 +284,15 @@ def create_taxonomy_table(conn: Any) -> None:
         """
     )
     existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(dim_company_model_taxonomy)").fetchall()}
+    if "model_family" not in existing:
+        conn.execute("ALTER TABLE dim_company_model_taxonomy ADD COLUMN model_family TEXT DEFAULT 'med_devices'")
+    conn.execute(
+        """
+        UPDATE dim_company_model_taxonomy
+        SET model_family = 'med_devices'
+        WHERE model_family IS NULL OR TRIM(model_family) = ''
+        """
+    )
     if "company_name" not in existing:
         conn.execute("ALTER TABLE dim_company_model_taxonomy ADD COLUMN company_name TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_company_model_taxonomy_cohort ON dim_company_model_taxonomy(calibration_cohort)")
@@ -363,7 +373,7 @@ def classify_cohort(ticker: str, raw_subsector: str) -> tuple[str, float, str]:
     if ticker in HOSPITAL_SUPPLIES_CONSUMABLES_DME:
         return HOSPITAL_SUPPLIES_SURGICAL_CONSUMABLES_OEM, 0.86, "ticker_heuristic"
     if ticker in IMPLANTABLE_INTERVENTIONAL:
-        return "implantable_interventional_devices", 0.86, "ticker_heuristic"
+        return IMPLANTABLE_DIRECT_PAYMENT_COHORT, 0.86, "ticker_heuristic"
 
     text = raw_subsector.lower()
     if "diagnostic" in text:
@@ -372,7 +382,7 @@ def classify_cohort(ticker: str, raw_subsector: str) -> tuple[str, float, str]:
         return HEALTHCARE_SERVICES_CRO_LAB_SERVICES, 0.65, "subsector_fallback"
     if "instrument" in text or "supplies" in text:
         return HOSPITAL_SUPPLIES_SURGICAL_CONSUMABLES_OEM, 0.65, "subsector_fallback"
-    return "implantable_interventional_devices", 0.55, "default_med_device"
+    return EMERGING_SINGLE_PRODUCT_THERAPEUTIC_PLATFORMS, 0.55, "default_med_device"
 
 
 def reimbursement_model(row: dict[str, Any] | None, cohort: str) -> str:
@@ -394,21 +404,18 @@ def reimbursement_model(row: dict[str, Any] | None, cohort: str) -> str:
     return "unknown"
 
 
-def refine_calibration_cohort(
-    base_cohort: str,
-    reimb_model: str,
-    confidence: float,
-    source: str,
-) -> tuple[str, float, str]:
-    if base_cohort != "implantable_interventional_devices":
-        return base_cohort, confidence, source
-    if reimb_model == "direct_payment":
-        return IMPLANTABLE_DIRECT_PAYMENT_COHORT, max(confidence, 0.88), f"{source}+reimbursement_model_split"
-    if reimb_model == "procedure_bundled":
-        return IMPLANTABLE_PROCEDURE_BUNDLED_COHORT, max(confidence, 0.86), f"{source}+reimbursement_model_split"
-    if reimb_model == "diagnostics_lab":
-        return "diagnostics_clinical_tests", max(confidence, 0.82), f"{source}+diagnostics_reclass"
-    return IMPLANTABLE_MIXED_OTHER_COHORT, confidence, f"{source}+reimbursement_model_split"
+def validate_final_rows(rows: list[dict[str, Any]]) -> None:
+    invalid = [
+        f"{row.get('ticker')}->{row.get('calibration_cohort')}"
+        for row in rows
+        if str(row.get("calibration_cohort") or "") not in VALID_CALIBRATION_COHORTS
+    ]
+    if invalid:
+        examples = ", ".join(invalid[:25])
+        raise ValueError(
+            "Invalid calibration cohorts produced before persistence. "
+            f"Examples: {examples}; expected one of {sorted(VALID_CALIBRATION_COHORTS)}"
+        )
 
 
 def regulatory_model(row: dict[str, Any] | None, ticker: str, cohort: str) -> str:
@@ -429,7 +436,6 @@ def regulatory_model(row: dict[str, Any] | None, ticker: str, cohort: str) -> st
 
 def business_model(cohort: str) -> str:
     return {
-        "implantable_interventional_devices": "procedure_volume_sensitive",
         IMPLANTABLE_DIRECT_PAYMENT_COHORT: "procedure_volume_sensitive_direct_payment",
         IMPLANTABLE_PROCEDURE_BUNDLED_COHORT: "procedure_volume_sensitive_bundled",
         EMERGING_SINGLE_PRODUCT_THERAPEUTIC_PLATFORMS: "single_product_binary_therapeutic_platform",
@@ -478,12 +484,12 @@ def build_rows(conn: Any, *, taxonomy_overrides: dict[str, dict[str, str]]) -> l
             analyst_reviewed = 1
             reimb_model = reimbursement_model(reimbursement.get(int(company["company_id"])), cohort)
         else:
-            base_cohort, confidence, source = classify_cohort(ticker, raw_subsector)
-            reimb_model = reimbursement_model(reimbursement.get(int(company["company_id"])), base_cohort)
-            cohort, confidence, source = refine_calibration_cohort(base_cohort, reimb_model, confidence, source)
+            cohort, confidence, source = classify_cohort(ticker, raw_subsector)
+            reimb_model = reimbursement_model(reimbursement.get(int(company["company_id"])), cohort)
             analyst_reviewed = 0
         row = {
             "company_id": int(company["company_id"]),
+            "model_family": "med_devices",
             "ticker": ticker,
             "company_name": company["company_name"] or "",
             "primary_subsector_raw": raw_subsector,
@@ -605,6 +611,7 @@ def main() -> None:
         init_db(conn)
         create_taxonomy_table(conn)
         rows = build_rows(conn, taxonomy_overrides=taxonomy_overrides)
+        validate_final_rows(rows)
         missing_override_tickers = warn_on_unmatched_taxonomy_overrides(rows, taxonomy_overrides)
         fallback_rows = warn_on_unmapped_ticker_heuristics(rows)
         upsert_rows(conn, rows)
@@ -620,4 +627,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

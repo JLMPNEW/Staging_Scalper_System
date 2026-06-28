@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,27 @@ def read_csv(path: Path) -> list[dict[str, str]]:
         return [dict(row) for row in csv.DictReader(handle)]
 
 
+def validate_grid_contract(rows: list[dict[str, str]], *, path: Path) -> None:
+    if not rows:
+        raise RuntimeError(f"Calibration recommendation grid is empty: {path}")
+    required = {
+        "calibration_cohort",
+        "parameter_set_id",
+        "pass_fail",
+        "objective_score",
+        "validation_count_120d",
+        "validation_unique_tickers_120d",
+        "validation_cohort_unique_tickers_120d",
+        "validation_lcb_120d",
+    }
+    missing = sorted(required.difference(rows[0]))
+    if missing:
+        raise RuntimeError(
+            f"Calibration grid CSV {path} is missing required script-25 output columns: {','.join(missing)}. "
+            "Regenerate the gate grid before publishing recommendations."
+        )
+
+
 def parse_csv_set(raw: object) -> set[str]:
     return {item.strip() for item in str(raw or "").split(",") if item.strip()}
 
@@ -103,7 +125,7 @@ def best_components(ic_rows: list[dict[str, str]], cohort: str) -> tuple[str, st
         if str(row.get("calibration_cohort") or "") != cohort or str(row.get("horizon_days") or "") != "120":
             continue
         component = str(row.get("component") or "")
-        rec = str(row.get("recommendation") or "")
+        rec = str(row.get("production_recommendation") or "")
         if rec == "positive_candidate_factor":
             positive.append(component)
         elif rec in {"negative_or_inverse_factor", "weak_or_unstable_factor"}:
@@ -266,9 +288,9 @@ def write_yaml_fragment(path: Path, recommendations: list[dict[str, Any]]) -> No
                 f"      selected_row_type: {row['selected_row_type']}",
                 f"      production_candidate: {str(bool(row['production_candidate'])).lower()}",
                 f"      parameter_set_id: {row['parameter_set_id']}",
-                f"      note: {row['notes']}",
+                f"      note: {json.dumps(str(row['notes']), ensure_ascii=True)}",
                 "      gates:",
-                f"        raw_composite_min: {row['raw_score_min']}",
+                f"        composite_min: {row['raw_score_min']}",
                 f"        cohort_percentile_min: {row['cohort_percentile_min']}",
                 f"        fundamental_quality_min: {row['fundamental_quality_min']}",
                 f"        fda_product_min: {row['fda_product_min']}",
@@ -307,7 +329,9 @@ def main() -> None:
         if args.output_yaml
         else resolve_path(cfg_get(config, "calibration.recommended_config_yaml"), base_dir=base_dir)
     )
-    recommendations = choose_recommendations(read_csv(grid_csv), read_csv(ic_csv), config)
+    grid_rows = read_csv(grid_csv)
+    validate_grid_contract(grid_rows, path=grid_csv)
+    recommendations = choose_recommendations(grid_rows, read_csv(ic_csv), config)
     write_csv(output_csv, recommendations)
     write_yaml_fragment(output_yaml, recommendations)
     print(f"recommendations_csv={output_csv} rows={len(recommendations)}")
@@ -315,4 +339,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

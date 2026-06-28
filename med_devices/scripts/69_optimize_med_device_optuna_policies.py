@@ -42,6 +42,10 @@ DEFAULT_EXCLUDED_COMPONENTS = {
     "liquidity_score",
     "durable_growth_score",
     "durable_growth_score_legacy",
+    "fda_event_risk_score",
+    "fda_event_risk_breadth_adjusted_score",
+    "borrow_squeeze_risk_score",
+    "borrow_pressure_score",
 }
 TEXT_FIELDS = {
     "asof_date",
@@ -239,6 +243,15 @@ def to_float(raw: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) else None
+
+
+def finite_float_values(values: list[object]) -> list[float]:
+    out: list[float] = []
+    for raw in values:
+        value = to_float(raw)
+        if value is not None:
+            out.append(value)
+    return out
 
 
 def score_or(row: PanelRow, field: str, default: float = 50.0) -> float:
@@ -1042,26 +1055,26 @@ def sleeve_weight_map(candidate: TrialCandidate) -> dict[str, float]:
 
 
 def objective_value(result: dict[str, Any], settings: dict[str, Any]) -> float:
-    lcb_values = [
+    lcb_values = finite_float_values([
         result.get(f"mean_lcb_excess_{horizon}d")
         for horizon in settings["horizons"]
         if result.get(f"mean_lcb_excess_{horizon}d") is not None
-    ]
-    min_lcb_values = [
+    ])
+    min_lcb_values = finite_float_values([
         result.get(f"min_lcb_excess_{horizon}d")
         for horizon in settings["horizons"]
         if result.get(f"min_lcb_excess_{horizon}d") is not None
-    ]
-    median_values = [
+    ])
+    median_values = finite_float_values([
         result.get(f"mean_median_excess_{horizon}d")
         for horizon in settings["horizons"]
         if result.get(f"mean_median_excess_{horizon}d") is not None
-    ]
-    delta_values = [
+    ])
+    delta_values = finite_float_values([
         result.get(f"delta_lcb_vs_topdecile_{horizon}d")
         for horizon in settings["horizons"]
         if result.get(f"delta_lcb_vs_topdecile_{horizon}d") is not None
-    ]
+    ])
     avg_lcb = mean(lcb_values) if lcb_values else -0.25
     worst_lcb = min(min_lcb_values) if min_lcb_values else -0.25
     avg_median = mean(median_values) if median_values else -0.25
@@ -1331,12 +1344,13 @@ def sample_candidate(
     if max_components < 1:
         raise ValueError(f"No eligible components for cohort {cohort}")
     min_components = max(1, min(min_components, max_components))
-    requested = trial.suggest_int("component_count", min_components, max_components)
-    chosen_indexes: list[int] = []
-    for slot in range(requested):
-        idx = trial.suggest_int(f"component_idx_{slot}", 0, len(pool) - 1)
-        if idx not in chosen_indexes:
-            chosen_indexes.append(idx)
+    chosen_indexes = [
+        idx
+        for idx in range(len(pool))
+        if trial.suggest_categorical(f"include_component_{idx}", [False, True])
+    ]
+    if len(chosen_indexes) > max_components:
+        chosen_indexes = sorted(chosen_indexes, key=lambda idx: pool[idx].quality, reverse=True)[:max_components]
     for idx, _candidate in enumerate(pool):
         if len(chosen_indexes) >= min_components:
             break
@@ -1506,7 +1520,7 @@ def sample_candidate(
 
 
 def trial_row(trial: optuna.trial.FrozenTrial, result: dict[str, Any], candidate: TrialCandidate) -> dict[str, Any]:
-    row = {field: "" for field in TRIAL_FIELDS}
+    row: dict[str, Any] = {field: "" for field in TRIAL_FIELDS}
     row.update(
         {
             "calibration_cohort": result["calibration_cohort"],
@@ -1668,9 +1682,7 @@ def write_config_fragment(path: Path, recommendations: list[dict[str, Any]]) -> 
         with path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(payload, handle, sort_keys=False)
     except ImportError:
-        with path.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, indent=2, sort_keys=False))
-            handle.write("\n")
+        raise RuntimeError("PyYAML is required to write a .yaml Optuna config fragment.") from None
 
 
 def main() -> None:
@@ -1729,6 +1741,15 @@ def main() -> None:
         default="../output/med_devices_reports/calibration/med_device_optuna_policy_config_fragment.yaml",
         base_dir=base_dir,
     )
+    study_journal_path = resolve_path(
+        cfg_get(
+            config,
+            "calibration.optuna_policy_optimizer.study_journal_path",
+            str(output_csv.with_name(output_csv.stem + "_study_journal.log")),
+        ),
+        base_dir=base_dir,
+    )
+    study_journal_path.parent.mkdir(parents=True, exist_ok=True)
     horizons = parse_int_list(args.horizons) or parse_int_list(
         cfg_get(config, "calibration.optuna_policy_optimizer.horizons", "60,120")
     )
@@ -1740,7 +1761,7 @@ def main() -> None:
     timeout_sec = args.timeout_sec_per_cohort
     if timeout_sec is None:
         timeout_sec = cfg_int(config, "calibration.optuna_policy_optimizer.timeout_sec_per_cohort", 0)
-    seed = args.seed or cfg_int(config, "calibration.optuna_policy_optimizer.seed", 20260607)
+    seed = args.seed if args.seed is not None else cfg_int(config, "calibration.optuna_policy_optimizer.seed", 20260607)
 
     rows, feature_names = load_panel(input_csv)
     if not rows:
@@ -1847,8 +1868,19 @@ def main() -> None:
                 raise optuna.TrialPruned(prune_reason)
             return float(result["objective_value"])
 
-        sampler = optuna.samplers.TPESampler(seed=seed + len(all_trial_rows))
-        study = optuna.create_study(direction="maximize", sampler=sampler)
+        cohort_seed = seed + int(hashlib.sha1(cohort.encode("utf-8")).hexdigest()[:8], 16) % 100_000
+        sampler = optuna.samplers.TPESampler(seed=cohort_seed)
+        journal_file_backend_cls: Any = getattr(optuna.storages, "JournalFileBackend")
+        storage = optuna.storages.JournalStorage(
+            journal_file_backend_cls(str(study_journal_path))
+        )
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=sampler,
+            storage=storage,
+            study_name=f"med_device_{cohort}",
+            load_if_exists=True,
+        )
         study.optimize(objective, n_trials=n_trials, timeout=timeout_sec or None, show_progress_bar=False)
         cohort_trial_rows: list[dict[str, Any]] = []
         for trial in study.trials:
@@ -1856,8 +1888,8 @@ def main() -> None:
             candidate = trial.user_attrs.get("candidate")
             if not isinstance(result, dict) or not isinstance(candidate, TrialCandidate):
                 if trial.state.name == "PRUNED":
-                    row = {field: "" for field in TRIAL_FIELDS}
-                    row.update(
+                    pruned_row: dict[str, Any] = {field: "" for field in TRIAL_FIELDS}
+                    pruned_row.update(
                         {
                             "calibration_cohort": cohort,
                             "trial_number": trial.number,
@@ -1868,14 +1900,14 @@ def main() -> None:
                             "candidate_reason": trial.user_attrs.get("prune_reason", "pruned_before_candidate_evaluation"),
                         }
                     )
-                    all_trial_rows.append(row)
-                    cohort_trial_rows.append(row)
+                    all_trial_rows.append(pruned_row)
+                    cohort_trial_rows.append(pruned_row)
                 continue
-            row = trial_row(trial, result, candidate)
-            all_trial_rows.append(row)
-            cohort_trial_rows.append(row)
+            candidate_row = trial_row(trial, result, candidate)
+            all_trial_rows.append(candidate_row)
+            cohort_trial_rows.append(candidate_row)
             for detail in result.get("fold_diagnostics", []):
-                diagnostic = {field: "" for field in FOLD_DIAGNOSTIC_FIELDS}
+                diagnostic: dict[str, Any] = {field: "" for field in FOLD_DIAGNOSTIC_FIELDS}
                 diagnostic.update(
                     {
                         "calibration_cohort": cohort,
@@ -1925,4 +1957,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

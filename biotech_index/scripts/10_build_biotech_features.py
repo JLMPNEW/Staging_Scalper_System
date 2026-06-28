@@ -354,6 +354,18 @@ def as_bool(raw: object) -> bool:
     return str(raw or "").strip().lower() in {"1", "true", "yes", "y"}
 
 
+FORCE_ACTIVE_OUTCOME_STATUSES = {
+    "active_verified",
+    "active_program_owner",
+}
+NON_ACTIVE_MILESTONE_OUTCOME_STATUSES = {
+    "completed_recent_catalyst",
+    "regulatory_milestone",
+    "suspended_open_investigational_file",
+    "terminated_recent_catalyst",
+}
+
+
 def read_optional_csv(path: Path | None) -> pd.DataFrame:
     if path is None or not path.exists():
         return pd.DataFrame()
@@ -400,6 +412,76 @@ def apply_trial_status_overrides(evidence_df: pd.DataFrame, overrides_df: pd.Dat
             existing = out.loc[mask, "exclusion_reasons"].astype(str)
             suffix = f"outcome_override:{status}" if status else "outcome_override"
             out.loc[mask, "exclusion_reasons"] = existing.map(lambda value: ";".join(part for part in [value, suffix] if part))
+        elif status.lower() in FORCE_ACTIVE_OUTCOME_STATUSES:
+            out.loc[mask, "overall_status"] = "ACTIVE_NOT_RECRUITING"
+            out.loc[mask, "is_active_status"] = "True"
+            out.loc[mask, "is_therapeutic"] = "True"
+            out.loc[mask, "qualifying_trial"] = "True"
+            suffix = f"outcome_override:{status}" if status else "outcome_override"
+            existing = out.loc[mask, "exclusion_reasons"].astype(str)
+            out.loc[mask, "exclusion_reasons"] = existing.map(
+                lambda value: ";".join(
+                    part
+                    for part in [
+                        *[
+                            item
+                            for item in str(value or "").split(";")
+                            if item and item not in {"completed_stale", "active_stale"}
+                        ],
+                        suffix,
+                    ]
+                    if part
+                )
+            )
+
+            def score_floor(row: pd.Series) -> float:
+                roles = {part.strip().lower() for part in str(row.get("match_roles") or "").split(";") if part.strip()}
+                try:
+                    rank = int(float(row.get("phase_rank") or 0.0))
+                except (TypeError, ValueError):
+                    rank = 0
+                if "lead" in roles:
+                    return {3: 10.0, 2: 8.0, 1: 5.0, 4: 3.0}.get(rank, 3.0)
+                if "program" in roles:
+                    return {3: 9.0, 2: 7.0, 1: 5.0, 4: 3.0}.get(rank, 3.0)
+                if "collaborator" in roles:
+                    return {3: 2.0, 2: 1.0, 1: 0.5, 4: 0.5}.get(rank, 0.5)
+                return 3.0
+
+            for idx, row in out.loc[mask].iterrows():
+                current = pd.to_numeric(pd.Series([row.get("trial_score")]), errors="coerce").fillna(0.0).iloc[0]
+                out.at[idx, "trial_score"] = str(round(max(float(current), score_floor(row)), 4))
+        elif status.lower() in NON_ACTIVE_MILESTONE_OUTCOME_STATUSES:
+            out.loc[mask, "is_therapeutic"] = "True"
+            out.loc[mask, "qualifying_trial"] = "True"
+            suffix = f"outcome_override:{status}" if status else "outcome_override"
+            existing = out.loc[mask, "exclusion_reasons"].astype(str)
+            out.loc[mask, "exclusion_reasons"] = existing.map(
+                lambda value: ";".join(
+                    part
+                    for part in [
+                        *[item for item in str(value or "").split(";") if item],
+                        suffix,
+                    ]
+                    if part
+                )
+            )
+
+            def milestone_score_floor(row: pd.Series) -> float:
+                roles = {part.strip().lower() for part in str(row.get("match_roles") or "").split(";") if part.strip()}
+                try:
+                    rank = int(float(row.get("phase_rank") or 0.0))
+                except (TypeError, ValueError):
+                    rank = 0
+                if "lead" in roles:
+                    return {3: 4.0, 2: 3.0, 1: 1.5, 4: 1.0}.get(rank, 1.0)
+                if "program" in roles:
+                    return {3: 3.0, 2: 2.0, 1: 1.0, 4: 0.5}.get(rank, 0.5)
+                return 0.5
+
+            for idx, row in out.loc[mask].iterrows():
+                current = pd.to_numeric(pd.Series([row.get("trial_score")]), errors="coerce").fillna(0.0).iloc[0]
+                out.at[idx, "trial_score"] = str(round(max(float(current), milestone_score_floor(row)), 4))
     return out
 
 

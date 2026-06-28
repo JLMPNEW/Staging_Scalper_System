@@ -68,6 +68,7 @@ class QueryHitRow:
 class ProgramOwnerOverride:
     nct_id: str
     company_id: int
+    match_role: str
     confidence: float
     source_name: str
 
@@ -220,11 +221,23 @@ def load_program_owner_overrides(
                     LOGGER.warning("Ignoring program owner override for unknown ticker at %s:%d: %s", path, line_no, ticker)
                     continue
                 confidence = float(row.get("confidence") or 0.95)
+                match_role = str(row.get("match_role") or "program").strip().lower()
+                if match_role not in {"lead", "collaborator", "program"}:
+                    LOGGER.warning(
+                        "Ignoring invalid program owner/link match_role at %s:%d for %s/%s: %s",
+                        path,
+                        line_no,
+                        ticker,
+                        nct_id,
+                        match_role,
+                    )
+                    continue
                 source_name = str(row.get("source_name") or "manual_program_owner").strip() or "manual_program_owner"
                 overrides.append(
                     ProgramOwnerOverride(
                         nct_id=nct_id,
                         company_id=company.company_id,
+                        match_role=match_role,
                         confidence=confidence,
                         source_name=source_name,
                     )
@@ -389,7 +402,7 @@ def program_owner_links(
         candidate = LinkCandidate(
             nct_id=override.nct_id,
             company_id=override.company_id,
-            match_role="program",
+            match_role=override.match_role,
             match_method=f"program_owner_override:{override.source_name}"[:120],
             confidence=override.confidence,
         )

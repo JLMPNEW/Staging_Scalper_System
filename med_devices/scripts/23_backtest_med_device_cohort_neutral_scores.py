@@ -327,7 +327,7 @@ def add_taxonomy_and_scores(rows: list[dict[str, Any]], taxonomy: dict[str, dict
         for field in TAXONOMY_FIELDS:
             row[field] = tax.get(field, "")
         if not row.get("calibration_cohort"):
-            row["calibration_cohort"] = row.get("subsector") or "unknown"
+            row["calibration_cohort"] = "unknown"
         for field in SCORE_FIELDS:
             if field in score:
                 row[field] = score.get(field, "")
@@ -550,6 +550,8 @@ def main() -> None:
     )
     rows: list[dict[str, Any]] = read_csv(input_csv)
     horizons = return_horizons(rows)
+    if not horizons:
+        raise RuntimeError(f"No forward_return_<horizon>d columns found in {input_csv}")
     asofs = {str(row.get("asof_date") or "") for row in rows if str(row.get("asof_date") or "").strip()}
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
@@ -566,4 +568,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

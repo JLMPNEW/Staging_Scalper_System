@@ -176,7 +176,7 @@ def validate() -> int:
         )
         if filing_tickers != len(tickers):
             missing = conn.execute(
-                f"""
+                """
                 SELECT c.ticker
                 FROM dim_company c
                 JOIN dim_technology_taxonomy t
@@ -235,11 +235,12 @@ def validate() -> int:
             if ifrs_missing_features:
                 errors.append(f"Expected IFRS issuers missing financial features: {[row['ticker'] for row in ifrs_missing_features]}")
             cbrs_status = value(conn, "SELECT coverage_status FROM dim_issuer_reporting_profile WHERE ticker = 'CBRS'")
-            if cbrs_status != "SEC_NEW_ISSUER_INSUFFICIENT_FILINGS":
-                errors.append(f"CBRS expected SEC_NEW_ISSUER_INSUFFICIENT_FILINGS, found {cbrs_status!r}")
-            cbrs_eligible = value(conn, "SELECT calibration_fundamental_eligible FROM dim_issuer_reporting_profile WHERE ticker = 'CBRS'")
-            if int(cbrs_eligible or 0) != 0:
-                errors.append("CBRS should be excluded from fundamental calibration until regular financial statements exist.")
+            if cbrs_status == "SEC_NEW_ISSUER_INSUFFICIENT_FILINGS":
+                cbrs_eligible = value(conn, "SELECT calibration_fundamental_eligible FROM dim_issuer_reporting_profile WHERE ticker = 'CBRS'")
+                if int(cbrs_eligible or 0) != 0:
+                    errors.append("CBRS should be excluded from fundamental calibration until regular financial statements exist.")
+            elif cbrs_status not in {"SEC_OK_US_GAAP", "SEC_OK_IFRS_FULL"}:
+                errors.append(f"CBRS expected new-issuer or recovered SEC coverage status, found {cbrs_status!r}")
         lagged_profiles = scalar(
             conn,
             "SELECT COUNT(*) FROM dim_issuer_reporting_profile WHERE companyfacts_lag_flag = 1",

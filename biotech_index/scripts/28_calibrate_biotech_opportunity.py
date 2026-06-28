@@ -54,6 +54,7 @@ from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
 
 LOGGER = logging.getLogger("calibrate_biotech_opportunity")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+DEFAULT_DELISTED_CANDIDATES_CSV = PACKAGE_ROOT / "data" / "delisted_biotech_calibration_candidates.csv"
 SQLITE_PARAM_CHUNK_SIZE = 800
 ALLOWED_LATEST_TABLES = frozenset(
     {
@@ -231,6 +232,14 @@ BOOTSTRAP_METRIC_KEYS = [
 class Bar:
     day: date
     close: float
+
+
+@dataclass(frozen=True)
+class TerminalEvent:
+    terminal_date: date
+    equity_recovery: float
+    recovery_type: str
+    drop_otc_tape: bool
 
 
 @dataclass(frozen=True)
@@ -4202,12 +4211,50 @@ def load_bars(
     return out
 
 
+def load_terminal_events(path: Path = DEFAULT_DELISTED_CANDIDATES_CSV) -> dict[str, TerminalEvent]:
+    """Load explicit delisting-resolution recoveries for calibration returns.
+
+    These are not ordinary market bars.  They model legal resolution events such
+    as a common-equity wipeout on a bankruptcy plan effective date.  The return
+    calculation applies them in arithmetic space when a forward horizon crosses
+    the terminal date, avoiding log-return infinities and OTC penny-stub leakage.
+    """
+    if not path.exists():
+        return {}
+    events: dict[str, TerminalEvent] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            return {}
+        fields = {str(field or "").strip() for field in reader.fieldnames}
+        required = {"ticker", "terminal_date", "equity_recovery", "recovery_type", "drop_otc_tape"}
+        if not required.issubset(fields):
+            return {}
+        for row in reader:
+            ticker = normalize_ticker(row.get("ticker"))
+            terminal_date = parse_date(row.get("terminal_date"))
+            equity_recovery = to_float(row.get("equity_recovery"))
+            recovery_type = str(row.get("recovery_type") or "").strip().lower()
+            if not ticker or terminal_date is None or equity_recovery is None:
+                continue
+            if recovery_type not in {"wipeout", "settlement", "reorg_retained", "cash_cvr", "distressed_nonzero"}:
+                continue
+            events[ticker] = TerminalEvent(
+                terminal_date=terminal_date,
+                equity_recovery=max(0.0, float(equity_recovery)),
+                recovery_type=recovery_type,
+                drop_otc_tape=as_bool(row.get("drop_otc_tape"), False),
+            )
+    return events
+
+
 def forward_return(
     bars: list[Bar],
     asof: date,
     horizon: int,
     *,
     next_bar_entry: bool,
+    terminal_event: TerminalEvent | None = None,
 ) -> tuple[float | None, str, str]:
     if not bars:
         return None, "", ""
@@ -4216,9 +4263,18 @@ def forward_return(
     if entry_idx >= len(bars):
         return None, "", ""
     target_idx = entry_idx + horizon
-    if target_idx >= len(bars):
-        return None, bars[entry_idx].day.isoformat(), ""
     entry = bars[entry_idx]
+    if terminal_event is not None and entry.day <= terminal_event.terminal_date:
+        if target_idx >= len(bars) or bars[min(target_idx, len(bars) - 1)].day >= terminal_event.terminal_date:
+            if entry.close <= 0:
+                return None, entry.day.isoformat(), terminal_event.terminal_date.isoformat()
+            return (
+                (terminal_event.equity_recovery / entry.close) - 1.0,
+                entry.day.isoformat(),
+                terminal_event.terminal_date.isoformat(),
+            )
+    if target_idx >= len(bars):
+        return None, entry.day.isoformat(), ""
     target = bars[target_idx]
     if entry.close <= 0:
         return None, entry.day.isoformat(), target.day.isoformat()
@@ -4252,15 +4308,18 @@ def add_forward_returns(
     next_bar_entry: bool,
     benchmark_ticker: str = "",
     benchmark_bars: list[Bar] | None = None,
+    terminal_events_by_ticker: dict[str, TerminalEvent] | None = None,
 ) -> None:
     cost = float(round_trip_cost_bps) / 10_000.0
     missing_return_counts: defaultdict[tuple[int, str], int] = defaultdict(int)
     clean_benchmark_ticker = normalize_ticker(benchmark_ticker)
     benchmark_bars = benchmark_bars or []
+    terminal_events_by_ticker = terminal_events_by_ticker or {}
     for row in rows:
         ticker = normalize_ticker(row.get("ticker"))
         asof = parse_date(row.get("asof_date"))
         bars = bars_by_ticker.get(ticker, [])
+        terminal_event = terminal_events_by_ticker.get(ticker)
         for horizon in horizons:
             prefix = f"fwd_{horizon}d"
             if asof is None:
@@ -4278,6 +4337,7 @@ def add_forward_returns(
                 asof,
                 horizon,
                 next_bar_entry=next_bar_entry,
+                terminal_event=terminal_event,
             )
             row[f"{prefix}_return"] = ret if ret is not None else ""
             row[f"{prefix}_net_return"] = ret - cost if ret is not None else ""
@@ -7434,6 +7494,7 @@ def main() -> None:
         )
         observation_cache_path = progress_csv_path(output_dir, "tier1_observations_with_forward_returns.csv")
         observation_cache_manifest_path = progress_csv_path(output_dir, "tier1_observations_with_forward_returns_manifest.json")
+        terminal_events_by_ticker = load_terminal_events()
         observation_cache_signature = {
             "start_asof": start_asof.isoformat() if start_asof else "",
             "end_asof": end_asof.isoformat() if end_asof else "",
@@ -7450,6 +7511,15 @@ def main() -> None:
             "benchmark_ticker": params.benchmark_ticker,
             "excluded_tickers": sorted(excluded_tickers),
             "min_addv20": min_addv20,
+            "terminal_events": {
+                ticker: {
+                    "terminal_date": event.terminal_date.isoformat(),
+                    "equity_recovery": event.equity_recovery,
+                    "recovery_type": event.recovery_type,
+                    "drop_otc_tape": event.drop_otc_tape,
+                }
+                for ticker, event in sorted(terminal_events_by_ticker.items())
+            },
         }
         observations_loaded_from_cache = False
         if args.resume and observation_cache_path.exists() and cache_signature_matches(
@@ -7498,6 +7568,7 @@ def main() -> None:
                 next_bar_entry=next_bar_entry,
                 benchmark_ticker=params.benchmark_ticker if params.alpha_adjustment_enabled else "",
                 benchmark_bars=bars_by_ticker.get(params.benchmark_ticker, []) if params.alpha_adjustment_enabled else [],
+                terminal_events_by_ticker=terminal_events_by_ticker,
             )
             write_csv(observation_cache_path, observations)
             write_json(

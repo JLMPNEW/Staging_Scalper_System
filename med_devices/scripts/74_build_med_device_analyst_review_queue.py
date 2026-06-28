@@ -79,8 +79,13 @@ def review_categories(row: dict[str, Any], *, high_score_threshold: float, inclu
 
 
 def priority_for(row: dict[str, Any], categories: list[str], *, priority_score_threshold: float) -> str:
-    score = float_or_zero(row.get("portfolio_candidate_score") or row.get("composite_score"))
-    if "hard_red_flag" in categories or str(row.get("classification") or "") == "avoid_confirmed_regulatory_risk":
+    portfolio_candidate_score = row.get("portfolio_candidate_score")
+    score = float_or_zero(
+        portfolio_candidate_score
+        if portfolio_candidate_score is not None and str(portfolio_candidate_score).strip() != ""
+        else row.get("composite_score")
+    )
+    if "hard_red_flag" in categories or "avoid_confirmed_regulatory_risk" in categories:
         return "P1"
     if "manual_review_regulatory_risk" in categories:
         return "P1"
@@ -151,7 +156,13 @@ def main() -> int:
         base_dir=base_dir,
     )
     analyst_review_core.ensure_decision_file(decision_path)
-    analyst_decisions, decision_issues = analyst_review_core.load_analyst_review_decisions(decision_path)
+    allowed_decisions = analyst_review_core.parse_allowed_decisions(
+        cfg_get(config, f"{CONFIG_KEY}.allowed_decisions", None)
+    )
+    analyst_decisions, decision_issues = analyst_review_core.load_analyst_review_decisions(
+        decision_path,
+        allowed_decisions=allowed_decisions,
+    )
     critical_decision_issues = [
         issue for issue in decision_issues if str(issue.get("severity") or "").upper() == "CRITICAL"
     ]
@@ -244,6 +255,7 @@ def main() -> int:
                 "ticker": row.get("ticker", ""),
                 "company_name": row.get("company_name", ""),
                 "calibration_cohort": row.get("calibration_cohort", ""),
+                "calibration_eligible_flag": row.get("calibration_eligible_flag", ""),
                 "rank": row.get("rank", ""),
                 "portfolio_candidate_gate": row.get("portfolio_candidate_gate", ""),
                 "portfolio_candidate_score": row.get("portfolio_candidate_score", ""),
@@ -291,6 +303,7 @@ def main() -> int:
         "ticker",
         "company_name",
         "calibration_cohort",
+        "calibration_eligible_flag",
         "rank",
         "portfolio_candidate_gate",
         "portfolio_candidate_score",

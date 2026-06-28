@@ -248,6 +248,11 @@ def parse_validate_args(settings: ScoringFeatureSettings) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=settings.default_config)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--asof", default="", help="Validation as-of date. Defaults to latest scoring feature date.")
+    parser.add_argument(
+        "--historical-mode",
+        action="store_true",
+        help="Validate a historical PIT report snapshot; review-only active tickers are warnings instead of production-blocking errors.",
+    )
     return parser.parse_args()
 
 
@@ -261,7 +266,7 @@ def parse_date(raw: object) -> date | None:
         return None
 
 
-def safe_float(raw: object) -> float | None:
+def safe_float(raw: Any) -> float | None:
     try:
         value = float(raw)
     except (TypeError, ValueError):
@@ -1336,7 +1341,11 @@ def validate_scoring_feature_contract(settings: ScoringFeatureSettings) -> int:
             if int(row["rank_ready_flag"] or 0) != 1 and normalize_ticker(row["ticker"]) not in rank_ready_exempt
         ]
         if not_ready:
-            errors.append(f"Non-exempt tickers are not rank ready: {not_ready}")
+            message = f"Non-exempt tickers are not rank ready: {not_ready}"
+            if args.historical_mode:
+                warnings.append(message)
+            else:
+                errors.append(message)
         active_exemptions = sorted(
             normalize_ticker(row["ticker"])
             for row in feature_rows
@@ -1397,10 +1406,14 @@ def validate_scoring_feature_contract(settings: ScoringFeatureSettings) -> int:
             dead = sum(1 for row in comp_rows if float(row["component_quality"] or 0.0) <= 0)
             dead_pct = dead / len(comp_rows)
             if dead_pct > max_dead_pct:
-                errors.append(
+                message = (
                     f"Core component '{component_name}' has zero quality for {dead}/{len(comp_rows)} tickers "
                     f"({dead_pct:.0%} > {max_dead_pct:.0%}); upstream feature layer is likely broken."
                 )
+                if args.historical_mode:
+                    warnings.append(message)
+                else:
+                    errors.append(message)
             elif dead:
                 warnings.append(f"Core component '{component_name}' has zero quality for {dead}/{len(comp_rows)} tickers.")
             live_scores = [float(row["component_score"]) for row in comp_rows if float(row["component_quality"] or 0.0) > 0]

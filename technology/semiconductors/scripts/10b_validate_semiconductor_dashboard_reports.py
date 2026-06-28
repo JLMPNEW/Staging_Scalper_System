@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Stage 10 technology-hardware dashboard/report outputs."""
+"""Validate Stage 10 semiconductor dashboard/report outputs."""
 from __future__ import annotations
 
 import argparse
@@ -19,20 +19,20 @@ from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E40
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
 
 
-LOGGER = logging.getLogger("technology_hardware_dashboard_validator")
+LOGGER = logging.getLogger("semiconductor_dashboard_validator")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-CONFIG_KEY = "technology_hardware_dashboard_reports"
+CONFIG_KEY = "semiconductor_dashboard_reports"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Validate Stage 10 technology-hardware dashboard reports.")
+    parser = argparse.ArgumentParser(description="Validate Stage 10 semiconductor dashboard reports.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--asof", default="", help="Expected dashboard as-of date. When set, validates manifest and rank table dates.")
     parser.add_argument(
         "--historical-mode",
         action="store_true",
-        help="Allow PIT historical reports to omit current full-history Stage 8/backtest research rows.",
+        help="Validate a PIT historical report where non-PIT research/backtest sections are omitted.",
     )
     return parser.parse_args()
 
@@ -44,9 +44,11 @@ def read_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def require_file(errors: list[str], path: Path, label: str) -> None:
-    if not path.exists() or path.stat().st_size == 0:
-        errors.append(f"Missing or empty {label}: {path}")
+def require_file(errors: list[str], path: Path, label: str, *, nonempty: bool = True) -> None:
+    if not path.exists():
+        errors.append(f"Missing {label}: {path}")
+    elif nonempty and path.stat().st_size == 0:
+        errors.append(f"Empty {label}: {path}")
 
 
 def main() -> int:
@@ -56,33 +58,29 @@ def main() -> int:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     output_dir = args.output_dir.expanduser().resolve() if args.output_dir else resolve_path(
-        cfg_get(config, f"{CONFIG_KEY}.output_dir", "../output/technology_reports/technology_hardware/dashboard"),
+        cfg_get(config, f"{CONFIG_KEY}.output_dir", "../output/technology_reports/semi_dashboard"),
         base_dir=base_dir,
     )
     paths = {
-        "rank_table": output_dir / "technology_hardware_final_rank_table.csv",
-        "scorecards": output_dir / "technology_hardware_company_scorecards.csv",
-        "cohort_summary": output_dir / "technology_hardware_cohort_rank_summary.csv",
-        "component_summary": output_dir / "technology_hardware_component_summary.csv",
-        "risk_flags": output_dir / "technology_hardware_risk_flags.csv",
-        "review_queue": output_dir / "technology_hardware_review_queue.csv",
-        "calibration_summary": output_dir / "technology_hardware_calibration_summary.csv",
-        "backtest_leaders": output_dir / "technology_hardware_backtest_leaders.csv",
-        "stage8_candidate_rank_table": output_dir / "technology_hardware_stage8_candidate_rank_table.csv",
+        "rank_table": output_dir / "semiconductor_final_rank_table.csv",
+        "scorecards": output_dir / "semiconductor_company_scorecards.csv",
+        "cohort_summary": output_dir / "semiconductor_cohort_rank_summary.csv",
+        "risk_flags": output_dir / "semiconductor_risk_flags.csv",
+        "review_queue": output_dir / "semiconductor_review_queue.csv",
+        "overlay_summary": output_dir / "semiconductor_overlay_summary.csv",
         "html": output_dir / "index.html",
-        "manifest": output_dir / "technology_hardware_dashboard_manifest.json",
+        "manifest": output_dir / "semiconductor_dashboard_manifest.json",
     }
     errors: list[str] = []
-    for label, path in paths.items():
-        require_file(errors, path, label)
+    for label in ("rank_table", "scorecards", "cohort_summary", "overlay_summary", "html", "manifest"):
+        require_file(errors, paths[label], label)
+    for label in ("risk_flags", "review_queue"):
+        require_file(errors, paths[label], label, nonempty=False)
 
     rank_rows = read_rows(paths["rank_table"])
     scorecard_rows = read_rows(paths["scorecards"])
     cohort_rows = read_rows(paths["cohort_summary"])
-    component_rows = read_rows(paths["component_summary"])
-    calibration_rows = read_rows(paths["calibration_summary"])
-    backtest_rows = read_rows(paths["backtest_leaders"])
-    stage8_rows = read_rows(paths["stage8_candidate_rank_table"])
+    overlay_rows = read_rows(paths["overlay_summary"])
 
     if len(rank_rows) < 20:
         errors.append(f"Rank table has too few rows: {len(rank_rows)}")
@@ -90,14 +88,8 @@ def main() -> int:
         errors.append(f"Scorecard row count {len(scorecard_rows)} does not match rank rows {len(rank_rows)}")
     if len(cohort_rows) < 2:
         errors.append(f"Cohort summary has too few rows: {len(cohort_rows)}")
-    if len(component_rows) < 6:
-        errors.append(f"Component summary has too few rows: {len(component_rows)}")
-    if not args.historical_mode and len(calibration_rows) < 5:
-        errors.append(f"Calibration summary has too few rows: {len(calibration_rows)}")
-    if not args.historical_mode and len(backtest_rows) < 4:
-        errors.append(f"Backtest leaders has too few rows: {len(backtest_rows)}")
-    if not args.historical_mode and len(stage8_rows) < 20:
-        errors.append(f"Stage 8 candidate rank table has too few rows: {len(stage8_rows)}")
+    if len(overlay_rows) < 1:
+        errors.append(f"Overlay summary has too few rows: {len(overlay_rows)}")
 
     if rank_rows:
         required_rank_fields = {
@@ -123,7 +115,6 @@ def main() -> int:
             "market_behavior_score",
             "positioning_score",
             "risk_control_score",
-            "inventory_days",
         }
         missing = sorted(required_rank_fields.difference(rank_rows[0].keys()))
         if missing:
@@ -141,12 +132,6 @@ def main() -> int:
             manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
             if int(manifest.get("rank_rows") or 0) != len(rank_rows):
                 errors.append(f"Manifest rank_rows mismatch: {manifest.get('rank_rows')} vs {len(rank_rows)}")
-            if int(manifest.get("stage8_candidate_rows") or 0) != len(stage8_rows):
-                errors.append(
-                    f"Manifest stage8_candidate_rows mismatch: {manifest.get('stage8_candidate_rows')} vs {len(stage8_rows)}"
-                )
-            if str(manifest.get("model_family") or "") != "technology_hardware":
-                errors.append(f"Manifest model_family is not technology_hardware: {manifest.get('model_family')}")
             if args.asof and str(manifest.get("asof_date") or "") != args.asof:
                 errors.append(f"Manifest asof_date mismatch: {manifest.get('asof_date')} vs {args.asof}")
             expected_mode = "historical" if args.historical_mode else "current"
@@ -157,7 +142,7 @@ def main() -> int:
 
     if paths["html"].exists():
         text = paths["html"].read_text(encoding="utf-8", errors="ignore")
-        if "Technology Hardware Dashboard" not in text:
+        if "Semiconductor Dashboard" not in text:
             errors.append("HTML report does not contain expected title.")
 
     if errors:
@@ -165,10 +150,10 @@ def main() -> int:
             LOGGER.error(error)
         return 1
     LOGGER.info(
-        "Stage 10 technology-hardware dashboard validation passed: rank_rows=%d cohort_rows=%d backtest_rows=%d output=%s",
+        "Stage 10 semiconductor dashboard validation passed: rank_rows=%d cohort_rows=%d overlay_rows=%d output=%s",
         len(rank_rows),
         len(cohort_rows),
-        len(backtest_rows),
+        len(overlay_rows),
         output_dir,
     )
     return 0

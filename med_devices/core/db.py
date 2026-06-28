@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS dim_company_alias (
 
 CREATE TABLE IF NOT EXISTS dim_company_model_taxonomy (
     company_id INTEGER PRIMARY KEY,
+    model_family TEXT NOT NULL DEFAULT 'med_devices',
     ticker TEXT NOT NULL,
     company_name TEXT,
     primary_subsector_raw TEXT,
@@ -1081,6 +1082,7 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     calibration_cohort TEXT,
     calibration_status TEXT DEFAULT 'production_eligible',
     calibration_status_reason TEXT DEFAULT '',
+    calibration_eligible_flag INTEGER DEFAULT 1,
     cohort_score_template_id TEXT DEFAULT '',
     cohort_score_template_spec TEXT DEFAULT '',
     cohort_score_template_tier1_role TEXT DEFAULT '',
@@ -1369,7 +1371,12 @@ class ManagedConnection:
         conn = sqlite3.connect(self.db_path, timeout=self.timeout_sec)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA temp_store = MEMORY")
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError as exc:
+            if "unable to open database file" not in str(exc).lower():
+                raise
         self._conn = conn
         return conn
 
@@ -1445,6 +1452,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn,
         "dim_company_model_taxonomy",
         {
+            "model_family": "TEXT DEFAULT 'med_devices'",
             "company_name": "TEXT",
             "primary_subsector_raw": "TEXT",
             "reimbursement_model": "TEXT",
@@ -1461,6 +1469,13 @@ def init_db(conn: sqlite3.Connection) -> None:
             "analyst_reviewed": "INTEGER",
             "updated_at": "TEXT",
         },
+    )
+    conn.execute(
+        """
+        UPDATE dim_company_model_taxonomy
+        SET model_family = 'med_devices'
+        WHERE model_family IS NULL OR TRIM(model_family) = ''
+        """
     )
     _ensure_table_optional_columns(
         conn,
@@ -1651,6 +1666,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             "calibration_cohort": "TEXT",
             "calibration_status": "TEXT",
             "calibration_status_reason": "TEXT",
+            "calibration_eligible_flag": "INTEGER",
             "cohort_score_template_id": "TEXT",
             "cohort_score_template_spec": "TEXT",
             "cohort_score_template_tier1_role": "TEXT",
@@ -1831,6 +1847,16 @@ def init_db(conn: sqlite3.Connection) -> None:
             "diagnostics_lab_flag": "INTEGER",
             "unknown_reimbursement_flag": "INTEGER",
         },
+    )
+    conn.execute(
+        """
+        UPDATE med_device_daily_scores
+        SET calibration_eligible_flag = CASE
+            WHEN LOWER(COALESCE(calibration_status, 'production_eligible')) = 'production_eligible' THEN 1
+            ELSE 0
+        END
+        WHERE calibration_eligible_flag IS NULL
+        """
     )
     conn.execute("DROP INDEX IF EXISTS idx_fact_fda_recall_unique")
     conn.execute("DROP INDEX IF EXISTS idx_fact_fda_recall_key")

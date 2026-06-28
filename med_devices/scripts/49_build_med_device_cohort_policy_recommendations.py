@@ -308,7 +308,7 @@ def build_recommendations(
                 selected += 1
                 if action == "guarded_policy_candidate":
                     high_risk_used += 1
-            item["recommendation_rank"] = selected if item["recommended_action"] != "defer_lower_priority" else ""
+            item["recommendation_rank"] = selected if item["recommended_action"] != "defer_lower_priority" else -1
             out.append(item)
     return out
 
@@ -392,7 +392,7 @@ def main() -> None:
             cfg_get(config, "calibration.cohort_policy_recommendations.max_high_risk_recommendations_per_cohort", 1)
         ),
         min_supporting_components=int(
-            cfg_get(config, "calibration.cohort_policy_recommendations.min_supporting_components", 1)
+            cfg_get(config, "calibration.cohort_policy_recommendations.min_supporting_components", 2)
         ),
     )
     summary_rows = summarize(recommendations)
@@ -403,4 +403,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

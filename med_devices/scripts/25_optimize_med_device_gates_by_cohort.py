@@ -141,6 +141,60 @@ def parse_date(raw: object) -> datetime | None:
         return None
 
 
+def is_auto_date(raw: object) -> bool:
+    return str(raw or "").strip().lower() in {"", "auto", "latest", "latest_market_date", "auto_latest_complete"}
+
+
+def available_asof_dates(rows: list[dict[str, str]]) -> list[str]:
+    dates = {
+        str(row.get("asof_date") or "").strip()[:10]
+        for row in rows
+        if parse_date(row.get("asof_date")) is not None
+    }
+    return sorted(dates)
+
+
+def previous_asof(dates: list[str], target: str) -> str:
+    prior = [item for item in dates if item < target]
+    if not prior:
+        raise ValueError(f"Cannot derive train_end_asof before validation_start_asof={target}")
+    return prior[-1]
+
+
+def resolve_calibration_dates(config: dict[str, Any], rows: list[dict[str, str]]) -> tuple[str, str, str]:
+    dates = available_asof_dates(rows)
+    if not dates:
+        raise ValueError("Cannot resolve calibration windows: input rows have no valid asof_date values.")
+    train_raw = cfg_get(config, "calibration.train_end_asof", "auto")
+    validation_start_raw = cfg_get(config, "calibration.validation_start_asof", "auto")
+    validation_end_raw = cfg_get(config, "calibration.validation_end_asof", "auto")
+    validation_window_asofs = max(1, int(cfg_get(config, "calibration.validation_window_asofs", 26)))
+
+    validation_end = dates[-1] if is_auto_date(validation_end_raw) else str(validation_end_raw).strip()[:10]
+    eligible_dates = [item for item in dates if item <= validation_end]
+    if not eligible_dates:
+        raise ValueError(f"No calibration rows on or before validation_end_asof={validation_end}")
+    if is_auto_date(validation_start_raw):
+        validation_start = eligible_dates[max(0, len(eligible_dates) - validation_window_asofs)]
+    else:
+        validation_start = str(validation_start_raw).strip()[:10]
+    train_end = previous_asof(dates, validation_start) if is_auto_date(train_raw) else str(train_raw).strip()[:10]
+
+    for label, value in (
+        ("train_end_asof", train_end),
+        ("validation_start_asof", validation_start),
+        ("validation_end_asof", validation_end),
+    ):
+        if parse_date(value) is None:
+            raise ValueError(f"Invalid {label}: {value}")
+    if not (train_end < validation_start <= validation_end):
+        raise ValueError(
+            "Invalid calibration window ordering: "
+            f"train_end_asof={train_end}, validation_start_asof={validation_start}, validation_end_asof={validation_end}"
+        )
+    return train_end, validation_start, validation_end
+
+
 def effective_train_end(train_end_asof: str, validation_start_asof: str, embargo_days: int) -> str:
     train_end = parse_date(train_end_asof)
     validation_start = parse_date(validation_start_asof)
@@ -171,7 +225,9 @@ def metrics(values: list[float], tickers: list[str]) -> dict[str, Any]:
             "mean": "",
             "median": "",
             "hit_rate": "",
+            "loss_rate": "",
             "lcb": "",
+            "worst_loss": "",
             "sortino": "",
             "profit_factor": "",
         }
@@ -196,7 +252,9 @@ def metrics(values: list[float], tickers: list[str]) -> dict[str, Any]:
         "mean": f"{avg:.6f}",
         "median": f"{median(values):.6f}",
         "hit_rate": f"{sum(1 for value in values if value > 0) / len(values):.4f}",
+        "loss_rate": f"{sum(1 for value in values if value < 0) / len(values):.4f}",
         "lcb": f"{lcb_value:.6f}",
+        "worst_loss": f"{min(values):.6f}",
         "sortino": f"{sortino:.4f}",
         "profit_factor": f"{profit_factor:.4f}",
     }
@@ -277,7 +335,9 @@ def passes_gates(
         if op == ">=" and value < threshold:
             return False
     value_trap = to_float(row.get("value_trap_score"))
-    if value_trap is not None and value_trap > value_trap_max:
+    if value_trap is None:
+        return False
+    if value_trap > value_trap_max:
         return False
     return True
 
@@ -413,7 +473,7 @@ def prepare_cohort(
                 if value >= threshold:
                     field_threshold_masks[field][threshold] |= bit
         for threshold in value_trap_maxes:
-            if item.value_trap_score is None or item.value_trap_score <= threshold:
+            if item.value_trap_score is not None and item.value_trap_score <= threshold:
                 value_trap_threshold_masks[threshold] |= bit
 
     prepared = PreparedCohort(
@@ -459,12 +519,14 @@ def score_objective(metrics_by_horizon: dict[int, dict[str, Any]], weights: dict
         mean_value = to_float(values.get("mean")) or 0.0
         sortino = min(3.0, max(-3.0, to_float(values.get("sortino")) or 0.0))
         profit = min(3.0, max(0.0, to_float(values.get("profit_factor")) or 0.0))
+        worst_loss = min(0.0, to_float(values.get("worst_loss")) or 0.0)
         total += (
             weights.get("median_excess_return", 0.35) * median_value * 100.0
             + weights.get("lower_confidence_bound", 0.25) * lcb_value * 100.0
             + weights.get("sortino", 0.15) * sortino
             + weights.get("profit_factor", 0.15) * (profit - 1.0)
             + weights.get("mean_excess_return", 0.10) * mean_value * 100.0
+            + weights.get("worst_loss", 0.10) * worst_loss * 100.0
         )
         used += 1
     return total / used if used else -999.0
@@ -758,7 +820,7 @@ def output_fields(horizons: list[int]) -> list[str]:
     fields = list(BASE_FIELDS)
     for horizon in horizons:
         for prefix in ("train", "validation"):
-            for key in ("count", "unique_tickers", "mean", "median", "hit_rate", "lcb", "sortino", "profit_factor"):
+            for key in ("count", "unique_tickers", "mean", "median", "hit_rate", "loss_rate", "lcb", "worst_loss", "sortino", "profit_factor"):
                 fields.append(f"{prefix}_{key}_{horizon}d")
     return fields
 
@@ -781,9 +843,15 @@ def main() -> None:
     )
     rows = read_csv(input_csv)
     horizons = parse_int_list(cfg_get(config, "calibration.horizons", "30,60,120"), "30,60,120")
-    train_end_asof = str(cfg_get(config, "calibration.train_end_asof", "2025-05-30"))
-    validation_start_asof = str(cfg_get(config, "calibration.validation_start_asof", "2025-06-06"))
-    validation_end_asof = str(cfg_get(config, "calibration.validation_end_asof", "2025-11-28"))
+    if not rows:
+        raise RuntimeError(f"Gate optimization input is empty: {input_csv}")
+    missing_horizons = [horizon for horizon in horizons if f"cohort_excess_return_{horizon}d" not in rows[0]]
+    if missing_horizons:
+        raise RuntimeError(
+            f"Gate optimization input {input_csv} is missing cohort_excess_return columns for horizons: "
+            + ",".join(str(item) for item in missing_horizons)
+        )
+    train_end_asof, validation_start_asof, validation_end_asof = resolve_calibration_dates(config, rows)
     embargo_days = int(cfg_get(config, "calibration.embargo_days", 120))
     effective_train_end_asof = effective_train_end(train_end_asof, validation_start_asof, embargo_days)
     min_train_obs = int(cfg_get(config, "calibration.min_train_obs", 100))
@@ -882,4 +950,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

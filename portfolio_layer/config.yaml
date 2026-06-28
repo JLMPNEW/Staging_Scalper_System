@@ -389,6 +389,7 @@ sleeves:
 holdings_ledger:
   enabled_in_production: false
   source_reports_dir: "../IB_reports"
+  statement_glob: "U*.csv"
   broker: "IBKR"
   manual_lot_overrides:
     FISV:

@@ -45,8 +45,6 @@ COMPONENT_FIELDS = [
     "fda_clearance_acceleration_raw",
     "fda_clearance_acceleration_score",
     "fda_evidence_quality_score",
-    "fda_event_risk_score",
-    "fda_event_risk_breadth_adjusted_score",
     "fda_safety_breadth_adjusted_score",
     "quality_value_interaction_score",
     "fda_technical_interaction_score",
@@ -89,6 +87,9 @@ OUTPUT_FIELDS = [
     "component",
     "count",
     "unique_tickers",
+    "ic_period_count",
+    "net_ic_period_count",
+    "factor_neutral_ic_period_count",
     "spearman_ic_excess",
     "spearman_ic_excess_t_stat",
     "spearman_ic_excess_p_value",
@@ -238,7 +239,7 @@ def residualize_scores(
     factors: list[str],
     min_group_n: int,
     ridge: float,
-) -> list[tuple[str, float, float, float | None]]:
+) -> list[tuple[str, str, float, float, float | None]]:
     active_factors = [factor for factor in factors if factor != component]
     if not active_factors:
         return []
@@ -250,7 +251,7 @@ def residualize_scores(
         grouped.setdefault(str(row.get("asof_date") or ""), []).append(
             (ticker, row, score, excess, net_excess, [float(value) for value in xs if value is not None])
         )
-    out: list[tuple[str, float, float, float | None]] = []
+    out: list[tuple[str, str, float, float, float | None]] = []
     for items in grouped.values():
         feature_count = len(active_factors)
         if len(items) < max(min_group_n, feature_count + 3):
@@ -262,23 +263,36 @@ def residualize_scores(
             variance = sum((value - avg) ** 2 for value in column) / max(1, len(column) - 1)
             stds.append(math.sqrt(variance) if variance > 1e-12 else 1.0)
         x_rows = [[1.0] + [(value - avg) / std for value, avg, std in zip(item[5], means, stds)] for item in items]
-        y_values = [item[2] for item in items]
+        score_values = [item[2] for item in items]
+        excess_values = [item[3] for item in items]
         k = feature_count + 1
-        xtx = [[0.0 for _ in range(k)] for _ in range(k)]
-        xty = [0.0 for _ in range(k)]
-        for x_row, y_value in zip(x_rows, y_values):
-            for i in range(k):
-                xty[i] += x_row[i] * y_value
-                for j in range(k):
-                    xtx[i][j] += x_row[i] * x_row[j]
-        for i in range(1, k):
-            xtx[i][i] += ridge
-        beta = matrix_solve(xtx, xty)
-        if beta is None:
+
+        def solve_response(response_values: list[float]) -> list[float] | None:
+            xtx = [[0.0 for _ in range(k)] for _ in range(k)]
+            xty = [0.0 for _ in range(k)]
+            for x_row, y_value in zip(x_rows, response_values):
+                for i in range(k):
+                    xty[i] += x_row[i] * y_value
+                    for j in range(k):
+                        xtx[i][j] += x_row[i] * x_row[j]
+            for i in range(1, k):
+                xtx[i][i] += ridge
+            return matrix_solve(xtx, xty)
+
+        score_beta = solve_response(score_values)
+        excess_beta = solve_response(excess_values)
+        if score_beta is None or excess_beta is None:
             continue
         for item, x_row in zip(items, x_rows):
-            prediction = sum(beta_i * x_i for beta_i, x_i in zip(beta, x_row))
-            out.append((item[0], item[2] - prediction, item[3], item[4]))
+            score_prediction = sum(beta_i * x_i for beta_i, x_i in zip(score_beta, x_row))
+            excess_prediction = sum(beta_i * x_i for beta_i, x_i in zip(excess_beta, x_row))
+            out.append((
+                item[0],
+                str(item[1].get("asof_date") or ""),
+                item[2] - score_prediction,
+                item[3] - excess_prediction,
+                item[4],
+            ))
     return out
 
 
@@ -294,7 +308,7 @@ def two_sided_t_p_value(t_stat: float | None, df: int) -> float | None:
 
         return float(2.0 * stats.t.sf(abs(t_stat), df=df))
     except Exception:
-        return math.erfc(abs(t_stat) / math.sqrt(2.0))
+        return None
 
 
 def correlation_t_stat(corr: float | None, n: int) -> float | None:
@@ -304,6 +318,30 @@ def correlation_t_stat(corr: float | None, n: int) -> float | None:
         return math.copysign(float("inf"), corr)
     denom = max(1e-12, 1.0 - corr * corr)
     return corr * math.sqrt((n - 2) / denom)
+
+
+def period_spearman_stats(records: list[tuple[str, float, float]]) -> tuple[float | None, float | None, float | None, int]:
+    grouped: dict[str, list[tuple[float, float]]] = {}
+    for asof, score, target in records:
+        grouped.setdefault(asof, []).append((score, target))
+    ics: list[float] = []
+    for items in grouped.values():
+        ic = spearman([item[0] for item in items], [item[1] for item in items])
+        if ic is not None and math.isfinite(ic):
+            ics.append(ic)
+    if not ics:
+        return None, None, None, 0
+    avg_ic = mean(ics)
+    if len(ics) < 2:
+        return avg_ic, None, None, len(ics)
+    variance = sum((value - avg_ic) ** 2 for value in ics) / max(1, len(ics) - 1)
+    std = math.sqrt(variance)
+    if std <= 1e-12:
+        t_stat = math.copysign(float("inf"), avg_ic) if abs(avg_ic) > 1e-12 else 0.0
+    else:
+        t_stat = avg_ic / (std / math.sqrt(len(ics)))
+    p_value = two_sided_t_p_value(t_stat, len(ics) - 1)
+    return avg_ic, t_stat, p_value, len(ics)
 
 
 def hit_rate(values: list[float]) -> str:
@@ -376,13 +414,17 @@ def analyze_component(
     excess_values = [item[3] for item in pairs]
     raw_values = [item[4] for item in pairs]
     top_count, bottom_count, top_med, bottom_med, spread = quintile_spread([(item[2], item[3]) for item in pairs])
-    ic = spearman(xs, excess_values)
-    t_stat = correlation_t_stat(ic, len(pairs))
-    p_value = two_sided_t_p_value(t_stat, max(1, len(pairs) - 2))
+    ic, t_stat, p_value, period_count = period_spearman_stats(
+        [(str(item[1].get("asof_date") or ""), item[2], item[3]) for item in pairs]
+    )
     net_pairs = [(item[2], float(item[5])) for item in pairs if item[5] is not None]
-    net_ic = spearman([item[0] for item in net_pairs], [item[1] for item in net_pairs])
-    net_t_stat = correlation_t_stat(net_ic, len(net_pairs))
-    net_p_value = two_sided_t_p_value(net_t_stat, max(1, len(net_pairs) - 2))
+    net_ic, net_t_stat, net_p_value, net_period_count = period_spearman_stats(
+        [
+            (str(item[1].get("asof_date") or ""), item[2], float(item[5]))
+            for item in pairs
+            if item[5] is not None
+        ]
+    )
     _, _, _, _, net_spread = quintile_spread(net_pairs)
     residualized = residualize_scores(
         [(ticker, row, score, excess, net_excess) for ticker, row, score, excess, _, net_excess in pairs],
@@ -391,18 +433,19 @@ def analyze_component(
         min_group_n=factor_neutral_min_group_n,
         ridge=factor_neutral_ridge,
     )
-    factor_xs = [item[1] for item in residualized]
-    factor_excess_values = [item[2] for item in residualized]
-    factor_ic = spearman(factor_xs, factor_excess_values)
-    factor_t_stat = correlation_t_stat(factor_ic, len(residualized))
-    factor_p_value = two_sided_t_p_value(factor_t_stat, max(1, len(residualized) - 2))
-    _, _, _, _, factor_spread = quintile_spread([(item[1], item[2]) for item in residualized])
+    factor_ic, factor_t_stat, factor_p_value, factor_period_count = period_spearman_stats(
+        [(item[1], item[2], item[3]) for item in residualized]
+    )
+    _, _, _, _, factor_spread = quintile_spread([(item[2], item[3]) for item in residualized])
     return {
         "calibration_cohort": cohort,
         "horizon_days": horizon,
         "component": component,
         "count": len(pairs),
         "unique_tickers": len({item[0] for item in pairs}),
+        "ic_period_count": period_count,
+        "net_ic_period_count": net_period_count,
+        "factor_neutral_ic_period_count": factor_period_count,
         "spearman_ic_excess": fmt(ic),
         "spearman_ic_excess_t_stat": fmt(t_stat, 4),
         "spearman_ic_excess_p_value": fmt(p_value, 8),
@@ -588,6 +631,8 @@ def main() -> None:
     factor_neutral_ridge = float(cfg_get(config, "calibration.component_ic.factor_neutralization_ridge", 1.0))
     rows = read_csv(input_csv)
     horizons = return_horizons(rows)
+    if not horizons:
+        raise RuntimeError(f"No cohort_excess_return_<horizon>d columns found in {input_csv}")
     cohorts = sorted({str(row.get("calibration_cohort") or "") for row in rows if str(row.get("calibration_cohort") or "")})
     out = [
         analyze_component(
@@ -636,4 +681,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

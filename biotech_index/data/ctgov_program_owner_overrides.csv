@@ -1,13 +1,28 @@
-enabled,ticker,nct_id,confidence,source_name,notes
-true,ABUS,NCT06154278,0.95,manual_program_owner,Arbutus-owned imdusiran AB-729 program in investigator-led mechanistic chronic HBV study
-true,ALEC,NCT06079190,0.95,manual_program_owner,Alector partnered AL101/GSK4527226 program with GSK listed as lead sponsor
-true,ALEC,NCT07105709,0.95,manual_program_owner,Alector partnered AL101/GSK4527226 open-label extension with GSK listed as lead sponsor
-true,ZVRA,NCT06773026,0.95,manual_program_owner,Zevra ACER-001 program in investigator-led MCADD study
-true,ZVRA,NCT07125066,0.95,manual_program_owner,Zevra ACER-001 program in investigator-led C-2HGA study
-true,ATRA,NCT04554914,0.85,manual_program_owner,Atara tab-cel economics retained through Pierre Fabre partnership; classify as program/economic owner rather than lead sponsor
-true,EDSA,NCT06701669,0.95,manual_program_owner,Edesa paridiprubart EB05 arm in JUST BREATHE ARDS platform trial; classify as program-owner evidence
-true,EDSA,NCT06703073,0.90,manual_program_owner,Edesa paridiprubart EB05 included in JUST BREATHE ARDS master record; classify as program-owner evidence
-true,HRMY,NCT04462770,0.85,manual_program_owner,Harmony acquired Epygenix EPX-100 program; classify as program-owner evidence
-true,HRMY,NCT05066217,0.85,manual_program_owner,Harmony acquired Epygenix clemizole program; classify as program-owner evidence
-true,ZYME,NCT05152147,0.85,manual_program_owner,Zymeworks zanidatamab economics via Jazz partnership; classify as program-owner evidence
-true,ZYME,NCT06282575,0.85,manual_program_owner,Zymeworks zanidatamab economics via Jazz partnership; classify as program-owner evidence
+enabled,ticker,nct_id,match_role,confidence,source_name,notes
+true,ABUS,NCT06154278,program,0.95,manual_program_owner,Arbutus-owned imdusiran AB-729 program in investigator-led mechanistic chronic HBV study
+true,ALEC,NCT06079190,program,0.95,manual_program_owner,Alector partnered AL101/GSK4527226 program with GSK listed as lead sponsor
+true,ALEC,NCT07105709,program,0.95,manual_program_owner,Alector partnered AL101/GSK4527226 open-label extension with GSK listed as lead sponsor
+true,ZVRA,NCT06773026,program,0.95,manual_program_owner,Zevra ACER-001 program in investigator-led MCADD study
+true,ZVRA,NCT07125066,program,0.95,manual_program_owner,Zevra ACER-001 program in investigator-led C-2HGA study
+true,ATRA,NCT04554914,program,0.85,manual_program_owner,Atara tab-cel economics retained through Pierre Fabre partnership; classify as program/economic owner rather than lead sponsor
+true,EDSA,NCT06701669,program,0.95,manual_program_owner,Edesa paridiprubart EB05 arm in JUST BREATHE ARDS platform trial; classify as program-owner evidence
+true,EDSA,NCT06703073,program,0.90,manual_program_owner,Edesa paridiprubart EB05 included in JUST BREATHE ARDS master record; classify as program-owner evidence
+true,HRMY,NCT04462770,program,0.85,manual_program_owner,Harmony acquired Epygenix EPX-100 program; classify as program-owner evidence
+true,HRMY,NCT05066217,program,0.85,manual_program_owner,Harmony acquired Epygenix clemizole program; classify as program-owner evidence
+true,ZYME,NCT05152147,program,0.85,manual_program_owner,Zymeworks zanidatamab economics via Jazz partnership; classify as program-owner evidence
+true,ZYME,NCT06282575,program,0.85,manual_program_owner,Zymeworks zanidatamab economics via Jazz partnership; classify as program-owner evidence
+true,AARD,NCT06828861,lead,0.95,manual_link_review_20260626,AARD ARD-101 Phase 3 HERO trial should map to Aardvark sponsor evidence; user-verified CTGov correction.
+true,AARD,NCT06126653,lead,0.90,manual_link_review_20260626,AARD ARD-501 Phase 2 historical sponsor evidence; user-verified CTGov correction.
+true,ARMP,NCT05616221,lead,0.95,manual_link_review_20260626,Armata AP-PA02 Phase 2 Tailwind study should map to Armata sponsor evidence; user-verified CTGov correction.
+true,ARMP,NCT05184764,lead,0.95,manual_link_review_20260626,Armata AP-SA02 bacteremia study should map to Armata sponsor evidence; user-verified CTGov correction.
+true,ARMP,NCT04596319,lead,0.90,manual_link_review_20260626,Armata AP-PA02 Phase 1/2 study should map to Armata sponsor evidence; user-verified CTGov correction.
+true,CRVO,NCT05869669,program,0.95,manual_link_review_20260626,CervoMed/EIP Pharma RewinD-LB neflamapimod trial should map to CervoMed program evidence.
+true,CRVO,NCT07033481,program,0.95,manual_link_review_20260626,CervoMed/EIP Pharma neflamapimod PPA study should map to CervoMed program evidence.
+true,GALT,NCT04365868,lead,0.95,manual_link_review_20260626,Galectin belapectin NAVIGATE Phase 2b/3 MASH/NASH cirrhosis study should map to Galectin sponsor evidence.
+true,INMB,NCT05318976,lead,0.95,manual_link_review_20260626,INmune XPro1595 Phase 2 Alzheimer study should map to INmune sponsor evidence.
+true,INMB,NCT03943264,lead,0.90,manual_link_review_20260626,INmune XPro1595 biomarker-directed Alzheimer study should map to INmune sponsor evidence.
+true,LPCN,NCT04874350,lead,0.90,manual_link_review_20260626,Lipocine LPCN 1148 clinical evidence should map to Lipocine sponsor evidence.
+true,LSTA,NCT05712356,lead,0.95,manual_link_review_20260626,Lisata LSTA1 BOLSTER Phase 2a study should map to Lisata sponsor evidence.
+true,NGEN,NCT05965700,lead,0.95,manual_link_review_20260626,NervGen NVG-291 Phase 1b/2a spinal-cord-injury study should map to NervGen sponsor evidence.
+true,RLYB,NCT06435845,lead,0.95,manual_link_review_20260626,Rallybio RLYB212 Phase 2 pregnancy alloimmunization study should map to Rallybio sponsor evidence.
+true,SPRO,NCT06059846,lead,0.95,manual_link_review_20260626,Spero tebipenem Phase 3 PIVOT-PO study should map to Spero sponsor evidence.

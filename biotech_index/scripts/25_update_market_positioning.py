@@ -56,6 +56,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ibkr-only", action="store_true", help="Only run IBKR borrow availability refresh and export.")
     parser.add_argument("--public-float-only", action="store_true", help="Only run SEC public-float proxy extraction and export.")
     parser.add_argument(
+        "--force-sec13f-reprocess",
+        action="store_true",
+        help="Reprocess cached SEC 13F archives. Use after adding CUSIP mappings for delisted calibration names.",
+    )
+    parser.add_argument(
         "--ibkr-borrow-backfill",
         action="store_true",
         help="Use the configured long IBKR FEE_RATE backfill duration instead of the daily initial-load duration.",
@@ -437,6 +442,13 @@ def main() -> None:
                         timeout_sec=timeout_sec,
                         sleep_sec=to_float(cfg_get(config, "market_positioning.institutional_13f.sleep_sec", 0.2), 0.2),
                         max_archives=to_int(cfg_get(config, "market_positioning.institutional_13f.max_archives_per_run", 0), 0),
+                        force_reprocess_archives=(
+                            bool(args.force_sec13f_reprocess)
+                            or as_bool(
+                                cfg_get(config, "market_positioning.institutional_13f.force_reprocess_archives", False),
+                                False,
+                            )
+                        ),
                     )
                     results.append(f"{result.feed_name} rows={result.rows}")
                 except Exception as exc:

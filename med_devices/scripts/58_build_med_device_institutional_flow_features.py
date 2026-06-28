@@ -6,7 +6,7 @@ import csv
 import json
 import math
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +92,7 @@ def parse_date(raw: str) -> date | None:
 
 
 def eligible_report_cutoff(asof: str, *, config: dict[str, Any]) -> str:
-    asof_date = parse_date(asof) or date.today()
+    asof_date = parse_date(asof) or datetime.now(timezone.utc).date()
     lag_days = int(cfg_get(config, "institutional_flow_features.report_lag_days", 45))
     return (asof_date - timedelta(days=lag_days)).isoformat()
 
@@ -136,7 +136,9 @@ def load_companies(conn: Any) -> list[dict[str, Any]]:
         """
         SELECT c.company_id, c.ticker, COALESCE(t.calibration_cohort, '') AS calibration_cohort
         FROM dim_company c
-        LEFT JOIN dim_company_model_taxonomy t ON t.company_id = c.company_id
+        INNER JOIN dim_company_model_taxonomy t
+            ON t.company_id = c.company_id
+           AND t.model_family = 'med_devices'
         WHERE c.is_active = 1
         ORDER BY c.ticker
         """
@@ -153,14 +155,28 @@ def load_quarterly_facts(conn: Any, *, cutoff: str) -> dict[int, list[dict[str, 
             company_id,
             ticker,
             report_date,
-            SUM(COALESCE(shares, 0.0)) AS shares,
-            SUM(COALESCE(market_value_usd, 0.0)) AS market_value_usd,
+            CASE
+                WHEN SUM(CASE WHEN COALESCE(manager_count, 0.0) > 1.0 THEN 1 ELSE 0 END) > 0
+                    THEN COALESCE(
+                        MAX(CASE WHEN COALESCE(manager_count, 0.0) > 1.0 THEN COALESCE(shares, 0.0) END),
+                        SUM(COALESCE(shares, 0.0))
+                    )
+                ELSE SUM(COALESCE(shares, 0.0))
+            END AS shares,
+            CASE
+                WHEN SUM(CASE WHEN COALESCE(manager_count, 0.0) > 1.0 THEN 1 ELSE 0 END) > 0
+                    THEN COALESCE(
+                        MAX(CASE WHEN COALESCE(manager_count, 0.0) > 1.0 THEN COALESCE(market_value_usd, 0.0) END),
+                        SUM(COALESCE(market_value_usd, 0.0))
+                    )
+                ELSE SUM(COALESCE(market_value_usd, 0.0))
+            END AS market_value_usd,
             CASE
                 WHEN MAX(COALESCE(manager_count, 0.0)) > 1.0 THEN MAX(manager_count)
                 ELSE COUNT(DISTINCT COALESCE(NULLIF(manager_cik, ''), NULLIF(manager_name, ''), accession_nodash))
             END AS reported_manager_count,
-            MAX(institutional_ownership_pct) AS reported_ownership_pct,
-            MAX(institutional_ownership_delta_pct) AS reported_delta_pct,
+            MAX(CASE WHEN COALESCE(manager_count, 0.0) > 1.0 THEN institutional_ownership_pct END) AS reported_ownership_pct,
+            MAX(CASE WHEN COALESCE(manager_count, 0.0) > 1.0 THEN institutional_ownership_delta_pct END) AS reported_delta_pct,
             COUNT(DISTINCT COALESCE(manager_cik, manager_name, accession_nodash)) AS distinct_manager_count
         FROM fact_sec_13f_holding
         WHERE report_date <= ?
@@ -337,7 +353,7 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    asof = args.asof.strip() or date.today().isoformat()
+    asof = args.asof.strip() or datetime.now(timezone.utc).date().isoformat()
     output_csv = (
         args.output_csv.expanduser().resolve()
         if args.output_csv
@@ -357,4 +373,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

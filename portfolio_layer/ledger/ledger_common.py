@@ -225,11 +225,40 @@ class ParsedStatement:
     securities_lending: list[dict[str, str]]
 
 
-def latest_ib_report(source_dir: Path) -> Path:
-    reports = sorted(source_dir.glob("*.csv"), key=lambda path: path.stat().st_mtime, reverse=True)
+def latest_ib_report(source_dir: Path, pattern: str = "*.csv") -> Path:
+    reports = sorted(source_dir.glob(pattern), key=lambda path: path.stat().st_mtime, reverse=True)
     if not reports:
-        raise FileNotFoundError(f"No IB CSV reports found under {source_dir}")
+        raise FileNotFoundError(f"No IB CSV reports found under {source_dir} with glob {pattern!r}")
     return reports[0]
+
+
+def peek_statement_period_end(path: Path) -> str | None:
+    """Return a statement's period-end date by reading only its header block.
+
+    IB activity statements emit the contiguous ``Statement`` metadata block first, so the
+    ``Statement,Data,Period,...`` row appears within the first handful of lines. We return as soon as
+    it is found (and bail the moment the block ends), so this stays O(header) even for a multi-MB
+    full-year statement -- cheap enough to date every file during a backfill scan without parsing it.
+    Returns ``None`` if no period row is found (caller should fall back to a full parse).
+    """
+    seen_statement = False
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.reader(handle):
+                if not row:
+                    continue
+                section = row[0].strip()
+                if section == "Statement":
+                    seen_statement = True
+                    if len(row) >= 4 and row[1].strip() == "Data" and row[2].strip() == "Period":
+                        _, end = parse_period(row[3].strip())
+                        return end or None
+                elif seen_statement:
+                    # The Statement block is contiguous and first; once it ends, Period won't appear.
+                    break
+    except OSError:
+        return None
+    return None
 
 
 def sha256_file(path: Path) -> str:

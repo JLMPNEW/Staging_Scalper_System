@@ -309,6 +309,38 @@ def override_protects_absent_ticker(override: dict[str, str], *, active_decision
     return decision in active_decisions or as_bool(override.get("manual_include")) or as_bool(override.get("manual_review"))
 
 
+def company_from_absent_status_override(ticker: str, override: dict[str, str], row: Any) -> ScreenCompany:
+    """Build an upsertable company row for active overrides absent from the screen.
+
+    Some explicitly retained tickers may be missing from the latest preload file.
+    They still need the current override fields applied, not just protection from
+    deactivation, otherwise stale DB fields like manual_review can persist.
+    """
+    decision = str(override.get("decision") or row["universe_status"] or "keep").strip().lower()
+    return ScreenCompany(
+        ticker=ticker,
+        cik=str(row["cik"] or ""),
+        company_name=str(row["company_name"] or ticker),
+        exchange=str(row["exchange"] or ""),
+        sector=str(row["sector"] or ""),
+        industry=str(row["industry"] or ""),
+        industry_aggregate=str(row["industry_aggregate"] or ""),
+        security_type=str(row["security_type"] or ""),
+        is_primary_listing=str(row["is_primary_listing"] or ""),
+        listing_status=str(override.get("listing_status") or row["listing_status"] or ""),
+        country=str(row["country"] or ""),
+        currency=str(row["currency"] or ""),
+        manual_include=str(override.get("manual_include") or row["manual_include"] or ""),
+        manual_exclude=str(override.get("manual_exclude") or row["manual_exclude"] or ""),
+        manual_review=str(override.get("manual_review") or row["manual_review"] or ""),
+        notes=str(override.get("notes") or row["notes"] or ""),
+        decision=decision,
+        reason_codes=str(override.get("reason_codes") or row["reason_codes"] or ""),
+        match_type="status_override_absent_screen",
+        source="status_override_absent_screen",
+    )
+
+
 def apply_status_override(company: ScreenCompany, overrides: dict[str, dict[str, str]]) -> ScreenCompany:
     override = overrides.get(company.ticker)
     if not override:
@@ -655,7 +687,27 @@ def main() -> None:
             alias_now = utc_now()
             with conn:
                 prepare_successor_ticker_renames(conn, ticker_actions, asof_date=history_asof_date)
-                for company in companies:
+                companies_to_process = list(companies)
+                for ticker in sorted(protected_absent_tickers):
+                    row = conn.execute(
+                        """
+                        SELECT ticker, cik, company_name, exchange, sector, industry, industry_aggregate,
+                               security_type, is_primary_listing, listing_status, country, currency,
+                               manual_include, manual_exclude, manual_review, notes, universe_status, reason_codes
+                        FROM companies
+                        WHERE ticker = ?
+                        """,
+                        (ticker,),
+                    ).fetchone()
+                    if row is None:
+                        LOGGER.warning(
+                            "Active status override ticker %s is absent from the latest screen and has no existing "
+                            "company master row; skipping synthetic protection row.",
+                            ticker,
+                        )
+                        continue
+                    companies_to_process.append(company_from_absent_status_override(ticker, status_overrides[ticker], row))
+                for company in companies_to_process:
                     company = apply_status_override(company, status_overrides)
                     company_id = upsert_company(conn, company, active_decisions=active_decisions)
                     alias_delete_ids.append((company_id,))
@@ -713,11 +765,17 @@ def main() -> None:
                 conn,
                 run_id=run_id,
                 status="success",
-                row_count=len(companies),
+                row_count=len(companies_to_process),
                 message=f"active={active_count} aliases={alias_count} deactivated_absent={absent_count}",
             )
             LOGGER.info("Wrote company master DB: %s", db_path)
-            LOGGER.info("Companies=%d Active=%d Aliases=%d DeactivatedAbsent=%d", len(companies), active_count, alias_count, absent_count)
+            LOGGER.info(
+                "Companies=%d Active=%d Aliases=%d DeactivatedAbsent=%d",
+                len(companies_to_process),
+                active_count,
+                alias_count,
+                absent_count,
+            )
         except BaseException as exc:
             if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")

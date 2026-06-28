@@ -73,19 +73,20 @@ def read_membership_csv(path: Path) -> list[dict[str, str]]:
         rows = [{str(key): str(value or "").strip() for key, value in row.items()} for row in reader]
 
     out: list[dict[str, str]] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for row in rows:
         ticker = normalize_ticker(row.get("ticker") or row.get("internal_ticker"))
         if not ticker:
             continue
-        if ticker in seen:
-            raise ValueError(f"Duplicate historical membership ticker: {ticker}")
-        seen.add(ticker)
         cohort = str(row.get("calibration_cohort") or "").strip()
         if cohort not in VALID_COHORTS:
             raise ValueError(f"{ticker}: invalid calibration_cohort={cohort!r}")
         start_date = parse_date_text(row.get("start_date"), field="start_date", ticker=ticker)
         end_date = parse_date_text(row.get("end_date"), field="end_date", ticker=ticker)
+        period_key = (ticker, start_date)
+        if period_key in seen:
+            raise ValueError(f"Duplicate historical membership interval: {ticker} start_date={start_date}")
+        seen.add(period_key)
         if end_date < start_date:
             raise ValueError(f"{ticker}: end_date {end_date} precedes start_date {start_date}")
         row["ticker"] = ticker
@@ -201,6 +202,10 @@ def procedure_sensitivity(cohort: str) -> str:
     return "high"
 
 
+def single_product_risk_flag(cohort: str) -> int:
+    return int(cohort == "emerging_single_product_therapeutic_platforms")
+
+
 def upsert_historical_member(conn: Any, row: dict[str, str], *, source_id: str) -> int:
     now = utc_now()
     ticker = normalize_ticker(row["ticker"])
@@ -282,14 +287,15 @@ def upsert_historical_member(conn: Any, row: dict[str, str], *, source_id: str) 
     conn.execute(
         """
         INSERT INTO dim_company_model_taxonomy(
-            company_id, ticker, company_name, primary_subsector_raw, calibration_cohort,
+            company_id, model_family, ticker, company_name, primary_subsector_raw, calibration_cohort,
             reimbursement_model, regulatory_model, business_model, procedure_sensitivity,
             capital_equipment_flag, consumables_flag, diagnostics_flag, implantable_flag,
             single_product_risk_flag, taxonomy_confidence, taxonomy_source, analyst_reviewed, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, 'historical_unknown', 'historical_fda_exposure',
-                ?, ?, ?, ?, ?, ?, 0, ?, ?, 1, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 'historical_unknown', 'historical_fda_exposure',
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
         ON CONFLICT(company_id) DO UPDATE SET
+            model_family = excluded.model_family,
             ticker = excluded.ticker,
             company_name = excluded.company_name,
             primary_subsector_raw = excluded.primary_subsector_raw,
@@ -310,6 +316,7 @@ def upsert_historical_member(conn: Any, row: dict[str, str], *, source_id: str) 
         """,
         (
             company_id,
+            MODEL_FAMILY,
             ticker,
             company_name,
             cohort,
@@ -320,6 +327,7 @@ def upsert_historical_member(conn: Any, row: dict[str, str], *, source_id: str) 
             1 if cohort == "hospital_supplies_surgical_consumables_oem" else 0,
             1 if cohort == "diagnostics_clinical_tests" else 0,
             1 if cohort in {"implantable_interventional_devices_direct_payment", "orthopedics_spine_sports_implants"} else 0,
+            single_product_risk_flag(cohort),
             confidence,
             source_id,
             now,
@@ -364,6 +372,51 @@ def upsert_historical_member(conn: Any, row: dict[str, str], *, source_id: str) 
     return company_id
 
 
+def deactivate_removed_memberships(conn: Any, *, source_id: str, active_intervals: set[tuple[str, str]]) -> int:
+    """Disable stale calibration-only PIT intervals that are no longer in the source CSV."""
+    if not active_intervals:
+        return 0
+    existing = conn.execute(
+        """
+        SELECT ticker, start_date
+        FROM dim_universe_membership
+        WHERE model_family = ?
+          AND membership_source_id = ?
+          AND membership_basis = 'calibration_only_historical_delisted'
+          AND point_in_time_flag = 1
+        """,
+        (MODEL_FAMILY, source_id),
+    ).fetchall()
+    stale_intervals = [
+        (str(row["ticker"]).upper(), str(row["start_date"]))
+        for row in existing
+        if (str(row["ticker"]).upper(), str(row["start_date"])) not in active_intervals
+    ]
+    if not stale_intervals:
+        return 0
+    now = utc_now()
+    before = conn.total_changes
+    for ticker, start_date in stale_intervals:
+        conn.execute(
+            """
+            UPDATE dim_universe_membership
+            SET membership_status = 'removed_from_source',
+                point_in_time_flag = 0,
+                is_current_member = 0,
+                confidence = 0.0,
+                reason = COALESCE(reason, '') || ';removed_from_current_historical_membership_seed',
+                updated_at = ?
+            WHERE model_family = ?
+              AND membership_source_id = ?
+              AND membership_basis = 'calibration_only_historical_delisted'
+              AND ticker = ?
+              AND start_date = ?
+            """,
+            (now, MODEL_FAMILY, source_id, ticker, start_date),
+        )
+    return conn.total_changes - before
+
+
 def main() -> int:
     configure_utc_logging()
     args = parse_args()
@@ -389,9 +442,21 @@ def main() -> int:
         upsert_source_registry(conn, source_id)
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=membership_csv)
         try:
+            active_intervals = {(row["ticker"], row["start_date"]) for row in rows}
             for row in rows:
                 upsert_historical_member(conn, row, source_id=source_id)
-            finish_run(conn, run_id=run_id, status="completed", row_count=len(rows), message=f"source_id={source_id}")
+            deactivated = deactivate_removed_memberships(
+                conn,
+                source_id=source_id,
+                active_intervals=active_intervals,
+            )
+            finish_run(
+                conn,
+                run_id=run_id,
+                status="success",
+                row_count=len(rows),
+                message=f"source_id={source_id};deactivated_removed={deactivated}",
+            )
         except Exception as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=repr(exc))
             raise

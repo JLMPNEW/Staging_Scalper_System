@@ -336,7 +336,7 @@ def format_table_column_candidates(candidates: tuple[tuple[str, str], ...]) -> s
     return ", ".join(f"{table}.{column}" for table, column in candidates)
 
 
-def _terminate_process(proc: subprocess.Popen[object]) -> None:
+def _terminate_process(proc: subprocess.Popen[Any]) -> None:
     try:
         proc.terminate()
         proc.wait(timeout=10)
@@ -1150,6 +1150,13 @@ def main() -> None:
     alignment_cfg = cfg_get(orch_cfg, "alignment", default={}) or {}
 
     align_enabled = bool(cfg_get(alignment_cfg, "enabled", default=True)) and (not args.skip_alignment)
+    sec_table: str | None = None
+    form4_table_name: str | None = None
+    sec_dates: set[str] | None = None
+    form4_dates: set[str] | None = None
+    missing_in_sec: list[str] | None = None
+    missing_in_form4: list[str] | None = None
+
     if align_enabled:
         lookback_days = parse_required_int(
             cfg_get(alignment_cfg, "lookback_days", default=120),
@@ -1495,8 +1502,8 @@ def main() -> None:
         else:
             sec_table = None
             form4_table_name = None
-            sec_dates: set[str] = set()
-            form4_dates: set[str] = set()
+            sec_dates = set()
+            form4_dates = set()
             if target in {"both", "sec"}:
                 sec_table_candidates = parse_snapshot_table_candidates(
                     cfg_get(sec_cfg, "snapshot_table_candidates", default=None),

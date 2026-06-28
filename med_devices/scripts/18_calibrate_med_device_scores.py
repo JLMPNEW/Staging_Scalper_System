@@ -38,6 +38,7 @@ OUTPUT_FIELDS = [
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarize med-device score backtest output for gate calibration.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--db", type=Path, default=None, help="Accepted for orchestration consistency; this script reads CSV inputs.")
     parser.add_argument("--input-csv", type=Path, default=None)
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--asof", type=str, default="")
@@ -211,4 +212,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

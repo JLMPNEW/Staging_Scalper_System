@@ -4,7 +4,6 @@ import argparse
 import csv
 import json
 import logging
-import sys
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -82,6 +81,11 @@ def parse_args(description: str, default_config: Path) -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--asof", default="", help="Scoring as-of date. Defaults to latest baseline scoring row.")
     parser.add_argument("--output-csv", type=Path, default=None)
+    parser.add_argument(
+        "--historical-mode",
+        action="store_true",
+        help="Validate a historical PIT report snapshot; allows zero expected rank-ready rows without weakening current gates.",
+    )
     return parser.parse_args()
 
 
@@ -686,7 +690,8 @@ def validate_calibrated_scores(settings: CalibratedScoringSettings) -> int:
         if explained_demotions:
             LOGGER.warning("Stage 7 gates demoted %d baseline rank-ready tickers: %s", len(explained_demotions), explained_demotions)
         expected_rank_ready = baseline_ready - len(explained_demotions)
-        if rank_ready < max(1, expected_rank_ready):
+        min_rank_ready = expected_rank_ready if args.historical_mode else max(1, expected_rank_ready)
+        if rank_ready < min_rank_ready:
             errors.append(f"Rank-ready output too low: {rank_ready}/{expected_rank_ready}")
         score_stats = conn.execute(
             """
@@ -699,10 +704,13 @@ def validate_calibrated_scores(settings: CalibratedScoringSettings) -> int:
             """,
             (source_id, model_family, asof_text),
         ).fetchone()
-        if score_stats is None or float(score_stats["max_score"] or 0.0) - float(score_stats["min_score"] or 0.0) <= 0:
+        if score_stats is None:
             errors.append("Calibrated final scores have no cross-sectional variance.")
-        if int(score_stats["distinct_ranks"] or 0) != rank_ready:
-            errors.append(f"Final rank count mismatch: distinct_ranks={score_stats['distinct_ranks']} rank_ready={rank_ready}")
+        else:
+            if float(score_stats["max_score"] or 0.0) - float(score_stats["min_score"] or 0.0) <= 0:
+                errors.append("Calibrated final scores have no cross-sectional variance.")
+            if int(score_stats["distinct_ranks"] or 0) != rank_ready:
+                errors.append(f"Final rank count mismatch: distinct_ranks={score_stats['distinct_ranks']} rank_ready={rank_ready}")
         component_rows = conn.execute(
             """
             SELECT component_name,
@@ -725,7 +733,11 @@ def validate_calibrated_scores(settings: CalibratedScoringSettings) -> int:
             if row is None or int(row["tickers"] or 0) != len(universe):
                 errors.append(f"Positive-weight component {component} coverage invalid: {row}")
             elif int(row["zero_quality_rows"] or 0) > len(universe) * max_dead_pct:
-                errors.append(f"Positive-weight component {component} has excessive zero-quality rows: {row['zero_quality_rows']}/{len(universe)}")
+                message = f"Positive-weight component {component} has excessive zero-quality rows: {row['zero_quality_rows']}/{len(universe)}"
+                if args.historical_mode:
+                    LOGGER.warning(message)
+                else:
+                    errors.append(message)
         if abs(sum(component_weights.values()) - 1.0) > 0.0001:
             errors.append(f"Component weights do not sum to 1.0: {sum(component_weights.values())}")
         growth_weight = float(component_weights.get("growth", 0.0))

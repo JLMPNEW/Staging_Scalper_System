@@ -30,6 +30,10 @@ DEFAULT_EXCLUDED_COMPONENTS = {
     "safe_core_score",
     "safe_core_percentile",
     "safe_core_cohort_percentile",
+    "fda_event_risk_score",
+    "fda_event_risk_breadth_adjusted_score",
+    "borrow_squeeze_risk_score",
+    "borrow_pressure_score",
 }
 DETAIL_FIELDS = [
     "calibration_cohort",
@@ -171,12 +175,26 @@ def eligible_tickers_by_cohort_horizon(rows: list[dict[str, str]], horizons: lis
 
 
 def load_component_set(raw: object) -> set[str]:
+    defaults = set(DEFAULT_EXCLUDED_COMPONENTS)
     if raw is None:
-        return set(DEFAULT_EXCLUDED_COMPONENTS)
+        return defaults
     text = str(raw).strip()
     if not text:
-        return set()
-    return {item.strip() for item in text.split(",") if item.strip()}
+        return defaults
+    return defaults | {item.strip() for item in text.split(",") if item.strip()}
+
+
+def fdr_gate_passed(row: dict[str, str], *, max_q_value: float) -> bool:
+    fields = (
+        "spearman_ic_excess_bh_q_value",
+        "net_spearman_ic_excess_bh_q_value",
+        "factor_neutral_spearman_ic_excess_bh_q_value",
+    )
+    for field in fields:
+        q_value = to_float(row.get(field))
+        if q_value is None or q_value > max_q_value:
+            return False
+    return True
 
 
 def build_review_rows(
@@ -192,6 +210,7 @@ def build_review_rows(
     min_validation_obs: int,
     max_single_ticker_share: float,
     require_60_120_persistence: bool,
+    max_bh_q_value: float,
 ) -> list[dict[str, Any]]:
     by_key = {
         (str(row.get("calibration_cohort") or ""), str(row.get("component") or ""), to_int(row.get("horizon_days"))): row
@@ -228,6 +247,8 @@ def build_review_rows(
             action = "research_only"
             reasons.append(production_recommendation or "not_promotable")
         else:
+            if not fdr_gate_passed(row, max_q_value=max_bh_q_value):
+                reasons.append(f"bh_q_value_above_{max_bh_q_value:.3f}")
             if to_int(row.get("count")) < min_validation_obs:
                 reasons.append("insufficient_validation_obs")
             if component_unique < required_unique:
@@ -356,13 +377,22 @@ def main() -> None:
     min_validation_obs = int(cfg_get(config, "calibration.component_promotion_review.min_validation_obs", 20))
     max_share = float(cfg_get(config, "calibration.component_promotion_review.max_single_ticker_share", 0.35))
     require_persistence = bool(cfg_get(config, "calibration.component_promotion_review.require_60_120_persistence", True))
+    max_bh_q_value = float(
+        cfg_get(
+            config,
+            "calibration.component_promotion_review.bh_fdr_alpha",
+            cfg_get(config, "calibration.component_ic.bh_fdr", 0.05),
+        )
+    )
     excluded_components = load_component_set(
-        cfg_get(config, "calibration.component_promotion_review.excluded_components", "")
+        cfg_get(config, "calibration.component_promotion_review.excluded_components", None)
     )
 
     ic_rows = read_csv(ic_csv)
     cohort_rows = read_csv(cohort_csv)
     horizons = return_horizons(cohort_rows)
+    if not horizons:
+        raise RuntimeError(f"No cohort_excess_return_<horizon>d columns found in {cohort_csv}")
     eligible = eligible_tickers_by_cohort_horizon(cohort_rows, horizons)
     review_rows = build_review_rows(
         ic_rows=ic_rows,
@@ -376,6 +406,7 @@ def main() -> None:
         min_validation_obs=min_validation_obs,
         max_single_ticker_share=max_share,
         require_60_120_persistence=require_persistence,
+        max_bh_q_value=max_bh_q_value,
     )
     write_csv(output_csv, review_rows, DETAIL_FIELDS)
     summary_rows = summarize(review_rows)
@@ -385,4 +416,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

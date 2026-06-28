@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--asof", default="", help="Dashboard as-of date. Defaults to latest production output.")
+    parser.add_argument(
+        "--historical-mode",
+        action="store_true",
+        help="Publish a point-in-time historical snapshot and omit non-PIT research/backtest sections.",
+    )
     return parser.parse_args()
 
 
@@ -103,17 +108,20 @@ def sec_url(row: dict[str, Any] | None) -> str:
     return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_clean}/"
 
 
-def latest_filings(conn: sqlite3.Connection, source_id: str) -> dict[str, dict[str, Any]]:
+def latest_filings(conn: sqlite3.Connection, source_id: str, *, asof: str = "") -> dict[str, dict[str, Any]]:
+    asof_clause = "AND filing_date <= ?" if asof else ""
+    params: tuple[Any, ...] = (source_id, asof) if asof else (source_id,)
     rows = fetch_dicts(
         conn,
-        """
+        f"""
         SELECT ticker, cik, accession_number, form_type, filing_date, primary_document
         FROM fact_sec_filing
         WHERE source_id = ?
           AND form_type IN ('10-K', '10-Q', '20-F', '40-F', '10-K/A', '10-Q/A', '20-F/A', '40-F/A')
+          {asof_clause}
         ORDER BY ticker, filing_date DESC, accession_number DESC
         """,
-        (source_id,),
+        params,
     )
     out: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -271,6 +279,7 @@ def rank_table(rows: list[dict[str, Any]], components: dict[str, dict[str, dict[
             "calibration_cohort": row.get("calibration_cohort"),
             "market_cap": row.get("market_cap"),
             "latest_price": row.get("latest_price"),
+            "avg_dollar_volume_60d": row.get("avg_dollar_volume_60d"),
             "revenue_yoy_growth": row.get("revenue_yoy_growth"),
             "gross_margin": row.get("gross_margin"),
             "operating_margin": row.get("operating_margin"),
@@ -318,8 +327,8 @@ def snapshot_outputs(output_dir: Path, asof: str, outputs: dict[str, Path], *, m
 def scorecards(rank_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     fields = [
         "final_rank", "ticker", "final_score", "calibration_cohort_id", "market_cap",
-        "revenue_yoy_growth", "gross_margin", "operating_margin", "fcf_margin",
-        "inventory_days", "fcf_yield", "ev_gross_profit",
+        "latest_price", "avg_dollar_volume_60d", "revenue_yoy_growth", "gross_margin",
+        "operating_margin", "fcf_margin", "inventory_days", "fcf_yield", "ev_gross_profit",
         "ret_12m_ex_1m", "rel_strength_bench_3m", "quality_score", "valuation_score",
         "growth_score", "market_behavior_score", "positioning_score", "risk_control_score",
         "data_quality_confidence", "latest_sec_filing_date", "latest_sec_url",
@@ -391,6 +400,7 @@ def risk_flags(rows: list[dict[str, Any]], *, current_asof: str) -> list[dict[st
                 "ticker": row.get("ticker"),
                 "asof_date": row.get("asof_date"),
                 "calibration_cohort_id": row.get("calibration_cohort_id"),
+                "avg_dollar_volume_60d": row.get("avg_dollar_volume_60d"),
                 "severity": severity,
                 "flag": flag,
                 "detail": detail,
@@ -432,6 +442,7 @@ def review_queue(flags: list[dict[str, Any]], rows: list[dict[str, Any]]) -> lis
             **flag,
             "final_rank": by_ticker.get(str(flag["ticker"]), {}).get("final_rank", ""),
             "final_score": by_ticker.get(str(flag["ticker"]), {}).get("final_score", ""),
+            "avg_dollar_volume_60d": by_ticker.get(str(flag["ticker"]), {}).get("avg_dollar_volume_60d", ""),
             "model_status": by_ticker.get(str(flag["ticker"]), {}).get("model_status", ""),
             "review_reason": by_ticker.get(str(flag["ticker"]), {}).get("review_reason", ""),
         }
@@ -496,7 +507,12 @@ def html_table(rows: list[dict[str, Any]], columns: list[str], limit: int | None
     return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
 
-def write_html(path: Path, *, rank_rows: list[dict[str, Any]], stage8_rows: list[dict[str, Any]], cohort_rows: list[dict[str, Any]], component_rows_for_summary: list[dict[str, Any]], backtest_rows: list[dict[str, Any]], calibration_rows: list[dict[str, Any]], review_rows: list[dict[str, Any]], top_n: int, review_n: int) -> None:
+def write_html(path: Path, *, rank_rows: list[dict[str, Any]], stage8_rows: list[dict[str, Any]], cohort_rows: list[dict[str, Any]], component_rows_for_summary: list[dict[str, Any]], backtest_rows: list[dict[str, Any]], calibration_rows: list[dict[str, Any]], review_rows: list[dict[str, Any]], top_n: int, review_n: int, historical_mode: bool) -> None:
+    historical_notice = (
+        "<p class=\"meta\">Historical point-in-time mode: current full-history Stage 8/backtest research sections are omitted.</p>"
+        if historical_mode
+        else ""
+    )
     html_text = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -514,15 +530,16 @@ def write_html(path: Path, *, rank_rows: list[dict[str, Any]], stage8_rows: list
 <body>
   <h1>Technology Hardware Dashboard</h1>
   <div class="meta">Generated {html.escape(datetime.now(timezone.utc).isoformat(timespec="seconds"))}</div>
+  {historical_notice}
   <h2>Production Rank Table</h2>
   {html_table(rank_rows, ["final_rank", "ticker", "final_score", "calibration_cohort_id", "data_quality_confidence", "model_status"], top_n)}
-  <h2>Stage 8 Report-Only Candidate Rank Table</h2>
+  <h2>{'Stage 8 Candidate Omitted' if historical_mode else 'Stage 8 Report-Only Candidate Rank Table'}</h2>
   {html_table(stage8_rows, ["stage8_candidate_rank", "ticker", "stage8_candidate_score", "stage7_rank", "stage7_score", "stage8_quality"], top_n)}
   <h2>Cohort Summary</h2>
   {html_table(cohort_rows, ["calibration_cohort_id", "ticker_count", "rank_ready_count", "avg_final_score", "top_ticker", "top_score"])}
   <h2>Component Summary</h2>
   {html_table(component_rows_for_summary, ["component_name", "ticker_count", "avg_component_score", "avg_component_quality", "review_count", "default_applied_count"])}
-  <h2>Backtest Leaders</h2>
+  <h2>{'Backtest Leaders Omitted' if historical_mode else 'Backtest Leaders'}</h2>
   {html_table(backtest_rows, ["model_name", "portfolio_name", "weight_method", "exposure_mode", "annualized_return", "sharpe", "max_drawdown", "avg_excess_return_vs_equal_weight", "avg_turnover"])}
   <h2>Calibration Evidence</h2>
   {html_table(calibration_rows, ["section", "metric", "value", "detail"])}
@@ -565,7 +582,7 @@ def main() -> int:
         asof = str(score_rows[0]["asof_date"])
         detail_components = component_rows(conn, source_id=production_source, model_family=model_family, asof=asof)
         components = component_pivot(detail_components)
-        filings = latest_filings(conn, filing_source)
+        filings = latest_filings(conn, filing_source, asof=asof)
 
     ranks = rank_table(score_rows, components, filings)
     cards = scorecards(ranks)
@@ -573,10 +590,23 @@ def main() -> int:
     component_summaries = component_summary(detail_components)
     flags = risk_flags(score_rows, current_asof=asof)
     queue = review_queue(flags, score_rows)
-    backtest_rows = read_csv_rows(resolve_path(cfg_get(config, f"{CONFIG_KEY}.backtest_summary_csv"), base_dir=base_dir))
-    backtest_top = backtest_leaders(backtest_rows, limit=int(cfg_get(config, f"{CONFIG_KEY}.backtest_leader_rows", 16)))
-    stage8_candidate_rows = read_csv_rows(resolve_path(cfg_get(config, f"{CONFIG_KEY}.optuna_candidate_scores_csv"), base_dir=base_dir))
-    calibration_rows = calibration_summary(config, base_dir)
+    if args.historical_mode:
+        backtest_rows = []
+        backtest_top = []
+        stage8_candidate_rows = []
+        calibration_rows = [
+            {
+                "section": "historical_mode",
+                "metric": "non_point_in_time_research_sections",
+                "value": "omitted",
+                "detail": "Backtest, Stage 8 candidate, Optuna, and walk-forward sections are current full-history artifacts, not point-in-time.",
+            }
+        ]
+    else:
+        backtest_rows = read_csv_rows(resolve_path(cfg_get(config, f"{CONFIG_KEY}.backtest_summary_csv"), base_dir=base_dir))
+        backtest_top = backtest_leaders(backtest_rows, limit=int(cfg_get(config, f"{CONFIG_KEY}.backtest_leader_rows", 16)))
+        stage8_candidate_rows = read_csv_rows(resolve_path(cfg_get(config, f"{CONFIG_KEY}.optuna_candidate_scores_csv"), base_dir=base_dir))
+        calibration_rows = calibration_summary(config, base_dir)
 
     outputs = {
         "rank_table": output_dir / "technology_hardware_final_rank_table.csv",
@@ -611,6 +641,7 @@ def main() -> int:
         review_rows=queue,
         top_n=int(cfg_get(config, f"{CONFIG_KEY}.top_rank_rows_in_html", 25)),
         review_n=int(cfg_get(config, f"{CONFIG_KEY}.max_review_rows_in_html", 50)),
+        historical_mode=bool(args.historical_mode),
     )
     snapshot_dir, snapshot_map = snapshot_outputs(output_dir, asof, outputs, manifest_key="manifest")
 
@@ -622,6 +653,8 @@ def main() -> int:
         "production_source_id": production_source,
         "baseline_feature_source_id": baseline_source,
         "asof_date": asof,
+        "report_mode": "historical" if args.historical_mode else "current",
+        "non_point_in_time_sections": "omitted" if args.historical_mode else "included",
         "rank_rows": len(ranks),
         "rank_ready_count": rank_ready_count,
         "risk_flags": len(flags),

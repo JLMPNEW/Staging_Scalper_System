@@ -6,7 +6,7 @@ import csv
 import json
 import math
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -81,14 +81,27 @@ def parse_date(raw: str) -> date | None:
 
 
 def load_companies(conn: Any) -> list[dict[str, Any]]:
-    rows = conn.execute("SELECT company_id, ticker FROM dim_company WHERE is_active = 1 ORDER BY ticker").fetchall()
+    rows = conn.execute(
+        """
+        SELECT c.company_id, c.ticker
+        FROM dim_company c
+        WHERE c.is_active = 1
+          AND EXISTS (
+                SELECT 1
+                FROM dim_company_model_taxonomy t
+                WHERE t.company_id = c.company_id
+                  AND t.model_family = 'med_devices'
+          )
+        ORDER BY ticker
+        """
+    ).fetchall()
     return [dict(row) for row in rows]
 
 
 def load_transactions(conn: Any, *, asof: str, lookback_days: int) -> dict[int, list[dict[str, Any]]]:
     if not conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='fact_sec_form4_transaction'").fetchone():
         return {}
-    asof_date = parse_date(asof) or date.today()
+    asof_date = parse_date(asof) or datetime.now(timezone.utc).date()
     start = (asof_date - timedelta(days=lookback_days)).isoformat()
     rows = conn.execute(
         """
@@ -97,7 +110,7 @@ def load_transactions(conn: Any, *, asof: str, lookback_days: int) -> dict[int, 
         WHERE company_id IS NOT NULL
           AND transaction_date <= ?
           AND transaction_date > ?
-          AND derivative_flag = 0
+          AND COALESCE(derivative_flag, 0) = 0
         """,
         (asof, start),
     ).fetchall()
@@ -154,7 +167,7 @@ def score_company(company: dict[str, Any], txs: list[dict[str, Any]], *, asof: s
         "ticker": normalize_ticker(company.get("ticker")),
         "insider_net_buy_score": round(net_buy_score, 2),
         "insider_cluster_buy_score": round(cluster_buy_score, 2),
-        "insider_selling_pressure_score": round(selling_pressure_score, 2),
+        "insider_selling_pressure_score": round(clamp(100.0 - selling_pressure_score), 2),
         "insider_activity_score": round(activity_score, 2),
         "net_purchase_value_90d": net_purchase,
         "open_market_buy_count_90d": len(buys),
@@ -243,7 +256,7 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    asof = args.asof.strip() or date.today().isoformat()
+    asof = args.asof.strip() or datetime.now(timezone.utc).date().isoformat()
     output_csv = (
         args.output_csv.expanduser().resolve()
         if args.output_csv
@@ -263,4 +276,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

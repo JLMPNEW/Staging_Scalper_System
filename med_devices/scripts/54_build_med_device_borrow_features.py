@@ -6,7 +6,7 @@ import csv
 import json
 import math
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -96,9 +96,15 @@ def load_companies(conn: Any) -> list[dict[str, Any]]:
         dict(row)
         for row in conn.execute(
             """
-            SELECT company_id, ticker
-            FROM dim_company
-            WHERE is_active = 1
+            SELECT c.company_id, c.ticker
+            FROM dim_company c
+            WHERE c.is_active = 1
+              AND EXISTS (
+                    SELECT 1
+                    FROM dim_company_model_taxonomy t
+                    WHERE t.company_id = c.company_id
+                      AND t.model_family = 'med_devices'
+              )
             ORDER BY ticker
             """
         ).fetchall()
@@ -168,7 +174,7 @@ def score_snapshot(snapshot: dict[str, Any] | None, *, asof: str, config: dict[s
     availability_score = clamp(0.55 * status_score + 0.45 * shares_score)
     fee_score = clamp(100.0 - fee_risk)
     squeeze_risk_score = clamp(0.55 * (100.0 - availability_score) + 0.45 * fee_risk)
-    pressure_score = squeeze_risk_score
+    pressure_score = 100.0 - squeeze_risk_score
     populated = sum(value is not None for value in (shortable_status, shortable_shares, fee_rate))
     data_quality = 0.0 if stale else round(100.0 * populated / 3.0, 2)
     return {
@@ -264,7 +270,7 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    asof = args.asof.strip() or date.today().isoformat()
+    asof = args.asof.strip() or datetime.now(timezone.utc).date().isoformat()
     output_csv = (
         args.output_csv.expanduser().resolve()
         if args.output_csv
@@ -284,4 +290,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

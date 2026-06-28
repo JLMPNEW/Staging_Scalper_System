@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+TRANSIENT_SQLITE_MARKERS = (
+    "database is locked",
+    "database table is locked",
+    "unable to open database file",
+    "readonly database",
+)
 
 XBRL_CONCEPT_MAP_SEED: list[dict[str, Any]] = [
     {"canonical_metric": "revenue", "statement": "income_statement", "taxonomy": "us-gaap", "concept": "Revenues", "priority": 1, "period_type": "duration", "unit_type": "currency", "sign_policy": "positive", "currency_required": 1, "is_core": 1},
@@ -1233,21 +1240,44 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _is_transient_sqlite_error(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in TRANSIENT_SQLITE_MARKERS)
+
+
 def connect(db_path: Path, *, timeout_sec: float = 30.0) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), timeout=float(timeout_sec))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute(f"PRAGMA busy_timeout = {int(float(timeout_sec) * 1000)}")
-    conn.execute("PRAGMA journal_mode = WAL")
+    for attempt in range(3):
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            break
+        except sqlite3.OperationalError as exc:
+            if attempt >= 2 or not _is_transient_sqlite_error(exc):
+                # WAL is a performance/concurrency setting, not a schema requirement.
+                # If another short-lived process is negotiating SQLite state, continue
+                # with the existing journal mode and let normal write operations decide.
+                break
+            time.sleep(0.25 * (attempt + 1))
     return conn
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    with conn:
-        conn.executescript(SCHEMA_SQL)
-        migrate_schema(conn)
-        seed_xbrl_concept_map(conn)
+    for attempt in range(3):
+        try:
+            with conn:
+                conn.executescript(SCHEMA_SQL)
+                migrate_schema(conn)
+                seed_xbrl_concept_map(conn)
+            return
+        except sqlite3.OperationalError as exc:
+            if attempt >= 2 or not _is_transient_sqlite_error(exc):
+                raise
+            conn.rollback()
+            time.sleep(0.5 * (attempt + 1))
 
 
 def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
@@ -1364,6 +1394,8 @@ def start_run(conn: sqlite3.Connection, *, run_type: str, input_path: Path | str
             """,
             (run_type, now, str(input_path or ""), now),
         )
+    if cur.lastrowid is None:
+        raise RuntimeError("Failed to create run record.")
     return int(cur.lastrowid)
 
 

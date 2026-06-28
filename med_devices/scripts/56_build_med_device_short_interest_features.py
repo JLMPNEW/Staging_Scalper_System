@@ -7,7 +7,7 @@ import json
 import math
 import statistics
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -97,9 +97,15 @@ def load_companies(conn: Any) -> list[dict[str, Any]]:
         dict(row)
         for row in conn.execute(
             """
-            SELECT company_id, ticker
-            FROM dim_company
-            WHERE is_active = 1
+            SELECT c.company_id, c.ticker
+            FROM dim_company c
+            WHERE c.is_active = 1
+              AND EXISTS (
+                    SELECT 1
+                    FROM dim_company_model_taxonomy t
+                    WHERE t.company_id = c.company_id
+                      AND t.model_family = 'med_devices'
+              )
             ORDER BY ticker
             """
         ).fetchall()
@@ -224,11 +230,11 @@ def score_company(
         "company_id": int(company["company_id"]),
         "ticker": normalize_ticker(company.get("ticker")),
         "short_interest_score": round(clamp(100.0 - short_risk), 2),
-        "short_pressure_score": round(short_pressure, 2),
-        "short_squeeze_score": round(short_squeeze, 2),
-        "short_volume_score": round(volume_risk, 2),
-        "short_interest_velocity_score": round(velocity_risk, 2),
-        "days_to_cover_score": round(dtc_risk, 2),
+        "short_pressure_score": round(clamp(100.0 - short_pressure), 2),
+        "short_squeeze_score": round(clamp(100.0 - short_squeeze), 2),
+        "short_volume_score": round(clamp(100.0 - volume_risk), 2),
+        "short_interest_velocity_score": round(clamp(100.0 - velocity_risk), 2),
+        "days_to_cover_score": round(clamp(100.0 - dtc_risk), 2),
         "short_interest": short_interest,
         "short_interest_pct_float": pct_float,
         "days_to_cover": days_to_cover,
@@ -335,7 +341,7 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    asof = args.asof.strip() or date.today().isoformat()
+    asof = args.asof.strip() or datetime.now(timezone.utc).date().isoformat()
     output_csv = (
         args.output_csv.expanduser().resolve()
         if args.output_csv
@@ -355,4 +361,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

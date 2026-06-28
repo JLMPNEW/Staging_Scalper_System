@@ -452,6 +452,64 @@ def split_code_set(raw: object) -> set[str]:
     return out
 
 
+def parse_method_set(raw: object, default: set[str]) -> set[str]:
+    if raw is None:
+        return set(default)
+    items = raw if isinstance(raw, list) else str(raw or "").split(",")
+    parsed = {str(item or "").strip().lower() for item in items if str(item or "").strip()}
+    return parsed or set(default)
+
+
+def load_excluded_fda_manufacturer_ids(config: dict[str, Any], *, base_dir: Path) -> set[int]:
+    raw_path = str(
+        cfg_get(
+            config,
+            "fda_mapping_governance.manual_overrides_csv",
+            cfg_get(config, "fda_entity_linking.manual_overrides_csv", ""),
+        )
+        or ""
+    ).strip()
+    if not raw_path:
+        return set()
+    path = resolve_path(raw_path, base_dir=base_dir)
+    if not path.exists():
+        LOGGER.warning("Configured FDA manufacturer override CSV does not exist: %s", path)
+        return set()
+    default_excluded = {
+        "out_of_universe",
+        "do_not_map",
+        "non_us_traded_parent",
+        "not_in_investible_universe",
+        "private_excluded",
+        "international_excluded",
+        "inactive_or_delisted",
+    }
+    excluded_methods = parse_method_set(
+        cfg_get(config, "fda_mapping_governance.excluded_override_methods", default_excluded),
+        default_excluded,
+    )
+    excluded: set[int] = set()
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            method = str(row.get("mapping_method") or row.get("method") or "").strip().lower()
+            raw_id = str(row.get("fda_manufacturer_id") or "").strip()
+            if method not in excluded_methods or not raw_id:
+                continue
+            try:
+                excluded.add(int(float(raw_id)))
+            except ValueError:
+                continue
+    return excluded
+
+
+def fda_exclusion_clause(column: str, excluded_ids: set[int]) -> tuple[str, list[int]]:
+    if not excluded_ids:
+        return "", []
+    placeholders = ",".join("?" for _ in excluded_ids)
+    return f" AND ({column} IS NULL OR {column} NOT IN ({placeholders}))", sorted(excluded_ids)
+
+
 def fda_feature_policy(config: dict[str, Any]) -> FdaFeaturePolicy:
     if cfg_get(config, "fda_features.recall_severity_weights", None) is not None:
         LOGGER.warning(
@@ -669,8 +727,10 @@ def load_companies(
             SELECT c.company_id, c.ticker, c.company_name,
                    COALESCE(t.calibration_cohort, '') AS calibration_cohort
             FROM dim_company c
-            LEFT JOIN dim_company_model_taxonomy t ON t.company_id = c.company_id
-            WHERE c.is_active = 1
+            LEFT JOIN dim_company_model_taxonomy t
+                ON t.company_id = c.company_id
+               AND t.model_family = 'med_devices'
+            WHERE (c.is_active = 1 AND t.company_id IS NOT NULL)
                OR (? = 1 AND EXISTS (
                     SELECT 1
                     FROM dim_universe_membership m
@@ -687,7 +747,7 @@ def load_companies(
     else:
         rows = conn.execute(
             """
-            SELECT company_id, ticker, company_name, '' AS calibration_cohort
+            SELECT c.company_id, c.ticker, c.company_name, '' AS calibration_cohort
             FROM dim_company c
             WHERE c.is_active = 1
                OR (? = 1 AND EXISTS (
@@ -913,7 +973,8 @@ def recall_status_multiplier(status: object, termination_date: object, *, asof: 
     return 1.00
 
 
-def refresh_canonical_recalls(conn: Any) -> int:
+def refresh_canonical_recalls(conn: Any, *, excluded_manufacturer_ids: set[int] | None = None) -> int:
+    excluded_manufacturer_ids = excluded_manufacturer_ids or set()
     raw_rows = conn.execute(
         """
         SELECT r.*, m.mapping_confidence, m.mapping_method
@@ -924,6 +985,9 @@ def refresh_canonical_recalls(conn: Any) -> int:
     ).fetchall()
     grouped: dict[str, list[Any]] = {}
     for item in raw_rows:
+        manufacturer_id = item["fda_manufacturer_id"]
+        if manufacturer_id is not None and int(manufacturer_id) in excluded_manufacturer_ids:
+            continue
         grouped.setdefault(canonical_recall_key_from_row(item), []).append(item)
 
     now = utc_now()
@@ -1030,20 +1094,23 @@ def count_approvals(
     policy: FdaFeaturePolicy,
     include_product_codes: set[str] | None = None,
     exclude_product_codes: set[str] | None = None,
+    excluded_manufacturer_ids: set[int] | None = None,
 ) -> None:
     long_start = months_before(asof, policy.long_months).isoformat()
     medium_start = months_before(asof, policy.medium_months).isoformat()
     short_start = months_before(asof, policy.short_months).isoformat()
+    exclusion_sql, exclusion_params = fda_exclusion_clause("fda_manufacturer_id", excluded_manufacturer_ids or set())
     rows = conn.execute(
-        """
-        SELECT submission_type, product_code, decision_date
+        f"""
+        SELECT submission_type, product_code, decision_date, fda_manufacturer_id
         FROM fact_fda_approval
         WHERE company_id = ?
           AND COALESCE(decision_date, '') != ''
           AND decision_date <= ?
           AND decision_date >= ?
+          {exclusion_sql}
         """,
-        (row.company_id, asof.isoformat(), long_start),
+        (row.company_id, asof.isoformat(), long_start, *exclusion_params),
     ).fetchall()
     product_codes: set[str] = set()
     for item in rows:
@@ -1082,23 +1149,32 @@ def recall_severity_weight(classification: object) -> float:
     return 1.0
 
 
-def count_recalls(conn: Any, row: FdaFeatureRow, *, asof: date, policy: FdaFeaturePolicy) -> None:
+def count_recalls(
+    conn: Any,
+    row: FdaFeatureRow,
+    *,
+    asof: date,
+    policy: FdaFeaturePolicy,
+    excluded_manufacturer_ids: set[int] | None = None,
+) -> None:
     long_start = months_before(asof, policy.long_months).isoformat()
     medium_start = months_before(asof, policy.medium_months).isoformat()
     short_start = months_before(asof, policy.short_months).isoformat()
+    exclusion_sql, exclusion_params = fda_exclusion_clause("fda_manufacturer_id", excluded_manufacturer_ids or set())
     rows = conn.execute(
-        """
+        f"""
         SELECT classification, COALESCE(max_severity_weight, 1.0) AS severity_weight,
                status, termination_date, is_open, is_terminated, source_count,
-               mapping_confidence,
+               mapping_confidence, fda_manufacturer_id,
                COALESCE(recall_initiation_date, center_classification_date) AS event_date
         FROM fact_fda_recall_canonical
         WHERE company_id = ?
           AND COALESCE(recall_initiation_date, center_classification_date, '') != ''
           AND COALESCE(recall_initiation_date, center_classification_date) <= ?
           AND COALESCE(recall_initiation_date, center_classification_date) >= ?
+          {exclusion_sql}
         """,
-        (row.company_id, asof.isoformat(), long_start),
+        (row.company_id, asof.isoformat(), long_start, *exclusion_params),
     ).fetchall()
     for item in rows:
         event_date = str(item["event_date"] or "")
@@ -1128,13 +1204,21 @@ def count_recalls(conn: Any, row: FdaFeatureRow, *, asof: date, policy: FdaFeatu
         update_latest_fda_event_date(row, event_date)
 
 
-def count_adverse_events(conn: Any, row: FdaFeatureRow, *, asof: date, policy: FdaFeaturePolicy) -> None:
+def count_adverse_events(
+    conn: Any,
+    row: FdaFeatureRow,
+    *,
+    asof: date,
+    policy: FdaFeaturePolicy,
+    excluded_manufacturer_ids: set[int] | None = None,
+) -> None:
     medium_start = months_before(asof, policy.medium_months)
     previous_start = months_before(asof, policy.medium_months * 2)
+    exclusion_sql, exclusion_params = fda_exclusion_clause("e.fda_manufacturer_id", excluded_manufacturer_ids or set())
     rows = conn.execute(
-        """
+        f"""
         SELECT e.report_date, e.death_count, e.injury_count, e.malfunction_count,
-               m.mapping_confidence
+               m.mapping_confidence, e.fda_manufacturer_id
         FROM fact_fda_adverse_event e
         LEFT JOIN dim_fda_manufacturer m
           ON m.fda_manufacturer_id = e.fda_manufacturer_id
@@ -1142,8 +1226,9 @@ def count_adverse_events(conn: Any, row: FdaFeatureRow, *, asof: date, policy: F
           AND COALESCE(e.report_date, e.event_date, '') != ''
           AND COALESCE(e.report_date, e.event_date) <= ?
           AND COALESCE(e.report_date, e.event_date) >= ?
+          {exclusion_sql}
         """,
-        (row.company_id, asof.isoformat(), previous_start.isoformat()),
+        (row.company_id, asof.isoformat(), previous_start.isoformat(), *exclusion_params),
     ).fetchall()
     for item in rows:
         event_day = parse_date(item["report_date"])
@@ -1165,10 +1250,29 @@ def count_adverse_events(conn: Any, row: FdaFeatureRow, *, asof: date, policy: F
         update_latest_fda_event_date(row, event_day.isoformat())
 
 
-def count_device_categories(conn: Any, row: FdaFeatureRow, *, asof: date, policy: FdaFeaturePolicy) -> None:
+def count_device_categories(
+    conn: Any,
+    row: FdaFeatureRow,
+    *,
+    asof: date,
+    policy: FdaFeaturePolicy,
+    excluded_manufacturer_ids: set[int] | None = None,
+) -> None:
     long_start = months_before(asof, policy.long_months).isoformat()
+    approval_exclusion_sql, approval_exclusion_params = fda_exclusion_clause(
+        "fda_manufacturer_id",
+        excluded_manufacturer_ids or set(),
+    )
+    recall_exclusion_sql, recall_exclusion_params = fda_exclusion_clause(
+        "fda_manufacturer_id",
+        excluded_manufacturer_ids or set(),
+    )
+    adverse_exclusion_sql, adverse_exclusion_params = fda_exclusion_clause(
+        "fda_manufacturer_id",
+        excluded_manufacturer_ids or set(),
+    )
     rows = conn.execute(
-        """
+        f"""
         WITH product_events AS (
             SELECT product_code
             FROM fact_fda_approval
@@ -1176,6 +1280,7 @@ def count_device_categories(conn: Any, row: FdaFeatureRow, *, asof: date, policy
               AND COALESCE(decision_date, '') != ''
               AND decision_date <= ?
               AND decision_date >= ?
+              {approval_exclusion_sql}
             UNION
             SELECT product_code
             FROM fact_fda_recall_canonical
@@ -1183,6 +1288,7 @@ def count_device_categories(conn: Any, row: FdaFeatureRow, *, asof: date, policy
               AND COALESCE(recall_initiation_date, center_classification_date, '') != ''
               AND COALESCE(recall_initiation_date, center_classification_date) <= ?
               AND COALESCE(recall_initiation_date, center_classification_date) >= ?
+              {recall_exclusion_sql}
             UNION
             SELECT product_code
             FROM fact_fda_adverse_event
@@ -1190,6 +1296,7 @@ def count_device_categories(conn: Any, row: FdaFeatureRow, *, asof: date, policy
               AND COALESCE(report_date, event_date, '') != ''
               AND COALESCE(report_date, event_date) <= ?
               AND COALESCE(report_date, event_date) >= ?
+              {adverse_exclusion_sql}
         )
         SELECT DISTINCT
                COALESCE(NULLIF(TRIM(p.medical_specialty), ''), NULLIF(TRIM(e.product_code), '')) AS device_category
@@ -1202,25 +1309,30 @@ def count_device_categories(conn: Any, row: FdaFeatureRow, *, asof: date, policy
             row.company_id,
             asof.isoformat(),
             long_start,
+            *approval_exclusion_params,
             row.company_id,
             asof.isoformat(),
             long_start,
+            *recall_exclusion_params,
             row.company_id,
             asof.isoformat(),
             long_start,
+            *adverse_exclusion_params,
         ),
     ).fetchall()
     row.fda_distinct_device_category_count = len({str(item["device_category"] or "").strip() for item in rows if item["device_category"]})
 
 
-def manufacturer_mapping_summary(conn: Any, row: FdaFeatureRow) -> None:
+def manufacturer_mapping_summary(conn: Any, row: FdaFeatureRow, *, excluded_manufacturer_ids: set[int] | None = None) -> None:
+    exclusion_sql, exclusion_params = fda_exclusion_clause("m.fda_manufacturer_id", excluded_manufacturer_ids or set())
     rows = conn.execute(
-        """
+        f"""
         SELECT DISTINCT m.fda_manufacturer_id, m.mapping_confidence
         FROM dim_fda_manufacturer m
         WHERE m.parent_company_id = ?
+          {exclusion_sql}
         """,
-        (row.company_id,),
+        (row.company_id, *exclusion_params),
     ).fetchall()
     confidences = [float(item["mapping_confidence"] or 0.0) for item in rows]
     row.mapped_manufacturer_count = len(confidences)
@@ -1266,8 +1378,8 @@ def apply_breadth_adjusted_event_risk(row: FdaFeatureRow, *, policy: FdaFeatureP
     row.fda_mdr_death_injury_count_24m = row.death_count_24m + row.injury_count_24m
     row.fda_mdr_malfunction_count_24m = row.malfunction_count_24m
     if not row.fda_data_available or revenue_base is None or revenue_base <= 0:
-        row.fda_event_risk_breadth_adjusted_score = row.fda_event_risk_score
-        row.fda_safety_breadth_adjusted_score = row.fda_safety_score
+        row.fda_event_risk_breadth_adjusted_score = 0.0
+        row.fda_safety_breadth_adjusted_score = 50.0
         return
 
     category_count = max(0, row.fda_distinct_device_category_count)
@@ -1967,12 +2079,14 @@ def build_rows(
     default_signal_profile: FdaSignalProfile | None = None,
     signal_profiles: dict[str, FdaSignalProfile] | None = None,
     min_cohort_rank_n: int = 5,
+    excluded_manufacturer_ids: set[int] | None = None,
 ) -> list[FdaFeatureRow]:
     review_overrides = review_overrides or {}
     footprint_overrides = footprint_overrides or {}
     manual_evidence = manual_evidence or {}
     default_signal_profile = default_signal_profile or FdaSignalProfile()
     signal_profiles = signal_profiles or {}
+    excluded_manufacturer_ids = excluded_manufacturer_ids or set()
     rows: list[FdaFeatureRow] = []
     for company in companies:
         override = review_overrides.get(company.ticker)
@@ -2008,6 +2122,7 @@ def build_rows(
                 policy=policy,
                 include_product_codes=include_approval_codes,
                 exclude_product_codes=exclude_approval_codes,
+                excluded_manufacturer_ids=excluded_manufacturer_ids,
             )
             filter_parts: list[str] = []
             if include_approval_codes:
@@ -2020,10 +2135,10 @@ def build_rows(
                 "approval_product_code_filter_note",
                 "product_line_filter_note",
             )
-        count_recalls(conn, row, asof=asof, policy=policy)
-        count_adverse_events(conn, row, asof=asof, policy=policy)
-        count_device_categories(conn, row, asof=asof, policy=policy)
-        manufacturer_mapping_summary(conn, row)
+        count_recalls(conn, row, asof=asof, policy=policy, excluded_manufacturer_ids=excluded_manufacturer_ids)
+        count_adverse_events(conn, row, asof=asof, policy=policy, excluded_manufacturer_ids=excluded_manufacturer_ids)
+        count_device_categories(conn, row, asof=asof, policy=policy, excluded_manufacturer_ids=excluded_manufacturer_ids)
+        manufacturer_mapping_summary(conn, row, excluded_manufacturer_ids=excluded_manufacturer_ids)
         row.revenue_ttm = latest_revenue_ttm(conn, company.company_id, asof=asof)
         score_row(row, policy=policy)
         footprint = footprint_overrides.get(row.ticker)
@@ -2448,6 +2563,7 @@ def main() -> None:
     manual_evidence_raw = str(cfg_get(config, "fda_features.manual_footprint_evidence_csv", "") or "").strip()
     manual_evidence_csv = resolve_path(manual_evidence_raw, base_dir=base_dir) if manual_evidence_raw else None
     policy = fda_feature_policy(config)
+    excluded_manufacturer_ids = load_excluded_fda_manufacturer_ids(config, base_dir=base_dir)
     default_signal_profile = default_fda_signal_profile(config)
     signal_profiles = fda_signal_profiles(config, default_signal_profile)
     min_cohort_rank_n = int(cfg_get(config, "fda_features.alpha.min_cohort_rank_n", 5))
@@ -2469,7 +2585,7 @@ def main() -> None:
             raise ValueError("No active or point-in-time historical companies selected")
         run_id = start_run(conn, run_type="build_med_device_fda_features", input_path=config_path)
         try:
-            canonical_count = refresh_canonical_recalls(conn)
+            canonical_count = refresh_canonical_recalls(conn, excluded_manufacturer_ids=excluded_manufacturer_ids)
             preflight_fda_company_links(conn)
             review_overrides = load_review_overrides(review_override_csv)
             footprint_overrides = load_footprint_overrides(footprint_csv)
@@ -2485,6 +2601,7 @@ def main() -> None:
                 default_signal_profile=default_signal_profile,
                 signal_profiles=signal_profiles,
                 min_cohort_rank_n=min_cohort_rank_n,
+                excluded_manufacturer_ids=excluded_manufacturer_ids,
             )
             upserted = upsert_feature_rows(conn, rows)
             issue_count = replace_data_quality_issues(conn, rows, asof=asof.isoformat())
@@ -2500,6 +2617,7 @@ def main() -> None:
             red_flags = sum(1 for row in rows if row.hard_red_flag)
             message = (
                 f"asof={asof.isoformat()} rows={upserted} canonical_recalls={canonical_count} "
+                f"excluded_fda_manufacturers={len(excluded_manufacturer_ids)} "
                 f"red_flags={red_flags} review_rows={review_row_count} issues={issue_count} "
                 f"output={output_csv} review_output={review_csv}"
             )
@@ -2511,4 +2629,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

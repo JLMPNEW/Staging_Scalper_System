@@ -35,6 +35,7 @@ BASE_FIELDS = [
     "classification",
     "decision_bucket",
     "entry_status",
+    "calibration_eligible_flag",
     "composite_score",
     "raw_composite_score",
     "ic_tilted_composite_score",
@@ -43,6 +44,7 @@ BASE_FIELDS = [
     "ic_tilted_composite_active_weight",
     "ic_tilted_composite_payload_json",
     "composite_percentile",
+    "cohort_percentile",
     "safe_core_score",
     "safe_core_percentile",
     "safe_core_cohort_percentile",
@@ -56,6 +58,30 @@ BASE_FIELDS = [
     "tier1_safety_status",
     "tier1_safety_reason",
     "passed_tier1_safety_gate",
+    "fundamental_quality_score",
+    "durable_growth_score",
+    "durable_growth_score_legacy",
+    "durable_growth_alpha_score",
+    "durable_growth_growth_score",
+    "durable_growth_quality_score",
+    "durable_growth_efficiency_score",
+    "durable_growth_capital_discipline_score",
+    "durable_growth_evidence_quality_score",
+    "fda_product_score",
+    "fda_product_score_legacy",
+    "fda_alpha_score",
+    "fda_safety_score",
+    "fda_clearance_velocity_raw",
+    "fda_clearance_velocity_score",
+    "fda_clearance_acceleration_raw",
+    "fda_clearance_acceleration_score",
+    "fda_evidence_quality_score",
+    "fda_safety_breadth_adjusted_score",
+    "reimbursement_score",
+    "valuation_score",
+    "technical_entry_score",
+    "sentiment_catalyst_score",
+    "value_trap_score",
     "technical_trend_quality_score",
     "technical_relative_strength_score",
     "technical_liquidity_score",
@@ -159,6 +185,14 @@ def first_float(*raw_values: object, default: float = 0.0) -> float:
     return default
 
 
+def first_float_or_none(*raw_values: object) -> float | None:
+    for raw in raw_values:
+        value = to_float(raw)
+        if value is not None:
+            return value
+    return None
+
+
 def value_or_blank(row: dict[str, Any], key: str) -> object:
     value = row.get(key)
     return "" if value is None else value
@@ -222,7 +256,9 @@ def load_scores(conn: Any, *, asof: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def rank_bucket(percentile: float) -> str:
+def rank_bucket(percentile: float | None) -> str:
+    if percentile is None:
+        return "unknown"
     if percentile >= 90.0:
         return "top_decile"
     if percentile >= 80.0:
@@ -305,13 +341,16 @@ def build_backtest_rows(
     if asof_date is None:
         raise ValueError(f"Invalid asof date: {asof}")
     out: list[dict[str, Any]] = []
+    market_dates = sorted({bar_date for _, series in price_series.values() for bar_date, _ in series})
+    market_date_index = {bar_date: idx for idx, bar_date in enumerate(market_dates)}
+    price_maps = {ticker: {bar_date: price for bar_date, price in series} for ticker, (_, series) in price_series.items()}
     for row in score_rows:
         ticker = str(row["ticker"] or "").upper()
         source_id, series = price_series.get(ticker, ("", []))
         idx = entry_index(series, asof_date) if series else None
         composite_score = first_float(row.get("composite_score"))
         raw_composite_score = first_float(row.get("raw_composite_score"), default=composite_score)
-        composite_percentile = first_float(row.get("composite_percentile"), default=composite_score)
+        composite_percentile = first_float_or_none(row.get("composite_percentile"))
         round_trip_cost = estimate_round_trip_cost(
             position_usd,
             to_float(row.get("avg_dollar_volume_60d")),
@@ -335,6 +374,7 @@ def build_backtest_rows(
             "ic_tilted_composite_active_weight": value_or_blank(row, "ic_tilted_composite_active_weight"),
             "ic_tilted_composite_payload_json": row.get("ic_tilted_composite_payload_json") or "",
             "composite_percentile": composite_percentile,
+            "cohort_percentile": value_or_blank(row, "cohort_percentile"),
             "safe_core_score": value_or_blank(row, "safe_core_score"),
             "safe_core_percentile": value_or_blank(row, "safe_core_percentile"),
             "safe_core_cohort_percentile": value_or_blank(row, "safe_core_cohort_percentile"),
@@ -348,6 +388,30 @@ def build_backtest_rows(
             "tier1_safety_status": row.get("tier1_safety_status") or "",
             "tier1_safety_reason": row.get("tier1_safety_reason") or "",
             "passed_tier1_safety_gate": value_or_blank(row, "passed_tier1_safety_gate"),
+            "fundamental_quality_score": value_or_blank(row, "fundamental_quality_score"),
+            "durable_growth_score": value_or_blank(row, "durable_growth_score"),
+            "durable_growth_score_legacy": value_or_blank(row, "durable_growth_score_legacy"),
+            "durable_growth_alpha_score": value_or_blank(row, "durable_growth_alpha_score"),
+            "durable_growth_growth_score": value_or_blank(row, "durable_growth_growth_score"),
+            "durable_growth_quality_score": value_or_blank(row, "durable_growth_quality_score"),
+            "durable_growth_efficiency_score": value_or_blank(row, "durable_growth_efficiency_score"),
+            "durable_growth_capital_discipline_score": value_or_blank(row, "durable_growth_capital_discipline_score"),
+            "durable_growth_evidence_quality_score": value_or_blank(row, "durable_growth_evidence_quality_score"),
+            "fda_product_score": value_or_blank(row, "fda_product_score"),
+            "fda_product_score_legacy": value_or_blank(row, "fda_product_score_legacy"),
+            "fda_alpha_score": value_or_blank(row, "fda_alpha_score"),
+            "fda_safety_score": value_or_blank(row, "fda_safety_score"),
+            "fda_clearance_velocity_raw": value_or_blank(row, "fda_clearance_velocity_raw"),
+            "fda_clearance_velocity_score": value_or_blank(row, "fda_clearance_velocity_score"),
+            "fda_clearance_acceleration_raw": value_or_blank(row, "fda_clearance_acceleration_raw"),
+            "fda_clearance_acceleration_score": value_or_blank(row, "fda_clearance_acceleration_score"),
+            "fda_evidence_quality_score": value_or_blank(row, "fda_evidence_quality_score"),
+            "fda_safety_breadth_adjusted_score": value_or_blank(row, "fda_safety_breadth_adjusted_score"),
+            "reimbursement_score": value_or_blank(row, "reimbursement_score"),
+            "valuation_score": value_or_blank(row, "valuation_score"),
+            "technical_entry_score": value_or_blank(row, "technical_entry_score"),
+            "sentiment_catalyst_score": value_or_blank(row, "sentiment_catalyst_score"),
+            "value_trap_score": value_or_blank(row, "value_trap_score"),
             "technical_trend_quality_score": value_or_blank(row, "technical_trend_quality_score"),
             "technical_relative_strength_score": value_or_blank(row, "technical_relative_strength_score"),
             "technical_liquidity_score": value_or_blank(row, "technical_liquidity_score"),
@@ -410,10 +474,16 @@ def build_backtest_rows(
             entry_date, entry_price = series[idx]
             item["entry_price_date"] = entry_date.isoformat()
             item["entry_price"] = round(entry_price, 6)
+            calendar_idx = market_date_index.get(entry_date)
+            ticker_price_map = price_maps.get(ticker, {})
             for horizon in horizons:
-                target_idx = idx + horizon
-                if target_idx < len(series):
-                    target_date, target_price = series[target_idx]
+                target_date = (
+                    market_dates[calendar_idx + horizon]
+                    if calendar_idx is not None and calendar_idx + horizon < len(market_dates)
+                    else None
+                )
+                target_price = ticker_price_map.get(target_date) if target_date is not None else None
+                if target_date is not None and target_price is not None:
                     forward_return = (target_price - entry_price) / entry_price
                     item[f"forward_date_{horizon}d"] = target_date.isoformat()
                     item[f"forward_return_{horizon}d"] = round(forward_return, 6)
@@ -561,4 +631,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -34,6 +34,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--asof", default="", help="Dashboard as-of date. Defaults to latest Stage 7 output.")
+    parser.add_argument(
+        "--historical-mode",
+        action="store_true",
+        help="Publish a point-in-time historical snapshot and omit non-PIT research/backtest sections.",
+    )
     return parser.parse_args()
 
 
@@ -91,17 +96,20 @@ def sec_url(row: dict[str, Any] | None) -> str:
     return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_clean}/"
 
 
-def latest_filings(conn: sqlite3.Connection, source_id: str) -> dict[str, dict[str, Any]]:
+def latest_filings(conn: sqlite3.Connection, source_id: str, *, asof: str = "") -> dict[str, dict[str, Any]]:
+    asof_clause = "AND filing_date <= ?" if asof else ""
+    params: tuple[Any, ...] = (source_id, asof) if asof else (source_id,)
     rows = fetch_dicts(
         conn,
-        """
+        f"""
         SELECT ticker, cik, accession_number, form_type, filing_date, primary_document
         FROM fact_sec_filing
         WHERE source_id = ?
           AND form_type IN ('10-K', '10-Q', '20-F', '40-F', '10-K/A', '10-Q/A', '20-F/A')
+          {asof_clause}
         ORDER BY ticker, filing_date DESC, accession_number DESC
         """,
-        (source_id,),
+        params,
     )
     out: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -366,6 +374,7 @@ def risk_flags(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "ticker": row.get("ticker"),
                 "asof_date": row.get("asof_date"),
                 "calibration_cohort_id": row.get("calibration_cohort_id"),
+                "avg_dollar_volume_60d": row.get("avg_dollar_volume_60d"),
                 "severity": severity,
                 "flag": flag,
                 "detail": detail,
@@ -404,7 +413,7 @@ def risk_flags(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def overlay_summary(conn: sqlite3.Connection, *, model_family: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+def overlay_summary(conn: sqlite3.Connection, *, model_family: str, config: dict[str, Any], asof: str) -> list[dict[str, Any]]:
     sector_source = str(cfg_get(config, "semiconductor_sector_overlays.wsts.feature_source_id", "semiconductor_sector_cycle"))
     capex_source = str(cfg_get(config, "semiconductor_sector_overlays.big_tech_capex.feature_source_id", "semiconductor_big_tech_capex_cycle"))
     rows: list[dict[str, Any]] = []
@@ -413,11 +422,11 @@ def overlay_summary(conn: sqlite3.Connection, *, model_family: str, config: dict
         """
         SELECT *
         FROM feature_semiconductor_sector_cycle
-        WHERE source_id = ? AND model_family = ?
+        WHERE source_id = ? AND model_family = ? AND asof_date <= ?
         ORDER BY asof_date DESC
         LIMIT 1
         """,
-        (sector_source, model_family),
+        (sector_source, model_family, asof),
     )
     if sector:
         row = sector[0]
@@ -437,11 +446,11 @@ def overlay_summary(conn: sqlite3.Connection, *, model_family: str, config: dict
         """
         SELECT *
         FROM feature_big_tech_capex_cycle
-        WHERE source_id = ? AND model_family = ?
+        WHERE source_id = ? AND model_family = ? AND asof_date <= ?
         ORDER BY asof_date DESC
         LIMIT 1
         """,
-        (capex_source, model_family),
+        (capex_source, model_family, asof),
     )
     if capex:
         row = capex[0]
@@ -469,6 +478,7 @@ def review_queue(flags: list[dict[str, Any]], rows: list[dict[str, Any]]) -> lis
                 **flag,
                 "final_rank": source.get("final_rank", ""),
                 "final_score": source.get("final_score", ""),
+                "avg_dollar_volume_60d": source.get("avg_dollar_volume_60d", ""),
                 "model_status": source.get("model_status", ""),
                 "review_reason": source.get("review_reason", ""),
             }
@@ -505,8 +515,14 @@ def write_html(
     review_rows: list[dict[str, Any]],
     top_n: int,
     review_n: int,
+    historical_mode: bool,
 ) -> None:
     best_backtests = sorted(backtest_rows, key=lambda row: safe_float(row.get("annualized_return")) or -999, reverse=True)
+    historical_notice = (
+        "<p class=\"meta\">Historical point-in-time mode: current full-history backtest/research sections are omitted.</p>"
+        if historical_mode
+        else ""
+    )
     html_text = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -524,11 +540,12 @@ def write_html(
 <body>
   <h1>Semiconductor Dashboard</h1>
   <div class="meta">Generated {html.escape(datetime.now(timezone.utc).isoformat(timespec="seconds"))}</div>
+  {historical_notice}
   <h2>Top Ranked Companies</h2>
   {html_table(rank_rows, ["final_rank", "ticker", "final_score", "calibration_cohort_id", "data_quality_confidence", "model_status"], top_n)}
   <h2>Cohort Summary</h2>
   {html_table(cohort_rows, ["calibration_cohort_id", "ticker_count", "rank_ready_count", "avg_final_score", "top_ticker", "top_score"])}
-  <h2>Backtest Summary</h2>
+  <h2>{'Backtest Summary Omitted' if historical_mode else 'Backtest Summary'}</h2>
   {html_table(best_backtests, ["model_name", "portfolio_name", "weight_method", "exposure_mode", "annualized_return", "annualized_vol", "sharpe", "max_drawdown", "avg_excess_return_vs_equal_weight", "avg_turnover", "avg_total_cost", "avg_max_cohort_share"], 24)}
   <h2>Sector Overlays</h2>
   {html_table(overlay_rows, ["overlay", "asof_date", "score", "quality", "status", "latest_month", "detail"])}
@@ -568,15 +585,15 @@ def main() -> int:
             raise RuntimeError("No Stage 7 model output rows found for dashboard publishing.")
         asof = str(score_rows[0]["asof_date"])
         components = component_pivot(conn, source_id=stage7_source, model_family=model_family, asof=asof)
-        filings = latest_filings(conn, filing_source)
-        overlay_rows = overlay_summary(conn, model_family=model_family, config=config)
+        filings = latest_filings(conn, filing_source, asof=asof)
+        overlay_rows = overlay_summary(conn, model_family=model_family, config=config, asof=asof)
 
     ranks = rank_table(score_rows, components, filings)
     cohorts = cohort_summary(score_rows)
     flags = risk_flags(score_rows)
     queue = review_queue(flags, score_rows)
     backtest_path = resolve_path(cfg_get(config, f"{CONFIG_KEY}.backtest_summary_csv"), base_dir=base_dir)
-    backtest_rows = read_csv_rows(backtest_path)
+    backtest_rows = [] if args.historical_mode else read_csv_rows(backtest_path)
 
     outputs = {
         "rank_table": output_dir / "semiconductor_final_rank_table.csv",
@@ -603,6 +620,7 @@ def main() -> int:
         review_rows=queue,
         top_n=int(cfg_get(config, f"{CONFIG_KEY}.top_rank_rows_in_html", 25)),
         review_n=int(cfg_get(config, f"{CONFIG_KEY}.max_review_rows_in_html", 50)),
+        historical_mode=bool(args.historical_mode),
     )
     snapshot_dir, snapshot_map = snapshot_outputs(output_dir, asof, outputs, manifest_key="manifest")
     manifest = {
@@ -611,6 +629,8 @@ def main() -> int:
         "stage7_source_id": stage7_source,
         "baseline_feature_source_id": baseline_source,
         "asof_date": asof,
+        "report_mode": "historical" if args.historical_mode else "current",
+        "non_point_in_time_sections": "omitted" if args.historical_mode else "included",
         "rank_rows": len(ranks),
         "risk_flags": len(flags),
         "review_queue_rows": len(queue),

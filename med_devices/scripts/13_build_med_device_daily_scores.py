@@ -155,6 +155,7 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "currency": "TEXT DEFAULT ''",
     "calibration_status": "TEXT DEFAULT 'production_eligible'",
     "calibration_status_reason": "TEXT DEFAULT ''",
+    "calibration_eligible_flag": "INTEGER DEFAULT 1",
     "cohort_score_template_id": "TEXT DEFAULT ''",
     "cohort_score_template_spec": "TEXT DEFAULT ''",
     "cohort_score_template_tier1_role": "TEXT DEFAULT ''",
@@ -322,6 +323,7 @@ FIELDNAMES = [
     "calibration_cohort",
     "calibration_status",
     "calibration_status_reason",
+    "calibration_eligible_flag",
     "cohort_score_template_id",
     "cohort_score_template_spec",
     "cohort_score_template_tier1_role",
@@ -539,6 +541,7 @@ class ScoreRow:
     calibration_cohort: str = ""
     calibration_status: str = CALIBRATION_STATUS_PRODUCTION_ELIGIBLE
     calibration_status_reason: str = ""
+    calibration_eligible_flag: int = 1
     cohort_score_template_id: str = ""
     cohort_score_template_spec: str = ""
     cohort_score_template_tier1_role: str = ""
@@ -573,6 +576,7 @@ class ScoreRow:
     ic_tilted_component_ics_json: str = "{}"
     cohort_percentile: float = 50.0
     fundamental_quality_score: float = 0.0
+    fundamental_quality_component_weight: float = DEFAULT_WEIGHTS["fundamental_quality"]
     durable_growth_score: float = 50.0
     durable_growth_score_legacy: float = 50.0
     durable_growth_alpha_score: float = 50.0
@@ -628,6 +632,7 @@ class ScoreRow:
     quality_value_interaction_score: float = 50.0
     fda_technical_interaction_score: float = 50.0
     reimbursement_score: float = 50.0
+    reimbursement_component_weight: float = DEFAULT_WEIGHTS["reimbursement"]
     reimbursement_status: str = "unknown"
     direct_code_evidence: int = 0
     payment_rate_evidence: int = 0
@@ -637,6 +642,7 @@ class ScoreRow:
     diagnostics_lab_flag: int = 0
     unknown_reimbursement_flag: int = 1
     valuation_score: float = 0.0
+    valuation_component_weight: float = DEFAULT_WEIGHTS["valuation"]
     technical_entry_score: float = 50.0
     technical_trend_quality_score: float = 50.0
     technical_relative_strength_score: float = 50.0
@@ -678,6 +684,7 @@ class ScoreRow:
     insider_activity_score: float = 50.0
     insider_data_quality_score: float = 0.0
     sentiment_catalyst_score: float = 50.0
+    sentiment_catalyst_component_weight: float = DEFAULT_WEIGHTS["sentiment_catalyst"]
     value_trap_score: float = 0.0
     data_completeness_score: float = 0.0
     live_component_count: int = 0
@@ -1676,13 +1683,13 @@ def upsert_sentiment_proxy_rows(conn: Any, rows: list[ScoreRow]) -> int:
 
 def score_drivers(row: ScoreRow) -> tuple[list[str], list[str]]:
     items = [
-        ("fundamental", row.fundamental_quality_score, 1.0),
+        ("fundamental", row.fundamental_quality_score, row.fundamental_quality_component_weight),
         ("durable_growth", row.durable_growth_score, row.durable_growth_component_weight),
         ("fda_product", row.fda_product_score, row.fda_component_weight),
-        ("reimbursement", row.reimbursement_score, 1.0),
-        ("valuation", row.valuation_score, 1.0),
+        ("reimbursement", row.reimbursement_score, row.reimbursement_component_weight),
+        ("valuation", row.valuation_score, row.valuation_component_weight),
         ("technical_entry", row.technical_entry_score, row.technical_component_weight),
-        ("sentiment_catalyst", row.sentiment_catalyst_score, 1.0),
+        ("sentiment_catalyst", row.sentiment_catalyst_score, row.sentiment_catalyst_component_weight),
     ]
     active_items = [(name, score) for name, score, weight in items if weight > WEIGHT_EPSILON]
     positives = [f"{name}:{score:.1f}" for name, score in sorted(active_items, key=lambda item: item[1], reverse=True)[:3]]
@@ -3641,7 +3648,13 @@ def load_analyst_review_decisions_for_scoring(
         base_dir=base_dir,
     )
     analyst_review_core.ensure_decision_file(decision_path)
-    decisions, issues = analyst_review_core.load_analyst_review_decisions(decision_path)
+    allowed_decisions = analyst_review_core.parse_allowed_decisions(
+        cfg_get(config, "med_devices_analyst_review.allowed_decisions", None)
+    )
+    decisions, issues = analyst_review_core.load_analyst_review_decisions(
+        decision_path,
+        allowed_decisions=allowed_decisions,
+    )
     critical = [issue for issue in issues if str(issue.get("severity") or "").upper() == "CRITICAL"]
     if critical:
         details = "; ".join(
@@ -4372,6 +4385,26 @@ def build_rows(
         effective_weights.setdefault("fda_alpha", 0.0)
         effective_weights.setdefault("fda_safety", 0.0)
         effective_weights.setdefault("fda_safety_breadth_adjusted", 0.0)
+        fundamental_component_weight = (
+            score_template_component_weight(active_score_template, "fundamental_quality")
+            if active_score_template is not None
+            else effective_weights.get("fundamental_quality", 0.0)
+        )
+        reimbursement_component_weight = (
+            score_template_component_weight(active_score_template, "reimbursement")
+            if active_score_template is not None
+            else effective_weights.get("reimbursement", 0.0)
+        )
+        valuation_component_weight = (
+            score_template_component_weight(active_score_template, "valuation")
+            if active_score_template is not None
+            else effective_weights.get("valuation", 0.0)
+        )
+        sentiment_catalyst_component_weight = (
+            score_template_component_weight(active_score_template, "sentiment_catalyst")
+            if active_score_template is not None
+            else effective_weights.get("sentiment_catalyst", 0.0)
+        )
         current_shares_outstanding = to_float(item.get("current_shares_outstanding"))
         diluted_weighted_average_shares = to_float(item.get("diluted_weighted_average_shares"))
         basic_weighted_average_shares = to_float(item.get("basic_weighted_average_shares"))
@@ -4469,6 +4502,7 @@ def build_rows(
             calibration_cohort=cohort,
             calibration_status=calibration_status,
             calibration_status_reason=calibration_status_reason,
+            calibration_eligible_flag=int(calibration_status == CALIBRATION_STATUS_PRODUCTION_ELIGIBLE),
             cohort_score_template_id=active_score_template.template_id if active_score_template is not None else "",
             cohort_score_template_spec=score_template_spec(active_score_template),
             cohort_score_template_tier1_role=(
@@ -4480,6 +4514,7 @@ def build_rows(
             single_product_risk_flag=int(risk_flags.get("single_product_risk_flag") or 0),
             binary_event_risk_flag=int(risk_flags.get("binary_event_risk_flag") or 0),
             fundamental_quality_score=score_or(item.get("fundamental_quality_score_v1"), neutral_fundamental),
+            fundamental_quality_component_weight=fundamental_component_weight,
             durable_growth_score=durable_score,
             durable_growth_score_legacy=durable_selection.legacy_score,
             durable_growth_alpha_score=durable_selection.alpha_score,
@@ -4564,6 +4599,7 @@ def build_rows(
                 technical_entry_status_score,
             ),
             reimbursement_score=score_or(reimbursement_table_score, neutral_reimbursement) if reimbursement_item else neutral_reimbursement,
+            reimbursement_component_weight=reimbursement_component_weight,
             reimbursement_status=reimbursement_status,
             direct_code_evidence=direct_code_evidence,
             payment_rate_evidence=payment_rate_evidence,
@@ -4573,6 +4609,7 @@ def build_rows(
             diagnostics_lab_flag=diagnostics_lab_flag,
             unknown_reimbursement_flag=unknown_reimbursement_flag,
             valuation_score=score_or(item.get("valuation_score_v1"), neutral_valuation),
+            valuation_component_weight=valuation_component_weight,
             technical_entry_score=technical_score,
             technical_trend_quality_score=technical_trend_quality_score,
             technical_relative_strength_score=technical_relative_strength_score,
@@ -4640,6 +4677,7 @@ def build_rows(
             ),
             insider_data_quality_score=score_or(insider_item.get("data_quality_score"), 0.0) if insider_item else 0.0,
             sentiment_catalyst_score=sentiment_score,
+            sentiment_catalyst_component_weight=sentiment_catalyst_component_weight,
             value_trap_score=score_or(item.get("value_trap_score"), neutral_value_trap),
             live_component_count=active_live_count,
             data_completeness_score=data_completeness,
@@ -4855,6 +4893,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "calibration_cohort",
         "calibration_status",
         "calibration_status_reason",
+        "calibration_eligible_flag",
         "cohort_score_template_id",
         "cohort_score_template_spec",
         "cohort_score_template_tier1_role",
@@ -5083,6 +5122,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.calibration_cohort,
                 row.calibration_status,
                 row.calibration_status_reason,
+                row.calibration_eligible_flag,
                 row.cohort_score_template_id,
                 row.cohort_score_template_spec,
                 row.cohort_score_template_tier1_role,
@@ -5352,4 +5392,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -264,7 +264,12 @@ def load_companies(
         """
         SELECT company_id, ticker, company_name
         FROM dim_company c
-        WHERE c.is_active = 1
+        WHERE (c.is_active = 1 AND EXISTS (
+                SELECT 1
+                FROM dim_company_model_taxonomy t
+                WHERE t.company_id = c.company_id
+                  AND t.model_family = 'med_devices'
+           ))
            OR (? = 1 AND EXISTS (
                 SELECT 1
                 FROM dim_universe_membership m
@@ -1253,4 +1258,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

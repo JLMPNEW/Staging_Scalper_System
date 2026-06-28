@@ -500,7 +500,12 @@ def load_companies(
         """
         SELECT company_id, ticker, company_name, subsector
         FROM dim_company c
-        WHERE c.is_active = 1
+        WHERE (c.is_active = 1 AND EXISTS (
+                SELECT 1
+                FROM dim_company_model_taxonomy t
+                WHERE t.company_id = c.company_id
+                  AND t.model_family = 'med_devices'
+           ))
            OR (? = 1 AND EXISTS (
                 SELECT 1
                 FROM dim_universe_membership m
@@ -1502,9 +1507,9 @@ def apply_scores(rows: list[FeatureRow], *, policy: FinancialFeaturePolicy) -> N
 
     for idx, row in enumerate(rows):
         if row.data_quality_status == "fail":
-            row.fundamental_quality_score_v1 = 0.0
-            row.valuation_score_v1 = 0.0
-            row.value_trap_score = 100.0
+            row.fundamental_quality_score_v1 = None
+            row.valuation_score_v1 = None
+            row.value_trap_score = None
             continue
         hist_score = history_confidence(
             row,
@@ -1911,4 +1916,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

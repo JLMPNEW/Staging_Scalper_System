@@ -186,6 +186,11 @@ def step_index(steps: list[Step], step_id: str) -> int:
     raise ValueError(f"Unknown step id: {step_id}")
 
 
+def validate_step_order(steps: list[Step]) -> None:
+    if step_index(steps, "74_build_analyst_review") > step_index(steps, "72_validate_production_outputs"):
+        raise ValueError("74_build_analyst_review must run before 72_validate_production_outputs.")
+
+
 def selected_steps(steps: list[Step], args: argparse.Namespace) -> list[Step]:
     out = list(steps)
     if args.from_step:
@@ -335,6 +340,7 @@ def main() -> int:
         skip_form4_runner=bool(args.skip_form4_runner),
         import_positioning_sources=str(args.import_positioning_sources or ""),
     )
+    validate_step_order(steps)
     steps = apply_optional_step_config(steps, configured_optional_step_ids(config))
     if args.list_steps:
         for step in steps:

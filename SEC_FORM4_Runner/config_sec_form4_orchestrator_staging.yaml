@@ -44,7 +44,7 @@ sec_form4_orchestrator:
       form4_progress_interval_sec: 60
       form4_stop_after_sec: 600
       run_form4_quarterly_backfill: false
-      run_form4_reports: true
+      run_form4_reports: false
 
     weekly:
       sec_fetch_mode: "weekly"
@@ -61,7 +61,7 @@ sec_form4_orchestrator:
       form4_progress_interval_sec: 60
       form4_stop_after_sec: 1800
       run_form4_quarterly_backfill: false
-      run_form4_reports: true
+      run_form4_reports: false
 
   alignment:
     enabled: true

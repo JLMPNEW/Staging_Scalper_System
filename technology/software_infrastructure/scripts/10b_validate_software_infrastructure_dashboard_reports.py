@@ -28,6 +28,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate Stage 10 software-infrastructure dashboard reports.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--asof", default="", help="Expected dashboard as-of date. When set, validates manifest and rank table dates.")
+    parser.add_argument(
+        "--historical-mode",
+        action="store_true",
+        help="Allow PIT historical reports to omit current full-history Stage 8/backtest research rows.",
+    )
     return parser.parse_args()
 
 
@@ -86,11 +92,11 @@ def main() -> int:
         errors.append(f"Cohort summary has too few rows: {len(cohort_rows)}")
     if len(component_rows) < 6:
         errors.append(f"Component summary has too few rows: {len(component_rows)}")
-    if len(calibration_rows) < 5:
+    if not args.historical_mode and len(calibration_rows) < 5:
         errors.append(f"Calibration summary has too few rows: {len(calibration_rows)}")
-    if len(backtest_rows) < 4:
+    if not args.historical_mode and len(backtest_rows) < 4:
         errors.append(f"Backtest leaders has too few rows: {len(backtest_rows)}")
-    if len(stage8_rows) < 20:
+    if not args.historical_mode and len(stage8_rows) < 20:
         errors.append(f"Stage 8 candidate rank table has too few rows: {len(stage8_rows)}")
 
     if rank_rows:
@@ -124,6 +130,10 @@ def main() -> int:
         ranks = [row.get("final_rank") for row in rank_rows if row.get("final_rank")]
         if len(ranks) != len(set(ranks)):
             errors.append("Rank table contains duplicate final_rank values.")
+        if args.asof:
+            bad_dates = sorted({str(row.get("asof_date") or "") for row in rank_rows if str(row.get("asof_date") or "") != args.asof})
+            if bad_dates:
+                errors.append(f"Rank table contains rows outside asof={args.asof}: {bad_dates[:5]}")
 
     if paths["manifest"].exists():
         try:
@@ -136,6 +146,11 @@ def main() -> int:
                 )
             if str(manifest.get("model_family") or "") != "software_infrastructure":
                 errors.append(f"Manifest model_family is not software_infrastructure: {manifest.get('model_family')}")
+            if args.asof and str(manifest.get("asof_date") or "") != args.asof:
+                errors.append(f"Manifest asof_date mismatch: {manifest.get('asof_date')} vs {args.asof}")
+            expected_mode = "historical" if args.historical_mode else "current"
+            if args.historical_mode and str(manifest.get("report_mode") or "") != expected_mode:
+                errors.append(f"Manifest report_mode mismatch: {manifest.get('report_mode')} vs {expected_mode}")
         except json.JSONDecodeError as exc:
             errors.append(f"Invalid manifest JSON: {exc}")
 

@@ -51,7 +51,8 @@ market_positioning:
     source: "sec_form_13f_data_sets"
     data_sets_url: "https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets"
     cache_dir: "../output/market_positioning_cache/sec_13f"
-    cusip_ticker_map_csv: ""
+    cusip_ticker_map_csv: "data/delisted_13f_cusip_ticker_map.csv"
+    force_reprocess_archives: false
     sleep_sec: 0.2
     max_archives_per_run: 0
   ibkr_borrow:

@@ -58,29 +58,8 @@ DEFAULT_COMPONENTS = (
     "sentiment_catalyst_score",
     "value_trap_score",
 )
-OUTPUT_FIELDS = [
-    "calibration_cohort",
-    "component",
-    "count_30d",
-    "unique_tickers_30d",
-    "spearman_ic_30d",
-    "ic_t_stat_30d",
-    "top_minus_bottom_median_excess_30d",
-    "count_60d",
-    "unique_tickers_60d",
-    "spearman_ic_60d",
-    "ic_t_stat_60d",
-    "top_minus_bottom_median_excess_60d",
-    "count_120d",
-    "unique_tickers_120d",
-    "spearman_ic_120d",
-    "ic_t_stat_120d",
-    "top_minus_bottom_median_excess_120d",
-    "best_horizon_days",
-    "decay_profile",
-    "suggested_refresh_cadence",
-    "diagnostic_reason",
-]
+BASE_OUTPUT_FIELDS = ["calibration_cohort", "component"]
+TAIL_OUTPUT_FIELDS = ["best_horizon_days", "decay_profile", "suggested_refresh_cadence", "diagnostic_reason"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -108,10 +87,25 @@ def read_csv(path: Path) -> list[dict[str, str]]:
         return [dict(row) for row in csv.DictReader(handle)]
 
 
-def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+def output_fields(horizons: list[int]) -> list[str]:
+    fields = list(BASE_OUTPUT_FIELDS)
+    for horizon in horizons:
+        fields.extend(
+            [
+                f"count_{horizon}d",
+                f"unique_tickers_{horizon}d",
+                f"spearman_ic_{horizon}d",
+                f"ic_t_stat_{horizon}d",
+                f"top_minus_bottom_median_excess_{horizon}d",
+            ]
+        )
+    return [*fields, *TAIL_OUTPUT_FIELDS]
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]], *, horizons: list[int]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS, extrasaction="ignore", lineterminator="\n")
+        writer = csv.DictWriter(handle, fieldnames=output_fields(horizons), extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -123,6 +117,52 @@ def parse_int_list(raw: object, default: str) -> list[int]:
         if text.isdigit():
             out.append(int(text))
     return sorted(set(out))
+
+
+def parse_date(raw: object) -> str:
+    text = str(raw or "").strip()[:10]
+    if len(text) != 10:
+        return ""
+    try:
+        year, month, day = (int(part) for part in text.split("-"))
+    except ValueError:
+        return ""
+    if not (1 <= month <= 12 and 1 <= day <= 31 and 1900 <= year <= 2100):
+        return ""
+    return text
+
+
+def is_auto_date(raw: object) -> bool:
+    return str(raw or "").strip().lower() in {"", "auto", "latest", "latest_market_date", "auto_latest_complete"}
+
+
+def available_asof_dates(rows: list[dict[str, str]]) -> list[str]:
+    return sorted({parse_date(row.get("asof_date")) for row in rows if parse_date(row.get("asof_date"))})
+
+
+def resolve_analysis_window(config: dict[str, Any], rows: list[dict[str, str]]) -> tuple[str, str]:
+    dates = available_asof_dates(rows)
+    if not dates:
+        raise ValueError("Cannot resolve signal-decay analysis window: input rows have no valid asof_date values.")
+    start_raw = cfg_get(
+        config,
+        "calibration.signal_decay.validation_start_asof",
+        cfg_get(config, "calibration.validation_start_asof", "auto"),
+    )
+    end_raw = cfg_get(
+        config,
+        "calibration.signal_decay.validation_end_asof",
+        cfg_get(config, "calibration.validation_end_asof", "auto"),
+    )
+    window_asofs = max(1, int(cfg_get(config, "calibration.signal_decay.validation_window_asofs", cfg_get(config, "calibration.validation_window_asofs", 26))))
+    end = dates[-1] if is_auto_date(end_raw) else parse_date(end_raw)
+    eligible_dates = [item for item in dates if item <= end]
+    if not eligible_dates:
+        raise ValueError(f"No signal-decay rows on or before validation_end_asof={end}")
+    start = eligible_dates[max(0, len(eligible_dates) - window_asofs)] if is_auto_date(start_raw) else parse_date(start_raw)
+    if not start or not end or start > end:
+        raise ValueError(f"Invalid signal-decay analysis window: {start}..{end}")
+    return start, end
 
 
 def parse_component_list(raw: object) -> list[str]:
@@ -220,16 +260,16 @@ def classify_decay(metrics: dict[int, dict[str, Any]], *, min_obs: int, min_abs_
     if not eligible:
         return "", "insufficient_signal", "diagnostic_only", "no horizon clears obs/ic/t-stat thresholds"
     best_horizon, best_metric = max(eligible.items(), key=lambda item: abs(float(item[1]["ic"])))
-    abs_30 = abs(float(metrics.get(30, {}).get("ic") or 0.0))
-    abs_60 = abs(float(metrics.get(60, {}).get("ic") or 0.0))
-    abs_120 = abs(float(metrics.get(120, {}).get("ic") or 0.0))
-    if best_horizon == 30 and abs_30 >= fast_ratio * max(abs_60, abs_120, 1e-9):
-        return "30", "fast_decay", "weekly", "30d IC dominates longer horizons"
-    if best_horizon == 60:
-        return "60", "medium_decay", "monthly", "60d IC is strongest eligible horizon"
-    if best_horizon == 120:
-        return "120", "slow_decay", "quarterly", "120d IC is strongest eligible horizon"
-    return str(best_horizon), "mixed_decay", "monthly", "eligible horizons are mixed; monthly review is the conservative default"
+    ordered_horizons = sorted(metrics)
+    shortest = ordered_horizons[0]
+    longest = ordered_horizons[-1]
+    best_abs = abs(float(best_metric["ic"]))
+    other_abs = [abs(float(metric.get("ic") or 0.0)) for horizon, metric in metrics.items() if horizon != best_horizon]
+    if best_horizon == shortest and best_abs >= fast_ratio * max([*other_abs, 1e-9]):
+        return str(best_horizon), "fast_decay", "weekly", f"{best_horizon}d IC dominates longer horizons"
+    if best_horizon == longest:
+        return str(best_horizon), "slow_decay", "quarterly", f"{best_horizon}d IC is strongest eligible horizon"
+    return str(best_horizon), "medium_decay", "monthly", f"{best_horizon}d IC is strongest eligible horizon"
 
 
 def build_rows(
@@ -265,7 +305,7 @@ def build_rows(
                 "suggested_refresh_cadence": cadence,
                 "diagnostic_reason": reason,
             }
-            for horizon in (30, 60, 120):
+            for horizon in horizons:
                 metric = metrics.get(horizon, {"count": 0, "unique_tickers": 0, "ic": None, "t_stat": None, "spread": None})
                 item[f"count_{horizon}d"] = metric["count"]
                 item[f"unique_tickers_{horizon}d"] = metric["unique_tickers"]
@@ -299,8 +339,25 @@ def main() -> None:
         cfg_get(config, "calibration.signal_decay.components", cfg_get(config, "calibration.feature_stability.components", ""))
     )
     horizons = parse_int_list(cfg_get(config, "calibration.signal_decay.horizons", "30,60,120"), "30,60,120")
+    input_rows = read_csv(input_csv)
+    if not input_rows:
+        raise RuntimeError(f"Signal decay input is empty: {input_csv}")
+    missing_horizons = [horizon for horizon in horizons if f"cohort_excess_return_{horizon}d" not in input_rows[0]]
+    if missing_horizons:
+        raise RuntimeError(
+            f"Signal decay input {input_csv} is missing cohort_excess_return columns for horizons: "
+            + ",".join(str(item) for item in missing_horizons)
+        )
+    validation_start, validation_end = resolve_analysis_window(config, input_rows)
+    analysis_rows = [
+        row
+        for row in input_rows
+        if validation_start <= str(row.get("asof_date") or "").strip()[:10] <= validation_end
+    ]
+    if not analysis_rows:
+        raise RuntimeError(f"No signal-decay rows in validation window {validation_start}..{validation_end}")
     rows = build_rows(
-        read_csv(input_csv),
+        analysis_rows,
         components=components,
         horizons=horizons,
         min_obs=int(cfg_get(config, "calibration.signal_decay.min_obs", 50)),
@@ -308,9 +365,9 @@ def main() -> None:
         min_t=float(cfg_get(config, "calibration.signal_decay.min_ic_t_stat", 2.0)),
         fast_ratio=float(cfg_get(config, "calibration.signal_decay.fast_decay_ratio", 1.25)),
     )
-    write_csv(output_csv, rows)
-    print(f"signal_decay_csv={output_csv} rows={len(rows)}")
+    write_csv(output_csv, rows, horizons=horizons)
+    print(f"signal_decay_csv={output_csv} rows={len(rows)} validation_window={validation_start}..{validation_end}")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -27,6 +27,7 @@ med_devices_refresh_pipeline:
     - safe_core_score
     - ic_tilted_composite_score
     - calibration_cohort
+    - calibration_eligible_flag
     - classification
     - score_model_version
     - model_family
@@ -1744,18 +1745,20 @@ scoring:
         data_completeness_min: 85
 
 historical_backfill:
-  start_asof: "2019-01-01"
-  end_asof: "latest_market_date"
+  start_asof: "2019-01-04"
+  end_asof: "2026-06-26"
   backtest_end_asof: "auto_complete_max_horizon"
-  frequency: "weekly"
+  frequency: "daily"
   weekday: "friday"
-  stages: "financial,fda,reimbursement,technical,borrow,short_interest,institutional_flow,insider_activity,scores"
+  run_setup: true
+  setup_stages: "init_db,historical_membership,taxonomy"
+  stages: "financial,fda,reimbursement,technical,borrow,short_interest,institutional_flow,insider_activity,scores,review_pack"
   horizons: "30,60,120"
   include_historical_members: true
   skip_existing: false
   run_backtest: true
   run_calibration: true
-  publish_review_packs: false
+  publish_review_packs: true
   manifest_csv: "../output/med_devices_reports/historical_backfill/weekly_score_backfill_manifest.csv"
 
 calibration:
@@ -1868,9 +1871,10 @@ calibration:
     min_lcb_excess_return: 0.0
     require_60_120_persistence: true
   horizons: "30,60,120"
-  train_end_asof: "2025-05-30"
-  validation_start_asof: "2025-06-06"
-  validation_end_asof: "2025-11-28"
+  train_end_asof: "auto"
+  validation_start_asof: "auto"
+  validation_end_asof: "auto"
+  validation_window_asofs: 26
   embargo_days: 120
   min_train_obs: 50
   min_validation_obs: 40
@@ -2103,8 +2107,10 @@ calibration:
     recommendation_csv: "../output/med_devices_reports/calibration/med_device_safe_core_threshold_recommendations.csv"
     current_near_miss_csv: "../output/med_devices_reports/calibration/med_device_safe_core_current_near_misses.csv"
     horizons: "120"
-    validation_start_asof: "2025-06-06"
-    validation_end_asof: "2025-11-28"
+    validation_start_asof: "auto"
+    validation_end_asof: "auto"
+    validation_window_asofs: 26
+    recommendation_horizon: 120
     min_validation_obs: 20
     min_unique_tickers: 3
     min_lcb_excess: 0.0

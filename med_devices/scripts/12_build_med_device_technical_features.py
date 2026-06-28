@@ -325,8 +325,10 @@ def load_companies(
             """
             SELECT c.company_id, c.ticker, c.company_name, c.subsector, t.calibration_cohort
             FROM dim_company c
-            LEFT JOIN dim_company_model_taxonomy t ON t.company_id = c.company_id
-            WHERE c.is_active = 1
+            LEFT JOIN dim_company_model_taxonomy t
+                ON t.company_id = c.company_id
+               AND t.model_family = 'med_devices'
+            WHERE (c.is_active = 1 AND t.company_id IS NOT NULL)
                OR (? = 1 AND EXISTS (
                     SELECT 1
                     FROM dim_universe_membership m
@@ -343,7 +345,7 @@ def load_companies(
     else:
         rows = conn.execute(
             """
-            SELECT company_id, ticker, company_name, subsector, '' AS calibration_cohort
+            SELECT c.company_id, c.ticker, c.company_name, c.subsector, '' AS calibration_cohort
             FROM dim_company c
             WHERE c.is_active = 1
                OR (? = 1 AND EXISTS (
@@ -852,8 +854,8 @@ def apply_scores(
     failed_indices: set[int] = set()
     for idx, row in enumerate(rows):
         if row.latest_close is None or row.sma_50 is None:
-            row.technical_entry_score = 0.0
-            row.technical_setup_score = 0.0
+            row.technical_entry_score = 50.0
+            row.technical_setup_score = 50.0
             row.technical_core_score = 50.0
             row.technical_alpha_score = 50.0
             row.technical_pullback_score = 50.0
@@ -1125,4 +1127,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import os
 import sqlite3
 import sys
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from med_devices.core.db import connect, init_db  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 
 
@@ -95,6 +98,10 @@ def safe_float(value: Any) -> float | None:
         return None
 
 
+def pandas_index_date(value: object) -> str:
+    return str(pd.Timestamp(str(value)))[:10]
+
+
 def normalize_ticker(raw: object) -> str:
     return str(raw or "").strip().upper().replace(".", "-")
 
@@ -146,7 +153,7 @@ def choose_symbol(norgatedata: Any, member: HistoricalMember, delisted_symbols: 
         return SymbolMatch(None, "missing_norgate_symbol")
 
     target = pd.Timestamp(member.end_date)
-    scored: list[tuple[int, str]] = []
+    scored: list[tuple[float, str]] = []
     for symbol in hits:
         try:
             last = pd.Timestamp(norgatedata.last_quoted_date(symbol))
@@ -260,6 +267,8 @@ def start_ingestion(conn: sqlite3.Connection, source_id: str, timestamp: str) ->
         """,
         (source_id, timestamp, RUN_TYPE, timestamp),
     )
+    if cur.lastrowid is None:
+        raise RuntimeError("Unable to create Norgate ingestion run; missing ingestion_run_id.")
     return int(cur.lastrowid)
 
 
@@ -291,6 +300,7 @@ def upsert_price_rows(
         adj_close = safe_float(row.get("AdjClose"))
         if close is None or adj_close is None:
             continue
+        bar_date = pandas_index_date(idx)
         conn.execute(
             """
             INSERT INTO fact_price_ohlcv(
@@ -305,14 +315,14 @@ def upsert_price_rows(
                 adj_close = excluded.adj_close,
                 volume = excluded.volume,
                 dividend_amount = excluded.dividend_amount,
-                split_factor = excluded.split_factor,
+                split_factor = COALESCE(excluded.split_factor, fact_price_ohlcv.split_factor),
                 price_adjustment = excluded.price_adjustment,
                 is_adjusted = excluded.is_adjusted,
                 updated_at = excluded.updated_at
             """,
             (
                 ticker,
-                idx.isoformat(),
+                bar_date,
                 source_id,
                 safe_float(row.get("Open")),
                 safe_float(row.get("High")),
@@ -345,8 +355,13 @@ def main() -> int:
         )
     start_date = args.start_date or "2010-01-01"
 
+    if not os.environ.get("NORGATEDATA_ROOT"):
+        cache_dir = PROJECT_ROOT / "output" / "norgatedata_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["NORGATEDATA_ROOT"] = str(cache_dir)
+
     try:
-        import norgatedata
+        import norgatedata  # pyright: ignore[reportMissingImports]
     except ImportError as exc:
         raise SystemExit("norgatedata package is not installed in this Python environment.") from exc
 
@@ -360,85 +375,85 @@ def main() -> int:
     loaded_rows = 0
     request_count = 0
 
-    conn = sqlite3.connect(db_path, timeout=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0) or 30.0))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
     run_id: int | None = None
     started = now_utc()
-    try:
-        if not args.dry_run:
-            ensure_source(conn, args.source_id, started)
-            run_id = start_ingestion(conn, args.source_id, started)
+    timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0) or 30.0)
+    context = nullcontext(None) if args.dry_run else connect(db_path, timeout_sec=timeout_sec)
+    with context as conn:
+        try:
+            if conn is not None:
+                init_db(conn)
+                ensure_source(conn, args.source_id, started)
+                run_id = start_ingestion(conn, args.source_id, started)
 
-        for member in members:
-            match = choose_symbol(norgatedata, member, delisted_symbols, current_symbols)
-            status = "skipped"
-            rows = 0
-            first_bar = ""
-            last_bar = ""
-            error = ""
-            if match.source_symbol is None:
-                status = match.reason
-            else:
+            for member in members:
+                match = choose_symbol(norgatedata, member, delisted_symbols, current_symbols)
+                status = "skipped"
+                rows = 0
+                first_bar = ""
+                last_bar = ""
+                error = ""
+                if match.source_symbol is None:
+                    status = match.reason
+                else:
+                    try:
+                        prices = fetch_prices(norgatedata, match.source_symbol, start_date, member.end_date)
+                        request_count += 2
+                        if prices.empty:
+                            status = "no_price_bars"
+                        else:
+                            first_bar = min(pandas_index_date(idx) for idx in prices.index)
+                            last_bar = max(pandas_index_date(idx) for idx in prices.index)
+                            status = "loaded"
+                            rows = len(prices)
+                            if conn is not None:
+                                rows = upsert_price_rows(
+                                    conn,
+                                    ticker=member.ticker,
+                                    source_id=args.source_id,
+                                    source_symbol=match.source_symbol,
+                                    match_reason=match.reason,
+                                    prices=prices,
+                                )
+                                loaded_rows += rows
+                    except Exception as exc:  # noqa: BLE001
+                        status = "error"
+                        error = repr(exc)
+                report_rows.append(
+                    {
+                        "ticker": member.ticker,
+                        "exchange_ticker": member.exchange_ticker,
+                        "company_name": member.company_name,
+                        "membership_start": member.start_date,
+                        "membership_end": member.end_date,
+                        "norgate_symbol": match.source_symbol or "",
+                        "norgate_security_name": match.security_name,
+                        "mapping_reason": match.reason,
+                        "status": status,
+                        "loaded_rows": rows if status == "loaded" else 0,
+                        "first_bar_date": first_bar,
+                        "last_bar_date": last_bar,
+                        "error": error,
+                    }
+                )
+
+            if run_id is not None and conn is not None:
+                finish_ingestion(
+                    conn,
+                    run_id,
+                    "completed",
+                    request_count,
+                    loaded_rows,
+                    f"{RUN_TYPE}: loaded_rows={loaded_rows}",
+                )
+        except Exception:
+            if run_id is not None and conn is not None:
                 try:
-                    prices = fetch_prices(norgatedata, match.source_symbol, start_date, member.end_date)
-                    request_count += 2
-                    if prices.empty:
-                        status = "no_price_bars"
-                    else:
-                        first_bar = min(idx.isoformat() for idx in prices.index)
-                        last_bar = max(idx.isoformat() for idx in prices.index)
-                        status = "loaded"
-                        rows = len(prices)
-                        if not args.dry_run:
-                            rows = upsert_price_rows(
-                                conn,
-                                ticker=member.ticker,
-                                source_id=args.source_id,
-                                source_symbol=match.source_symbol,
-                                match_reason=match.reason,
-                                prices=prices,
-                            )
-                            loaded_rows += rows
-                except Exception as exc:  # noqa: BLE001
-                    status = "error"
-                    error = repr(exc)
-            report_rows.append(
-                {
-                    "ticker": member.ticker,
-                    "exchange_ticker": member.exchange_ticker,
-                    "company_name": member.company_name,
-                    "membership_start": member.start_date,
-                    "membership_end": member.end_date,
-                    "norgate_symbol": match.source_symbol or "",
-                    "norgate_security_name": match.security_name,
-                    "mapping_reason": match.reason,
-                    "status": status,
-                    "loaded_rows": rows if status == "loaded" else 0,
-                    "first_bar_date": first_bar,
-                    "last_bar_date": last_bar,
-                    "error": error,
-                }
-            )
-
-        if run_id is not None:
-            finish_ingestion(
-                conn,
-                run_id,
-                "completed",
-                request_count,
-                loaded_rows,
-                f"{RUN_TYPE}: loaded_rows={loaded_rows}",
-            )
-        if not args.dry_run:
-            conn.commit()
-    except Exception:
-        if run_id is not None:
-            finish_ingestion(conn, run_id, "failed", request_count, loaded_rows, f"{RUN_TYPE}: failed")
-            conn.commit()
-        raise
-    finally:
-        conn.close()
+                    finish_ingestion(conn, run_id, "failed", request_count, loaded_rows, f"{RUN_TYPE}: failed")
+                    conn.commit()
+                except Exception as cleanup_exc:  # noqa: BLE001
+                    LOGGER.warning("Failed to mark Norgate import run as failed: %r", cleanup_exc)
+            raise
 
     with output_csv.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=REPORT_FIELDS, extrasaction="ignore", lineterminator="\n")

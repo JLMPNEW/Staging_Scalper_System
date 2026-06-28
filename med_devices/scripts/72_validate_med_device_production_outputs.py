@@ -163,7 +163,13 @@ def main() -> int:
         base_dir=base_dir,
     )
     analyst_review_core.ensure_decision_file(decision_path)
-    analyst_decisions, decision_issues = analyst_review_core.load_analyst_review_decisions(decision_path)
+    allowed_decisions = analyst_review_core.parse_allowed_decisions(
+        cfg_get(config, "med_devices_analyst_review.allowed_decisions", None)
+    )
+    analyst_decisions, decision_issues = analyst_review_core.load_analyst_review_decisions(
+        decision_path,
+        allowed_decisions=allowed_decisions,
+    )
 
     with sqlite3.connect(db_path, timeout=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0) or 30.0)) as conn:
         conn.row_factory = sqlite3.Row
@@ -191,6 +197,8 @@ def main() -> int:
             JOIN dim_company c ON c.company_id = m.company_id
             WHERE m.model_family = 'med_devices'
               AND m.membership_basis = 'calibration_only_historical_delisted'
+              AND m.membership_status = 'historical'
+              AND COALESCE(m.point_in_time_flag, 0) = 1
               AND COALESCE(c.is_active, 0) = 0
             """,
         )
@@ -211,6 +219,8 @@ def main() -> int:
             JOIN dim_company c ON c.company_id = m.company_id
             WHERE m.model_family = 'med_devices'
               AND m.membership_basis = 'calibration_only_historical_delisted'
+              AND m.membership_status = 'historical'
+              AND COALESCE(m.point_in_time_flag, 0) = 1
               AND COALESCE(c.is_active, 0) = 1
             """,
         )
@@ -474,9 +484,11 @@ def main() -> int:
     top_level_csv = report_dir / "med_device_daily_composite_scores.csv"
     review_dir = review_base_dir / asof
     dated_daily_csv = review_dir / "med_device_daily_composite_scores.csv"
+    dated_portfolio_candidate_csv = review_dir / "med_device_score_review_portfolio_candidates.csv"
     for check_id, path in {
         "top_level_daily_csv_exists": top_level_csv,
         "dated_daily_csv_exists": dated_daily_csv,
+        "dated_portfolio_candidate_csv_exists": dated_portfolio_candidate_csv,
     }.items():
         add_check(
             checks,
@@ -487,7 +499,11 @@ def main() -> int:
             expected="exists",
             details="Required production score CSV must exist.",
         )
-    for label, path in {"top_level": top_level_csv, "dated_review": dated_daily_csv}.items():
+    for label, path in {
+        "top_level": top_level_csv,
+        "dated_review": dated_daily_csv,
+        "dated_portfolio_candidates": dated_portfolio_candidate_csv,
+    }.items():
         fields, rows = read_csv_rows(path)
         if not fields:
             continue

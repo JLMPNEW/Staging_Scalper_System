@@ -40,6 +40,7 @@ SCORE_FIELDS = [
     "calibration_cohort",
     "calibration_status",
     "calibration_status_reason",
+    "calibration_eligible_flag",
     "cohort_score_template_id",
     "cohort_score_template_spec",
     "cohort_score_template_tier1_role",
@@ -551,7 +552,7 @@ def classification_counts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         classification = str(row.get("classification") or "unclassified")
         counts[classification] = counts.get(classification, 0) + 1
     return [
-        {"classification": classification, "count": count}
+        {"classification": classification, "calibration_eligible_flag": "", "count": count}
         for classification, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     ]
 
@@ -562,7 +563,7 @@ def reimbursement_status_counts(rows: list[dict[str, Any]]) -> list[dict[str, An
         status = str(row.get("reimbursement_status") or "unknown")
         counts[status] = counts.get(status, 0) + 1
     return [
-        {"reimbursement_status": status, "count": count}
+        {"reimbursement_status": status, "calibration_eligible_flag": "", "count": count}
         for status, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     ]
 
@@ -850,11 +851,15 @@ def main() -> None:
         write_csv(output_dir / "med_device_score_review_regulatory_risk.csv", regulatory_risk, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_top25.csv", top25, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_bottom25.csv", bottom25, SCORE_FIELDS)
-        write_csv(output_dir / "med_device_score_review_classification_counts.csv", counts, ["classification", "count"])
+        write_csv(
+            output_dir / "med_device_score_review_classification_counts.csv",
+            counts,
+            ["classification", "calibration_eligible_flag", "count"],
+        )
         write_csv(
             output_dir / "med_device_score_review_reimbursement_status_counts.csv",
             reimbursement_counts,
-            ["reimbursement_status", "count"],
+            ["reimbursement_status", "calibration_eligible_flag", "count"],
         )
         write_markdown(
             output_dir / "med_device_score_review_pack.md",
@@ -878,4 +883,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
