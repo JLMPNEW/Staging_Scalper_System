@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -99,10 +99,6 @@ def py_script(relative: str) -> Path:
     return PROJECT_ROOT / relative
 
 
-def asof_or_today(raw: str) -> str:
-    return str(raw or "").strip() or date.today().isoformat()
-
-
 def build_steps(
     *,
     asof: str,
@@ -126,11 +122,11 @@ def build_steps(
         Step("05_sync_sec_fundamentals", "stage_4", "Sync SEC fundamentals", py_script("med_devices/scripts/05_sync_med_device_sec_fundamentals.py"), [*sec_args, "--allow-partial"], network=True),
         Step("06_build_financial_features", "stage_4", "Build financial/valuation features", py_script("med_devices/scripts/06_build_med_device_financial_features.py"), asof_args),
         Step("08_sync_fda_core", "stage_5", "Sync FDA core source facts", py_script("med_devices/scripts/08_sync_med_device_fda_core.py"), ["--allow-partial"], network=True),
-        Step("09_link_fda", "stage_5", "Link FDA manufacturers to companies", py_script("med_devices/scripts/09_link_med_device_fda_to_companies.py")),
+        Step("09_link_fda", "stage_5", "Link FDA manufacturers to companies", py_script("med_devices/scripts/09_link_med_device_fda_to_companies.py"), asof_args),
         Step("70_audit_fda_mapping", "stage_5", "Audit FDA mapping governance", py_script("med_devices/scripts/70_audit_med_device_fda_mapping_governance.py")),
         Step("10_build_fda_features", "stage_5", "Build FDA product-risk features", py_script("med_devices/scripts/10_build_med_device_fda_features.py"), asof_args),
         Step("14_sync_cms_reimbursement", "stage_5", "Sync CMS/reimbursement source facts", py_script("med_devices/scripts/14_sync_med_device_cms_reimbursement.py"), ["--allow-partial"], network=True),
-        Step("15_link_reimbursement", "stage_5", "Link reimbursement evidence to companies", py_script("med_devices/scripts/15_link_med_device_reimbursement_to_companies.py")),
+        Step("15_link_reimbursement", "stage_5", "Link reimbursement evidence to companies", py_script("med_devices/scripts/15_link_med_device_reimbursement_to_companies.py"), asof_args),
         Step("11_build_reimbursement_features", "stage_5", "Build reimbursement features", py_script("med_devices/scripts/11_build_med_device_reimbursement_features.py"), asof_args),
         Step("12_build_technical_features", "stage_6", "Build technical-entry features", py_script("med_devices/scripts/12_build_med_device_technical_features.py"), asof_args),
         Step("55_sync_finra_short_volume", "stage_7", "Sync FINRA short-volume facts", py_script("med_devices/scripts/55_sync_med_device_finra_short_volume.py"), ["--end-date", asof] if asof else [], network=True, optional=True),
@@ -311,7 +307,7 @@ def main() -> int:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
-    asof = asof_or_today(args.asof)
+    asof = str(args.asof or "").strip()
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_dir = (
         args.output_dir.expanduser().resolve()

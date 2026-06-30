@@ -1,0 +1,117 @@
+model_family: defense
+cohorts:
+  - cohort_id: aerospace_components_materials_and_mro
+    cohort_name: Aerospace components, materials and MRO
+    calibration_use: core
+    tickers:
+      - HWM
+      - TDG
+      - HEI
+      - HEI-A
+      - FTAI
+      - WWD
+      - ARXS
+      - MOG-A
+      - MOG-B
+      - SARO
+      - LOAR
+      - HXL
+      - DPC
+      - MRCY
+      - VSEC
+      - KRMN
+      - AIR
+      - ATRO
+      - DCO
+      - PKE
+      - TATT
+      - ELMT
+      - ISSC
+      - SIF
+      - CVU
+      - AIRI
+      - OSIS
+      - ATI
+      - CRS
+
+  - cohort_id: emerging_defense_tech_drones_munitions_speculative
+    cohort_name: Emerging defense tech, drones, munitions and speculative defense
+    calibration_use: development_stage
+    tickers:
+      - KTOS
+      - AVAV
+      - RCAT
+      - CDRE
+      - AVEX
+      - NPK
+      - SWBI
+      - RGR
+      - MRLN
+      - POWW
+      - AIRO
+      - BYRN
+      - VWAV
+      - CODA
+      - OPXS
+      - SPAI
+      - XTIA
+      - MOB
+      - DUKR
+      - BBAI
+
+  - cohort_id: primes_diversified_and_govtech_services
+    cohort_name: Primes, diversified defense and govtech services
+    calibration_use: core
+    tickers:
+      - GE
+      - RTX
+      - BA
+      - LMT
+      - GD
+      - NOC
+      - HONAV
+      - LHX
+      - AXON
+      - ESLT
+      - CW
+      - BWXT
+      - TXT
+      - EMBJ
+      - DRS
+      - HII
+      - CAE
+      - VVX
+      - LDOS
+      - SAIC
+      - CACI
+      - BAH
+      - PSN
+      - KBR
+      - TDY
+      - PLTR
+
+  - cohort_id: space_satellite_and_advanced_air_mobility
+    cohort_name: Space, satellite and advanced air mobility
+    calibration_use: development_stage
+    tickers:
+      - SPCX
+      - RKLB
+      - PL
+      - MDA
+      - FLY
+      - BETA
+      - ACHR
+      - YSS
+      - LUNR
+      - RDW
+      - HAWK
+      - VOYG
+      - EVEX
+      - SATL
+      - FJET
+      - EVTL
+      - SIDU
+      - MNTS
+      - HOVR
+      - BKSY
+

@@ -214,6 +214,47 @@ class TrialCandidate:
     candidate_id: str
 
 
+def candidate_to_attr(candidate: TrialCandidate) -> dict[str, Any]:
+    return {
+        "cohort": candidate.cohort,
+        "components": [
+            {
+                "component": component,
+                "direction": direction,
+                "weight": weight,
+                "sleeve": sleeve,
+            }
+            for component, direction, weight, sleeve in candidate.components
+        ],
+        "gates": dict(candidate.gates),
+        "candidate_id": candidate.candidate_id,
+    }
+
+
+def candidate_from_attr(raw: object) -> TrialCandidate | None:
+    if isinstance(raw, TrialCandidate):
+        return raw
+    if not isinstance(raw, dict):
+        return None
+    components: list[tuple[str, str, float, str]] = []
+    for item in raw.get("components") or []:
+        if not isinstance(item, dict):
+            continue
+        component = str(item.get("component") or "").strip()
+        direction = str(item.get("direction") or "").strip()
+        sleeve = str(item.get("sleeve") or "").strip()
+        if not component or not direction:
+            continue
+        components.append((component, direction, float(item.get("weight") or 0.0), sleeve))
+    gates_raw = raw.get("gates") if isinstance(raw.get("gates"), dict) else {}
+    gates = {str(key): float(value or 0.0) for key, value in gates_raw.items()}
+    cohort = str(raw.get("cohort") or "").strip()
+    candidate_id = str(raw.get("candidate_id") or "").strip()
+    if not cohort or not candidate_id:
+        return None
+    return TrialCandidate(cohort=cohort, components=tuple(components), gates=gates, candidate_id=candidate_id)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -1658,6 +1699,14 @@ def write_config_fragment(path: Path, recommendations: list[dict[str, Any]]) -> 
     }
     cohorts = payload["calibration"]["optuna_shadow_policy_candidates"]["cohorts"]
     for row in recommendations:
+        if not str(row.get("recommended_candidate_id") or "").strip():
+            continue
+        try:
+            component_spec = json.loads(str(row.get("component_spec_json") or ""))
+            sleeve_weight = json.loads(str(row.get("sleeve_weight_json") or ""))
+            gate_spec = json.loads(str(row.get("gate_spec_json") or ""))
+        except json.JSONDecodeError:
+            continue
         cohorts[row["calibration_cohort"]] = {
             "candidate_id": row["recommended_candidate_id"],
             "promotion_status": row["promotion_status"],
@@ -1670,9 +1719,9 @@ def write_config_fragment(path: Path, recommendations: list[dict[str, Any]]) -> 
             "min_lcb_scope": row["min_lcb_scope"],
             "min_lcb_excess_60d": to_float(row["min_lcb_excess_60d"]),
             "min_lcb_excess_120d": to_float(row["min_lcb_excess_120d"]),
-            "component_spec": json.loads(row["component_spec_json"]),
-            "sleeve_weight": json.loads(row["sleeve_weight_json"]),
-            "gate_spec": json.loads(row["gate_spec_json"]),
+            "component_spec": component_spec,
+            "sleeve_weight": sleeve_weight,
+            "gate_spec": gate_spec,
             "promotion_reason": row["promotion_reason"],
         }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1857,7 +1906,7 @@ def main() -> None:
                 horizons=horizons,
                 settings=settings,
             )
-            trial.set_user_attr("candidate", candidate)
+            trial.set_user_attr("candidate", candidate_to_attr(candidate))
             trial.set_user_attr("result", result)
             prune_reason = infeasible_prune_reason(result, settings)
             if prune_reason:
@@ -1870,9 +1919,18 @@ def main() -> None:
 
         cohort_seed = seed + int(hashlib.sha1(cohort.encode("utf-8")).hexdigest()[:8], 16) % 100_000
         sampler = optuna.samplers.TPESampler(seed=cohort_seed)
-        journal_file_backend_cls: Any = getattr(optuna.storages, "JournalFileBackend")
-        storage = optuna.storages.JournalStorage(
-            journal_file_backend_cls(str(study_journal_path))
+        journal_file_backend_cls: Any = getattr(optuna.storages, "JournalFileBackend", None)
+        journal_file_storage_cls: Any = getattr(optuna.storages, "JournalFileStorage", None)
+        if journal_file_backend_cls is not None:
+            journal_backend = journal_file_backend_cls(str(study_journal_path))
+        elif journal_file_storage_cls is not None and sys.platform != "win32":
+            journal_backend = journal_file_storage_cls(str(study_journal_path))
+        else:
+            journal_backend = None
+        storage = (
+            optuna.storages.JournalStorage(journal_backend)
+            if journal_backend is not None
+            else optuna.storages.RDBStorage(f"sqlite:///{study_journal_path.with_suffix('.sqlite').as_posix()}")
         )
         study = optuna.create_study(
             direction="maximize",
@@ -1885,8 +1943,8 @@ def main() -> None:
         cohort_trial_rows: list[dict[str, Any]] = []
         for trial in study.trials:
             result = trial.user_attrs.get("result")
-            candidate = trial.user_attrs.get("candidate")
-            if not isinstance(result, dict) or not isinstance(candidate, TrialCandidate):
+            candidate = candidate_from_attr(trial.user_attrs.get("candidate"))
+            if not isinstance(result, dict) or candidate is None:
                 if trial.state.name == "PRUNED":
                     pruned_row: dict[str, Any] = {field: "" for field in TRIAL_FIELDS}
                     pruned_row.update(

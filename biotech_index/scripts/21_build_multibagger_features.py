@@ -33,6 +33,7 @@ from biotech_index.core.pipeline_guards import (  # noqa: E402
     validate_output_coverage,
     validate_requested_tickers,
 )
+from biotech_index.core.report_inputs import resolve_dated_report_input_csv  # noqa: E402
 
 
 LOGGER = logging.getLogger("build_multibagger_features")
@@ -692,6 +693,25 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def read_delisted_universe_tickers(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    out: set[str] = set()
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            is_delisted = (
+                str(row.get("calibration_only") or "").strip().lower() in {"1", "true", "yes"}
+                or str(row.get("universe_status") or "").strip().lower() == "delisted_calibration"
+                or str(row.get("historical_universe_source") or "").strip().lower()
+                == "delisted_biotech_calibration_universe"
+            )
+            ticker = normalize_ticker(row.get("ticker"))
+            if is_delisted and ticker:
+                out.add(ticker)
+    return out
+
+
 def main() -> None:
     configure_logging()
     args = parse_args()
@@ -699,7 +719,7 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    universe_csv = resolve_path(
+    configured_universe_csv = resolve_path(
         cfg_get(
             config,
             "multibagger.final_scoring_universe_csv",
@@ -711,7 +731,6 @@ def main() -> None:
     output_csv = output_dir / str(cfg_get(config, "multibagger.features_csv", "multibagger_features.csv"))
     ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if value.strip()}
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
-    scoring_tickers = read_final_scoring_tickers(universe_csv)
     subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_companies))
     output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
 
@@ -726,8 +745,16 @@ def main() -> None:
             effective_asof_obj = parse_date(asof_date)
             if effective_asof_obj is None:
                 raise ValueError(f"Invalid resolved asof_date: {asof_date}")
+            universe_csv = resolve_dated_report_input_csv(
+                configured_universe_csv,
+                base_output_dir=resolve_path(cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir),
+                asof_date=asof_date,
+                logger=LOGGER,
+            )
+            scoring_tickers = read_final_scoring_tickers(universe_csv)
+            delisted_universe_tickers = read_delisted_universe_tickers(universe_csv)
             run_id = start_run(conn, run_type="build_multibagger_features", input_path=db_path)
-            inactive_expected_tickers = scoring_tickers.intersection(load_inactive_company_tickers(conn))
+            inactive_expected_tickers = scoring_tickers.intersection(load_inactive_company_tickers(conn)) - delisted_universe_tickers
             if inactive_expected_tickers:
                 LOGGER.warning(
                     "Excluding %d inactive/delisted final-universe ticker(s) from multibagger coverage: %s",
@@ -749,6 +776,8 @@ def main() -> None:
             commercial = load_latest_table(conn, "commercial_value_features_daily", asof_date)
             survival = load_latest_table(conn, "financial_survival_features", asof_date)
             market_source_priority = scoring_market_sources(config)
+            if delisted_universe_tickers and "norgate_us_equities_total_return" not in market_source_priority:
+                market_source_priority = [*market_source_priority, "norgate_us_equities_total_return"]
             max_upstream_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2))
             market = load_latest_table(
                 conn,

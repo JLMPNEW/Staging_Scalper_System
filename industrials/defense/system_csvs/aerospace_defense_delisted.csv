@@ -1,0 +1,41 @@
+ticker,company,cohort,exit_type,terminal_type,acquirer,exit_year,cik,confidence
+PCP,Precision Castparts,aerospace_components_materials_and_mro,strategic,acquisition,Berkshire Hathaway,2016,79958,high
+GR,Goodrich,aerospace_components_materials_and_mro,strategic,acquisition,United Technologies,2012,42542,high
+BEAV,B/E Aerospace,aerospace_components_materials_and_mro,strategic,acquisition,Rockwell Collins,2017,866370,high
+ESL,Esterline Technologies,aerospace_components_materials_and_mro,strategic,acquisition,TransDigm,2019,33608,high
+COL,Rockwell Collins,aerospace_components_materials_and_mro,strategic,acquisition,United Technologies,2018,1137411,high
+KAMN,Kaman,aerospace_components_materials_and_mro,pe_buyout,acquisition,Arcline,2024,54381,verified
+WAIR,Wesco Aircraft,aerospace_components_materials_and_mro,pe_buyout,acquisition,Platinum Equity (Incora),2020,1517735,high
+RTI,RTI International Metals,aerospace_components_materials_and_mro,strategic,acquisition,Alcoa,2015,1043325,high
+AJRD,Aerojet Rocketdyne,aerospace_components_materials_and_mro,strategic,acquisition,L3Harris,2023,40888,high
+LDSH,Ladish,aerospace_components_materials_and_mro,strategic,acquisition,Allegheny Technologies,2011,57055,medium
+OA,Orbital ATK,emerging_defense_tech_drones_munitions_speculative,strategic,acquisition,Northrop Grumman,2018,866121,verified
+ATK,Alliant Techsystems,emerging_defense_tech_drones_munitions_speculative,merger,acquisition,Orbital Sciences (formed Orbital ATK),2015,866121,verified
+HRLY,Herley Industries,emerging_defense_tech_drones_munitions_speculative,strategic,acquisition,Kratos,2011,47218,high
+APSG,Applied Signal Technology,emerging_defense_tech_drones_munitions_speculative,strategic,acquisition,Raytheon,2011,906236,high
+STST,Argon ST,emerging_defense_tech_drones_munitions_speculative,strategic,acquisition,Boeing,2010,1293674,high
+ATNY,API Technologies,emerging_defense_tech_drones_munitions_speculative,pe_buyout,acquisition,J.F. Lehman,2016,1081661,high
+ARTX,Arotech,emerging_defense_tech_drones_munitions_speculative,pe_buyout,acquisition,Greenbriar Equity,2019,6313,high
+DRS,DRS Technologies,emerging_defense_tech_drones_munitions_speculative,strategic,acquisition,Finmeccanica (Leonardo),2008,28634,high
+RTN,Raytheon Company,primes_diversified_and_govtech_services,merger,acquisition,United Technologies (RTX),2020,1047124,high
+UTX,United Technologies,primes_diversified_and_govtech_services,merger,acquisition,Raytheon (RTX),2020,101829,high
+HRS,Harris Corp,primes_diversified_and_govtech_services,merger,acquisition,L3 Technologies (L3Harris),2019,45319,high
+LLL,L3 Technologies,primes_diversified_and_govtech_services,merger,acquisition,Harris (L3Harris),2019,1056239,high
+CUB,Cubic Corp,primes_diversified_and_govtech_services,pe_buyout,acquisition,Veritas/Evergreen,2021,26076,high
+MANT,ManTech International,primes_diversified_and_govtech_services,pe_buyout,acquisition,Carlyle,2022,1156295,verified
+CSRA,CSRA,primes_diversified_and_govtech_services,strategic,acquisition,General Dynamics,2018,1650808,verified
+PRSP,Perspecta,primes_diversified_and_govtech_services,pe_buyout,acquisition,Peraton/Veritas,2021,1725516,verified
+EGL,Engility,primes_diversified_and_govtech_services,strategic,acquisition,SAIC,2019,1544229,high
+KEYW,KEYW Holding,primes_diversified_and_govtech_services,strategic,acquisition,Jacobs,2019,1479426,high
+PAE,PAE Inc,primes_diversified_and_govtech_services,pe_buyout,acquisition,Amentum (Lindsay Goldberg),2022,1758254,high
+XLS,Exelis,primes_diversified_and_govtech_services,strategic,acquisition,Harris,2015,1516104,high
+MAXR,Maxar Technologies,space_satellite_and_advanced_air_mobility,pe_buyout,acquisition,Advent International,2023,1121142,high
+GEOY,GeoEye,space_satellite_and_advanced_air_mobility,merger,acquisition,DigitalGlobe,2013,788626,high
+ORBC,ORBCOMM,space_satellite_and_advanced_air_mobility,pe_buyout,acquisition,GI Partners,2021,1361956,high
+LORL,Loral Space and Communications,space_satellite_and_advanced_air_mobility,merger,acquisition,Telesat,2021,1006269,high
+ORB,Orbital Sciences,space_satellite_and_advanced_air_mobility,merger,acquisition,Alliant Techsystems (formed Orbital ATK),2015,820736,verified
+LLAP,Terran Orbital,space_satellite_and_advanced_air_mobility,strategic,distressed_nonzero,Lockheed Martin,2024,1879903,verified
+ASTR,Astra Space,space_satellite_and_advanced_air_mobility,pe_buyout,distressed_nonzero,Apogee (founder take-private),2024,1814329,verified
+VORB,Virgin Orbit,space_satellite_and_advanced_air_mobility,bankruptcy,wipeout,Chapter 11 (assets sold piecemeal),2023,1831804,verified
+I,Intelsat,space_satellite_and_advanced_air_mobility,bankruptcy,wipeout,Chapter 11 (emerged private 2022),2020,1561550,high
+LILM,Lilium,space_satellite_and_advanced_air_mobility,bankruptcy,wipeout,German insolvency,2024,1855756,medium

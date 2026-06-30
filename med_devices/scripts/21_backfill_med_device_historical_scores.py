@@ -85,6 +85,8 @@ class BackfillPolicy:
     run_backtest: bool
     run_calibration: bool
     publish_review_packs: bool
+    run_oos_validation: bool
+    allow_missing_static_pit_metadata: bool
 
 
 def parse_args() -> argparse.Namespace:
@@ -121,6 +123,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-run-calibration", action="store_false", dest="run_calibration")
     parser.add_argument("--publish-review-packs", action="store_true", default=None)
     parser.add_argument("--no-publish-review-packs", action="store_false", dest="publish_review_packs")
+    parser.add_argument("--run-oos-validation", action="store_true", default=None)
+    parser.add_argument("--no-run-oos-validation", action="store_false", dest="run_oos_validation")
+    parser.add_argument("--allow-missing-static-pit-metadata", action="store_true")
     return parser.parse_args()
 
 
@@ -237,6 +242,15 @@ def policy_from_config(config: dict[str, Any], args: argparse.Namespace) -> Back
         if args.publish_review_packs is None
         else bool(args.publish_review_packs)
     )
+    run_oos_validation = (
+        parse_bool(cfg_get(config, "historical_backfill.run_oos_validation", True), True)
+        if args.run_oos_validation is None
+        else bool(args.run_oos_validation)
+    )
+    allow_missing_static_pit_metadata = bool(args.allow_missing_static_pit_metadata) or parse_bool(
+        cfg_get(config, "historical_backfill.allow_missing_static_pit_metadata", False),
+        False,
+    )
     skip_existing = parse_bool(cfg_get(config, "historical_backfill.skip_existing", True), True) and not args.force
     if publish_review_packs and "review_pack" not in stages:
         stages = [*stages, "review_pack"]
@@ -255,6 +269,8 @@ def policy_from_config(config: dict[str, Any], args: argparse.Namespace) -> Back
         run_backtest=run_backtest,
         run_calibration=run_calibration,
         publish_review_packs=publish_review_packs,
+        run_oos_validation=run_oos_validation,
+        allow_missing_static_pit_metadata=allow_missing_static_pit_metadata,
     )
 
 
@@ -462,6 +478,43 @@ def validate_backtest_csv(path: Path, *, expected_start: date, expected_end: dat
         )
 
 
+def run_oos_validation(
+    *,
+    config_path: Path,
+    start_asof: date,
+    end_asof: date,
+    reports_root: Path,
+    output_csv: Path,
+    diagnostic_output_csv: Path,
+    allow_missing_static_pit_metadata: bool,
+) -> None:
+    command = [
+        sys.executable,
+        str(PACKAGE_ROOT / "scripts" / "75_validate_med_device_historical_snapshot_oos.py"),
+        "--config",
+        str(config_path),
+        "--start-asof",
+        start_asof.isoformat(),
+        "--end-asof",
+        end_asof.isoformat(),
+        "--reports-root",
+        str(reports_root),
+        "--output-csv",
+        str(output_csv),
+        "--diagnostic-output-csv",
+        str(diagnostic_output_csv),
+    ]
+    if allow_missing_static_pit_metadata:
+        command.append("--allow-missing-static-pit-metadata")
+    try:
+        run_command(command)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "OOS validation failed before backtest/calibration. "
+            f"Review strict output at {output_csv} and diagnostic output at {diagnostic_output_csv}."
+        ) from exc
+
+
 def main() -> None:
     configure_utc_logging()
     args = parse_args()
@@ -491,6 +544,15 @@ def main() -> None:
         cfg_get(config, "scoring.review_pack_dir", "../output/med_devices_reports/score_review_pack"),
         base_dir=base_dir,
     )
+    oos_validation_csv = resolve_path(
+        cfg_get(
+            config,
+            "historical_backfill.oos_validation_csv",
+            "../output/med_devices_reports/oos_validation/med_device_historical_snapshot_oos_validation.csv",
+        ),
+        base_dir=base_dir,
+    )
+    oos_validation_diagnostic_csv = oos_validation_csv.with_name(f"{oos_validation_csv.stem}_diagnostic{oos_validation_csv.suffix}")
     review_pack_required_files = [
         str(item).strip()
         for item in cfg_get(config, "med_devices_production_qa.review_pack_required_files", []) or []
@@ -628,6 +690,18 @@ def main() -> None:
             write_manifest(manifest_path, manifest_rows)
             raise
     write_manifest(manifest_path, manifest_rows)
+
+    successful_asofs = [asof for asof, row in zip(asofs, manifest_rows) if row.get("status") in {"success", "skipped_existing"}]
+    if successful_asofs and policy.run_oos_validation:
+        run_oos_validation(
+            config_path=config_path,
+            start_asof=successful_asofs[0],
+            end_asof=successful_asofs[-1],
+            reports_root=review_pack_base_dir,
+            output_csv=oos_validation_csv,
+            diagnostic_output_csv=oos_validation_diagnostic_csv,
+            allow_missing_static_pit_metadata=policy.allow_missing_static_pit_metadata,
+        )
 
     backtest_asofs = [asof for asof in asofs if backtest_end_asof is not None and asof <= backtest_end_asof]
     if backtest_asofs and policy.run_backtest:

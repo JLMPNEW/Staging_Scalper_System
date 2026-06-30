@@ -1,0 +1,41 @@
+expected_ticker_count: 95
+default_sector: Industrials
+default_industry: Aerospace & Defense
+default_subsector: Defense
+default_country: United States
+default_currency: USD
+default_unassigned_cohort_id: defense_unassigned
+default_unassigned_cohort_name: Unassigned defense review
+default_unassigned_calibration_use: review
+allow_unassigned_cohort: false
+active_listing_statuses:
+  - active
+non_investable_listing_statuses:
+  - inactive_or_not_investable
+  - invalid_or_inactive
+  - active_financial_status_d
+  - active_financial_status_e
+investable_security_types:
+  - common_stock
+  - ordinary_shares
+  - adr_ads
+  - american_depositary_shares
+  - new_york_registry_shares
+required_non_cik_fields:
+  - ticker
+  - investability_status
+  - company_name
+  - exchange
+  - sector
+  - industry
+  - subsector
+  - defense_calibration_cohort
+  - country
+  - currency
+  - security_type
+  - listing_status
+  - is_primary_listing
+development_stage_cohorts:
+  - emerging_defense_tech_drones_munitions_speculative
+  - space_satellite_and_advanced_air_mobility
+allowed_shared_cik_same_issuer: true

@@ -47,6 +47,11 @@ from biotech_index.core.pipeline_guards import (  # noqa: E402
     validate_full_universe_coverage,
     validate_layer_freshness,
 )
+from biotech_index.core.report_inputs import (  # noqa: E402
+    compact_asof,
+    dated_output_dir,
+    resolve_dated_report_input_csv,
+)
 from biotech_index.core.scoring_math import (  # noqa: E402
     convex_risk_drag as shared_convex_risk_drag,
     normalize_growth_drag_curve,
@@ -83,6 +88,53 @@ EXPECTED_COMMERCIAL_RISK_FIELDS = frozenset(
         "commercial_risk_sub_scores",
     }
 )
+
+PORTFOLIO_LAYER_CONTRACT_FIELDS = [
+    "portfolio_candidate_gate",
+    "portfolio_candidate_score",
+    "portfolio_candidate_status",
+    "portfolio_candidate_reason",
+    "calibration_eligible_flag",
+    "score_confidence",
+    "avg_dollar_volume_60d",
+    "review_reason",
+    "eligibility_reason",
+    "universe_status",
+    "historical_universe_source",
+    "price_start_date",
+    "price_end_date",
+    "terminal_date",
+    "historical_price_ticker",
+    "calibration_only",
+    "recovery_type",
+    "equity_recovery",
+    "drop_otc_tape",
+    "latest_price_date",
+    "source_snapshot_asof_date",
+    "price_data_asof_date",
+    "feature_data_asof_date",
+    "clinical_data_asof_date",
+    "financial_data_asof_date",
+    "short_interest_asof_date",
+    "institutional_data_asof_date",
+    "insider_data_asof_date",
+    "borrow_data_asof_date",
+    "calibration_cohort",
+    "calibration_status",
+    "calibration_status_reason",
+    "native_score_field",
+    "native_score_value",
+    "score_scale_min",
+    "score_scale_max",
+    "score_neutral_value",
+    "score_zero_is_missing_flag",
+    "capacity_bucket",
+    "min_position_size_feasible",
+    "max_position_size_feasible",
+    "liquidity_score",
+    "forward_catalyst_event_date",
+    "forward_catalyst_asof_date",
+]
 
 
 @dataclass(frozen=True)
@@ -122,27 +174,66 @@ PRODUCTION_SELECTION_POLICIES = frozenset(
         "investable_core_risk_cap",
         "core_structural_veto",
         "core_veto_event_drag",
+        "core_veto_event_drag_commercial_overlay_light",
+        "core_veto_event_drag_commercial_overlay_strict",
+        "core_veto_event_drag_top10_quality_guard",
         "core_veto_event_soft_drag",
         "core_veto_event_drag_quality_guardrail",
+        "core_veto_event_drag_rebound_preserve_value_guard",
+        "core_veto_event_drag_rebound_catalyst_value_guard",
         "core_veto_event_soft_drag_quality_guardrail",
         "core_veto_event_drag_business_shock_strict",
+        "core_veto_event_drag_value_trap_guardrail",
         "core_veto_event_drag_expected_return_tilt",
         "core_veto_event_drag_mature_defensive_guard",
+        "core_veto_event_drag_toxic_soft_filter",
+        "core_veto_event_soft_drag_quality_guardrail_commercial_er_tilt",
+        "core_veto_event_soft_drag_quality_guardrail_commercial_entry_guard",
+        "core_veto_event_soft_drag_quality_guardrail_short_term_catalyst_timing",
+        "core_veto_event_soft_drag_quality_guardrail_borrow_squeeze_bonus",
+        "core_veto_event_soft_drag_quality_guardrail_borrow_squeeze_distress_guard",
+        "core_veto_event_soft_drag_quality_guardrail_borrow_pressure_cohort",
+        "core_veto_event_soft_drag_quality_guardrail_borrow_discovery_only",
+        # Calibration-generated cohort policies — keep in sync with
+        # generate_selection_policies() in 28_calibrate_biotech_opportunity.py
+        "cohort_commercial_profitable_value_fit",
+        "cohort_late_clinical_catalyst_risk",
+        "cohort_commercial_turnaround_rebound",
     }
 )
 SOFT_DRAG_SELECTION_POLICIES = frozenset(
     {
         "core_veto_event_soft_drag",
         "core_veto_event_soft_drag_quality_guardrail",
+        "core_veto_event_soft_drag_quality_guardrail_commercial_er_tilt",
+        "core_veto_event_soft_drag_quality_guardrail_commercial_entry_guard",
+        "core_veto_event_soft_drag_quality_guardrail_short_term_catalyst_timing",
+        "core_veto_event_soft_drag_quality_guardrail_borrow_squeeze_bonus",
+        "core_veto_event_soft_drag_quality_guardrail_borrow_squeeze_distress_guard",
+        "core_veto_event_soft_drag_quality_guardrail_borrow_pressure_cohort",
+        "core_veto_event_soft_drag_quality_guardrail_borrow_discovery_only",
     }
 )
 QUALITY_GUARDRAIL_SELECTION_POLICIES = frozenset(
     {
         "core_veto_event_drag_quality_guardrail",
         "core_veto_event_soft_drag_quality_guardrail",
+        "core_veto_event_drag_commercial_overlay_light",
+        "core_veto_event_drag_commercial_overlay_strict",
+        "core_veto_event_drag_top10_quality_guard",
         "core_veto_event_drag_business_shock_strict",
+        "core_veto_event_drag_value_trap_guardrail",
         "core_veto_event_drag_expected_return_tilt",
+        "core_veto_event_drag_rebound_preserve_value_guard",
+        "core_veto_event_drag_rebound_catalyst_value_guard",
         "core_veto_event_drag_mature_defensive_guard",
+        "core_veto_event_soft_drag_quality_guardrail_commercial_er_tilt",
+        "core_veto_event_soft_drag_quality_guardrail_commercial_entry_guard",
+        "core_veto_event_soft_drag_quality_guardrail_short_term_catalyst_timing",
+        "core_veto_event_soft_drag_quality_guardrail_borrow_squeeze_bonus",
+        "core_veto_event_soft_drag_quality_guardrail_borrow_squeeze_distress_guard",
+        "core_veto_event_soft_drag_quality_guardrail_borrow_pressure_cohort",
+        "core_veto_event_soft_drag_quality_guardrail_borrow_discovery_only",
     }
 )
 
@@ -186,38 +277,13 @@ def parse_date(raw: object) -> date | None:
         return None
 
 
-def compact_asof(asof_date: str) -> str:
-    parsed = parse_date(asof_date)
-    if parsed is None:
-        raise ValueError(f"Invalid as_of date for output folder: {asof_date!r}")
-    return parsed.strftime("%Y%m%d")
-
-
-def dated_output_dir(base_output_dir: Path, asof_date: str) -> Path:
-    compact = compact_asof(asof_date)
-    return base_output_dir if base_output_dir.name == compact else base_output_dir / compact
-
-
 def resolve_report_input_csv(configured_path: Path, *, base_output_dir: Path, asof_date: str) -> Path:
-    if configured_path.exists():
-        return configured_path
-    dated_candidate = dated_output_dir(base_output_dir, asof_date) / configured_path.name
-    if dated_candidate.exists():
-        return dated_candidate
-    candidates = sorted(
-        base_output_dir.glob(f"*/{configured_path.name}"),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
+    return resolve_dated_report_input_csv(
+        configured_path,
+        base_output_dir=base_output_dir,
+        asof_date=asof_date,
+        logger=LOGGER,
     )
-    if candidates:
-        LOGGER.warning(
-            "Configured report input not found at %s or %s; using latest dated copy %s",
-            configured_path,
-            dated_candidate,
-            candidates[0],
-        )
-        return candidates[0]
-    return configured_path
 
 
 def to_float(raw: object, default: float = 0.0) -> float:
@@ -273,6 +339,26 @@ def as_bool(raw: object, default: bool = False) -> bool:
     if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
         return False
     return default
+
+
+def first_nonblank(*values: object) -> str:
+    for value in values:
+        text = str(value if value is not None else "").strip()
+        if text:
+            return text
+    return ""
+
+
+def capacity_bucket_from_addv(avg_dollar_volume: float) -> str:
+    if avg_dollar_volume >= 20_000_000:
+        return "high_capacity"
+    if avg_dollar_volume >= 5_000_000:
+        return "medium_capacity"
+    if avg_dollar_volume >= 1_000_000:
+        return "low_capacity"
+    if avg_dollar_volume > 0:
+        return "micro_capacity"
+    return "unknown"
 
 
 def parse_string_list(raw: object, default: list[str] | None = None) -> list[str]:
@@ -368,6 +454,36 @@ def load_calibration_cohort_overrides(path: Path | None) -> dict[str, dict[str, 
                 "biotech_calibration_cohort_reason": str(row.get("reason") or "").strip(),
             }
     return overrides
+
+
+def load_delisted_calibration_cohort_overrides(conn: sqlite3.Connection) -> dict[str, dict[str, str]]:
+    table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'delisted_calibration_universe'"
+    ).fetchone()
+    if table is None:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT ticker, calibration_company_ticker, cohort
+        FROM delisted_calibration_universe
+        WHERE COALESCE(cohort, '') <> ''
+        """
+    ).fetchall()
+    out: dict[str, dict[str, str]] = {}
+    for row in rows:
+        cohort = str(row["cohort"] or "").strip()
+        if not cohort:
+            continue
+        payload = {
+            "biotech_calibration_cohort": cohort,
+            "biotech_calibration_cohort_source": "delisted_calibration_universe",
+            "biotech_calibration_cohort_reason": "calibration-only delisted universe cohort",
+        }
+        for ticker in (row["ticker"], row["calibration_company_ticker"]):
+            clean = str(ticker or "").strip().upper()
+            if clean:
+                out[clean] = dict(payload)
+    return out
 
 
 def calibration_cohort_fields(
@@ -964,6 +1080,84 @@ def production_rank_blocked(row: dict[str, Any], *, apply_core_veto_to_rank: boo
     )
 
 
+def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]]) -> None:
+    """Add cross-sector portfolio/calibration aliases without changing scoring math."""
+    for row in rows:
+        investible = to_float(row.get("biotech_cohort_investible_flag"), 1.0) > 0.0
+        calibration_eligible = to_float(row.get("biotech_cohort_calibration_eligible_flag"), 0.0) > 0.0
+        core_veto = to_float(row.get("core_structural_veto_flag"), 0.0) > 0.0
+        rank_cap_vetoed = to_float(row.get("rank_quality_cap_vetoed"), 0.0) > 0.0
+        allocation_bucket = str(row.get("allocation_bucket") or row.get("bucket") or "").strip().lower()
+        native_score_field = str(row.get("production_rank_score_field") or "opportunity_score").strip() or "opportunity_score"
+        native_score_value = to_float(row.get(native_score_field), to_float(row.get("production_rank_score"), math.nan))
+        missing_score = not math.isfinite(native_score_value) or native_score_value <= 0.0
+
+        if missing_score:
+            status = "excluded"
+            reason = "missing_score"
+        elif not investible:
+            status = "excluded"
+            reason = "not_investible"
+        elif core_veto:
+            status = "excluded"
+            reason = "core_structural_veto"
+        elif allocation_bucket == "avoid":
+            status = "excluded"
+            reason = "allocation_bucket_avoid"
+        elif rank_cap_vetoed:
+            status = "review"
+            reason = "rank_quality_cap_veto"
+        else:
+            status = "eligible"
+            reason = "ok"
+        candidate_gate = bool(
+            not missing_score
+            and status == "eligible"
+            and investible
+            and not core_veto
+        )
+
+        review_reason = first_nonblank(
+            row.get("core_structural_veto_reasons"),
+            row.get("biotech_cohort_exclusion_reason"),
+            row.get("rank_quality_cap_reasons"),
+            row.get("rank_quality_cap_veto_reasons"),
+        )
+        avg60 = to_float(row.get("avg_dollar_volume_60d"), math.nan)
+        capacity_addv = avg60 if math.isfinite(avg60) else to_float(row.get("median_addv20"), 0.0)
+        calibration_reason = (
+            "eligible"
+            if calibration_eligible
+            else first_nonblank(row.get("biotech_cohort_exclusion_reason"), "not_calibration_eligible")
+        )
+
+        row.update(
+            {
+                "portfolio_candidate_gate": 1.0 if candidate_gate else 0.0,
+                "portfolio_candidate_score": round(to_float(row.get("production_rank_score"), native_score_value), 4),
+                "portfolio_candidate_status": status,
+                "portfolio_candidate_reason": reason,
+                "calibration_eligible_flag": 1.0 if calibration_eligible else 0.0,
+                "score_confidence": round(to_float(row.get("data_quality_confidence_multiplier"), 1.0), 6),
+                "avg_dollar_volume_60d": round(avg60, 4) if math.isfinite(avg60) and avg60 > 0.0 else "",
+                "review_reason": review_reason,
+                "eligibility_reason": reason if not review_reason else f"{reason}:{review_reason}",
+                "calibration_cohort": row.get("biotech_primary_cohort") or "",
+                "calibration_status": "eligible" if calibration_eligible else "excluded",
+                "calibration_status_reason": calibration_reason,
+                "native_score_field": native_score_field,
+                "native_score_value": round(native_score_value, 4) if math.isfinite(native_score_value) else "",
+                "score_scale_min": 0.0,
+                "score_scale_max": 100.0,
+                "score_neutral_value": 50.0,
+                "score_zero_is_missing_flag": 1.0 if missing_score else 0.0,
+                "capacity_bucket": capacity_bucket_from_addv(capacity_addv),
+                "min_position_size_feasible": "",
+                "max_position_size_feasible": "",
+            }
+        )
+
+
 def commercial_risk_overlay_settings(config: dict[str, Any]) -> dict[str, Any]:
     settings = dict(cfg_get(config, "biotech_scoring.commercial_risk_overlay", {}) or {})
     production_fragility_threshold = float(
@@ -1333,17 +1527,28 @@ def latest_feature_date(conn: sqlite3.Connection) -> str:
     return asof
 
 
-def load_feature_rows(conn: sqlite3.Connection, asof_date: str) -> list[dict[str, Any]]:
-    rows = conn.execute(
+def load_feature_rows(conn: sqlite3.Connection, asof_date: str, *, include_inactive: bool = False) -> list[dict[str, Any]]:
+    active_filter = (
+        ""
+        if include_inactive
+        else """
+          AND (
+                COALESCE(c.is_active, 0) = 1
+                OR c.universe_status = 'delisted_calibration'
+          )
         """
+    )
+    rows = conn.execute(
+        f"""
         SELECT
             f.asof_date, f.company_id, f.catalyst_score_raw, f.credibility_score_raw,
             f.financial_quality_score_raw, f.risk_score_raw, f.momentum_score_raw, f.feature_json,
-            c.ticker, c.company_name, c.sector, c.industry, c.industry_aggregate, c.country, c.currency
+            c.ticker, c.company_name, c.sector, c.industry, c.industry_aggregate, c.country, c.currency,
+            c.universe_status
         FROM daily_features f
         JOIN companies c ON c.company_id = f.company_id
         WHERE f.asof_date = ?
-          AND COALESCE(c.is_active, 0) = 1
+          {active_filter}
         ORDER BY c.ticker
         """,
         (asof_date,),
@@ -1362,6 +1567,25 @@ def load_feature_rows(conn: sqlite3.Connection, asof_date: str) -> list[dict[str
 def load_inactive_company_tickers(conn: sqlite3.Connection) -> set[str]:
     rows = conn.execute("SELECT ticker FROM companies WHERE COALESCE(is_active, 0) <= 0").fetchall()
     return {ticker for row in rows if (ticker := normalize_ticker(row["ticker"]))}
+
+
+def read_delisted_universe_tickers(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    out: set[str] = set()
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            is_delisted = (
+                str(row.get("calibration_only") or "").strip().lower() in {"1", "true", "yes"}
+                or str(row.get("universe_status") or "").strip().lower() == "delisted_calibration"
+                or str(row.get("historical_universe_source") or "").strip().lower()
+                == "delisted_biotech_calibration_universe"
+            )
+            ticker = normalize_ticker(row.get("ticker"))
+            if is_delisted and ticker:
+                out.add(ticker)
+    return out
 
 
 def load_commercial_rows(conn: sqlite3.Connection, asof_date: str) -> dict[int, dict[str, Any]]:
@@ -1692,6 +1916,15 @@ def score_rows(
             row.get("feature_json"),
             context=f"company_id={company_id} ticker={row.get('ticker') or ''} source=daily_features",
         )
+        universe_metadata = payload.get("universe_metadata", {}) if isinstance(payload, dict) else {}
+        if not isinstance(universe_metadata, dict):
+            universe_metadata = {}
+        data_provenance = payload.get("data_provenance", {}) if isinstance(payload, dict) else {}
+        if not isinstance(data_provenance, dict):
+            data_provenance = {}
+        sec_liq = payload.get("sec_and_liquidity", {}) if isinstance(payload, dict) else {}
+        if not isinstance(sec_liq, dict):
+            sec_liq = {}
         raw_scores = payload.get("raw_scores", {}) if isinstance(payload, dict) else {}
         shadow_signals = payload.get("shadow_signals", {}) if isinstance(payload, dict) else {}
         forward_catalyst_calendar = (
@@ -1793,6 +2026,16 @@ def score_rows(
         forward_catalyst_confidence = finite_value_or_blank(
             forward_catalyst_calendar.get("forward_catalyst_confidence")
         )
+        forward_catalyst_event_date = str(
+            forward_catalyst_calendar.get("forward_catalyst_event_date")
+            or raw_scores.get("forward_catalyst_event_date")
+            or ""
+        )
+        forward_catalyst_asof_date = str(
+            forward_catalyst_calendar.get("forward_catalyst_asof_date")
+            or raw_scores.get("forward_catalyst_asof_date")
+            or ""
+        )
         forward_catalyst_score = clamp(to_float(forward_catalyst_calendar.get("forward_catalyst_score"), 0.0))
         forward_catalyst_unfiltered_score = clamp(
             to_float(
@@ -1884,7 +2127,7 @@ def score_rows(
         insider_buy_cluster_count_90d = to_float(insider_activity.get("insider_buy_cluster_count_90d"), 0.0)
         insider_sell_value_90d = to_float(insider_activity.get("insider_sell_value_90d"), 0.0)
         insider_accumulation_score = clamp(to_float(insider_activity.get("insider_accumulation_score"), 50.0))
-        adcom_nearest_days = fda_adcom.get("adcom_nearest_days")
+        adcom_nearest_days = finite_value_or_blank(fda_adcom.get("adcom_nearest_days"))
         adcom_within_60d_flag = 1.0 if to_float(fda_adcom.get("adcom_within_60d_flag"), 0.0) > 0.0 else 0.0
         adcom_within_120d_flag = 1.0 if to_float(fda_adcom.get("adcom_within_120d_flag"), 0.0) > 0.0 else 0.0
         adcom_score = clamp(to_float(fda_adcom.get("adcom_score"), 0.0))
@@ -1896,6 +2139,11 @@ def score_rows(
         priority_review_flag = 1.0 if to_float(fda_designations.get("priority_review_flag"), 0.0) > 0.0 else 0.0
         fda_designation_tier = to_float(fda_designations.get("fda_designation_tier"), 0.0)
         fda_designation_score = clamp(to_float(fda_designations.get("fda_designation_score"), 0.0))
+        avg_dollar_volume_60d = to_float(sec_liq.get("avg_dollar_volume_60d"), math.nan)
+        liquidity_score = to_float(sec_liq.get("liquidity_score"), math.nan)
+        calibration_only = 1.0 if as_bool(universe_metadata.get("calibration_only"), False) else 0.0
+        drop_otc_tape = 1.0 if as_bool(universe_metadata.get("drop_otc_tape"), False) else 0.0
+        equity_recovery = to_float(universe_metadata.get("equity_recovery"), math.nan)
         momentum = clamp(momentum_raw if momentum_raw is not None else 0.0)
         clinical_positive = (
             catalyst_w * catalyst
@@ -2376,10 +2624,12 @@ def score_rows(
                 "transient_revenue_anchor_score": commercial_risk["transient_revenue_anchor_score"],
                 "commercial_business_shock_score": commercial_risk["commercial_business_shock_score"],
                 "forward_catalyst_nearest_days": forward_catalyst_nearest_days,
+                "forward_catalyst_event_date": forward_catalyst_event_date,
                 "forward_catalyst_event_type": forward_catalyst_event_type,
                 "forward_catalyst_source": forward_catalyst_source,
                 "forward_catalyst_source_url": forward_catalyst_source_url,
                 "forward_catalyst_confidence": forward_catalyst_confidence,
+                "forward_catalyst_asof_date": forward_catalyst_asof_date,
                 "forward_catalyst_score": round(forward_catalyst_score, 4),
                 "forward_catalyst_unfiltered_score": round(forward_catalyst_unfiltered_score, 4),
                 "ctgov_forward_catalyst_score": round(ctgov_forward_catalyst_score, 4),
@@ -2570,6 +2820,8 @@ def score_rows(
                 "going_concern_status": sec_liq.get("going_concern_status") or survival.get("going_concern_status", ""),
                 "reverse_split_hits_2y": sec_liq.get("reverse_split_hits_2y", 0),
                 "median_addv20": sec_liq.get("median_addv20", 0),
+                "avg_dollar_volume_60d": avg_dollar_volume_60d if math.isfinite(avg_dollar_volume_60d) else "",
+                "liquidity_score": liquidity_score if math.isfinite(liquidity_score) else "",
                 "cash_runway_months": finite_value_or_none(survival.get("cash_runway_months")),
                 "financial_survival_score": finite_value_or_none(survival.get("financial_survival_score")),
                 "financial_data_quality": survival.get("data_quality", ""),
@@ -2613,6 +2865,26 @@ def score_rows(
                 "model_family": model_metadata["model_family"],
                 "model_version": model_metadata["model_version"],
                 "scoring_contract_version": model_metadata["scoring_contract_version"],
+                "universe_status": str(universe_metadata.get("universe_status") or "live"),
+                "historical_universe_source": str(universe_metadata.get("historical_universe_source") or "current_final_scoring_universe"),
+                "price_start_date": str(universe_metadata.get("price_start_date") or ""),
+                "price_end_date": str(universe_metadata.get("price_end_date") or ""),
+                "terminal_date": str(universe_metadata.get("terminal_date") or ""),
+                "historical_price_ticker": str(universe_metadata.get("historical_price_ticker") or row["ticker"]),
+                "calibration_only": calibration_only,
+                "recovery_type": str(universe_metadata.get("recovery_type") or ""),
+                "equity_recovery": round(equity_recovery, 8) if math.isfinite(equity_recovery) else "",
+                "drop_otc_tape": drop_otc_tape,
+                "latest_price_date": str(universe_metadata.get("latest_price_date") or ""),
+                "source_snapshot_asof_date": str(data_provenance.get("source_snapshot_asof_date") or row["asof_date"]),
+                "price_data_asof_date": str(data_provenance.get("price_data_asof_date") or ""),
+                "feature_data_asof_date": str(data_provenance.get("feature_data_asof_date") or row["asof_date"]),
+                "clinical_data_asof_date": str(data_provenance.get("clinical_data_asof_date") or ""),
+                "financial_data_asof_date": str(data_provenance.get("financial_data_asof_date") or ""),
+                "short_interest_asof_date": str(data_provenance.get("short_interest_asof_date") or ""),
+                "institutional_data_asof_date": str(data_provenance.get("institutional_data_asof_date") or ""),
+                "insider_data_asof_date": str(data_provenance.get("insider_data_asof_date") or ""),
+                "borrow_data_asof_date": str(data_provenance.get("borrow_data_asof_date") or ""),
                 "catalyst_score": round(catalyst, 4),
                 "credibility_score": round(credibility, 4),
                 "financial_quality_score": round(financial_quality, 4),
@@ -2651,10 +2923,12 @@ def score_rows(
                 "mature_defensive_score": round(mature_defensive, 4),
                 "expected_return_quality_score": round(expected_return_quality, 4),
                 "forward_catalyst_nearest_days": forward_catalyst_nearest_days,
+                "forward_catalyst_event_date": forward_catalyst_event_date,
                 "forward_catalyst_event_type": forward_catalyst_event_type,
                 "forward_catalyst_source": forward_catalyst_source,
                 "forward_catalyst_source_url": forward_catalyst_source_url,
                 "forward_catalyst_confidence": forward_catalyst_confidence,
+                "forward_catalyst_asof_date": forward_catalyst_asof_date,
                 "forward_catalyst_score": round(forward_catalyst_score, 4),
                 "forward_catalyst_unfiltered_score": round(forward_catalyst_unfiltered_score, 4),
                 "ctgov_forward_catalyst_score": round(ctgov_forward_catalyst_score, 4),
@@ -2825,6 +3099,8 @@ def score_rows(
                 "collaborator_heavy_flag": ctgov.get("collaborator_heavy_flag", False),
                 "active_pivotal_trials": ctgov.get("active_pivotal_trials", 0),
                 "median_addv20": sec_liq.get("median_addv20", 0),
+                "avg_dollar_volume_60d": round(avg_dollar_volume_60d, 4) if math.isfinite(avg_dollar_volume_60d) else "",
+                "liquidity_score": round(liquidity_score, 4) if math.isfinite(liquidity_score) else "",
                 "cash_runway_months": finite_value_or_none(survival.get("cash_runway_months")),
                 "financial_survival_score": finite_value_or_none(survival.get("financial_survival_score")),
                 "financial_data_quality": survival.get("data_quality", ""),
@@ -2839,6 +3115,7 @@ def score_rows(
         )
     enrich_biotech_cohort_rank_stats(scored)
     apply_biotech_cohort_policy(scored, cohort_policy)
+    enrich_portfolio_layer_contract_rows(scored)
     scored.sort(
         key=lambda item: (
             1 if production_rank_blocked(item, apply_core_veto_to_rank=apply_core_veto_to_rank) else 0,
@@ -2912,6 +3189,7 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "model_family",
         "model_version",
         "scoring_contract_version",
+        *PORTFOLIO_LAYER_CONTRACT_FIELDS,
         "catalyst_score",
         "credibility_score",
         "financial_quality_score",
@@ -3163,6 +3441,34 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "model_family",
         "model_version",
         "scoring_contract_version",
+        "portfolio_candidate_status",
+        "portfolio_candidate_reason",
+        "review_reason",
+        "eligibility_reason",
+        "universe_status",
+        "historical_universe_source",
+        "price_start_date",
+        "price_end_date",
+        "terminal_date",
+        "historical_price_ticker",
+        "recovery_type",
+        "latest_price_date",
+        "source_snapshot_asof_date",
+        "price_data_asof_date",
+        "feature_data_asof_date",
+        "clinical_data_asof_date",
+        "financial_data_asof_date",
+        "short_interest_asof_date",
+        "institutional_data_asof_date",
+        "insider_data_asof_date",
+        "borrow_data_asof_date",
+        "calibration_cohort",
+        "calibration_status",
+        "calibration_status_reason",
+        "native_score_field",
+        "capacity_bucket",
+        "forward_catalyst_event_date",
+        "forward_catalyst_asof_date",
         "tier1_production_score_model",
         "tier1_selection_policy",
         "alpha_multibagger_role",
@@ -3213,10 +3519,22 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "risk_component_json",
         "top_evidence_json",
     }
+    declared_text_fields = set(text_fields)
+    schema_types = {
+        str(row["name"]): str(row["type"] or "").upper()
+        for row in conn.execute("PRAGMA table_info(daily_scores)").fetchall()
+    }
+    schema_text_fields = {field for field in fields if "TEXT" in schema_types.get(field, "")}
+    text_fields = schema_text_fields or declared_text_fields
 
     def db_value(row: dict[str, Any], field: str) -> Any:
         if field in row:
-            return row[field]
+            value = row[field]
+            # Blank string in a numeric (REAL/INTEGER) column must be stored as
+            # NULL so that IS NOT NULL filters and aggregates behave correctly.
+            if value == "" and field not in text_fields:
+                return None
+            return value
         return "" if field in text_fields else None
 
     params = [tuple(db_value(row, field) for field in fields) + (now, now) for row in rows]
@@ -3331,6 +3649,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "model_family",
         "model_version",
         "scoring_contract_version",
+        *PORTFOLIO_LAYER_CONTRACT_FIELDS,
         "bucket",
         "opportunity_score",
         "allocation_opportunity_score",
@@ -3524,13 +3843,14 @@ def main() -> None:
         run_id: int | None = None
         try:
             init_db(conn)
+            latest_available_feature_asof = latest_feature_date(conn)
             if args.asof:
                 parsed_asof = parse_date(args.asof)
                 if parsed_asof is None:
                     raise ValueError(f"Invalid --asof date: {args.asof}")
                 asof_date = parsed_asof.isoformat()
             else:
-                asof_date = latest_feature_date(conn)
+                asof_date = latest_available_feature_asof
             output_dir = dated_output_dir(base_output_dir, asof_date)
             output_csv = output_dir / str(cfg_get(config, "biotech_scoring.output_csv", "biotech_daily_scores.csv"))
             universe_csv = resolve_report_input_csv(
@@ -3539,7 +3859,8 @@ def main() -> None:
                 asof_date=asof_date,
             )
             expected_tickers = read_final_scoring_tickers(universe_csv)
-            inactive_expected_tickers = expected_tickers.intersection(load_inactive_company_tickers(conn))
+            delisted_universe_tickers = read_delisted_universe_tickers(universe_csv)
+            inactive_expected_tickers = expected_tickers.intersection(load_inactive_company_tickers(conn)) - delisted_universe_tickers
             if inactive_expected_tickers:
                 LOGGER.warning(
                     "Excluding %d inactive/delisted final-universe ticker(s) from scoring coverage: %s",
@@ -3548,13 +3869,66 @@ def main() -> None:
                     + (f"...(+{len(inactive_expected_tickers) - 25})" if len(inactive_expected_tickers) > 25 else ""),
                 )
                 expected_tickers = expected_tickers - inactive_expected_tickers
+            calibration_cohorts_by_ticker = (
+                load_calibration_cohort_overrides(calibration_cohorts_path)
+                if as_bool(calibration_cohort_settings.get("enabled", False), False)
+                else {}
+            )
+            if as_bool(calibration_cohort_settings.get("enabled", False), False):
+                delisted_cohorts = load_delisted_calibration_cohort_overrides(conn)
+                calibration_cohorts_by_ticker.update(delisted_cohorts)
+            if calibration_cohorts_by_ticker:
+                LOGGER.info(
+                    "Loaded biotech calibration cohort overrides: tickers=%d path=%s",
+                    len(calibration_cohorts_by_ticker),
+                    calibration_cohorts_path,
+                )
             run_id = start_run(conn, run_type="score_biotech_index", input_path=db_path)
-            features = load_feature_rows(conn, asof_date)
+            historical_feature_universe = bool(args.asof and asof_date < latest_available_feature_asof)
+            features = load_feature_rows(conn, asof_date, include_inactive=historical_feature_universe)
             if not features:
                 raise ValueError(f"No features found for asof_date={asof_date}")
+            if historical_feature_universe and calibration_cohorts_by_ticker:
+                before_count = len(features)
+                excluded_without_cohort = [
+                    normalize_ticker(row["ticker"])
+                    for row in features
+                    if normalize_ticker(row["ticker"]) not in calibration_cohorts_by_ticker
+                    and str(row.get("universe_status") or "").strip().lower() != "delisted_calibration"
+                ]
+                if excluded_without_cohort:
+                    excluded_set = set(excluded_without_cohort)
+                    features = [
+                        row
+                        for row in features
+                        if normalize_ticker(row["ticker"]) not in excluded_set
+                    ]
+                    LOGGER.warning(
+                        "Excluded %d historical feature row(s) without biotech calibration cohort: %s",
+                        before_count - len(features),
+                        ",".join(sorted(excluded_set)[:25])
+                        + (f"...(+{len(excluded_set) - 25})" if len(excluded_set) > 25 else ""),
+                    )
+            feature_tickers = {normalize_ticker(row["ticker"]) for row in features if normalize_ticker(row["ticker"])}
+            historical_date_varying_universe = bool(
+                args.asof
+                and asof_date < latest_available_feature_asof
+                and not expected_tickers.issubset(feature_tickers)
+            )
+            coverage_expected_tickers = feature_tickers if historical_date_varying_universe else expected_tickers
+            if historical_date_varying_universe:
+                LOGGER.warning(
+                    "Using date-varying historical universe for scoring coverage: asof=%s "
+                    "latest_feature_asof=%s feature_tickers=%d current_expected_tickers=%d missing_current=%d",
+                    asof_date,
+                    latest_available_feature_asof,
+                    len(feature_tickers),
+                    len(expected_tickers),
+                    len(expected_tickers - feature_tickers),
+                )
             validate_full_universe_coverage(
-                expected_tickers=expected_tickers,
-                observed_tickers=[row["ticker"] for row in features],
+                expected_tickers=coverage_expected_tickers,
+                observed_tickers=feature_tickers,
                 context="biotech scoring input features",
                 subset_mode=False,
             )
@@ -3625,17 +3999,6 @@ def main() -> None:
                 )
             else:
                 LOGGER.warning("Skipping optional governance freshness validation because no governance rows are available.")
-            calibration_cohorts_by_ticker = (
-                load_calibration_cohort_overrides(calibration_cohorts_path)
-                if as_bool(calibration_cohort_settings.get("enabled", False), False)
-                else {}
-            )
-            if calibration_cohorts_by_ticker:
-                LOGGER.info(
-                    "Loaded biotech calibration cohort overrides: tickers=%d path=%s",
-                    len(calibration_cohorts_by_ticker),
-                    calibration_cohorts_path,
-                )
             taxonomy_overrides_by_ticker: dict[str, list[TaxonomyOverride]] = {}
             if calibration_cohorts_by_ticker:
                 LOGGER.info(
@@ -3659,7 +4022,7 @@ def main() -> None:
                 calibration_cohorts_by_ticker,
             )
             validate_full_universe_coverage(
-                expected_tickers=expected_tickers,
+                expected_tickers=coverage_expected_tickers,
                 observed_tickers=[row["ticker"] for row in scored],
                 context="biotech scoring output",
                 subset_mode=False,

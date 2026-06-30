@@ -39,6 +39,7 @@ from biotech_index.core.pipeline_guards import (
     validate_output_coverage,
     validate_requested_tickers,
 )
+from biotech_index.core.report_inputs import resolve_dated_report_input_csv
 from biotech_index.core.scoring_math import score_growth
 
 
@@ -642,8 +643,13 @@ def load_companies(conn: sqlite3.Connection, *, scoring_tickers: set[str], ticke
         SELECT company_id, ticker, company_name
         FROM companies
         WHERE is_active = 1
+           OR (universe_status = 'delisted_calibration' AND ticker IN (
+                SELECT value FROM json_each(?)
+           ))
         ORDER BY ticker
         """
+        ,
+        (json.dumps(sorted(scoring_tickers)),),
     ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -2175,13 +2181,19 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    universe_csv = resolve_path(cfg_get(config, "forward_guidance.final_scoring_universe_csv"), base_dir=base_dir)
+    configured_universe_csv = resolve_path(cfg_get(config, "forward_guidance.final_scoring_universe_csv"), base_dir=base_dir)
     guidance_csv = resolve_path(cfg_get(config, "forward_guidance.guidance_output_csv"), base_dir=base_dir)
     features_csv = resolve_path(cfg_get(config, "forward_guidance.features_output_csv"), base_dir=base_dir)
     overrides_csv = resolve_optional_path(cfg_get(config, "forward_guidance.overrides_csv"), base_dir=base_dir)
     asof_date = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
     if asof_date is None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
+    universe_csv = resolve_dated_report_input_csv(
+        configured_universe_csv,
+        base_output_dir=resolve_path(cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir),
+        asof_date=asof_date.isoformat(),
+        logger=LOGGER,
+    )
     ticker_filter = {normalize_ticker(part) for part in args.tickers.split(",") if normalize_ticker(part)}
     forms = {str(item).upper() for item in (cfg_get(config, "forward_guidance.forms", []) or [])}
     lookback_days = int(cfg_get(config, "forward_guidance.lookback_days", 420))

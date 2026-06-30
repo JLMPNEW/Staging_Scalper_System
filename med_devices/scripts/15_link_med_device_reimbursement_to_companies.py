@@ -9,6 +9,7 @@ import math
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
+from med_devices.core.point_in_time import parse_iso_date, row_is_effective_asof  # noqa: E402
 from med_devices.core.text_norm import as_bool, normalize_code, normalize_org_name, normalize_ticker  # noqa: E402
 
 
@@ -157,9 +159,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--unmapped-output-csv", type=Path, default=None)
     parser.add_argument("--manual-rate-audit-csv", type=Path, default=None)
     parser.add_argument("--tickers", type=str, default="")
+    parser.add_argument("--asof", type=str, default="")
     parser.add_argument("--max-policies", type=int, default=0)
     parser.add_argument("--min-confidence", type=float, default=0.0)
     return parser.parse_args()
+
+
+def allow_missing_static_pit_metadata(config: dict[str, Any]) -> bool:
+    return str(cfg_get(config, "historical_backfill.allow_missing_static_pit_metadata", True)).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+
+def resolve_asof(raw: str) -> str:
+    text = str(raw or "").strip() or datetime.now(timezone.utc).date().isoformat()
+    parsed = parse_iso_date(text)
+    if parsed is None:
+        raise ValueError(f"Invalid as-of date: {text}")
+    return parsed.isoformat()
+
+
+def table_exists(conn: Any, table_name: str) -> bool:
+    row = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()
+    return row is not None
+
+
+def table_columns(conn: Any, table_name: str) -> set[str]:
+    if not table_exists(conn, table_name):
+        return set()
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({quote_identifier(table_name)})").fetchall()}
 
 
 def to_float(raw: object) -> float | None:
@@ -264,15 +296,40 @@ def alias_confidence_score(raw: object) -> float:
     return value
 
 
-def build_aliases(conn: Any, *, ticker_filter: set[str], policy: LinkPolicy) -> list[CompanyAlias]:
-    rows = conn.execute(
-        """
-        SELECT company_id, ticker, company_name
-        FROM dim_company
-        WHERE is_active = 1
-        ORDER BY ticker
-        """
-    ).fetchall()
+def build_aliases(
+    conn: Any,
+    *,
+    ticker_filter: set[str],
+    policy: LinkPolicy,
+    asof: str | None = None,
+) -> list[CompanyAlias]:
+    if asof:
+        rows = conn.execute(
+            """
+            SELECT c.company_id, c.ticker, c.company_name
+            FROM dim_company c
+            WHERE EXISTS (
+                SELECT 1
+                FROM dim_universe_membership m
+                WHERE m.company_id = c.company_id
+                  AND m.model_family = 'med_devices'
+                  AND m.point_in_time_flag = 1
+                  AND m.start_date <= ?
+                  AND (m.end_date IS NULL OR m.end_date >= ?)
+            )
+            ORDER BY c.ticker
+            """,
+            (asof, asof),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT company_id, ticker, company_name
+            FROM dim_company
+            WHERE is_active = 1
+            ORDER BY ticker
+            """
+        ).fetchall()
     aliases: dict[tuple[int, str], CompanyAlias] = {}
     company_ids: list[int] = []
     meta: dict[int, tuple[str, str]] = {}
@@ -334,7 +391,7 @@ def build_aliases(conn: Any, *, ticker_filter: set[str], policy: LinkPolicy) -> 
             term = normalize_org_name(str(row["alias_norm"] or row["alias_raw"] or ""))
             if term:
                 alias_companies.setdefault(term, set()).add(int(row["company_id"]))
-        ambiguous_terms = {term for term, company_ids in alias_companies.items() if len(company_ids) > 1}
+        ambiguous_terms = {term for term, term_company_ids in alias_companies.items() if len(term_company_ids) > 1}
         for row in alias_rows:
             company_id = int(row["company_id"])
             ticker, company_name = meta[company_id]
@@ -357,13 +414,13 @@ def build_aliases(conn: Any, *, ticker_filter: set[str], policy: LinkPolicy) -> 
     return sorted(aliases.values(), key=lambda item: (-item.confidence, item.ticker, item.term))
 
 
-def load_policy_rows(conn: Any, *, policy: LinkPolicy, max_rows: int) -> list[PolicyRow]:
+def load_policy_rows(conn: Any, *, policy: LinkPolicy, max_rows: int, asof: str | None = None) -> list[PolicyRow]:
     if not policy.source_ids:
         return []
     placeholders = ",".join("?" for _ in policy.source_ids)
     limit = max_rows or policy.max_policy_rows
     limit_sql = " LIMIT ?" if limit > 0 else ""
-    params: list[Any] = [*policy.source_ids]
+    params: list[Any] = [*policy.source_ids, asof, asof, asof, asof]
     if limit > 0:
         params.append(limit)
     rows = conn.execute(
@@ -371,6 +428,8 @@ def load_policy_rows(conn: Any, *, policy: LinkPolicy, max_rows: int) -> list[Po
         SELECT reimbursement_policy_id, policy_type, policy_id, title, related_codes, source_id, payload_json
         FROM fact_reimbursement_policy
         WHERE source_id IN ({placeholders})
+          AND (? IS NULL OR NULLIF(effective_date, '') IS NULL OR SUBSTR(effective_date, 1, 10) <= ?)
+          AND (? IS NULL OR NULLIF(retirement_date, '') IS NULL OR SUBSTR(retirement_date, 1, 10) >= ?)
         ORDER BY reimbursement_policy_id
         {limit_sql}
         """,
@@ -443,13 +502,19 @@ def parse_related_codes(raw: object) -> set[str]:
     return {match.group(0) for match in CODE_TOKEN_RE.finditer(text)}
 
 
-def reimbursement_code_ids(conn: Any, codes: set[str], *, source_ids: list[str] | None = None) -> dict[str, list[int]]:
+def reimbursement_code_ids(
+    conn: Any,
+    codes: set[str],
+    *,
+    source_ids: list[str] | None = None,
+    asof: str | None = None,
+) -> dict[str, list[int]]:
     if not codes:
         return {}
     placeholders = ",".join("?" for _ in codes)
     source_ids = [source_id for source_id in (source_ids or []) if source_id]
     source_sql = ""
-    params: list[Any] = [*sorted(codes)]
+    params: list[Any] = [*sorted(codes), asof, asof, asof, asof]
     if source_ids:
         source_placeholders = ",".join("?" for _ in source_ids)
         source_sql = f" AND source_id IN ({source_placeholders})"
@@ -459,6 +524,8 @@ def reimbursement_code_ids(conn: Any, codes: set[str], *, source_ids: list[str] 
         SELECT reimbursement_code_id, code
         FROM dim_reimbursement_code
         WHERE code IN ({placeholders})
+          AND (? IS NULL OR NULLIF(effective_date, '') IS NULL OR SUBSTR(effective_date, 1, 10) <= ?)
+          AND (? IS NULL OR NULLIF(termination_date, '') IS NULL OR SUBSTR(termination_date, 1, 10) >= ?)
         {source_sql}
         """,
         params,
@@ -586,6 +653,7 @@ def official_rate_validation(
     reimbursement_code_id: int,
     manual_payment_rate: float | None,
     tolerance_pct: float,
+    asof: str | None = None,
 ) -> dict[str, Any]:
     if manual_payment_rate is None:
         return {
@@ -605,8 +673,9 @@ def official_rate_validation(
           AND LOWER(payment_system) NOT LIKE '%manual%'
           AND LOWER(payment_system) NOT LIKE '%benchmark%'
           AND LOWER(payment_system) NOT LIKE '%override%'
+          AND (? IS NULL OR NULLIF(effective_date, '') IS NULL OR SUBSTR(effective_date, 1, 10) <= ?)
         """,
-        (reimbursement_code_id,),
+        (reimbursement_code_id, asof, asof),
     ).fetchall()
     if not rows:
         return {
@@ -639,6 +708,8 @@ def load_manual_rate_rows(
     path: Path,
     *,
     policy: LinkPolicy,
+    asof: str | None = None,
+    include_missing_pit_metadata: bool = True,
     audit_rows: list[dict[str, Any]] | None = None,
 ) -> int:
     if not path.exists():
@@ -647,6 +718,8 @@ def load_manual_rate_rows(
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         for raw_row in reader:
+            if not row_is_effective_asof(raw_row, asof, include_missing=include_missing_pit_metadata):
+                continue
             code = normalize_code(row_get(raw_row, "code", "reimbursement_code", "hcpcs", "cpt"))
             if not code:
                 continue
@@ -669,6 +742,7 @@ def load_manual_rate_rows(
                 reimbursement_code_id=reimbursement_code_id,
                 manual_payment_rate=payment_rate,
                 tolerance_pct=policy.manual_rate_validation_tolerance_pct,
+                asof=asof,
             )
             upsert_manual_reimbursement_rate(
                 conn,
@@ -712,7 +786,14 @@ def load_manual_rate_rows(
     return count
 
 
-def build_matches(conn: Any, aliases: list[CompanyAlias], policies: list[PolicyRow], *, min_confidence: float) -> list[MatchRow]:
+def build_matches(
+    conn: Any,
+    aliases: list[CompanyAlias],
+    policies: list[PolicyRow],
+    *,
+    min_confidence: float,
+    asof: str | None = None,
+) -> list[MatchRow]:
     matches: list[MatchRow] = []
     eligible_aliases = [alias for alias in aliases if alias.confidence >= min_confidence]
     term_to_aliases: dict[str, list[CompanyAlias]] = {}
@@ -731,7 +812,7 @@ def build_matches(conn: Any, aliases: list[CompanyAlias], policies: list[PolicyR
         codes = parse_related_codes(policy_row.related_codes)
         policy_codes[policy_row.reimbursement_policy_id] = codes
         all_codes.update(codes)
-    all_code_ids = reimbursement_code_ids(conn, all_codes)
+    all_code_ids = reimbursement_code_ids(conn, all_codes, asof=asof)
     for policy_row in policies:
         codes = policy_codes.get(policy_row.reimbursement_policy_id, set())
         best_by_company: dict[int, CompanyAlias] = {}
@@ -802,15 +883,34 @@ def build_matches(conn: Any, aliases: list[CompanyAlias], policies: list[PolicyR
     return matches
 
 
-def load_company_meta(conn: Any, *, ticker_filter: set[str]) -> dict[int, tuple[str, str]]:
-    rows = conn.execute(
-        """
-        SELECT company_id, ticker, company_name
-        FROM dim_company
-        WHERE is_active = 1
-        ORDER BY ticker
-        """
-    ).fetchall()
+def load_company_meta(conn: Any, *, ticker_filter: set[str], asof: str | None = None) -> dict[int, tuple[str, str]]:
+    if asof:
+        rows = conn.execute(
+            """
+            SELECT c.company_id, c.ticker, c.company_name
+            FROM dim_company c
+            WHERE EXISTS (
+                SELECT 1
+                FROM dim_universe_membership m
+                WHERE m.company_id = c.company_id
+                  AND m.model_family = 'med_devices'
+                  AND m.point_in_time_flag = 1
+                  AND m.start_date <= ?
+                  AND (m.end_date IS NULL OR m.end_date >= ?)
+            )
+            ORDER BY c.ticker
+            """,
+            (asof, asof),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT company_id, ticker, company_name
+            FROM dim_company
+            WHERE is_active = 1
+            ORDER BY ticker
+            """
+        ).fetchall()
     out: dict[int, tuple[str, str]] = {}
     for row in rows:
         ticker = normalize_ticker(row["ticker"])
@@ -820,48 +920,89 @@ def load_company_meta(conn: Any, *, ticker_filter: set[str]) -> dict[int, tuple[
     return out
 
 
-def load_company_descriptor_terms(conn: Any, company_meta: dict[int, tuple[str, str]], *, policy: LinkPolicy) -> dict[int, set[str]]:
+FDA_DESCRIPTOR_DATE_COLUMNS = {
+    "fact_fda_approval": ("decision_date", "receipt_date"),
+    "fact_fda_recall": ("recall_initiation_date", "center_classification_date", "termination_date"),
+    "fact_fda_adverse_event": (
+        "event_date",
+        "date_of_event",
+        "report_date",
+        "mdr_report_date",
+        "date_received",
+        "report_received_date",
+    ),
+}
+FDA_DESCRIPTOR_PRODUCT_CODE_TABLES = ("fact_fda_recall", "fact_fda_adverse_event")
+
+
+def fda_descriptor_date_expr(available_columns: set[str], table: str) -> str:
+    date_columns = [column for column in FDA_DESCRIPTOR_DATE_COLUMNS.get(table, ()) if column in available_columns]
+    if not date_columns:
+        return ""
+    quoted = [quote_identifier(column) for column in date_columns]
+    return quoted[0] if len(quoted) == 1 else f"COALESCE({', '.join(quoted)})"
+
+
+def load_company_descriptor_terms(
+    conn: Any,
+    company_meta: dict[int, tuple[str, str]],
+    *,
+    policy: LinkPolicy,
+    asof: str | None = None,
+) -> dict[int, set[str]]:
     if not company_meta:
         return {}
     company_ids = sorted(company_meta)
     placeholders = ",".join("?" for _ in company_ids)
-    rows = conn.execute(
-        f"""
-        SELECT company_id, device_name
-        FROM fact_fda_approval
-        WHERE company_id IN ({placeholders})
-          AND COALESCE(device_name, '') != ''
-        UNION ALL
-        SELECT company_id, device_name
-        FROM dim_device
-        WHERE company_id IN ({placeholders})
-          AND COALESCE(device_name, '') != ''
-        UNION ALL
-        SELECT f.company_id, p.device_name
-        FROM (
-            SELECT DISTINCT company_id, product_code
-            FROM fact_fda_approval
-            WHERE company_id IN ({placeholders}) AND COALESCE(product_code, '') != ''
-            UNION
-            SELECT DISTINCT company_id, product_code
-            FROM fact_fda_recall
-            WHERE company_id IN ({placeholders}) AND COALESCE(product_code, '') != ''
-            UNION
-            SELECT DISTINCT company_id, product_code
-            FROM fact_fda_adverse_event
-            WHERE company_id IN ({placeholders}) AND COALESCE(product_code, '') != ''
-        ) f
-        JOIN dim_fda_product_code p
-          ON p.product_code = f.product_code
-        WHERE COALESCE(p.device_name, '') != ''
-        """,
-        [*company_ids, *company_ids, *company_ids, *company_ids, *company_ids],
-    ).fetchall()
     out: dict[int, set[str]] = {company_id: set() for company_id in company_ids}
-    for row in rows:
-        company_id = int(row["company_id"])
-        for term in descriptor_terms(row["device_name"], policy=policy):
-            out.setdefault(company_id, set()).add(term)
+    approval_columns = table_columns(conn, "fact_fda_approval")
+    if {"company_id", "device_name"}.issubset(approval_columns):
+        date_expr = fda_descriptor_date_expr(approval_columns, "fact_fda_approval")
+        if date_expr:
+            rows = conn.execute(
+                f"""
+                SELECT company_id, device_name
+                FROM fact_fda_approval
+                WHERE company_id IN ({placeholders})
+                  AND COALESCE(device_name, '') != ''
+                  AND (? IS NULL OR NULLIF({date_expr}, '') IS NULL OR SUBSTR({date_expr}, 1, 10) <= ?)
+                """,
+                [*company_ids, asof, asof],
+            ).fetchall()
+            for row in rows:
+                company_id = int(row["company_id"])
+                for term in descriptor_terms(row["device_name"], policy=policy):
+                    out.setdefault(company_id, set()).add(term)
+        else:
+            LOGGER.warning("Skipping FDA approval descriptor terms without PIT date column.")
+
+    product_code_columns = table_columns(conn, "dim_fda_product_code")
+    if {"product_code", "device_name"}.issubset(product_code_columns):
+        for table in FDA_DESCRIPTOR_PRODUCT_CODE_TABLES:
+            columns = table_columns(conn, table)
+            if not {"company_id", "product_code"}.issubset(columns):
+                continue
+            date_expr = fda_descriptor_date_expr(columns, table)
+            if not date_expr:
+                LOGGER.warning("Skipping FDA product-code descriptor terms without PIT date column: table=%s", table)
+                continue
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT f.company_id, p.device_name
+                FROM {quote_identifier(table)} f
+                JOIN dim_fda_product_code p
+                  ON p.product_code = f.product_code
+                WHERE f.company_id IN ({placeholders})
+                  AND COALESCE(f.product_code, '') != ''
+                  AND COALESCE(p.device_name, '') != ''
+                  AND (? IS NULL OR NULLIF({date_expr}, '') IS NULL OR SUBSTR({date_expr}, 1, 10) <= ?)
+                """,
+                [*company_ids, asof, asof],
+            ).fetchall()
+            for row in rows:
+                company_id = int(row["company_id"])
+                for term in descriptor_terms(row["device_name"], policy=policy):
+                    out.setdefault(company_id, set()).add(term)
     return out
 
 
@@ -893,14 +1034,18 @@ def descriptor_terms(raw: object, *, policy: LinkPolicy) -> set[str]:
     return out
 
 
-def load_reimbursement_code_rows(conn: Any, *, policy: LinkPolicy) -> list[ReimbursementCodeRow]:
+def load_reimbursement_code_rows(conn: Any, *, policy: LinkPolicy, asof: str | None = None) -> list[ReimbursementCodeRow]:
     source_ids = [source_id for source_id in (policy.code_source_ids or policy.source_ids) if source_id]
-    source_sql = ""
-    params: list[Any] = []
+    where_parts = [
+        "(? IS NULL OR NULLIF(c.effective_date, '') IS NULL OR SUBSTR(c.effective_date, 1, 10) <= ?)",
+        "(? IS NULL OR NULLIF(c.termination_date, '') IS NULL OR SUBSTR(c.termination_date, 1, 10) >= ?)",
+    ]
+    params: list[Any] = [asof, asof, asof, asof]
     if source_ids:
         placeholders = ",".join("?" for _ in source_ids)
-        source_sql = f"WHERE c.source_id IN ({placeholders})"
+        where_parts.append(f"c.source_id IN ({placeholders})")
         params.extend(source_ids)
+    where_sql = "WHERE " + " AND ".join(where_parts)
     rows = conn.execute(
         f"""
         SELECT c.reimbursement_code_id, c.code, c.short_description, c.long_description, c.source_id,
@@ -908,10 +1053,11 @@ def load_reimbursement_code_rows(conn: Any, *, policy: LinkPolicy) -> list[Reimb
         FROM dim_reimbursement_code c
         LEFT JOIN fact_reimbursement_rate r
           ON r.reimbursement_code_id = c.reimbursement_code_id
-        {source_sql}
+         AND (? IS NULL OR NULLIF(r.effective_date, '') IS NULL OR SUBSTR(r.effective_date, 1, 10) <= ?)
+        {where_sql}
         GROUP BY c.reimbursement_code_id, c.code, c.short_description, c.long_description, c.source_id
         """,
-        params,
+        [asof, asof, *params],
     ).fetchall()
     out: list[ReimbursementCodeRow] = []
     for row in rows:
@@ -951,11 +1097,12 @@ def build_descriptor_code_matches(
     *,
     policy: LinkPolicy,
     min_confidence: float,
+    asof: str | None = None,
 ) -> list[MatchRow]:
     if not policy.enable_descriptor_matching or policy.descriptor_confidence < min_confidence:
         return []
-    company_terms = load_company_descriptor_terms(conn, company_meta, policy=policy)
-    code_rows = load_reimbursement_code_rows(conn, policy=policy)
+    company_terms = load_company_descriptor_terms(conn, company_meta, policy=policy, asof=asof)
+    code_rows = load_reimbursement_code_rows(conn, policy=policy, asof=asof)
     token_index: dict[str, set[int]] = {}
     for idx, code_row in enumerate(code_rows):
         for token in text_tokens(code_row.search_text):
@@ -1025,6 +1172,8 @@ def load_override_matches(
     *,
     policy: LinkPolicy,
     min_confidence: float,
+    asof: str | None = None,
+    include_missing_pit_metadata: bool = True,
 ) -> list[MatchRow]:
     if not path.exists():
         return []
@@ -1033,6 +1182,8 @@ def load_override_matches(
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         for raw_row in reader:
+            if not row_is_effective_asof(raw_row, asof, include_missing=include_missing_pit_metadata):
+                continue
             active = row_get(raw_row, "active", "enabled")
             if active and active.lower() in {"0", "false", "no", "n"}:
                 continue
@@ -1058,7 +1209,12 @@ def load_override_matches(
                 short_description=short_description,
                 long_description=long_description,
             )
-            code_ids = reimbursement_code_ids(conn, {code}, source_ids=policy.code_source_ids or policy.source_ids)
+            code_ids = reimbursement_code_ids(
+                conn,
+                {code},
+                source_ids=policy.code_source_ids or policy.source_ids,
+                asof=asof,
+            )
             if not code_ids.get(code):
                 code_ids = {code: [manual_code_id]}
             company_id, company_name = company
@@ -1123,6 +1279,9 @@ RESOLVED_NO_CODE_PAYMENT_STATUSES = {
 def load_resolved_no_code_company_ids(
     path: Path | None,
     company_meta: dict[int, tuple[str, str]],
+    *,
+    asof: str | None = None,
+    include_missing_pit_metadata: bool = True,
 ) -> set[int]:
     if path is None or not path.exists():
         return set()
@@ -1131,6 +1290,8 @@ def load_resolved_no_code_company_ids(
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
+            if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
+                continue
             ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
             if not ticker:
                 continue
@@ -1413,6 +1574,7 @@ def main() -> None:
         )
     )
     policy = link_policy(config)
+    include_missing_pit_metadata = allow_missing_static_pit_metadata(config)
     manual_rate_audit_csv = (
         args.manual_rate_audit_csv.expanduser().resolve()
         if args.manual_rate_audit_csv
@@ -1422,20 +1584,22 @@ def main() -> None:
     )
     min_confidence = float(args.min_confidence or policy.min_auto_confidence)
     ticker_filter = {normalize_ticker(value) for value in str(args.tickers or "").split(",") if normalize_ticker(value)}
+    asof = resolve_asof(args.asof)
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
         run_id = start_run(conn, run_type="link_med_device_reimbursement_to_companies", input_path=config_path)
         try:
-            company_meta = load_company_meta(conn, ticker_filter=ticker_filter)
-            aliases = build_aliases(conn, ticker_filter=ticker_filter, policy=policy)
-            policies = load_policy_rows(conn, policy=policy, max_rows=int(args.max_policies))
-            matches = build_matches(conn, aliases, policies, min_confidence=min_confidence)
+            company_meta = load_company_meta(conn, ticker_filter=ticker_filter, asof=asof)
+            aliases = build_aliases(conn, ticker_filter=ticker_filter, policy=policy, asof=asof)
+            policies = load_policy_rows(conn, policy=policy, max_rows=int(args.max_policies), asof=asof)
+            matches = build_matches(conn, aliases, policies, min_confidence=min_confidence, asof=asof)
             matches.extend(
                 build_descriptor_code_matches(
                     conn,
                     company_meta,
                     policy=policy,
                     min_confidence=min_confidence,
+                    asof=asof,
                 )
             )
             if policy.override_csv:
@@ -1446,6 +1610,8 @@ def main() -> None:
                         company_meta,
                         policy=policy,
                         min_confidence=min_confidence,
+                        asof=asof,
+                        include_missing_pit_metadata=include_missing_pit_metadata,
                     )
             )
             manual_rate_count = 0
@@ -1455,6 +1621,8 @@ def main() -> None:
                     conn,
                     resolve_path(policy.manual_rate_csv, base_dir=base_dir),
                     policy=policy,
+                    asof=asof,
+                    include_missing_pit_metadata=include_missing_pit_metadata,
                     audit_rows=manual_rate_audit_rows,
                 )
             matches = dedupe_matches(matches)
@@ -1475,6 +1643,8 @@ def main() -> None:
             resolved_no_code_company_ids = load_resolved_no_code_company_ids(
                 resolved_classification_csv,
                 company_meta,
+                asof=asof,
+                include_missing_pit_metadata=include_missing_pit_metadata,
             )
             write_unmapped_csv(
                 unmapped_output_csv,

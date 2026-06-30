@@ -25,6 +25,7 @@ from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.fda_states import MANUAL_FDA_REVIEW_STATES, normalize_fda_state  # noqa: E402
+from med_devices.core.point_in_time import row_is_effective_asof  # noqa: E402
 from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 
 
@@ -460,7 +461,23 @@ def parse_method_set(raw: object, default: set[str]) -> set[str]:
     return parsed or set(default)
 
 
-def load_excluded_fda_manufacturer_ids(config: dict[str, Any], *, base_dir: Path) -> set[int]:
+def allow_missing_static_pit_metadata(config: dict[str, Any]) -> bool:
+    return str(cfg_get(config, "historical_backfill.allow_missing_static_pit_metadata", True)).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+
+def load_excluded_fda_manufacturer_ids(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+    asof: date | str | None = None,
+    include_missing_pit_metadata: bool = True,
+) -> set[int]:
     raw_path = str(
         cfg_get(
             config,
@@ -492,6 +509,8 @@ def load_excluded_fda_manufacturer_ids(config: dict[str, Any], *, base_dir: Path
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
+            if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
+                continue
             method = str(row.get("mapping_method") or row.get("method") or "").strip().lower()
             raw_id = str(row.get("fda_manufacturer_id") or "").strip()
             if method not in excluded_methods or not raw_id:
@@ -781,7 +800,12 @@ def load_companies(
     return out
 
 
-def load_review_overrides(path: Path | None) -> dict[str, dict[str, str]]:
+def load_review_overrides(
+    path: Path | None,
+    *,
+    asof: date | None = None,
+    include_missing_pit_metadata: bool = True,
+) -> dict[str, dict[str, str]]:
     if path is None:
         return {}
     if not path.exists():
@@ -789,6 +813,8 @@ def load_review_overrides(path: Path | None) -> dict[str, dict[str, str]]:
         return {}
     out: dict[str, dict[str, str]] = {}
     for row in read_csv_flexible(path):
+        if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
+            continue
         ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
         if not ticker:
             continue
@@ -797,7 +823,12 @@ def load_review_overrides(path: Path | None) -> dict[str, dict[str, str]]:
     return out
 
 
-def load_footprint_overrides(path: Path | None) -> dict[str, dict[str, str]]:
+def load_footprint_overrides(
+    path: Path | None,
+    *,
+    asof: date | None = None,
+    include_missing_pit_metadata: bool = True,
+) -> dict[str, dict[str, str]]:
     if path is None:
         return {}
     if not path.exists():
@@ -805,6 +836,8 @@ def load_footprint_overrides(path: Path | None) -> dict[str, dict[str, str]]:
         return {}
     out: dict[str, dict[str, str]] = {}
     for row in read_csv_flexible(path):
+        if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
+            continue
         ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
         if not ticker:
             continue
@@ -813,7 +846,12 @@ def load_footprint_overrides(path: Path | None) -> dict[str, dict[str, str]]:
     return out
 
 
-def load_manual_footprint_evidence(path: Path | None) -> dict[str, dict[str, str]]:
+def load_manual_footprint_evidence(
+    path: Path | None,
+    *,
+    asof: date | None = None,
+    include_missing_pit_metadata: bool = True,
+) -> dict[str, dict[str, str]]:
     if path is None:
         return {}
     if not path.exists():
@@ -821,6 +859,8 @@ def load_manual_footprint_evidence(path: Path | None) -> dict[str, dict[str, str
         return {}
     out: dict[str, dict[str, str]] = {}
     for row in read_csv_flexible(path):
+        if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
+            continue
         ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
         if not ticker:
             continue
@@ -2563,7 +2603,7 @@ def main() -> None:
     manual_evidence_raw = str(cfg_get(config, "fda_features.manual_footprint_evidence_csv", "") or "").strip()
     manual_evidence_csv = resolve_path(manual_evidence_raw, base_dir=base_dir) if manual_evidence_raw else None
     policy = fda_feature_policy(config)
-    excluded_manufacturer_ids = load_excluded_fda_manufacturer_ids(config, base_dir=base_dir)
+    include_missing_pit_metadata = allow_missing_static_pit_metadata(config)
     default_signal_profile = default_fda_signal_profile(config)
     signal_profiles = fda_signal_profiles(config, default_signal_profile)
     min_cohort_rank_n = int(cfg_get(config, "fda_features.alpha.min_cohort_rank_n", 5))
@@ -2574,6 +2614,12 @@ def main() -> None:
         asof = parse_date(asof_text)
         if asof is None:
             raise ValueError(f"Invalid as-of date: {asof_text}")
+        excluded_manufacturer_ids = load_excluded_fda_manufacturer_ids(
+            config,
+            base_dir=base_dir,
+            asof=asof,
+            include_missing_pit_metadata=include_missing_pit_metadata,
+        )
         companies = load_companies(
             conn,
             asof=asof,
@@ -2587,9 +2633,21 @@ def main() -> None:
         try:
             canonical_count = refresh_canonical_recalls(conn, excluded_manufacturer_ids=excluded_manufacturer_ids)
             preflight_fda_company_links(conn)
-            review_overrides = load_review_overrides(review_override_csv)
-            footprint_overrides = load_footprint_overrides(footprint_csv)
-            manual_evidence = load_manual_footprint_evidence(manual_evidence_csv)
+            review_overrides = load_review_overrides(
+                review_override_csv,
+                asof=asof,
+                include_missing_pit_metadata=include_missing_pit_metadata,
+            )
+            footprint_overrides = load_footprint_overrides(
+                footprint_csv,
+                asof=asof,
+                include_missing_pit_metadata=include_missing_pit_metadata,
+            )
+            manual_evidence = load_manual_footprint_evidence(
+                manual_evidence_csv,
+                asof=asof,
+                include_missing_pit_metadata=include_missing_pit_metadata,
+            )
             rows = build_rows(
                 conn,
                 companies,

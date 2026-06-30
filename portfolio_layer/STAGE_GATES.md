@@ -811,6 +811,39 @@ constraint, harvest-staggering so realized gains spread over time).
 
 **Goal:** the rigorous gate wrapping the combined system; lockbox period untouched until final.
 
+**Readiness tracker - what exists vs. what Stage 11 still needs:**
+
+| area | current implementation / data status | still required for full Stage 11 |
+|---|---|---|
+| Sector score snapshots | Stage 1 consumes dated sector files and emits sealed `stocks_scores.csv` snapshots. Med-devices has generated daily `score_review_pack/<yyyy-mm-dd>/med_device_daily_composite_scores.csv` history from 2019-01-04 through current, with candidate gate, candidate score, model/version fields, calibration eligibility, component scores, and liquidity/capacity fields. Tech/biotech historical file generation is in progress. | Generate the same PIT dated Stage-1-consumed CSV history for biotech, semiconductors, technology hardware, and software infrastructure. Each file must include `asof_date`, ticker/company/taxonomy, native score, investability gate, `calibration_eligible_flag`, score/model/scoring versions, confidence/data-completeness, component scores, review/veto reasons, and `avg_dollar_volume_60d` when available. |
+| Stage 1 replay | Current Stage 1 can build the live canonical contract and already points med-devices to the dated path template. It preserves source hashes, duplicate-resolution provenance, finite/range gates, canonical overrides, and model/version fields where published. | Add/run the historical replay driver that iterates dates, requires all enabled sectors for each date, writes one sealed `stocks_scores.csv` snapshot per date, and stores a PIT snapshot index/table. Historical replay must fail loudly on missing sector files, score-scale drift, stale/mixed as-of dates, or missing calibration-critical fields. |
+| Forward returns | Stage 2 owns the live/current price panel and covariance model. | Build Stage 11 target-generation over historical snapshots: 21d, 63d, 126d, and 252d forward returns; sector-excess returns; benchmark returns; drawdown targets; and factor-residual returns. Targets must align `snapshot_as_of_date` to future returns without look-ahead. |
+| Survivorship | Stage 2 is intentionally live/current-book oriented and does not solve long-horizon survivorship. Some sectors have delisted/Norgate support outside the portfolio layer. | Build `backtest/15b_build_survivorship_panel.py`: a survivorship-complete return panel for historical backtests. Use layer-owned ingestion or published sector delisted-price exports, never live reads of sector DBs. Yahoo-only history is not acceptable for the full Stage 11 backtest because delisted names disappear. |
+| Benchmarks / factors | Stage 2 already carries broad and sleeve ETFs used for risk, rotation, and factor decomposition. | Ensure historical benchmark/ETF coverage exists for every snapshot date and forward-return horizon: SPY/QQQ plus sleeve ETFs such as SMH/SOXX, XBI, IHI, and configured software/hardware/foreign proxies. |
+| Macro regime | Stage 6 produces a sealed macro contract from independent MacroLayer outputs with PIT `MAX(as_of_date) <= run_as_of` semantics. | Build historical macro-regime joins for each score snapshot date, including regime label, gross scalar, sector macro fits, and foreign-budget state. Historical macro features must use vintages/releases available by the snapshot date. |
+| Rotation state | Stage 5 produces sealed rotation signals and optimizer-compatible sector states. | Recompute or load historical rotation state for each snapshot date using only prices available at that date. Join `Positive`/`Neutral`/`Negative` sleeve state and foreign eligibility to the PIT snapshot store. |
+| Risk / liquidity state | Stages 2, 2.5, and 4 build current risk eligibility, covariance, liquidity snapshots, and transaction-cost overlays. | Store historical risk eligibility, coverage reason, spread/cost assumptions, ADV/capacity, and cost estimates by snapshot date. Liquidity can use historical IB spread samples when available, then latest-prior fallback, then documented default spread. |
+| BL / sleeves / exits | Stages 7, 8, 8.5, and 9 are implemented as sealed shadow layers: BL fusion, sleeve risk proposal, broker ledger ingestion, and actual-holdings exits. | For Stage 11, replay these layers through time as comparison arms: AQR-only, +rotation, +macro/BL, +sleeves, +exits. Exit tests require historical or replayed holdings/ledger state; otherwise exits remain a current-book diagnostic until Stage 12 orchestration/backtest support exists. |
+| Calibration model | Stage 1 slopes are provisional; Stage 7 consumes them as annual alpha views but does not prove the payoff. | Estimate payoff slopes by sector, horizon, and regime after enough PIT snapshots exist. Start with within-sector/date standardization and ridge shrinkage; add elastic-net and Bayesian hierarchical shrinkage only after basic diagnostics are stable. Emit calibrated slopes plus confidence intervals back to Stage 1/Stage 7 only after OOS gates pass. |
+| Optional modules | Forecasting (6.7) and hedging (7.5) are intentionally deferred. | Test ML forecasting and hedging only inside Stage 11 after the rule-based stack has a valid OOS baseline. They remain shadow-only unless they beat the simpler stack OOS net of cost. |
+
+**Minimum Stage 11 dataset row:** one row per `(snapshot_as_of_date, ticker)` containing the sealed Stage 1
+score fields (`source_pipeline`, native score, `final_score`, `rating`, `score_confidence`,
+`investable_eligible`, `calibration_eligible_flag`, model/scoring versions, component scores), joined to
+macro regime, rotation state, sleeve assignment, risk eligibility, liquidity/capacity, forward returns,
+sector/benchmark excess returns, factor-residual returns, and survivorship/delisting flags.
+
+**Data-quality rule:** historical sector CSVs are valid for Stage 11 calibration only if they are
+point-in-time. A file dated `2019-01-04` must have been generated using data available on or before
+2019-01-04. If a historical file uses today's revised data, future-known classifications, or future-known
+eligibility/veto decisions, it may be useful for diagnostics but not for true OOS calibration.
+
+**History horizon rule:** a 252-trading-day forward target requires at least 252 trading days after each
+snapshot. One year of daily snapshots is the minimum for first 252d labels; 2-3 years of snapshots is the
+practical minimum for stable sector/horizon/regime calibration. Weekly sampling can be used for OOS folds
+or lower-overlap diagnostics, but the raw snapshot store should remain daily so Stage 11 can choose the
+proper sampling cadence without losing information.
+
 **Build - optimal Stage 11 sequence:**
 - `backtest/15b_build_survivorship_panel.py` - the **survivorship-complete** return panel. Delisted/Norgate
   history is mandatory here, unlike Stage 2's live-only panel. Source decision: self-ingest delisted history

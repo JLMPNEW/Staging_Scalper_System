@@ -1,0 +1,2 @@
+"""Defense subsector pipeline."""
+

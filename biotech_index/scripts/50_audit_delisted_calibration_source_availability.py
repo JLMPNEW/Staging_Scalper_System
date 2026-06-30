@@ -29,6 +29,7 @@ DEFAULT_CANDIDATES = PACKAGE_ROOT / "data" / "delisted_biotech_calibration_candi
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "output" / "biotech_index_reports" / "delisted_calibration_source_availability"
 DEFAULT_13F_CUSIP_MAP = PACKAGE_ROOT / "data" / "delisted_13f_cusip_ticker_map.csv"
 FORM4_FEATURE_TABLES = ("form4_events_tier1", "form4_buy_events_v1")
+DELISTED_FORM4_BACKFILL_TABLE = "delisted_calibration_form4_filings"
 
 ALLOWED_CALIBRATION_COHORTS = frozenset(
     {
@@ -500,6 +501,99 @@ def empty_form4_aggregate() -> dict[str, Any]:
     }
 
 
+def merge_form4_fallback(
+    primary: dict[str, dict[str, Any]],
+    fallback: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Use biotech-owned SEC Form 4 backfill only when staging DB has no rows.
+
+    The staging Form 4 database remains the primary source for live/current data.
+    The delisted backfill table is a calibration-only fallback and should not
+    double-count rows for names that are already covered in staging.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    for ticker in sorted(set(primary) | set(fallback)):
+        primary_rows = int((primary.get(ticker) or {}).get("form4_matching_row_count") or 0)
+        if primary_rows > 0:
+            merged[ticker] = primary.get(ticker, empty_form4_aggregate())
+        else:
+            merged[ticker] = fallback.get(ticker, primary.get(ticker, empty_form4_aggregate()))
+    return merged
+
+
+def preload_delisted_form4_backfill_counts(
+    conn: sqlite3.Connection | None,
+    candidates: list[dict[str, str]],
+) -> dict[str, dict[str, Any]]:
+    out = {row["ticker"]: empty_form4_aggregate() for row in candidates if row.get("ticker")}
+    if conn is None or not out or not table_exists(conn, DELISTED_FORM4_BACKFILL_TABLE):
+        return out
+
+    candidate_windows: dict[str, tuple[str, str]] = {
+        row["ticker"]: (parse_flexible_date(row.get("price_start_date")), parse_flexible_date(row.get("price_end_date")))
+        for row in candidates
+        if row.get("ticker")
+    }
+    ticker_to_candidate = {row["ticker"]: row["ticker"] for row in candidates if row.get("ticker")}
+    ciks = sorted({normalize_cik(row.get("cik")) for row in candidates if normalize_cik(row.get("cik"))})
+    tickers = sorted(ticker_to_candidate)
+    where_parts: list[str] = []
+    params: list[Any] = []
+    if tickers:
+        placeholders = ",".join("?" for _ in tickers)
+        where_parts.append(f"UPPER(ticker) IN ({placeholders})")
+        params.extend(tickers)
+    if ciks:
+        placeholders = ",".join("?" for _ in ciks)
+        where_parts.append(f"issuer_cik IN ({placeholders})")
+        params.extend(ciks)
+    if not where_parts:
+        return out
+
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT ticker, issuer_cik, filing_date, purchase_transaction_count
+            FROM {quote_identifier(DELISTED_FORM4_BACKFILL_TABLE)}
+            WHERE {" OR ".join(where_parts)}
+            """,
+            tuple(params),
+        ).fetchall()
+    except sqlite3.Error:
+        return out
+
+    per_candidate_counts: Counter[str] = Counter()
+    for item in rows:
+        ticker = str(item["ticker"] or "").upper()
+        if ticker not in out:
+            continue
+        event_date = parse_flexible_date(item["filing_date"])
+        if not event_date:
+            continue
+        start_date, end_date = candidate_windows.get(ticker, ("", ""))
+        if start_date and event_date < start_date:
+            continue
+        if end_date and event_date > end_date:
+            continue
+        bucket = out.setdefault(ticker, empty_form4_aggregate())
+        bucket["form4_matching_row_count"] = int(bucket["form4_matching_row_count"] or 0) + 1
+        bucket["form4_matching_buy_event_rows"] = int(bucket["form4_matching_buy_event_rows"] or 0) + int(
+            item["purchase_transaction_count"] or 0
+        )
+        bucket["form4_matching_min_date"] = min(
+            [value for value in (bucket["form4_matching_min_date"], event_date) if value] or [""]
+        )
+        bucket["form4_matching_max_date"] = max(
+            [value for value in (bucket["form4_matching_max_date"], event_date) if value] or [""]
+        )
+        per_candidate_counts[ticker] += 1
+    for ticker, count in per_candidate_counts.items():
+        bucket = out.setdefault(ticker, empty_form4_aggregate())
+        bucket["form4_matching_tables"] = f"{DELISTED_FORM4_BACKFILL_TABLE}:{count}"
+        bucket["form4_matching_table_count"] = 1
+    return out
+
+
 def preload_form4_counts(conn: sqlite3.Connection | None, candidates: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
     """Bulk-load Form 4 counts by candidate.
 
@@ -839,7 +933,10 @@ def main() -> int:
     market_conn = connect_readonly(market_db)
     form4_conn = connect_readonly(form4_db)
     try:
-        form4_lookup = preload_form4_counts(form4_conn, candidates)
+        form4_lookup = merge_form4_fallback(
+            preload_form4_counts(form4_conn, candidates),
+            preload_delisted_form4_backfill_counts(biotech_conn, candidates),
+        )
         rows = [
             audit_candidate(
                 row,

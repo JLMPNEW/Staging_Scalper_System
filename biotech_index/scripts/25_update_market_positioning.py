@@ -5,7 +5,7 @@ import argparse
 import csv
 import logging
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -98,7 +98,7 @@ def parse_asof(raw: str) -> date:
     parsed = parse_date(raw)
     if parsed is not None:
         return parsed
-    return datetime.utcnow().date()
+    return datetime.now(timezone.utc).date()
 
 
 def config_path_or_default(config: dict[str, Any], key: str, *, base_dir: Path, default: str = "") -> Path | None:
@@ -340,8 +340,6 @@ def main() -> None:
                     LOGGER.exception("SEC public-float proxy update failed but required=false: %s", exc)
                     results.append(f"sec_public_float_proxy failed={type(exc).__name__}")
             if (
-                not args.public_float_only
-                and
                 not args.finra_only
                 and
                 not args.sec13f_only

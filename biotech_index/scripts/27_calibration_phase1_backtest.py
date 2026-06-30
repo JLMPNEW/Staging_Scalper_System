@@ -235,7 +235,6 @@ def load_snapshot_dates(
         """
         SELECT d.asof_date
         FROM daily_scores d
-        INNER JOIN multibagger_scores_daily m ON m.asof_date = d.asof_date
         GROUP BY d.asof_date
         ORDER BY d.asof_date
         """
@@ -630,7 +629,7 @@ def pct(value: float | None) -> float | str:
 
 
 def rounded(value: float | None, digits: int = 6) -> float | str:
-    return "" if value is None else round(value, digits)
+    return "" if value is None or not math.isfinite(value) else round(value, digits)
 
 
 def safe_ratio(numerator: float | None, denominator: float | None) -> float | None:
@@ -863,10 +862,11 @@ def build_correlation_rows(rows: list[dict[str, Any]], horizons: list[int]) -> l
                     cs_obs_counts.append(float(len(date_pairs)))
             cs_spearman_mean = mean(cs_spearman_values)
             cs_spearman_std = stdev(cs_spearman_values)
-            cs_spearman_t = (
-                cs_spearman_mean / (cs_spearman_std / math.sqrt(len(cs_spearman_values)))
-                if cs_spearman_mean is not None and cs_spearman_std not in {None, 0.0}
-                else None
+            cs_spearman_t = safe_ratio(
+                cs_spearman_mean,
+                (cs_spearman_std / math.sqrt(len(cs_spearman_values)))
+                if cs_spearman_std not in {None, 0.0} and cs_spearman_values
+                else None,
             )
             residual_pairs = (
                 linear_residual_pairs(rows, "biotech_opportunity_score", ret_key, score_key)
@@ -1024,7 +1024,7 @@ def build_bucket_diagnostic_rows(
                         "mean_distinctive_acceleration_percentile": mean_numeric(
                             bucket_rows, "diag_distinctive_acceleration_score_percentile"
                         ),
-                        "mean_tier1_risk_score": mean_numeric(bucket_rows, "tier1_risk_score"),
+                        "mean_tier1_risk_score": mean_numeric(bucket_rows, "biotech_risk_score"),
                         "mean_multibagger_risk_penalty": mean_numeric(bucket_rows, "diag_multibagger_risk_penalty"),
                         "mean_multibagger_risk_penalty_percentile": mean_numeric(
                             bucket_rows, "diag_multibagger_risk_penalty_percentile"
@@ -1867,10 +1867,15 @@ def main() -> None:
         else float(cfg_get(config, "calibration.phase1.train_fraction", 0.70))
     )
     train_fraction = max(0.10, min(0.90, train_fraction))
+    # When the config key is absent, derive a calendar-day embargo from the
+    # longest horizon (trading bars → calendar days, same formula as script 28).
+    # Using max(horizons) directly as calendar days would undercount by ~54 days
+    # for a 120-bar horizon (120 bars ≈ 174 calendar days, not 120).
+    _default_embargo = math.ceil(max(horizons) * 365.25 / 252.0) + 10
     embargo_days = (
         int(args.embargo_days)
         if args.embargo_days is not None
-        else int(cfg_get(config, "calibration.phase1.embargo_days", max(horizons)))
+        else int(cfg_get(config, "calibration.phase1.embargo_days", _default_embargo))
     )
     embargo_days = max(0, embargo_days)
     bootstrap_iterations = (

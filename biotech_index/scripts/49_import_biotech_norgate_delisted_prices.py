@@ -162,6 +162,39 @@ def safe_float(value: Any) -> float | None:
         return None
 
 
+def parse_date_text(raw: object) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return ""
+
+
+def as_bool(raw: object) -> bool:
+    return str(raw or "").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def min_date_text(*values: object) -> str:
+    dates = [parsed for value in values if (parsed := parse_date_text(value))]
+    return min(dates) if dates else ""
+
+
+def price_import_end_date(row: dict[str, str], norgate_last_date: str) -> str:
+    """Return the vetted import end date for a delisted candidate.
+
+    Candidate price_end_date is the primary historical scoring window.  For
+    bankruptcy/liquidation rows where post-terminal OTC tape must be dropped, the
+    import is capped at the legal terminal date so penny-stub prints cannot leak
+    into calibration returns.
+    """
+    candidate_end = parse_date_text(row.get("price_end_date"))
+    norgate_end = parse_date_text(norgate_last_date)
+    terminal_end = parse_date_text(row.get("terminal_date")) if as_bool(row.get("drop_otc_tape")) else ""
+    return min_date_text(candidate_end, norgate_end, terminal_end) or candidate_end or norgate_end or "2100-01-01"
+
+
 def pandas_index_date(value: object) -> str:
     return str(pd.Timestamp(str(value)))[:10]
 
@@ -432,9 +465,10 @@ def main() -> int:
             last_adjusted_close: float | None = None
             error = ""
             if match.source_symbol:
-                end_date = last_quoted_date(norgatedata, match.source_symbol)
+                norgate_last = last_quoted_date(norgatedata, match.source_symbol)
+                end_date = price_import_end_date(row, norgate_last)
                 try:
-                    prices = fetch_prices(norgatedata, match.source_symbol, args.start_date, end_date or "2100-01-01")
+                    prices = fetch_prices(norgatedata, match.source_symbol, args.start_date, end_date)
                     if prices.empty:
                         status = "no_price_bars"
                     else:

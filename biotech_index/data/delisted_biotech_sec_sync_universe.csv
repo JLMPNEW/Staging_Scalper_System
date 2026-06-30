@@ -1,0 +1,49 @@
+ticker,scoring_include,original_ticker,company_name,cik,calibration_only,source
+AKAOQ-202106,true,AKAO,Achaogen Inc.,0001301501,true,delisted_biotech_calibration_universe
+ANAC-201606,true,ANAC,Anacor Pharmaceuticals Inc.,0001411158,true,delisted_biotech_calibration_universe
+APTX-202312,true,APTX,Aptinyx Inc.,0001674365,true,delisted_biotech_calibration_universe
+ARIA-201702,true,ARIA,Ariad Pharmaceuticals Inc.,0000884731,true,delisted_biotech_calibration_universe
+AUXL-201501,true,AUXL,Auxilium Pharmaceuticals Inc.,0001182129,true,delisted_biotech_calibration_universe
+AVXS-201805,true,AVXS,AveXis Inc.,0001652923,true,delisted_biotech_calibration_universe
+BOLD-202001,true,BOLD,Audentes Therapeutics Inc.,0001628738,true,delisted_biotech_calibration_universe
+CASC-201803,true,CASC,Cascadian Therapeutics Inc.,0001412067,true,delisted_biotech_calibration_universe
+CBST-201501,true,CBST,Cubist Pharmaceuticals Inc.,0000912183,true,delisted_biotech_calibration_universe
+CDAKQ-202307,true,CDAK,Codiak BioSciences Inc.,0001659352,true,delisted_biotech_calibration_universe
+CELG-201911,true,CELG,Celgene Corp.,0000816284,true,delisted_biotech_calibration_universe
+CEPH-201110,true,CEPH,Cephalon Inc.,0000873364,true,delisted_biotech_calibration_universe
+CLVSQ-202307,true,CLVS,Clovis Oncology Inc.,0001466301,true,delisted_biotech_calibration_universe
+DNA-200903,true,DNA,"Genentech, Inc.",0000318771,true,delisted_biotech_calibration_universe
+DNDNQ-201506,true,DNDN,Dendreon Corp.,0001107332,true,delisted_biotech_calibration_universe
+DRNA-202112,true,DRNA,Dicerna Pharmaceuticals Inc.,0001562088,true,delisted_biotech_calibration_universe
+EIGRQ-202409,true,EIGR,Eiger BioPharmaceuticals Inc.,0001305253,true,delisted_biotech_calibration_universe
+FPRX-202104,true,FPRX,Five Prime Therapeutics Inc.,0001175505,true,delisted_biotech_calibration_universe
+GENZ-201104,true,GENZ,Genzyme Corp.,0000732485,true,delisted_biotech_calibration_universe
+GRTSQ-202504,true,GRTS,Gritstone bio Inc.,0001656634,true,delisted_biotech_calibration_universe
+HGENQ-202407,true,HGEN,Humanigen Inc.,0001351197,true,delisted_biotech_calibration_universe
+HGSI-201208,true,HGSI,Human Genome Sciences Inc.,0000901219,true,delisted_biotech_calibration_universe
+IMCL-200811,true,IMCL,ImClone Systems Inc.,0000765258,true,delisted_biotech_calibration_universe
+IMMU-202010,true,IMMU,Immunomedics Inc.,0000722830,true,delisted_biotech_calibration_universe
+INHX-201202,true,INHX,Inhibitex Inc.,0001274913,true,delisted_biotech_calibration_universe
+INSYQ-202002,true,INSY,INSYS Therapeutics Inc.,0001516479,true,delisted_biotech_calibration_universe
+JUNO-201803,true,JUNO,Juno Therapeutics Inc.,0001594864,true,delisted_biotech_calibration_universe
+KERX-201812,true,KERX,Keryx Biopharmaceuticals Inc.,0001114220,true,delisted_biotech_calibration_universe
+KITE-201710,true,KITE,Kite Pharma Inc.,0001510580,true,delisted_biotech_calibration_universe
+LOXO-201902,true,LOXO,Loxo Oncology Inc.,0001581720,true,delisted_biotech_calibration_universe
+MDCO-202001,true,MDCO,The Medicines Company,0001113481,true,delisted_biotech_calibration_universe
+MEDI-200706,true,MEDI,MedImmune Inc.,0000873591,true,delisted_biotech_calibration_universe
+MLNTQ-202004,true,MLNT,Melinta Therapeutics Inc.,0001111665,true,delisted_biotech_calibration_universe
+OMGAQ-202508,true,OMGA,Omega Therapeutics Inc.,0001850838,true,delisted_biotech_calibration_universe
+ONCE-201912,true,ONCE,Spark Therapeutics Inc.,0001609351,true,delisted_biotech_calibration_universe
+PCYC-201505,true,PCYC,Pharmacyclics Inc.,0000949699,true,delisted_biotech_calibration_universe
+PGNX-202006,true,PGNX,Progenics Pharmaceuticals Inc.,0000835887,true,delisted_biotech_calibration_universe
+RCPT-201508,true,RCPT,Receptos Inc.,0001463729,true,delisted_biotech_calibration_universe
+RXDX-202306,true,RXDX,Prometheus Biosciences Inc.,0001718852,true,delisted_biotech_calibration_universe
+SYBX,true,SYBX,Synlogic Inc.,0001527599,true,delisted_biotech_calibration_universe
+TBIO-202109,true,TBIO,Translate Bio Inc.,0001693415,true,delisted_biotech_calibration_universe
+TPTX-202208,true,TPTX,Turning Point Therapeutics Inc.,0001595893,true,delisted_biotech_calibration_universe
+TRIL-202111,true,TRIL,Trillium Therapeutics Inc.,0001616212,true,delisted_biotech_calibration_universe
+TSRO-201901,true,TSRO,Tesaro Inc.,0001491576,true,delisted_biotech_calibration_universe
+TTPH-202007,true,TTPH,Tetraphase Pharmaceuticals Inc.,0001373707,true,delisted_biotech_calibration_universe
+VRUS-201201,true,VRUS,Pharmasset Inc.,0001301081,true,delisted_biotech_calibration_universe
+VVUSQ-202012,true,VVUS,Vivus Inc.,0000881524,true,delisted_biotech_calibration_universe
+ZSPH-201512,true,ZSPH,ZS Pharma Inc.,0001459266,true,delisted_biotech_calibration_universe

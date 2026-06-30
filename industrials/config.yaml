@@ -1,0 +1,122 @@
+paths:
+  database_path: "${INDUSTRIALS_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/industrials.sqlite"
+  output_dir: "../output/industrials"
+  cache_dir: "../output/industrials_cache"
+
+runtime:
+  sqlite_timeout_sec: 120.0
+
+source_registry:
+  path: "data/free_source_registry.yaml"
+
+industrials_universe:
+  initial_subsector: "defense"
+  expected_ticker_count: 95
+  seed_csv: "defense/system_csvs/defense_tickers.csv"
+  seed_source_id: "defense_ticker_seed"
+  policy_path: "defense/data/defense_universe_policy.yaml"
+  cohort_path: "defense/data/defense_cohorts.yaml"
+  cohort_source_id: "defense_cohort_policy"
+  historical_membership_csv: "defense/system_csvs/defense_historical_membership.csv"
+  historical_membership_source_id: "defense_historical_membership_seed"
+  delisted_seed_csv: "defense/system_csvs/aerospace_defense_delisted.csv"
+  delisted_source_id: "defense_delisted_calibration_seed"
+  ticker_aliases_csv: "defense/system_csvs/defense_ticker_aliases.csv"
+  ticker_aliases_source_id: "defense_ticker_alias_seed"
+  cik_ticker_overrides_csv: "defense/system_csvs/defense_cik_ticker_overrides.csv"
+  cik_ticker_overrides_source_id: "defense_cik_ticker_overrides"
+  optimization_start_date: "2010-01-01"
+  delisted_default_start_date: "2000-01-01"
+  sector: "Industrials"
+  industry: "Aerospace & Defense"
+  subsector: "Defense"
+  country: "United States"
+  currency: "USD"
+  benchmark_ticker: "XAR"
+  robustness_benchmark_ticker: "ITA"
+  benchmark_tickers:
+    - XAR
+    - ITA
+    - SPY
+
+market_data_policy:
+  scoring_primary_source: "yahoo_finance_adjusted"
+  scoring_fallback_sources:
+    - "norgate_us_equities_total_return"
+  require_adjusted_for_scoring: true
+  max_staleness_days: 7
+  min_trading_days_for_full_features: 252
+  min_avg_dollar_volume_60d_for_full_features: 5000000
+
+yahoo_price_ingestion:
+  source_id: "yahoo_finance_adjusted"
+  chart_url_template: "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+  start_date: "2010-01-01"
+  interval: "1d"
+  events: "div,splits"
+  include_adjusted_close: true
+  include_benchmark_tickers: true
+  user_agent: "${INDUSTRIALS_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  timeout_sec: 30.0
+  max_retries: 3
+  parallel_workers: 4
+  cache_dir: "../output/industrials_cache/yahoo_adjusted"
+  output_csv: "../output/industrials/defense/stage3/yahoo_adjusted_price_coverage.csv"
+  ticker_start_date_overrides: {}
+  retry_status_codes:
+    - 429
+    - 500
+    - 502
+    - 503
+    - 504
+
+market_data_audit:
+  output_csv: "../output/industrials/defense/stage3/market_data_source_audit.csv"
+
+market_feature_build:
+  source_id: "yahoo_finance_adjusted"
+  output_csv: "../output/industrials/defense/stage3/market_feature_coverage.csv"
+  min_trading_days_for_full_features: 252
+  min_avg_dollar_volume_60d_for_full_features: 5000000
+  windows:
+    one_month_days: 21
+    three_month_days: 63
+    six_month_days: 126
+    one_year_days: 252
+    skip_latest_month_days: 21
+    volatility_days: 60
+    ma_short_days: 50
+    ma_long_days: 200
+
+sec_fundamentals:
+  submissions_source_id: "sec_submissions"
+  companyfacts_source_id: "sec_companyfacts"
+  submissions_url_template: "https://data.sec.gov/submissions/CIK{cik}.json"
+  companyfacts_url_template: "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+  start_date: "2015-01-01"
+  forms:
+    - "10-K"
+    - "10-Q"
+    - "20-F"
+    - "40-F"
+    - "6-K"
+  include_historical_members: false
+  neutral_fallback_enabled: true
+  user_agent: "${INDUSTRIALS_SEC_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  timeout_sec: 30.0
+  max_retries: 3
+  request_sleep_sec: 0.12
+  cache_dir: "../output/industrials_cache/sec_fundamentals"
+  sync_output_csv: "../output/industrials/defense/stage4/sec_fundamentals_coverage.csv"
+  feature_output_csv: "../output/industrials/defense/stage4/financial_feature_coverage.csv"
+
+fx_rates:
+  source_id: "yahoo_fx_rates"
+  default_usd_rate: 1.0
+
+oos_calibration_standards:
+  version: "industrials_defense_oos_provenance_v1"
+  families:
+    defense:
+      calibration_provenance_version: "industrials_defense_oos_provenance_v1"
+      calibration_validation_method: "stage8_report_only_with_true_oos_file_standard_validator"

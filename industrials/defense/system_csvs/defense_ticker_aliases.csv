@@ -1,0 +1,2 @@
+contract_ticker,active_ticker,predecessor_ticker,effective_date,price_history_csv,issuer_id,reason,source,verified_flag,notes
+HONAV,HONA,HONAV,2026-06-29,,HONAV,when_issued_to_regular_way,manual_verified_corporate_action,TRUE,When-issued ticker migrates to regular-way active ticker HONA on or after 2026-06-29.

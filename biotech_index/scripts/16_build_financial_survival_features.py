@@ -32,6 +32,7 @@ from biotech_index.core.pipeline_guards import (
     validate_output_coverage,
     validate_requested_tickers,
 )
+from biotech_index.core.report_inputs import resolve_dated_report_input_csv
 
 
 LOGGER = logging.getLogger("build_financial_survival_features")
@@ -146,6 +147,7 @@ def as_bool(raw: object) -> bool:
 
 def read_screen_rows(path: Path) -> dict[str, dict[str, str]]:
     if not path.exists():
+        LOGGER.warning("Financial survival screen CSV is missing; screen-derived fields will be blank: %s", path)
         return {}
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -168,8 +170,13 @@ def load_companies(
         SELECT company_id, ticker, company_name
         FROM companies
         WHERE is_active = 1
+           OR (universe_status = 'delisted_calibration' AND ticker IN (
+                SELECT value FROM json_each(?)
+           ))
         ORDER BY ticker
         """
+        ,
+        (json.dumps(sorted(scoring_tickers)),),
     ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -376,7 +383,7 @@ def financing_event_is_current(event_type: str, excerpt: str, *, asof_date: date
     # 10-Ks often restate years-old financing history. Keep events that are
     # explicitly current/recent, but do not punish stale financing boilerplate.
     years = [int(match) for match in re.findall(r"\b(20\d{2})\b", text)]
-    if years and max(years) < asof_date.year - 1:
+    if years and max(years) < asof_date.year:
         return False
 
     if event_type in {"atm_program", "atm_facility"}:
@@ -559,7 +566,10 @@ def compute_survival_row(
         missing.append("working_capital_ratio")
 
     total_debt, _ = latest_nonnull(rows, "total_debt")
-    debt_to_cash = total_debt / cash if total_debt is not None and cash is not None and cash != 0 else None
+    if total_debt is not None and total_debt > 0 and cash is not None and cash <= 0:
+        debt_to_cash = 999.0
+    else:
+        debt_to_cash = total_debt / cash if total_debt is not None and cash is not None and cash != 0 else None
 
     cash_period_date = parse_date(cash_row.get("period_end")) if cash_row else None
     cash_qoq = pct_change(cash, closest_prior_value(rows_after_marker(rows, cash_row), cash_field, cash_period_date or asof_date, 30, 140))
@@ -659,7 +669,11 @@ def compute_survival_row(
     elif runway >= float(cfg_get(config, "financial_survival.min_high_quality_runway_months", 18)):
         score += 5.0
     if debt_to_cash is not None:
-        if debt_to_cash > 1.0:
+        if debt_to_cash < 0.0:
+            # Negative ratio means liabilities exceed assets with a sign flip —
+            # treat as extreme stress, same penalty as debt > cash.
+            score -= 15.0
+        elif debt_to_cash > 1.0:
             score -= 15.0
         elif debt_to_cash > 0.5:
             score -= 8.0
@@ -796,7 +810,7 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    universe_csv = resolve_path(
+    configured_universe_csv = resolve_path(
         cfg_get(
             config,
             "financial_survival.final_scoring_universe_csv",
@@ -809,6 +823,12 @@ def main() -> None:
     asof_date = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
     if asof_date is None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
+    universe_csv = resolve_dated_report_input_csv(
+        configured_universe_csv,
+        base_output_dir=resolve_path(cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir),
+        asof_date=asof_date.isoformat(),
+        logger=LOGGER,
+    )
     ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
 

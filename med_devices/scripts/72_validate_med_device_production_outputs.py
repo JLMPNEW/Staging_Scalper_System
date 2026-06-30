@@ -330,6 +330,7 @@ def main() -> int:
             "analyst_review_decision",
             "analyst_review_reason",
             "analyst_review_owner",
+            "analyst_reviewed_at",
             "analyst_review_expires_at",
             "analyst_portfolio_override_applied",
         }
@@ -385,6 +386,27 @@ def main() -> int:
                 observed=expired_applied_decisions,
                 expected=0,
                 details="Expired analyst decisions cannot be applied to the production score surface.",
+            )
+            future_applied_decisions = count_rows(
+                conn,
+                """
+                SELECT COUNT(*)
+                FROM med_device_daily_scores
+                WHERE asof_date = ?
+                  AND COALESCE(TRIM(analyst_review_decision), '') <> ''
+                  AND COALESCE(analyst_reviewed_at, '') <> ''
+                  AND analyst_reviewed_at >= ?
+                """,
+                (asof, asof),
+            )
+            add_check(
+                checks,
+                check_id="no_future_analyst_decision_applied",
+                severity="CRITICAL",
+                passed=future_applied_decisions == 0,
+                observed=future_applied_decisions,
+                expected=0,
+                details="Analyst decisions cannot be applied before their reviewed_at date.",
             )
             hard_gate_bypass_overrides = count_rows(
                 conn,

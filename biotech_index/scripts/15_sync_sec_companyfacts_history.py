@@ -179,6 +179,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", type=str, default="", help="History as-of date in YYYY-MM-DD. Defaults to UTC today.")
     parser.add_argument("--max-companies", type=int, default=0, help="Smoke-test limit. 0 means all.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
+    parser.add_argument("--universe-csv", type=Path, default=None, help="Override final scoring universe CSV. Used for calibration-only SEC backfills.")
+    parser.add_argument("--output-csv", type=Path, default=None, help="Override companyfacts output CSV.")
+    parser.add_argument("--sign-audit-csv", type=Path, default=None, help="Override companyfacts sign-convention audit CSV.")
+    parser.add_argument("--lookback-years", type=int, default=0, help="Override sec_companyfacts_history.lookback_years.")
+    parser.add_argument(
+        "--include-delisted-calibration",
+        action="store_true",
+        help="Allow inactive companies with universe_status=delisted_calibration when the supplied universe CSV names them.",
+    )
     parser.add_argument("--full-refresh", action="store_true", help="Force refresh for all eligible companies regardless of sync state.")
     parser.add_argument("--audit-only", action="store_true", help="Write the sign-convention audit from existing DB rows without fetching SEC data.")
     parser.add_argument("--allow-partial", action="store_true", help="Return success even if one or more companyfacts fetches fail.")
@@ -228,12 +237,16 @@ def load_companies(
     scoring_tickers: set[str],
     ticker_filter: set[str],
     max_companies: int,
+    include_delisted_calibration: bool = False,
 ) -> list[Company]:
+    status_clause = "is_active = 1"
+    if include_delisted_calibration:
+        status_clause = "(is_active = 1 OR universe_status = 'delisted_calibration')"
     rows = conn.execute(
-        """
+        f"""
         SELECT company_id, ticker, cik, company_name
         FROM companies
-        WHERE is_active = 1
+        WHERE {status_clause}
         ORDER BY ticker
         """
     ).fetchall()
@@ -1182,8 +1195,16 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    universe_csv = resolve_path(cfg_get(config, "sec_companyfacts_history.final_scoring_universe_csv"), base_dir=base_dir)
-    output_csv = resolve_path(cfg_get(config, "sec_companyfacts_history.output_csv"), base_dir=base_dir)
+    universe_csv = (
+        args.universe_csv.expanduser().resolve()
+        if args.universe_csv
+        else resolve_path(cfg_get(config, "sec_companyfacts_history.final_scoring_universe_csv"), base_dir=base_dir)
+    )
+    output_csv = (
+        args.output_csv.expanduser().resolve()
+        if args.output_csv
+        else resolve_path(cfg_get(config, "sec_companyfacts_history.output_csv"), base_dir=base_dir)
+    )
     sign_audit_csv = resolve_path(
         cfg_get(
             config,
@@ -1192,12 +1213,18 @@ def main() -> None:
         ),
         base_dir=base_dir,
     )
+    if args.sign_audit_csv:
+        sign_audit_csv = args.sign_audit_csv.expanduser().resolve()
     cache_dir = resolve_path(cfg_get(config, "sec_companyfacts_history.cache_dir", "../output/biotech_index_cache"), base_dir=base_dir)
     url_template = str(cfg_get(config, "sec_companyfacts_history.companyfacts_url_template", "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"))
     user_agent = str(cfg_get(config, "sec_companyfacts_history.user_agent", "") or "").strip()
     if not user_agent:
         raise ValueError("sec_companyfacts_history.user_agent is required for SEC requests.")
-    lookback_years = int(cfg_get(config, "sec_companyfacts_history.lookback_years", 3))
+    lookback_years = (
+        int(args.lookback_years)
+        if int(args.lookback_years) > 0
+        else int(cfg_get(config, "sec_companyfacts_history.lookback_years", 3))
+    )
     asof_obj = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
     if asof_obj is None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
@@ -1224,6 +1251,7 @@ def main() -> None:
             scoring_tickers=scoring_tickers,
             ticker_filter=ticker_filter,
             max_companies=int(args.max_companies),
+            include_delisted_calibration=bool(args.include_delisted_calibration),
         )
         subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_companies))
         output_csv = subset_output_path(output_csv, subset_mode=subset_mode)

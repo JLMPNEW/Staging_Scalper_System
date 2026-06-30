@@ -36,6 +36,22 @@ SCORE_FIELDS = [
     "industry",
     "country",
     "currency",
+    "score_confidence",
+    "eligibility_reason",
+    "native_score_field",
+    "native_score_value",
+    "score_zero_is_missing_flag",
+    "universe_status",
+    "historical_universe_source",
+    "price_start_date",
+    "price_end_date",
+    "terminal_date",
+    "historical_price_ticker",
+    "calibration_only",
+    "latest_price_date",
+    "source_snapshot_asof_date",
+    "price_data_asof_date",
+    "feature_data_asof_date",
     "subsector",
     "calibration_cohort",
     "calibration_status",
@@ -57,6 +73,7 @@ SCORE_FIELDS = [
     "analyst_review_decision",
     "analyst_review_reason",
     "analyst_review_owner",
+    "analyst_reviewed_at",
     "analyst_review_expires_at",
     "analyst_portfolio_override_applied",
     "safe_core_score",
@@ -71,6 +88,9 @@ SCORE_FIELDS = [
     "legacy_gate_misses",
     "composite_score",
     "raw_composite_score",
+    "composite_score_delta",
+    "rank_delta",
+    "classification_change",
     "ic_tilted_composite_score",
     "ic_tilted_composite_delta",
     "ic_tilted_composite_mode",
@@ -217,6 +237,7 @@ SCORE_FIELDS = [
     "shares_source_period",
     "market_cap_validated_flag",
     "avg_dollar_volume_60d",
+    "avg_dollar_volume_60d_available_flag",
     "liquidity_score",
     "capacity_bucket",
     "min_position_size_feasible",
@@ -246,6 +267,32 @@ SCORE_FIELDS = [
     "top_positive_drivers",
     "top_negative_drivers",
 ]
+DAILY_COMPOSITE_EXTRA_FIELDS = [
+    "recovery_type",
+    "equity_recovery",
+    "drop_otc_tape",
+    "financial_data_asof_date",
+    "short_interest_asof_date",
+    "institutional_data_asof_date",
+    "insider_data_asof_date",
+    "borrow_data_asof_date",
+    "forward_catalyst_event_date",
+    "forward_catalyst_event_type",
+    "forward_catalyst_nearest_days",
+    "forward_catalyst_source",
+    "forward_catalyst_confidence",
+    "forward_catalyst_asof_date",
+]
+assert "feature_data_asof_date" in set(SCORE_FIELDS), (
+    "DAILY_COMPOSITE_FIELDS injection is anchored on 'feature_data_asof_date' in SCORE_FIELDS; "
+    "if that field is ever removed from SCORE_FIELDS the 14 extra composite fields will be silently dropped. "
+    "Update the injection loop below before removing it."
+)
+DAILY_COMPOSITE_FIELDS = []
+for field in SCORE_FIELDS:
+    DAILY_COMPOSITE_FIELDS.append(field)
+    if field == "feature_data_asof_date":
+        DAILY_COMPOSITE_FIELDS.extend(extra for extra in DAILY_COMPOSITE_EXTRA_FIELDS if extra not in SCORE_FIELDS)
 CALIBRATED_BASELINE_FIELDS = [
     "calibrated_baseline_status",
     "calibrated_baseline_reason",
@@ -525,7 +572,7 @@ def calibrated_baseline_candidates(rows: list[dict[str, Any]], config: dict[str,
     )
 
 
-def clean_row(row: dict[str, Any]) -> dict[str, Any]:
+def clean_row(row: dict[str, Any], *, fieldnames: list[str] | None = None) -> dict[str, Any]:
     item = dict(row)
     item["fda_review_state"] = (
         item.get("fda_review_state")
@@ -535,7 +582,8 @@ def clean_row(row: dict[str, Any]) -> dict[str, Any]:
     )
     item["top_positive_drivers"] = decode_driver_list(item.get("top_positive_drivers_json"))
     item["top_negative_drivers"] = decode_driver_list(item.get("top_negative_drivers_json"))
-    return {field: item.get(field, "") for field in SCORE_FIELDS}
+    output_fields = fieldnames if fieldnames is not None else SCORE_FIELDS
+    return {field: item.get(field, "") for field in output_fields}
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
@@ -793,7 +841,7 @@ def main() -> None:
             raise RuntimeError(f"No med_device_daily_scores rows found for {asof}")
         output_dir = dated_output_dir(output_base_dir, asof)
         counts = classification_counts(rows)
-        clean_rows = [clean_row(row) for row in rows]
+        clean_rows = [clean_row(row, fieldnames=DAILY_COMPOSITE_FIELDS) for row in rows]
         reimbursement_counts = reimbursement_status_counts(clean_rows)
         tier1 = [row for row in clean_rows if row["classification"] == "tier_1_long_candidate"]
         safe_core = sorted(
@@ -830,7 +878,7 @@ def main() -> None:
         bottom25 = list(reversed(clean_rows[-25:]))
         baseline_candidates = calibrated_baseline_candidates(clean_rows, config)
 
-        write_csv(output_dir / "med_device_daily_composite_scores.csv", clean_rows, SCORE_FIELDS)
+        write_csv(output_dir / "med_device_daily_composite_scores.csv", clean_rows, DAILY_COMPOSITE_FIELDS)
         write_csv(output_dir / "med_device_score_review_all.csv", clean_rows, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_tier1.csv", tier1, SCORE_FIELDS)
         write_csv(output_dir / "med_device_score_review_portfolio_candidates.csv", portfolio_candidates, SCORE_FIELDS)

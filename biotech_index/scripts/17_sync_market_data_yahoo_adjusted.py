@@ -32,6 +32,7 @@ from biotech_index.core.pipeline_guards import (
     validate_nonempty_selection,
     validate_requested_tickers,
 )
+from biotech_index.core.report_inputs import resolve_dated_report_input_csv
 
 
 LOGGER = logging.getLogger("sync_market_data_yahoo_adjusted")
@@ -57,8 +58,10 @@ CSV_FIELDNAMES = [
     "market_cap",
     "shares_outstanding",
     "avg_dollar_volume_20d",
+    "avg_dollar_volume_60d",
     "return_1m_pct",
     "return_3m_pct",
+    "xbi_return_3m_pct",
     "relative_strength_3m_vs_xbi",
     "price_vs_200d_pct",
     "distance_from_52w_high_pct",
@@ -81,6 +84,7 @@ class Company:
     ticker: str
     company_name: str
     currency: str
+    price_ticker: str
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,12 @@ def parse_args() -> argparse.Namespace:
         "--offline-existing-bars",
         action="store_true",
         help="Build the as-of market snapshot/features only from existing yahoo_adjusted bars without network fetches.",
+    )
+    parser.add_argument(
+        "--source",
+        type=str,
+        default="",
+        help="Optional market_bars_daily source override. Use with --offline-existing-bars for non-Yahoo historical sources.",
     )
     parser.add_argument("--allow-partial", action="store_true", help="Return success even if one or more ticker updates fail.")
     return parser.parse_args()
@@ -214,14 +224,44 @@ def read_scoring_tickers(path: Path) -> set[str]:
     return read_final_scoring_tickers(path)
 
 
-def load_companies(conn: sqlite3.Connection, *, scoring_tickers: set[str], ticker_filter: set[str], max_tickers: int) -> list[Company]:
+def read_universe_price_tickers(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            ticker = normalize_ticker(row.get("ticker"))
+            price_ticker = normalize_ticker(
+                row.get("historical_price_ticker")
+                or row.get("price_ticker")
+                or row.get("original_ticker")
+                or row.get("ticker")
+            )
+            if ticker and price_ticker:
+                out[ticker] = price_ticker
+    return out
+
+
+def load_companies(
+    conn: sqlite3.Connection,
+    *,
+    scoring_tickers: set[str],
+    ticker_filter: set[str],
+    max_tickers: int,
+    price_tickers_by_ticker: dict[str, str],
+) -> list[Company]:
     rows = conn.execute(
         """
         SELECT company_id, ticker, company_name, currency
         FROM companies
         WHERE is_active = 1
+           OR (universe_status = 'delisted_calibration' AND ticker IN (
+                SELECT value FROM json_each(?)
+           ))
         ORDER BY ticker
-        """
+        """,
+        (json.dumps(sorted(scoring_tickers)),),
     ).fetchall()
     out: list[Company] = []
     for row in rows:
@@ -230,7 +270,15 @@ def load_companies(conn: sqlite3.Connection, *, scoring_tickers: set[str], ticke
             continue
         if ticker_filter and ticker not in ticker_filter:
             continue
-        out.append(Company(int(row["company_id"]), ticker, str(row["company_name"] or ""), str(row["currency"] or "USD") or "USD"))
+        out.append(
+            Company(
+                int(row["company_id"]),
+                ticker,
+                str(row["company_name"] or ""),
+                str(row["currency"] or "USD") or "USD",
+                price_tickers_by_ticker.get(ticker, ticker),
+            )
+        )
         if max_tickers > 0 and len(out) >= max_tickers:
             break
     return out
@@ -552,12 +600,35 @@ def build_market_rows(
         max_missing_days=continuity_max_missing_days,
     )
     close = closes[-1]
-    dollar_volumes = [closes[idx] * volumes[idx] for idx in range(min(len(closes), len(volumes)))]
+    raw_closes = [
+        to_float(row.get("raw_close"))
+        if to_float(row.get("raw_close")) is not None and (to_float(row.get("raw_close")) or 0.0) > 0.0
+        else to_float(row.get("close")) or 0.0
+        for row in usable_bars
+    ]
+    dollar_volumes = [raw_closes[idx] * volumes[idx] for idx in range(min(len(raw_closes), len(volumes)))]
     avg_volume_20d = sum(volumes[-20:]) / min(20, len(volumes)) if volumes else None
     avg_dollar_volume_20d = sum(dollar_volumes[-20:]) / min(20, len(dollar_volumes)) if dollar_volumes else None
+    avg_dollar_volume_60d = sum(dollar_volumes[-60:]) / min(60, len(dollar_volumes)) if dollar_volumes else None
     window_52w = usable_bars[-260:]
-    high_52w = max((to_float(row.get("high")) or to_float(row.get("close")) or 0.0 for row in window_52w), default=None)
-    low_52w = min((to_float(row.get("low")) or to_float(row.get("close")) or close for row in window_52w), default=None)
+    high_52w = max(
+        (
+            to_float(row.get("high"))
+            if to_float(row.get("high")) is not None
+            else to_float(row.get("close")) or 0.0
+            for row in window_52w
+        ),
+        default=None,
+    )
+    low_52w = min(
+        (
+            to_float(row.get("low"))
+            if to_float(row.get("low")) is not None
+            else to_float(row.get("close")) or close
+            for row in window_52w
+        ),
+        default=None,
+    )
     market_cap = close * shares if shares and shares > 0 else None
     sma_200 = sum(closes[-200:]) / min(200, len(closes)) if closes else None
     return_1m = pct_return(closes, 21)
@@ -589,6 +660,7 @@ def build_market_rows(
         "shares_outstanding": shares,
         "avg_volume_20d": avg_volume_20d,
         "avg_dollar_volume_20d": avg_dollar_volume_20d,
+        "avg_dollar_volume_60d": avg_dollar_volume_60d,
         "fifty_two_week_high": high_52w,
         "fifty_two_week_low": low_52w,
         "currency": company.currency,
@@ -619,6 +691,7 @@ def build_market_rows(
         "relative_strength_3m_vs_xbi": relative_strength,
         "distance_from_52w_high_pct": distance_52w,
         "avg_dollar_volume_20d": avg_dollar_volume_20d,
+        "avg_dollar_volume_60d": avg_dollar_volume_60d,
         "liquidity_score": score_liquidity(avg_dollar_volume_20d),
         "price_adjustment": "adjusted",
         "is_adjusted": 1,
@@ -707,6 +780,7 @@ def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], 
             "shares_outstanding",
             "avg_volume_20d",
             "avg_dollar_volume_20d",
+            "avg_dollar_volume_60d",
             "fifty_two_week_high",
             "fifty_two_week_low",
             "currency",
@@ -727,16 +801,17 @@ def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], 
                 """
                 INSERT INTO market_snapshots_daily(
                     asof_date, company_id, ticker, source, last_price, close_price, market_cap, shares_outstanding,
-                    avg_volume_20d, avg_dollar_volume_20d, fifty_two_week_high, fifty_two_week_low, currency,
+                    avg_volume_20d, avg_dollar_volume_20d, avg_dollar_volume_60d, fifty_two_week_high, fifty_two_week_low, currency,
                     price_adjustment, is_adjusted, is_provisional, first_bar_date, last_bar_date, bar_count,
                     expected_bar_count, missing_bar_count, continuity_status, data_quality, payload_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(asof_date, company_id, source) DO UPDATE SET
                     ticker = excluded.ticker,
                     last_price = excluded.last_price, close_price = excluded.close_price, market_cap = excluded.market_cap,
                     shares_outstanding = excluded.shares_outstanding, avg_volume_20d = excluded.avg_volume_20d,
-                    avg_dollar_volume_20d = excluded.avg_dollar_volume_20d, fifty_two_week_high = excluded.fifty_two_week_high,
+                    avg_dollar_volume_20d = excluded.avg_dollar_volume_20d, avg_dollar_volume_60d = excluded.avg_dollar_volume_60d,
+                    fifty_two_week_high = excluded.fifty_two_week_high,
                     fifty_two_week_low = excluded.fifty_two_week_low, currency = excluded.currency,
                     price_adjustment = excluded.price_adjustment,
                     is_adjusted = excluded.is_adjusted,
@@ -767,6 +842,7 @@ def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], 
             "relative_strength_3m_vs_xbi",
             "distance_from_52w_high_pct",
             "avg_dollar_volume_20d",
+            "avg_dollar_volume_60d",
             "liquidity_score",
             "market_data_quality",
             "price_adjustment",
@@ -786,11 +862,11 @@ def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], 
                 INSERT INTO market_features_daily(
                     asof_date, company_id, ticker, source, close_price, market_cap, shares_outstanding, price_vs_200d_pct,
                     return_1m_pct, return_3m_pct, xbi_return_3m_pct, relative_strength_3m_vs_xbi,
-                    distance_from_52w_high_pct, avg_dollar_volume_20d, liquidity_score, market_data_quality,
+                    distance_from_52w_high_pct, avg_dollar_volume_20d, avg_dollar_volume_60d, liquidity_score, market_data_quality,
                     price_adjustment, is_adjusted, is_provisional, first_bar_date, last_bar_date, bar_count,
                     expected_bar_count, missing_bar_count, continuity_status, payload_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(asof_date, company_id, source) DO UPDATE SET
                     ticker = excluded.ticker,
                     close_price = excluded.close_price, market_cap = excluded.market_cap, shares_outstanding = excluded.shares_outstanding,
@@ -798,7 +874,9 @@ def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], 
                     return_3m_pct = excluded.return_3m_pct, xbi_return_3m_pct = excluded.xbi_return_3m_pct,
                     relative_strength_3m_vs_xbi = excluded.relative_strength_3m_vs_xbi,
                     distance_from_52w_high_pct = excluded.distance_from_52w_high_pct,
-                    avg_dollar_volume_20d = excluded.avg_dollar_volume_20d, liquidity_score = excluded.liquidity_score,
+                    avg_dollar_volume_20d = excluded.avg_dollar_volume_20d,
+                    avg_dollar_volume_60d = excluded.avg_dollar_volume_60d,
+                    liquidity_score = excluded.liquidity_score,
                     price_adjustment = excluded.price_adjustment,
                     is_adjusted = excluded.is_adjusted,
                     is_provisional = excluded.is_provisional,
@@ -888,7 +966,7 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    final_universe_csv = resolve_path(
+    configured_final_universe_csv = resolve_path(
         cfg_get(config, "yahoo_market_data.final_scoring_universe_csv", cfg_get(config, "ib_market_data.final_scoring_universe_csv")),
         base_dir=base_dir,
     )
@@ -896,7 +974,10 @@ def main() -> None:
         cfg_get(config, "yahoo_market_data.output_csv", "../output/biotech_index_reports/yahoo_adjusted_market_features.csv"),
         base_dir=base_dir,
     )
-    source = str(cfg_get(config, "yahoo_market_data.source", DEFAULT_SOURCE) or DEFAULT_SOURCE).strip() or DEFAULT_SOURCE
+    source = str(args.source or cfg_get(config, "yahoo_market_data.source", DEFAULT_SOURCE) or DEFAULT_SOURCE).strip() or DEFAULT_SOURCE
+    if source != DEFAULT_SOURCE and not args.offline_existing_bars:
+        raise ValueError("--source override is supported only with --offline-existing-bars")
+    benchmark_source = DEFAULT_SOURCE if source != DEFAULT_SOURCE else source
     benchmark_ticker = normalize_ticker(cfg_get(config, "yahoo_market_data.benchmark_ticker", DEFAULT_BENCHMARK))
     requested_asof_arg = parse_date(args.asof) if args.asof else None
     if args.asof and requested_asof_arg is None:
@@ -925,6 +1006,12 @@ def main() -> None:
             asof_decision.reason,
         )
     asof_date = asof_decision.effective_asof
+    final_universe_csv = resolve_dated_report_input_csv(
+        configured_final_universe_csv,
+        base_output_dir=resolve_path(cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir),
+        asof_date=asof_date.isoformat(),
+        logger=LOGGER,
+    )
     if explicit_start_date is not None and explicit_start_date > asof_date:
         raise ValueError(f"--start-date {explicit_start_date.isoformat()} is after effective as-of date {asof_date.isoformat()}")
     history_start_date = explicit_start_date or configured_start_date
@@ -943,7 +1030,14 @@ def main() -> None:
             init_db(conn)
             run_id = start_run(conn, run_type="sync_market_data_yahoo_adjusted", input_path=db_path)
             scoring_tickers = read_scoring_tickers(final_universe_csv)
-            companies = load_companies(conn, scoring_tickers=scoring_tickers, ticker_filter=ticker_filter, max_tickers=args.max_tickers)
+            price_tickers_by_ticker = read_universe_price_tickers(final_universe_csv)
+            companies = load_companies(
+                conn,
+                scoring_tickers=scoring_tickers,
+                ticker_filter=ticker_filter,
+                max_tickers=args.max_tickers,
+                price_tickers_by_ticker=price_tickers_by_ticker,
+            )
             subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_tickers))
             output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
             validate_nonempty_selection(count=len(companies), context="Yahoo adjusted market sync", subset_mode=subset_mode)
@@ -960,12 +1054,13 @@ def main() -> None:
                 subset_mode=subset_mode,
             )
             LOGGER.info("Loaded %d company job(s) for Yahoo adjusted market sync", len(companies))
-            all_symbols = [benchmark_ticker, *[company.ticker for company in companies]]
+            all_symbols = [company.price_ticker for company in companies]
             latest_bar_dates = load_latest_bar_dates(conn, tickers=all_symbols, source=source)
+            benchmark_latest_bar_dates = load_latest_bar_dates(conn, tickers=[benchmark_ticker], source=benchmark_source)
             benchmark_start = compute_fetch_start(
                 history_start_date,
                 asof_date,
-                latest_bar_dates.get(benchmark_ticker),
+                benchmark_latest_bar_dates.get(benchmark_ticker),
                 refetch_days,
             )
             benchmark_refresh_failed = False
@@ -978,7 +1073,7 @@ def main() -> None:
                         benchmark_ticker,
                         start_date=benchmark_start,
                         asof_date=asof_date,
-                        source=source,
+                        source=benchmark_source,
                         provisional_asof=asof_decision.provisional_asof,
                     )
                 except Exception as exc:
@@ -988,7 +1083,7 @@ def main() -> None:
             benchmark_existing = load_existing_bars(
                 conn,
                 ticker=benchmark_ticker,
-                source=source,
+                source=benchmark_source,
                 start_date=history_start_date,
                 asof_date=asof_date,
             )
@@ -997,7 +1092,15 @@ def main() -> None:
             reference_dates = reference_dates_from_bars(benchmark_ordered, asof_date)
             xbi_closes = [value for value in (to_float(row.get("close")) for row in benchmark_ordered) if value is not None and value > 0]
             if not xbi_closes:
-                raise RuntimeError(f"Yahoo adjusted benchmark fetch produced no usable bars for {benchmark_ticker}")
+                if args.allow_partial:
+                    LOGGER.warning(
+                        "Benchmark %s source=%s has no usable bars through %s; relative-strength fields will be blank.",
+                        benchmark_ticker,
+                        benchmark_source,
+                        asof_date.isoformat(),
+                    )
+                else:
+                    raise RuntimeError(f"Yahoo adjusted benchmark fetch produced no usable bars for {benchmark_ticker}")
 
             bars_to_upsert: list[dict[str, Any]] = list(benchmark_fetched)
             snapshots: list[dict[str, Any]] = []
@@ -1009,7 +1112,7 @@ def main() -> None:
                     fetch_start = compute_fetch_start(
                         history_start_date,
                         asof_date,
-                        latest_bar_dates.get(company.ticker),
+                        latest_bar_dates.get(company.price_ticker),
                         refetch_days,
                     )
                     fetch_error: Exception | None = None
@@ -1018,7 +1121,7 @@ def main() -> None:
                     else:
                         try:
                             fetched = fetch_yahoo_bars(
-                                company.ticker,
+                                company.price_ticker,
                                 start_date=fetch_start,
                                 asof_date=asof_date,
                                 source=source,
@@ -1030,7 +1133,7 @@ def main() -> None:
                             LOGGER.warning("Yahoo adjusted fetch failed for %s; trying existing DB bars: %s", company.ticker, exc)
                     existing = load_existing_bars(
                         conn,
-                        ticker=company.ticker,
+                        ticker=company.price_ticker,
                         source=source,
                         start_date=history_start_date,
                         asof_date=asof_date,
@@ -1055,10 +1158,11 @@ def main() -> None:
                     snapshots.append(snapshot)
                     features.append(feature)
                     LOGGER.info(
-                        "[%d/%d] %s mode=%s fetched=%d bars=%d continuity=%s quality=%s",
+                        "[%d/%d] %s%s mode=%s fetched=%d bars=%d continuity=%s quality=%s",
                         idx,
                         len(companies),
                         company.ticker,
+                        f" price_ticker={company.price_ticker}" if company.price_ticker != company.ticker else "",
                         "offline_existing_bars" if offline_existing_bars else "fetch",
                         len(fetched),
                         len(bars),

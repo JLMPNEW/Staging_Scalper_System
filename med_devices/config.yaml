@@ -40,6 +40,7 @@ med_devices_refresh_pipeline:
     - analyst_review_decision
     - analyst_review_reason
     - analyst_review_owner
+    - analyst_reviewed_at
     - analyst_review_expires_at
     - analyst_portfolio_override_applied
 
@@ -1060,6 +1061,8 @@ short_interest_features:
     - "finra_regsho_short_volume"
   no_data_score: 50.0
   no_data_quality_score: 0.0
+  publication_lag_days: 8
+  short_volume_publication_lag_days: 1
   short_volume_lookback_days: 30
   velocity_settlement_lookback_days: 60
 
@@ -1101,6 +1104,7 @@ insider_activity_features:
   no_data_score: 50.0
   no_data_quality_score: 0.0
   transaction_data_quality_score: 90.0
+  filing_lag_days: 2
   lookback_days: 90
 external_positioning_import:
   market_positioning_db_path: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
@@ -1746,7 +1750,7 @@ scoring:
 
 historical_backfill:
   start_asof: "2019-01-04"
-  end_asof: "2026-06-26"
+  end_asof: "2026-06-27"
   backtest_end_asof: "auto_complete_max_horizon"
   frequency: "daily"
   weekday: "friday"
@@ -1759,6 +1763,10 @@ historical_backfill:
   run_backtest: true
   run_calibration: true
   publish_review_packs: true
+  run_oos_validation: true
+  allow_missing_static_pit_metadata: false
+  new_daily_columns_required_from: "2026-06-26"
+  oos_validation_csv: "../output/med_devices_reports/oos_validation/med_device_historical_snapshot_oos_validation.csv"
   manifest_csv: "../output/med_devices_reports/historical_backfill/weekly_score_backfill_manifest.csv"
 
 calibration:
@@ -2128,6 +2136,7 @@ calibration:
     candidate_min_avg_dollar_volume_60d: "1000000,2000000"
     candidate_max_value_trap: "30,35"
     candidate_max_fda_event_risk: "35,40"
+    max_grid_size: 20000
 
 stage_plan:
   stage_1:

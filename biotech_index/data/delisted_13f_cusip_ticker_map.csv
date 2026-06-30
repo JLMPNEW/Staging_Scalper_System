@@ -1,49 +1,49 @@
 ticker,cusip,company_name,cik,share_class_figi,norgate_symbol,source
 AKAO,004449104,Achaogen Inc.,0001301501,BBG0017R3M27,AKAOQ-202106,delisted_biotech_calibration_candidates
-ANAC,032014103,Anacor Pharmaceuticals Inc.,0001411158,BBG000V0R611,ANAC-201606,delisted_biotech_calibration_candidates
+ANAC,032420101,Anacor Pharmaceuticals Inc.,0001411158,BBG000V0R611,ANAC-201606,delisted_biotech_calibration_candidates
 APTX,03836N103,Aptinyx Inc.,0001674365,BBG00K18W5H8,APTX-202312,delisted_biotech_calibration_candidates
 ARIA,04033A100,Ariad Pharmaceuticals Inc.,0000884731,BBG000BDD683,ARIA-201702,delisted_biotech_calibration_candidates
-AUXL,05333P105,Auxilium Pharmaceuticals Inc.,0001182129,BBG000PFRGD4,AUXL-201501,delisted_biotech_calibration_candidates
-AVXS,053550100,AveXis Inc.,0001652923,BBG009P5KXM5,AVXS-201805,delisted_biotech_calibration_candidates
-BOLD,05073P101,Audentes Therapeutics Inc.,0001628738,BBG009R9X8D1,BOLD-202001,delisted_biotech_calibration_candidates
-CASC,14740B606,Cascadian Therapeutics Inc.,0001060736,BBG000QF09F8,CASC-201803,delisted_biotech_calibration_candidates
+AUXL,05334D107,Auxilium Pharmaceuticals Inc.,0001182129,BBG000PFRGD4,AUXL-201501,delisted_biotech_calibration_candidates
+AVXS,05366U100,AveXis Inc.,0001652923,BBG009P5KXM5,AVXS-201805,delisted_biotech_calibration_candidates
+BOLD,05070R104,Audentes Therapeutics Inc.,0001628738,BBG009R9X8D1,BOLD-202001,delisted_biotech_calibration_candidates
+CASC,14740B606,Cascadian Therapeutics Inc.,0001412067,BBG000QF09F8,CASC-201803,delisted_biotech_calibration_candidates
 CBST,229678107,Cubist Pharmaceuticals Inc.,0000912183,BBG000BK50V1,CBST-201501,delisted_biotech_calibration_candidates
 CDAK,192010106,Codiak BioSciences Inc.,0001659352,BBG00X3M9R58,CDAKQ-202307,delisted_biotech_calibration_candidates
 CELG,151020104,Celgene Corp.,0000816284,BBG000BHXDV1,CELG-201911,delisted_biotech_calibration_candidates
-CEPH,156708107,Cephalon Inc.,0000873364,BBG000BCTY21,CEPH-201110,delisted_biotech_calibration_candidates
-CLVS,189464100,Clovis Oncology Inc.,0001442276,BBG0017869X0,CLVSQ-202307,delisted_biotech_calibration_candidates
-DNA,37244T103,"Genentech, Inc.",0000318771,BBG000BJB751,DNA-200903,delisted_biotech_calibration_candidates
-DNDN,24823A105,Dendreon Corp.,0001107310,BBG000BS8V91,DNDNQ-201506,delisted_biotech_calibration_candidates
+CEPH,156708109,Cephalon Inc.,0000873364,BBG000BCTY21,CEPH-201110,delisted_biotech_calibration_candidates
+CLVS,189464100,Clovis Oncology Inc.,0001466301,BBG0017869X0,CLVSQ-202307,delisted_biotech_calibration_candidates
+DNA,368710406,"Genentech, Inc.",0000318771,BBG000BJB751,DNA-200903,delisted_biotech_calibration_candidates
+DNDN,24823Q107,Dendreon Corp.,0001107332,BBG000BS8V91,DNDNQ-201506,delisted_biotech_calibration_candidates
 DRNA,253031108,Dicerna Pharmaceuticals Inc.,0001562088,BBG0017M78R2,DRNA-202112,delisted_biotech_calibration_candidates
-EIGR,28249U204,Eiger BioPharmaceuticals Inc.,0001305244,BBG000BDBH25,EIGRQ-202409,delisted_biotech_calibration_candidates
-FPRX,33830X103,Five Prime Therapeutics Inc.,0001175505,BBG00178MDS7,FPRX-202104,delisted_biotech_calibration_candidates
-GENZ,372917105,Genzyme Corp.,0000732485,BBG000C12C07,GENZ-201104,delisted_biotech_calibration_candidates
-GRTS,39868T105,Gritstone bio Inc.,0001655644,BBG00L2B70W1,GRTSQ-202504,delisted_biotech_calibration_candidates
+EIGR,28249U204,Eiger BioPharmaceuticals Inc.,0001305253,BBG000BDBH25,EIGRQ-202409,delisted_biotech_calibration_candidates
+FPRX,33830X104,Five Prime Therapeutics Inc.,0001175505,BBG00178MDS7,FPRX-202104,delisted_biotech_calibration_candidates
+GENZ,372917104,Genzyme Corp.,0000732485,BBG000C12C07,GENZ-201104,delisted_biotech_calibration_candidates
+GRTS,39868T105,Gritstone bio Inc.,0001656634,BBG00L2B70W1,GRTSQ-202504,delisted_biotech_calibration_candidates
 HGEN,444863203,Humanigen Inc.,0001351197,BBG000C6M6X9,HGENQ-202407,delisted_biotech_calibration_candidates
-HGSI,444903108,Human Genome Sciences Inc.,0000908195,BBG000BGC0C3,HGSI-201208,delisted_biotech_calibration_candidates
+HGSI,444903108,Human Genome Sciences Inc.,0000901219,BBG000BGC0C3,HGSI-201208,delisted_biotech_calibration_candidates
 IMCL,45245W109,ImClone Systems Inc.,0000765258,BBG000BLM8W3,IMCL-200811,delisted_biotech_calibration_candidates
-IMMU,452682103,Immunomedics Inc.,0000742278,BBG000BCTM58,IMMU-202010,delisted_biotech_calibration_candidates
-INHX,457223101,Inhibitex Inc.,0001274913,BBG000C1FMT9,INHX-201202,delisted_biotech_calibration_candidates
+IMMU,452907108,Immunomedics Inc.,0000722830,BBG000BCTM58,IMMU-202010,delisted_biotech_calibration_candidates
+INHX,45719T103,Inhibitex Inc.,0001274913,BBG000C1FMT9,INHX-201202,delisted_biotech_calibration_candidates
 INSY,45824V209,INSYS Therapeutics Inc.,0001516479,BBG003S8F9B6,INSYQ-202002,delisted_biotech_calibration_candidates
-JUNO,48205A109,Juno Therapeutics Inc.,0001594447,BBG007P1P7F4,JUNO-201803,delisted_biotech_calibration_candidates
+JUNO,48205A109,Juno Therapeutics Inc.,0001594864,BBG007P1P7F4,JUNO-201803,delisted_biotech_calibration_candidates
 KERX,492515101,Keryx Biopharmaceuticals Inc.,0001114220,BBG000BF7237,KERX-201812,delisted_biotech_calibration_candidates
-KITE,49803X106,Kite Pharma Inc.,0001510580,BBG006SP8XY9,KITE-201710,delisted_biotech_calibration_candidates
-LOXO,544391100,Loxo Oncology Inc.,0001579471,BBG00680MQL8,LOXO-201902,delisted_biotech_calibration_candidates
+KITE,49803L109,Kite Pharma Inc.,0001510580,BBG006SP8XY9,KITE-201710,delisted_biotech_calibration_candidates
+LOXO,548862101,Loxo Oncology Inc.,0001581720,BBG00680MQL8,LOXO-201902,delisted_biotech_calibration_candidates
 MDCO,584688105,The Medicines Company,0001113481,BBG000BRLB90,MDCO-202001,delisted_biotech_calibration_candidates
 MEDI,584699102,MedImmune Inc.,0000873591,BBG000BDT0J6,MEDI-200706,delisted_biotech_calibration_candidates
 MLNT,58549G209,Melinta Therapeutics Inc.,0001111665,BBG000BHXDV1,MLNTQ-202004,delisted_biotech_calibration_candidates
-OMGA,68217N105,Omega Therapeutics Inc.,0001850892,BBG00WCNQZQ1,OMGAQ-202508,delisted_biotech_calibration_candidates
+OMGA,68217N105,Omega Therapeutics Inc.,0001850838,BBG00WCNQZQ1,OMGAQ-202508,delisted_biotech_calibration_candidates
 ONCE,846517100,Spark Therapeutics Inc.,0001609351,BBG006X09RY9,ONCE-201912,delisted_biotech_calibration_candidates
-PCYC,06740P403,Pharmacyclics Inc.,0000949428,BBG000BM6G18,PCYC-201505,delisted_biotech_calibration_candidates
-PGNX,743171101,Progenics Pharmaceuticals Inc.,0000835887,BBG000BCK8B8,PGNX-202006,delisted_biotech_calibration_candidates
-RCPT,75612A109,Receptos Inc.,0001463729,BBG0049C2M52,RCPT-201508,delisted_biotech_calibration_candidates
+PCYC,06740P403,Pharmacyclics Inc.,0000949699,BBG000BM6G18,PCYC-201505,delisted_biotech_calibration_candidates
+PGNX,743187106,Progenics Pharmaceuticals Inc.,0000835887,BBG000BCK8B8,PGNX-202006,delisted_biotech_calibration_candidates
+RCPT,756207106,Receptos Inc.,0001463729,BBG0049C2M52,RCPT-201508,delisted_biotech_calibration_candidates
 RXDX,74349U108,Prometheus Biosciences Inc.,0001718852,BBG00Y2H06Q1,RXDX-202306,delisted_biotech_calibration_candidates
-SYBX,87166L209,Synlogic Inc.,0001421251,BBG007K7Z014,SYBX,delisted_biotech_calibration_candidates
-TBIO,89374L105,Translate Bio Inc.,0001614013,BBG009S63Y96,TBIO-202109,delisted_biotech_calibration_candidates
+SYBX,87166L209,Synlogic Inc.,0001527599,BBG007K7Z014,SYBX,delisted_biotech_calibration_candidates
+TBIO,89374L104,Translate Bio Inc.,0001693415,BBG009S63Y96,TBIO-202109,delisted_biotech_calibration_candidates
 TPTX,90041T108,Turning Point Therapeutics Inc.,0001595893,BBG00N7K0Z36,TPTX-202208,delisted_biotech_calibration_candidates
-TRIL,896257100,Trillium Therapeutics Inc.,0001616212,BBG001S87P75,TRIL-202111,delisted_biotech_calibration_candidates
-TSRO,881569107,Tesaro Inc.,0001509180,BBG0029K6P64,TSRO-201901,delisted_biotech_calibration_candidates
-TTPH,88166L209,Tetraphase Pharmaceuticals Inc.,0001373707,BBG0030W96W2,TTPH-202007,delisted_biotech_calibration_candidates
-VRUS,71715N106,Pharmasset Inc.,0001305409,BBG000C872X6,VRUS-201201,delisted_biotech_calibration_candidates
-VVUS,928509100,Vivus Inc.,0000885550,BBG000BDBH25,VVUSQ-202012,delisted_biotech_calibration_candidates
-ZSPH,98878X107,ZS Pharma Inc.,0001594924,BBG006BL6K24,ZSPH-201512,delisted_biotech_calibration_candidates
+TRIL,89620X506,Trillium Therapeutics Inc.,0001616212,BBG001S87P75,TRIL-202111,delisted_biotech_calibration_candidates
+TSRO,881569107,Tesaro Inc.,0001491576,BBG0029K6P64,TSRO-201901,delisted_biotech_calibration_candidates
+TTPH,88165N204,Tetraphase Pharmaceuticals Inc.,0001373707,BBG0030W96W2,TTPH-202007,delisted_biotech_calibration_candidates
+VRUS,71715N106,Pharmasset Inc.,0001301081,BBG000C872X6,VRUS-201201,delisted_biotech_calibration_candidates
+VVUS,928551308,Vivus Inc.,0000881524,BBG000BDBH25,VVUSQ-202012,delisted_biotech_calibration_candidates
+ZSPH,98979G105,ZS Pharma Inc.,0001459266,BBG006BL6K24,ZSPH-201512,delisted_biotech_calibration_candidates

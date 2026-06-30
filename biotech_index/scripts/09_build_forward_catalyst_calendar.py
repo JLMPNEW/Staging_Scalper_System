@@ -184,6 +184,8 @@ def confidence_for_event(event_type: str, raw_confidence: object) -> float:
     confidence = to_float(raw_confidence, 0.0)
     if confidence > 2.0:
         confidence /= 100.0
+    if confidence <= 0.0:
+        return 0.0
     floor = EVENT_TYPE_CONFIDENCE_FLOOR.get(event_type, 0.60)
     return round(max(floor, min(1.0, confidence)), 6)
 
@@ -273,7 +275,7 @@ def load_forward_events(
     output: list[dict[str, Any]] = []
     for row in rows:
         event_type = str(row["event_type"] or "").strip().lower()
-        event_date = parse_date(row["event_date"]) or parse_date(row["event_value"])
+        event_date = parse_date(row["event_date"])
         if event_date is None:
             if diagnostics is not None:
                 diagnostics["sec_events_unparseable_event_date"] += 1

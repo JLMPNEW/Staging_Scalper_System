@@ -35,6 +35,7 @@ from biotech_index.core.pipeline_guards import (
     validate_output_coverage,
     validate_requested_tickers,
 )
+from biotech_index.core.report_inputs import resolve_dated_report_input_csv
 
 
 LOGGER = logging.getLogger("build_governance_event_features")
@@ -80,6 +81,29 @@ GOVERNANCE_FIELDS = [
     "proxy_fields_used",
     "payload_json",
 ]
+
+GOVERNANCE_NUMERIC_DEFAULT_FIELDS = {
+    "company_id",
+    "insider_buy_count_90d",
+    "open_market_buy_count_90d",
+    "insider_buy_value_90d",
+    "insider_buy_cluster_count_90d",
+    "ceo_cfo_buy_count_180d",
+    "director_buy_count_180d",
+    "insider_sell_value_90d",
+    "sell_to_buy_value_ratio_180d",
+    "planned_10b5_1_buy_count",
+    "activist_13d_count_365d",
+    "buyback_event_count_365d",
+    "asr_event_count_365d",
+    "leadership_change_count_365d",
+    "cfo_departure_flag_365d",
+    "regulatory_setback_count_365d",
+    "adverse_legal_event_count_365d",
+    "generic_competition_risk_count_365d",
+    "product_concentration_risk_count_365d",
+    "commercial_fragility_risk_score",
+}
 
 
 BUYBACK_PATTERNS = [
@@ -258,8 +282,13 @@ def load_companies(
         SELECT company_id, ticker, cik, company_name
         FROM companies
         WHERE is_active = 1
+           OR (universe_status = 'delisted_calibration' AND ticker IN (
+                SELECT value FROM json_each(?)
+           ))
         ORDER BY ticker
         """
+        ,
+        (json.dumps(sorted(scoring_tickers)),),
     ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -414,6 +443,69 @@ def load_form4_rows_bulk(
         for company_id in matched_ids:
             grouped.setdefault(company_id, []).append(item)
     return grouped, ""
+
+
+def load_delisted_form4_rows_bulk(
+    conn: sqlite3.Connection,
+    *,
+    companies: list[dict[str, Any]],
+    start_date: date,
+    asof_date: date,
+) -> dict[int, list[dict[str, Any]]]:
+    table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'delisted_calibration_form4_filings'"
+    ).fetchone()
+    grouped: dict[int, list[dict[str, Any]]] = {int(company["company_id"]): [] for company in companies}
+    if table is None or not companies:
+        return grouped
+    company_ids = [int(company["company_id"]) for company in companies]
+    for company_chunk in chunked(company_ids):
+        placeholders = ",".join("?" for _ in company_chunk)
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM delisted_calibration_form4_filings
+            WHERE company_id IN ({placeholders})
+              AND COALESCE(report_date, filing_date) >= ?
+              AND COALESCE(report_date, filing_date) <= ?
+              AND (valid_window_start IS NULL OR valid_window_start = '' OR date(COALESCE(report_date, filing_date)) >= date(valid_window_start))
+              AND (valid_window_end IS NULL OR valid_window_end = '' OR date(COALESCE(report_date, filing_date)) <= date(valid_window_end))
+            ORDER BY COALESCE(report_date, filing_date) DESC
+            """,
+            (*company_chunk, start_date.isoformat(), asof_date.isoformat()),
+        ).fetchall()
+        for row in rows:
+            item = dict(row)
+            company_id = int(item["company_id"])
+            codes = [
+                code.strip().upper()
+                for code in str(item.get("transaction_codes") or "").replace(";", ",").replace("|", ",").split(",")
+                if code.strip()
+            ]
+            purchase_count = to_int(item.get("purchase_transaction_count"))
+            trans_code = codes[0] if codes else ("P" if purchase_count > 0 else "")
+            grouped.setdefault(company_id, []).append(
+                {
+                    "issuer_trading_symbol": item.get("calibration_company_ticker") or item.get("ticker") or "",
+                    "issuer_cik": item.get("issuer_cik") or "",
+                    "trans_date": item.get("report_date") or item.get("filing_date") or "",
+                    "filing_date": item.get("filing_date") or "",
+                    "trans_code": trans_code,
+                    "signal_side": "buy" if purchase_count > 0 or trans_code == "P" else "",
+                    "trade_value_usd": 0.0,
+                    "rptowner_name": "",
+                    "rptowner_title": "",
+                    "rptowner_relationship": "",
+                    "aff10b5one_flag": 0,
+                    "cluster_insiders_5bd": 0,
+                    "cluster_insiders_10bd": 0,
+                    "cluster_insiders_20bd": 0,
+                    "source": "delisted_calibration_form4_filings",
+                    "accession_nodash": item.get("accession_nodash") or "",
+                    "document_parse_status": item.get("document_parse_status") or "",
+                }
+            )
+    return grouped
 
 
 def score_governance(row: dict[str, Any]) -> tuple[float, float]:
@@ -1213,8 +1305,17 @@ def build_row(
         "sample_sec_events": sec_events.get("sample_sec_events", []),
         "method": "form4_current_truth_plus_sec_text_governance_scan",
     }
+    copied_fields: dict[str, Any] = {}
+    excluded_fields = {"governance_event_score", "governance_risk_score", "data_quality", "missing_fields", "payload_json"}
+    for field in GOVERNANCE_FIELDS:
+        if field in excluded_fields:
+            continue
+        value = base.get(field)
+        if (value is None or value == "") and field in GOVERNANCE_NUMERIC_DEFAULT_FIELDS:
+            value = 0.0
+        copied_fields[field] = "" if value is None else value
     return {
-        **{field: base.get(field, "") for field in GOVERNANCE_FIELDS if field not in {"governance_event_score", "governance_risk_score", "data_quality", "missing_fields", "payload_json"}},
+        **copied_fields,
         "governance_event_score": event_score,
         "governance_risk_score": risk_score,
         "data_quality": data_quality,
@@ -1314,11 +1415,17 @@ def main() -> None:
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_csv = resolve_path(cfg_get(config, "governance_events.output_csv"), base_dir=base_dir)
-    universe_csv = resolve_path(cfg_get(config, "governance_events.final_scoring_universe_csv"), base_dir=base_dir)
+    configured_universe_csv = resolve_path(cfg_get(config, "governance_events.final_scoring_universe_csv"), base_dir=base_dir)
     form4_db_path = resolve_path(cfg_get(config, "governance_events.form4_db_path"), base_dir=base_dir)
     asof_date = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
     if asof_date is None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
+    universe_csv = resolve_dated_report_input_csv(
+        configured_universe_csv,
+        base_output_dir=resolve_path(cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir),
+        asof_date=asof_date.isoformat(),
+        logger=LOGGER,
+    )
     ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if value.strip()}
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     form4_required = as_bool(cfg_get(config, "governance_events.form4_required", True)) and not bool(args.allow_missing_form4)
@@ -1373,10 +1480,22 @@ def main() -> None:
                 start_date=asof_date - timedelta(days=lookback_days),
                 asof_date=asof_date,
             )
+            delisted_form4_rows_by_company = load_delisted_form4_rows_bulk(
+                conn,
+                companies=companies,
+                start_date=asof_date - timedelta(days=lookback_days),
+                asof_date=asof_date,
+            )
+            delisted_form4_count = 0
+            for company_id, rows in delisted_form4_rows_by_company.items():
+                if rows:
+                    form4_rows_by_company.setdefault(company_id, []).extend(rows)
+                    delisted_form4_count += len(rows)
             LOGGER.info(
-                "Governance Form 4 preload complete: companies=%d rows=%d elapsed=%.3fs error=%s",
+                "Governance Form 4 preload complete: companies=%d rows=%d delisted_cache_rows=%d elapsed=%.3fs error=%s",
                 len(companies),
                 sum(len(rows) for rows in form4_rows_by_company.values()),
+                delisted_form4_count,
                 time.perf_counter() - phase_start,
                 form4_preload_error or "",
             )

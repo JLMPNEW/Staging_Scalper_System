@@ -34,6 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from technology.core.oos_provenance import parse_iso_date, validate_oos_rank_rows  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -228,6 +229,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calendar-ticker", default=DEFAULT_CALENDAR_TICKER)
     parser.add_argument("--step-timeout-sec", type=int, default=1800)
     parser.add_argument("--continue-on-error", action="store_true")
+    parser.add_argument(
+        "--require-oos-score-valid",
+        action="store_true",
+        help=(
+            "Require strict OOS scores for dates on/after each family's production start. "
+            "Pre-production dates remain PIT calibration inputs and log a strict-check skip."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-restore-latest-root", action="store_true")
     parser.add_argument(
@@ -406,7 +415,14 @@ def tail(text: str, lines: int = 20) -> str:
     return "\n".join(parts[-lines:])
 
 
-def validate_snapshot_files(snapshot_dir: Path, spec: FamilySpec, asof: str, *, historical_mode: bool) -> None:
+def validate_snapshot_files(
+    snapshot_dir: Path,
+    spec: FamilySpec,
+    asof: str,
+    *,
+    historical_mode: bool,
+    require_oos_score: bool = False,
+) -> None:
     manifest_path = snapshot_dir / spec.manifest_filename
     rank_path = snapshot_dir / spec.rank_filename
     if not manifest_path.exists():
@@ -418,6 +434,26 @@ def validate_snapshot_files(snapshot_dir: Path, spec: FamilySpec, asof: str, *, 
         raise RuntimeError(f"{spec.family} manifest asof mismatch: {manifest.get('asof_date')} vs {asof}")
     if historical_mode and str(manifest.get("report_mode") or "") != "historical":
         raise RuntimeError(f"{spec.family} manifest report_mode mismatch: {manifest.get('report_mode')} vs historical")
+    if historical_mode:
+        if str(manifest.get("non_point_in_time_sections") or "") != "omitted":
+            raise RuntimeError(f"{spec.family} historical manifest did not omit non-PIT sections.")
+        if str(manifest.get("calibration_input_valid_flag") or "") != "1":
+            raise RuntimeError(f"{spec.family} historical manifest calibration_input_valid_flag is not 1.")
+        if not str(manifest.get("oos_assertion_basis") or "").strip():
+            raise RuntimeError(f"{spec.family} historical manifest missing oos_assertion_basis.")
+        effective_require_oos_score = require_oos_score
+        asof_date = parse_iso_date(asof)
+        production_start = parse_iso_date(manifest.get("calibration_production_start_date"))
+        if require_oos_score and asof_date is not None and production_start is not None and asof_date < production_start:
+            effective_require_oos_score = False
+            print(
+                f"[{asof}][{spec.family}][oos] strict OOS score check skipped before "
+                f"production_start={production_start.isoformat()}; PIT calibration-input validation still enforced."
+            )
+        if effective_require_oos_score and str(manifest.get("oos_score_valid_flag") or "") != "1":
+            raise RuntimeError(f"{spec.family} historical manifest oos_score_valid_flag is not 1: {manifest.get('oos_invalid_reason')}")
+    else:
+        effective_require_oos_score = require_oos_score
     with rank_path.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
     if not rows:
@@ -425,6 +461,9 @@ def validate_snapshot_files(snapshot_dir: Path, spec: FamilySpec, asof: str, *, 
     bad_dates = sorted({str(row.get("asof_date") or "") for row in rows if str(row.get("asof_date") or "") != asof})
     if bad_dates:
         raise RuntimeError(f"{spec.family} rank table contains rows outside {asof}: {bad_dates[:5]}")
+    oos_errors = validate_oos_rank_rows(rows, asof=asof, historical_mode=historical_mode, require_oos_score=effective_require_oos_score)
+    if oos_errors:
+        raise RuntimeError(f"{spec.family} OOS snapshot validation failed: {'; '.join(oos_errors)}")
 
 
 def write_run_report(output_dir: Path, rows: list[dict[str, Any]], summary: dict[str, Any]) -> None:
@@ -507,7 +546,13 @@ def run_with_args(args: argparse.Namespace) -> int:
                         return 1
             if not args.dry_run:
                 try:
-                    validate_snapshot_files(snapshot_dir, spec, asof, historical_mode=True)
+                    validate_snapshot_files(
+                        snapshot_dir,
+                        spec,
+                        asof,
+                        historical_mode=True,
+                        require_oos_score=bool(args.require_oos_score_valid),
+                    )
                     rows.append({"asof_date": asof, "family": spec.family, "step_id": "snapshot_file_validation", "returncode": 0})
                 except Exception as exc:  # noqa: BLE001 - report and optionally continue
                     failures += 1

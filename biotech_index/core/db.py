@@ -753,6 +753,35 @@ CREATE TABLE IF NOT EXISTS governance_event_features_daily (
     FOREIGN KEY (company_id) REFERENCES companies(company_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS delisted_calibration_form4_filings (
+    accession_nodash TEXT PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    calibration_company_ticker TEXT NOT NULL,
+    company_id INTEGER,
+    company_name TEXT,
+    issuer_cik TEXT NOT NULL,
+    sec_company_name TEXT,
+    sec_company_tickers TEXT,
+    form TEXT NOT NULL,
+    filing_date TEXT NOT NULL,
+    report_date TEXT,
+    primary_document TEXT,
+    raw_document_url TEXT,
+    issuer_name_document TEXT,
+    issuer_trading_symbol_document TEXT,
+    issuer_cik_document TEXT,
+    issuer_document_match INTEGER NOT NULL DEFAULT 0,
+    transaction_codes TEXT,
+    purchase_transaction_count INTEGER NOT NULL DEFAULT 0,
+    document_parse_status TEXT,
+    source_url TEXT,
+    valid_window_start TEXT,
+    valid_window_end TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES companies(company_id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS multibagger_features_daily (
     asof_date TEXT NOT NULL,
     company_id INTEGER NOT NULL,
@@ -955,6 +984,50 @@ DAILY_SCORES_OPTIONAL_COLUMNS = {
     "leverage_fragility_score": "REAL",
     "mature_defensive_score": "REAL",
     "expected_return_quality_score": "REAL",
+    "portfolio_candidate_gate": "REAL",
+    "portfolio_candidate_score": "REAL",
+    "portfolio_candidate_status": "TEXT",
+    "portfolio_candidate_reason": "TEXT",
+    "calibration_eligible_flag": "REAL",
+    "score_confidence": "REAL",
+    "avg_dollar_volume_60d": "REAL",
+    "review_reason": "TEXT",
+    "eligibility_reason": "TEXT",
+    "universe_status": "TEXT",
+    "historical_universe_source": "TEXT",
+    "price_start_date": "TEXT",
+    "price_end_date": "TEXT",
+    "terminal_date": "TEXT",
+    "historical_price_ticker": "TEXT",
+    "calibration_only": "REAL",
+    "recovery_type": "TEXT",
+    "equity_recovery": "REAL",
+    "drop_otc_tape": "REAL",
+    "latest_price_date": "TEXT",
+    "source_snapshot_asof_date": "TEXT",
+    "price_data_asof_date": "TEXT",
+    "feature_data_asof_date": "TEXT",
+    "clinical_data_asof_date": "TEXT",
+    "financial_data_asof_date": "TEXT",
+    "short_interest_asof_date": "TEXT",
+    "institutional_data_asof_date": "TEXT",
+    "insider_data_asof_date": "TEXT",
+    "borrow_data_asof_date": "TEXT",
+    "calibration_cohort": "TEXT",
+    "calibration_status": "TEXT",
+    "calibration_status_reason": "TEXT",
+    "native_score_field": "TEXT",
+    "native_score_value": "REAL",
+    "score_scale_min": "REAL",
+    "score_scale_max": "REAL",
+    "score_neutral_value": "REAL",
+    "score_zero_is_missing_flag": "REAL",
+    "capacity_bucket": "TEXT",
+    "min_position_size_feasible": "REAL",
+    "max_position_size_feasible": "REAL",
+    "liquidity_score": "REAL",
+    "forward_catalyst_event_date": "TEXT",
+    "forward_catalyst_asof_date": "TEXT",
     "forward_catalyst_nearest_days": "REAL",
     "forward_catalyst_event_type": "TEXT",
     "forward_catalyst_source": "TEXT",
@@ -1206,6 +1279,7 @@ MARKET_BARS_OPTIONAL_COLUMNS = {
 }
 
 MARKET_DAILY_OPTIONAL_COLUMNS = {
+    "avg_dollar_volume_60d": "REAL",
     "price_adjustment": "TEXT",
     "is_adjusted": "INTEGER",
     "is_provisional": "INTEGER",
@@ -1240,10 +1314,12 @@ DAILY_FEATURES_OPTIONAL_COLUMNS = {
     "indication_success_multiplier": "REAL",
     "indication_weighted_phase2_3_component": "REAL",
     "forward_catalyst_nearest_days": "REAL",
+    "forward_catalyst_event_date": "TEXT",
     "forward_catalyst_event_type": "TEXT",
     "forward_catalyst_source": "TEXT",
     "forward_catalyst_source_url": "TEXT",
     "forward_catalyst_confidence": "REAL",
+    "forward_catalyst_asof_date": "TEXT",
     "forward_catalyst_score": "REAL",
     "forward_catalyst_unfiltered_score": "REAL",
     "ctgov_forward_catalyst_score": "REAL",
@@ -1301,6 +1377,7 @@ DAILY_FEATURES_OPTIONAL_COLUMNS = {
     "insider_buy_cluster_count_90d": "REAL",
     "insider_sell_value_90d": "REAL",
     "insider_accumulation_score": "REAL",
+    "avg_dollar_volume_60d": "REAL",
     "momentum_score_raw": "REAL",
     "adcom_nearest_days": "REAL",
     "adcom_within_60d_flag": "REAL",
@@ -1472,7 +1549,32 @@ def init_db(conn: sqlite3.Connection) -> None:
         ON company_forward_guidance_overrides(unique_key)
         """
     )
+    _repair_blank_numeric_nulls_in_daily_scores(conn)
     conn.commit()
+
+
+def _repair_blank_numeric_nulls_in_daily_scores(conn: sqlite3.Connection) -> None:
+    """Convert blank-string values to NULL for REAL/INTEGER columns in daily_scores.
+
+    Prior to the PRAGMA-driven db_value fix in 11_score_biotech_index.py, the scorer
+    wrote empty strings instead of NULL for optional numeric fields when a value was
+    absent.  This one-time repair corrects existing rows so that IS NOT NULL filters
+    and SQL aggregates work correctly.  Each UPDATE is a no-op after the first run
+    because SQLite skips rows where the value is already NULL or non-empty.
+    """
+    _NUMERIC_TYPE_KEYWORDS = {"REAL", "INTEGER", "INT", "NUMERIC", "FLOAT", "DOUBLE"}
+    try:
+        pragma_rows = conn.execute("PRAGMA table_info(daily_scores)").fetchall()
+    except Exception:
+        return
+    for pragma_row in pragma_rows:
+        col_name = str(pragma_row["name"])
+        col_type = str(pragma_row["type"] or "").upper()
+        if any(kw in col_type for kw in _NUMERIC_TYPE_KEYWORDS):
+            col_sql = quote_identifier(col_name)
+            conn.execute(
+                f"UPDATE daily_scores SET {col_sql} = NULL WHERE {col_sql} = ''"
+            )
 
 
 def ensure_company_optional_columns(conn: sqlite3.Connection) -> None:

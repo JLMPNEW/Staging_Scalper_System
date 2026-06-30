@@ -1,0 +1,271 @@
+sources:
+  - source_id: defense_ticker_seed
+    stage: security_master
+    source_name: Defense active ticker seed
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/defense/system_csvs/defense_tickers.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema:
+      - defense_tickers_csv
+    canonical_tables:
+      - dim_company
+      - dim_security
+      - dim_identifier
+      - dim_universe_membership
+    feature_stages:
+      - security_master
+    subsector_scope: defense
+    priority: 10
+    status: active
+    notes: Active defense universe system CSV.
+
+  - source_id: defense_cohort_policy
+    stage: security_master
+    source_name: Defense cohort policy
+    source_owner: internal
+    source_type: yaml
+    base_url: industrials/defense/data/defense_cohorts.yaml
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema:
+      - defense_cohorts_yaml
+    canonical_tables:
+      - dim_industrials_taxonomy
+    feature_stages:
+      - security_master
+    subsector_scope: defense
+    priority: 20
+    status: active
+    notes: Four defense calibration cohorts.
+
+  - source_id: defense_historical_membership_seed
+    stage: security_master
+    source_name: Defense historical membership seed
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/defense/system_csvs/defense_historical_membership.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema:
+      - defense_historical_membership_csv
+    canonical_tables:
+      - dim_universe_membership
+    feature_stages:
+      - calibration_research
+    subsector_scope: defense
+    priority: 30
+    status: active
+    notes: Optional explicit point-in-time historical membership intervals.
+
+  - source_id: defense_delisted_calibration_seed
+    stage: security_master
+    source_name: Aerospace and defense delisted calibration seed
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/defense/system_csvs/aerospace_defense_delisted.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema:
+      - aerospace_defense_delisted_csv
+    canonical_tables:
+      - dim_company
+      - dim_universe_membership
+      - dim_delisted_calibration_seed
+    feature_stages:
+      - calibration_research
+    subsector_scope: defense
+    priority: 35
+    status: active
+    notes: Delisted aerospace and defense names used for OOS calibration panels.
+
+  - source_id: defense_ticker_alias_seed
+    stage: security_master
+    source_name: Defense ticker aliases
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/defense/system_csvs/defense_ticker_aliases.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema:
+      - defense_ticker_aliases_csv
+    canonical_tables:
+      - dim_ticker_alias
+      - fact_corporate_action
+    feature_stages:
+      - security_master
+      - portfolio_layer_handoff
+    subsector_scope: defense
+    priority: 40
+    status: active
+    notes: Active ticker migrations and predecessor to active ticker mapping.
+
+  - source_id: defense_cik_ticker_overrides
+    stage: security_master
+    source_name: Defense CIK/ticker identity overrides
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/defense/system_csvs/defense_cik_ticker_overrides.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema:
+      - defense_cik_ticker_overrides_csv
+    canonical_tables:
+      - data_quality_issues
+    feature_stages:
+      - security_master
+    subsector_scope: defense
+    priority: 45
+    status: active
+    notes: Manual reviewed exceptions for ticker/CIK/company reconciliation.
+
+  - source_id: sec_company_tickers
+    stage: security_master
+    source_name: SEC company ticker mapping
+    source_owner: SEC
+    source_type: rest_json
+    base_url: https://www.sec.gov/files/company_tickers_exchange.json
+    documentation_url: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: SEC
+    raw_schema:
+      - company_tickers_exchange_json
+    canonical_tables:
+      - dim_company
+      - dim_security
+      - dim_identifier
+    feature_stages:
+      - security_master
+    subsector_scope: industrials
+    priority: 50
+    status: planned
+    notes: External CIK/ticker verification source for later network-enabled reconciliation.
+
+  - source_id: sec_submissions
+    stage: financials
+    source_name: SEC submissions feed
+    source_owner: SEC
+    source_type: rest_json
+    base_url: https://data.sec.gov/submissions/
+    documentation_url: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: SEC
+    raw_schema:
+      - submissions_json
+    canonical_tables:
+      - fact_sec_filing
+      - dim_issuer_reporting_profile
+    feature_stages:
+      - financials
+    subsector_scope: industrials
+    priority: 55
+    status: active
+    notes: Filing metadata, accepted filing timestamps, forms, periods, and accession lineage.
+
+  - source_id: sec_companyfacts
+    stage: financials
+    source_name: SEC companyfacts XBRL feed
+    source_owner: SEC
+    source_type: rest_json
+    base_url: https://data.sec.gov/api/xbrl/companyfacts/
+    documentation_url: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: SEC
+    raw_schema:
+      - companyfacts_json
+    canonical_tables:
+      - fact_sec_xbrl_fact_raw
+      - fact_sec_xbrl_fact
+      - fact_financial_statement_canonical
+      - feature_financial_statement
+    feature_stages:
+      - financials
+    subsector_scope: industrials
+    priority: 56
+    status: active
+    notes: Raw and mapped SEC XBRL facts for PIT financial features.
+
+  - source_id: yahoo_finance_adjusted
+    stage: market_data
+    source_name: Yahoo Finance adjusted chart data
+    source_owner: Yahoo Finance
+    source_type: rest_json
+    base_url: https://query1.finance.yahoo.com/v8/finance/chart/
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: Yahoo
+    raw_schema:
+      - yahoo_chart_json
+    canonical_tables:
+      - fact_price_ohlcv
+      - fact_corporate_action
+      - fact_market_snapshot
+      - feature_market_technical
+    feature_stages:
+      - market_data
+    subsector_scope: industrials
+    priority: 60
+    status: active
+    notes: Primary current adjusted price source for daily scoring and Stage 3 market features.
+
+  - source_id: yahoo_fx_rates
+    stage: financials
+    source_name: Yahoo Finance FX rates
+    source_owner: Yahoo Finance
+    source_type: rest_json
+    base_url: https://query1.finance.yahoo.com/v8/finance/chart/
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: Yahoo
+    raw_schema:
+      - yahoo_fx_chart_json
+    canonical_tables:
+      - fact_fx_rate
+    feature_stages:
+      - financials
+    subsector_scope: industrials
+    priority: 65
+    status: planned
+    notes: Planned FX source for non-USD issuer conversion; Stage 4 accepts neutral-low-confidence fallback when FX is unavailable.
+
+  - source_id: norgate_us_equities_total_return
+    stage: calibration_research
+    source_name: Norgate US equities total return
+    source_owner: Norgate
+    source_type: vendor_file
+    base_url: norgate://us-equities-total-return
+    authentication_required: true
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: Norgate
+    raw_schema:
+      - norgate_price_history
+    canonical_tables:
+      - fact_price_ohlcv
+    feature_stages:
+      - calibration_research
+    subsector_scope: industrials
+    priority: 70
+    status: planned
+    notes: Required for delisted historical price coverage before promotable OOS calibration.

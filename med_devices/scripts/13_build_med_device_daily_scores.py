@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +23,7 @@ from med_devices.core.config import DEFAULT_NEUTRAL_SCORE, cfg_get, load_yaml, r
 from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.fda_states import MANUAL_FDA_REVIEW_STATES  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
+from med_devices.core.market_policy import scoring_market_sources  # noqa: E402
 from med_devices.core.scoring_enhancements import blended_score as ic_blended_score  # noqa: E402
 from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 
@@ -153,6 +154,37 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "industry": "TEXT DEFAULT ''",
     "country": "TEXT DEFAULT ''",
     "currency": "TEXT DEFAULT ''",
+    "score_confidence": "REAL DEFAULT 0.0",
+    "eligibility_reason": "TEXT DEFAULT ''",
+    "native_score_field": "TEXT DEFAULT ''",
+    "native_score_value": "REAL DEFAULT 0.0",
+    "score_zero_is_missing_flag": "INTEGER DEFAULT 0",
+    "universe_status": "TEXT DEFAULT ''",
+    "historical_universe_source": "TEXT DEFAULT ''",
+    "price_start_date": "TEXT DEFAULT ''",
+    "price_end_date": "TEXT DEFAULT ''",
+    "terminal_date": "TEXT DEFAULT ''",
+    "historical_price_ticker": "TEXT DEFAULT ''",
+    "calibration_only": "INTEGER DEFAULT 0",
+    "latest_price_date": "TEXT DEFAULT ''",
+    "source_snapshot_asof_date": "TEXT DEFAULT ''",
+    "price_data_asof_date": "TEXT DEFAULT ''",
+    "feature_data_asof_date": "TEXT DEFAULT ''",
+    "recovery_type": "TEXT DEFAULT ''",
+    "equity_recovery": "INTEGER DEFAULT 0",
+    "drop_otc_tape": "INTEGER DEFAULT 0",
+    "financial_data_asof_date": "TEXT DEFAULT ''",
+    "short_interest_asof_date": "TEXT DEFAULT ''",
+    "institutional_data_asof_date": "TEXT DEFAULT ''",
+    "insider_data_asof_date": "TEXT DEFAULT ''",
+    "borrow_data_asof_date": "TEXT DEFAULT ''",
+    "forward_catalyst_event_date": "TEXT DEFAULT ''",
+    "forward_catalyst_event_type": "TEXT DEFAULT ''",
+    "forward_catalyst_nearest_days": "INTEGER DEFAULT NULL",
+    "forward_catalyst_source": "TEXT DEFAULT ''",
+    "forward_catalyst_confidence": "REAL DEFAULT NULL",
+    "forward_catalyst_asof_date": "TEXT DEFAULT ''",
+    "avg_dollar_volume_60d_available_flag": "INTEGER DEFAULT 0",
     "calibration_status": "TEXT DEFAULT 'production_eligible'",
     "calibration_status_reason": "TEXT DEFAULT ''",
     "calibration_eligible_flag": "INTEGER DEFAULT 1",
@@ -172,6 +204,7 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "analyst_review_decision": "TEXT DEFAULT ''",
     "analyst_review_reason": "TEXT DEFAULT ''",
     "analyst_review_owner": "TEXT DEFAULT ''",
+    "analyst_reviewed_at": "TEXT DEFAULT ''",
     "analyst_review_expires_at": "TEXT DEFAULT ''",
     "analyst_portfolio_override_applied": "INTEGER DEFAULT 0",
     "safe_core_score": "REAL DEFAULT 0.0",
@@ -316,6 +349,36 @@ FIELDNAMES = [
     "industry",
     "country",
     "currency",
+    "score_confidence",
+    "eligibility_reason",
+    "native_score_field",
+    "native_score_value",
+    "score_zero_is_missing_flag",
+    "universe_status",
+    "historical_universe_source",
+    "price_start_date",
+    "price_end_date",
+    "terminal_date",
+    "historical_price_ticker",
+    "calibration_only",
+    "latest_price_date",
+    "source_snapshot_asof_date",
+    "price_data_asof_date",
+    "feature_data_asof_date",
+    "recovery_type",
+    "equity_recovery",
+    "drop_otc_tape",
+    "financial_data_asof_date",
+    "short_interest_asof_date",
+    "institutional_data_asof_date",
+    "insider_data_asof_date",
+    "borrow_data_asof_date",
+    "forward_catalyst_event_date",
+    "forward_catalyst_event_type",
+    "forward_catalyst_nearest_days",
+    "forward_catalyst_source",
+    "forward_catalyst_confidence",
+    "forward_catalyst_asof_date",
     "subsector",
     "composite_score",
     "raw_composite_score",
@@ -340,6 +403,7 @@ FIELDNAMES = [
     "analyst_review_decision",
     "analyst_review_reason",
     "analyst_review_owner",
+    "analyst_reviewed_at",
     "analyst_review_expires_at",
     "analyst_portfolio_override_applied",
     "safe_core_score",
@@ -496,6 +560,7 @@ FIELDNAMES = [
     "shares_source_period",
     "market_cap_validated_flag",
     "avg_dollar_volume_60d",
+    "avg_dollar_volume_60d_available_flag",
     "liquidity_score",
     "capacity_bucket",
     "min_position_size_feasible",
@@ -535,6 +600,36 @@ class ScoreRow:
     industry: str = ""
     country: str = ""
     currency: str = ""
+    score_confidence: float = 0.0
+    eligibility_reason: str = ""
+    native_score_field: str = "composite_score"
+    native_score_value: float = 0.0
+    score_zero_is_missing_flag: int = 0
+    universe_status: str = ""
+    historical_universe_source: str = ""
+    price_start_date: str = ""
+    price_end_date: str = ""
+    terminal_date: str = ""
+    historical_price_ticker: str = ""
+    calibration_only: int = 0
+    latest_price_date: str = ""
+    source_snapshot_asof_date: str = ""
+    price_data_asof_date: str = ""
+    feature_data_asof_date: str = ""
+    recovery_type: str = ""
+    equity_recovery: int = 0
+    drop_otc_tape: int = 0
+    financial_data_asof_date: str = ""
+    short_interest_asof_date: str = ""
+    institutional_data_asof_date: str = ""
+    insider_data_asof_date: str = ""
+    borrow_data_asof_date: str = ""
+    forward_catalyst_event_date: str = ""
+    forward_catalyst_event_type: str = ""
+    forward_catalyst_nearest_days: int | None = None
+    forward_catalyst_source: str = ""
+    forward_catalyst_confidence: float | None = None
+    forward_catalyst_asof_date: str = ""
     composite_score: float = 0.0
     raw_composite_score: float = 0.0
     composite_percentile: float = 0.0
@@ -558,6 +653,7 @@ class ScoreRow:
     analyst_review_decision: str = ""
     analyst_review_reason: str = ""
     analyst_review_owner: str = ""
+    analyst_reviewed_at: str = ""
     analyst_review_expires_at: str = ""
     analyst_portfolio_override_applied: int = 0
     safe_core_score: float = 0.0
@@ -718,6 +814,7 @@ class ScoreRow:
     shares_source_period: str = ""
     market_cap_validated_flag: int = 0
     avg_dollar_volume_60d: float | None = None
+    avg_dollar_volume_60d_available_flag: int = 0
     liquidity_score: float | None = None
     capacity_bucket: str = "unknown"
     min_position_size_feasible: float | None = None
@@ -1020,7 +1117,9 @@ def load_financial_rows(
                c.sector AS company_sector,
                c.industry AS company_industry,
                c.country AS company_country,
-               c.currency AS company_currency
+               c.currency AS company_currency,
+               c.universe_status AS company_universe_status,
+               c.is_active AS company_is_active
         FROM feature_financial_valuation f
         JOIN dim_company c ON c.company_id = f.company_id
         WHERE (
@@ -1094,6 +1193,130 @@ def load_latest_feature(conn: Any, table: str, score_col: str, *, asof: str) -> 
             continue
         seen.add(company_id)
         out[company_id] = dict(row)
+    return out
+
+
+def _max_date_text(*values: object) -> str:
+    parsed: list[datetime] = []
+    for value in values:
+        item = parse_date(value)
+        if item is not None:
+            parsed.append(item)
+    if not parsed:
+        return ""
+    return max(parsed).strftime("%Y-%m-%d")
+
+
+def _unit_confidence(raw: object, *, default: float = 0.0) -> float:
+    value = to_float(raw)
+    if value is None:
+        return clamp(default, 0.0, 1.0)
+    if value > 1.0:
+        value /= 100.0
+    return clamp(value, 0.0, 1.0)
+
+
+def _price_recency_confidence(latest_price_date: object, asof: object) -> float:
+    latest = parse_date(latest_price_date)
+    target = parse_date(asof)
+    if latest is None or target is None:
+        return 0.0
+    lag_days = max(0, (target.date() - latest.date()).days)
+    if lag_days <= 1:
+        return 1.0
+    return clamp(1.0 - ((lag_days - 1) / 10.0), 0.0, 1.0)
+
+
+def _score_confidence(
+    *,
+    data_completeness: float,
+    financial_confidence: object,
+    latest_price_date: object,
+    asof: object,
+    avg_dollar_volume_60d: float | None,
+    quality_scores: Iterable[object],
+) -> float:
+    completeness = _unit_confidence(data_completeness)
+    financial = _unit_confidence(financial_confidence, default=completeness)
+    price = _price_recency_confidence(latest_price_date, asof)
+    if avg_dollar_volume_60d is None:
+        price *= 0.5
+    positioning = max((_unit_confidence(score) for score in quality_scores), default=0.0)
+    confidence = 0.50 * completeness + 0.25 * financial + 0.20 * price + 0.05 * positioning
+    return round(clamp(confidence, 0.0, 1.0), 4)
+
+
+def load_price_provenance(
+    conn: Any,
+    *,
+    tickers: set[str],
+    sources: list[str],
+    asof: str,
+) -> dict[str, dict[str, str]]:
+    if not tickers or not sources:
+        return {}
+    ticker_placeholders = ", ".join("?" for _ in tickers)
+    source_placeholders = ", ".join("?" for _ in sources)
+    rows = conn.execute(
+        f"""
+        SELECT ticker,
+               MIN(bar_date) AS price_start_date,
+               MAX(bar_date) AS price_end_date
+        FROM fact_price_ohlcv
+        WHERE ticker IN ({ticker_placeholders})
+          AND source_id IN ({source_placeholders})
+          AND bar_date <= ?
+          AND COALESCE(adj_close, close) > 0
+        GROUP BY ticker
+        """,
+        [*sorted(tickers), *sources, asof],
+    ).fetchall()
+    return {
+        normalize_ticker(row["ticker"]): {
+            "price_start_date": str(row["price_start_date"] or ""),
+            "price_end_date": str(row["price_end_date"] or ""),
+            "historical_price_ticker": normalize_ticker(row["ticker"]),
+        }
+        for row in rows
+    }
+
+
+def load_universe_provenance(conn: Any, *, asof: str) -> dict[int, dict[str, Any]]:
+    if not table_exists(conn, "dim_universe_membership"):
+        return {}
+    rows = conn.execute(
+        """
+        SELECT company_id,
+               membership_source_id,
+               membership_basis,
+               membership_status,
+               start_date,
+               end_date,
+               confidence
+        FROM dim_universe_membership
+        WHERE model_family = 'med_devices'
+          AND point_in_time_flag = 1
+          AND start_date <= ?
+          AND (end_date IS NULL OR end_date >= ?)
+        ORDER BY company_id, start_date DESC
+        """,
+        (asof, asof),
+    ).fetchall()
+    out: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        company_id = int(row["company_id"])
+        if company_id in out:
+            continue
+        membership_basis = str(row["membership_basis"] or "")
+        end_date = str(row["end_date"] or "")
+        out[company_id] = {
+            "historical_universe_source": str(row["membership_source_id"] or ""),
+            "membership_basis": membership_basis,
+            "membership_status": str(row["membership_status"] or ""),
+            "terminal_date": end_date if end_date and end_date <= asof else "",
+            "calibration_only": int("calibration_only" in membership_basis.lower()),
+            "membership_confidence": to_float(row["confidence"]),
+        }
     return out
 
 
@@ -2157,6 +2380,25 @@ def normalize_calibration_status(raw: object, *, context: str) -> str:
     if status not in CALIBRATION_STATUSES:
         raise ValueError(f"{context} must be one of {sorted(CALIBRATION_STATUSES)}, got {status!r}")
     return status
+
+
+def normalize_universe_status(raw: object, *, company_is_active: bool) -> str:
+    """Collapse raw company/membership statuses to stable output values."""
+    status = str(raw or "").strip().lower()
+    if status in {"active", "current", "keep", "candidate", "watch", "review", "source_current"}:
+        return "active" if company_is_active else "historical"
+    if status in {
+        "historical",
+        "inactive",
+        "delisted",
+        "remove",
+        "removed",
+        "removed_from_source",
+        "historical_delisted",
+        "not_current",
+    }:
+        return "historical"
+    return "active" if company_is_active else "historical"
 
 
 def cohort_calibration_status_profiles(config: dict[str, Any]) -> dict[str, tuple[str, str]]:
@@ -3692,6 +3934,7 @@ def apply_analyst_review_decision(
     row.analyst_review_decision = decision.decision
     row.analyst_review_reason = decision.decision_reason
     row.analyst_review_owner = decision.review_owner
+    row.analyst_reviewed_at = decision.reviewed_at
     row.analyst_review_expires_at = decision.expires_at
     if decision.decision in {
         analyst_review_core.DECISION_REJECT,
@@ -4157,6 +4400,13 @@ def build_rows(
         max_tickers=max_tickers,
         include_historical_members=include_historical_members,
     )
+    price_provenance = load_price_provenance(
+        conn,
+        tickers={normalize_ticker(item.get("ticker")) for item in financial_rows if normalize_ticker(item.get("ticker"))},
+        sources=scoring_market_sources(config),
+        asof=asof,
+    )
+    universe_provenance = load_universe_provenance(conn, asof=asof)
     fda_rows = load_latest_feature(conn, "feature_fda_product_risk", "fda_product_score", asof=asof)
     reimbursement_rows = load_latest_feature(conn, "feature_reimbursement", "score", asof=asof)
     technical_rows = load_latest_feature(conn, "feature_technical_entry", "technical_score", asof=asof)
@@ -4269,6 +4519,37 @@ def build_rows(
         short_item = short_rows.get(company_id, {})
         institutional_item = institutional_rows.get(company_id, {})
         insider_item = insider_rows.get(company_id, {})
+        ticker = normalize_ticker(item.get("ticker"))
+        price_meta = price_provenance.get(ticker, {})
+        universe_meta = universe_provenance.get(company_id, {})
+        company_is_active = int_flag(item.get("company_is_active"))
+        raw_universe_status = str(universe_meta.get("membership_status") or "").strip()
+        if not raw_universe_status:
+            raw_universe_status = str(item.get("company_universe_status") or "").strip()
+        universe_status = normalize_universe_status(raw_universe_status, company_is_active=bool(company_is_active))
+        historical_universe_source = str(universe_meta.get("historical_universe_source") or "").strip()
+        if not historical_universe_source:
+            historical_universe_source = "dim_company_active_universe" if company_is_active else "dim_company_historical_universe"
+        latest_price_date = _max_date_text(technical_item.get("latest_price_date"), price_meta.get("price_end_date"))
+        price_end_date = str(price_meta.get("price_end_date") or latest_price_date)
+        price_data_asof_date = latest_price_date or price_end_date
+        feature_data_asof_date = _max_date_text(
+            item.get("asof_date"),
+            fda_item.get("asof_date") if fda_item else "",
+            reimbursement_item.get("asof_date") if reimbursement_item else "",
+            technical_item.get("asof_date") if technical_item else "",
+            durable_item.get("asof_date") if durable_item else "",
+            sentiment_item.get("asof_date") if sentiment_item else "",
+            borrow_item.get("asof_date") if borrow_item else "",
+            short_item.get("asof_date") if short_item else "",
+            institutional_item.get("asof_date") if institutional_item else "",
+            insider_item.get("asof_date") if insider_item else "",
+        )
+        financial_data_asof_date = str(item.get("asof_date") or "")
+        short_interest_asof_date = str(short_item.get("asof_date") or "") if short_item else ""
+        institutional_data_asof_date = str(institutional_item.get("asof_date") or "") if institutional_item else ""
+        insider_data_asof_date = str(insider_item.get("asof_date") or "") if insider_item else ""
+        borrow_data_asof_date = str(borrow_item.get("asof_date") or "") if borrow_item else ""
         durable_proxy_item = durable_proxy.get(company_id)
         has_durable_proxy = durable_proxy_item is not None
         sentiment_proxy_item = sentiment_proxy.get(company_id)
@@ -4483,6 +4764,21 @@ def build_rows(
             active_component_keys = [key for key, weight in effective_weights.items() if weight > WEIGHT_EPSILON]
             active_live_count = sum(1 for key in active_component_keys if component_available.get(key, False))
             data_completeness = round(100.0 * active_live_count / len(active_component_keys), 2) if active_component_keys else 0.0
+        calibration_only = int(universe_meta.get("calibration_only") or (0 if company_is_active else 1))
+        recovery_type = "historical_equity_recovery" if calibration_only else "standard_equity"
+        score_confidence = _score_confidence(
+            data_completeness=data_completeness,
+            financial_confidence=item.get("data_confidence_score"),
+            latest_price_date=latest_price_date,
+            asof=asof,
+            avg_dollar_volume_60d=avg_dollar_volume_60d,
+            quality_scores=[
+                borrow_item.get("data_quality_score") if borrow_item else 0.0,
+                short_item.get("data_quality_score") if short_item else 0.0,
+                institutional_item.get("data_quality_score") if institutional_item else 0.0,
+                insider_item.get("data_quality_score") if insider_item else 0.0,
+            ],
+        )
         row = ScoreRow(
             asof_date=asof,
             scoring_model_version=model_version,
@@ -4492,13 +4788,34 @@ def build_rows(
             scoring_contract_version=scoring_contract_version,
             rank=0,
             company_id=company_id,
-            ticker=normalize_ticker(item.get("ticker")),
+            ticker=ticker,
             company_name=str(item.get("company_name") or ""),
             subsector=str(item.get("subsector") or ""),
             sector=str(item.get("company_sector") or item.get("sector") or ""),
             industry=str(item.get("company_industry") or item.get("industry") or ""),
             country=str(item.get("company_country") or item.get("country") or ""),
             currency=str(item.get("company_currency") or item.get("currency") or ""),
+            score_confidence=score_confidence,
+            native_score_field="composite_score",
+            universe_status=universe_status,
+            historical_universe_source=historical_universe_source,
+            price_start_date=str(price_meta.get("price_start_date") or ""),
+            price_end_date=price_end_date,
+            terminal_date=str(universe_meta.get("terminal_date") or ""),
+            historical_price_ticker=str(price_meta.get("historical_price_ticker") or ticker),
+            calibration_only=calibration_only,
+            latest_price_date=latest_price_date,
+            source_snapshot_asof_date=asof,
+            price_data_asof_date=price_data_asof_date,
+            feature_data_asof_date=feature_data_asof_date,
+            recovery_type=recovery_type,
+            equity_recovery=calibration_only,
+            drop_otc_tape=0,
+            financial_data_asof_date=financial_data_asof_date,
+            short_interest_asof_date=short_interest_asof_date,
+            institutional_data_asof_date=institutional_data_asof_date,
+            insider_data_asof_date=insider_data_asof_date,
+            borrow_data_asof_date=borrow_data_asof_date,
             calibration_cohort=cohort,
             calibration_status=calibration_status,
             calibration_status_reason=calibration_status_reason,
@@ -4695,6 +5012,7 @@ def build_rows(
             sentiment_proxy_source=sentiment_proxy_item.source if sentiment_proxy_item is not None else "",
             sentiment_proxy_input=sentiment_proxy_item.input_name if sentiment_proxy_item is not None else "",
             avg_dollar_volume_60d=avg_dollar_volume_60d,
+            avg_dollar_volume_60d_available_flag=int(avg_dollar_volume_60d is not None),
             liquidity_score=liquidity_score,
             technical_component_weight=technical_component_weight,
             market_cap=market_cap,
@@ -4783,6 +5101,8 @@ def build_rows(
             2,
         )
         row.composite_score = row.raw_composite_score
+        row.native_score_value = row.composite_score
+        row.score_zero_is_missing_flag = int(row.composite_score == 0.0 and row.live_component_count == 0)
         rows.append(row)
     if rank_composite:
         cross_sectional_percentile_rank(rows)
@@ -4830,6 +5150,7 @@ def build_rows(
             row,
             profile_for_cohort(row.calibration_cohort, pullback_candidate_profiles, cohort_profile_alias_map),
         )
+        row.eligibility_reason = row.portfolio_candidate_reason or row.safe_core_reason or row.tier1_safety_reason or row.review_reason
         row.top_positive_drivers, row.top_negative_drivers = score_drivers(row)
     rows.sort(
         key=lambda item: (
@@ -4886,6 +5207,36 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "industry",
         "country",
         "currency",
+        "score_confidence",
+        "eligibility_reason",
+        "native_score_field",
+        "native_score_value",
+        "score_zero_is_missing_flag",
+        "universe_status",
+        "historical_universe_source",
+        "price_start_date",
+        "price_end_date",
+        "terminal_date",
+        "historical_price_ticker",
+        "calibration_only",
+        "latest_price_date",
+        "source_snapshot_asof_date",
+        "price_data_asof_date",
+        "feature_data_asof_date",
+        "recovery_type",
+        "equity_recovery",
+        "drop_otc_tape",
+        "financial_data_asof_date",
+        "short_interest_asof_date",
+        "institutional_data_asof_date",
+        "insider_data_asof_date",
+        "borrow_data_asof_date",
+        "forward_catalyst_event_date",
+        "forward_catalyst_event_type",
+        "forward_catalyst_nearest_days",
+        "forward_catalyst_source",
+        "forward_catalyst_confidence",
+        "forward_catalyst_asof_date",
         "scoring_model_version",
         "composite_score",
         "raw_composite_score",
@@ -4910,6 +5261,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "analyst_review_decision",
         "analyst_review_reason",
         "analyst_review_owner",
+        "analyst_reviewed_at",
         "analyst_review_expires_at",
         "analyst_portfolio_override_applied",
         "safe_core_score",
@@ -5065,6 +5417,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "shares_source_period",
         "market_cap_validated_flag",
         "avg_dollar_volume_60d",
+        "avg_dollar_volume_60d_available_flag",
         "liquidity_score",
         "capacity_bucket",
         "min_position_size_feasible",
@@ -5115,6 +5468,36 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.industry,
                 row.country,
                 row.currency,
+                row.score_confidence,
+                row.eligibility_reason,
+                row.native_score_field,
+                row.native_score_value,
+                row.score_zero_is_missing_flag,
+                row.universe_status,
+                row.historical_universe_source,
+                row.price_start_date,
+                row.price_end_date,
+                row.terminal_date,
+                row.historical_price_ticker,
+                row.calibration_only,
+                row.latest_price_date,
+                row.source_snapshot_asof_date,
+                row.price_data_asof_date,
+                row.feature_data_asof_date,
+                row.recovery_type,
+                row.equity_recovery,
+                row.drop_otc_tape,
+                row.financial_data_asof_date,
+                row.short_interest_asof_date,
+                row.institutional_data_asof_date,
+                row.insider_data_asof_date,
+                row.borrow_data_asof_date,
+                row.forward_catalyst_event_date,
+                row.forward_catalyst_event_type,
+                row.forward_catalyst_nearest_days,
+                row.forward_catalyst_source,
+                row.forward_catalyst_confidence,
+                row.forward_catalyst_asof_date,
                 row.scoring_model_version,
                 row.composite_score,
                 row.raw_composite_score,
@@ -5139,6 +5522,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.analyst_review_decision,
                 row.analyst_review_reason,
                 row.analyst_review_owner,
+                row.analyst_reviewed_at,
                 row.analyst_review_expires_at,
                 row.analyst_portfolio_override_applied,
                 row.safe_core_score,
@@ -5294,6 +5678,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.shares_source_period,
                 row.market_cap_validated_flag,
                 row.avg_dollar_volume_60d,
+                row.avg_dollar_volume_60d_available_flag,
                 row.liquidity_score,
                 row.capacity_bucket,
                 row.min_position_size_feasible,

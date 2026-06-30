@@ -38,6 +38,7 @@ from biotech_index.core.pipeline_guards import (  # noqa: E402
     validate_layer_freshness,
     validate_nonempty_selection,
 )
+from biotech_index.core.report_inputs import resolve_dated_report_input_csv  # noqa: E402
 from biotech_index.core.scoring_math import (  # noqa: E402
     decomposed_risk_penalty_input,
     weighted_predictive_risk_penalty_input,
@@ -88,6 +89,7 @@ FEATURE_CSV_FIELDNAMES = [
     "active_program_override_trials",
     "active_collaborator_trials",
     "median_addv20",
+    "avg_dollar_volume_60d",
     "going_concern_status",
     "reverse_split_hits_2y",
     "sec_regulatory_catalyst_count",
@@ -108,10 +110,12 @@ FEATURE_CSV_FIELDNAMES = [
     "indication_success_multiplier",
     "indication_weighted_phase2_3_component",
     "forward_catalyst_nearest_days",
+    "forward_catalyst_event_date",
     "forward_catalyst_event_type",
     "forward_catalyst_source",
     "forward_catalyst_source_url",
     "forward_catalyst_confidence",
+    "forward_catalyst_asof_date",
     "forward_catalyst_score",
     "forward_catalyst_unfiltered_score",
     "ctgov_forward_catalyst_score",
@@ -254,6 +258,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--asof", type=str, default="", help="Feature date in YYYY-MM-DD. Defaults to UTC today.")
+    parser.add_argument(
+        "--universe-csv",
+        type=Path,
+        default=None,
+        help="Optional point-in-time final scoring universe CSV override.",
+    )
     return parser.parse_args()
 
 
@@ -707,10 +717,12 @@ def forward_catalyst_signal(
     if not row:
         return {
             "forward_catalyst_nearest_days": "",
+            "forward_catalyst_event_date": "",
             "forward_catalyst_event_type": "",
             "forward_catalyst_source": "",
             "forward_catalyst_source_url": "",
             "forward_catalyst_confidence": "",
+            "forward_catalyst_asof_date": "",
             "forward_catalyst_score": 0.0,
             "forward_catalyst_unfiltered_score": 0.0,
             "ctgov_forward_catalyst_score": 0.0,
@@ -733,10 +745,12 @@ def forward_catalyst_signal(
     primary_score = 0.0 if is_ctgov and not ctgov_guardrail_pass else unfiltered_score
     return {
         "forward_catalyst_nearest_days": days_until,
+        "forward_catalyst_event_date": str(row.get("event_date") or row.get("catalyst_date") or row.get("date") or ""),
         "forward_catalyst_event_type": event_type,
         "forward_catalyst_source": source,
         "forward_catalyst_source_url": str(row.get("source_url") or row.get("document_url") or row.get("url") or ""),
         "forward_catalyst_confidence": round(clamp(confidence, 0.0, 1.0), 6),
+        "forward_catalyst_asof_date": str(row.get("filing_date") or row.get("snapshot_asof") or row.get("asof_date") or ""),
         "forward_catalyst_score": round(primary_score, 4),
         "forward_catalyst_unfiltered_score": round(unfiltered_score, 4),
         "ctgov_forward_catalyst_score": round(unfiltered_score if is_ctgov else 0.0, 4),
@@ -1033,14 +1047,16 @@ def load_fda_adcom_events(
 ) -> dict[int, list[dict[str, Any]]]:
     """Return company_id → list of upcoming AdCom meeting dicts."""
     cutoff = asof_date.isoformat()
+    max_meeting_date = (asof_date + timedelta(days=lookahead_days)).isoformat()
     rows = conn.execute(
         """
         SELECT company_id, ticker, meeting_date, committee, drug_name, indication, vote_result, source_url
         FROM fda_adcom_events
         WHERE meeting_date >= ?
+          AND meeting_date <= ?
         ORDER BY company_id, meeting_date
         """,
-        (cutoff,),
+        (cutoff, max_meeting_date),
     ).fetchall()
     result: dict[int, list[dict[str, Any]]] = {}
     for r in rows:
@@ -1316,14 +1332,35 @@ def ctgov_evidence_type(
     return "historical_only"
 
 
-def load_company_ids(conn: sqlite3.Connection) -> dict[str, int]:
-    rows = conn.execute("SELECT company_id, ticker FROM companies WHERE is_active = 1").fetchall()
+def load_company_ids(conn: sqlite3.Connection, *, include_inactive: bool = False) -> dict[str, int]:
+    where = "" if include_inactive else "WHERE is_active = 1"
+    rows = conn.execute(f"SELECT company_id, ticker FROM companies {where}").fetchall()
     return {normalize_ticker(row["ticker"]): int(row["company_id"]) for row in rows}
 
 
 def load_inactive_company_tickers(conn: sqlite3.Connection) -> set[str]:
     rows = conn.execute("SELECT ticker FROM companies WHERE COALESCE(is_active, 0) <= 0").fetchall()
     return {ticker for row in rows if (ticker := normalize_ticker(row["ticker"]))}
+
+
+def explicit_company_id(row: dict[str, Any]) -> int | None:
+    raw = str(row.get("company_id") or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(float(raw))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def is_delisted_calibration_universe_row(row: dict[str, Any]) -> bool:
+    return (
+        as_bool(row.get("calibration_only"))
+        or str(row.get("universe_status") or "").strip().lower() == "delisted_calibration"
+        or str(row.get("source") or "").strip().lower() == "delisted_biotech_calibration_universe"
+        or str(row.get("historical_universe_source") or "").strip().lower() == "delisted_biotech_calibration_universe"
+    )
 
 
 def load_latest_survival_features(conn: sqlite3.Connection, asof_date: date) -> dict[int, dict[str, Any]]:
@@ -2334,10 +2371,56 @@ def compute_feature_row(
     momentum_raw += 15.0 if median_addv20 >= strong_liquidity_addv20 else 8.0 if median_addv20 >= low_liquidity_addv20 else 0.0
     momentum_raw += min(20.0, primary_trial_score * 2.0)
     momentum_raw = clamp(momentum_raw)
+    market_asof_date = str(market.get("asof_date") if market else "")
+    market_last_bar_date = str(market.get("last_bar_date") if market else "")
+    universe_metadata = {
+        "universe_status": str(universe_row.get("universe_status") or ""),
+        "historical_universe_source": str(universe_row.get("historical_universe_source") or ""),
+        "price_start_date": str(universe_row.get("price_start_date") or ""),
+        "price_end_date": str(universe_row.get("price_end_date") or ""),
+        "terminal_date": str(universe_row.get("terminal_date") or ""),
+        "historical_price_ticker": str(universe_row.get("historical_price_ticker") or universe_row.get("original_ticker") or ticker),
+        "calibration_only": bool(as_bool(universe_row.get("calibration_only"))),
+        "recovery_type": str(universe_row.get("recovery_type") or ""),
+        "equity_recovery": str(universe_row.get("equity_recovery") or ""),
+        "drop_otc_tape": bool(as_bool(universe_row.get("drop_otc_tape"))),
+        "latest_price_date": str(universe_row.get("latest_price_date") or market_last_bar_date or market_asof_date),
+    }
+    data_provenance = {
+        "source_snapshot_asof_date": asof_date.isoformat(),
+        "price_data_asof_date": market_last_bar_date or market_asof_date,
+        "feature_data_asof_date": asof_date.isoformat(),
+        "clinical_data_asof_date": asof_date.isoformat(),
+        "financial_data_asof_date": str(
+            (survival or {}).get("asof_date")
+            or (survival or {}).get("latest_period_end")
+            or ""
+        ),
+        "short_interest_asof_date": str(
+            (short_interest or {}).get("asof_date")
+            or (short_interest or {}).get("settlement_date")
+            or ""
+        ),
+        "institutional_data_asof_date": str(
+            (institutional_ownership or {}).get("asof_date")
+            or (institutional_ownership or {}).get("filing_date")
+            or (institutional_ownership or {}).get("report_date")
+            or ""
+        ),
+        "insider_data_asof_date": str((governance or {}).get("asof_date") or ""),
+        "borrow_data_asof_date": str(
+            (borrow_availability or {}).get("borrow_fee_asof_date")
+            or (borrow_availability or {}).get("shortable_asof_date")
+            or (borrow_availability or {}).get("asof_date")
+            or ""
+        ),
+    }
 
     feature_json = {
         "ticker": ticker,
         "company_name": str(universe_row.get("company_name") or ""),
+        "universe_metadata": universe_metadata,
+        "data_provenance": data_provenance,
         "company_strategy_category": strategy_category,
         "ctgov": {
             "primary_nct": str(universe_row.get("primary_nct") or ""),
@@ -2379,14 +2462,17 @@ def compute_feature_row(
             "median_addv20": median_addv20,
             "liquidity_status": liquidity_status,
             "market_source": str(market.get("source") if market else ""),
-            "market_asof_date": str(market.get("asof_date") if market else ""),
+            "market_asof_date": market_asof_date,
             "market_price_adjustment": str(market.get("price_adjustment") if market else ""),
             "market_is_adjusted": optional_market_int(
                 market.get("is_adjusted") if market else None,
                 field="is_adjusted",
                 ticker=ticker,
             ),
-            "market_last_bar_date": str(market.get("last_bar_date") if market else ""),
+            "market_last_bar_date": market_last_bar_date,
+            "market_cap": to_float(market.get("market_cap") if market else None, 0.0),
+            "avg_dollar_volume_60d": to_float(market.get("avg_dollar_volume_60d") if market else None, 0.0),
+            "liquidity_score": to_float(market.get("liquidity_score") if market else None, 0.0),
             "market_bar_count": optional_market_int(
                 market.get("bar_count") if market else None,
                 field="bar_count",
@@ -2516,12 +2602,14 @@ def compute_feature_row(
             "indication_success_probability": round(indication_success_prob, 6),
             "indication_success_multiplier": round(indication_success_multiplier, 6),
             "indication_weighted_phase2_3_component": round(indication_weighted_phase2_3_component, 4),
+            "forward_catalyst_event_date": forward_catalyst_signals["forward_catalyst_event_date"],
             "forward_catalyst_score": forward_catalyst_signals["forward_catalyst_score"],
             "forward_catalyst_unfiltered_score": forward_catalyst_signals["forward_catalyst_unfiltered_score"],
             "ctgov_forward_catalyst_score": forward_catalyst_signals["ctgov_forward_catalyst_score"],
             "ctgov_forward_catalyst_guardrail_pass": forward_catalyst_signals["ctgov_forward_catalyst_guardrail_pass"],
             "forward_catalyst_source": forward_catalyst_signals["forward_catalyst_source"],
             "forward_catalyst_confidence": forward_catalyst_signals["forward_catalyst_confidence"],
+            "forward_catalyst_asof_date": forward_catalyst_signals["forward_catalyst_asof_date"],
             "short_interest_shares": short_interest_signals["short_interest_shares"],
             "float_shares": short_interest_signals["float_shares"],
             "short_interest_pct_float": short_interest_signals["short_interest_pct_float"],
@@ -2601,6 +2689,7 @@ def compute_feature_row(
         "active_program_override_trials": active_program,
         "active_collaborator_trials": active_collab,
         "median_addv20": median_addv20,
+        "avg_dollar_volume_60d": to_float(market.get("avg_dollar_volume_60d") if market else None, 0.0),
         "going_concern_status": going_status,
         "reverse_split_hits_2y": reverse_2y,
         "sec_regulatory_catalyst_count": regulatory_catalysts,
@@ -2621,10 +2710,12 @@ def compute_feature_row(
         "indication_success_multiplier": round(indication_success_multiplier, 6),
         "indication_weighted_phase2_3_component": round(indication_weighted_phase2_3_component, 4),
         "forward_catalyst_nearest_days": forward_catalyst_signals["forward_catalyst_nearest_days"],
+        "forward_catalyst_event_date": forward_catalyst_signals["forward_catalyst_event_date"],
         "forward_catalyst_event_type": forward_catalyst_signals["forward_catalyst_event_type"],
         "forward_catalyst_source": forward_catalyst_signals["forward_catalyst_source"],
         "forward_catalyst_source_url": forward_catalyst_signals["forward_catalyst_source_url"],
         "forward_catalyst_confidence": forward_catalyst_signals["forward_catalyst_confidence"],
+        "forward_catalyst_asof_date": forward_catalyst_signals["forward_catalyst_asof_date"],
         "forward_catalyst_score": forward_catalyst_signals["forward_catalyst_score"],
         "forward_catalyst_unfiltered_score": forward_catalyst_signals["forward_catalyst_unfiltered_score"],
         "ctgov_forward_catalyst_score": forward_catalyst_signals["ctgov_forward_catalyst_score"],
@@ -2714,10 +2805,12 @@ def upsert_features(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_d
         "indication_success_multiplier",
         "indication_weighted_phase2_3_component",
         "forward_catalyst_nearest_days",
+        "forward_catalyst_event_date",
         "forward_catalyst_event_type",
         "forward_catalyst_source",
         "forward_catalyst_source_url",
         "forward_catalyst_confidence",
+        "forward_catalyst_asof_date",
         "forward_catalyst_score",
         "forward_catalyst_unfiltered_score",
         "ctgov_forward_catalyst_score",
@@ -2775,6 +2868,7 @@ def upsert_features(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_d
         "insider_buy_cluster_count_90d",
         "insider_sell_value_90d",
         "insider_accumulation_score",
+        "avg_dollar_volume_60d",
         "momentum_score_raw",
         "feature_json",
     ]
@@ -2814,7 +2908,17 @@ def main() -> None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_dir = resolve_path(cfg_get(config, "biotech_features.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
-    universe_csv = resolve_path(cfg_get(config, "biotech_features.final_scoring_universe_csv"), base_dir=base_dir)
+    configured_universe_csv = (
+        args.universe_csv.expanduser().resolve()
+        if args.universe_csv
+        else resolve_path(cfg_get(config, "biotech_features.final_scoring_universe_csv"), base_dir=base_dir)
+    )
+    universe_csv = resolve_dated_report_input_csv(
+        configured_universe_csv,
+        base_output_dir=output_dir,
+        asof_date=asof_date.isoformat(),
+        logger=LOGGER,
+    )
     evidence_csv = resolve_path(cfg_get(config, "biotech_features.ctgov_evidence_csv"), base_dir=base_dir)
     trial_status_overrides_csv = resolve_optional_path(cfg_get(config, "ctgov_audit.trial_status_overrides_csv"), base_dir=base_dir)
     category_overrides_csv = resolve_optional_path(
@@ -2888,8 +2992,15 @@ def main() -> None:
     category_overrides = load_company_strategy_overrides(category_overrides_csv)
     universe = universe[universe["scoring_include"].map(as_bool)].copy()
     universe_records = cast(list[dict[str, Any]], cast(Any, universe).to_dict("records"))
-    normalized_universe = [(normalize_ticker(row.get("ticker")), row) for row in universe_records]
-    expected_tickers = {ticker for ticker, _ in normalized_universe if ticker}
+    normalized_universe = [
+        (normalize_ticker(row.get("ticker")), row, explicit_company_id(row))
+        for row in universe_records
+    ]
+    universe_has_delisted_calibration = any(
+        is_delisted_calibration_universe_row(row)
+        for _, row, _ in normalized_universe
+    )
+    expected_tickers = {ticker for ticker, _, _ in normalized_universe if ticker}
     if not expected_tickers:
         raise ValueError(f"No scoring_include tickers found in final scoring universe CSV: {universe_csv}")
     screen_by_ticker = {
@@ -2916,9 +3027,17 @@ def main() -> None:
         init_db(conn)
         try:
             run_id = start_run(conn, run_type="build_biotech_features", input_path=universe_csv)
-            company_ids = load_company_ids(conn)
+            active_company_ids = load_company_ids(conn)
+            all_company_ids = load_company_ids(conn, include_inactive=True)
             inactive_company_tickers = load_inactive_company_tickers(conn)
-            inactive_expected_tickers = expected_tickers.intersection(inactive_company_tickers)
+            inactive_expected_tickers = {
+                ticker
+                for ticker, universe_row, row_company_id in normalized_universe
+                if ticker
+                and ticker in inactive_company_tickers
+                and row_company_id is None
+                and not is_delisted_calibration_universe_row(universe_row)
+            }
             if inactive_expected_tickers:
                 LOGGER.warning(
                     "Excluding %d inactive/delisted final-universe ticker(s) from feature build: %s",
@@ -2928,12 +3047,14 @@ def main() -> None:
                 )
                 expected_tickers = expected_tickers - inactive_expected_tickers
                 normalized_universe = [
-                    (ticker, universe_row)
-                    for ticker, universe_row in normalized_universe
+                    (ticker, universe_row, row_company_id)
+                    for ticker, universe_row, row_company_id in normalized_universe
                     if ticker not in inactive_expected_tickers
                 ]
             survival_features = load_latest_survival_features(conn, asof_date)
             market_source_priority = scoring_market_sources(config)
+            if universe_has_delisted_calibration and "norgate_us_equities_total_return" not in market_source_priority:
+                market_source_priority = [*market_source_priority, "norgate_us_equities_total_return"]
             market_features = load_latest_market_features(
                 conn,
                 asof_date,
@@ -2958,10 +3079,14 @@ def main() -> None:
             adcom_by_company = load_fda_adcom_events(conn, asof_date, lookahead_days=adcom_lookahead_days)
             rows: list[dict[str, Any]] = []
             skipped: list[str] = []
-            for ticker, universe_row in normalized_universe:
+            for ticker, universe_row, row_company_id in normalized_universe:
                 if not ticker:
                     continue
-                company_id = company_ids.get(ticker)
+                company_id = row_company_id
+                if company_id is None:
+                    company_id = active_company_ids.get(ticker)
+                if company_id is None and is_delisted_calibration_universe_row(universe_row):
+                    company_id = all_company_ids.get(ticker)
                 if company_id is None:
                     skipped.append(ticker)
                     continue

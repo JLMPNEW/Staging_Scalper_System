@@ -33,6 +33,7 @@ from biotech_index.core.pipeline_guards import (  # noqa: E402
     validate_output_coverage,
     validate_requested_tickers,
 )
+from biotech_index.core.report_inputs import resolve_dated_report_input_csv  # noqa: E402
 from biotech_index.core.scoring_math import score_growth  # noqa: E402
 
 
@@ -222,14 +223,35 @@ def read_scoring_tickers(path: Path) -> set[str]:
     return read_final_scoring_tickers(path)
 
 
+def universe_has_delisted_calibration_rows(path: Path) -> bool:
+    if not path.exists():
+        return False
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if (
+                str(row.get("calibration_only") or "").strip().lower() in {"1", "true", "yes"}
+                or str(row.get("universe_status") or "").strip().lower() == "delisted_calibration"
+                or str(row.get("historical_universe_source") or "").strip().lower()
+                == "delisted_biotech_calibration_universe"
+            ):
+                return True
+    return False
+
+
 def load_companies(conn: sqlite3.Connection, *, scoring_tickers: set[str], ticker_filter: set[str], max_companies: int) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT company_id, ticker, company_name
         FROM companies
         WHERE is_active = 1
+           OR (universe_status = 'delisted_calibration' AND ticker IN (
+                SELECT value FROM json_each(?)
+           ))
         ORDER BY ticker
         """
+        ,
+        (json.dumps(sorted(scoring_tickers)),),
     ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -1006,11 +1028,17 @@ def main() -> None:
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_csv = resolve_path(cfg_get(config, "commercial_value.output_csv"), base_dir=base_dir)
-    final_universe_csv = resolve_path(cfg_get(config, "commercial_value.final_scoring_universe_csv"), base_dir=base_dir)
+    configured_final_universe_csv = resolve_path(cfg_get(config, "commercial_value.final_scoring_universe_csv"), base_dir=base_dir)
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     asof_date = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
     if asof_date is None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
+    final_universe_csv = resolve_dated_report_input_csv(
+        configured_final_universe_csv,
+        base_output_dir=resolve_path(cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir),
+        asof_date=asof_date.isoformat(),
+        logger=LOGGER,
+    )
     ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if normalize_ticker(value)}
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
@@ -1034,6 +1062,8 @@ def main() -> None:
             company_ids = [int(company["company_id"]) for company in companies]
             fact_rows_by_company = load_fact_rows_bulk(conn, company_ids, asof_date)
             market_source_priority = scoring_market_sources(config)
+            if universe_has_delisted_calibration_rows(final_universe_csv) and "norgate_us_equities_total_return" not in market_source_priority:
+                market_source_priority = [*market_source_priority, "norgate_us_equities_total_return"]
             max_market_staleness_days = int(cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2))
             market_by_company = load_latest_market_bulk(
                 conn,

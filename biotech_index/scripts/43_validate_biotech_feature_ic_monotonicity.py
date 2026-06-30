@@ -39,11 +39,15 @@ DATA_AVAILABILITY_PROXY_FACTORS: frozenset[str] = frozenset({
     "borrow_fee_staleness_days",
     "shortable_staleness_days",
     "borrow_fee_stale_flag",
+    "shortable_stale_flag",
     "float_shares_proxy_flag",
     "float_shares_staleness_days",
     "float_shares_measurement_staleness_days",
     "short_interest_pct_float_available_flag",
     "short_interest_signal_max_possible_score",
+    "adcom_within_60d_flag",
+    "adcom_within_120d_flag",
+    "priority_review_flag",
 })
 
 CANDIDATE_FACTORS = [
@@ -65,6 +69,7 @@ CANDIDATE_FACTORS = [
     "borrow_fee_history_count_30d",
     "borrow_fee_history_count_90d",
     "borrow_rate_spike_flag",
+    "borrow_fee_stale_flag",
     "hard_to_borrow_flag",
     "institutional_accumulation_score",
     "institutional_ownership_delta_pct",
@@ -74,6 +79,7 @@ CANDIDATE_FACTORS = [
     "forward_catalyst_score",
     "forward_catalyst_unfiltered_score",
     "ctgov_forward_catalyst_score",
+    "shortable_stale_flag",
     "open_market_buy_count_90d",
     "planned_10b5_1_buy_count",
     "insider_accumulation_score",
@@ -95,12 +101,37 @@ CATALYST_FACTORS = {
     "forward_catalyst_unfiltered_score",
     "ctgov_forward_catalyst_score",
     "adcom_score",
+    "adcom_nearest_days",
     "adcom_within_60d_flag",
     "adcom_within_120d_flag",
+    "adcom_committee_oncology_flag",
     "priority_review_flag",
     "fda_designation_score",
     "fda_designation_tier",
 }
+SOURCE_GATED_CATALYST_FACTORS = {
+    "forward_catalyst_score",
+    "forward_catalyst_unfiltered_score",
+    "ctgov_forward_catalyst_score",
+}
+# FDA AdCom and designation factors are in CATALYST_FACTORS but have no
+# forward_catalyst_source value (they originate from fda_adcom_events and
+# SEC-parsed designation events, not the forward catalyst pipeline).  Routing
+# them through the forward_catalyst_source check always yields source_group
+# "none", which keeps their IC out of the top-level summary output.  Bypass
+# the source routing and always treat them as the "ALL" group.
+_FDA_CATALYST_FACTORS: frozenset[str] = frozenset(
+    {
+        "adcom_nearest_days",
+        "adcom_within_60d_flag",
+        "adcom_within_120d_flag",
+        "adcom_score",
+        "adcom_committee_oncology_flag",
+        "priority_review_flag",
+        "fda_designation_score",
+        "fda_designation_tier",
+    }
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -267,6 +298,10 @@ def source_group_for(row: dict[str, Any], factor: str) -> str:
             return "ibkr_shortable_only"
         return "ibkr_unavailable"
     if factor not in CATALYST_FACTORS:
+        return "ALL"
+    # FDA AdCom and designation factors have no forward_catalyst_source;
+    # always include them in the ALL group so their IC appears in summary output.
+    if factor in _FDA_CATALYST_FACTORS:
         return "ALL"
     source = str(row.get("forward_catalyst_source") or "").strip().lower()
     ctgov_score = to_float(row.get("ctgov_forward_catalyst_score"), 0.0) or 0.0
@@ -596,7 +631,7 @@ def main() -> None:
             grouped = rows_by_groups(all_values, factor=factor)
             for (cohort, source_group), values in sorted(grouped.items()):
                 values = dedupe_group_values(values)
-                if source_group == "none" and factor in CATALYST_FACTORS:
+                if source_group == "none" and factor in SOURCE_GATED_CATALYST_FACTORS:
                     continue
                 summary, q_rows = summary_for_group(
                     factor=factor,

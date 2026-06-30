@@ -7,6 +7,7 @@ import logging
 import re
 import sys
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +18,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.fda_mapping_governance import DEFAULT_EXCLUDED_METHODS, audit_fda_mapping_governance  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
+from med_devices.core.point_in_time import parse_iso_date, row_is_effective_asof  # noqa: E402
 from med_devices.core.text_norm import normalize_org_name, normalize_submission_identifier, normalize_ticker  # noqa: E402
 
 
@@ -221,9 +223,32 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional CSV: fda_manufacturer_id or manufacturer_name plus ticker/company_id.",
     )
+    parser.add_argument("--asof", type=str, default="")
     parser.add_argument("--max-candidate-summary", type=int, default=None)
     parser.add_argument("--no-fact-update", action="store_true")
     return parser.parse_args()
+
+
+def allow_missing_static_pit_metadata(config: dict[str, Any]) -> bool:
+    return str(cfg_get(config, "historical_backfill.allow_missing_static_pit_metadata", True)).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+
+def latest_asof(conn: Any) -> str:
+    for table in ("feature_financial_valuation", "med_device_daily_scores"):
+        try:
+            row = conn.execute(f"SELECT MAX(asof_date) AS asof_date FROM {table}").fetchone()
+        except Exception:
+            continue
+        asof = str(row["asof_date"] or "") if row is not None else ""
+        if asof:
+            return asof
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def strip_suffixes(norm_name: str) -> str:
@@ -288,6 +313,12 @@ def acronym(tokens: set[str]) -> str:
 def table_exists(conn: Any, table_name: str) -> bool:
     row = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()
     return row is not None
+
+
+def table_columns(conn: Any, table_name: str) -> set[str]:
+    if not table_exists(conn, table_name):
+        return set()
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({quote_identifier(table_name)})").fetchall()}
 
 
 def read_csv_flexible(path: Path) -> list[dict[str, str]]:
@@ -365,7 +396,13 @@ def load_company_lookup(conn: Any) -> tuple[dict[int, ResolvedCompany], dict[str
     return by_id, by_ticker
 
 
-def load_company_footprints(conn: Any, path: Path | None) -> list[CompanyFootprint]:
+def load_company_footprints(
+    conn: Any,
+    path: Path | None,
+    *,
+    asof: date | str | None = None,
+    include_missing_pit_metadata: bool = True,
+) -> list[CompanyFootprint]:
     if path is None:
         return []
     if not path.exists():
@@ -374,6 +411,8 @@ def load_company_footprints(conn: Any, path: Path | None) -> list[CompanyFootpri
     _, by_ticker = load_company_lookup(conn)
     out: list[CompanyFootprint] = []
     for row in read_csv_flexible(path):
+        if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
+            continue
         ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
         company = by_ticker.get(ticker)
         if company is None:
@@ -414,6 +453,9 @@ def build_aliases(
     *,
     extra_alias_csv: Path | None = None,
     footprint_csv: Path | None = None,
+    footprints: list[CompanyFootprint] | None = None,
+    asof: date | str | None = None,
+    include_missing_pit_metadata: bool = True,
 ) -> list[CompanyAlias]:
     companies = conn.execute(
         """
@@ -464,15 +506,26 @@ def build_aliases(
         add(company_id, ticker, company_name, company_name, "company_name")
 
     if table_exists(conn, "dim_company_alias"):
+        alias_columns = table_columns(conn, "dim_company_alias")
+        effective_expr = "a.effective_date" if "effective_date" in alias_columns else "NULL"
+        valid_from_expr = "a.valid_from" if "valid_from" in alias_columns else "NULL"
+        valid_to_expr = "a.valid_to" if "valid_to" in alias_columns else "NULL"
+        reviewed_at_expr = "a.reviewed_at" if "reviewed_at" in alias_columns else "NULL"
         alias_rows = conn.execute(
-            """
-            SELECT a.company_id, c.ticker, c.company_name, a.alias_raw
+            f"""
+            SELECT a.company_id, c.ticker, c.company_name, a.alias_raw,
+                   {effective_expr} AS effective_date,
+                   {valid_from_expr} AS valid_from,
+                   {valid_to_expr} AS valid_to,
+                   {reviewed_at_expr} AS reviewed_at
             FROM dim_company_alias a
             JOIN dim_company c ON c.company_id = a.company_id
             WHERE c.is_active = 1
             """
         ).fetchall()
         for row in alias_rows:
+            if not row_is_effective_asof(dict(row), asof, include_missing=include_missing_pit_metadata):
+                continue
             add(
                 int(row["company_id"]),
                 normalize_ticker(row["ticker"]),
@@ -486,6 +539,8 @@ def build_aliases(
         extra_rows = read_csv_flexible(extra_alias_csv)
         loaded = 0
         for row in extra_rows:
+            if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
+                continue
             ticker = normalize_ticker(row_get(row, "ticker", "mapped_ticker", "symbol"))
             alias_raw = row_get(row, "alias_raw", "alias", "manufacturer_name", "subsidiary_name", "brand")
             company = by_ticker.get(ticker)
@@ -496,7 +551,14 @@ def build_aliases(
         LOGGER.info("Loaded FDA/company extra aliases: rows=%d path=%s", loaded, extra_alias_csv)
     elif extra_alias_csv is not None:
         LOGGER.warning("Configured FDA extra alias CSV does not exist: %s", extra_alias_csv)
-    for footprint in load_company_footprints(conn, footprint_csv):
+    if footprints is None:
+        footprints = load_company_footprints(
+            conn,
+            footprint_csv,
+            asof=asof,
+            include_missing_pit_metadata=include_missing_pit_metadata,
+        )
+    for footprint in footprints:
         if footprint.primary_fda_entity:
             add(
                 footprint.company.company_id,
@@ -667,7 +729,13 @@ def best_match(
     )
 
 
-def load_manual_overrides(conn: Any, path: Path | None) -> dict[tuple[str, str], ManufacturerMatch]:
+def load_manual_overrides(
+    conn: Any,
+    path: Path | None,
+    *,
+    asof: date | str | None = None,
+    include_missing_pit_metadata: bool = True,
+) -> dict[tuple[str, str], ManufacturerMatch]:
     if path is None:
         return {}
     if not path.exists():
@@ -678,6 +746,8 @@ def load_manual_overrides(conn: Any, path: Path | None) -> dict[tuple[str, str],
     rows = read_csv_flexible(path)
     loaded = 0
     for row in rows:
+        if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
+            continue
         method = row_get(row, "mapping_method", "method") or "manual_override"
         normalized_method = method_key(method)
         reason = row_get(row, "review_reason", "note", "notes")
@@ -740,7 +810,13 @@ def load_manual_overrides(conn: Any, path: Path | None) -> dict[tuple[str, str],
     return out
 
 
-def load_product_line_overrides(conn: Any, path: Path | None) -> list[ProductLineOverride]:
+def load_product_line_overrides(
+    conn: Any,
+    path: Path | None,
+    *,
+    asof: date | str | None = None,
+    include_missing_pit_metadata: bool = True,
+) -> list[ProductLineOverride]:
     if path is None:
         return []
     if not path.exists():
@@ -749,6 +825,8 @@ def load_product_line_overrides(conn: Any, path: Path | None) -> list[ProductLin
     _, by_ticker = load_company_lookup(conn)
     out: list[ProductLineOverride] = []
     for row in read_csv_flexible(path):
+        if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
+            continue
         ticker = normalize_ticker(row_get(row, "ticker", "mapped_ticker", "symbol"))
         company = by_ticker.get(ticker)
         if company is None:
@@ -1196,15 +1274,42 @@ def main() -> None:
         not args.no_fact_update
         and str(cfg_get(config, "fda_entity_linking.update_fact_company_ids", True)).strip().lower() not in {"0", "false", "no"}
     )
+    include_missing_pit_metadata = allow_missing_static_pit_metadata(config)
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
         run_id = start_run(conn, run_type="link_med_device_fda_to_companies", input_path=config_path)
         try:
-            aliases = build_aliases(conn, extra_alias_csv=extra_alias_csv, footprint_csv=footprint_csv)
-            footprints = load_company_footprints(conn, footprint_csv)
-            manual_overrides = load_manual_overrides(conn, manual_overrides_csv)
-            product_line_overrides = load_product_line_overrides(conn, product_line_overrides_csv)
+            asof_text = args.asof.strip() if args.asof else latest_asof(conn)
+            asof_value = parse_iso_date(asof_text)
+            if asof_value is None:
+                raise ValueError(f"Invalid as-of date: {asof_text}")
+            footprints = load_company_footprints(
+                conn,
+                footprint_csv,
+                asof=asof_value,
+                include_missing_pit_metadata=include_missing_pit_metadata,
+            )
+            aliases = build_aliases(
+                conn,
+                extra_alias_csv=extra_alias_csv,
+                footprint_csv=footprint_csv,
+                footprints=footprints,
+                asof=asof_value,
+                include_missing_pit_metadata=include_missing_pit_metadata,
+            )
+            manual_overrides = load_manual_overrides(
+                conn,
+                manual_overrides_csv,
+                asof=asof_value,
+                include_missing_pit_metadata=include_missing_pit_metadata,
+            )
+            product_line_overrides = load_product_line_overrides(
+                conn,
+                product_line_overrides_csv,
+                asof=asof_value,
+                include_missing_pit_metadata=include_missing_pit_metadata,
+            )
             counts_by_manufacturer = load_fact_counts(conn)
             manufacturers = conn.execute(
                 """

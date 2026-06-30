@@ -2,7 +2,7 @@
 
 Three shapes cover all sub-sectors:
   - tech_family : semiconductors, software_infrastructure, technology_hardware (shared `final_score`)
-  - biotech     : biotech_index daily scores (headline named by `production_rank_score_field`)
+  - biotech     : biotech_index daily scores using `portfolio_candidate_*` when present
   - med_devices : med_device daily composite scores gated by `portfolio_candidate_gate`
 
 Adapters read files only. They never import a sector package or open a sector DB.
@@ -131,6 +131,7 @@ def _resolve_file(cfg: dict[str, Any], root: Path, run_as_of: str | None) -> Pat
 
 def _adapt_tech_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[CanonicalScore]:
     out: list[CanonicalScore] = []
+    require_oos_score_valid = bool(cfg.get("require_oos_score_valid", False))
     for r in rows:
         ticker = str(r.get("ticker", "")).strip().upper()
         native = _f(r.get("final_score"))
@@ -139,10 +140,13 @@ def _adapt_tech_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
         rank_ready = _truthy(r.get("rank_ready_flag"))
         calib_ok = _truthy(r.get("calibration_eligible_flag"))
         complete = str(r.get("model_status", "")).strip().lower() == "complete"
-        eligible = rank_ready and calib_ok and complete
+        oos_score_valid = _truthy(r.get("oos_score_valid_flag")) if "oos_score_valid_flag" in r else not require_oos_score_valid
+        eligible = rank_ready and calib_ok and complete and (oos_score_valid or not require_oos_score_valid)
         reason = "ok" if eligible else (
             "not_rank_ready" if not rank_ready else
-            "not_calibration_eligible" if not calib_ok else "model_incomplete"
+            "not_calibration_eligible" if not calib_ok else
+            "model_incomplete" if not complete else
+            f"not_oos_score_valid:{str(r.get('oos_invalid_reason') or '').strip()[:180]}"
         )
         out.append(CanonicalScore(
             ticker=ticker, source_pipeline=str(cfg["model_family"]),
@@ -165,20 +169,57 @@ def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[Cano
         raise ValueError(f"biotech production_rank_score_field must be unanimous; found={sorted(score_fields)}")
     score_field = next(iter(score_fields), "opportunity_score")
     zero_is_missing = bool(cfg.get("zero_score_is_missing", score_field in {"opportunity_score", "production_rank_score"}))
+    has_standard_contract = bool(rows and "portfolio_candidate_gate" in rows[0])
     out: list[CanonicalScore] = []
     for r in rows:
         ticker = str(r.get("ticker", "")).strip().upper()
-        native = _f(r.get(score_field))
+        if has_standard_contract:
+            native_score_field = str(r.get("native_score_field") or score_field or "opportunity_score").strip()
+            native_candidates = [
+                r.get("native_score_value"),
+                r.get(native_score_field) if native_score_field else None,
+                r.get("opportunity_score"),
+                r.get("production_rank_score"),
+                r.get(score_field) if score_field != native_score_field else None,
+                r.get("portfolio_candidate_score"),
+            ]
+        else:
+            native_candidates = [
+                r.get(score_field),
+                r.get("production_rank_score"),
+            ]
+        native = next((value for value in (_f(candidate) for candidate in native_candidates) if value is not None), None)
         if not ticker or native is None:
             continue
-        if zero_is_missing and native == 0.0:
-            continue
-        investible = _truthy(r.get("biotech_cohort_investible_flag"))
-        vetoed = _truthy(r.get("core_structural_veto_flag"))
-        eligible = investible and not vetoed
-        reason = "ok" if eligible else ("core_structural_veto" if vetoed else "not_investible")
+        score_zero_is_missing = _truthy(r.get("score_zero_is_missing_flag"))
+        missing_score = score_zero_is_missing or bool(zero_is_missing and native == 0.0)
+        if has_standard_contract:
+            status = str(r.get("portfolio_candidate_status") or "").strip().lower()
+            status_allows = status in {"", "eligible"}
+            eligible = _truthy(r.get("portfolio_candidate_gate")) and status_allows and not missing_score
+            reason = str(
+                r.get("eligibility_reason")
+                or r.get("portfolio_candidate_reason")
+                or ("ok" if eligible else "failed_portfolio_candidate_gate")
+            ).strip()
+            if missing_score:
+                eligible = False
+                reason = "missing_score"
+        else:
+            if missing_score:
+                eligible = False
+                reason = "missing_score"
+            else:
+                investible = _truthy(r.get("biotech_cohort_investible_flag"))
+                vetoed = _truthy(r.get("core_structural_veto_flag"))
+                eligible = investible and not vetoed
+                reason = "ok" if eligible else ("core_structural_veto" if vetoed else "not_investible")
         industry = str(r.get("biotech_primary_cohort", "")).strip() or str(cfg["industry"])
-        conf = _confidence(r.get("data_quality_confidence_multiplier"))
+        conf = _confidence(
+            r.get("score_confidence")
+            if has_standard_contract and str(r.get("score_confidence", "")).strip()
+            else r.get("data_quality_confidence_multiplier")
+        )
         out.append(CanonicalScore(
             ticker=ticker, source_pipeline=str(cfg["model_family"]),
             sector=str(cfg["sector"]), industry=industry,

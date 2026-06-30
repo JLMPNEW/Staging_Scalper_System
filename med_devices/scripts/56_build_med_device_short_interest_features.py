@@ -112,22 +112,27 @@ def load_companies(conn: Any) -> list[dict[str, Any]]:
     ]
 
 
-def load_short_interest(conn: Any, *, asof: str) -> dict[int, list[dict[str, Any]]]:
+def load_short_interest(conn: Any, *, asof: str, config: dict[str, Any]) -> dict[int, list[dict[str, Any]]]:
     if not conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='fact_short_interest'").fetchone():
         return {}
+    fallback_lag_days = int(cfg_get(config, "short_interest_features.publication_lag_days", 8))
     rows = conn.execute(
         """
         SELECT si.*, dc.company_id AS mapped_company_id
         FROM fact_short_interest si
         LEFT JOIN dim_company dc ON dc.ticker = si.ticker
         WHERE si.settlement_date <= ?
+          AND COALESCE(
+                NULLIF(SUBSTR(si.publication_date, 1, 10), ''),
+                date(si.settlement_date, '+' || ? || ' days')
+              ) <= ?
         ORDER BY
             COALESCE(si.company_id, dc.company_id),
             si.settlement_date DESC,
             CASE WHEN si.source_id = 'finra_equity_short_interest' THEN 0 ELSE 1 END,
             si.source_id
         """,
-        (asof,),
+        (asof, fallback_lag_days, asof),
     ).fetchall()
     out: dict[int, list[dict[str, Any]]] = {}
     seen_dates: dict[int, set[str]] = {}
@@ -145,14 +150,19 @@ def load_short_interest(conn: Any, *, asof: str) -> dict[int, list[dict[str, Any
     return out
 
 
-def load_short_volume_stats(conn: Any, *, asof: str, lookback_days: int) -> dict[int, dict[str, float]]:
+def load_short_volume_stats(
+    conn: Any, *, asof: str, lookback_days: int, config: dict[str, Any]
+) -> dict[int, dict[str, float]]:
     if not conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='fact_finra_short_volume'").fetchone():
         return {}
     asof_date = parse_date(asof)
     if asof_date is None:
         return {}
-    cur_start = (asof_date - timedelta(days=lookback_days)).isoformat()
-    prior_start = (asof_date - timedelta(days=2 * lookback_days)).isoformat()
+    publication_lag_days = int(cfg_get(config, "short_interest_features.short_volume_publication_lag_days", 1))
+    available_end_date = asof_date - timedelta(days=max(0, publication_lag_days))
+    available_end = available_end_date.isoformat()
+    cur_start = (available_end_date - timedelta(days=lookback_days)).isoformat()
+    prior_start = (available_end_date - timedelta(days=2 * lookback_days)).isoformat()
     rows = conn.execute(
         """
         SELECT v.*, dc.company_id AS mapped_company_id
@@ -161,7 +171,7 @@ def load_short_volume_stats(conn: Any, *, asof: str, lookback_days: int) -> dict
         WHERE v.trade_date <= ?
           AND v.trade_date > ?
         """,
-        (asof, prior_start),
+        (available_end, prior_start),
     ).fetchall()
     current: dict[int, list[float]] = {}
     prior: dict[int, list[float]] = {}
@@ -255,9 +265,9 @@ def score_company(
 
 def build_rows(conn: Any, *, asof: str, config: dict[str, Any]) -> list[dict[str, Any]]:
     companies = load_companies(conn)
-    si_by_company = load_short_interest(conn, asof=asof)
+    si_by_company = load_short_interest(conn, asof=asof, config=config)
     lookback = int(cfg_get(config, "short_interest_features.short_volume_lookback_days", 30))
-    sv_by_company = load_short_volume_stats(conn, asof=asof, lookback_days=lookback)
+    sv_by_company = load_short_volume_stats(conn, asof=asof, lookback_days=lookback, config=config)
     return [
         score_company(
             company,

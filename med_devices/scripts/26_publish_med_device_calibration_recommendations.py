@@ -73,12 +73,13 @@ def validate_grid_contract(rows: list[dict[str, str]], *, path: Path) -> None:
         "parameter_set_id",
         "pass_fail",
         "objective_score",
-        "validation_count_120d",
         "validation_unique_tickers_120d",
         "validation_cohort_unique_tickers_120d",
         "validation_lcb_120d",
     }
     missing = sorted(required.difference(rows[0]))
+    if "validation_count_120d" not in rows[0] and "validation_cohort_obs_120d" not in rows[0]:
+        missing.append("validation_count_120d|validation_cohort_obs_120d")
     if missing:
         raise RuntimeError(
             f"Calibration grid CSV {path} is missing required script-25 output columns: {','.join(missing)}. "
@@ -108,6 +109,14 @@ def to_float(raw: object) -> float | None:
 def to_int(raw: object) -> int:
     value = to_float(raw)
     return int(value) if value is not None else 0
+
+
+def row_value(row: dict[str, str], *keys: str) -> str:
+    for key in keys:
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -144,8 +153,10 @@ def production_guardrail_reasons(
     required_positive_lcb_horizons: list[int],
 ) -> tuple[list[str], bool]:
     reasons: list[str] = []
-    validation_count = to_int(selected.get("validation_count_120d"))
-    unique_tickers = to_int(selected.get("validation_unique_tickers_120d"))
+    # validation_count_120d is selected-subset support; validation_cohort_obs_120d is only
+    # a compatibility fallback for older/alternate grid files and is not semantically identical.
+    validation_count = to_int(row_value(selected, "validation_count_120d", "validation_cohort_obs_120d"))
+    unique_tickers = to_int(row_value(selected, "validation_unique_tickers_120d", "validation_cohort_unique_tickers_120d"))
     concentration_override = cohort in concentration_override_cohorts
     concentration_override_used = False
     if validation_count < min_selected_validation:
@@ -255,9 +266,17 @@ def choose_recommendations(
                 "valuation_min": selected.get("valuation_min", ""),
                 "technical_entry_min": selected.get("technical_entry_min", ""),
                 "value_trap_max": selected.get("value_trap_max", ""),
-                "validation_count_120d": selected.get("validation_count_120d", ""),
-                "validation_unique_tickers_120d": selected.get("validation_unique_tickers_120d", ""),
-                "validation_cohort_unique_tickers_120d": selected.get("validation_cohort_unique_tickers_120d", ""),
+                "validation_count_120d": row_value(selected, "validation_count_120d", "validation_cohort_obs_120d"),
+                "validation_unique_tickers_120d": row_value(
+                    selected,
+                    "validation_unique_tickers_120d",
+                    "validation_cohort_unique_tickers_120d",
+                ),
+                "validation_cohort_unique_tickers_120d": row_value(
+                    selected,
+                    "validation_cohort_unique_tickers_120d",
+                    "validation_unique_tickers_120d",
+                ),
                 "validation_selected_ticker_coverage_120d": selected.get("validation_selected_ticker_coverage_120d", ""),
                 "validation_improved_selected_ticker_rate_120d": selected.get("validation_improved_selected_ticker_rate_120d", ""),
                 "validation_median_excess_120d": selected.get("validation_median_120d", ""),

@@ -80,8 +80,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-fetch-failure",
         action="store_true",
-        default=True,
-        help="Do not raise if FDA network fetch fails (default: True).",
+        default=None,
+        help="Do not raise if FDA network fetch fails. Defaults to fda_adcom_calendar.allow_fetch_failure or true.",
+    )
+    parser.add_argument(
+        "--fail-on-fetch-failure",
+        dest="allow_fetch_failure",
+        action="store_false",
+        help="Raise when all FDA calendar fetch attempts fail.",
+    )
+    parser.add_argument(
+        "--store-vote-results",
+        action="store_true",
+        help="Persist vote_result values. Defaults to current/future live runs only to avoid historical look-ahead.",
     )
     return parser.parse_args()
 
@@ -129,6 +140,17 @@ def extract_href(raw: object) -> str:
 
 def utc_today() -> date:
     return datetime.now(timezone.utc).date()
+
+
+def as_bool(raw: object, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
 
 def build_ssl_context(mode: str = "auto", ca_bundle_path: str = "") -> ssl.SSLContext | None:
@@ -291,19 +313,26 @@ def match_company_id(
     alias_map: dict[str, int],
 ) -> int | None:
     """Best-effort match of an AdCom entry to a company_id via alias lookup."""
-    candidates: list[str] = []
+    candidates: list[tuple[str, str]] = []
     if company_name:
-        candidates.append(_normalize_for_match(company_name))
+        candidates.append((_normalize_for_match(company_name), "company"))
     if drug_name:
-        candidates.append(_normalize_for_match(drug_name))
-    for candidate in candidates:
+        candidates.append((_normalize_for_match(drug_name), "drug"))
+    for candidate, candidate_type in candidates:
         if candidate in alias_map:
             return alias_map[candidate]
+        if candidate_type != "company":
+            continue
         # Try word-level prefix match (≥3 chars) as fallback
+        matched_company_ids: set[int] = set()
+        candidate_tokens = set(candidate.split())
         for alias_key, cid in alias_map.items():
-            if len(alias_key) >= 5 and len(candidate) >= 5:
+            if len(alias_key) >= 8 and len(candidate) >= 8:
                 if alias_key.startswith(candidate[:8]) or candidate.startswith(alias_key[:8]):
-                    return cid
+                    if candidate_tokens.intersection(set(alias_key.split())):
+                        matched_company_ids.add(cid)
+        if len(matched_company_ids) == 1:
+            return next(iter(matched_company_ids))
     return None
 
 
@@ -319,6 +348,7 @@ def parse_adcom_entries(
     lookahead_days: int,
     alias_map: dict[str, int],
     company_tickers: dict[int, str],
+    include_vote_results: bool = False,
 ) -> list[dict[str, Any]]:
     """Parse raw FDA JSON entries into normalized AdCom event dicts."""
     results: list[dict[str, Any]] = []
@@ -357,7 +387,11 @@ def parse_adcom_entries(
             entry.get("company") or entry.get("companyName") or entry.get("sponsor") or entry.get("applicant") or ""
         ).strip()
         indication = str(entry.get("indication") or entry.get("topic") or clean_title or "").strip()
-        vote_result = str(entry.get("vote") or entry.get("voteResult") or entry.get("vote_result") or "").strip()
+        vote_result = (
+            str(entry.get("vote") or entry.get("voteResult") or entry.get("vote_result") or "").strip()
+            if include_vote_results
+            else ""
+        )
         source_url = str(entry.get("url") or entry.get("sourceUrl") or entry.get("source_url") or "").strip()
         if not source_url and title_html:
             source_url = extract_href(title_html)
@@ -388,49 +422,52 @@ def upsert_adcom_events(
     inserted = 0
     updated = 0
     skipped_unmatched = 0
-    for ev in events:
-        if ev["company_id"] is None or int(ev["company_id"]) <= 0:
-            # fda_adcom_events is company-linked with a foreign key.  FDA
-            # calendar rows that cannot be matched to the biotech universe are
-            # intentionally skipped instead of inserting a synthetic company id.
-            skipped_unmatched += 1
-            continue
-        existing = conn.execute(
-            """
-            SELECT event_id FROM fda_adcom_events
-            WHERE company_id = ? AND meeting_date = ? AND (drug_name = ? OR (drug_name IS NULL AND ? IS NULL))
-            """,
-            (ev["company_id"], ev["meeting_date"], ev["drug_name"] or None, ev["drug_name"] or None),
-        ).fetchone()
-        if existing:
-            conn.execute(
+    with conn:
+        conn.execute("UPDATE fda_adcom_events SET drug_name = NULL WHERE drug_name = ''")
+        for ev in events:
+            if ev["company_id"] is None or int(ev["company_id"]) <= 0:
+                # fda_adcom_events is company-linked with a foreign key.  FDA
+                # calendar rows that cannot be matched to the biotech universe are
+                # intentionally skipped instead of inserting a synthetic company id.
+                skipped_unmatched += 1
+                continue
+            drug_name = str(ev.get("drug_name") or "").strip() or None
+            existing = conn.execute(
                 """
-                UPDATE fda_adcom_events
-                SET ticker=?, committee=?, indication=?, vote_result=?, source=?, source_url=?, updated_at=?
-                WHERE event_id=?
+                SELECT event_id FROM fda_adcom_events
+                WHERE company_id = ? AND meeting_date = ? AND (drug_name = ? OR (drug_name IS NULL AND ? IS NULL))
                 """,
-                (
-                    ev["ticker"], ev["committee"], ev["indication"],
-                    ev["vote_result"], ev["source"], ev["source_url"],
-                    now, existing[0],
-                ),
-            )
-            updated += 1
-        else:
-            conn.execute(
-                """
-                INSERT INTO fda_adcom_events
-                (company_id, ticker, meeting_date, committee, drug_name, indication, vote_result, source, source_url, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    ev["company_id"], ev["ticker"], ev["meeting_date"],
-                    ev["committee"], ev["drug_name"], ev["indication"],
-                    ev["vote_result"], ev["source"], ev["source_url"],
-                    now, now,
-                ),
-            )
-            inserted += 1
+                (ev["company_id"], ev["meeting_date"], drug_name, drug_name),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE fda_adcom_events
+                    SET ticker=?, committee=?, indication=?, vote_result=?, source=?, source_url=?, updated_at=?
+                    WHERE event_id=?
+                    """,
+                    (
+                        ev["ticker"], ev["committee"], ev["indication"],
+                        ev["vote_result"], ev["source"], ev["source_url"],
+                        now, existing[0],
+                    ),
+                )
+                updated += 1
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO fda_adcom_events
+                    (company_id, ticker, meeting_date, committee, drug_name, indication, vote_result, source, source_url, created_at, updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        ev["company_id"], ev["ticker"], ev["meeting_date"],
+                        ev["committee"], drug_name, ev["indication"],
+                        ev["vote_result"], ev["source"], ev["source_url"],
+                        now, now,
+                    ),
+                )
+                inserted += 1
     return inserted, updated, skipped_unmatched
 
 
@@ -447,6 +484,18 @@ def main() -> None:
     lookahead_days = args.lookahead_days
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     fda_cfg = cfg_get(config, "fda_adcom_calendar", {}) or {}
+    allow_fetch_failure = (
+        as_bool(fda_cfg.get("allow_fetch_failure"), True)
+        if args.allow_fetch_failure is None
+        else bool(args.allow_fetch_failure)
+    )
+    include_vote_results = bool(
+        args.store_vote_results
+        or (
+            asof_date >= utc_today()
+            and as_bool(fda_cfg.get("store_vote_results_for_live_runs", True), True)
+        )
+    )
     calendar_url = str(fda_cfg.get("calendar_url") or FDA_ADCOM_CALENDAR_URL)
     fallback_calendar_urls = [
         str(item).strip()
@@ -487,7 +536,7 @@ def main() -> None:
                         last_fetch_error = exc
                         LOGGER.warning("FDA AdCom calendar source failed: source=%s error=%s", source_url, exc)
                 if not raw_entries and last_fetch_error is not None:
-                    if args.allow_fetch_failure:
+                    if allow_fetch_failure:
                         LOGGER.warning("FDA AdCom calendar fetch failed (non-blocking): %s", last_fetch_error)
                     else:
                         raise last_fetch_error
@@ -499,11 +548,11 @@ def main() -> None:
                 lookahead_days=lookahead_days,
                 alias_map=alias_map,
                 company_tickers=company_tickers,
+                include_vote_results=include_vote_results,
             )
             matched = sum(1 for e in events if e["company_id"] is not None)
             LOGGER.info("Parsed %d AdCom entries, %d matched to universe tickers", len(events), matched)
             inserted, updated, skipped_unmatched = upsert_adcom_events(conn, events, now=now)
-            conn.commit()
             LOGGER.info(
                 "AdCom sync: inserted=%d updated=%d skipped_unmatched=%d total_events=%d",
                 inserted,

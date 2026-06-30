@@ -94,6 +94,35 @@ market_feature_build:
     ma_short_days: 50
     ma_long_days: 200
 
+oos_calibration_standards:
+  # These dates are governance assertions used to label dated dashboard CSVs.
+  # They do not independently prove PIT construction or weight immutability;
+  # validators and Portfolio Layer fail closed when a score predates the
+  # declared production window.
+  version: "technology_oos_provenance_v1"
+  families:
+    semiconductors:
+      calibration_provenance_version: "technology_oos_provenance_v1"
+      calibration_train_start_date: "2011-01-01"
+      calibration_train_end_date: "2026-06-14"
+      calibration_lock_date: "2026-06-15"
+      calibration_production_start_date: "2026-06-15"
+      calibration_validation_method: "stage7_static_weights_with_stage8_walk_forward_challenger_review"
+    software_infrastructure:
+      calibration_provenance_version: "technology_oos_provenance_v1"
+      calibration_train_start_date: "2011-01-01"
+      calibration_train_end_date: "2026-06-14"
+      calibration_lock_date: "2026-06-15"
+      calibration_production_start_date: "2026-06-15"
+      calibration_validation_method: "stage8_constrained_optuna_with_walk_forward_validation"
+    technology_hardware:
+      calibration_provenance_version: "technology_oos_provenance_v1"
+      calibration_train_start_date: "2011-01-01"
+      calibration_train_end_date: "2026-06-14"
+      calibration_lock_date: "2026-06-15"
+      calibration_production_start_date: "2026-06-15"
+      calibration_validation_method: "stage7_static_weights_with_stage8_report_only_challenger"
+
 semiconductor_research:
   price_source_ids:
     - "yahoo_finance_adjusted"

@@ -1,0 +1,96 @@
+ticker,investability_status,company_name,cik,exchange,sector,industry,subsector,defense_calibration_cohort,country,currency,security_type,listing_status,is_primary_listing
+HWM,investable,Howmet Aerospace Inc.,4281,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+TDG,investable,TransDigm Group Incorporated,1260221,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+HEI,investable,HEICO Corporation,46619,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+HEI-A,investable,HEICO Corporation,46619,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,FALSE
+FTAI,investable,FTAI Aviation Ltd.,1590364,Nasdaq,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+WWD,investable,"Woodward, Inc.",108312,Nasdaq,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+ARXS,investable,"Arxis, Inc.",2093536,Nasdaq,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+MOG-A,investable,Moog Inc.,67887,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+MOG-B,investable,Moog Inc.,67887,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,FALSE
+SARO,investable,"StandardAero, Inc.",2025410,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+LOAR,investable,Loar Holdings Inc.,2000178,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+HXL,investable,Hexcel Corporation,717605,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+DPC,investable,DPC Holdings Limited,2107018,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Ordinary Shares,active,TRUE
+MRCY,investable,"Mercury Systems, Inc.",1049521,Nasdaq,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+VSEC,investable,VSE Corporation,102752,Nasdaq,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+KRMN,investable,Karman Holdings Inc.,2040127,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+AIR,investable,AAR Corp.,1750,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+ATRO,investable,Astronics Corporation,8063,Nasdaq,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+DCO,investable,Ducommun Incorporated,30305,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+PKE,investable,Park Aerospace Corp.,76267,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+TATT,investable,TAT Technologies Ltd.,808439,Nasdaq,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Ordinary Shares,active,TRUE
+ELMT,investable,The Elmet Group Co.,2101698,Nasdaq,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+ISSC,investable,"Innovative Aerosystems, Inc.",836690,Nasdaq,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+SIF,investable,"SIFCO Industries, Inc.",90168,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+CVU,investable,"CPI Aerostructures, Inc.",889348,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+AIRI,investable,Air Industries Group,1009891,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+OSIS,investable,"OSI Systems, Inc.",1039065,Nasdaq,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+ATI,investable,ATI Inc.,1018963,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+CRS,investable,Carpenter Technology Corporation,17843,NYSE,Industrials,Aerospace & Defense,Defense,aerospace_components_materials_and_mro,United States,USD,Common Stock,active,TRUE
+KTOS,investable,"Kratos Defense & Security Solutions, Inc.",1069258,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+AVAV,investable,"AeroVironment, Inc.",1368622,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+RCAT,investable,"Red Cat Holdings, Inc.",748268,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+CDRE,investable,"Cadre Holdings, Inc.",1860543,NYSE,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+AVEX,investable,AEVEX Corp.,2096300,NYSE,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+NPK,investable,"National Presto Industries, Inc.",80172,NYSE,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+SWBI,investable,"Smith & Wesson Brands, Inc.",1092796,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+RGR,investable,"Sturm, Ruger & Company, Inc.",95029,NYSE,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+MRLN,investable,"Merlin, Inc.",2028707,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+POWW,investable,Outdoor Holding Company,1015383,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+AIRO,investable,"AIRO Group Holdings, Inc.",1927958,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+BYRN,investable,Byrna Technologies Inc.,1354866,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+VWAV,investable,"VisionWave Holdings, Inc.",2038439,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+CODA,investable,"Coda Octopus Group, Inc.",1334325,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+OPXS,investable,"Optex Systems Holdings, Inc",1397016,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+SPAI,investable,Safe Pro Group Inc.,2011208,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+XTIA,investable,"XTI Aerospace, Inc.",1529113,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+MOB,investable,Mobilicom Limited,1898643,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Ordinary Shares,active,TRUE
+DUKR,investable,DUKE Robotics Corp.,1638911,Nasdaq,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+BBAI,investable,"BigBear.ai Holdings, Inc.",1836981,NYSE,Industrials,Aerospace & Defense,Defense,emerging_defense_tech_drones_munitions_speculative,United States,USD,Common Stock,active,TRUE
+GE,investable,GE Aerospace,40545,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+RTX,investable,RTX Corporation,101829,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+BA,investable,The Boeing Company,12927,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+LMT,investable,Lockheed Martin Corporation,936468,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+GD,investable,General Dynamics Corporation,40533,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+NOC,investable,Northrop Grumman Corporation,1133421,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+HONAV,investable,Honeywell Aerospace Inc.,2089271,Nasdaq,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+LHX,investable,"L3Harris Technologies, Inc.",202058,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+AXON,investable,"Axon Enterprise, Inc.",1069183,Nasdaq,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+ESLT,investable,Elbit Systems Ltd.,1027664,Nasdaq,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Ordinary Shares,active,TRUE
+CW,investable,Curtiss-Wright Corporation,26324,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+BWXT,investable,"BWX Technologies, Inc.",1486957,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+TXT,investable,Textron Inc.,217346,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+EMBJ,investable,Embraer S.A.,1355444,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+DRS,investable,"Leonardo DRS, Inc.",1833756,Nasdaq,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+HII,investable,"Huntington Ingalls Industries, Inc.",1501585,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+CAE,investable,CAE Inc.,1173382,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Ordinary Shares,active,TRUE
+VVX,investable,"V2X, Inc.",1601548,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+LDOS,investable,"Leidos Holdings, Inc.",1336920,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+SAIC,investable,Science Applications International Corporation,1571123,Nasdaq,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+CACI,investable,CACI International Inc,16058,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+BAH,investable,Booz Allen Hamilton Holding Corporation,1443646,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+PSN,investable,Parsons Corporation,275880,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+KBR,investable,"KBR, Inc.",1357615,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+TDY,investable,Teledyne Technologies Incorporated,1094285,NYSE,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+PLTR,investable,Palantir Technologies Inc.,1321655,Nasdaq,Industrials,Aerospace & Defense,Defense,primes_diversified_and_govtech_services,United States,USD,Common Stock,active,TRUE
+SPCX,investable,Space Exploration Technologies Corp.,1181412,Nasdaq,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+RKLB,investable,Rocket Lab Corporation,1819994,Nasdaq,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+PL,investable,Planet Labs PBC,1836833,NYSE,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+MDA,investable,MDA Space Ltd.,1857047,NYSE,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+FLY,investable,Firefly Aerospace Inc.,1860160,Nasdaq,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+BETA,investable,"Beta Technologies, Inc.",1784570,NYSE,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+ACHR,investable,Archer Aviation Inc.,1824502,NYSE,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+YSS,investable,York Space Systems Inc.,2086587,NYSE,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+LUNR,investable,"Intuitive Machines, Inc.",1844452,Nasdaq,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+RDW,investable,Redwire Corporation,1819810,NYSE,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+HAWK,investable,"HawkEye 360, Inc.",1750704,NYSE,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+VOYG,investable,"Voyager Technologies, Inc.",1788060,NYSE,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+EVEX,investable,"Eve Holding, Inc.",1823652,NYSE,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+SATL,investable,Satellogic Inc.,1874315,Nasdaq,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+FJET,investable,"Starfighters Space, Inc.",1947016,NYSE,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+EVTL,investable,Vertical Aerospace Ltd.,1867102,NYSE,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Ordinary Shares,active,TRUE
+SIDU,investable,"Sidus Space, Inc.",1879726,Nasdaq,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+MNTS,investable,Momentus Inc.,1781162,Nasdaq,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE
+HOVR,investable,New Horizon Aircraft Ltd.,1930021,Nasdaq,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Ordinary Shares,active,TRUE
+BKSY,investable,BlackSky Technology Inc.,1753539,NYSE,Industrials,Aerospace & Defense,Defense,space_satellite_and_advanced_air_mobility,United States,USD,Common Stock,active,TRUE

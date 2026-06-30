@@ -1,0 +1,2 @@
+"""Industrials sector scoring package."""
+

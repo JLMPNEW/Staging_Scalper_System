@@ -339,6 +339,11 @@ def is_expired(decision: AnalystReviewDecision, *, asof: date) -> bool:
     return expires_at is not None and expires_at < asof
 
 
+def is_reviewed_after_asof(decision: AnalystReviewDecision, *, asof: date) -> bool:
+    reviewed_at = parse_date(decision.reviewed_at)
+    return reviewed_at is not None and reviewed_at >= asof
+
+
 def decision_matches(
     decision: AnalystReviewDecision,
     *,
@@ -388,7 +393,10 @@ def effective_decision(
             cohort=cohort,
             review_categories=review_categories,
         )
-        if decision.active and decision.decision and not is_expired(decision, asof=target_asof)
+        if decision.active
+        and decision.decision
+        and not is_expired(decision, asof=target_asof)
+        and not is_reviewed_after_asof(decision, asof=target_asof)
     ]
     candidates.sort(
         key=lambda item: (
@@ -417,7 +425,10 @@ def latest_expired_decision(
             cohort=cohort,
             review_categories=review_categories,
         )
-        if decision.active and decision.decision and is_expired(decision, asof=target_asof)
+        if decision.active
+        and decision.decision
+        and is_expired(decision, asof=target_asof)
+        and not is_reviewed_after_asof(decision, asof=target_asof)
     ]
     candidates.sort(key=lambda item: (parse_date(item.expires_at) or date.min, -item.row_number), reverse=True)
     return candidates[0] if candidates else None

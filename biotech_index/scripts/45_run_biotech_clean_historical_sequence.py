@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import json
 import logging
@@ -63,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Earliest market-bar date to use/fetch. Defaults to 420 days before the first scoring date.",
     )
+    parser.add_argument(
+        "--no-snap-weekly-to-market-days",
+        action="store_true",
+        help="Keep requested weekly Friday dates exactly instead of snapping market holidays to the prior market bar date.",
+    )
     parser.add_argument("--history-date-source", choices=["daily_scores", "daily_features"], default="daily_scores")
     parser.add_argument("--history-fridays-only", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -75,9 +81,31 @@ def parse_args() -> argparse.Namespace:
         default=0.90,
         help="Hard minimum per-date short_interest_pct_float availability ratio for clean-panel QA.",
     )
+    parser.add_argument(
+        "--step-timeout-sec",
+        type=int,
+        default=0,
+        help=(
+            "Optional timeout applied to each child step. Defaults to "
+            "biotech_historical_sequence.step_timeout_sec; 0 disables the timeout."
+        ),
+    )
     parser.add_argument("--skip-recompute", action="store_true")
     parser.add_argument("--skip-market-bar-backfill", action="store_true")
     parser.add_argument("--skip-qa", action="store_true")
+    parser.add_argument(
+        "--skip-historical-score-csvs",
+        action="store_true",
+        help=(
+            "Skip generation/validation of output/biotech_index_reports/<YYYYMMDD>/biotech_daily_scores.csv "
+            "for each historical calibration date."
+        ),
+    )
+    parser.add_argument(
+        "--historical-score-csv-overwrite",
+        action="store_true",
+        help="Overwrite existing historical biotech_daily_scores.csv files even when --skip-recompute is used.",
+    )
     parser.add_argument("--skip-ic", action="store_true")
     parser.add_argument("--skip-baseline-backtest", action="store_true")
     parser.add_argument("--run-candidate-calibration", action="store_true")
@@ -147,6 +175,45 @@ def friday_grid(*, start_asof: str, end_asof: str, target_count: int = 0) -> lis
     if not dates:
         raise RuntimeError("Weekly date grid is empty.")
     return dates
+
+
+def snap_to_available_market_dates(db_path: Path, dates: list[str]) -> list[str]:
+    """Snap calendar date-grid entries to the latest available market-bar date.
+
+    Weekly calibration grids are expressed as Fridays, but some Fridays are market
+    holidays.  Using the prior market day preserves point-in-time ordering and
+    avoids trying to score a non-trading as-of date.
+    """
+    parsed_dates = [parse_date(item) for item in dates]
+    valid_dates = [item for item in parsed_dates if item is not None]
+    if not valid_dates:
+        return dates
+    min_query = (min(valid_dates) - timedelta(days=10)).isoformat()
+    max_query = max(valid_dates).isoformat()
+    with closing(connect_readonly(db_path)) as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT bar_date
+            FROM market_bars_daily
+            WHERE bar_date BETWEEN ? AND ?
+            ORDER BY bar_date
+            """,
+            (min_query, max_query),
+        ).fetchall()
+    market_dates = [parse_date(row["bar_date"]) for row in rows]
+    market_dates = [item for item in market_dates if item is not None]
+    if not market_dates:
+        raise RuntimeError("Cannot snap weekly grid because market_bars_daily has no dates in the requested range.")
+
+    snapped: list[str] = []
+    for raw, parsed in zip(dates, parsed_dates):
+        if parsed is None:
+            continue
+        idx = bisect.bisect_right(market_dates, parsed) - 1
+        if idx < 0:
+            raise RuntimeError(f"No market date available on or before requested historical as-of {raw}")
+        snapped.append(market_dates[idx].isoformat())
+    return list(dict.fromkeys(snapped))
 
 
 def default_market_history_start(first_scoring_asof: str) -> str:
@@ -261,12 +328,54 @@ def read_expected_tickers(config: dict[str, Any], *, config_path: Path) -> set[s
     return out
 
 
+def read_calibration_tickers(config: dict[str, Any], *, config_path: Path) -> set[str]:
+    settings = cfg_get(config, "biotech_scoring.calibration_cohorts", {}) or {}
+    if not isinstance(settings, dict):
+        settings = {}
+    csv_path = resolve_path(settings.get("csv", "data/biotech_calibration_cohorts.csv"), base_dir=config_path.parent)
+    out: set[str] = set()
+    for path, columns in (
+        (csv_path, ("ticker",)),
+        (config_path.parent / "data" / "delisted_biotech_calibration_universe.csv", ("ticker", "calibration_company_ticker")),
+    ):
+        if not path.exists():
+            continue
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                for column in columns:
+                    ticker = str(row.get(column) or "").strip().upper()
+                    if ticker:
+                        out.add(ticker)
+    return out
+
+
+def read_dated_expected_tickers(
+    *,
+    base_output_dir: Path,
+    configured_universe_name: str,
+    asof: str,
+    fallback_tickers: set[str],
+) -> tuple[set[str], str]:
+    dated_path = base_output_dir / compact_date(asof) / configured_universe_name
+    if not dated_path.exists():
+        return set(fallback_tickers), "current_universe_fallback"
+    out: set[str] = set()
+    with dated_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if as_bool(row.get("scoring_include"), False):
+                ticker = str(row.get("ticker") or "").strip().upper()
+                if ticker:
+                    out.add(ticker)
+    return (out, "dated_universe") if out else (set(fallback_tickers), "current_universe_fallback")
+
+
 def run_command(
     *,
     label: str,
     command: list[str],
     output_dir: Path,
     dry_run: bool,
+    timeout_sec: int,
     timing_rows: list[dict[str, Any]],
 ) -> None:
     start = time.monotonic()
@@ -277,12 +386,24 @@ def run_command(
         "status": "dry_run" if dry_run else "running",
         "elapsed_sec": "",
         "returncode": "",
+        "timeout_sec": max(0, int(timeout_sec or 0)),
     }
     timing_rows.append(row)
     write_csv(output_dir / "clean_historical_sequence_timing.csv", timing_rows)
     if dry_run:
         return
-    result = subprocess.run(command, cwd=PROJECT_ROOT)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=PROJECT_ROOT,
+            timeout=max(0, int(timeout_sec or 0)) or None,
+        )
+    except subprocess.TimeoutExpired as exc:
+        row["elapsed_sec"] = round(time.monotonic() - start, 3)
+        row["returncode"] = "timeout"
+        row["status"] = "timeout"
+        write_csv(output_dir / "clean_historical_sequence_timing.csv", timing_rows)
+        raise TimeoutError(f"{label} exceeded timeout_sec={max(0, int(timeout_sec or 0))}") from exc
     row["elapsed_sec"] = round(time.monotonic() - start, 3)
     row["returncode"] = result.returncode
     row["status"] = "success" if result.returncode == 0 else "failed"
@@ -357,11 +478,13 @@ def config_guardrail_qa(config: dict[str, Any]) -> list[dict[str, Any]]:
         ctgov = {}
     cohort_modes = routing.get("cohort_modes", {}) if isinstance(routing.get("cohort_modes"), dict) else {}
     old_keys = sorted(set(str(key) for key in cohort_modes) - ALLOWED_CALIBRATION_COHORTS)
+    production_score_source = str(routing.get("production_score_source") or "opportunity_score").strip().lower()
+    allocation_source_aliases = {"legacy", "legacy_allocation", "allocation", "opportunity", "opportunity_score"}
     rows = [
         {
             "check": "production_score_source_allocation_only",
-            "status": "PASS" if str(routing.get("production_score_source") or "opportunity_score") == "opportunity_score" else "FAIL",
-            "value": str(routing.get("production_score_source") or ""),
+            "status": "PASS" if production_score_source in allocation_source_aliases else "FAIL",
+            "value": production_score_source,
             "details": "Production rank must use allocation opportunity score.",
         },
         {
@@ -390,12 +513,14 @@ def panel_qa(
     db_path: Path,
     *,
     expected_tickers: set[str],
+    calibration_tickers: set[str],
+    base_output_dir: Path,
+    configured_universe_name: str,
     start_asof: str,
     end_asof: str,
     expected_dates: list[str] | None = None,
     min_short_pct_coverage: float = 0.90,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    expected_count = len(expected_tickers)
     start = parse_date(start_asof)
     end = parse_date(end_asof)
     with closing(connect_readonly(db_path)) as conn:
@@ -424,9 +549,22 @@ def panel_qa(
 
         summary_rows: list[dict[str, Any]] = []
         detail_rows: list[dict[str, Any]] = []
+        calibration_ticker_values = sorted(ticker for ticker in calibration_tickers if ticker)
+        calibration_placeholders = ", ".join("?" for _ in calibration_ticker_values)
+        calibration_filter = (
+            f"(c.universe_status = 'delisted_calibration' OR UPPER(c.ticker) IN ({calibration_placeholders}))"
+            if calibration_ticker_values
+            else "1 = 1"
+        )
         for asof in dates:
+            dated_expected_tickers, expected_ticker_source = read_dated_expected_tickers(
+                base_output_dir=base_output_dir,
+                configured_universe_name=configured_universe_name,
+                asof=asof,
+                fallback_tickers=expected_tickers,
+            )
             feature = conn.execute(
-                """
+                f"""
                 SELECT
                     COUNT(*) AS n,
                     SUM(CASE WHEN COALESCE(short_interest_pct_float_available_flag, 0.0) > 0.0 THEN 1 ELSE 0 END) AS short_pct_available,
@@ -437,13 +575,15 @@ def panel_qa(
                     SUM(CASE WHEN institutional_accumulation_score IS NOT NULL THEN 1 ELSE 0 END) AS institutional_score_present,
                     SUM(CASE WHEN insider_accumulation_score IS NOT NULL THEN 1 ELSE 0 END) AS insider_score_present,
                     SUM(CASE WHEN ctgov_forward_catalyst_score IS NOT NULL THEN 1 ELSE 0 END) AS ctgov_score_present
-                FROM daily_features
-                WHERE asof_date = ?
+                FROM daily_features f
+                JOIN companies c ON c.company_id = f.company_id
+                WHERE f.asof_date = ?
+                  AND {calibration_filter}
                 """,
-                (asof,),
+                (asof, *calibration_ticker_values),
             ).fetchone()
             score = conn.execute(
-                """
+                f"""
                 SELECT
                     COUNT(*) AS n,
                     SUM(CASE WHEN biotech_primary_cohort IN (
@@ -454,18 +594,35 @@ def panel_qa(
                         'early_clinical_speculative_or_single_asset_pipeline'
                     ) THEN 1 ELSE 0 END) AS five_cohort_rows,
                     SUM(CASE WHEN production_score_source = 'legacy_allocation' THEN 1 ELSE 0 END) AS legacy_source_rows,
+                    SUM(CASE WHEN production_score_source IN (
+                        'legacy',
+                        'legacy_allocation',
+                        'allocation',
+                        'opportunity',
+                        'opportunity_score'
+                    ) OR production_score_source LIKE 'legacy_allocation|%' THEN 1 ELSE 0 END) AS allocation_source_rows,
+                    SUM(CASE WHEN production_score_source LIKE '%discovery%'
+                              OR production_rank_score_field = 'discovery_opportunity_score'
+                             THEN 1 ELSE 0 END) AS discovery_rank_source_rows,
                     SUM(CASE WHEN production_rank_score_field = 'opportunity_score' THEN 1 ELSE 0 END) AS allocation_rank_field_rows,
                     SUM(CASE WHEN COALESCE(discovery_opportunity_score, 0.0) > 0.0 THEN 1 ELSE 0 END) AS discovery_score_rows
-                FROM daily_scores
-                WHERE asof_date = ?
+                FROM daily_scores s
+                JOIN companies c ON c.company_id = s.company_id
+                WHERE s.asof_date = ?
+                  AND {calibration_filter}
                 """,
-                (asof,),
+                (asof, *calibration_ticker_values),
             ).fetchone()
+            feature_count = int(feature["n"] or 0)
+            score_count = int(score["n"] or 0)
+            has_dated_universe = expected_ticker_source == "dated_universe"
+            expected_count = len(dated_expected_tickers) if has_dated_universe else max(feature_count, score_count)
             row = {
                 "asof_date": asof,
                 "expected_tickers": expected_count,
-                "daily_features_rows": int(feature["n"] or 0),
-                "daily_scores_rows": int(score["n"] or 0),
+                "expected_ticker_source": expected_ticker_source,
+                "daily_features_rows": feature_count,
+                "daily_scores_rows": score_count,
                 "short_pct_available_rows": int(feature["short_pct_available"] or 0),
                 "short_pct_positive_rows": int(feature["short_pct_positive"] or 0),
                 "borrow_fee_available_rows": int(feature["borrow_fee_available"] or 0),
@@ -476,21 +633,35 @@ def panel_qa(
                 "ctgov_score_present_rows": int(feature["ctgov_score_present"] or 0),
                 "five_cohort_rows": int(score["five_cohort_rows"] or 0),
                 "legacy_source_rows": int(score["legacy_source_rows"] or 0),
+                "allocation_source_rows": int(score["allocation_source_rows"] or 0),
+                "discovery_rank_source_rows": int(score["discovery_rank_source_rows"] or 0),
                 "allocation_rank_field_rows": int(score["allocation_rank_field_rows"] or 0),
                 "discovery_score_rows": int(score["discovery_score_rows"] or 0),
             }
             short_pct_min = int(round(expected_count * min_short_pct_coverage))
             failures: list[str] = []
             warnings: list[str] = []
-            if row["daily_features_rows"] != expected_count:
-                failures.append("daily_features_row_count")
-            if row["daily_scores_rows"] != expected_count:
-                failures.append("daily_scores_row_count")
+            if has_dated_universe:
+                if row["daily_features_rows"] != expected_count:
+                    failures.append("daily_features_row_count")
+                if row["daily_scores_rows"] != expected_count:
+                    failures.append("daily_scores_row_count")
+            elif row["daily_features_rows"] != row["daily_scores_rows"]:
+                failures.append("daily_features_scores_row_count_mismatch")
             if row["short_pct_available_rows"] < short_pct_min:
                 warnings.append("short_interest_pct_float_coverage")
-            if row["five_cohort_rows"] != expected_count:
+            if row["five_cohort_rows"] != row["daily_scores_rows"]:
                 failures.append("five_cohort_assignment")
-            if row["legacy_source_rows"] != expected_count or row["allocation_rank_field_rows"] != expected_count:
+            # Discovery scores can be present as diagnostics on rows whose
+            # production rank is still allocation-based, so discovery_score_rows
+            # is not a mutually exclusive source bucket.  Production output is
+            # clean only when every row's rank source is allocation and no row
+            # routes discovery into production ranking.
+            if (
+                row["allocation_source_rows"] != row["daily_scores_rows"]
+                or row["allocation_rank_field_rows"] != row["daily_scores_rows"]
+                or row["discovery_rank_source_rows"] > 0
+            ):
                 failures.append("allocation_rank_source")
             row["status"] = "PASS" if not failures else "FAIL"
             row["failures"] = "|".join(failures)
@@ -532,7 +703,7 @@ def panel_qa(
                 "check": "core_panel_row_count_and_ranking_integrity",
                 "status": "PASS" if hard_failure_count == 0 else "FAIL",
                 "value": hard_failure_count,
-                "details": f"expected_tickers={expected_count}",
+                "details": "expected_tickers=dated_universe_per_asof",
             }
         )
         summary_rows.append(
@@ -541,7 +712,7 @@ def panel_qa(
                 "status": "PASS" if warning_count == 0 else "WARN",
                 "value": warning_count,
                 "details": (
-                    f"expected_tickers={expected_count}; min_short_pct_coverage={min_short_pct_coverage:.2f}; "
+                    f"expected_tickers=dated_universe_per_asof; min_short_pct_coverage={min_short_pct_coverage:.2f}; "
                     "coverage gaps do not block the clean panel because IC classifies coverage-limited factors."
                 ),
             }
@@ -572,6 +743,8 @@ def planned_sequence(args: argparse.Namespace) -> list[str]:
         steps.append("historical_restatement")
     if not args.skip_qa:
         steps.append("clean_panel_qa")
+    if not args.skip_historical_score_csvs:
+        steps.append("historical_score_csv_generation")
     if not args.skip_ic:
         steps.append("feature_ic_monitor")
     if not args.skip_baseline_backtest:
@@ -601,6 +774,11 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=config_path.parent)
+    step_timeout_sec = (
+        int(args.step_timeout_sec)
+        if int(args.step_timeout_sec or 0) > 0
+        else int(cfg_get(config, "biotech_historical_sequence.step_timeout_sec", 0) or 0)
+    )
     if int(args.target_weekly_date_count or 0) > 0 or args.start_asof:
         inferred_end = args.end_asof
         if not inferred_end:
@@ -610,6 +788,8 @@ def main() -> None:
             end_asof=inferred_end,
             target_count=max(0, int(args.target_weekly_date_count or 0)),
         )
+        if not args.no_snap_weekly_to_market_days:
+            history_dates = snap_to_available_market_dates(db_path, history_dates)
         start_asof = history_dates[0]
         end_asof = history_dates[-1]
     else:
@@ -628,6 +808,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     staging_paths = validate_staging_paths(config, config_path=config_path, db_path=db_path)
     expected_tickers = read_expected_tickers(config, config_path=config_path)
+    calibration_tickers = read_calibration_tickers(config, config_path=config_path)
     timing_rows: list[dict[str, Any]] = []
     data_rules = {
         "created_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
@@ -635,6 +816,10 @@ def main() -> None:
         "end_asof": end_asof,
         "history_date_count": len(history_dates),
         "target_weekly_date_count": int(args.target_weekly_date_count or 0),
+        "weekly_dates_snapped_to_market_days": (
+            bool(int(args.target_weekly_date_count or 0) > 0 or args.start_asof)
+            and not bool(args.no_snap_weekly_to_market_days)
+        ),
         "market_history_start_asof": market_history_start_asof,
         "expected_ticker_count": len(expected_tickers),
         "staging_paths": staging_paths,
@@ -647,6 +832,35 @@ def main() -> None:
         },
     }
     write_json(output_dir / "clean_historical_data_rules_manifest.json", data_rules)
+
+    if args.dry_run and args.skip_recompute:
+        planned_steps = planned_sequence(args)
+        timing_rows.extend(
+            {
+                "step": planned_step,
+                "command": "planned_dry_run",
+                "status": "dry_run",
+                "elapsed_sec": "",
+                "returncode": "",
+                "timeout_sec": max(0, int(step_timeout_sec or 0)),
+            }
+            for planned_step in planned_steps
+        )
+        write_csv(output_dir / "clean_historical_sequence_timing.csv", timing_rows)
+        write_json(
+            output_dir / "clean_historical_sequence_manifest.json",
+            {
+                "output_dir": str(output_dir),
+                "start_asof": start_asof,
+                "end_asof": end_asof,
+                "history_date_count": len(history_dates),
+                "planned_full_sequence": planned_steps,
+                "steps": planned_steps,
+                "dry_run": True,
+            },
+        )
+        LOGGER.info("Clean historical sequence dry-run complete: output_dir=%s", output_dir)
+        return
 
     if not args.skip_recompute:
         if not args.skip_market_bar_backfill:
@@ -663,7 +877,7 @@ def main() -> None:
                 market_history_start_asof,
                 "--allow-partial",
             ]
-            run_command(label="market_bar_backfill", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timing_rows=timing_rows)
+            run_command(label="market_bar_backfill", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timeout_sec=step_timeout_sec, timing_rows=timing_rows)
         cmd = [
             sys.executable,
             str(PACKAGE_ROOT / "scripts" / "24_run_biotech_refresh_pipeline.py"),
@@ -687,8 +901,24 @@ def main() -> None:
             cmd.extend(["--history-dates", ",".join(history_dates)])
         if args.history_fridays_only:
             cmd.append("--history-fridays-only")
-        run_command(label="historical_restatement", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timing_rows=timing_rows)
+        run_command(label="historical_restatement", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timeout_sec=step_timeout_sec, timing_rows=timing_rows)
         if args.dry_run:
+            planned_steps = planned_sequence(args)
+            recorded_steps = {str(row.get("step") or "") for row in timing_rows}
+            for planned_step in planned_steps:
+                if planned_step in recorded_steps:
+                    continue
+                timing_rows.append(
+                    {
+                        "step": planned_step,
+                        "command": "planned_after_recompute_boundary",
+                        "status": "dry_run",
+                        "elapsed_sec": "",
+                        "returncode": "",
+                        "timeout_sec": max(0, int(step_timeout_sec or 0)),
+                    }
+                )
+            write_csv(output_dir / "clean_historical_sequence_timing.csv", timing_rows)
             write_json(
                 output_dir / "clean_historical_sequence_manifest.json",
                 {
@@ -696,8 +926,8 @@ def main() -> None:
                     "start_asof": start_asof,
                     "end_asof": end_asof,
                     "history_date_count": len(history_dates),
-                    "planned_full_sequence": planned_sequence(args),
-                    "steps": [row["step"] for row in timing_rows],
+                    "planned_full_sequence": planned_steps,
+                    "steps": planned_steps,
                     "dry_run": True,
                 },
             )
@@ -710,6 +940,9 @@ def main() -> None:
         panel_summary, panel_detail = panel_qa(
             db_path,
             expected_tickers=expected_tickers,
+            calibration_tickers=calibration_tickers,
+            base_output_dir=resolve_path(cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=config_path.parent),
+            configured_universe_name=Path(str(cfg_get(config, "biotech_features.final_scoring_universe_csv"))).name,
             start_asof=start_asof,
             end_asof=end_asof,
             expected_dates=history_dates,
@@ -719,6 +952,25 @@ def main() -> None:
         write_csv(output_dir / "clean_historical_qa_summary.csv", qa_summary)
         write_csv(output_dir / "clean_historical_panel_qa_by_asof.csv", panel_detail)
         fail_if_qa_failed(qa_summary)
+
+    if not args.skip_historical_score_csvs:
+        cmd = [
+            sys.executable,
+            str(PACKAGE_ROOT / "scripts" / "56_generate_historical_biotech_score_csvs.py"),
+            "--config",
+            str(config_path),
+            "--db",
+            str(db_path),
+            "--dates",
+            ",".join(history_dates),
+            "--summary-csv",
+            str(output_dir / "historical_score_csv_generation_summary.csv"),
+            "--manifest-json",
+            str(output_dir / "historical_score_csv_generation_manifest.json"),
+        ]
+        if not args.skip_recompute or args.historical_score_csv_overwrite:
+            cmd.append("--overwrite")
+        run_command(label="historical_score_csv_generation", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timeout_sec=step_timeout_sec, timing_rows=timing_rows)
 
     if not args.skip_ic:
         cmd = [
@@ -740,7 +992,7 @@ def main() -> None:
             "--next-bar-entry",
             "--resume",
         ]
-        run_command(label="feature_ic_monitor", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timing_rows=timing_rows)
+        run_command(label="feature_ic_monitor", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timeout_sec=step_timeout_sec, timing_rows=timing_rows)
 
     if not args.skip_baseline_backtest:
         cmd = [
@@ -764,7 +1016,7 @@ def main() -> None:
             str(max(0, int(args.bootstrap_iterations))),
             "--next-bar-entry",
         ]
-        run_command(label="phase1_baseline_backtest", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timing_rows=timing_rows)
+        run_command(label="phase1_baseline_backtest", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timeout_sec=step_timeout_sec, timing_rows=timing_rows)
 
     if args.run_candidate_calibration:
         cmd = [
@@ -801,7 +1053,7 @@ def main() -> None:
             cmd.extend(["--max-workers", str(int(args.calibration_max_workers))])
         if args.candidate_grid_executor:
             cmd.extend(["--candidate-grid-executor", args.candidate_grid_executor])
-        run_command(label="candidate_calibration", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timing_rows=timing_rows)
+        run_command(label="candidate_calibration", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timeout_sec=step_timeout_sec, timing_rows=timing_rows)
 
     optuna_status = "not_requested"
     if args.run_optuna:
@@ -828,7 +1080,7 @@ def main() -> None:
             "--top-n",
             args.top_n,
         ]
-        run_command(label="gated_optuna", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timing_rows=timing_rows)
+        run_command(label="gated_optuna", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timeout_sec=step_timeout_sec, timing_rows=timing_rows)
         optuna_status = "success"
 
     final_manifest = {

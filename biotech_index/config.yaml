@@ -5,6 +5,27 @@ paths:
   company_ticker_actions_csv: "data/company_ticker_actions.csv"
   database_path: "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/biotech_index.sqlite"
 
+delisted_calibration:
+  enabled: true
+  candidate_csv: "data/delisted_biotech_calibration_candidates.csv"
+  frozen_universe_csv: "data/delisted_biotech_calibration_universe.csv"
+  sec_sync_universe_csv: "data/delisted_biotech_sec_sync_universe.csv"
+  form4_backfill_table: "delisted_calibration_form4_filings"
+  strict_universe_count: 48
+  company_universe_status: "delisted_calibration"
+  use_in_current_production_reports: false
+  source_rules:
+    price_source: "norgate_us_equities_total_return"
+    sec_key: "issuer_cik"
+    form4_key: "issuer_cik"
+    institutional_13f_key: "cusip"
+    missing_borrow_short_policy: "null_insufficient_data"
+  terminal_event_policy:
+    wipeout: "hard_zero_on_terminal_date"
+    cash_deal: "cash_consideration_on_close_date"
+    cvr_or_nonzero: "explicit_recovery_value_required"
+    drop_otc_tape_when_flagged: true
+
 market_positioning:
   enabled: true
   database_path: "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/market_positioning.sqlite"
@@ -1245,6 +1266,12 @@ biotech_reports:
     - SMMT
     - UTHR
     - INCY
+
+biotech_historical_sequence:
+  # Per-child-step timeout used by 45_run_biotech_clean_historical_sequence.py.
+  # Mirrors biotech_refresh.step_timeout_sec so both orchestrators share the same
+  # default without requiring a CLI --step-timeout-sec override.
+  step_timeout_sec: 28800
 
 biotech_refresh:
   timing_csv: "../output/biotech_index_reports/biotech_refresh_timing.csv"

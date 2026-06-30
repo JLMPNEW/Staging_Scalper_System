@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import random
+import re
 import sqlite3
 import sys
 import time
@@ -355,7 +356,7 @@ class SelectionPolicy:
     commercial_cohort_expected_return_bonus: float = 0.0
     commercial_cohort_entry_quality_penalty: float = 0.0
     commercial_cohort_overextension_penalty: float = 0.0
-    commercial_cohort_target_cohorts: tuple[str, ...] = ("commercial_profitable_quality_or_mature",)
+    commercial_cohort_target_cohorts: tuple[str, ...] = ()
     short_term_catalyst_timing_bonus: float = 0.0
     borrow_squeeze_setup_bonus: float = 0.0
     borrow_pressure_conditional_bonus: float = 0.0
@@ -1192,7 +1193,7 @@ def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
         ),
         rank_quality_cheap_low_growth_cap=float(rank_caps.get("cheap_low_growth_cap", 60.0)),
         rank_quality_cap_veto_enabled=as_bool(
-            rank_caps.get("rank_quality_cap_veto_enabled", rank_caps.get("rank_cap_veto_enabled", True)),
+            rank_caps.get("rank_quality_cap_veto_enabled", True),
             True,
         ),
         rank_quality_cap_veto_threshold=float(rank_caps.get("rank_cap_veto_threshold", 49.0)),
@@ -1909,6 +1910,15 @@ def reason_tuple(raw: object) -> tuple[str, ...]:
 def policy_from_dict(raw: dict[str, Any], *, fallback_name: str) -> SelectionPolicy:
     max_risk_raw = raw.get("max_risk_score")
     max_risk = to_float(max_risk_raw) if max_risk_raw not in {None, ""} else None
+    commercial_overlay_requested = any(
+        abs(to_float(raw.get(field), 0.0) or 0.0) > 0.0
+        for field in (
+            "commercial_cohort_expected_return_bonus",
+            "commercial_cohort_entry_quality_penalty",
+            "commercial_cohort_overextension_penalty",
+        )
+    )
+    commercial_target_default = ["commercial_profitable_quality_or_mature"] if commercial_overlay_requested else []
     policy = SelectionPolicy(
         policy_name=str(raw.get("policy_name") or raw.get("name") or fallback_name),
         description=str(raw.get("description") or "Custom calibration selection policy."),
@@ -1934,7 +1944,7 @@ def policy_from_dict(raw: dict[str, Any], *, fallback_name: str) -> SelectionPol
         commercial_cohort_target_cohorts=tuple(
             normalize_string_list(
                 raw.get("commercial_cohort_target_cohorts"),
-                ["commercial_profitable_quality_or_mature"],
+                commercial_target_default,
             )
         ),
         short_term_catalyst_timing_bonus=float(raw.get("short_term_catalyst_timing_bonus", 0.0)),
@@ -2640,6 +2650,18 @@ def load_feature_rows(conn: sqlite3.Connection, asof_date: str, excluded_tickers
         "insider_buy_cluster_count_90d",
         "insider_sell_value_90d",
         "insider_accumulation_score",
+        "adcom_nearest_days",
+        "adcom_within_60d_flag",
+        "adcom_within_120d_flag",
+        "adcom_score",
+        "adcom_committee_oncology_flag",
+        "breakthrough_therapy_count",
+        "orphan_drug_count",
+        "fast_track_count",
+        "rmat_count",
+        "priority_review_flag",
+        "fda_designation_tier",
+        "fda_designation_score",
     ]
     optional_select = ",\n            ".join(feature_expr(column) for column in optional_risk_columns)
     rows = conn.execute(
@@ -3835,6 +3857,42 @@ def load_observations(
                 and revenue_yoy is not None
                 and revenue_yoy <= 0.0
             )
+            # FDA AdCom and designation features are stored in daily_features as
+            # optional columns (written by 10_build_biotech_features.py) and
+            # returned in `row` via load_feature_rows(), but were not explicitly
+            # forwarded into the observation dict above.  Add them here so that
+            # the IC monitor (43_validate_biotech_feature_ic_monotonicity.py)
+            # can compute information coefficients for FDA factors.
+            # adcom_nearest_days: keep None when no meeting is scheduled so
+            # completed_rows() skips those tickers (correct IC population).
+            observation.update(
+                {
+                    k: to_float(row.get(k))
+                    for k in (
+                        "adcom_nearest_days",
+                        "adcom_within_60d_flag",
+                        "adcom_within_120d_flag",
+                        "adcom_score",
+                        "adcom_committee_oncology_flag",
+                    )
+                }
+            )
+            # Designation counts and flags default to 0.0 when absent because
+            # zero designations is meaningful signal (not missing data).
+            observation.update(
+                {
+                    k: to_float(row.get(k), 0.0)
+                    for k in (
+                        "breakthrough_therapy_count",
+                        "orphan_drug_count",
+                        "fast_track_count",
+                        "rmat_count",
+                        "priority_review_flag",
+                        "fda_designation_tier",
+                        "fda_designation_score",
+                    )
+                }
+            )
             observation.update(
                 {
                     "diag_value_trap_score": float(observation["value_trap_score"]),
@@ -4211,6 +4269,36 @@ def load_bars(
     return out
 
 
+def terminal_recovery_from_row(row: Mapping[str, Any]) -> tuple[float | None, str]:
+    explicit = to_float(row.get("equity_recovery"))
+    recovery_type = str(row.get("recovery_type") or "").strip().lower()
+    if explicit is not None:
+        return max(0.0, float(explicit)), recovery_type
+    if recovery_type == "wipeout":
+        return 0.0, "wipeout"
+    component_cash = to_float(row.get("terminal_cash_per_share"))
+    component_stock_ratio = to_float(row.get("terminal_stock_exchange_ratio"))
+    component_stock_price = to_float(row.get("terminal_stock_reference_price"))
+    component_cvr_value = to_float(row.get("terminal_cvr_value_per_share"))
+    has_component = any(
+        value is not None
+        for value in (component_cash, component_stock_ratio, component_stock_price, component_cvr_value)
+    )
+    if has_component:
+        if component_stock_ratio is not None and component_stock_ratio > 0.0 and component_stock_price is None:
+            return None, recovery_type
+        recovery = float(component_cash or 0.0)
+        recovery += float(component_stock_ratio or 0.0) * float(component_stock_price or 0.0)
+        recovery += float(component_cvr_value or 0.0)
+        return max(0.0, recovery), recovery_type
+    consideration = str(row.get("terminal_consideration") or "").strip().lower()
+    if "cash per share" in consideration and not any(token in consideration for token in ("plus", "stock", "cvr", "mix")):
+        match = re.search(r"\$([0-9]+(?:\.[0-9]+)?)", str(row.get("terminal_consideration") or ""))
+        if match:
+            return float(match.group(1)), "cash"
+    return None, recovery_type
+
+
 def load_terminal_events(path: Path = DEFAULT_DELISTED_CANDIDATES_CSV) -> dict[str, TerminalEvent]:
     """Load explicit delisting-resolution recoveries for calibration returns.
 
@@ -4233,11 +4321,21 @@ def load_terminal_events(path: Path = DEFAULT_DELISTED_CANDIDATES_CSV) -> dict[s
         for row in reader:
             ticker = normalize_ticker(row.get("ticker"))
             terminal_date = parse_date(row.get("terminal_date"))
-            equity_recovery = to_float(row.get("equity_recovery"))
-            recovery_type = str(row.get("recovery_type") or "").strip().lower()
+            equity_recovery, recovery_type = terminal_recovery_from_row(row)
             if not ticker or terminal_date is None or equity_recovery is None:
                 continue
-            if recovery_type not in {"wipeout", "settlement", "reorg_retained", "cash_cvr", "distressed_nonzero"}:
+            if recovery_type not in {
+                "cash",
+                "wipeout",
+                "settlement",
+                "reorg_retained",
+                "cash_cvr",
+                "distressed_nonzero",
+                "cash_stock",
+                "cash_stock_cvr",
+                "stock",
+                "stock_cvr",
+            }:
                 continue
             events[ticker] = TerminalEvent(
                 terminal_date=terminal_date,
@@ -7339,10 +7437,11 @@ def main() -> None:
         raise ValueError("calibration.tier1.train_fraction must be numeric") from exc
     if not 0.10 <= train_fraction <= 0.90:
         raise ValueError(f"--train-fraction must be between 0.10 and 0.90, got {train_fraction}")
+    default_embargo_days = minimum_calendar_embargo_days_for_horizon(max(horizons))
     embargo_days = (
         int(args.embargo_days)
         if args.embargo_days is not None
-        else int(cfg_get(config, "calibration.tier1.embargo_days", max(horizons)))
+        else int(cfg_get(config, "calibration.tier1.embargo_days", default_embargo_days))
     )
     embargo_days = max(0, embargo_days)
     auto_expand_embargo = as_bool(

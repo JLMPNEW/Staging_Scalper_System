@@ -17,6 +17,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
+from technology.core.oos_provenance import OOS_RANK_FIELDS, validate_oos_rank_rows  # noqa: E402
+from technology.core.portfolio_candidate_fields import PORTFOLIO_CANDIDATE_FIELDS  # noqa: E402
 
 
 LOGGER = logging.getLogger("semiconductor_dashboard_validator")
@@ -116,6 +118,8 @@ def main() -> int:
             "positioning_score",
             "risk_control_score",
         }
+        required_rank_fields.update(OOS_RANK_FIELDS)
+        required_rank_fields.update(PORTFOLIO_CANDIDATE_FIELDS)
         missing = sorted(required_rank_fields.difference(rank_rows[0].keys()))
         if missing:
             errors.append(f"Rank table missing fields: {', '.join(missing)}")
@@ -126,6 +130,8 @@ def main() -> int:
             bad_dates = sorted({str(row.get("asof_date") or "") for row in rank_rows if str(row.get("asof_date") or "") != args.asof})
             if bad_dates:
                 errors.append(f"Rank table contains rows outside asof={args.asof}: {bad_dates[:5]}")
+        if args.historical_mode:
+            errors.extend(validate_oos_rank_rows(rank_rows, asof=args.asof or str(rank_rows[0].get("asof_date") or ""), historical_mode=True))
 
     if paths["manifest"].exists():
         try:
@@ -137,6 +143,29 @@ def main() -> int:
             expected_mode = "historical" if args.historical_mode else "current"
             if args.historical_mode and str(manifest.get("report_mode") or "") != expected_mode:
                 errors.append(f"Manifest report_mode mismatch: {manifest.get('report_mode')} vs {expected_mode}")
+            if args.historical_mode:
+                if str(manifest.get("non_point_in_time_sections") or "") != "omitted":
+                    errors.append("Historical manifest did not omit non-point-in-time sections.")
+                if int(manifest.get("backtest_summary_rows") or 0) != 0:
+                    errors.append(f"Historical manifest backtest_summary_rows should be 0: {manifest.get('backtest_summary_rows')}")
+                required_manifest_fields = {
+                    "oos_standards_status",
+                    "calibration_input_valid_flag",
+                    "oos_score_valid_flag",
+                    "feature_point_in_time_flag",
+                    "future_return_excluded_flag",
+                    "non_point_in_time_sections_omitted_flag",
+                    "calibration_train_end_date",
+                    "calibration_lock_date",
+                    "calibration_production_start_date",
+                    "calibration_validation_method",
+                    "oos_assertion_basis",
+                }
+                missing_manifest = sorted(required_manifest_fields.difference(manifest.keys()))
+                if missing_manifest:
+                    errors.append(f"Historical manifest missing OOS fields: {', '.join(missing_manifest)}")
+                if str(manifest.get("calibration_input_valid_flag") or "") != "1":
+                    errors.append("Historical manifest calibration_input_valid_flag is not 1.")
         except json.JSONDecodeError as exc:
             errors.append(f"Invalid manifest JSON: {exc}")
 

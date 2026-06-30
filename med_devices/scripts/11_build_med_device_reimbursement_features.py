@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
+from med_devices.core.point_in_time import row_is_effective_asof  # noqa: E402
 from med_devices.core.text_norm import normalize_org_name, normalize_ticker  # noqa: E402
 
 
@@ -252,6 +253,27 @@ def latest_asof(conn: Any) -> str:
     return asof or datetime.now(timezone.utc).date().isoformat()
 
 
+def allow_missing_static_pit_metadata(config: dict[str, Any]) -> bool:
+    return str(cfg_get(config, "historical_backfill.allow_missing_static_pit_metadata", True)).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+
+def table_exists(conn: Any, table_name: str) -> bool:
+    row = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()
+    return row is not None
+
+
+def table_columns(conn: Any, table_name: str) -> set[str]:
+    if not table_exists(conn, table_name):
+        return set()
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({quote_identifier(table_name)})").fetchall()}
+
+
 def load_companies(
     conn: Any,
     *,
@@ -269,6 +291,9 @@ def load_companies(
                 FROM dim_company_model_taxonomy t
                 WHERE t.company_id = c.company_id
                   AND t.model_family = 'med_devices'
+                  AND (NULLIF(t.valid_from, '') IS NULL OR SUBSTR(t.valid_from, 1, 10) <= ?)
+                  AND (NULLIF(t.reviewed_at, '') IS NULL OR SUBSTR(t.reviewed_at, 1, 10) < ?)
+                  AND (NULLIF(t.valid_to, '') IS NULL OR SUBSTR(t.valid_to, 1, 10) >= ?)
            ))
            OR (? = 1 AND EXISTS (
                 SELECT 1
@@ -281,7 +306,7 @@ def load_companies(
            ))
         ORDER BY ticker
         """,
-        (1 if include_historical_members else 0, asof, asof),
+        (asof, asof, asof, 1 if include_historical_members else 0, asof, asof),
     ).fetchall()
     out: list[Company] = []
     for row in rows:
@@ -306,13 +331,20 @@ def row_get(row: dict[str, str], *keys: str) -> str:
     return ""
 
 
-def load_company_classifications(path: Path | None) -> dict[str, ReimbursementClassification]:
+def load_company_classifications(
+    path: Path | None,
+    *,
+    asof: date | str | None = None,
+    include_missing_pit_metadata: bool = True,
+) -> dict[str, ReimbursementClassification]:
     if path is None or not path.exists():
         return {}
     out: dict[str, ReimbursementClassification] = {}
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
+            if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
+                continue
             ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
             if not ticker:
                 continue
@@ -378,6 +410,7 @@ def regional_rate_for_codes(
     codes: set[str],
     billing_zip: str,
     zip_mac_rules: list[ZipMacRule],
+    asof: str,
 ) -> dict[str, Any]:
     if not billing_zip:
         return {}
@@ -396,11 +429,23 @@ def regional_rate_for_codes(
           ON c.reimbursement_code_id = r.reimbursement_code_id
         WHERE r.source_id IN ({source_placeholders})
           AND c.code IN ({code_placeholders})
+          AND (
+                NULLIF(c.effective_date, '') IS NULL
+                OR SUBSTR(c.effective_date, 1, 10) <= ?
+              )
+          AND (
+                NULLIF(c.termination_date, '') IS NULL
+                OR SUBSTR(c.termination_date, 1, 10) >= ?
+              )
           AND LOWER(COALESCE(r.locality, '')) = LOWER(?)
           AND r.payment_rate IS NOT NULL
+          AND (
+                NULLIF(r.effective_date, '') IS NULL
+                OR SUBSTR(r.effective_date, 1, 10) <= ?
+              )
         ORDER BY COALESCE(r.effective_date, '') DESC, r.reimbursement_rate_id DESC
         """,
-        [*source_ids, *sorted(codes), mac_name],
+        [*source_ids, *sorted(codes), asof, asof, mac_name, asof],
     ).fetchall()
     if not rows:
         return {"regional_rate_status": "local_mac_rate_not_found", "billing_zip": billing_zip, "regional_mac_name": mac_name}
@@ -416,21 +461,38 @@ def regional_rate_for_codes(
     }
 
 
-def source_row_counts(conn: Any, source_ids: list[str]) -> tuple[int, int, int]:
+def source_row_counts(conn: Any, source_ids: list[str], *, asof: str | None = None) -> tuple[int, int, int]:
     if not source_ids:
         return 0, 0, 0
     placeholders = ",".join("?" for _ in source_ids)
     policies = conn.execute(
-        f"SELECT COUNT(*) AS n FROM fact_reimbursement_policy WHERE source_id IN ({placeholders})",
-        source_ids,
+        f"""
+        SELECT COUNT(*) AS n
+        FROM fact_reimbursement_policy
+        WHERE source_id IN ({placeholders})
+          AND (? IS NULL OR NULLIF(effective_date, '') IS NULL OR SUBSTR(effective_date, 1, 10) <= ?)
+          AND (? IS NULL OR NULLIF(retirement_date, '') IS NULL OR SUBSTR(retirement_date, 1, 10) >= ?)
+        """,
+        [*source_ids, asof, asof, asof, asof],
     ).fetchone()
     codes = conn.execute(
-        f"SELECT COUNT(*) AS n FROM dim_reimbursement_code WHERE source_id IN ({placeholders})",
-        source_ids,
+        f"""
+        SELECT COUNT(*) AS n
+        FROM dim_reimbursement_code
+        WHERE source_id IN ({placeholders})
+          AND (? IS NULL OR NULLIF(effective_date, '') IS NULL OR SUBSTR(effective_date, 1, 10) <= ?)
+          AND (? IS NULL OR NULLIF(termination_date, '') IS NULL OR SUBSTR(termination_date, 1, 10) >= ?)
+        """,
+        [*source_ids, asof, asof, asof, asof],
     ).fetchone()
     rates = conn.execute(
-        f"SELECT COUNT(*) AS n FROM fact_reimbursement_rate WHERE source_id IN ({placeholders})",
-        source_ids,
+        f"""
+        SELECT COUNT(*) AS n
+        FROM fact_reimbursement_rate
+        WHERE source_id IN ({placeholders})
+          AND (? IS NULL OR NULLIF(effective_date, '') IS NULL OR SUBSTR(effective_date, 1, 10) <= ?)
+        """,
+        [*source_ids, asof, asof],
     ).fetchone()
     return int(policies["n"] or 0), int(codes["n"] or 0), int(rates["n"] or 0)
 
@@ -450,10 +512,10 @@ def mapped_reimbursement_row_count(conn: Any, source_ids: list[str]) -> int:
     return int(policy_row["n"] or 0) + int(code_row["n"] or 0)
 
 
-def preflight_reimbursement_links(conn: Any, policy: ReimbursementPolicy, *, require_links: bool) -> None:
+def preflight_reimbursement_links(conn: Any, policy: ReimbursementPolicy, *, require_links: bool, asof: str | None = None) -> None:
     if not require_links:
         return
-    policy_count, code_count, rate_count = source_row_counts(conn, policy.source_ids)
+    policy_count, code_count, rate_count = source_row_counts(conn, policy.source_ids, asof=asof)
     if policy_count + code_count + rate_count <= 0:
         return
     mapping_count = mapped_reimbursement_row_count(conn, policy.source_ids)
@@ -463,7 +525,7 @@ def preflight_reimbursement_links(conn: Any, policy: ReimbursementPolicy, *, req
         )
 
 
-def load_policy_search_rows(conn: Any, source_ids: list[str]) -> list[PolicySearchRow]:
+def load_policy_search_rows(conn: Any, source_ids: list[str], *, asof: str | None = None) -> list[PolicySearchRow]:
     if not source_ids:
         return []
     placeholders = ",".join("?" for _ in source_ids)
@@ -472,8 +534,10 @@ def load_policy_search_rows(conn: Any, source_ids: list[str]) -> list[PolicySear
         SELECT policy_id, policy_type, title, related_codes, payload_json
         FROM fact_reimbursement_policy
         WHERE source_id IN ({placeholders})
+          AND (? IS NULL OR NULLIF(effective_date, '') IS NULL OR SUBSTR(effective_date, 1, 10) <= ?)
+          AND (? IS NULL OR NULLIF(retirement_date, '') IS NULL OR SUBSTR(retirement_date, 1, 10) >= ?)
         """,
-        source_ids,
+        [*source_ids, asof, asof, asof, asof],
     ).fetchall()
     return [
         PolicySearchRow(
@@ -504,17 +568,50 @@ def company_terms(company: Company) -> list[str]:
     return [term for term in terms if len(term) >= 3]
 
 
-def mapped_product_codes(conn: Any, company_id: int) -> set[str]:
+FDA_PRODUCT_CODE_DATE_COLUMNS = {
+    "fact_fda_approval": ("decision_date", "receipt_date"),
+    "fact_fda_recall": ("recall_initiation_date", "center_classification_date", "termination_date"),
+    "fact_fda_adverse_event": (
+        "event_date",
+        "date_of_event",
+        "report_date",
+        "mdr_report_date",
+        "date_received",
+        "report_received_date",
+    ),
+}
+
+
+def fda_product_code_date_expr(available_columns: set[str], table: str) -> str:
+    date_columns = [column for column in FDA_PRODUCT_CODE_DATE_COLUMNS.get(table, ()) if column in available_columns]
+    if not date_columns:
+        return ""
+    quoted = [quote_identifier(column) for column in date_columns]
+    return quoted[0] if len(quoted) == 1 else f"COALESCE({', '.join(quoted)})"
+
+
+def mapped_product_codes(conn: Any, company_id: int, *, asof: str) -> set[str]:
     codes: set[str] = set()
-    for table in ("fact_fda_approval", "fact_fda_recall", "fact_fda_adverse_event"):
+    for table in FDA_PRODUCT_CODE_DATE_COLUMNS:
+        columns = table_columns(conn, table)
+        if "product_code" not in columns:
+            continue
+        date_expr = fda_product_code_date_expr(columns, table)
+        if not date_expr:
+            LOGGER.warning("Skipping FDA product-code scan without PIT date column: table=%s", table)
+            continue
         rows = conn.execute(
             f"""
             SELECT DISTINCT product_code
             FROM {quote_identifier(table)}
             WHERE company_id = ?
               AND COALESCE(product_code, '') != ''
+              AND (
+                    NULLIF({date_expr}, '') IS NULL
+                    OR SUBSTR({date_expr}, 1, 10) <= ?
+                  )
             """,
-            (company_id,),
+            (company_id, asof),
         ).fetchall()
         codes.update(str(row["product_code"] or "").strip() for row in rows if str(row["product_code"] or "").strip())
     return codes
@@ -550,7 +647,7 @@ def policy_evidence(policy_rows: list[PolicySearchRow], company: Company, produc
     return evidence_count, mention_count, matched_codes, matched_policy_ids
 
 
-def rate_count_for_codes(conn: Any, source_ids: list[str], codes: set[str]) -> int:
+def rate_count_for_codes(conn: Any, source_ids: list[str], codes: set[str], *, asof: str) -> int:
     if not source_ids or not codes:
         return 0
     source_placeholders = ",".join("?" for _ in source_ids)
@@ -563,13 +660,36 @@ def rate_count_for_codes(conn: Any, source_ids: list[str], codes: set[str]) -> i
           ON c.reimbursement_code_id = r.reimbursement_code_id
         WHERE r.source_id IN ({source_placeholders})
           AND c.code IN ({code_placeholders})
+          AND (
+                NULLIF(c.effective_date, '') IS NULL
+                OR SUBSTR(c.effective_date, 1, 10) <= ?
+              )
+          AND (
+                NULLIF(c.termination_date, '') IS NULL
+                OR SUBSTR(c.termination_date, 1, 10) >= ?
+              )
+          AND (
+                NULLIF(r.effective_date, '') IS NULL
+                OR SUBSTR(r.effective_date, 1, 10) <= ?
+              )
         """,
-        [*source_ids, *sorted(codes)],
+        [*source_ids, *sorted(codes), asof, asof, asof],
     ).fetchone()
     return int(row["n"] or 0) if row is not None else 0
 
 
-def load_mapped_reimbursement_evidence(conn: Any, source_ids: list[str]) -> dict[int, CompanyReimbursementEvidence]:
+def load_mapped_reimbursement_evidence(
+    conn: Any,
+    source_ids: list[str],
+    *,
+    asof: str,
+) -> dict[int, CompanyReimbursementEvidence]:
+    """Load current company-to-reimbursement mappings and PIT-filter effective-dated rate rows.
+
+    The map_company_reimbursement_* tables are current-state link tables today; they do not
+    carry valid_from/created_at metadata. Historical OOS protection therefore depends on
+    rebuilding those mappings from PIT-filtered static CSVs before a strict backfill.
+    """
     if not source_ids:
         return {}
     source_placeholders = ",".join("?" for _ in source_ids)
@@ -579,9 +699,17 @@ def load_mapped_reimbursement_evidence(conn: Any, source_ids: list[str]) -> dict
         FROM map_company_reimbursement_policy m
         JOIN fact_reimbursement_policy p
           ON p.reimbursement_policy_id = m.reimbursement_policy_id
+         AND (
+                NULLIF(p.effective_date, '') IS NULL
+                OR SUBSTR(p.effective_date, 1, 10) <= ?
+             )
+         AND (
+                NULLIF(p.retirement_date, '') IS NULL
+                OR SUBSTR(p.retirement_date, 1, 10) >= ?
+             )
         WHERE m.source_id IN ({source_placeholders})
         """,
-        source_ids,
+        [asof, asof, *source_ids],
     ).fetchall()
     code_rows = conn.execute(
         f"""
@@ -589,9 +717,17 @@ def load_mapped_reimbursement_evidence(conn: Any, source_ids: list[str]) -> dict
         FROM map_company_reimbursement_code m
         JOIN dim_reimbursement_code c
           ON c.reimbursement_code_id = m.reimbursement_code_id
+         AND (
+                NULLIF(c.effective_date, '') IS NULL
+                OR SUBSTR(c.effective_date, 1, 10) <= ?
+             )
+         AND (
+                NULLIF(c.termination_date, '') IS NULL
+                OR SUBSTR(c.termination_date, 1, 10) >= ?
+             )
         WHERE m.source_id IN ({source_placeholders})
         """,
-        source_ids,
+        [asof, asof, *source_ids],
     ).fetchall()
     code_ids = sorted({int(row["reimbursement_code_id"]) for row in code_rows})
     rate_counts: dict[int, int] = {}
@@ -603,9 +739,13 @@ def load_mapped_reimbursement_evidence(conn: Any, source_ids: list[str]) -> dict
             FROM fact_reimbursement_rate
             WHERE source_id IN ({source_placeholders})
               AND reimbursement_code_id IN ({code_placeholders})
+              AND (
+                    NULLIF(effective_date, '') IS NULL
+                    OR SUBSTR(effective_date, 1, 10) <= ?
+                  )
             GROUP BY reimbursement_code_id
             """,
-            [*source_ids, *code_ids],
+            [*source_ids, *code_ids, asof],
         ).fetchall()
         rate_counts = {int(row["reimbursement_code_id"]): int(row["n"] or 0) for row in rate_rows}
     by_company: dict[int, dict[str, Any]] = {}
@@ -913,15 +1053,15 @@ def build_rows(
     classifications: dict[str, ReimbursementClassification] | None = None,
     zip_mac_rules: list[ZipMacRule] | None = None,
 ) -> list[ReimbursementFeatureRow]:
-    policy_count, global_code_count, global_rate_count = source_row_counts(conn, policy.source_ids)
-    policy_rows = load_policy_search_rows(conn, policy.source_ids)
-    mapped_evidence = load_mapped_reimbursement_evidence(conn, policy.source_ids)
+    policy_count, global_code_count, global_rate_count = source_row_counts(conn, policy.source_ids, asof=asof)
+    policy_rows = load_policy_search_rows(conn, policy.source_ids, asof=asof)
+    mapped_evidence = load_mapped_reimbursement_evidence(conn, policy.source_ids, asof=asof)
     use_mapped_evidence = bool(mapped_evidence)
     classifications = classifications or {}
     zip_mac_rules = zip_mac_rules or []
     rows: list[ReimbursementFeatureRow] = []
     for company in companies:
-        product_codes = mapped_product_codes(conn, company.company_id)
+        product_codes = mapped_product_codes(conn, company.company_id, asof=asof)
         if company.company_id in mapped_evidence:
             evidence = mapped_evidence.get(
                 company.company_id,
@@ -934,7 +1074,7 @@ def build_rows(
             matched_rate_count = evidence.rate_row_count
         elif not use_mapped_evidence or policy.use_fallback_policy_scan_when_unmapped:
             evidence_count, mention_count, matched_codes, matched_policy_ids = policy_evidence(policy_rows, company, product_codes)
-            matched_rate_count = rate_count_for_codes(conn, policy.source_ids, matched_codes)
+            matched_rate_count = rate_count_for_codes(conn, policy.source_ids, matched_codes, asof=asof)
         else:
             evidence_count = 0
             mention_count = 0
@@ -987,6 +1127,7 @@ def build_rows(
             codes=matched_codes,
             billing_zip=policy.billing_zip,
             zip_mac_rules=zip_mac_rules,
+            asof=asof,
         )
         if regional_rate.get("regional_mac_name"):
             row.regional_mac_name = str(regional_rate.get("regional_mac_name") or "")
@@ -1206,10 +1347,8 @@ def main() -> None:
         )
     )
     policy = reimbursement_policy(config, billing_zip_override=args.billing_zip)
+    include_missing_pit_metadata = allow_missing_static_pit_metadata(config)
     classification_raw = str(cfg_get(config, "reimbursement_features.company_classification_csv", "") or "").strip()
-    classifications = load_company_classifications(
-        resolve_path(classification_raw, base_dir=base_dir) if classification_raw else None
-    )
     zip_mac_rules = load_zip_mac_rules(resolve_path(policy.zip_mac_csv, base_dir=base_dir) if policy.zip_mac_csv else None)
     ticker_filter = {normalize_ticker(value) for value in str(args.tickers or "").split(",") if normalize_ticker(value)}
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
@@ -1218,6 +1357,11 @@ def main() -> None:
         if parsed_asof is None:
             raise ValueError(f"Invalid as-of date: {args.asof}")
         asof = parsed_asof.isoformat()
+        classifications = load_company_classifications(
+            resolve_path(classification_raw, base_dir=base_dir) if classification_raw else None,
+            asof=asof,
+            include_missing_pit_metadata=include_missing_pit_metadata,
+        )
         companies = load_companies(
             conn,
             asof=asof,
@@ -1236,6 +1380,7 @@ def main() -> None:
                 .strip()
                 .lower()
                 in {"1", "true", "yes", "y", "on"},
+                asof=asof,
             )
             rows = build_rows(
                 conn,

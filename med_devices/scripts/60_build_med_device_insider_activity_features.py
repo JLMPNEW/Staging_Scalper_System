@@ -80,6 +80,52 @@ def parse_date(raw: str) -> date | None:
         return None
 
 
+def parse_payload_date(raw: object) -> date | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    parsed = parse_date(text[:10])
+    if parsed is not None:
+        return parsed
+    if len(text) >= 8 and text[:8].isdigit():
+        try:
+            return datetime.strptime(text[:8], "%Y%m%d").date()
+        except ValueError:
+            return None
+    return None
+
+
+def safe_json_loads(raw: object) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(raw or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def form4_availability_date(tx: dict[str, Any], *, fallback_lag_days: int) -> date | None:
+    transaction_date = parse_payload_date(tx.get("transaction_date"))
+    payload = safe_json_loads(tx.get("payload_json"))
+    filing_date = None
+    for key in (
+        "filing_date",
+        "filingDate",
+        "filed_date",
+        "accepted_at",
+        "acceptedAt",
+        "acceptance_datetime",
+        "ACCEPTANCE_DATETIME",
+    ):
+        filing_date = parse_payload_date(payload.get(key))
+        if filing_date is not None:
+            break
+    if transaction_date is None:
+        return filing_date
+    if filing_date is None:
+        filing_date = transaction_date + timedelta(days=max(0, fallback_lag_days))
+    return max(transaction_date, filing_date)
+
+
 def load_companies(conn: Any) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -98,10 +144,11 @@ def load_companies(conn: Any) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def load_transactions(conn: Any, *, asof: str, lookback_days: int) -> dict[int, list[dict[str, Any]]]:
+def load_transactions(conn: Any, *, asof: str, lookback_days: int, config: dict[str, Any]) -> dict[int, list[dict[str, Any]]]:
     if not conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='fact_sec_form4_transaction'").fetchone():
         return {}
     asof_date = parse_date(asof) or datetime.now(timezone.utc).date()
+    fallback_lag_days = int(cfg_get(config, "insider_activity_features.filing_lag_days", 2))
     start = (asof_date - timedelta(days=lookback_days)).isoformat()
     rows = conn.execute(
         """
@@ -116,7 +163,11 @@ def load_transactions(conn: Any, *, asof: str, lookback_days: int) -> dict[int, 
     ).fetchall()
     out: dict[int, list[dict[str, Any]]] = {}
     for row in rows:
-        out.setdefault(int(row["company_id"]), []).append(dict(row))
+        item = dict(row)
+        available_date = form4_availability_date(item, fallback_lag_days=fallback_lag_days)
+        if available_date is None or available_date > asof_date:
+            continue
+        out.setdefault(int(row["company_id"]), []).append(item)
     return out
 
 
@@ -183,7 +234,7 @@ def score_company(company: dict[str, Any], txs: list[dict[str, Any]], *, asof: s
 
 def build_rows(conn: Any, *, asof: str, config: dict[str, Any]) -> list[dict[str, Any]]:
     lookback_days = int(cfg_get(config, "insider_activity_features.lookback_days", 90))
-    tx_by_company = load_transactions(conn, asof=asof, lookback_days=lookback_days)
+    tx_by_company = load_transactions(conn, asof=asof, lookback_days=lookback_days, config=config)
     return [
         score_company(company, tx_by_company.get(int(company["company_id"]), []), asof=asof, config=config)
         for company in load_companies(conn)

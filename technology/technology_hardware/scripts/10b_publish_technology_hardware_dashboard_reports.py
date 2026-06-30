@@ -23,6 +23,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
+from technology.core.oos_provenance import apply_oos_fields, build_oos_provenance  # noqa: E402
+from technology.core.portfolio_candidate_fields import add_portfolio_candidate_fields  # noqa: E402
 from technology.technology_hardware.optuna_calibration import write_csv  # noqa: E402
 
 
@@ -167,9 +169,39 @@ def load_latest_score_rows(
                c.subsector,
                c.country,
                c.currency,
+               (SELECT m.membership_status
+                  FROM dim_universe_membership m
+                 WHERE m.ticker = o.ticker
+                   AND m.model_family = o.model_family
+                   AND m.start_date <= o.asof_date
+                   AND (m.end_date IS NULL OR m.end_date >= o.asof_date)
+                 ORDER BY m.point_in_time_flag DESC, m.is_current_member DESC, m.start_date DESC
+                 LIMIT 1) AS universe_status,
+               (SELECT m.membership_source_id
+                  FROM dim_universe_membership m
+                 WHERE m.ticker = o.ticker
+                   AND m.model_family = o.model_family
+                   AND m.start_date <= o.asof_date
+                   AND (m.end_date IS NULL OR m.end_date >= o.asof_date)
+                 ORDER BY m.point_in_time_flag DESC, m.is_current_member DESC, m.start_date DESC
+                 LIMIT 1) AS historical_universe_source,
+               (SELECT m.end_date
+                  FROM dim_universe_membership m
+                 WHERE m.ticker = o.ticker
+                   AND m.model_family = o.model_family
+                   AND m.start_date <= o.asof_date
+                   AND (m.end_date IS NULL OR m.end_date >= o.asof_date)
+                 ORDER BY m.point_in_time_flag DESC, m.is_current_member DESC, m.start_date DESC
+                 LIMIT 1) AS terminal_date,
+               (SELECT MIN(p.bar_date) FROM fact_price_ohlcv p WHERE p.ticker = o.ticker) AS price_start_date,
+               (SELECT MAX(p.bar_date) FROM fact_price_ohlcv p WHERE p.ticker = o.ticker) AS price_end_date,
+               (SELECT MAX(p.bar_date) FROM fact_price_ohlcv p WHERE p.ticker = o.ticker AND p.bar_date <= o.asof_date) AS latest_price_date,
                i.calibration_cohort_id,
                i.calibration_cohort,
                i.scoring_contract_version,
+               i.market_feature_asof_date,
+               i.financial_feature_asof_date,
+               i.positioning_feature_asof_date,
                i.latest_price,
                i.market_cap,
                i.revenue_yoy_growth,
@@ -266,6 +298,16 @@ def rank_table(rows: list[dict[str, Any]], components: dict[str, dict[str, dict[
             "subsector": row.get("subsector"),
             "country": row.get("country"),
             "currency": row.get("currency"),
+            "universe_status": row.get("universe_status"),
+            "historical_universe_source": row.get("historical_universe_source"),
+            "price_start_date": row.get("price_start_date"),
+            "price_end_date": row.get("price_end_date"),
+            "terminal_date": row.get("terminal_date"),
+            "historical_price_ticker": ticker,
+            "latest_price_date": row.get("latest_price_date"),
+            "market_feature_asof_date": row.get("market_feature_asof_date"),
+            "financial_feature_asof_date": row.get("financial_feature_asof_date"),
+            "positioning_feature_asof_date": row.get("positioning_feature_asof_date"),
             "final_rank": row.get("final_rank"),
             "final_percentile": row.get("final_percentile"),
             "final_score": row.get("final_score"),
@@ -331,7 +373,8 @@ def scorecards(rank_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "operating_margin", "fcf_margin", "inventory_days", "fcf_yield", "ev_gross_profit",
         "ret_12m_ex_1m", "rel_strength_bench_3m", "quality_score", "valuation_score",
         "growth_score", "market_behavior_score", "positioning_score", "risk_control_score",
-        "data_quality_confidence", "latest_sec_filing_date", "latest_sec_url",
+        "data_quality_confidence", "calibration_usage", "calibration_input_valid_flag",
+        "oos_score_valid_flag", "oos_invalid_reason", "latest_sec_filing_date", "latest_sec_url",
     ]
     return [{field: row.get(field, "") for field in fields} for row in rank_rows]
 
@@ -401,6 +444,10 @@ def risk_flags(rows: list[dict[str, Any]], *, current_asof: str) -> list[dict[st
                 "asof_date": row.get("asof_date"),
                 "calibration_cohort_id": row.get("calibration_cohort_id"),
                 "avg_dollar_volume_60d": row.get("avg_dollar_volume_60d"),
+                "calibration_usage": row.get("calibration_usage"),
+                "calibration_input_valid_flag": row.get("calibration_input_valid_flag"),
+                "oos_score_valid_flag": row.get("oos_score_valid_flag"),
+                "oos_invalid_reason": row.get("oos_invalid_reason"),
                 "severity": severity,
                 "flag": flag,
                 "detail": detail,
@@ -443,6 +490,10 @@ def review_queue(flags: list[dict[str, Any]], rows: list[dict[str, Any]]) -> lis
             "final_rank": by_ticker.get(str(flag["ticker"]), {}).get("final_rank", ""),
             "final_score": by_ticker.get(str(flag["ticker"]), {}).get("final_score", ""),
             "avg_dollar_volume_60d": by_ticker.get(str(flag["ticker"]), {}).get("avg_dollar_volume_60d", ""),
+            "calibration_usage": by_ticker.get(str(flag["ticker"]), {}).get("calibration_usage", ""),
+            "calibration_input_valid_flag": by_ticker.get(str(flag["ticker"]), {}).get("calibration_input_valid_flag", ""),
+            "oos_score_valid_flag": by_ticker.get(str(flag["ticker"]), {}).get("oos_score_valid_flag", ""),
+            "oos_invalid_reason": by_ticker.get(str(flag["ticker"]), {}).get("oos_invalid_reason", ""),
             "model_status": by_ticker.get(str(flag["ticker"]), {}).get("model_status", ""),
             "review_reason": by_ticker.get(str(flag["ticker"]), {}).get("review_reason", ""),
         }
@@ -580,16 +631,18 @@ def main() -> int:
         if not score_rows:
             raise RuntimeError("No technology-hardware production model output rows found for dashboard publishing.")
         asof = str(score_rows[0]["asof_date"])
+        oos_provenance = build_oos_provenance(config, model_family=model_family, asof=asof, historical_mode=bool(args.historical_mode))
         detail_components = component_rows(conn, source_id=production_source, model_family=model_family, asof=asof)
         components = component_pivot(detail_components)
         filings = latest_filings(conn, filing_source, asof=asof)
 
-    ranks = rank_table(score_rows, components, filings)
+    score_rows_with_oos = apply_oos_fields(score_rows, oos_provenance)
+    ranks = add_portfolio_candidate_fields(apply_oos_fields(rank_table(score_rows, components, filings), oos_provenance))
     cards = scorecards(ranks)
     cohorts = cohort_summary(score_rows)
     component_summaries = component_summary(detail_components)
-    flags = risk_flags(score_rows, current_asof=asof)
-    queue = review_queue(flags, score_rows)
+    flags = risk_flags(score_rows_with_oos, current_asof=asof)
+    queue = review_queue(flags, ranks)
     if args.historical_mode:
         backtest_rows = []
         backtest_top = []
@@ -667,6 +720,7 @@ def main() -> int:
         "outputs": {key: str(path) for key, path in outputs.items() if key != "manifest"},
         "snapshot_dir": str(snapshot_dir),
         "snapshot_outputs": snapshot_map,
+        **oos_provenance.manifest_fields,
     }
     outputs["manifest"].write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     manifest_copy = snapshot_dir / outputs["manifest"].name

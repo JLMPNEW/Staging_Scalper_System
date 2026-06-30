@@ -550,8 +550,18 @@ def historical_restatement_steps(
     market_args: tuple[str, ...] = ("--offline-existing-bars", "--allow-partial")
     if str(market_start_asof or "").strip():
         market_args = (*market_args, "--start-date", str(market_start_asof).strip())
+    norgate_args = (
+        "--offline-existing-bars",
+        "--allow-partial",
+        "--source",
+        "norgate_us_equities_total_return",
+    )
+    if str(market_start_asof or "").strip():
+        norgate_args = (*norgate_args, "--start-date", str(market_start_asof).strip())
     return [
+        Step("historical_scoring_universe", "57_build_historical_scoring_universe.py"),
         Step("yahoo_market_adjusted", "17_sync_market_data_yahoo_adjusted.py", market_args),
+        Step("norgate_market_features", "17_sync_market_data_yahoo_adjusted.py", norgate_args),
         Step("market_positioning_export", "25_update_market_positioning.py", ("--skip-download",)),
         Step("forward_catalyst_calendar", "09_build_forward_catalyst_calendar.py"),
         Step("financial_survival", "16_build_financial_survival_features.py"),
@@ -1938,7 +1948,7 @@ def main() -> None:
         elif form4_preflight_needed and not form4_refresh_enabled:
             LOGGER.warning("Form 4 refresh skipped because biotech_refresh.form4_refresh.enabled=false.")
 
-        if form4_preflight_needed and form4_preflight_enabled and not args.skip_form4_preflight:
+        if form4_preflight_needed and form4_preflight_enabled and not args.skip_form4_preflight and not args.history_restatement:
             preflight_start = time.monotonic()
             timing_rows.append(
                 {
@@ -1982,6 +1992,10 @@ def main() -> None:
                 write_timing_csv(timing_csv, timing_rows)
                 raise SystemExit(1)
             write_timing_csv(timing_csv, timing_rows)
+        elif form4_preflight_needed and args.history_restatement:
+            LOGGER.info(
+                "Form 4 preflight skipped for historical restatement; downstream layers filter by filing/transaction date."
+            )
         elif form4_preflight_needed and args.skip_form4_preflight:
             LOGGER.warning("Form 4 preflight skipped via --skip-form4-preflight.")
         elif form4_preflight_needed and not form4_preflight_enabled:
@@ -2015,7 +2029,10 @@ def main() -> None:
                 )
                 write_timing_csv(timing_csv, timing_rows)
                 if timing_rows[-1]["status"] != "success":
-                    step_returncode = int(timing_rows[-1]["returncode"])
+                    try:
+                        step_returncode = int(timing_rows[-1].get("returncode") or 1)
+                    except (TypeError, ValueError):
+                        step_returncode = 1
                     raise SystemExit(step_returncode if step_returncode > 0 else 1)
         if not args.skip_analyze:
             timing_rows.append(analyze_db(db_path, run_started_at=run_started_at, mode=effective_mode))

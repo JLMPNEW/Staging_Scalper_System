@@ -116,6 +116,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", type=str, default="", help="Optional YYYY-MM-DD upper bound for SEC filing_date. Defaults to UTC today.")
     parser.add_argument("--max-companies", type=int, default=0, help="Limit companies for smoke tests. 0 means all.")
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
+    parser.add_argument("--universe-csv", type=Path, default=None, help="Override final scoring universe CSV. Used for calibration-only SEC backfills.")
+    parser.add_argument("--output-csv", type=Path, default=None, help="Override SEC filing sync output CSV.")
+    parser.add_argument("--lookback-days", type=int, default=0, help="Override sec_filings.lookback_days.")
+    parser.add_argument(
+        "--include-delisted-calibration",
+        action="store_true",
+        help="Allow inactive companies with universe_status=delisted_calibration when the supplied universe CSV names them.",
+    )
     parser.add_argument("--skip-text", action="store_true", help="Only sync filing metadata; do not fetch filing text.")
     parser.add_argument("--allow-partial", action="store_true", help="Return success even if company or filing-text fetches fail.")
     return parser.parse_args()
@@ -192,11 +200,15 @@ def load_companies(
     scoring_tickers: set[str],
     ticker_filter: set[str],
     max_companies: int,
+    include_delisted_calibration: bool = False,
 ) -> list[Company]:
-    sql = """
+    status_clause = "is_active = 1"
+    if include_delisted_calibration:
+        status_clause = "(is_active = 1 OR universe_status = 'delisted_calibration')"
+    sql = f"""
         SELECT company_id, ticker, company_name, cik
         FROM companies
-        WHERE is_active = 1
+        WHERE {status_clause}
         ORDER BY ticker
     """
     rows = conn.execute(sql).fetchall()
@@ -647,8 +659,16 @@ def main() -> None:
     base_dir = config_path.parent
 
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    universe_csv = resolve_path(cfg_get(config, "sec_filings.final_scoring_universe_csv"), base_dir=base_dir)
-    output_csv = resolve_path(cfg_get(config, "sec_filings.output_csv"), base_dir=base_dir)
+    universe_csv = (
+        args.universe_csv.expanduser().resolve()
+        if args.universe_csv
+        else resolve_path(cfg_get(config, "sec_filings.final_scoring_universe_csv"), base_dir=base_dir)
+    )
+    output_csv = (
+        args.output_csv.expanduser().resolve()
+        if args.output_csv
+        else resolve_path(cfg_get(config, "sec_filings.output_csv"), base_dir=base_dir)
+    )
     cache_dir = resolve_path(cfg_get(config, "sec_filings.cache_dir", "../output/biotech_index_cache"), base_dir=base_dir)
     submissions_template = str(cfg_get(config, "sec_filings.submissions_url_template", "https://data.sec.gov/submissions/CIK{cik}.json"))
     archives_base_url = str(cfg_get(config, "sec_filings.archives_base_url", "https://www.sec.gov/Archives/edgar/data"))
@@ -658,7 +678,7 @@ def main() -> None:
     allowed_forms = {str(x).strip().upper() for x in normalize_string_list(cfg_get(config, "sec_filings.forms"), []) if str(x).strip()}
     if not allowed_forms:
         raise ValueError("sec_filings.forms must contain at least one SEC form.")
-    lookback_days = int(cfg_get(config, "sec_filings.lookback_days", 730))
+    lookback_days = int(args.lookback_days) if int(args.lookback_days) > 0 else int(cfg_get(config, "sec_filings.lookback_days", 730))
     asof = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
     if asof is None:
         raise ValueError("--asof must be a valid YYYY-MM-DD date.")
@@ -678,6 +698,7 @@ def main() -> None:
             scoring_tickers=scoring_tickers,
             ticker_filter=ticker_filter,
             max_companies=int(args.max_companies),
+            include_delisted_calibration=bool(args.include_delisted_calibration),
         )
         subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_companies))
         output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
