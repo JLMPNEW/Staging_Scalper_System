@@ -48,7 +48,6 @@ from biotech_index.core.pipeline_guards import (  # noqa: E402
     validate_layer_freshness,
 )
 from biotech_index.core.report_inputs import (  # noqa: E402
-    compact_asof,
     dated_output_dir,
     resolve_dated_report_input_csv,
 )
@@ -326,6 +325,63 @@ def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     if not math.isfinite(value):
         return low
     return max(low, min(high, value))
+
+
+def linear_score(value: float, points: list[tuple[float, float]]) -> float:
+    ordered = sorted(points)
+    if value <= ordered[0][0]:
+        return clamp(ordered[0][1])
+    if value >= ordered[-1][0]:
+        return clamp(ordered[-1][1])
+    for (left_x, left_y), (right_x, right_y) in zip(ordered, ordered[1:]):
+        if left_x <= value <= right_x:
+            span = max(1e-12, right_x - left_x)
+            return clamp(left_y + (right_y - left_y) * (value - left_x) / span)
+    return clamp(ordered[-1][1])
+
+
+def source_date_after_asof(raw: object, asof_date: object) -> bool:
+    parsed = parse_date(raw)
+    asof = parse_date(asof_date)
+    return parsed is not None and asof is not None and parsed > asof
+
+
+def sanitize_short_interest_for_pit(short_interest: dict[str, Any], *, asof_date: object) -> dict[str, Any]:
+    """Remove float-share-derived short-interest components with future source dates."""
+    if not isinstance(short_interest, dict) or not short_interest:
+        return {}
+    out = dict(short_interest)
+    if not (
+        source_date_after_asof(out.get("float_shares_source_asof_date"), asof_date)
+        or source_date_after_asof(out.get("float_shares_asof_date"), asof_date)
+    ):
+        return out
+
+    days_to_cover = to_float(out.get("days_to_cover"), 0.0)
+    cover_score = linear_score(days_to_cover, [(0.0, 0.0), (2.0, 25.0), (5.0, 60.0), (10.0, 100.0)])
+    cover_available = days_to_cover > 0.0
+    out.update(
+        {
+            "float_shares": 0.0,
+            "short_interest_pct_float": 0.0,
+            "float_shares_source": "",
+            "float_shares_asof_date": "",
+            "float_shares_source_asof_date": "",
+            "float_shares_staleness_days": "",
+            "float_shares_measurement_staleness_days": "",
+            "float_shares_proxy_flag": 0.0,
+            "public_float_usd": 0.0,
+            "public_float_price_date": "",
+            "public_float_close_price": 0.0,
+            "short_interest_pct_float_available_flag": 0.0,
+            "short_interest_pct_score": 0.0,
+            "short_interest_days_to_cover_score": round(clamp(cover_score), 4),
+            "short_interest_signal_basis": "days_to_cover_only" if cover_available else "no_usable_short_interest_components",
+            "short_interest_signal_max_possible_score": 25.0 if cover_available else 0.0,
+            "short_interest_signal_score": round(clamp(0.25 * cover_score), 4) if cover_available else 0.0,
+        }
+    )
+    return out
 
 
 def as_bool(raw: object, default: bool = False) -> bool:
@@ -1941,6 +1997,7 @@ def score_rows(
         )
         if not isinstance(short_interest, dict):
             short_interest = {}
+        short_interest = sanitize_short_interest_for_pit(short_interest, asof_date=row.get("asof_date"))
         borrow_availability = (
             shadow_signals.get("borrow_availability", {})
             if isinstance(shadow_signals, dict)

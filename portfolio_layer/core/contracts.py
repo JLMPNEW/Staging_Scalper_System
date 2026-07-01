@@ -34,6 +34,11 @@ COLLECTED_FIELDS = [
     "native_score",          # the sector's own headline score (0-100 composite)
     "investable_eligible",   # 0/1 hard gate carried from the sector's native gate
     "eligibility_reason",
+    "calibration_research_eligible",  # 0/1 empirical score-to-return calibration universe
+    "calibration_research_reason",
+    "calibration_sample_role",  # source/intrinsic role: strict_oos | pre_lock_research | excluded
+    "stage1_sample_role",  # portfolio-layer verdict after adapter guardrails
+    "oos_score_valid_flag",  # 0/1 source score was frozen/live-valid for OOS use
     "score_confidence",      # 0-1
     "source_asof_date",      # the sector file's own date
 ]
@@ -52,6 +57,11 @@ CONTRACT_FIELDS = [
     "score_confidence",
     "investable_eligible",
     "eligibility_reason",
+    "calibration_research_eligible",
+    "calibration_research_reason",
+    "calibration_sample_role",
+    "stage1_sample_role",
+    "oos_score_valid_flag",
     "native_score",
     "source_asof_date",
     "staleness_days",
@@ -79,6 +89,11 @@ class CanonicalScore:
     native_score: float
     investable_eligible: int
     eligibility_reason: str
+    calibration_research_eligible: int
+    calibration_research_reason: str
+    calibration_sample_role: str
+    stage1_sample_role: str
+    oos_score_valid_flag: int
     score_confidence: float
     source_asof_date: str
 
@@ -243,6 +258,11 @@ CREATE TABLE IF NOT EXISTS stocks_scores (
     score_confidence REAL,
     investable_eligible INTEGER NOT NULL DEFAULT 0,
     eligibility_reason TEXT,
+    calibration_research_eligible INTEGER NOT NULL DEFAULT 0,
+    calibration_research_reason TEXT,
+    calibration_sample_role TEXT NOT NULL DEFAULT 'excluded',
+    stage1_sample_role TEXT NOT NULL DEFAULT 'excluded',
+    oos_score_valid_flag INTEGER NOT NULL DEFAULT 0,
     native_score REAL,
     source_asof_date TEXT,
     staleness_days INTEGER,
@@ -256,6 +276,7 @@ CREATE TABLE IF NOT EXISTS stocks_scores (
 def init_contract_tables(conn: sqlite3.Connection) -> None:
     with conn:
         conn.executescript(STOCKS_SCORES_DDL)
+        _ensure_stocks_scores_columns(conn)
         if _stocks_scores_pk_columns(conn) == ["run_as_of_date", "ticker"]:
             conn.execute("DROP INDEX IF EXISTS ux_stocks_scores_run_ticker")
         else:
@@ -278,6 +299,21 @@ def _stocks_scores_pk_columns(conn: sqlite3.Connection) -> list[str]:
     return [name for _, name in sorted(pk_cols)]
 
 
+def _ensure_stocks_scores_columns(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("PRAGMA table_info(stocks_scores)").fetchall()
+    existing = {str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) for row in rows}
+    if "calibration_research_eligible" not in existing:
+        conn.execute("ALTER TABLE stocks_scores ADD COLUMN calibration_research_eligible INTEGER NOT NULL DEFAULT 0")
+    if "calibration_research_reason" not in existing:
+        conn.execute("ALTER TABLE stocks_scores ADD COLUMN calibration_research_reason TEXT")
+    if "calibration_sample_role" not in existing:
+        conn.execute("ALTER TABLE stocks_scores ADD COLUMN calibration_sample_role TEXT NOT NULL DEFAULT 'excluded'")
+    if "stage1_sample_role" not in existing:
+        conn.execute("ALTER TABLE stocks_scores ADD COLUMN stage1_sample_role TEXT NOT NULL DEFAULT 'excluded'")
+    if "oos_score_valid_flag" not in existing:
+        conn.execute("ALTER TABLE stocks_scores ADD COLUMN oos_score_valid_flag INTEGER NOT NULL DEFAULT 0")
+
+
 def upsert_stocks_scores(conn: sqlite3.Connection, run_as_of: str, rows: Sequence[dict[str, Any]]) -> int:
     init_contract_tables(conn)
     now = utc_now()
@@ -287,6 +323,9 @@ def upsert_stocks_scores(conn: sqlite3.Connection, run_as_of: str, rows: Sequenc
             r["industry_aggregate"], _f(r.get("final_score")), r.get("rating"),
             _f(r.get("within_sector_percentile")), _f(r.get("score_confidence")),
             int(r.get("investable_eligible") or 0), r.get("eligibility_reason"), _f(r.get("native_score")),
+            int(r.get("calibration_research_eligible") or 0), r.get("calibration_research_reason"),
+            r.get("calibration_sample_role") or "excluded", r.get("stage1_sample_role") or "excluded",
+            int(r.get("oos_score_valid_flag") or 0),
             r.get("source_asof_date"), _i(r.get("staleness_days")), r.get("score_version"), now,
         )
         for r in rows
@@ -298,8 +337,10 @@ def upsert_stocks_scores(conn: sqlite3.Connection, run_as_of: str, rows: Sequenc
             INSERT INTO stocks_scores(
                 run_as_of_date, ticker, source_pipeline, as_of_date, sector, industry, industry_aggregate,
                 final_score, rating, within_sector_percentile, score_confidence, investable_eligible,
-                eligibility_reason, native_score, source_asof_date, staleness_days, score_version, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                eligibility_reason, native_score, calibration_research_eligible, calibration_research_reason,
+                calibration_sample_role, stage1_sample_role, oos_score_valid_flag, source_asof_date, staleness_days,
+                score_version, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             payload,
         )

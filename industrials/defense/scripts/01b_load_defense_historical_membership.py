@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.csv_utils import load_yaml_map, read_csv_flexible, row_get  # noqa: E402
 from industrials.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from industrials.core.listing_dates import ListingWindow, bound_membership_window, listing_window_for_ticker, load_listing_windows  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
 from industrials.core.text_norm import as_bool, normalize_cik, normalize_ticker  # noqa: E402
@@ -28,6 +30,18 @@ RUN_TYPE = "load_defense_historical_membership"
 LOAD_STAGE = "defense_historical_membership_load"
 
 
+@dataclass(frozen=True)
+class CikOverride:
+    ticker: str
+    cik: str
+    company_name: str
+    override_type: str
+    applies_to: str
+    source: str
+    reason: str
+    notes: str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Load defense historical and delisted calibration membership.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -35,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--membership-csv", type=Path, default=None)
     parser.add_argument("--delisted-csv", type=Path, default=None)
     parser.add_argument("--active-csv", type=Path, default=None)
+    parser.add_argument("--listing-dates-csv", type=Path, default=None)
     parser.add_argument("--skip-source-registry", action="store_true")
     return parser.parse_args()
 
@@ -91,6 +106,47 @@ def load_active_rows(path: Path) -> dict[str, dict[str, str]]:
         if ticker:
             out[ticker] = row
     return out
+
+
+def load_cik_overrides(path: Path) -> dict[str, CikOverride]:
+    if not path.exists():
+        return {}
+    overrides: dict[str, CikOverride] = {}
+    for row in read_csv_flexible(path):
+        ticker = normalize_ticker(row_get(row, "ticker"))
+        cik = normalize_cik(row_get(row, "cik"))
+        if not ticker and not cik:
+            continue
+        if not ticker:
+            raise ValueError(f"{path}: CIK override row missing ticker")
+        if not cik:
+            raise ValueError(f"{path}: CIK override for {ticker} missing valid cik")
+        if ticker in overrides:
+            raise ValueError(f"{path}: duplicate CIK override ticker={ticker}")
+        overrides[ticker] = CikOverride(
+            ticker=ticker,
+            cik=cik,
+            company_name=row_get(row, "company_name"),
+            override_type=row_get(row, "override_type") or "corrected_sec_cik",
+            applies_to=(row_get(row, "applies_to") or "both").lower(),
+            source=row_get(row, "source"),
+            reason=row_get(row, "reason"),
+            notes=row_get(row, "notes"),
+        )
+    return overrides
+
+
+def cik_for_ticker(
+    raw_cik: object,
+    *tickers: str,
+    overrides: dict[str, CikOverride],
+    scope: str,
+) -> str:
+    for ticker in tickers:
+        override = overrides.get(normalize_ticker(ticker))
+        if override is not None and override.applies_to in {scope, "both"}:
+            return override.cik
+    return normalize_cik(raw_cik)
 
 
 def csv_ticker_set(path: Path, *ticker_fields: str) -> set[str]:
@@ -238,6 +294,15 @@ def upsert_historical_company(
             (company_id, source_ticker, source_id_or_none(conn, source_id), confidence, now, now),
         )
     if cik:
+        conn.execute(
+            """
+            DELETE FROM dim_identifier
+            WHERE company_id = ?
+              AND identifier_type = 'CIK'
+              AND identifier_value <> ?
+            """,
+            (company_id, cik),
+        )
         conn.execute(
             """
             INSERT INTO dim_identifier(
@@ -520,6 +585,8 @@ def load_delisted_seed(
     cohort_names: dict[str, str],
     default_start_date: str,
     active_rows: dict[str, dict[str, str]],
+    cik_overrides: dict[str, CikOverride],
+    listing_windows: dict[str, ListingWindow],
 ) -> int:
     rows = read_csv_flexible(path)
     tickers: set[str] = set()
@@ -537,7 +604,7 @@ def load_delisted_seed(
         cohort_id = row_get(raw, "cohort", "calibration_cohort_id")
         if cohort_id not in cohort_names:
             raise ValueError(f"{ticker}: unknown delisted cohort {cohort_id!r}")
-        cik = normalize_cik(row_get(raw, "cik"))
+        raw_cik = row_get(raw, "cik")
         confidence_label = row_get(raw, "confidence")
         score = confidence_score(confidence_label)
         exit_year_text = row_get(raw, "exit_year")
@@ -556,10 +623,22 @@ def load_delisted_seed(
             conn,
             ticker=ticker,
             company_name=company_name,
-            cik=cik,
+            cik=normalize_cik(raw_cik),
             exit_year=exit_year,
             active_rows=active_rows,
         )
+        cik = cik_for_ticker(raw_cik, internal_ticker, ticker, overrides=cik_overrides, scope="delisted")
+        listing_window = listing_window_for_ticker(listing_windows, internal_ticker, ticker)
+        start_date, bounded_end_date, listing_confidence, listing_reason = bound_membership_window(
+            default_start_date=start_date,
+            default_end_date=end_date,
+            listing_window=listing_window,
+        )
+        end_date = bounded_end_date or end_date
+        if end_date < start_date:
+            raise ValueError(f"{ticker}: listing-date window has end_date {end_date} before start_date {start_date}")
+        score = min(score, listing_confidence) if listing_window is not None else score
+        reason = f"{reason}; {listing_reason}"
         incoming_internal_tickers.add(internal_ticker)
         records.append(
             {
@@ -689,6 +768,8 @@ def load_explicit_historical_membership(
     model_family: str,
     source_id: str,
     cohort_names: dict[str, str],
+    cik_overrides: dict[str, CikOverride],
+    listing_windows: dict[str, ListingWindow],
 ) -> int:
     rows = read_csv_flexible(path)
     records: list[dict[str, Any]] = []
@@ -705,15 +786,27 @@ def load_explicit_historical_membership(
         end_date = parse_date_text(row_get(raw, "membership_end_date", "end_date"), field="membership_end_date", ticker=ticker, allow_blank=True)
         if end_date and end_date < start_date:
             raise ValueError(f"{ticker}: membership_end_date {end_date} precedes membership_start_date {start_date}")
+        listing_window = listing_window_for_ticker(listing_windows, ticker)
+        start_date, bounded_end_date, listing_confidence, listing_reason = bound_membership_window(
+            default_start_date=start_date,
+            default_end_date=end_date or None,
+            listing_window=listing_window,
+        )
+        end_date = bounded_end_date or ""
+        if end_date and end_date < start_date:
+            raise ValueError(f"{ticker}: listing-date window has end_date {end_date} before start_date {start_date}")
         cohort_id = row_get(raw, "calibration_cohort_id", "cohort") or "historical_defense"
         cohort_name = cohort_names.get(cohort_id, "Historical defense membership")
-        cik = normalize_cik(row_get(raw, "cik"))
+        cik = cik_for_ticker(row_get(raw, "cik"), ticker, overrides=cik_overrides, scope="historical")
         confidence = confidence_score(row_get(raw, "confidence") or "medium")
+        if listing_window is not None:
+            confidence = min(confidence, listing_confidence)
         reason = "; ".join(
             part
             for part in (
                 row_get(raw, "source_membership"),
                 f"successor={row_get(raw, 'successor_ticker')}" if row_get(raw, "successor_ticker") else "",
+                listing_reason if listing_window is not None else "",
                 row_get(raw, "notes"),
             )
             if part
@@ -789,6 +882,8 @@ def main() -> int:
     membership_csv = args.membership_csv.expanduser().resolve() if args.membership_csv else resolve_path(cfg_get(config, "industrials_universe.historical_membership_csv"), base_dir=base_dir)
     delisted_csv = args.delisted_csv.expanduser().resolve() if args.delisted_csv else resolve_path(cfg_get(config, "industrials_universe.delisted_seed_csv"), base_dir=base_dir)
     active_csv = args.active_csv.expanduser().resolve() if args.active_csv else resolve_path(cfg_get(config, "industrials_universe.seed_csv"), base_dir=base_dir)
+    listing_dates_csv = args.listing_dates_csv.expanduser().resolve() if args.listing_dates_csv else resolve_path(cfg_get(config, "industrials_universe.listing_dates_csv"), base_dir=base_dir)
+    cik_overrides_csv = resolve_path(cfg_get(config, "industrials_universe.cik_ticker_overrides_csv"), base_dir=base_dir)
     cohort_path = resolve_path(cfg_get(config, "industrials_universe.cohort_path"), base_dir=base_dir)
     model_family = str(cfg_get(config, "industrials_universe.initial_subsector", "defense"))
     historical_source_id = str(cfg_get(config, "industrials_universe.historical_membership_source_id", "defense_historical_membership_seed"))
@@ -796,6 +891,8 @@ def main() -> int:
     default_start_date = str(cfg_get(config, "industrials_universe.delisted_default_start_date", "2000-01-01"))
     cohort_names = load_cohort_names(cohort_path, model_family=model_family)
     active_rows = load_active_rows(active_csv)
+    cik_overrides = load_cik_overrides(cik_overrides_csv)
+    listing_windows = load_listing_windows(listing_dates_csv)
     explicit_tickers = csv_ticker_set(membership_csv, "ticker")
     delisted_tickers = csv_ticker_set(delisted_csv, "ticker")
     overlap = sorted(explicit_tickers.intersection(delisted_tickers))
@@ -820,6 +917,8 @@ def main() -> int:
                     model_family=model_family,
                     source_id=historical_source_id,
                     cohort_names=cohort_names,
+                    cik_overrides=cik_overrides,
+                    listing_windows=listing_windows,
                 )
                 delisted_count = load_delisted_seed(
                     conn,
@@ -829,6 +928,8 @@ def main() -> int:
                     cohort_names=cohort_names,
                     default_start_date=default_start_date,
                     active_rows=active_rows,
+                    cik_overrides=cik_overrides,
+                    listing_windows=listing_windows,
                 )
             finish_run(
                 conn,

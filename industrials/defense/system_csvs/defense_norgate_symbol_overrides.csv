@@ -1,0 +1,7 @@
+ticker,norgate_symbol,source_database,override_start_date,override_end_date,mapping_reason,review_status,notes
+ATK,NOC,US Equities,,2015-02-09,reviewed_surviving_continuous_symbol,reviewed,"Alliant Techsystems merged with Orbital Sciences to form Orbital ATK, later absorbed by Northrop Grumman; local Norgate carries the continuous lineage under active NOC."
+HRS,LHX,US Equities,,2019-06-28,reviewed_surviving_continuous_symbol,reviewed,"Harris Corp merged with L3 Technologies to form L3Harris; local Norgate carries the continuous lineage under active LHX."
+I,INTEQ-202202,US Equities Delisted,,2022-02-23,reviewed_manual_mapping,reviewed,"Intelsat moved from NYSE ticker I to OTC ticker INTEQ before equity cancellation."
+LILM,LILMF,US Equities,,,reviewed_manual_mapping,reviewed,"Lilium moved from NASDAQ ticker LILM to active OTC ticker LILMF."
+LORL,TSAT,US Equities,,2021-11-18,reviewed_surviving_continuous_symbol,reviewed,"Loral Space and Communications merged into Telesat Corporation; local Norgate carries the continuous lineage under active TSAT."
+UTX,RTX,US Equities,,2020-04-02,reviewed_surviving_continuous_symbol,reviewed,"United Technologies merged with Raytheon to form Raytheon Technologies; local Norgate carries the continuous lineage under active RTX."

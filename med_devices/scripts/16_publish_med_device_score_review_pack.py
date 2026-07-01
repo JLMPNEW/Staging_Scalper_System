@@ -268,6 +268,13 @@ SCORE_FIELDS = [
     "top_negative_drivers",
 ]
 DAILY_COMPOSITE_EXTRA_FIELDS = [
+    "score_scale_min",
+    "score_scale_max",
+    "score_neutral_value",
+    "research_calibration_input_eligible_flag",
+    "research_calibration_status",
+    "research_calibration_reason",
+    "calibration_sample_role",
     "recovery_type",
     "equity_recovery",
     "drop_otc_tape",
@@ -285,7 +292,7 @@ DAILY_COMPOSITE_EXTRA_FIELDS = [
 ]
 assert "feature_data_asof_date" in set(SCORE_FIELDS), (
     "DAILY_COMPOSITE_FIELDS injection is anchored on 'feature_data_asof_date' in SCORE_FIELDS; "
-    "if that field is ever removed from SCORE_FIELDS the 14 extra composite fields will be silently dropped. "
+    "if that field is ever removed from SCORE_FIELDS the daily-only composite fields will be silently dropped. "
     "Update the injection loop below before removing it."
 )
 DAILY_COMPOSITE_FIELDS = []
@@ -293,6 +300,15 @@ for field in SCORE_FIELDS:
     DAILY_COMPOSITE_FIELDS.append(field)
     if field == "feature_data_asof_date":
         DAILY_COMPOSITE_FIELDS.extend(extra for extra in DAILY_COMPOSITE_EXTRA_FIELDS if extra not in SCORE_FIELDS)
+DAILY_COMPOSITE_FIELD_DEFAULTS: dict[str, Any] = {
+    "score_scale_min": 0.0,
+    "score_scale_max": 100.0,
+    "score_neutral_value": 50.0,
+    "research_calibration_input_eligible_flag": 0,
+    "research_calibration_status": "excluded",
+    "research_calibration_reason": "missing_research_calibration_metadata",
+    "calibration_sample_role": "excluded_from_research_calibration",
+}
 CALIBRATED_BASELINE_FIELDS = [
     "calibrated_baseline_status",
     "calibrated_baseline_reason",
@@ -583,7 +599,10 @@ def clean_row(row: dict[str, Any], *, fieldnames: list[str] | None = None) -> di
     item["top_positive_drivers"] = decode_driver_list(item.get("top_positive_drivers_json"))
     item["top_negative_drivers"] = decode_driver_list(item.get("top_negative_drivers_json"))
     output_fields = fieldnames if fieldnames is not None else SCORE_FIELDS
-    return {field: item.get(field, "") for field in output_fields}
+    return {
+        field: DAILY_COMPOSITE_FIELD_DEFAULTS.get(field, "") if item.get(field) in {None, ""} else item[field]
+        for field in output_fields
+    }
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:

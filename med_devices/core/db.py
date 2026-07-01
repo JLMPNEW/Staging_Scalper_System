@@ -1087,6 +1087,9 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     native_score_field TEXT DEFAULT '',
     native_score_value REAL DEFAULT 0.0,
     score_zero_is_missing_flag INTEGER DEFAULT 0,
+    score_scale_min REAL DEFAULT 0.0,
+    score_scale_max REAL DEFAULT 100.0,
+    score_neutral_value REAL DEFAULT 50.0,
     universe_status TEXT DEFAULT '',
     historical_universe_source TEXT DEFAULT '',
     price_start_date TEXT DEFAULT '',
@@ -1120,6 +1123,10 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     calibration_status TEXT DEFAULT 'production_eligible',
     calibration_status_reason TEXT DEFAULT '',
     calibration_eligible_flag INTEGER DEFAULT 1,
+    research_calibration_input_eligible_flag INTEGER DEFAULT 0,
+    research_calibration_status TEXT DEFAULT '',
+    research_calibration_reason TEXT DEFAULT '',
+    calibration_sample_role TEXT DEFAULT '',
     cohort_score_template_id TEXT DEFAULT '',
     cohort_score_template_spec TEXT DEFAULT '',
     cohort_score_template_tier1_role TEXT DEFAULT '',
@@ -1729,6 +1736,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             "native_score_field": "TEXT DEFAULT ''",
             "native_score_value": "REAL DEFAULT 0.0",
             "score_zero_is_missing_flag": "INTEGER DEFAULT 0",
+            "score_scale_min": "REAL DEFAULT 0.0",
+            "score_scale_max": "REAL DEFAULT 100.0",
+            "score_neutral_value": "REAL DEFAULT 50.0",
             "universe_status": "TEXT DEFAULT ''",
             "historical_universe_source": "TEXT DEFAULT ''",
             "price_start_date": "TEXT DEFAULT ''",
@@ -1766,6 +1776,10 @@ def init_db(conn: sqlite3.Connection) -> None:
             "calibration_status": "TEXT DEFAULT 'production_eligible'",
             "calibration_status_reason": "TEXT DEFAULT ''",
             "calibration_eligible_flag": "INTEGER DEFAULT 1",
+            "research_calibration_input_eligible_flag": "INTEGER DEFAULT 0",
+            "research_calibration_status": "TEXT DEFAULT ''",
+            "research_calibration_reason": "TEXT DEFAULT ''",
+            "calibration_sample_role": "TEXT DEFAULT ''",
             "cohort_score_template_id": "TEXT DEFAULT ''",
             "cohort_score_template_spec": "TEXT DEFAULT ''",
             "cohort_score_template_tier1_role": "TEXT DEFAULT ''",
@@ -2024,8 +2038,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     current_user_version_row = conn.execute("PRAGMA user_version").fetchone()
     current_user_version = int(current_user_version_row[0] if current_user_version_row is not None else 0)
-    if current_user_version < 2:
-        conn.execute("PRAGMA user_version = 2")
+    if current_user_version < 3:
+        conn.execute("PRAGMA user_version = 3")
     conn.commit()
 
 

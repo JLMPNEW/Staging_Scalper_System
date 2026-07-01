@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import re
 import sys
 from datetime import date
@@ -54,6 +55,13 @@ POST_MIGRATION_DAILY_COLUMNS = {
     "source_snapshot_asof_date",
     "price_data_asof_date",
     "feature_data_asof_date",
+    "score_scale_min",
+    "score_scale_max",
+    "score_neutral_value",
+    "research_calibration_input_eligible_flag",
+    "research_calibration_status",
+    "research_calibration_reason",
+    "calibration_sample_role",
     "recovery_type",
     "equity_recovery",
     "drop_otc_tape",
@@ -104,6 +112,17 @@ def parse_args() -> argparse.Namespace:
 
 def parse_date(raw: object) -> date | None:
     return parse_iso_date(raw)
+
+
+def parse_float(raw: object) -> float | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
 
 
 def read_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -222,6 +241,152 @@ def validate_daily_csv(
             "before that cutover, missing columns are diagnostic warnings for legacy snapshots."
         ),
     )
+    post_migration_severity = "CRITICAL" if enforce_post_migration else "WARNING"
+    research_fields = {
+        "score_scale_min",
+        "score_scale_max",
+        "score_neutral_value",
+        "research_calibration_input_eligible_flag",
+        "research_calibration_status",
+        "research_calibration_reason",
+        "calibration_sample_role",
+        "native_score_value",
+        "composite_score",
+    }
+    if not post_migration_missing and research_fields <= field_set:
+        invalid_scale_rows = sum(
+            1
+            for row in rows
+            if parse_float(row.get("score_scale_min")) != 0.0
+            or parse_float(row.get("score_scale_max")) != 100.0
+            or parse_float(row.get("score_neutral_value")) != 50.0
+        )
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="daily_research_score_scale_values",
+            severity=post_migration_severity,
+            passed=invalid_scale_rows == 0,
+            observed=invalid_scale_rows,
+            expected=0,
+            details="Research calibration score scale must be explicit 0..100 with neutral value 50.",
+        )
+        invalid_flag_rows = sum(
+            1
+            for row in rows
+            if str(row.get("research_calibration_input_eligible_flag") or "").strip() not in {"0", "1"}
+        )
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="daily_research_eligible_flag_values",
+            severity=post_migration_severity,
+            passed=invalid_flag_rows == 0,
+            observed=invalid_flag_rows,
+            expected=0,
+            details="Research calibration eligibility flag must be numeric 0 or 1.",
+        )
+        invalid_status_rows = sum(
+            1
+            for row in rows
+            if str(row.get("research_calibration_status") or "").strip() not in {"eligible", "excluded"}
+        )
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="daily_research_status_values",
+            severity=post_migration_severity,
+            passed=invalid_status_rows == 0,
+            observed=invalid_status_rows,
+            expected=0,
+            details="Research calibration status must be eligible or excluded.",
+        )
+        inconsistent_research_rows = 0
+        zero_score_eligible_rows = 0
+        missing_score_eligible_rows = 0
+        missing_exclusion_reason_rows = 0
+        wrong_eligible_reason_rows = 0
+        for row in rows:
+            flag = str(row.get("research_calibration_input_eligible_flag") or "").strip()
+            status = str(row.get("research_calibration_status") or "").strip()
+            role = str(row.get("calibration_sample_role") or "").strip()
+            reason = str(row.get("research_calibration_reason") or "").strip()
+            native_score = parse_float(row.get("native_score_value"))
+            composite_score = parse_float(row.get("composite_score"))
+            if flag == "1":
+                if status != "eligible" or role != "research_calibration_input":
+                    inconsistent_research_rows += 1
+                if reason != "valid_research_calibration_input":
+                    wrong_eligible_reason_rows += 1
+                if native_score is None or composite_score is None:
+                    missing_score_eligible_rows += 1
+                elif native_score <= 0.0 or composite_score <= 0.0:
+                    zero_score_eligible_rows += 1
+            elif flag == "0":
+                if status != "excluded" or role != "excluded_from_research_calibration":
+                    inconsistent_research_rows += 1
+                if not reason:
+                    missing_exclusion_reason_rows += 1
+            else:
+                inconsistent_research_rows += 1
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="daily_research_flag_status_role_consistency",
+            severity="CRITICAL",
+            passed=inconsistent_research_rows == 0,
+            observed=inconsistent_research_rows,
+            expected=0,
+            details="Research eligibility flag, status, and sample role must agree.",
+        )
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="daily_no_zero_score_research_inputs",
+            severity="CRITICAL",
+            passed=zero_score_eligible_rows == 0,
+            observed=zero_score_eligible_rows,
+            expected=0,
+            details="Rows with zero or negative native/composite score cannot be Stage 11 research inputs.",
+        )
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="daily_no_missing_score_research_inputs",
+            severity="CRITICAL",
+            passed=missing_score_eligible_rows == 0,
+            observed=missing_score_eligible_rows,
+            expected=0,
+            details="Rows with missing or non-finite native/composite score cannot be Stage 11 research inputs.",
+        )
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="daily_research_exclusions_have_reason",
+            severity=post_migration_severity,
+            passed=missing_exclusion_reason_rows == 0,
+            observed=missing_exclusion_reason_rows,
+            expected=0,
+            details="Excluded research calibration rows must publish an exclusion reason.",
+        )
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="daily_research_eligible_reason_value",
+            severity=post_migration_severity,
+            passed=wrong_eligible_reason_rows == 0,
+            observed=wrong_eligible_reason_rows,
+            expected=0,
+            details="Eligible research calibration rows must carry reason 'valid_research_calibration_input'.",
+        )
     wrong_asof = sum(1 for row in rows if str(row.get("asof_date") or "") != asof)
     add_check(
         checks,

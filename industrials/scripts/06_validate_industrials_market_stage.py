@@ -75,13 +75,47 @@ def parse_ticker_list(raw: object) -> list[str]:
     return out
 
 
+def parse_source_list(raw: object) -> list[str]:
+    values = raw if isinstance(raw, list) else str(raw or "").split(",")
+    out: list[str] = []
+    for value in values:
+        source = str(value or "").strip()
+        if source and source not in out:
+            out.append(source)
+    return out
+
+
+def source_priority_list(primary_source: str, fallback_sources: list[str]) -> list[str]:
+    out: list[str] = []
+    for source in [primary_source, *fallback_sources]:
+        text = str(source or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
 def read_expected_ticker_count(config: dict[str, Any], base_dir: Path, policy_path: Path | None) -> int:
     policy_path = policy_path or resolve_path(cfg_get(config, "industrials_universe.policy_path"), base_dir=base_dir)
     policy = load_yaml(policy_path)
     return int(policy.get("expected_ticker_count") or 0)
 
 
-def load_universe(conn: Any, model_family: str) -> list[str]:
+def load_universe(conn: Any, model_family: str, *, asof: date | None) -> list[str]:
+    if asof is not None:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT m.ticker
+            FROM dim_universe_membership m
+            JOIN dim_company c
+              ON c.company_id = m.company_id
+            WHERE m.model_family = ?
+              AND m.start_date <= ?
+              AND COALESCE(m.end_date, '9999-12-31') >= ?
+            ORDER BY m.ticker
+            """,
+            (model_family, asof.isoformat(), asof.isoformat()),
+        ).fetchall()
+        return [normalize_ticker(row["ticker"]) for row in rows if normalize_ticker(row["ticker"])]
     rows = conn.execute(
         """
         SELECT c.ticker
@@ -124,6 +158,8 @@ def validate() -> int:
     if not model_family:
         raise ValueError("model_family cannot be empty")
     source_id = str(cfg_get(config, "market_data_policy.scoring_primary_source", "yahoo_finance_adjusted") or "yahoo_finance_adjusted")
+    fallback_source_ids = parse_source_list(cfg_get(config, "market_data_policy.scoring_fallback_sources", []))
+    source_ids = source_priority_list(source_id, fallback_source_ids)
     benchmark_tickers = parse_ticker_list(args.benchmark_tickers) or parse_ticker_list(cfg_get(config, "industrials_universe.benchmark_tickers", []))
     policy_path = args.policy.expanduser().resolve() if args.policy else None
     expected_count = read_expected_ticker_count(config, base_dir, policy_path)
@@ -137,28 +173,29 @@ def validate() -> int:
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
-        source_status = value(conn, "SELECT status FROM source_registry WHERE source_id = ?", (source_id,))
-        if source_status != "active":
-            errors.append(f"Source {source_id} is not active in source_registry: {source_status!r}")
+        for check_source_id in source_ids:
+            source_status = value(conn, "SELECT status FROM source_registry WHERE source_id = ?", (check_source_id,))
+            if source_status != "active":
+                errors.append(f"Source {check_source_id} is not active in source_registry: {source_status!r}")
 
-        universe = load_universe(conn, model_family)
+        universe = load_universe(conn, model_family, asof=requested_asof)
         if not universe:
-            errors.append(f"No active industrials universe tickers found for model_family={model_family}")
+            errors.append(f"No industrials universe tickers found for model_family={model_family}")
             all_tickers = sorted(set(benchmark_tickers)) or ["__NO_TICKERS__"]
         else:
             all_tickers = sorted(set(universe + benchmark_tickers))
-        if expected_count and len(universe) != expected_count:
+        if requested_asof is None and expected_count and len(universe) != expected_count:
             errors.append(f"Universe count mismatch: expected={expected_count} actual={len(universe)}")
 
         universe_query = universe if universe else ["__NO_TICKERS__"]
         ph_all = placeholders(all_tickers)
         ph_universe = placeholders(universe_query)
-        params_all = (source_id, *all_tickers)
-        params_universe = (source_id, *universe_query)
+        ph_sources = placeholders(source_ids)
+        params_all = (*source_ids, *all_tickers)
         feature_asof = args.asof.strip() or value(
             conn,
-            "SELECT MAX(asof_date) FROM feature_market_technical WHERE source_id = ? AND model_family = ?",
-            (source_id, model_family),
+            f"SELECT MAX(asof_date) FROM feature_market_technical WHERE source_id IN ({ph_sources}) AND model_family = ?",
+            (*source_ids, model_family),
         )
         if requested_asof is not None:
             audit_asof = requested_asof
@@ -170,7 +207,7 @@ def validate() -> int:
             f"""
             SELECT ticker, bar_date, COUNT(*) AS n
             FROM fact_price_ohlcv
-            WHERE source_id = ? AND ticker IN ({ph_all})
+            WHERE source_id IN ({ph_sources}) AND ticker IN ({ph_all})
             GROUP BY ticker, bar_date, source_id
             HAVING COUNT(*) > 1
             """,
@@ -179,6 +216,11 @@ def validate() -> int:
         if duplicate_bars:
             errors.append(f"Duplicate OHLCV rows detected: {[dict(row) for row in duplicate_bars[:10]]}")
 
+        price_asof_clause = ""
+        price_params_all: tuple[Any, ...] = params_all
+        if requested_asof is not None:
+            price_asof_clause = "AND bar_date <= ?"
+            price_params_all = (*source_ids, *all_tickers, audit_asof.isoformat())
         price_rows = conn.execute(
             f"""
             SELECT
@@ -189,10 +231,10 @@ def validate() -> int:
                 MIN(bar_date) AS first_bar_date,
                 MAX(bar_date) AS latest_bar_date
             FROM fact_price_ohlcv
-            WHERE source_id = ? AND ticker IN ({ph_all})
+            WHERE source_id IN ({ph_sources}) AND ticker IN ({ph_all}) {price_asof_clause}
             GROUP BY ticker
             """,
-            params_all,
+            price_params_all,
         ).fetchall()
         price_by_ticker = {str(row["ticker"]): row for row in price_rows}
         missing_prices = [ticker for ticker in all_tickers if ticker not in price_by_ticker]
@@ -221,7 +263,7 @@ def validate() -> int:
             if latest_bar is None or (audit_asof - latest_bar).days > max_staleness_days:
                 stale_days = "" if latest_bar is None else str((audit_asof - latest_bar).days)
                 stale.append(f"{ticker}:{stale_days}")
-            if latest_bar is not None and latest_bar > audit_asof:
+            if requested_asof is None and latest_bar is not None and latest_bar > audit_asof:
                 future_bars.append(f"{ticker}:{latest_bar.isoformat()}")
 
         if no_adjusted:
@@ -237,11 +279,11 @@ def validate() -> int:
         elif low_history:
             warnings.append(f"Low-history review tickers under {min_days} bars: {low_history}")
 
-        snapshot_tickers = scalar(conn, f"SELECT COUNT(DISTINCT ticker) FROM fact_market_snapshot WHERE source_id = ? AND ticker IN ({ph_all})", params_all)
+        snapshot_tickers = scalar(conn, f"SELECT COUNT(DISTINCT ticker) FROM fact_market_snapshot WHERE source_id IN ({ph_sources}) AND ticker IN ({ph_all})", params_all)
         if snapshot_tickers != len(all_tickers):
             errors.append(f"Market snapshot ticker coverage mismatch: expected={len(all_tickers)} actual={snapshot_tickers}")
 
-        corporate_actions = scalar(conn, f"SELECT COUNT(*) FROM fact_corporate_action WHERE source_id = ? AND ticker IN ({ph_all})", params_all)
+        corporate_actions = scalar(conn, f"SELECT COUNT(*) FROM fact_corporate_action WHERE source_id IN ({ph_sources}) AND ticker IN ({ph_all})", params_all)
         if corporate_actions == 0:
             warnings.append(f"No Yahoo corporate action rows loaded for source_id={source_id}; acceptable if no dividends/splits occurred in fetched windows.")
 
@@ -256,24 +298,24 @@ def validate() -> int:
                 f"""
                 SELECT COUNT(*)
                 FROM feature_market_technical
-                WHERE source_id = ?
+                WHERE source_id IN ({ph_sources})
                   AND model_family = ?
                   AND asof_date = ?
                   AND ticker IN ({ph_universe})
                 """,
-                (source_id, model_family, feature_asof, *universe_query),
+                (*source_ids, model_family, feature_asof, *universe_query),
             )
             feature_rows = conn.execute(
                 f"""
                 SELECT ticker, market_data_quality, low_history_flag, low_liquidity_flag, stale_flag
                 FROM feature_market_technical
-                WHERE source_id = ?
+                WHERE source_id IN ({ph_sources})
                   AND model_family = ?
                   AND asof_date = ?
                   AND ticker IN ({ph_universe})
                 ORDER BY ticker
                 """,
-                (source_id, model_family, feature_asof, *universe_query),
+                (*source_ids, model_family, feature_asof, *universe_query),
             ).fetchall()
             feature_tickers = {str(row["ticker"]) for row in feature_rows}
             missing_features = [ticker for ticker in universe if ticker not in feature_tickers]
@@ -308,7 +350,7 @@ def validate() -> int:
         if feature_asof and len(review_features) != review_issue_count:
             errors.append(f"Feature review issue mismatch: features={len(review_features)} issues={review_issue_count}")
 
-        total_bars = scalar(conn, f"SELECT COUNT(*) FROM fact_price_ohlcv WHERE source_id = ? AND ticker IN ({ph_all})", params_all)
+        total_bars = scalar(conn, f"SELECT COUNT(*) FROM fact_price_ohlcv WHERE source_id IN ({ph_sources}) AND ticker IN ({ph_all})", params_all)
         raw_response_count = scalar(
             conn,
             "SELECT COUNT(DISTINCT endpoint || COALESCE(query_params_json, '')) FROM raw_api_responses WHERE source_id = ? AND asof_date = ?",

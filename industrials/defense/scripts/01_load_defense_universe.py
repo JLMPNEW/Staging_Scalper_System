@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.csv_utils import load_yaml_map, read_csv_flexible, row_get  # noqa: E402
 from industrials.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from industrials.core.listing_dates import ListingWindow, bound_membership_window, listing_window_for_ticker, load_listing_windows  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
 from industrials.core.text_norm import as_bool, normalize_cik, normalize_label, normalize_org_name, normalize_ticker  # noqa: E402
@@ -60,11 +61,24 @@ class DefenseCompany:
     data_quality_status: str
 
 
+@dataclass(frozen=True)
+class CikOverride:
+    ticker: str
+    cik: str
+    company_name: str
+    override_type: str
+    applies_to: str
+    source: str
+    reason: str
+    notes: str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Load the active defense universe into industrials.sqlite.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--universe-csv", type=Path, default=None)
+    parser.add_argument("--listing-dates-csv", type=Path, default=None)
     parser.add_argument("--policy", type=Path, default=None)
     parser.add_argument("--cohorts", type=Path, default=None)
     parser.add_argument("--model-family", default="")
@@ -75,6 +89,41 @@ def parse_args() -> argparse.Namespace:
 def normalized_set(raw: Any) -> set[str]:
     values = raw if isinstance(raw, list) else []
     return {normalize_label(value) for value in values if str(value or "").strip()}
+
+
+def load_cik_overrides(path: Path) -> dict[str, CikOverride]:
+    if not path.exists():
+        return {}
+    overrides: dict[str, CikOverride] = {}
+    for row in read_csv_flexible(path):
+        ticker = normalize_ticker(row_get(row, "ticker"))
+        cik = normalize_cik(row_get(row, "cik"))
+        if not ticker and not cik:
+            continue
+        if not ticker:
+            raise ValueError(f"{path}: CIK override row missing ticker")
+        if not cik:
+            raise ValueError(f"{path}: CIK override for {ticker} missing valid cik")
+        if ticker in overrides:
+            raise ValueError(f"{path}: duplicate CIK override ticker={ticker}")
+        overrides[ticker] = CikOverride(
+            ticker=ticker,
+            cik=cik,
+            company_name=row_get(row, "company_name"),
+            override_type=row_get(row, "override_type") or "corrected_sec_cik",
+            applies_to=(row_get(row, "applies_to") or "both").lower(),
+            source=row_get(row, "source"),
+            reason=row_get(row, "reason"),
+            notes=row_get(row, "notes"),
+        )
+    return overrides
+
+
+def cik_for_ticker(raw_cik: object, ticker: str, overrides: dict[str, CikOverride], *, scope: str) -> str:
+    override = overrides.get(ticker)
+    if override is not None and override.applies_to in {scope, "both"}:
+        return override.cik
+    return normalize_cik(raw_cik)
 
 
 def load_cohort_assignments(path: Path, *, expected_model_family: str) -> dict[str, CohortAssignment]:
@@ -150,6 +199,7 @@ def parse_universe_rows(
     cohort_path: Path,
     model_family: str,
     config: dict[str, Any],
+    cik_overrides: dict[str, CikOverride],
 ) -> list[DefenseCompany]:
     rows = read_csv_flexible(path)
     companies: list[DefenseCompany] = []
@@ -216,7 +266,7 @@ def parse_universe_rows(
             ticker=ticker,
             investability_status=investability_status,
             company_name=row_get(raw, "company_name", "company", "name"),
-            cik=normalize_cik(row_get(raw, "cik", "CIK")),
+            cik=cik_for_ticker(row_get(raw, "cik", "CIK"), ticker, cik_overrides, scope="active"),
             exchange=row_get(raw, "exchange", "Exchange"),
             sector=row_get(raw, "sector") or default_sector,
             industry=row_get(raw, "industry") or default_industry,
@@ -317,6 +367,9 @@ def upsert_current_membership(
     company_id: int,
     source_id: str,
     start_date: str,
+    end_date: str | None,
+    confidence: float,
+    reason: str,
 ) -> None:
     now = utc_now()
     conn.execute(
@@ -326,7 +379,7 @@ def upsert_current_membership(
             start_date, end_date, membership_status, is_current_member,
             point_in_time_flag, confidence, reason, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, 'current_source_of_truth', ?, NULL, ?, ?, 0, 1.0, ?, ?, ?)
+        VALUES (?, ?, ?, ?, 'current_source_of_truth', ?, ?, ?, ?, 1, ?, ?, ?, ?)
         ON CONFLICT(ticker, model_family, membership_source_id, start_date) DO UPDATE SET
             company_id = excluded.company_id,
             membership_basis = excluded.membership_basis,
@@ -344,16 +397,49 @@ def upsert_current_membership(
             company.model_family,
             source_id,
             start_date,
+            end_date,
             "active" if company.is_active else "inactive",
             int(company.is_active),
-            "Seeded from active defense_tickers.csv; this is the current production universe, not historical PIT backfill.",
+            confidence,
+            reason,
             now,
             now,
         ),
     )
 
 
-def upsert_universe(conn: Any, companies: list[DefenseCompany], *, source_id: str, cohort_source_id: str, start_date: str) -> int:
+def membership_window_for_company(
+    *,
+    company: DefenseCompany,
+    listing_windows: dict[str, ListingWindow],
+    default_start_date: str,
+) -> tuple[str, str | None, float, str]:
+    window = listing_window_for_ticker(listing_windows, company.ticker)
+    start_date, end_date, listing_confidence, listing_reason = bound_membership_window(
+        default_start_date=default_start_date,
+        default_end_date=None,
+        listing_window=window,
+    )
+    if end_date and end_date < start_date:
+        raise ValueError(f"{company.ticker}: listing-date window has end_date {end_date} before start_date {start_date}")
+    reason = (
+        "Seeded from active defense_tickers.csv and bounded by the defense listing-date contract "
+        "for historical PIT replays. "
+        f"{listing_reason}"
+    )
+    confidence = min(1.0, max(0.0, listing_confidence if window is not None else 1.0))
+    return start_date, end_date, confidence, reason
+
+
+def upsert_universe(
+    conn: Any,
+    companies: list[DefenseCompany],
+    *,
+    source_id: str,
+    cohort_source_id: str,
+    start_date: str,
+    listing_windows: dict[str, ListingWindow],
+) -> int:
     now = utc_now()
     seed_source_id = source_id_or_none(conn, source_id)
     if seed_source_id is None:
@@ -364,13 +450,12 @@ def upsert_universe(conn: Any, companies: list[DefenseCompany], *, source_id: st
     placeholders = ",".join("?" for _ in tickers)
     conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (LOAD_STAGE, *tickers))
     conn.execute(
-        f"""
+        """
         DELETE FROM dim_universe_membership
         WHERE model_family = ?
           AND membership_source_id = ?
-          AND ticker NOT IN ({placeholders})
         """,
-        (companies[0].model_family, seed_source_id, *tickers),
+        (companies[0].model_family, seed_source_id),
     )
 
     for company in companies:
@@ -462,6 +547,15 @@ def upsert_universe(conn: Any, companies: list[DefenseCompany], *, source_id: st
         if company.cik:
             conn.execute(
                 """
+                DELETE FROM dim_identifier
+                WHERE company_id = ?
+                  AND identifier_type = 'CIK'
+                  AND identifier_value <> ?
+                """,
+                (company_id, company.cik),
+            )
+            conn.execute(
+                """
                 INSERT INTO dim_identifier(
                     company_id, identifier_type, identifier_value, source_id, confidence, created_at, updated_at
                 )
@@ -511,7 +605,21 @@ def upsert_universe(conn: Any, companies: list[DefenseCompany], *, source_id: st
                 now,
             ),
         )
-        upsert_current_membership(conn, company=company, company_id=company_id, source_id=seed_source_id, start_date=start_date)
+        membership_start_date, membership_end_date, membership_confidence, membership_reason = membership_window_for_company(
+            company=company,
+            listing_windows=listing_windows,
+            default_start_date=start_date,
+        )
+        upsert_current_membership(
+            conn,
+            company=company,
+            company_id=company_id,
+            source_id=seed_source_id,
+            start_date=membership_start_date,
+            end_date=membership_end_date,
+            confidence=membership_confidence,
+            reason=membership_reason,
+        )
 
         if company.data_quality_status != "complete":
             add_issue(
@@ -567,14 +675,18 @@ def main() -> int:
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     universe_csv = args.universe_csv.expanduser().resolve() if args.universe_csv else resolve_path(cfg_get(config, "industrials_universe.seed_csv"), base_dir=base_dir)
+    listing_dates_csv = args.listing_dates_csv.expanduser().resolve() if args.listing_dates_csv else resolve_path(cfg_get(config, "industrials_universe.listing_dates_csv"), base_dir=base_dir)
     policy_path = args.policy.expanduser().resolve() if args.policy else resolve_path(cfg_get(config, "industrials_universe.policy_path"), base_dir=base_dir)
     cohort_path = args.cohorts.expanduser().resolve() if args.cohorts else resolve_path(cfg_get(config, "industrials_universe.cohort_path"), base_dir=base_dir)
+    cik_overrides_path = resolve_path(cfg_get(config, "industrials_universe.cik_ticker_overrides_csv"), base_dir=base_dir)
     model_family = str(args.model_family or cfg_get(config, "industrials_universe.initial_subsector", "defense")).strip()
     source_id = str(cfg_get(config, "industrials_universe.seed_source_id", "defense_ticker_seed"))
     cohort_source_id = str(cfg_get(config, "industrials_universe.cohort_source_id", "defense_cohort_policy"))
     start_date = str(cfg_get(config, "industrials_universe.optimization_start_date", "2010-01-01"))
     policy = load_yaml_map(policy_path)
     cohort_map = load_cohort_assignments(cohort_path, expected_model_family=model_family)
+    cik_overrides = load_cik_overrides(cik_overrides_path)
+    listing_windows = load_listing_windows(listing_dates_csv)
     companies = parse_universe_rows(
         universe_csv,
         policy=policy,
@@ -582,6 +694,7 @@ def main() -> int:
         cohort_path=cohort_path,
         model_family=model_family,
         config=config,
+        cik_overrides=cik_overrides,
     )
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
@@ -598,6 +711,7 @@ def main() -> int:
                     source_id=source_id,
                     cohort_source_id=cohort_source_id,
                     start_date=start_date,
+                    listing_windows=listing_windows,
                 )
             finish_run(
                 conn,

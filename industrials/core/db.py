@@ -39,19 +39,25 @@ def _xbrl_concept(
 
 XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax", "revenue", "income_statement", "duration", priority=10),
+    _xbrl_concept("us-gaap", "RevenueFromContractWithCustomerIncludingAssessedTax", "revenue", "income_statement", "duration", priority=15),
     _xbrl_concept("us-gaap", "Revenues", "revenue", "income_statement", "duration", priority=20),
     _xbrl_concept("us-gaap", "SalesRevenueNet", "revenue", "income_statement", "duration", priority=30),
+    _xbrl_concept("us-gaap", "SalesRevenueGoodsNet", "revenue", "income_statement", "duration", priority=40),
+    _xbrl_concept("us-gaap", "SalesRevenueServicesNet", "revenue", "income_statement", "duration", priority=45),
     _xbrl_concept("us-gaap", "CostOfRevenue", "cost_of_sales", "income_statement", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "CostOfGoodsAndServicesSold", "cost_of_sales", "income_statement", "duration", priority=20, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "GrossProfit", "gross_profit", "income_statement", "duration", priority=10),
     _xbrl_concept("us-gaap", "OperatingIncomeLoss", "operating_income", "income_statement", "duration", priority=10),
+    _xbrl_concept("us-gaap", "LossFromOperations", "operating_income", "income_statement", "duration", priority=20),
     _xbrl_concept("us-gaap", "NetIncomeLoss", "net_income", "income_statement", "duration", priority=10),
+    _xbrl_concept("us-gaap", "ProfitLoss", "net_income", "income_statement", "duration", priority=20),
     _xbrl_concept("us-gaap", "EarningsPerShareDiluted", "eps_diluted", "income_statement", "duration", priority=10),
     _xbrl_concept("us-gaap", "Assets", "assets", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "Liabilities", "liabilities", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "StockholdersEquity", "equity", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "CashAndCashEquivalentsAtCarryingValue", "cash_and_equivalents", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", "cash_and_equivalents", "balance_sheet", "instant", priority=20),
+    _xbrl_concept("us-gaap", "CashCashEquivalentsAndShortTermInvestments", "cash_and_equivalents", "balance_sheet", "instant", priority=30),
     _xbrl_concept("us-gaap", "InventoryNet", "inventory", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "AccountsReceivableNetCurrent", "accounts_receivable", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "AccountsPayableCurrent", "accounts_payable", "balance_sheet", "instant", priority=10),
@@ -71,9 +77,11 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("us-gaap", "RevenueRemainingPerformanceObligation", "remaining_performance_obligation", "backlog", "instant", priority=10),
     _xbrl_concept("us-gaap", "ContractWithCustomerLiabilityRevenueRecognized", "contract_liability_revenue_recognized", "income_statement", "duration", priority=10),
     _xbrl_concept("ifrs-full", "Revenue", "revenue", "income_statement", "duration", priority=10),
+    _xbrl_concept("ifrs-full", "RevenueFromContractsWithCustomers", "revenue", "income_statement", "duration", priority=15),
     _xbrl_concept("ifrs-full", "CostOfSales", "cost_of_sales", "income_statement", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "GrossProfit", "gross_profit", "income_statement", "duration", priority=10),
     _xbrl_concept("ifrs-full", "ProfitLossFromOperatingActivities", "operating_income", "income_statement", "duration", priority=10),
+    _xbrl_concept("ifrs-full", "OperatingProfitLoss", "operating_income", "income_statement", "duration", priority=20),
     _xbrl_concept("ifrs-full", "ProfitLoss", "net_income", "income_statement", "duration", priority=10),
     _xbrl_concept("ifrs-full", "DilutedEarningsLossPerShare", "eps_diluted", "income_statement", "duration", priority=10),
     _xbrl_concept("ifrs-full", "Assets", "assets", "balance_sheet", "instant", priority=10),
@@ -84,7 +92,9 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("ifrs-full", "TradeAndOtherCurrentReceivables", "accounts_receivable", "balance_sheet", "instant", priority=10),
     _xbrl_concept("ifrs-full", "TradeAndOtherCurrentPayablesToTradeSuppliers", "accounts_payable", "balance_sheet", "instant", priority=10),
     _xbrl_concept("ifrs-full", "CashFlowsFromUsedInOperatingActivities", "operating_cash_flow", "cash_flow", "duration", priority=10),
+    _xbrl_concept("ifrs-full", "NetCashFlowsFromUsedInOperatingActivities", "operating_cash_flow", "cash_flow", "duration", priority=20),
     _xbrl_concept("ifrs-full", "PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities", "capex", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("ifrs-full", "PaymentsToAcquirePropertyPlantAndEquipment", "capex", "cash_flow", "duration", priority=20, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "ResearchAndDevelopmentExpense", "research_and_development", "income_statement", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "SharebasedPaymentArrangementExpense", "stock_based_compensation", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "WeightedAverageNumberOfDilutedSharesOutstanding", "diluted_shares", "income_statement", "duration", priority=10),
@@ -783,12 +793,30 @@ def connect(db_path: Path, *, timeout_sec: float = 120.0) -> sqlite3.Connection:
     return conn
 
 
+def apply_schema(conn: sqlite3.Connection) -> list[str]:
+    deferred_indexes: list[str] = []
+    for statement in SCHEMA_SQL.split(";"):
+        sql = statement.strip()
+        if not sql:
+            continue
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError as exc:
+            if sql.upper().startswith("CREATE INDEX") and "no such column" in str(exc).lower():
+                deferred_indexes.append(sql)
+                continue
+            raise
+    return deferred_indexes
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     for attempt in range(3):
         try:
             with conn:
-                conn.executescript(SCHEMA_SQL)
+                deferred_indexes = apply_schema(conn)
                 migrate_schema(conn)
+                for index_sql in deferred_indexes:
+                    conn.execute(index_sql)
                 seed_xbrl_concept_map(conn)
             return
         except sqlite3.OperationalError as exc:

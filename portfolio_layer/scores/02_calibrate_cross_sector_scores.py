@@ -257,6 +257,14 @@ def main() -> int:
                 "score_confidence": round(score_confidence, 4),
                 "investable_eligible": int(r["investable_eligible"]),
                 "eligibility_reason": r["eligibility_reason"], "native_score": native,
+                "calibration_research_eligible": int(r.get("calibration_research_eligible") or 0),
+                "calibration_research_reason": str(r.get("calibration_research_reason") or "").strip()
+                or ("ok" if int(r.get("calibration_research_eligible") or 0) else "not_calibration_research_eligible"),
+                "calibration_sample_role": str(r.get("calibration_sample_role") or "excluded").strip() or "excluded",
+                "stage1_sample_role": str(
+                    r.get("stage1_sample_role") or r.get("calibration_sample_role") or "excluded"
+                ).strip() or "excluded",
+                "oos_score_valid_flag": int(r.get("oos_score_valid_flag") or 0),
                 "source_asof_date": r["source_asof_date"],
                 "staleness_days": staleness_days(run_as_of, r["source_asof_date"]),
                 "score_version": score_version,

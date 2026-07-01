@@ -837,6 +837,9 @@ sector/benchmark excess returns, factor-residual returns, and survivorship/delis
 point-in-time. A file dated `2019-01-04` must have been generated using data available on or before
 2019-01-04. If a historical file uses today's revised data, future-known classifications, or future-known
 eligibility/veto decisions, it may be useful for diagnostics but not for true OOS calibration.
+Technology dashboard rank snapshots also replay the current universe and are not a survivorship-correct
+calibration panel unless explicitly stamped with `survivorship_corrected_panel_flag=1`. See
+`docs/score_eligibility_flags.md` for the canonical flag meanings and consumers.
 
 **History horizon rule:** a 252-trading-day forward target requires at least 252 trading days after each
 snapshot. One year of daily snapshots is the minimum for first 252d labels; 2-3 years of snapshots is the

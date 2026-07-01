@@ -271,6 +271,11 @@ def main() -> int:
                 "sector": row.sector, "industry": row.industry, "industry_aggregate": row.industry_aggregate,
                 "native_score": row.native_score, "investable_eligible": row.investable_eligible,
                 "eligibility_reason": row.eligibility_reason, "score_confidence": row.score_confidence,
+                "calibration_research_eligible": row.calibration_research_eligible,
+                "calibration_research_reason": row.calibration_research_reason,
+                "calibration_sample_role": row.calibration_sample_role,
+                "stage1_sample_role": row.stage1_sample_role,
+                "oos_score_valid_flag": row.oos_score_valid_flag,
                 "source_asof_date": row.source_asof_date,
             })
 

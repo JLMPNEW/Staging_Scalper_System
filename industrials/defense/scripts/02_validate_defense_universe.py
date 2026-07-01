@@ -19,7 +19,7 @@ from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from industrials.core.csv_utils import load_yaml_map, read_csv_flexible, row_get  # noqa: E402
 from industrials.core.db import connect, init_db  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
-from industrials.core.text_norm import as_bool, normalize_cik, normalize_label, normalize_org_name, normalize_ticker  # noqa: E402
+from industrials.core.text_norm import as_bool, normalize_cik, normalize_org_name, normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("validate_defense_universe")
@@ -103,6 +103,31 @@ def validate_shared_cik_groups(rows_by_ticker: dict[str, dict[str, str]]) -> lis
     return errors
 
 
+def load_cik_overrides(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    for row in read_csv_flexible(path):
+        ticker = normalize_ticker(row_get(row, "ticker"))
+        cik = normalize_cik(row_get(row, "cik"))
+        applies_to = (row_get(row, "applies_to") or "both").lower()
+        if ticker and cik and applies_to in {"active", "both"}:
+            if ticker in out:
+                raise ValueError(f"{path}: duplicate CIK override ticker={ticker}")
+            out[ticker] = cik
+    return out
+
+
+def apply_active_cik_overrides(rows_by_ticker: dict[str, dict[str, str]], overrides: dict[str, str]) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    for ticker, row in rows_by_ticker.items():
+        new_row = dict(row)
+        if ticker in overrides:
+            new_row["cik"] = overrides[ticker]
+        out[ticker] = new_row
+    return out
+
+
 def validate_universe() -> int:
     configure_utc_logging()
     args = parse_args()
@@ -113,10 +138,12 @@ def validate_universe() -> int:
     universe_csv = args.universe_csv.expanduser().resolve() if args.universe_csv else resolve_path(cfg_get(config, "industrials_universe.seed_csv"), base_dir=base_dir)
     policy_path = args.policy.expanduser().resolve() if args.policy else resolve_path(cfg_get(config, "industrials_universe.policy_path"), base_dir=base_dir)
     cohort_path = args.cohorts.expanduser().resolve() if args.cohorts else resolve_path(cfg_get(config, "industrials_universe.cohort_path"), base_dir=base_dir)
+    cik_overrides_path = resolve_path(cfg_get(config, "industrials_universe.cik_ticker_overrides_csv"), base_dir=base_dir)
     model_family = str(args.model_family or cfg_get(config, "industrials_universe.initial_subsector", "defense")).strip()
     seed_source_id = str(cfg_get(config, "industrials_universe.seed_source_id", "defense_ticker_seed"))
     policy = load_yaml_map(policy_path)
     rows_by_ticker, duplicates = csv_rows_by_ticker(universe_csv)
+    rows_by_ticker = apply_active_cik_overrides(rows_by_ticker, load_cik_overrides(cik_overrides_path))
     unique_tickers = sorted(rows_by_ticker)
     ticker_params = tuple(unique_tickers)
     ph = placeholders(unique_tickers)

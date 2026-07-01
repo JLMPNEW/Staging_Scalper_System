@@ -23,6 +23,7 @@ industrials_universe:
   delisted_source_id: "defense_delisted_calibration_seed"
   ticker_aliases_csv: "defense/system_csvs/defense_ticker_aliases.csv"
   ticker_aliases_source_id: "defense_ticker_alias_seed"
+  listing_dates_csv: "defense/system_csvs/defense_listing_dates.csv"
   cik_ticker_overrides_csv: "defense/system_csvs/defense_cik_ticker_overrides.csv"
   cik_ticker_overrides_source_id: "defense_cik_ticker_overrides"
   optimization_start_date: "2010-01-01"
@@ -88,11 +89,19 @@ market_feature_build:
     ma_short_days: 50
     ma_long_days: 200
 
+norgate_delisted_import:
+  source_id: "norgate_us_equities_total_return"
+  symbol_overrides_csv: "defense/system_csvs/defense_norgate_symbol_overrides.csv"
+  output_csv: "../output/industrials/defense/stage3/norgate_delisted_price_import.csv"
+  price_adjustment_mode: "CAPITAL"
+  purge_existing_range: true
+
 sec_fundamentals:
   submissions_source_id: "sec_submissions"
   companyfacts_source_id: "sec_companyfacts"
   submissions_url_template: "https://data.sec.gov/submissions/CIK{cik}.json"
   companyfacts_url_template: "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+  reporting_overrides_csv: "defense/system_csvs/defense_sec_reporting_overrides.csv"
   start_date: "2015-01-01"
   forms:
     - "10-K"
@@ -113,6 +122,33 @@ sec_fundamentals:
 fx_rates:
   source_id: "yahoo_fx_rates"
   default_usd_rate: 1.0
+  chart_url_template: "https://query1.finance.yahoo.com/v8/finance/chart/{pair}"
+  start_date: "2010-01-01"
+  interval: "1d"
+  user_agent: "${INDUSTRIALS_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  timeout_sec: 30.0
+  max_retries: 3
+  request_sleep_sec: 0.12
+  cache_dir: "../output/industrials_cache/yahoo_fx_rates"
+  output_csv: "../output/industrials/defense/stage4/fx_rate_coverage.csv"
+  required_pairs:
+    - CADUSD
+    - GBPUSD
+    - EURUSD
+    - ILSUSD
+
+scoring_policy:
+  defense_eligibility_policy_csv: "defense/system_csvs/defense_scoring_eligibility_policy.csv"
+
+sec_archive:
+  enabled: true
+  index_url_template: "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/index.json"
+  document_url_template: "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/{document_name}"
+  submission_file_url_template: "https://data.sec.gov/submissions/{file_name}"
+  browse_edgar_atom_url_template: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form_type}&owner=exclude&count=100&output=atom"
+  max_submission_history_files: 0
+  max_filings_per_ticker: 0
+  max_documents_per_filing: 5
 
 oos_calibration_standards:
   version: "industrials_defense_oos_provenance_v1"

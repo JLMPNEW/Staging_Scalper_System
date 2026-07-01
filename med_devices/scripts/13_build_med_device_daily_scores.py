@@ -159,6 +159,9 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "native_score_field": "TEXT DEFAULT ''",
     "native_score_value": "REAL DEFAULT 0.0",
     "score_zero_is_missing_flag": "INTEGER DEFAULT 0",
+    "score_scale_min": "REAL DEFAULT 0.0",
+    "score_scale_max": "REAL DEFAULT 100.0",
+    "score_neutral_value": "REAL DEFAULT 50.0",
     "universe_status": "TEXT DEFAULT ''",
     "historical_universe_source": "TEXT DEFAULT ''",
     "price_start_date": "TEXT DEFAULT ''",
@@ -188,6 +191,10 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "calibration_status": "TEXT DEFAULT 'production_eligible'",
     "calibration_status_reason": "TEXT DEFAULT ''",
     "calibration_eligible_flag": "INTEGER DEFAULT 1",
+    "research_calibration_input_eligible_flag": "INTEGER DEFAULT 0",
+    "research_calibration_status": "TEXT DEFAULT ''",
+    "research_calibration_reason": "TEXT DEFAULT ''",
+    "calibration_sample_role": "TEXT DEFAULT ''",
     "cohort_score_template_id": "TEXT DEFAULT ''",
     "cohort_score_template_spec": "TEXT DEFAULT ''",
     "cohort_score_template_tier1_role": "TEXT DEFAULT ''",
@@ -354,6 +361,9 @@ FIELDNAMES = [
     "native_score_field",
     "native_score_value",
     "score_zero_is_missing_flag",
+    "score_scale_min",
+    "score_scale_max",
+    "score_neutral_value",
     "universe_status",
     "historical_universe_source",
     "price_start_date",
@@ -387,6 +397,10 @@ FIELDNAMES = [
     "calibration_status",
     "calibration_status_reason",
     "calibration_eligible_flag",
+    "research_calibration_input_eligible_flag",
+    "research_calibration_status",
+    "research_calibration_reason",
+    "calibration_sample_role",
     "cohort_score_template_id",
     "cohort_score_template_spec",
     "cohort_score_template_tier1_role",
@@ -605,6 +619,9 @@ class ScoreRow:
     native_score_field: str = "composite_score"
     native_score_value: float = 0.0
     score_zero_is_missing_flag: int = 0
+    score_scale_min: float = 0.0
+    score_scale_max: float = 100.0
+    score_neutral_value: float = 50.0
     universe_status: str = ""
     historical_universe_source: str = ""
     price_start_date: str = ""
@@ -637,6 +654,10 @@ class ScoreRow:
     calibration_status: str = CALIBRATION_STATUS_PRODUCTION_ELIGIBLE
     calibration_status_reason: str = ""
     calibration_eligible_flag: int = 1
+    research_calibration_input_eligible_flag: int = 0
+    research_calibration_status: str = ""
+    research_calibration_reason: str = ""
+    calibration_sample_role: str = ""
     cohort_score_template_id: str = ""
     cohort_score_template_spec: str = ""
     cohort_score_template_tier1_role: str = ""
@@ -2399,6 +2420,43 @@ def normalize_universe_status(raw: object, *, company_is_active: bool) -> str:
     }:
         return "historical"
     return "active" if company_is_active else "historical"
+
+
+def apply_research_calibration_metadata(row: ScoreRow) -> None:
+    """Publish explicit Stage 11 research-calibration eligibility metadata."""
+    row.score_scale_min = 0.0
+    row.score_scale_max = 100.0
+    row.score_neutral_value = DEFAULT_NEUTRAL_SCORE
+
+    reasons: list[str] = []
+    native_score_value = to_float(row.native_score_value)
+    composite_score = to_float(row.composite_score)
+    if int(row.calibration_eligible_flag or 0) != 1:
+        reasons.append(f"calibration_status={row.calibration_status or 'not_production_eligible'}")
+    if int(row.score_zero_is_missing_flag or 0) == 1:
+        reasons.append("zero_score_missing_sentinel")
+    if native_score_value is None:
+        reasons.append("missing_native_score")
+    elif native_score_value <= 0.0:
+        reasons.append("zero_or_negative_native_score")
+    if composite_score is None:
+        reasons.append("missing_composite_score")
+    elif composite_score <= 0.0:
+        reasons.append("zero_or_negative_composite_score")
+    if int(row.live_component_count or 0) <= 0:
+        reasons.append("no_live_components")
+
+    if reasons:
+        row.research_calibration_input_eligible_flag = 0
+        row.research_calibration_status = "excluded"
+        row.research_calibration_reason = ";".join(dict.fromkeys(reasons))
+        row.calibration_sample_role = "excluded_from_research_calibration"
+        return
+
+    row.research_calibration_input_eligible_flag = 1
+    row.research_calibration_status = "eligible"
+    row.research_calibration_reason = "valid_research_calibration_input"
+    row.calibration_sample_role = "research_calibration_input"
 
 
 def cohort_calibration_status_profiles(config: dict[str, Any]) -> dict[str, tuple[str, str]]:
@@ -5101,8 +5159,12 @@ def build_rows(
             2,
         )
         row.composite_score = row.raw_composite_score
-        row.native_score_value = row.composite_score
-        row.score_zero_is_missing_flag = int(row.composite_score == 0.0 and row.live_component_count == 0)
+        composite_score_value = to_float(row.composite_score)
+        row.native_score_value = composite_score_value if composite_score_value is not None else 0.0
+        row.score_zero_is_missing_flag = int(
+            (composite_score_value is None or composite_score_value == 0.0)
+            and row.live_component_count == 0
+        )
         rows.append(row)
     if rank_composite:
         cross_sectional_percentile_rank(rows)
@@ -5151,6 +5213,7 @@ def build_rows(
             profile_for_cohort(row.calibration_cohort, pullback_candidate_profiles, cohort_profile_alias_map),
         )
         row.eligibility_reason = row.portfolio_candidate_reason or row.safe_core_reason or row.tier1_safety_reason or row.review_reason
+        apply_research_calibration_metadata(row)
         row.top_positive_drivers, row.top_negative_drivers = score_drivers(row)
     rows.sort(
         key=lambda item: (
@@ -5212,6 +5275,9 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "native_score_field",
         "native_score_value",
         "score_zero_is_missing_flag",
+        "score_scale_min",
+        "score_scale_max",
+        "score_neutral_value",
         "universe_status",
         "historical_universe_source",
         "price_start_date",
@@ -5245,6 +5311,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "calibration_status",
         "calibration_status_reason",
         "calibration_eligible_flag",
+        "research_calibration_input_eligible_flag",
+        "research_calibration_status",
+        "research_calibration_reason",
+        "calibration_sample_role",
         "cohort_score_template_id",
         "cohort_score_template_spec",
         "cohort_score_template_tier1_role",
@@ -5473,6 +5543,9 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.native_score_field,
                 row.native_score_value,
                 row.score_zero_is_missing_flag,
+                row.score_scale_min,
+                row.score_scale_max,
+                row.score_neutral_value,
                 row.universe_status,
                 row.historical_universe_source,
                 row.price_start_date,
@@ -5506,6 +5579,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.calibration_status,
                 row.calibration_status_reason,
                 row.calibration_eligible_flag,
+                row.research_calibration_input_eligible_flag,
+                row.research_calibration_status,
+                row.research_calibration_reason,
+                row.calibration_sample_role,
                 row.cohort_score_template_id,
                 row.cohort_score_template_spec,
                 row.cohort_score_template_tier1_role,

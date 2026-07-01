@@ -33,6 +33,7 @@ LOGGER = logging.getLogger("validate_score_contract")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 KEY_FIELDS = ("ticker", "as_of_date", "source_pipeline", "sector")
 FLOAT_FIELDS = ("final_score", "within_sector_percentile", "score_confidence", "native_score")
+SAMPLE_ROLES = ("strict_oos", "pre_lock_research", "excluded")
 
 
 def parse_args() -> argparse.Namespace:
@@ -202,6 +203,14 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
                 bad_numeric.append(f"{ticker}:within_sector_percentile={value}")
         if str(r.get("investable_eligible", "")).strip() not in ("0", "1"):
             bad_numeric.append(f"{ticker}:investable_eligible={r.get('investable_eligible')}")
+        if str(r.get("calibration_research_eligible", "")).strip() not in ("0", "1"):
+            bad_numeric.append(f"{ticker}:calibration_research_eligible={r.get('calibration_research_eligible')}")
+        if str(r.get("calibration_sample_role", "")).strip() not in SAMPLE_ROLES:
+            bad_numeric.append(f"{ticker}:calibration_sample_role={r.get('calibration_sample_role')}")
+        if str(r.get("stage1_sample_role", "")).strip() not in SAMPLE_ROLES:
+            bad_numeric.append(f"{ticker}:stage1_sample_role={r.get('stage1_sample_role')}")
+        if str(r.get("oos_score_valid_flag", "")).strip() not in ("0", "1"):
+            bad_numeric.append(f"{ticker}:oos_score_valid_flag={r.get('oos_score_valid_flag')}")
         if parse_float(r.get("staleness_days")) is None:
             bad_numeric.append(f"{ticker}:staleness_days=missing_or_non_numeric")
     record("numeric_fields_valid", "PASS" if not bad_numeric else "FAIL",
@@ -300,9 +309,39 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         for r in rows
         if str(r.get("investable_eligible", "")).strip() not in ("0", "1")
         or not str(r.get("eligibility_reason", "")).strip()
+        or str(r.get("calibration_research_eligible", "")).strip() not in ("0", "1")
+        or not str(r.get("calibration_research_reason", "")).strip()
+        or str(r.get("calibration_sample_role", "")).strip() not in SAMPLE_ROLES
+        or str(r.get("stage1_sample_role", "")).strip() not in SAMPLE_ROLES
+        or str(r.get("oos_score_valid_flag", "")).strip() not in ("0", "1")
     ]
     record("eligibility_populated", "PASS" if not bad_elig else "FAIL",
-           "investable_eligible in {0,1} with reason" if not bad_elig else f"{len(bad_elig)} rows bad")
+           "allocation and calibration eligibility flags in {0,1} with reasons" if not bad_elig else f"{len(bad_elig)} rows bad")
+
+    # 9b. cross-field eligibility invariants.
+    invariant_errors: list[str] = []
+    for r in rows:
+        ticker = r.get("ticker", "<missing>")
+        investable = str(r.get("investable_eligible", "")).strip() == "1"
+        research = str(r.get("calibration_research_eligible", "")).strip() == "1"
+        source_role = str(r.get("calibration_sample_role", "")).strip()
+        stage1_role = str(r.get("stage1_sample_role", "")).strip()
+        oos = str(r.get("oos_score_valid_flag", "")).strip() == "1"
+        if investable and stage1_role != "strict_oos":
+            invariant_errors.append(f"{ticker}:investable_requires_stage1_strict_oos:{stage1_role}")
+        if stage1_role == "strict_oos" and not oos:
+            invariant_errors.append(f"{ticker}:strict_oos_requires_oos_score_valid")
+        if investable and not research:
+            invariant_errors.append(f"{ticker}:investable_requires_calibration_research_eligible")
+        if stage1_role == "strict_oos" and source_role != "strict_oos":
+            invariant_errors.append(f"{ticker}:stage1_strict_oos_requires_source_strict_oos:{source_role}")
+    record(
+        "eligibility_invariants_hold",
+        "PASS" if not invariant_errors else "FAIL",
+        "Stage 1 investable rows are strict OOS, strict OOS rows have valid OOS scores, and source roles are not upgraded"
+        if not invariant_errors
+        else f"{len(invariant_errors)} invariant errors; first={invariant_errors[:10]}",
+    )
 
     # 10. point-in-time source dates and staleness
     run_date = parse_iso_date(run_as_of)
@@ -382,6 +421,9 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         per_sector[pipe] = {
             "rows": len(srows),
             "eligible": sum(1 for r in srows if str(r.get("investable_eligible", "")).strip() == "1"),
+            "calibration_research_eligible": sum(
+                1 for r in srows if str(r.get("calibration_research_eligible", "")).strip() == "1"
+            ),
             "source_asof": next((r["source_asof_date"] for r in srows), ""),
             "final_score_min": round(min(finals), 6) if finals else None,
             "final_score_max": round(max(finals), 6) if finals else None,

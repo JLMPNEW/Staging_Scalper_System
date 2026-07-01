@@ -8,7 +8,7 @@ import sqlite3
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +97,47 @@ def load_overrides(path: Path) -> set[tuple[str, str]]:
             overrides.add((ticker, applies_to))
             overrides.add((ticker, "both"))
     return overrides
+
+
+def load_cik_overrides(path: Path) -> dict[str, tuple[str, str]]:
+    overrides: dict[str, tuple[str, str]] = {}
+    for row in read_csv_flexible(path):
+        ticker = normalize_ticker(row_get(row, "ticker"))
+        cik = normalize_cik(row_get(row, "cik"))
+        applies_to = (row_get(row, "applies_to") or "both").lower()
+        if ticker and cik:
+            if ticker in overrides:
+                raise ValueError(f"{path}: duplicate CIK override ticker={ticker}")
+            overrides[ticker] = (cik, applies_to)
+    return overrides
+
+
+def override_cik_for_row(ticker: str, row: dict[str, str], overrides: dict[str, tuple[str, str]], *, scope: str) -> str:
+    candidates = [ticker]
+    exit_year = row_get(row, "exit_year")
+    if exit_year.isdigit():
+        candidates.insert(0, f"{ticker}-DEL{int(exit_year)}")
+    for candidate in candidates:
+        override = overrides.get(candidate)
+        if override is not None:
+            cik, applies_to = override
+            if applies_to in {scope, "both"}:
+                return cik
+    return normalize_cik(row_get(row, "cik"))
+
+
+def apply_cik_overrides(
+    rows: dict[str, dict[str, str]],
+    overrides: dict[str, tuple[str, str]],
+    *,
+    scope: str,
+) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    for ticker, row in rows.items():
+        new_row = dict(row)
+        new_row["cik"] = override_cik_for_row(ticker, row, overrides, scope=scope)
+        out[ticker] = new_row
+    return out
 
 
 def has_override(overrides: set[tuple[str, str]], ticker: str, scope: str) -> bool:
@@ -401,6 +442,9 @@ def main() -> int:
     active_rows = rows_by_ticker(active_csv)
     delisted_rows = rows_by_ticker(delisted_csv)
     overrides = load_overrides(overrides_csv)
+    cik_overrides = load_cik_overrides(overrides_csv)
+    active_rows = apply_cik_overrides(active_rows, cik_overrides, scope="active")
+    delisted_rows = apply_cik_overrides(delisted_rows, cik_overrides, scope="delisted")
     sec_mapping = load_sec_mapping(sec_mapping_path)
 
     errors: list[str] = []

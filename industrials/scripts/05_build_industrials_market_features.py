@@ -56,6 +56,13 @@ class PriceRow:
     volume: float
 
 
+@dataclass(frozen=True)
+class UniverseMember:
+    ticker: str
+    start_date: date | None
+    end_date: date | None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build market and technical features for an industrials model family.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -64,6 +71,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--benchmark-tickers", default="", help="Optional comma-separated benchmark ticker override.")
     parser.add_argument("--primary-benchmark", default="", help="Primary benchmark for rel_strength_bench_3m.")
     parser.add_argument("--asof", default="", help="Feature as-of date. Defaults to latest available across universe and benchmarks.")
+    parser.add_argument("--source-id", default="", help="Price source override for universe tickers.")
+    parser.add_argument("--benchmark-source-id", default="", help="Price source override for benchmarks.")
+    parser.add_argument("--include-historical", action="store_true", help="Build features for active and historical/delisted members.")
+    parser.add_argument(
+        "--membership-status",
+        choices=["active", "inactive", "all"],
+        default="active",
+        help="Universe subset to build. Defaults to active.",
+    )
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
 
@@ -177,17 +193,21 @@ def rel_strength(ticker_ret: float | None, bench_rows: list[PriceRow] | None, as
     return ticker_ret - bench_ret if bench_ret is not None else None
 
 
-def load_price_rows(conn: Any, ticker: str, source_id: str, asof: date | None) -> list[PriceRow]:
+def load_price_rows(conn: Any, ticker: str, source_id: str, asof: date | None, start_date: date | None = None) -> list[PriceRow]:
     params: list[Any] = [ticker, source_id]
     asof_clause = ""
     if asof is not None:
         asof_clause = "AND bar_date <= ?"
         params.append(asof.isoformat())
+    start_clause = ""
+    if start_date is not None:
+        start_clause = "AND bar_date >= ?"
+        params.append(start_date.isoformat())
     db_rows = conn.execute(
         f"""
         SELECT bar_date, close, adj_close, volume
         FROM fact_price_ohlcv
-        WHERE ticker = ? AND source_id = ? AND adj_close IS NOT NULL {asof_clause}
+        WHERE ticker = ? AND source_id = ? AND adj_close IS NOT NULL {asof_clause} {start_clause}
         ORDER BY bar_date
         """,
         tuple(params),
@@ -219,13 +239,73 @@ def parse_ticker_list(raw: object) -> list[str]:
     return out
 
 
+def parse_source_list(raw: object) -> list[str]:
+    values = raw if isinstance(raw, list) else str(raw or "").split(",")
+    out: list[str] = []
+    for value in values:
+        source = str(value or "").strip()
+        if source and source not in out:
+            out.append(source)
+    return out
+
+
+def source_priority_list(primary_source: str, fallback_sources: list[str]) -> list[str]:
+    out: list[str] = []
+    for source in [primary_source, *fallback_sources]:
+        text = str(source or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
 def placeholders(values: list[str]) -> str:
     if not values:
         raise ValueError("values cannot be empty")
     return ",".join("?" for _ in values)
 
 
-def load_universe(conn: Any, model_family: str) -> list[str]:
+def load_universe(
+    conn: Any,
+    model_family: str,
+    *,
+    include_historical: bool,
+    membership_status: str,
+    asof: date | None,
+) -> list[UniverseMember]:
+    if include_historical or membership_status != "active" or asof is not None:
+        status_sql = ""
+        if membership_status == "active":
+            status_sql = "AND m.is_current_member = 1"
+        elif membership_status == "inactive":
+            status_sql = "AND m.is_current_member = 0"
+        asof_sql = ""
+        params: list[Any] = [model_family]
+        if asof is not None:
+            asof_sql = "AND m.start_date <= ? AND COALESCE(m.end_date, '9999-12-31') >= ?"
+            params.extend([asof.isoformat(), asof.isoformat()])
+        rows = conn.execute(
+            f"""
+            SELECT m.ticker, MIN(m.start_date) AS start_date, MAX(COALESCE(m.end_date, '')) AS end_date
+            FROM dim_universe_membership m
+            JOIN dim_company c
+              ON c.company_id = m.company_id
+            WHERE m.model_family = ?
+              {status_sql}
+              {asof_sql}
+            GROUP BY m.ticker
+            ORDER BY m.ticker
+            """,
+            tuple(params),
+        ).fetchall()
+        return [
+            UniverseMember(
+                ticker=normalize_ticker(row["ticker"]),
+                start_date=parse_date(row["start_date"]),
+                end_date=parse_date(row["end_date"]),
+            )
+            for row in rows
+            if normalize_ticker(row["ticker"])
+        ]
     rows = conn.execute(
         """
         SELECT DISTINCT c.ticker
@@ -238,7 +318,22 @@ def load_universe(conn: Any, model_family: str) -> list[str]:
         """,
         (model_family,),
     ).fetchall()
-    return [normalize_ticker(row["ticker"]) for row in rows if normalize_ticker(row["ticker"])]
+    return [UniverseMember(ticker=normalize_ticker(row["ticker"]), start_date=None, end_date=None) for row in rows if normalize_ticker(row["ticker"])]
+
+
+def load_first_available_price_rows(
+    conn: Any,
+    *,
+    ticker: str,
+    source_ids: list[str],
+    asof: date,
+    start_date: date | None,
+) -> tuple[list[PriceRow], str]:
+    for source_id in source_ids:
+        rows = load_price_rows(conn, ticker, source_id, asof, start_date)
+        if rows:
+            return rows, source_id
+    return [], source_ids[0]
 
 
 def build_feature(
@@ -455,7 +550,10 @@ def main() -> None:
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(cfg_get(config, "market_feature_build.output_csv"), base_dir=base_dir)
-    source_id = str(cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted") or "yahoo_finance_adjusted")
+    source_id = str(args.source_id or cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted") or "yahoo_finance_adjusted")
+    fallback_source_ids = parse_source_list(cfg_get(config, "market_data_policy.scoring_fallback_sources", []))
+    source_ids = source_priority_list(source_id, fallback_source_ids)
+    benchmark_source_id = str(args.benchmark_source_id or source_id)
     model_family = str(args.model_family or cfg_get(config, "industrials_universe.initial_subsector", "defense") or "defense").strip()
     if not model_family:
         raise ValueError("model_family cannot be empty")
@@ -489,33 +587,72 @@ def main() -> None:
         init_db(conn)
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
-            tickers = load_universe(conn, model_family)
+            members = load_universe(
+                conn,
+                model_family,
+                include_historical=bool(args.include_historical),
+                membership_status=str(args.membership_status),
+                asof=asof,
+            )
+            tickers = [member.ticker for member in members]
             if not tickers:
-                raise ValueError(f"No active industrials universe tickers found for model_family={model_family}.")
+                raise ValueError(f"No industrials universe tickers found for model_family={model_family}.")
             effective_asof = asof
             if effective_asof is None:
-                all_symbols = sorted(set(tickers + benchmark_tickers))
-                ph = placeholders(all_symbols)
+                ph = placeholders(tickers)
                 row = conn.execute(
-                    f"SELECT MAX(bar_date) AS max_date FROM fact_price_ohlcv WHERE source_id = ? AND ticker IN ({ph})",
-                    (source_id, *all_symbols),
+                    f"""
+                    SELECT MAX(bar_date) AS max_date
+                    FROM fact_price_ohlcv
+                    WHERE source_id IN ({placeholders(source_ids)})
+                      AND ticker IN ({ph})
+                    """,
+                    (*source_ids, *tickers),
                 ).fetchone()
                 effective_asof = parse_date(row["max_date"] if row is not None else "")
             if effective_asof is None:
                 raise ValueError(f"No price bars found for source_id={source_id}")
 
-            bench_rows = load_benchmark_rows(conn, source_id, benchmark_tickers, effective_asof)
+            if asof is None and effective_asof is not None:
+                members = load_universe(
+                    conn,
+                    model_family,
+                    include_historical=bool(args.include_historical),
+                    membership_status=str(args.membership_status),
+                    asof=effective_asof,
+                )
+                tickers = [member.ticker for member in members]
+                if not tickers:
+                    raise ValueError(f"No as-of eligible industrials universe tickers found for model_family={model_family} asof={effective_asof}.")
+            bench_rows = load_benchmark_rows(conn, benchmark_source_id, benchmark_tickers, effective_asof)
             report_rows: list[dict[str, Any]] = []
             review_count = 0
             with conn:
                 ph_tickers = placeholders(tickers)
+                ph_sources = placeholders(source_ids)
+                conn.execute(
+                    f"""
+                    DELETE FROM feature_market_technical
+                    WHERE asof_date = ?
+                      AND model_family = ?
+                      AND source_id IN ({ph_sources})
+                    """,
+                    (effective_asof.isoformat(), model_family, *source_ids),
+                )
                 conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({ph_tickers})", (RUN_TYPE, *tickers))
-                for ticker in tickers:
-                    rows = load_price_rows(conn, ticker, source_id, effective_asof)
+                for member in members:
+                    ticker = member.ticker
+                    rows, feature_source_id = load_first_available_price_rows(
+                        conn,
+                        ticker=ticker,
+                        source_ids=source_ids,
+                        asof=effective_asof,
+                        start_date=member.start_date,
+                    )
                     feature, review_reason = build_feature(
                         ticker,
                         rows,
-                        source_id=source_id,
+                        source_id=feature_source_id,
                         model_family=model_family,
                         asof=effective_asof,
                         max_staleness_days=max_staleness_days,
@@ -533,7 +670,7 @@ def main() -> None:
                         {
                             "ticker": ticker,
                             "asof_date": effective_asof.isoformat(),
-                            "source_id": source_id,
+                            "source_id": feature_source_id,
                             "model_family": model_family,
                             "status": "review" if review_reason else "success",
                             "trading_days_available": feature.get("trading_days_available", 0),

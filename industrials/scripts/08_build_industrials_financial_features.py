@@ -7,6 +7,7 @@ import logging
 import math
 import sys
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -154,6 +155,12 @@ DURATION_METRICS = {
     "diluted_shares",
 }
 
+
+@dataclass(frozen=True)
+class TtmResult:
+    value: float | None
+    quality_flag: str
+
 ACCEPTED_DATE_SQL = """
 CASE
     WHEN COALESCE(accepted_at, '') GLOB '????-??-??*' THEN SUBSTR(accepted_at, 1, 10)
@@ -171,6 +178,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-family", default="", help="Industrials model family to build, e.g. defense.")
     parser.add_argument("--tickers", default="", help="Optional comma-separated ticker filter.")
     parser.add_argument("--asof", default="", help="Feature as-of date. Defaults to latest market feature as-of date, then latest filing date.")
+    parser.add_argument("--include-historical", action="store_true", help="Also build features for non-current historical/delisted members.")
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
 
@@ -202,6 +210,25 @@ def parse_ticker_list(raw: object) -> list[str]:
     return out
 
 
+def parse_source_list(raw: object) -> list[str]:
+    values = raw if isinstance(raw, list) else str(raw or "").split(",")
+    out: list[str] = []
+    for value in values:
+        source = str(value or "").strip()
+        if source and source not in out:
+            out.append(source)
+    return out
+
+
+def source_priority_list(primary_source: str, fallback_sources: list[str]) -> list[str]:
+    out: list[str] = []
+    for source in [primary_source, *fallback_sources]:
+        text = str(source or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
 def placeholders(values: list[str]) -> str:
     if not values:
         raise ValueError("values cannot be empty")
@@ -224,8 +251,11 @@ def growth(cur: float | None, prev: float | None) -> float | None:
 def as_float(raw: object) -> float | None:
     if raw is None:
         return None
+    text = str(raw).strip()
+    if not text:
+        return None
     try:
-        value = float(raw)
+        value = float(text)
     except (TypeError, ValueError):
         return None
     if not math.isfinite(value):
@@ -233,12 +263,47 @@ def as_float(raw: object) -> float | None:
     return value
 
 
-def load_universe(conn: Any, *, model_family: str, ticker_filter: list[str]) -> list[dict[str, Any]]:
+def load_universe(
+    conn: Any,
+    *,
+    model_family: str,
+    ticker_filter: list[str],
+    include_historical: bool,
+    asof: date | None,
+) -> list[dict[str, Any]]:
     filter_sql = ""
     params: list[Any] = [model_family]
     if ticker_filter:
         filter_sql = f"AND c.ticker IN ({placeholders(ticker_filter)})"
-        params.extend(ticker_filter)
+    if include_historical or asof is not None:
+        asof_sql = ""
+        if asof is not None:
+            asof_sql = "AND m.start_date <= ? AND COALESCE(m.end_date, '9999-12-31') >= ?"
+            params.extend([asof.isoformat(), asof.isoformat()])
+        if ticker_filter:
+            params.extend(ticker_filter)
+        rows = conn.execute(
+            f"""
+            SELECT c.company_id, c.ticker, c.cik, c.company_name, c.country, c.currency,
+                   t.development_stage, t.calibration_cohort_id, t.calibration_cohort,
+                   MIN(m.start_date) AS membership_start_date,
+                   MAX(COALESCE(m.end_date, '')) AS membership_end_date
+            FROM dim_company c
+            JOIN dim_universe_membership m
+              ON m.company_id = c.company_id
+             AND m.model_family = ?
+            JOIN dim_industrials_taxonomy t
+              ON t.company_id = c.company_id
+             AND t.model_family = m.model_family
+            WHERE 1 = 1
+              {asof_sql}
+              {filter_sql}
+            GROUP BY c.company_id, c.ticker
+            ORDER BY c.is_active DESC, c.ticker
+            """,
+            tuple(params),
+        ).fetchall()
+        return [dict(row) for row in rows]
     rows = conn.execute(
         f"""
         SELECT c.company_id, c.ticker, c.cik, c.company_name, c.country, c.currency,
@@ -251,19 +316,20 @@ def load_universe(conn: Any, *, model_family: str, ticker_filter: list[str]) -> 
           {filter_sql}
         ORDER BY c.ticker
         """,
-        tuple(params),
+        tuple([*params, *ticker_filter] if ticker_filter else params),
     ).fetchall()
     return [dict(row) for row in rows]
 
 
-def latest_panel_asof(conn: Any, *, model_family: str, market_source_id: str, sec_source_id: str) -> date | None:
+def latest_panel_asof(conn: Any, *, model_family: str, market_source_ids: list[str], sec_source_id: str) -> date | None:
+    ph_sources = placeholders(market_source_ids)
     row = conn.execute(
-        """
+        f"""
         SELECT MAX(asof_date) AS asof_date
         FROM feature_market_technical
-        WHERE model_family = ? AND source_id = ?
+        WHERE model_family = ? AND source_id IN ({ph_sources})
         """,
-        (model_family, market_source_id),
+        (model_family, *market_source_ids),
     ).fetchone()
     parsed = parse_date(row["asof_date"] if row is not None else "")
     if parsed is not None:
@@ -492,16 +558,18 @@ def select_previous_annual(rows: list[dict[str, Any]], metric: str, current: dic
     current_end = parse_date(current.get("period_end"))
     if current_end is None:
         return None
-    candidates = [
-        row
-        for row in rows
-        if str(row.get("canonical_metric") or "") == metric
-        and row is not current
-        and as_float(row.get("value")) is not None
-        and is_annual_fact(row)
-        and parse_date(row.get("period_end")) is not None
-        and parse_date(row.get("period_end")) < current_end
-    ]
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        row_period_end = parse_date(row.get("period_end"))
+        if (
+            str(row.get("canonical_metric") or "") == metric
+            and row is not current
+            and as_float(row.get("value")) is not None
+            and is_annual_fact(row)
+            and row_period_end is not None
+            and row_period_end < current_end
+        ):
+            candidates.append(row)
     candidates.sort(key=row_sort_key, reverse=True)
     return candidates[offset - 1] if len(candidates) >= offset else None
 
@@ -512,6 +580,38 @@ def is_quarterly_or_interim_fact(row: dict[str, Any]) -> bool:
     if fiscal_period in {"Q1", "Q2", "Q3", "Q4"}:
         return True
     return days is not None and 45 <= days <= 130
+
+
+def fiscal_quarter(row: dict[str, Any]) -> int | None:
+    fiscal_period = str(row.get("fiscal_period") or "").upper()
+    if fiscal_period in {"Q1", "Q2", "Q3"}:
+        return int(fiscal_period[1])
+    days = duration_days(row)
+    if days is None:
+        return None
+    if 45 <= days <= 130:
+        return 1
+    if 130 < days <= 225:
+        return 2
+    if 225 < days <= 315:
+        return 3
+    return None
+
+
+def is_cumulative_interim_fact(row: dict[str, Any]) -> bool:
+    if is_annual_fact(row):
+        return False
+    quarter = fiscal_quarter(row)
+    days = duration_days(row)
+    if quarter is None or days is None:
+        return False
+    if quarter == 1:
+        return 45 <= days <= 130
+    if quarter == 2:
+        return 130 < days <= 225
+    if quarter == 3:
+        return 225 < days <= 315
+    return False
 
 
 def latest_quarterly_facts(rows: list[dict[str, Any]], metric: str, *, count: int = 4) -> list[dict[str, Any]]:
@@ -531,12 +631,137 @@ def latest_quarterly_facts(rows: list[dict[str, Any]], metric: str, *, count: in
     return selected if len(selected) == count else []
 
 
-def ttm_metric_value(rows: list[dict[str, Any]], metric: str) -> float | None:
+def rows_for_metric(rows: list[dict[str, Any]], metric: str) -> list[dict[str, Any]]:
+    return [row for row in rows if str(row.get("canonical_metric") or "") == metric and as_float(row.get("value")) is not None]
+
+
+def days_between(left: date, right: date) -> int:
+    return abs((right - left).days)
+
+
+def periods_are_one_year_apart(current: dict[str, Any], prior: dict[str, Any], *, tolerance_days: int = 20) -> bool:
+    current_start = parse_date(current.get("period_start"))
+    current_end = parse_date(current.get("period_end"))
+    prior_start = parse_date(prior.get("period_start"))
+    prior_end = parse_date(prior.get("period_end"))
+    if current_start is None or current_end is None or prior_start is None or prior_end is None:
+        return False
+    return (
+        345 <= days_between(current_start, prior_start) <= 385 + tolerance_days
+        and 345 <= days_between(current_end, prior_end) <= 385 + tolerance_days
+    )
+
+
+def valid_consecutive_quarter_window(quarters: list[dict[str, Any]]) -> bool:
+    if len(quarters) != 4:
+        return False
+    periods: list[tuple[date, date]] = []
+    for row in quarters:
+        start = parse_date(row.get("period_start"))
+        end = parse_date(row.get("period_end"))
+        days = duration_days(row)
+        if start is None or end is None or days is None or not 45 <= days <= 130:
+            return False
+        periods.append((start, end))
+    periods.sort(key=lambda item: item[1])
+    if len({end for _, end in periods}) != 4:
+        return False
+    if not 340 <= (periods[-1][1] - periods[0][0]).days <= 380:
+        return False
+    for idx in range(1, len(periods)):
+        prev_start, prev_end = periods[idx - 1]
+        cur_start, cur_end = periods[idx]
+        if cur_start <= prev_start or cur_end <= prev_end:
+            return False
+        gap_days = (cur_start - prev_end).days
+        if gap_days < 0 or gap_days > 7:
+            return False
+    return True
+
+
+def consecutive_quarter_ttm_result(rows: list[dict[str, Any]], metric: str) -> TtmResult:
     quarters = latest_quarterly_facts(rows, metric)
     if len(quarters) != 4:
-        return None
+        return TtmResult(None, f"ttm_{metric}_unavailable_no_four_quarter_window")
+    if not valid_consecutive_quarter_window(quarters):
+        return TtmResult(None, f"ttm_{metric}_unavailable_nonconsecutive_quarters")
     values = [as_float(row.get("value")) for row in quarters]
-    return sum(value for value in values if value is not None) if all(value is not None for value in values) else None
+    if not all(value is not None for value in values):
+        return TtmResult(None, f"ttm_{metric}_unavailable_missing_quarter_value")
+    return TtmResult(sum(value for value in values if value is not None), "")
+
+
+def annual_plus_interim_ttm_result(rows: list[dict[str, Any]], metric: str) -> TtmResult:
+    metric_rows = rows_for_metric(rows, metric)
+    if not metric_rows:
+        return TtmResult(None, f"ttm_{metric}_unavailable_no_metric_facts")
+
+    annual_rows = [row for row in metric_rows if is_annual_fact(row) and parse_date(row.get("period_end")) is not None]
+    annual_rows.sort(key=row_sort_key, reverse=True)
+    interim_rows = [row for row in metric_rows if is_cumulative_interim_fact(row) and parse_date(row.get("period_end")) is not None]
+    interim_rows.sort(key=row_sort_key, reverse=True)
+
+    latest_annual = annual_rows[0] if annual_rows else None
+    latest_annual_end = parse_date(latest_annual.get("period_end")) if latest_annual is not None else None
+    latest_interim = interim_rows[0] if interim_rows else None
+    latest_interim_end = parse_date(latest_interim.get("period_end")) if latest_interim is not None else None
+
+    if latest_annual is not None and (latest_interim_end is None or (latest_annual_end is not None and latest_annual_end >= latest_interim_end)):
+        annual_value = as_float(latest_annual.get("value"))
+        return TtmResult(annual_value, "" if annual_value is not None else f"ttm_{metric}_unavailable_missing_annual_value")
+    if latest_interim is None or latest_interim_end is None:
+        return consecutive_quarter_ttm_result(rows, metric)
+
+    quarter = fiscal_quarter(latest_interim)
+    if quarter is None:
+        return TtmResult(None, f"ttm_{metric}_unavailable_latest_interim_period_unknown")
+
+    annual_candidates = [
+        row
+        for row in annual_rows
+        if (period_end := parse_date(row.get("period_end"))) is not None and period_end < latest_interim_end
+    ]
+    if not annual_candidates:
+        return consecutive_quarter_ttm_result(rows, metric)
+    annual = annual_candidates[0]
+    annual_start = parse_date(annual.get("period_start"))
+    annual_end = parse_date(annual.get("period_end"))
+    if annual_start is None or annual_end is None:
+        return TtmResult(None, f"ttm_{metric}_unavailable_annual_period_missing")
+
+    prior_same_interim_candidates = [
+        row
+        for row in interim_rows
+        if row is not latest_interim
+        and fiscal_quarter(row) == quarter
+        and periods_are_one_year_apart(latest_interim, row)
+        and (period_end := parse_date(row.get("period_end"))) is not None
+        and period_end < annual_end
+    ]
+    if not prior_same_interim_candidates:
+        return consecutive_quarter_ttm_result(rows, metric)
+    prior_same_interim = prior_same_interim_candidates[0]
+    prior_start = parse_date(prior_same_interim.get("period_start"))
+    prior_end = parse_date(prior_same_interim.get("period_end"))
+    latest_start = parse_date(latest_interim.get("period_start"))
+    if prior_start is None or prior_end is None or latest_start is None:
+        return TtmResult(None, f"ttm_{metric}_unavailable_interim_period_missing")
+    if days_between(prior_start, annual_start) > 20 or not (prior_end < annual_end < latest_interim_end):
+        return TtmResult(None, f"ttm_{metric}_unavailable_interim_annual_window_mismatch")
+
+    annual_value = as_float(annual.get("value"))
+    latest_interim_value = as_float(latest_interim.get("value"))
+    prior_interim_value = as_float(prior_same_interim.get("value"))
+    if annual_value is None or latest_interim_value is None or prior_interim_value is None:
+        return TtmResult(None, f"ttm_{metric}_unavailable_missing_formula_value")
+    return TtmResult(annual_value + latest_interim_value - prior_interim_value, "")
+
+
+def ttm_metric_result(rows: list[dict[str, Any]], metric: str) -> TtmResult:
+    result = annual_plus_interim_ttm_result(rows, metric)
+    if result.value is not None or result.quality_flag:
+        return result
+    return consecutive_quarter_ttm_result(rows, metric)
 
 
 def metric_value(selected: dict[str, dict[str, Any] | None], metric: str) -> float | None:
@@ -569,37 +794,40 @@ def lookup_fx_rate(conn: Any, *, from_currency: str, to_currency: str, asof: dat
     return as_float(row["fx_rate"]) if row is not None else None
 
 
-def latest_market_values(conn: Any, *, ticker: str, market_source_id: str, model_family: str, asof: date) -> tuple[float | None, float | None]:
-    row = conn.execute(
-        """
-        SELECT market_cap, regular_market_price
-        FROM fact_market_snapshot
-        WHERE ticker = ?
-          AND source_id = ?
-          AND asof_date <= ?
-        ORDER BY asof_date DESC
-        LIMIT 1
-        """,
-        (ticker, market_source_id, asof.isoformat()),
-    ).fetchone()
-    market_cap = as_float(row["market_cap"]) if row is not None else None
-    latest_price = as_float(row["regular_market_price"]) if row is not None else None
-    if latest_price is None:
+def latest_market_values(conn: Any, *, ticker: str, market_source_ids: list[str], model_family: str, asof: date) -> tuple[float | None, float | None]:
+    for market_source_id in market_source_ids:
         row = conn.execute(
             """
-            SELECT latest_adj_close
-            FROM feature_market_technical
+            SELECT market_cap, regular_market_price
+            FROM fact_market_snapshot
             WHERE ticker = ?
               AND source_id = ?
-              AND model_family = ?
               AND asof_date <= ?
             ORDER BY asof_date DESC
             LIMIT 1
             """,
-            (ticker, market_source_id, model_family, asof.isoformat()),
+            (ticker, market_source_id, asof.isoformat()),
         ).fetchone()
-        latest_price = as_float(row["latest_adj_close"]) if row is not None else None
-    return market_cap, latest_price
+        market_cap = as_float(row["market_cap"]) if row is not None else None
+        latest_price = as_float(row["regular_market_price"]) if row is not None else None
+        if latest_price is None:
+            row = conn.execute(
+                """
+                SELECT latest_adj_close
+                FROM feature_market_technical
+                WHERE ticker = ?
+                  AND source_id = ?
+                  AND model_family = ?
+                  AND asof_date <= ?
+                ORDER BY asof_date DESC
+                LIMIT 1
+                """,
+                (ticker, market_source_id, model_family, asof.isoformat()),
+            ).fetchone()
+            latest_price = as_float(row["latest_adj_close"]) if row is not None else None
+        if market_cap is not None or latest_price is not None:
+            return market_cap, latest_price
+    return None, None
 
 
 def add_issue(conn: Any, *, ticker: str, source_id: str, severity: str, issue_type: str, detail: str) -> None:
@@ -671,7 +899,7 @@ def build_feature_from_facts(
     company: dict[str, Any],
     profile: dict[str, Any],
     rows: list[dict[str, Any]],
-    market_source_id: str,
+    market_source_ids: list[str],
 ) -> dict[str, Any]:
     feature = base_feature(ticker=ticker, asof=asof, source_id=source_id, model_family=model_family, company=company, profile=profile)
     selected: dict[str, dict[str, Any] | None] = {}
@@ -781,7 +1009,7 @@ def build_feature_from_facts(
     inventory_usd = usd(inventory)
     receivables_usd = usd(receivables)
     payables_usd = usd(payables)
-    market_cap, latest_price = latest_market_values(conn, ticker=ticker, market_source_id=market_source_id, model_family=model_family, asof=asof)
+    market_cap, latest_price = latest_market_values(conn, ticker=ticker, market_source_ids=market_source_ids, model_family=model_family, asof=asof)
     enterprise_value = market_cap + (debt_usd or 0.0) - (cash_usd or 0.0) if market_cap is not None else None
 
     prev_revenue = metric_value({"revenue": select_previous_annual(rows, "revenue", selected.get("revenue"))}, "revenue")
@@ -800,12 +1028,23 @@ def build_feature_from_facts(
         prev_capex = as_float(prev_capex_row.get("value"))
         prev_fcf = prev_ocf - prev_capex if prev_ocf is not None and prev_capex is not None else None
 
-    revenue_ttm_local = ttm_metric_value(rows, "revenue")
-    gross_profit_ttm_local = ttm_metric_value(rows, "gross_profit")
-    operating_income_ttm_local = ttm_metric_value(rows, "operating_income")
-    net_income_ttm_local = ttm_metric_value(rows, "net_income")
-    operating_cash_flow_ttm_local = ttm_metric_value(rows, "operating_cash_flow")
-    capex_ttm_local = ttm_metric_value(rows, "capex")
+    ttm_results = {
+        metric: ttm_metric_result(rows, metric)
+        for metric in [
+            "revenue",
+            "gross_profit",
+            "operating_income",
+            "net_income",
+            "operating_cash_flow",
+            "capex",
+        ]
+    }
+    revenue_ttm_local = ttm_results["revenue"].value
+    gross_profit_ttm_local = ttm_results["gross_profit"].value
+    operating_income_ttm_local = ttm_results["operating_income"].value
+    net_income_ttm_local = ttm_results["net_income"].value
+    operating_cash_flow_ttm_local = ttm_results["operating_cash_flow"].value
+    capex_ttm_local = ttm_results["capex"].value
     free_cash_flow_ttm_local = (
         operating_cash_flow_ttm_local - capex_ttm_local
         if operating_cash_flow_ttm_local is not None and capex_ttm_local is not None
@@ -822,12 +1061,22 @@ def build_feature_from_facts(
         reasons.append("missing_income_metrics")
     if fx_status == "missing_fx_rate":
         reasons.append(f"missing_fx_rate_{currency}_USD")
-    if selected.get("revenue") is not None and not is_annual_fact(selected["revenue"]):
+    revenue_row = selected.get("revenue")
+    if revenue_row is not None and not is_annual_fact(revenue_row):
         reasons.append("revenue_not_annual")
-    if revenue_ttm_local is None:
-        quality_flags.append("ttm_unavailable_no_four_quarter_window")
+    for metric, result in ttm_results.items():
+        if result.value is None and result.quality_flag:
+            quality_flags.append(result.quality_flag)
+    if free_cash_flow_ttm_local is None and (
+        operating_cash_flow_ttm_local is None or capex_ttm_local is None
+    ):
+        quality_flags.append("ttm_free_cash_flow_unavailable_missing_operating_cash_flow_or_capex")
     if rpo is not None:
         quality_flags.append("rpo_total_not_funded_backlog_or_bookings")
+
+    inventory_to_cogs = safe_div(inventory, cost_of_sales)
+    receivables_to_revenue = safe_div(receivables, revenue)
+    payables_to_cogs = safe_div(payables, cost_of_sales)
 
     feature.update(
         {
@@ -881,9 +1130,9 @@ def build_feature_from_facts(
             "sbc_pct_revenue": safe_div(sbc, revenue),
             "net_cash": (cash_usd or 0.0) - (debt_usd or 0.0) if cash_usd is not None or debt_usd is not None else None,
             "net_cash_to_assets": safe_div((cash_usd or 0.0) - (debt_usd or 0.0), assets_usd) if cash_usd is not None or debt_usd is not None else None,
-            "inventory_days": safe_div(inventory, cost_of_sales) * 365.0 if safe_div(inventory, cost_of_sales) is not None else None,
-            "days_sales_outstanding": safe_div(receivables, revenue) * 365.0 if safe_div(receivables, revenue) is not None else None,
-            "days_payables_outstanding": safe_div(payables, cost_of_sales) * 365.0 if safe_div(payables, cost_of_sales) is not None else None,
+            "inventory_days": inventory_to_cogs * 365.0 if inventory_to_cogs is not None else None,
+            "days_sales_outstanding": receivables_to_revenue * 365.0 if receivables_to_revenue is not None else None,
+            "days_payables_outstanding": payables_to_cogs * 365.0 if payables_to_cogs is not None else None,
             "cash_conversion_cycle": None,
             "revenue_yoy_growth": cur_revenue_growth,
             "gross_profit_yoy_growth": growth(gross_profit, prev_gross_profit),
@@ -960,23 +1209,41 @@ def main() -> None:
     model_family = str(args.model_family or cfg_get(config, "industrials_universe.initial_subsector", "defense") or "defense").strip()
     source_id = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts") or "sec_companyfacts")
     market_source_id = str(cfg_get(config, "market_data_policy.scoring_primary_source", "yahoo_finance_adjusted") or "yahoo_finance_adjusted")
+    market_fallback_source_ids = parse_source_list(cfg_get(config, "market_data_policy.scoring_fallback_sources", []))
+    market_source_ids = source_priority_list(market_source_id, market_fallback_source_ids)
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(cfg_get(config, "sec_fundamentals.feature_output_csv"), base_dir=base_dir)
     ticker_filter = parse_ticker_list(args.tickers)
 
     with closing(connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0)))) as conn:
         init_db(conn)
-        universe = load_universe(conn, model_family=model_family, ticker_filter=ticker_filter)
-        if not universe:
-            raise ValueError(f"No active industrials universe tickers found for model_family={model_family}")
-        tickers = [str(item["ticker"]) for item in universe]
         requested_asof = parse_date(args.asof)
-        effective_asof = requested_asof or latest_panel_asof(conn, model_family=model_family, market_source_id=market_source_id, sec_source_id=source_id) or date.today()
+        effective_asof = requested_asof or latest_panel_asof(conn, model_family=model_family, market_source_ids=market_source_ids, sec_source_id=source_id) or date.today()
+        universe = load_universe(
+            conn,
+            model_family=model_family,
+            ticker_filter=ticker_filter,
+            include_historical=bool(args.include_historical),
+            asof=effective_asof,
+        )
+        if not universe:
+            raise ValueError(f"No as-of eligible industrials universe tickers found for model_family={model_family} asof={effective_asof}")
+        tickers = [str(item["ticker"]) for item in universe]
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
             canonical_rows = refresh_canonical_facts(conn, source_id=source_id, model_family=model_family, tickers=tickers, asof=effective_asof)
             report_rows: list[dict[str, Any]] = []
             with conn:
                 ph = placeholders(tickers)
+                conn.execute(
+                    f"""
+                    DELETE FROM feature_financial_statement
+                    WHERE asof_date = ?
+                      AND source_id = ?
+                      AND model_family = ?
+                      AND ticker NOT IN ({ph})
+                    """,
+                    (effective_asof.isoformat(), source_id, model_family, *tickers),
+                )
                 conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({ph})", (RUN_TYPE, *tickers))
                 for company in universe:
                     ticker = normalize_ticker(company.get("ticker"))
@@ -1004,7 +1271,7 @@ def main() -> None:
                             company=company,
                             profile=profile,
                             rows=rows,
-                            market_source_id=market_source_id,
+                            market_source_ids=market_source_ids,
                         )
                     upsert_feature(conn, feature)
                     if str(feature.get("data_quality_status") or "") != "complete":

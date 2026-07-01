@@ -27,10 +27,17 @@ FEATURE_STAGE = "build_industrials_financial_features"
 VALID_PROFILES = {
     "SEC_XBRL_US_GAAP",
     "SEC_XBRL_IFRS",
+    "SEC_XBRL_US_GAAP_PARTIAL",
+    "SEC_XBRL_IFRS_PARTIAL",
     "SEC_20F_METADATA_ONLY",
     "FOREIGN_VENDOR_FUNDAMENTALS",
     "FOREIGN_NEUTRAL_LOW_CONFIDENCE",
     "NO_FINANCIALS_REVIEW",
+    "SEC_RAW_ARCHIVE_REQUIRED",
+    "RECENT_IPO_DEVELOPMENT_STAGE",
+    "PRIVATE_EXCLUDE",
+    "PARENT_SEGMENT_NO_STANDALONE_SEC",
+    "NON_FILING_OR_PENDING_REPORTING",
 }
 ACCEPTED_DATE_SQL = """
 CASE
@@ -78,7 +85,22 @@ def placeholders(values: list[str]) -> str:
     return ",".join("?" for _ in values)
 
 
-def load_universe(conn: Any, model_family: str) -> list[str]:
+def load_universe(conn: Any, model_family: str, *, asof: date | None) -> list[str]:
+    if asof is not None:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT m.ticker
+            FROM dim_universe_membership m
+            JOIN dim_company c
+              ON c.company_id = m.company_id
+            WHERE m.model_family = ?
+              AND m.start_date <= ?
+              AND COALESCE(m.end_date, '9999-12-31') >= ?
+            ORDER BY m.ticker
+            """,
+            (model_family, asof.isoformat(), asof.isoformat()),
+        ).fetchall()
+        return [normalize_ticker(row["ticker"]) for row in rows if normalize_ticker(row["ticker"])]
     rows = conn.execute(
         """
         SELECT c.ticker
@@ -120,11 +142,11 @@ def validate() -> int:
         if concept_count < 40:
             errors.append(f"XBRL concept map appears underseeded: active_concepts={concept_count}")
 
-        universe = load_universe(conn, model_family)
+        universe = load_universe(conn, model_family, asof=requested_asof)
         if not universe:
-            errors.append(f"No active industrials universe tickers found for model_family={model_family}")
+            errors.append(f"No industrials universe tickers found for model_family={model_family}")
             universe = ["__NO_TICKERS__"]
-        if expected_count and "__NO_TICKERS__" not in universe and len(universe) != expected_count:
+        if requested_asof is None and expected_count and "__NO_TICKERS__" not in universe and len(universe) != expected_count:
             errors.append(f"Universe count mismatch: expected={expected_count} actual={len(universe)}")
         ph = placeholders(universe)
 

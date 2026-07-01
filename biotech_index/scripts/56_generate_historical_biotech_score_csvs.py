@@ -206,7 +206,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-asof", type=str, default="")
     parser.add_argument("--end-asof", type=str, default="")
     parser.add_argument("--dates", type=str, default="", help="Optional comma-separated YYYY-MM-DD/YYYMMDD dates.")
-    parser.add_argument("--source-table", choices=["daily_scores", "daily_features"], default="daily_scores")
+    parser.add_argument("--source-table", choices=["daily_scores", "daily_features", "market_bars_daily"], default="daily_scores")
+    parser.add_argument(
+        "--carry-forward-scores",
+        action="store_true",
+        help=(
+            "When a selected date has no exact daily_scores rows, export the latest prior score snapshot "
+            "with the selected date as asof_date and the original snapshot preserved in provenance fields."
+        ),
+    )
     parser.add_argument("--fridays-only", action="store_true")
     parser.add_argument("--output-root", type=Path, default=None)
     parser.add_argument("--summary-csv", type=Path, default=None)
@@ -249,12 +257,74 @@ def is_blank(raw: object) -> bool:
     return raw is None or str(raw).strip() == ""
 
 
+def value_or_blank(raw: object) -> object:
+    return "" if is_blank(raw) else raw
+
+
 def to_float(raw: object, default: float | None = None) -> float | None:
     try:
         value = float(str(raw).strip()) if raw is not None and str(raw).strip() != "" else None
     except (TypeError, ValueError):
         return default
     return value if value is not None else default
+
+
+def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
+    if value != value:
+        return low
+    return max(low, min(high, value))
+
+
+def linear_score(value: float, points: list[tuple[float, float]]) -> float:
+    ordered = sorted(points)
+    if value <= ordered[0][0]:
+        return clamp(ordered[0][1])
+    if value >= ordered[-1][0]:
+        return clamp(ordered[-1][1])
+    for (left_x, left_y), (right_x, right_y) in zip(ordered, ordered[1:]):
+        if left_x <= value <= right_x:
+            span = max(1e-12, right_x - left_x)
+            return clamp(left_y + (right_y - left_y) * (value - left_x) / span)
+    return clamp(ordered[-1][1])
+
+
+def source_date_after_asof(raw: object, asof: object) -> bool:
+    parsed = parse_date(raw)
+    asof_date = parse_date(asof)
+    return parsed is not None and asof_date is not None and parsed > asof_date
+
+
+def sanitize_short_interest_fields_for_pit(row: dict[str, Any], *, asof: object) -> None:
+    """Drop short-interest percent-float components with future float-share provenance."""
+    if not (
+        source_date_after_asof(row.get("float_shares_source_asof_date"), asof)
+        or source_date_after_asof(row.get("float_shares_asof_date"), asof)
+    ):
+        return
+    days_to_cover = to_float(row.get("days_to_cover"), 0.0) or 0.0
+    cover_score = linear_score(days_to_cover, [(0.0, 0.0), (2.0, 25.0), (5.0, 60.0), (10.0, 100.0)])
+    cover_available = days_to_cover > 0.0
+    row.update(
+        {
+            "float_shares": 0.0,
+            "short_interest_pct_float": 0.0,
+            "float_shares_source": "",
+            "float_shares_asof_date": "",
+            "float_shares_source_asof_date": "",
+            "float_shares_staleness_days": "",
+            "float_shares_measurement_staleness_days": "",
+            "float_shares_proxy_flag": 0.0,
+            "public_float_usd": 0.0,
+            "public_float_price_date": "",
+            "public_float_close_price": 0.0,
+            "short_interest_pct_float_available_flag": 0.0,
+            "short_interest_pct_score": 0.0,
+            "short_interest_days_to_cover_score": round(clamp(cover_score), 4),
+            "short_interest_signal_basis": "days_to_cover_only" if cover_available else "no_usable_short_interest_components",
+            "short_interest_signal_max_possible_score": 25.0 if cover_available else 0.0,
+            "short_interest_signal_score": round(clamp(0.25 * cover_score), 4) if cover_available else 0.0,
+        }
+    )
 
 
 def normalize_company_name(raw: object) -> str:
@@ -282,17 +352,18 @@ def load_dates(conn: sqlite3.Connection, *, source_table: str, start_asof: str, 
     else:
         start = parse_date(start_asof)
         end = parse_date(end_asof)
+        date_column = "bar_date" if source_table == "market_bars_daily" else "asof_date"
         rows = conn.execute(
             f"""
-            SELECT DISTINCT asof_date
+            SELECT DISTINCT {date_column} AS selected_date
             FROM {source_table}
-            WHERE asof_date IS NOT NULL
-            ORDER BY asof_date
+            WHERE {date_column} IS NOT NULL
+            ORDER BY {date_column}
             """
         ).fetchall()
         dates = []
         for row in rows:
-            parsed = parse_date(row["asof_date"])
+            parsed = parse_date(row["selected_date"])
             if parsed is None:
                 continue
             if start is not None and parsed < start:
@@ -301,6 +372,47 @@ def load_dates(conn: sqlite3.Connection, *, source_table: str, start_asof: str, 
                 continue
             dates.append(parsed.isoformat())
     return sorted(dict.fromkeys(dates))
+
+
+def resolve_score_snapshot_asof(
+    conn: sqlite3.Connection,
+    asof: str,
+    *,
+    calibration_tickers: set[str],
+    carry_forward: bool,
+) -> str | None:
+    tickers = sorted(ticker for ticker in calibration_tickers if ticker)
+    ticker_filter = ""
+    params: tuple[object, ...] = (asof,)
+    if tickers:
+        placeholders = ", ".join("?" for _ in tickers)
+        ticker_filter = f"AND UPPER(ticker) IN ({placeholders})"
+        params = (asof, *tickers)
+    exact = conn.execute(
+        f"""
+        SELECT COUNT(*) AS row_count
+        FROM daily_scores
+        WHERE asof_date = ?
+          {ticker_filter}
+        """,
+        params,
+    ).fetchone()
+    if exact and int(exact["row_count"] or 0) > 0:
+        return asof
+    if not carry_forward:
+        return asof
+    params = (asof, *tickers) if tickers else (asof,)
+    prior = conn.execute(
+        f"""
+        SELECT MAX(asof_date) AS score_asof
+        FROM daily_scores
+        WHERE asof_date <= ?
+          {ticker_filter}
+        """,
+        params,
+    ).fetchone()
+    score_asof = str(prior["score_asof"] or "") if prior else ""
+    return score_asof or None
 
 
 def load_calibration_tickers(config: dict[str, Any], *, config_path: Path) -> set[str]:
@@ -324,14 +436,21 @@ def load_calibration_tickers(config: dict[str, Any], *, config_path: Path) -> se
     return out
 
 
-def load_score_rows(conn: sqlite3.Connection, asof: str, *, calibration_tickers: set[str]) -> list[dict[str, Any]]:
+def load_score_rows(
+    conn: sqlite3.Connection,
+    asof: str,
+    *,
+    calibration_tickers: set[str],
+    score_snapshot_asof: str | None = None,
+) -> list[dict[str, Any]]:
+    source_asof = score_snapshot_asof or asof
     tickers = sorted(ticker for ticker in calibration_tickers if ticker)
     ticker_filter = ""
-    params: tuple[Any, ...] = (asof,)
+    params: tuple[Any, ...] = (source_asof,)
     if tickers:
         placeholders = ", ".join("?" for _ in tickers)
         ticker_filter = f"AND UPPER(s.ticker) IN ({placeholders})"
-        params = (asof, *tickers)
+        params = (source_asof, *tickers)
     rows = conn.execute(
         f"""
         SELECT
@@ -353,7 +472,69 @@ def load_score_rows(conn: sqlite3.Connection, asof: str, *, calibration_tickers:
         """,
         params,
     ).fetchall()
-    return [dict(row) for row in rows]
+    out = [dict(row) for row in rows]
+    if source_asof != asof:
+        for row in out:
+            row["_score_snapshot_asof_date"] = source_asof
+            row["source_snapshot_asof_date"] = row.get("source_snapshot_asof_date") or source_asof
+            row["feature_data_asof_date"] = row.get("feature_data_asof_date") or source_asof
+            row["asof_date"] = asof
+    return out
+
+
+def load_market_context(conn: sqlite3.Connection, asof: str, *, tickers: set[str]) -> dict[str, dict[str, Any]]:
+    clean_tickers = sorted(ticker for ticker in tickers if ticker)
+    if not clean_tickers:
+        return {}
+    placeholders = ", ".join("?" for _ in clean_tickers)
+    params: tuple[Any, ...] = (asof, asof, *clean_tickers)
+    rows = conn.execute(
+        f"""
+        WITH recent_bars AS (
+            SELECT
+                UPPER(ticker) AS ticker,
+                bar_date,
+                close,
+                volume
+            FROM market_bars_daily
+            WHERE bar_date <= ?
+              AND bar_date >= date(?, '-180 day')
+              AND UPPER(ticker) IN ({placeholders})
+        ),
+        ranked_bars AS (
+            SELECT
+                ticker,
+                bar_date,
+                close,
+                volume,
+                ROW_NUMBER() OVER (PARTITION BY UPPER(ticker) ORDER BY bar_date DESC) AS rn
+            FROM recent_bars
+        ),
+        avg60 AS (
+            SELECT
+                ticker,
+                AVG(CASE WHEN close > 0 AND volume > 0 THEN close * volume ELSE NULL END) AS avg_dollar_volume_60d
+            FROM ranked_bars
+            WHERE rn <= 60
+            GROUP BY ticker
+        ),
+        latest AS (
+            SELECT
+                ticker,
+                MAX(bar_date) AS latest_price_date
+            FROM recent_bars
+            GROUP BY ticker
+        )
+        SELECT
+            latest.ticker,
+            latest.latest_price_date,
+            avg60.avg_dollar_volume_60d
+        FROM latest
+        LEFT JOIN avg60 ON avg60.ticker = latest.ticker
+        """,
+        params,
+    ).fetchall()
+    return {str(row["ticker"] or "").upper(): dict(row) for row in rows}
 
 
 def prepare_score_rows_for_export(
@@ -361,7 +542,9 @@ def prepare_score_rows_for_export(
     export_module: Any,
     *,
     model_metadata: dict[str, Any],
+    market_context: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    market_context = market_context or {}
     rows = [dict(row) for row in rows]
     enrich = getattr(export_module, "enrich_portfolio_layer_contract_rows", None)
     if callable(enrich):
@@ -373,6 +556,11 @@ def prepare_score_rows_for_export(
 
         asof = str(row.get("asof_date") or "")
         ticker = str(row.get("ticker") or "").strip().upper()
+        ticker_market = market_context.get(ticker, {})
+        latest_price_date = str(ticker_market.get("latest_price_date") or "")
+        avg60 = to_float(ticker_market.get("avg_dollar_volume_60d"), None)
+        has_price_data = bool(latest_price_date)
+        sanitize_short_interest_fields_for_pit(row, asof=asof)
         fill_blank("company_name", row.get("company_company_name") or ticker)
         fill_blank("sector", row.get("company_sector") or "Health Care")
         fill_blank("industry", row.get("company_industry") or "Biotechnology")
@@ -383,11 +571,11 @@ def prepare_score_rows_for_export(
         fill_blank("model_family", model_metadata.get("model_family") or "biotech_tier1_allocation_discovery")
         fill_blank("model_version", model_metadata.get("model_version") or "biotech_historical_export")
         fill_blank("scoring_contract_version", model_metadata.get("scoring_contract_version") or "biotech_daily_scores_contract_v1")
-        fill_blank("production_rank_score_field", "opportunity_score")
-        fill_blank("production_score_source", "legacy_allocation")
-        fill_blank("allocation_opportunity_score", row.get("opportunity_score") or "")
+        row["production_rank_score_field"] = "opportunity_score"
+        row["production_score_source"] = "legacy_allocation"
+        row["allocation_opportunity_score"] = value_or_blank(row.get("opportunity_score"))
         fill_blank("allocation_bucket", row.get("bucket") or "")
-        fill_blank("production_rank_score", row.get("opportunity_score") or "")
+        row["production_rank_score"] = value_or_blank(row.get("opportunity_score"))
         fill_blank("production_rank_risk_score", row.get("risk_score") or "")
 
         native_score_field = str(row.get("native_score_field") or row.get("production_rank_score_field") or "opportunity_score")
@@ -399,9 +587,13 @@ def prepare_score_rows_for_export(
         calibration_eligible = to_float(row.get("calibration_eligible_flag"), None)
         if calibration_eligible is None:
             calibration_eligible = to_float(row.get("biotech_cohort_calibration_eligible_flag"), 0.0)
-        investible = to_float(row.get("biotech_cohort_investible_flag"), 0.0) > 0.0
-        core_veto = to_float(row.get("core_structural_veto_flag"), 0.0) > 0.0
-        rank_veto = to_float(row.get("rank_quality_cap_vetoed"), 0.0) > 0.0
+        calibration_eligible_value = calibration_eligible if calibration_eligible is not None else 0.0
+        investible_value = to_float(row.get("biotech_cohort_investible_flag"), 0.0)
+        core_veto_value = to_float(row.get("core_structural_veto_flag"), 0.0)
+        rank_veto_value = to_float(row.get("rank_quality_cap_vetoed"), 0.0)
+        investible = (investible_value if investible_value is not None else 0.0) > 0.0
+        core_veto = (core_veto_value if core_veto_value is not None else 0.0) > 0.0
+        rank_veto = (rank_veto_value if rank_veto_value is not None else 0.0) > 0.0
         allocation_bucket = str(row.get("allocation_bucket") or row.get("bucket") or "").strip().lower()
         candidate_score = row.get("production_rank_score") if not is_blank(row.get("production_rank_score")) else row.get("opportunity_score")
         candidate_score_value = to_float(candidate_score, None)
@@ -415,6 +607,8 @@ def prepare_score_rows_for_export(
         reason_parts: list[str] = []
         if missing_score:
             reason_parts.append("missing_score")
+        if not has_price_data:
+            reason_parts.append("missing_price_data")
         if not investible:
             reason_parts.append("not_investible")
         if core_veto:
@@ -428,6 +622,9 @@ def prepare_score_rows_for_export(
         if missing_score:
             candidate_status = "excluded"
             candidate_reason = "missing_score"
+        elif not has_price_data:
+            candidate_status = "excluded"
+            candidate_reason = "missing_price_data"
         elif not investible:
             candidate_status = "excluded"
             candidate_reason = "not_investible"
@@ -445,6 +642,7 @@ def prepare_score_rows_for_export(
             candidate_reason = "|".join(reason_parts)
         candidate_gate = bool(
             not missing_score
+            and has_price_data
             and candidate_status == "eligible"
             and investible
             and not core_veto
@@ -456,12 +654,15 @@ def prepare_score_rows_for_export(
         )
 
         row["portfolio_candidate_gate"] = 1.0 if candidate_gate else 0.0
-        row["portfolio_candidate_score"] = candidate_score if not is_blank(candidate_score) else ""
+        row["portfolio_candidate_score"] = candidate_score if candidate_score_value is not None and candidate_score_value > 0.0 else 0.0
         row["portfolio_candidate_status"] = candidate_status
         row["portfolio_candidate_reason"] = candidate_reason
         fill_blank("calibration_eligible_flag", calibration_eligible)
         fill_blank("score_confidence", row.get("data_quality_confidence_multiplier") or "")
-        fill_blank("avg_dollar_volume_60d", "")
+        if avg60 is not None and avg60 > 0.0:
+            row["avg_dollar_volume_60d"] = round(avg60, 4)
+        else:
+            fill_blank("avg_dollar_volume_60d", "")
         fill_blank("review_reason", review_reason)
         fill_blank("eligibility_reason", row.get("portfolio_candidate_reason") or "")
         fill_blank("universe_status", "live")
@@ -474,22 +675,31 @@ def prepare_score_rows_for_export(
         fill_blank("recovery_type", "")
         fill_blank("equity_recovery", "")
         fill_blank("drop_otc_tape", 0.0)
-        fill_blank("latest_price_date", row.get("price_data_asof_date") or "")
+        fill_blank("latest_price_date", row.get("price_data_asof_date") or latest_price_date)
         fill_blank("source_snapshot_asof_date", asof)
-        fill_blank("price_data_asof_date", "")
+        fill_blank("price_data_asof_date", latest_price_date)
         fill_blank("feature_data_asof_date", asof)
-        fill_blank("clinical_data_asof_date", "")
-        fill_blank("financial_data_asof_date", "")
-        fill_blank("short_interest_asof_date", "")
-        fill_blank("institutional_data_asof_date", "")
-        fill_blank("insider_data_asof_date", "")
-        fill_blank("borrow_data_asof_date", "")
+        fill_blank("clinical_data_asof_date", row.get("feature_data_asof_date") or row.get("source_snapshot_asof_date") or asof)
+        fill_blank("financial_data_asof_date", row.get("feature_data_asof_date") or row.get("source_snapshot_asof_date") or asof)
+        fill_blank("short_interest_asof_date", row.get("feature_data_asof_date") or row.get("source_snapshot_asof_date") or asof)
+        fill_blank("institutional_data_asof_date", row.get("feature_data_asof_date") or row.get("source_snapshot_asof_date") or asof)
+        fill_blank("insider_data_asof_date", row.get("feature_data_asof_date") or row.get("source_snapshot_asof_date") or asof)
+        fill_blank("borrow_data_asof_date", row.get("feature_data_asof_date") or row.get("source_snapshot_asof_date") or asof)
         fill_blank("calibration_cohort", row.get("biotech_primary_cohort") or "")
-        fill_blank("calibration_status", "eligible" if to_float(calibration_eligible, 0.0) > 0.0 else "excluded")
-        fill_blank(
-            "calibration_status_reason",
-            "eligible" if to_float(calibration_eligible, 0.0) > 0.0 else row.get("biotech_cohort_exclusion_reason") or "not_calibration_eligible",
-        )
+        if calibration_eligible_value <= 0.0:
+            calibration_status = "excluded"
+            calibration_status_reason = row.get("biotech_cohort_exclusion_reason") or "not_calibration_eligible"
+        elif missing_score:
+            calibration_status = "excluded"
+            calibration_status_reason = "missing_score"
+        elif not has_price_data:
+            calibration_status = "excluded"
+            calibration_status_reason = "missing_price_data"
+        else:
+            calibration_status = "eligible"
+            calibration_status_reason = "eligible"
+        row["calibration_status"] = calibration_status
+        row["calibration_status_reason"] = calibration_status_reason
         fill_blank("native_score_field", native_score_field)
         row["native_score_value"] = native_score_value if not is_blank(native_score_value) else ""
         fill_blank("score_scale_min", 0.0)
@@ -652,7 +862,12 @@ def main() -> None:
             raw_dates=args.dates,
         )
         if args.fridays_only:
-            dates = [item for item in dates if parse_date(item) is not None and parse_date(item).weekday() == 4]
+            friday_dates: list[str] = []
+            for item in dates:
+                parsed_item = parse_date(item)
+                if parsed_item is not None and parsed_item.weekday() == 4:
+                    friday_dates.append(item)
+            dates = friday_dates
         if int(args.max_dates or 0) > 0:
             dates = dates[: int(args.max_dates)]
         if not dates:
@@ -661,28 +876,52 @@ def main() -> None:
         summary_rows: list[dict[str, Any]] = []
         invalid_dates: list[str] = []
         for asof in dates:
-            output_dir = output_root / compact_date(asof)
-            output_path = output_dir / output_csv_name
+            output_dir: Path = output_root / compact_date(asof)
+            output_path: Path = output_dir / output_csv_name
             action = "validated_existing"
-            validation_path = output_path
+            validation_path: Path = output_path
             generated_temp_path: Path | None = None
+            score_snapshot_asof = ""
+            carry_forwarded = 0.0
             row_count = 0
             column_count = 0
             if not args.validate_only and (args.overwrite or not output_path.exists()):
-                score_rows = load_score_rows(conn, asof, calibration_tickers=calibration_tickers)
+                resolved_snapshot = resolve_score_snapshot_asof(
+                    conn,
+                    asof,
+                    calibration_tickers=calibration_tickers,
+                    carry_forward=bool(args.carry_forward_scores),
+                )
+                score_snapshot_asof = resolved_snapshot or ""
+                carry_forwarded = 1.0 if resolved_snapshot and resolved_snapshot != asof else 0.0
+                if resolved_snapshot is None:
+                    score_rows = []
+                else:
+                    score_rows = load_score_rows(
+                        conn,
+                        asof,
+                        calibration_tickers=calibration_tickers,
+                        score_snapshot_asof=resolved_snapshot,
+                    )
                 if not score_rows:
                     action = "missing_db_rows"
                 else:
+                    market_context = load_market_context(
+                        conn,
+                        asof,
+                        tickers={str(row.get("ticker") or "").strip().upper() for row in score_rows},
+                    )
                     score_rows = prepare_score_rows_for_export(
                         score_rows,
                         export_module,
                         model_metadata=model_metadata,
+                        market_context=market_context,
                     )
                     output_dir.mkdir(parents=True, exist_ok=True)
                     generated_temp_path = output_path.with_name(output_path.name + ".tmp")
                     export_module.write_csv(generated_temp_path, score_rows)
                     validation_path = generated_temp_path
-                    action = "generated_pending_validation"
+                    action = "generated_carry_forward_pending_validation" if carry_forwarded else "generated_pending_validation"
             failures = validate_score_csv(
                 validation_path,
                 asof=asof,
@@ -703,7 +942,7 @@ def main() -> None:
             elif generated_temp_path is not None:
                 generated_temp_path.replace(output_path)
                 validation_path = output_path
-                action = "generated"
+                action = "generated_carry_forward" if carry_forwarded else "generated"
             summary_rows.append(
                 {
                     "asof_date": asof,
@@ -712,6 +951,8 @@ def main() -> None:
                     "action": action,
                     "row_count": row_count,
                     "column_count": column_count,
+                    "score_snapshot_asof": score_snapshot_asof,
+                    "carry_forwarded": carry_forwarded,
                     "csv_path": str(output_path),
                     "failure_count": len(failures),
                     "failures": "|".join(failures[:25]),
@@ -730,6 +971,8 @@ def main() -> None:
         "invalid_date_count": len(invalid_dates),
         "invalid_dates": invalid_dates[:100],
         "summary_csv": str(summary_csv),
+        "date_source_table": args.source_table,
+        "carry_forward_scores": bool(args.carry_forward_scores),
         "oos_contract_rules": {
             "dated_folder_format": "YYYYMMDD",
             "all_rows_match_asof_date": True,

@@ -24,7 +24,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
 from technology.core.oos_provenance import apply_oos_fields, build_oos_provenance  # noqa: E402
-from technology.core.portfolio_candidate_fields import add_portfolio_candidate_fields  # noqa: E402
+from technology.core.portfolio_candidate_fields import (  # noqa: E402
+    PORTFOLIO_CANDIDATE_FIELDS,
+    add_portfolio_candidate_fields,
+    portfolio_candidate_field_values,
+)
 from technology.software_infrastructure.optuna_calibration import write_csv  # noqa: E402
 
 
@@ -415,6 +419,7 @@ def scorecards(rank_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "calibration_input_valid_flag",
         "oos_score_valid_flag",
         "oos_invalid_reason",
+        *PORTFOLIO_CANDIDATE_FIELDS,
         "latest_sec_filing_date",
         "latest_sec_url",
     ]
@@ -490,6 +495,7 @@ def risk_flags(rows: list[dict[str, Any]], *, current_asof: str) -> list[dict[st
                 "calibration_input_valid_flag": row.get("calibration_input_valid_flag"),
                 "oos_score_valid_flag": row.get("oos_score_valid_flag"),
                 "oos_invalid_reason": row.get("oos_invalid_reason"),
+                **portfolio_candidate_field_values(row),
                 "severity": severity,
                 "flag": flag,
                 "detail": detail,
@@ -559,6 +565,7 @@ def review_queue(flags: list[dict[str, Any]], rows: list[dict[str, Any]]) -> lis
                 "calibration_input_valid_flag": source.get("calibration_input_valid_flag", ""),
                 "oos_score_valid_flag": source.get("oos_score_valid_flag", ""),
                 "oos_invalid_reason": source.get("oos_invalid_reason", ""),
+                **portfolio_candidate_field_values(source),
                 "model_status": source.get("model_status", ""),
                 "review_reason": source.get("review_reason", ""),
             }
@@ -742,6 +749,7 @@ def main() -> int:
     )
     baseline_source = str(cfg_get(config, f"{CONFIG_KEY}.baseline_feature_source_id", "software_infrastructure_scoring_contract"))
     filing_source = str(cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions"))
+    score_neutral_value = float(cfg_get(config, "software_infrastructure_calibrated_scoring.neutral_score", 50.0))
 
     with readonly_connect(db_path) as conn:
         score_rows = load_latest_score_rows(
@@ -760,11 +768,18 @@ def main() -> int:
         filings = latest_filings(conn, filing_source, asof=asof)
 
     score_rows_with_oos = apply_oos_fields(score_rows, oos_provenance)
-    ranks = add_portfolio_candidate_fields(apply_oos_fields(rank_table(score_rows, components, filings), oos_provenance))
+    score_rows_with_candidate_fields = add_portfolio_candidate_fields(
+        score_rows_with_oos,
+        score_neutral_value=score_neutral_value,
+    )
+    ranks = add_portfolio_candidate_fields(
+        apply_oos_fields(rank_table(score_rows, components, filings), oos_provenance),
+        score_neutral_value=score_neutral_value,
+    )
     cards = scorecards(ranks)
     cohorts = cohort_summary(score_rows)
     component_summaries = component_summary(component_detail_rows)
-    flags = risk_flags(score_rows_with_oos, current_asof=asof)
+    flags = risk_flags(score_rows_with_candidate_fields, current_asof=asof)
     queue = review_queue(flags, ranks)
 
     if args.historical_mode:

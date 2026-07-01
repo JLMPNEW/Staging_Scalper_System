@@ -77,6 +77,35 @@ def _confidence(value: Any, *, default: float = 0.5, denominator: float | None =
     return max(0.0, min(1.0, raw))
 
 
+def _research_reason(*, eligible: bool, reason: str) -> str:
+    return "ok" if eligible else (reason or "not_calibration_research_eligible")
+
+
+def _sample_role(row: dict[str, str], *, investable: bool, research_eligible: bool) -> str:
+    role = str(row.get("calibration_sample_role") or row.get("calibration_status") or "").strip().lower()
+    if role in {"strict_oos", "pre_lock_research", "excluded"}:
+        return role
+    if not research_eligible:
+        return "excluded"
+    return "strict_oos" if investable else "pre_lock_research"
+
+
+def _contract_sample_role(
+    source_role: str,
+    *,
+    investable: bool,
+    research_eligible: bool,
+    oos_score_valid: bool,
+) -> str:
+    if investable:
+        return "strict_oos" if oos_score_valid else "excluded"
+    if not research_eligible:
+        return "excluded"
+    if source_role == "strict_oos" and oos_score_valid:
+        return "strict_oos"
+    return "pre_lock_research"
+
+
 def _resolve_file(cfg: dict[str, Any], root: Path, run_as_of: str | None) -> Path:
     """Resolve a flat file or the dated-folder file for the run as-of (or latest <= as-of)."""
     mode = str(cfg.get("file_mode", "flat"))
@@ -141,18 +170,82 @@ def _adapt_tech_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
         calib_ok = _truthy(r.get("calibration_eligible_flag"))
         complete = str(r.get("model_status", "")).strip().lower() == "complete"
         oos_score_valid = _truthy(r.get("oos_score_valid_flag")) if "oos_score_valid_flag" in r else not require_oos_score_valid
-        eligible = rank_ready and calib_ok and complete and (oos_score_valid or not require_oos_score_valid)
+        if "portfolio_candidate_gate" in r:
+            eligible = _truthy(r.get("portfolio_candidate_gate"))
+        else:
+            eligible = rank_ready and calib_ok and complete and (oos_score_valid or not require_oos_score_valid)
+        if eligible and not oos_score_valid:
+            eligible = False
         reason = "ok" if eligible else (
+            str(r.get("portfolio_candidate_reason") or "").strip()
+            if str(r.get("portfolio_candidate_reason") or "").strip() else
             "not_rank_ready" if not rank_ready else
             "not_calibration_eligible" if not calib_ok else
             "model_incomplete" if not complete else
             f"not_oos_score_valid:{str(r.get('oos_invalid_reason') or '').strip()[:180]}"
+        )
+        source_role = _sample_role(r, investable=eligible, research_eligible=_truthy(
+            r.get("research_calibration_input_eligible_flag")
+        ))
+        if "stage11_calibration_input_eligible_flag" in r:
+            research_eligible = _truthy(r.get("stage11_calibration_input_eligible_flag"))
+            research_reason = str(
+                r.get("stage11_calibration_input_reason")
+                or r.get("research_calibration_reason")
+                or r.get("calibration_status_reason")
+                or ""
+            ).strip()
+            if eligible:
+                research_eligible = True
+                research_reason = "ok"
+            if not research_reason:
+                research_reason = _research_reason(
+                    eligible=research_eligible,
+                    reason=str(r.get("research_calibration_status") or "not_calibration_research_eligible"),
+                )
+        elif "research_calibration_input_eligible_flag" in r:
+            raw_research_eligible = _truthy(r.get("research_calibration_input_eligible_flag"))
+            survivorship_corrected = _truthy(r.get("survivorship_corrected_panel_flag"))
+            research_eligible = bool(
+                raw_research_eligible
+                and ((source_role == "strict_oos" and oos_score_valid) or survivorship_corrected)
+            )
+            if eligible:
+                research_eligible = True
+            research_reason = str(r.get("research_calibration_reason") or r.get("calibration_status_reason") or "").strip()
+            if not research_reason:
+                research_reason = _research_reason(
+                    eligible=research_eligible,
+                    reason=str(r.get("research_calibration_status") or "not_calibration_research_eligible"),
+                )
+            if raw_research_eligible and not research_eligible:
+                research_reason = "dashboard_snapshot_not_survivorship_corrected_use_sector_diagnostics_panel"
+        else:
+            research_eligible = calib_ok and complete and (oos_score_valid or not require_oos_score_valid)
+            research_reason = _research_reason(
+                eligible=research_eligible,
+                reason=(
+                    "not_calibration_eligible" if not calib_ok else
+                    "model_incomplete" if not complete else
+                    f"not_oos_score_valid:{str(r.get('oos_invalid_reason') or '').strip()[:180]}"
+                ),
+            )
+        contract_sample_role = _contract_sample_role(
+            source_role,
+            investable=eligible,
+            research_eligible=research_eligible,
+            oos_score_valid=oos_score_valid,
         )
         out.append(CanonicalScore(
             ticker=ticker, source_pipeline=str(cfg["model_family"]),
             sector=str(cfg["sector"]), industry=str(cfg["industry"]),
             industry_aggregate=str(cfg["industry_aggregate"]), native_score=native,
             investable_eligible=int(eligible), eligibility_reason=reason,
+            calibration_research_eligible=int(research_eligible),
+            calibration_research_reason=research_reason,
+            calibration_sample_role=source_role,
+            stage1_sample_role=contract_sample_role,
+            oos_score_valid_flag=int(oos_score_valid),
             score_confidence=_confidence(r.get("data_quality_confidence")),
             source_asof_date=_source_asof(r),
         ))
@@ -193,6 +286,10 @@ def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[Cano
             continue
         score_zero_is_missing = _truthy(r.get("score_zero_is_missing_flag"))
         missing_score = score_zero_is_missing or bool(zero_is_missing and native == 0.0)
+        calibration_ok = _truthy(r.get("calibration_eligible_flag")) if has_standard_contract else True
+        price_data_available = bool(
+            str(r.get("price_data_asof_date") or r.get("latest_price_date") or "").strip()
+        )
         if has_standard_contract:
             status = str(r.get("portfolio_candidate_status") or "").strip().lower()
             status_allows = status in {"", "eligible"}
@@ -214,17 +311,40 @@ def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[Cano
                 vetoed = _truthy(r.get("core_structural_veto_flag"))
                 eligible = investible and not vetoed
                 reason = "ok" if eligible else ("core_structural_veto" if vetoed else "not_investible")
+        research_eligible = bool(calibration_ok and not missing_score and price_data_available)
+        oos_score_valid = _truthy(r.get("oos_score_valid_flag")) if "oos_score_valid_flag" in r else bool(eligible)
+        if research_eligible:
+            research_reason = "ok"
+        elif not calibration_ok:
+            research_reason = "not_calibration_eligible"
+        elif missing_score:
+            research_reason = "missing_score"
+        elif not price_data_available:
+            research_reason = "missing_price_data"
+        else:
+            research_reason = "not_calibration_research_eligible"
         industry = str(r.get("biotech_primary_cohort", "")).strip() or str(cfg["industry"])
         conf = _confidence(
             r.get("score_confidence")
             if has_standard_contract and str(r.get("score_confidence", "")).strip()
             else r.get("data_quality_confidence_multiplier")
         )
+        source_role = _sample_role(r, investable=eligible, research_eligible=research_eligible)
         out.append(CanonicalScore(
             ticker=ticker, source_pipeline=str(cfg["model_family"]),
             sector=str(cfg["sector"]), industry=industry,
             industry_aggregate=str(cfg["industry_aggregate"]), native_score=native,
             investable_eligible=int(eligible), eligibility_reason=reason,
+            calibration_research_eligible=int(research_eligible),
+            calibration_research_reason=research_reason,
+            calibration_sample_role=source_role,
+            stage1_sample_role=_contract_sample_role(
+                source_role,
+                investable=eligible,
+                research_eligible=research_eligible,
+                oos_score_valid=oos_score_valid,
+            ),
+            oos_score_valid_flag=int(oos_score_valid),
             score_confidence=conf,
             source_asof_date=_source_asof(r),
         ))
@@ -254,7 +374,18 @@ def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
     out: list[CanonicalScore] = []
     for r in rows:
         ticker = str(r.get("ticker", "")).strip().upper()
-        native = _f(r.get("portfolio_candidate_score") or r.get("composite_score"))
+        native = next(
+            (
+                value
+                for value in (
+                    _f(r.get("native_score_value")),
+                    _f(r.get("portfolio_candidate_score")),
+                    _f(r.get("composite_score")),
+                )
+                if value is not None
+            ),
+            None,
+        )
         if not ticker or native is None:
             continue
         eligible = _truthy(r.get("portfolio_candidate_gate"))
@@ -263,6 +394,30 @@ def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
             if eligible
             else str(r.get("portfolio_candidate_reason") or "failed_portfolio_candidate_gate").strip()
         )
+        calibration_ok = _truthy(r.get("calibration_eligible_flag")) if "calibration_eligible_flag" in r else eligible
+        oos_score_valid = _truthy(r.get("oos_score_valid_flag")) if "oos_score_valid_flag" in r else bool(eligible)
+        if "research_calibration_input_eligible_flag" in r:
+            research_eligible = bool(_truthy(r.get("research_calibration_input_eligible_flag")) and native > 0.0)
+            research_reason = str(
+                r.get("research_calibration_reason")
+                or r.get("research_calibration_status")
+                or ""
+            ).strip()
+            if research_eligible and research_reason == "valid_research_calibration_input":
+                research_reason = "ok"
+            elif not research_eligible:
+                research_reason = (
+                    "missing_score"
+                    if native <= 0.0
+                    else research_reason
+                    or "not_calibration_research_eligible"
+                )
+        else:
+            research_eligible = bool(calibration_ok and native > 0.0)
+            research_reason = _research_reason(
+                eligible=research_eligible,
+                reason="not_calibration_eligible" if not calibration_ok else "missing_score",
+            )
         industry = str(r.get("subsector", "")).strip() or str(cfg["industry"])
         if explicit_confidence_field:
             conf = _confidence(r.get(explicit_confidence_field))
@@ -271,11 +426,22 @@ def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
             conf = 0.5
         else:
             conf = _confidence(r.get("data_completeness_score"), denominator=100.0)
+        source_role = _sample_role(r, investable=eligible, research_eligible=research_eligible)
         out.append(CanonicalScore(
             ticker=ticker, source_pipeline=str(cfg["model_family"]),
             sector=str(cfg["sector"]), industry=industry,
             industry_aggregate=str(cfg["industry_aggregate"]), native_score=native,
             investable_eligible=int(eligible), eligibility_reason=reason,
+            calibration_research_eligible=int(research_eligible),
+            calibration_research_reason=research_reason,
+            calibration_sample_role=source_role,
+            stage1_sample_role=_contract_sample_role(
+                source_role,
+                investable=eligible,
+                research_eligible=research_eligible,
+                oos_score_valid=oos_score_valid,
+            ),
+            oos_score_valid_flag=int(oos_score_valid),
             score_confidence=conf, source_asof_date=_source_asof(r),
         ))
     return out

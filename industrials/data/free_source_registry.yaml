@@ -246,15 +246,15 @@ sources:
       - financials
     subsector_scope: industrials
     priority: 65
-    status: planned
-    notes: Planned FX source for non-USD issuer conversion; Stage 4 accepts neutral-low-confidence fallback when FX is unavailable.
+    status: active
+    notes: Yahoo FX loader populates fact_fx_rate for non-USD issuer conversion; Stage 4 accepts neutral-low-confidence fallback when FX is unavailable.
 
   - source_id: norgate_us_equities_total_return
     stage: calibration_research
-    source_name: Norgate US equities total return
+    source_name: Norgate US equities adjusted prices
     source_owner: Norgate
     source_type: vendor_file
-    base_url: norgate://us-equities-total-return
+    base_url: norgate://us-equities-adjusted-prices
     authentication_required: true
     free_key_required: false
     refresh_frequency: manual
@@ -267,5 +267,5 @@ sources:
       - calibration_research
     subsector_scope: industrials
     priority: 70
-    status: planned
-    notes: Required for delisted historical price coverage before promotable OOS calibration.
+    status: active
+    notes: Required for delisted historical price coverage before promotable OOS calibration. The active price basis is controlled by norgate_delisted_import.price_adjustment_mode and recorded per bar in fact_price_ohlcv.price_adjustment. CAPITAL is split/capital-action adjusted and excludes ordinary-dividend total return.
