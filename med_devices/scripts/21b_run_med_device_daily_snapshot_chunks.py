@@ -115,9 +115,10 @@ def make_chunks(asofs: list[str], *, chunk_size: int) -> list[Chunk]:
     return chunks
 
 
-def review_pack_csv_complete(path: Path) -> bool:
-    # Mirrors script 21's review_pack_csv_complete: a header carrying the core
-    # columns plus at least one non-empty data row.
+def review_pack_csv_complete(path: Path, *, require_data_row: bool) -> bool:
+    # Daily composite output must contain rows. Filtered subset reports such as
+    # Tier 1 can be legitimately empty for a historical as-of, so a valid header
+    # is sufficient for those files.
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.reader(handle)
@@ -127,6 +128,8 @@ def review_pack_csv_complete(path: Path) -> bool:
             columns = {str(item or "").strip() for item in header}
             if not set(REVIEW_PACK_CORE_COLUMNS).issubset(columns):
                 return False
+            if not require_data_row:
+                return True
             return any(any(str(cell or "").strip() for cell in row) for row in reader)
     except (OSError, csv.Error):
         return False
@@ -138,7 +141,8 @@ def review_pack_complete(review_pack_base_dir: Path, asof: str) -> bool:
         path = output_dir / name
         if not path.exists() or path.stat().st_size == 0:
             return False
-        if name.lower().endswith(".csv") and not review_pack_csv_complete(path):
+        require_data_row = name == "med_device_daily_composite_scores.csv"
+        if name.lower().endswith(".csv") and not review_pack_csv_complete(path, require_data_row=require_data_row):
             return False
     return True
 
