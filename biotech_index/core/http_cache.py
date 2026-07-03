@@ -98,6 +98,14 @@ class CachedHttpClient:
                     continue
                 resp.raise_for_status()
                 return resp.text
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if status is not None and 400 <= status < 500 and status != 429:
+                    # Non-retryable client error: retrying cannot succeed.
+                    raise
+                last_exc = exc
+                if attempt < self.max_retries - 1:
+                    time.sleep(min(8.0, 2.0**attempt))
             except Exception as exc:
                 last_exc = exc
                 if attempt < self.max_retries - 1:
@@ -163,11 +171,17 @@ class CachedHttpClient:
         path = self.cache_path(namespace, url, params)
         if self.cache_is_fresh(path, ttl_hours):
             try:
-                return path.read_text(encoding="utf-8", errors="replace")
+                cached_text = path.read_text(encoding="utf-8", errors="replace")
             except FileNotFoundError:
-                pass
+                cached_text = ""
+            if cached_text:
+                return cached_text
+            if path.exists():
+                LOGGER.warning("Ignoring empty text cache file: %s", path)
 
         text = self._get_text(url=url, params=params, headers=headers or {})
+        if not text:
+            raise ValueError(f"Refusing to cache empty text response from {url}")
         with _CACHE_WRITE_LOCK:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")

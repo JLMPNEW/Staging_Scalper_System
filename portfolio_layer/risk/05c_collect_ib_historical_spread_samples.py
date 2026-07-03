@@ -173,10 +173,13 @@ def _sample_rows_for_ticker(
             "half_spread_bps": spread_bps / 2.0,
         })
 
-    if parsed:
-        sample_date = max(row["timestamp"].date() for row in parsed)
-    else:
-        sample_date = None
+    # Walk back through the fetched sessions (newest first): an early close (e.g. 13:00 ET) makes the
+    # afternoon targets unreachable on the latest date, but the prior full session is still fresh —
+    # staleness is enforced downstream via bar_date_et against max_stale_liquidity_days.
+    bar_dates = sorted({row["timestamp"].date() for row in parsed}, reverse=True)
+    by_date: dict[Any, list[dict[str, Any]]] = {}
+    for row in parsed:
+        by_date.setdefault(row["timestamp"].date(), []).append(row)
 
     out: list[dict[str, Any]] = []
     for target in sample_times:
@@ -197,19 +200,22 @@ def _sample_rows_for_ticker(
             "status": "missing",
             "reason": "no_ib_bars",
         }
-        if sample_date is None:
+        if not bar_dates:
             out.append(base)
             continue
-        target_dt = datetime.combine(sample_date, dt_time.fromisoformat(target), tzinfo=ET)
-        candidates = [row for row in parsed if row["timestamp"].date() == sample_date]
-        if not candidates:
-            out.append(base | {"reason": "no_bars_on_sample_date"})
+        hit = None
+        for day in bar_dates:
+            target_dt = datetime.combine(day, dt_time.fromisoformat(target), tzinfo=ET)
+            nearest = min(by_date[day], key=lambda row: abs((row["timestamp"] - target_dt).total_seconds()))
+            lag_minutes = abs((nearest["timestamp"] - target_dt).total_seconds()) / 60.0
+            if lag_minutes <= max_lag_minutes:
+                hit = (day, nearest)
+                break
+        if hit is None:
+            out.append(base | {"bar_date_et": bar_dates[0].isoformat(),
+                               "reason": f"nearest_bar_lag>{max_lag_minutes:g}m_all_sessions"})
             continue
-        nearest = min(candidates, key=lambda row: abs((row["timestamp"] - target_dt).total_seconds()))
-        lag_minutes = abs((nearest["timestamp"] - target_dt).total_seconds()) / 60.0
-        if lag_minutes > max_lag_minutes:
-            out.append(base | {"bar_date_et": sample_date.isoformat(), "reason": f"nearest_bar_lag>{max_lag_minutes:g}m"})
-            continue
+        day, nearest = hit
         status = "ok"
         reason = ""
         if float(nearest["half_spread_bps"]) >= max_half_spread_bps:
@@ -217,7 +223,7 @@ def _sample_rows_for_ticker(
             reason = f"half_spread_bps>={max_half_spread_bps:g}"
         out.append({
             **base,
-            "bar_date_et": sample_date.isoformat(),
+            "bar_date_et": day.isoformat(),
             "bar_timestamp_et": nearest["timestamp"].isoformat(timespec="seconds"),
             "bid": _finite_or_blank(nearest["bid"]),
             "ask": _finite_or_blank(nearest["ask"]),
@@ -237,8 +243,9 @@ def _tickers_from_trade_list(run_dir: Path) -> list[str]:
     tickers: set[str] = set()
     for r in read_csv(trade_path):
         ticker = str(r.get("ticker", "")).strip().upper()
-        notional = finite_float(r.get("trade_notional"), name="trade_notional")
-        if ticker and notional is not None and notional > 0:
+        raw = r.get("trade_notional")
+        notional = finite_float(raw, name="trade_notional") if raw not in (None, "") else 0.0
+        if ticker and notional > 0:
             tickers.add(ticker)
     return sorted(tickers)
 
@@ -250,8 +257,9 @@ def _tickers_from_target_weights(run_dir: Path) -> list[str]:
     tickers: set[str] = set()
     for r in read_csv(target_path):
         ticker = str(r.get("ticker", "")).strip().upper()
-        weight = finite_float(r.get("weight"), name="weight")
-        if ticker and weight is not None and weight > 0:
+        raw = r.get("weight")
+        weight = finite_float(raw, name="weight") if raw not in (None, "") else 0.0
+        if ticker and weight > 0:
             tickers.add(ticker)
     return sorted(tickers)
 

@@ -20,11 +20,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv  # noqa: E402
+from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.costs.cost_common import (  # noqa: E402
-    finite_float, invalidate_after_cost_model, require_same_aum, commission, resolve_aum,
+    commission, finite_float, half_spread_for_ticker, invalidate_after_cost_model,
+    load_spread_inputs, require_same_aum, resolve_aum,
 )
 from portfolio_layer.risk.liquidity import (  # noqa: E402
     configured_fallback_half_spread_bps,
@@ -59,104 +60,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--aum", type=float, default=None)
     p.add_argument("--force", action="store_true")
     return p.parse_args()
-
-
-def _load_spread_inputs(config: dict, run_dir: Path, default_half_spread_bps: float) -> dict:
-    """Resolve spread source for Stage 4 without silently requiring IB when disabled."""
-    use_panel = liquidity_panel_active(config)
-    allow_fallback = bool(cfg_get(config, "liquidity_panel.allow_fallback_to_default", True))
-    fallback_half_spread_bps = (
-        configured_fallback_half_spread_bps(config) if use_panel else default_half_spread_bps
-    )
-    max_half_spread_bps = liquidity_half_spread_fail_bps(config)
-    if not use_panel:
-        return {
-            "mode": "config_default",
-            "snapshot_path": None,
-            "snapshot_sha256": "",
-            "snapshot": {},
-            "allow_fallback": True,
-            "default_half_spread_bps": default_half_spread_bps,
-            "fallback_half_spread_bps": fallback_half_spread_bps,
-            "max_half_spread_bps": max_half_spread_bps,
-        }
-    snapshot_path = run_dir / "risk" / "spread_snapshot.csv"
-    if not snapshot_path.exists():
-        raise ValueError(
-            f"Enhanced liquidity spread source requested but missing {snapshot_path}. "
-            "Run risk/05c_collect_ib_historical_spread_samples.py first or set transaction_costs.spread_source=config_default."
-        )
-    snapshot = load_spread_snapshot(snapshot_path)
-    if not snapshot:
-        raise ValueError(f"Enhanced liquidity spread source requested but {snapshot_path} is empty")
-    return {
-        "mode": "liquidity_panel",
-        "snapshot_path": snapshot_path,
-        "snapshot_sha256": sha256_file(snapshot_path),
-        "snapshot": snapshot,
-        "allow_fallback": allow_fallback,
-        "default_half_spread_bps": default_half_spread_bps,
-        "fallback_half_spread_bps": fallback_half_spread_bps,
-        "max_half_spread_bps": max_half_spread_bps,
-    }
-
-
-def _half_spread_for_ticker(ticker: str, spread_inputs: dict) -> dict:
-    default_bps = float(spread_inputs["default_half_spread_bps"])
-    fallback_bps = float(spread_inputs["fallback_half_spread_bps"])
-    max_bps = float(spread_inputs["max_half_spread_bps"])
-    if spread_inputs["mode"] != "liquidity_panel":
-        return {
-            "half_spread_bps": default_bps,
-            "source": "config_default",
-            "status": "config_default",
-            "reason": "liquidity_panel_disabled",
-        }
-    row = spread_inputs["snapshot"].get(str(ticker).strip().upper())
-    if row is None:
-        if spread_inputs["allow_fallback"]:
-            return {
-                "half_spread_bps": fallback_bps,
-                "source": "config_default",
-                "status": "fallback",
-                "reason": "missing_spread_snapshot_row",
-            }
-        raise ValueError(f"Missing spread snapshot row for {ticker}")
-    status = str(row.get("spread_status", "")).strip().lower()
-    source = str(row.get("spread_source", "")).strip() or "unknown"
-    reason = str(row.get("spread_reason", "")).strip()
-    if status == "failed" and not spread_inputs["allow_fallback"]:
-        raise ValueError(f"Spread snapshot failed for {ticker}: {reason}")
-    if status == "failed":
-        return {
-            "half_spread_bps": fallback_bps,
-            "source": "config_default",
-            "status": "fallback",
-            "reason": reason or "spread_snapshot_failed",
-        }
-    try:
-        bps = finite_float(row.get("median_half_spread_bps"), name=f"spread_snapshot:{ticker}.median_half_spread_bps")
-    except ValueError:
-        if spread_inputs["allow_fallback"]:
-            return {
-                "half_spread_bps": fallback_bps,
-                "source": "config_default",
-                "status": "fallback",
-                "reason": "invalid_spread_snapshot_value",
-            }
-        raise
-    if bps < 0:
-        raise ValueError(f"spread_snapshot:{ticker}.median_half_spread_bps must be non-negative, got {bps}")
-    if bps >= max_bps:
-        raise ValueError(
-            f"spread_snapshot:{ticker}.median_half_spread_bps={bps} meets/exceeds hard limit {max_bps}"
-        )
-    return {
-        "half_spread_bps": bps,
-        "source": source,
-        "status": status or "ok",
-        "reason": reason,
-    }
 
 
 def main() -> int:
@@ -209,7 +112,7 @@ def main() -> int:
             raise ValueError(
                 f"transaction_costs.half_spread_bps_default must be non-negative, got {half_spread_bps}"
             )
-        spread_inputs = _load_spread_inputs(config, run_dir, half_spread_bps)
+        spread_inputs = load_spread_inputs(config, run_dir, half_spread_bps)
     except ValueError as exc:
         LOGGER.error("%s", exc)
         return 1
@@ -230,7 +133,7 @@ def main() -> int:
             LOGGER.error("Invalid trade row for %s: notional=%s n_orders=%s", t.get("ticker"), notional, n_orders)
             return 1
         try:
-            spread_info = _half_spread_for_ticker(t["ticker"], spread_inputs)
+            spread_info = half_spread_for_ticker(t["ticker"], spread_inputs)
         except ValueError as exc:
             LOGGER.error("%s", exc)
             return 1
@@ -291,7 +194,7 @@ def main() -> int:
             "impact=deferred (no ADV/volume impact model)"
         ),
     }
-    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    write_manifest(summary_path, summary)
     LOGGER.info("Cost: %d orders, one-way $%.2f (%.2f bps of AUM) [commission $%.2f]; round-trip $%.2f (diag) -> %s",
                 n_orders, one_way_base, summary["one_way_cost_bps_of_aum"], summary["commission_total_base"],
                 summary["round_trip_cost_base_usd_DIAGNOSTIC"], report_path)

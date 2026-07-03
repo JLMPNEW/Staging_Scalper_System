@@ -16,7 +16,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Iterable, TypeVar
@@ -65,6 +65,9 @@ DEFAULT_BOOTSTRAP_TOP_K = 8
 DEFAULT_BOOTSTRAP_SEED = 3001
 DEFAULT_SELECTED_TICKER_TOP_RANKS = 5
 DEFAULT_HOLDOUT_TOP_K = 25
+TRADING_BARS_PER_CALENDAR_YEAR = 252.0
+CALENDAR_DAYS_PER_YEAR = 365.25
+DEFAULT_EMBARGO_BUFFER_CALENDAR_DAYS = 10
 
 SCORE_COLUMNS = [
     "tier1_score",
@@ -1292,11 +1295,24 @@ def build_pool_specs(config: dict[str, Any]) -> list[PoolSpec]:
     ]
 
 
+def minimum_calendar_embargo_days_for_horizon(
+    horizon_bars: int,
+    *,
+    buffer_days: int = DEFAULT_EMBARGO_BUFFER_CALENDAR_DAYS,
+) -> int:
+    """Convert a trading-bar horizon into the calendar-day embargo needed to avoid split leakage."""
+    return int(
+        math.ceil(max(0, int(horizon_bars)) * CALENDAR_DAYS_PER_YEAR / TRADING_BARS_PER_CALENDAR_YEAR)
+        + max(0, int(buffer_days))
+    )
+
+
 def split_rows_by_completed_return_date(
     rows: list[dict[str, Any]],
     *,
     horizon: int,
     train_fraction: float,
+    embargo_days: int = 0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
     ret_key = f"fwd_{horizon}d_net_return"
     eligible_dates = sorted(
@@ -1329,6 +1345,23 @@ def split_rows_by_completed_return_date(
     split_idx = max(1, min(len(eligible_dates) - 1, split_idx))
     train_dates = eligible_dates[:split_idx]
     test_dates = eligible_dates[split_idx:]
+    if embargo_days > 0 and train_dates and test_dates:
+        first_test_date = parse_date(test_dates[0])
+        if first_test_date is not None:
+            embargo_start = first_test_date - timedelta(days=int(embargo_days))
+            kept_train_dates = [
+                text for text in train_dates if (parsed := parse_date(text)) is not None and parsed < embargo_start
+            ]
+            dropped_count = len(train_dates) - len(kept_train_dates)
+            if dropped_count:
+                LOGGER.info(
+                    "Horizon %sd: embargoed %d train as-of dates within %d calendar days before first test date %s.",
+                    horizon,
+                    dropped_count,
+                    embargo_days,
+                    test_dates[0],
+                )
+            train_dates = kept_train_dates
     train_set = set(train_dates)
     test_set = set(test_dates)
     return (
@@ -2124,12 +2157,19 @@ def main() -> None:
     grid_rows: list[dict[str, Any]] = []
     split_rows_by_key: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
     split_manifest: dict[str, Any] = {}
+    configured_embargo_days = cfg_get(config, "calibration.phase2.embargo_days", None)
     for horizon in horizons:
+        embargo_days = (
+            int(configured_embargo_days)
+            if configured_embargo_days is not None
+            else minimum_calendar_embargo_days_for_horizon(horizon)
+        )
         for sample, sample_rows in [("all", rows), ("liquidity_ok", liquid_rows)]:
             train_rows, test_rows, train_dates, test_dates = split_rows_by_completed_return_date(
                 sample_rows,
                 horizon=horizon,
                 train_fraction=train_fraction,
+                embargo_days=embargo_days,
             )
             split_rows_by_key[(sample, "train", horizon)] = train_rows
             split_rows_by_key[(sample, "test", horizon)] = test_rows
@@ -2138,6 +2178,7 @@ def main() -> None:
                 "train_snapshot_date_count": len(train_dates),
                 "test_snapshot_dates": test_dates,
                 "test_snapshot_date_count": len(test_dates),
+                "embargo_days": embargo_days,
             }
             grid_rows.extend(
                 build_grid_rows(

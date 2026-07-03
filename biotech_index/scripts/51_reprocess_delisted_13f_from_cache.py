@@ -8,7 +8,6 @@ import json
 import re
 import sqlite3
 import sys
-import time
 import zipfile
 from collections import defaultdict
 from datetime import date, datetime, timezone
@@ -157,12 +156,44 @@ def first_present(row: dict[str, Any], *keys: str) -> str:
     return ""
 
 
+def aggregate_holding_rows(holding_rows: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+    """Pre-aggregate duplicate (filing_key, ticker, cusip) holding rows.
+
+    One 13F filing can report the same issuer CUSIP on several INFOTABLE lines
+    (SOLE/SHARED/NONE investment-discretion splits).  The holdings table keys
+    on (filing_key, ticker, cusip), so upserting the raw lines would let the
+    last line win and undercount the position.  Sum shares and market_value
+    across the duplicate lines -- preferring plain share rows over put/call
+    rows when both appear -- and keep the other fields from the row with the
+    largest share count.  Row tuple layout: [0]=filing_key, [3]=ticker,
+    [4]=cusip, [8]=shares, [9]=market_value, [12]=put_call.
+    """
+    grouped: dict[tuple[Any, Any, Any], list[tuple[Any, ...]]] = {}
+    for row in holding_rows:
+        grouped.setdefault((row[0], row[3], row[4]), []).append(row)
+    out: list[tuple[Any, ...]] = []
+    for rows in grouped.values():
+        share_rows = [row for row in rows if not str(row[12] or "").strip()]
+        rows = share_rows or rows
+        if len(rows) == 1:
+            out.append(rows[0])
+            continue
+        shares = [float(row[8]) for row in rows if row[8] is not None]
+        values = [float(row[9]) for row in rows if row[9] is not None]
+        merged = list(max(rows, key=lambda row: float(row[8] or 0.0)))
+        merged[8] = sum(shares) if shares else None
+        merged[9] = sum(values) if values else None
+        out.append(tuple(merged))
+    return out
+
+
 def upsert_records(
     conn: sqlite3.Connection,
     *,
     filing_rows: list[tuple[Any, ...]],
     holding_rows: list[tuple[Any, ...]],
 ) -> None:
+    holding_rows = aggregate_holding_rows(holding_rows)
     with conn:
         conn.executemany(
             """
@@ -210,38 +241,51 @@ def aggregate_for_tickers(conn: sqlite3.Connection, tickers: set[str], *, source
     placeholders = ",".join("?" for _ in tickers)
     rows = conn.execute(
         f"""
-        SELECT ticker, filing_date AS asof_date, period_of_report,
+        SELECT ticker, filing_date, period_of_report,
                COALESCE(NULLIF(manager_cik, ''), NULLIF(manager_name, ''), filing_key) AS manager_key,
                COALESCE(shares, 0.0) AS shares,
                COALESCE(market_value, 0.0) AS market_value
         FROM institutional_13f_holdings
         WHERE ticker IN ({placeholders})
+          AND source = ?
           AND UPPER(COALESCE(share_type, '')) IN ('', 'SH')
           AND COALESCE(put_call, '') = ''
-        ORDER BY ticker, filing_date
+        ORDER BY ticker, period_of_report, filing_date
         """,
-        tuple(sorted(tickers)),
+        tuple(sorted(tickers)) + (source,),
     ).fetchall()
-    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    # Group holdings by period_of_report (quarter) so each snapshot aggregates
+    # ALL managers that reported for that quarter.  13F filing dates for one
+    # quarter are spread over ~45 days, so grouping by filing_date fragments
+    # the quarter and makes the new/exiting-buyer diff compare disjoint
+    # per-day filer subsets.  The snapshot's asof_date column carries
+    # MAX(filing_date) of the included filings, which keeps the snapshot
+    # point-in-time safe (only visible once every included filing existed).
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
-        key = (str(row["ticker"]), str(row["asof_date"]), str(row["period_of_report"] or ""))
-        bucket = grouped.setdefault(key, {"shares": 0.0, "value": 0.0, "managers": set()})
+        period = str(row["period_of_report"] or "") or str(row["filing_date"] or "")
+        key = (str(row["ticker"]), period)
+        bucket = grouped.setdefault(key, {"shares": 0.0, "value": 0.0, "managers": set(), "asof_date": ""})
         bucket["shares"] += float(row["shares"] or 0.0)
         bucket["value"] += float(row["market_value"] or 0.0)
+        filing_date = str(row["filing_date"] or "")
+        if filing_date > str(bucket["asof_date"]):
+            bucket["asof_date"] = filing_date
         manager_key = str(row["manager_key"] or "")
         if manager_key:
             bucket["managers"].add(manager_key)
 
-    by_ticker: dict[str, list[tuple[str, str, dict[str, Any]]]] = defaultdict(list)
-    for (ticker, asof_date, period), payload in grouped.items():
-        by_ticker[ticker].append((asof_date, period, payload))
+    by_ticker: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
+    for (ticker, period), payload in grouped.items():
+        by_ticker[ticker].append((period, payload))
 
     now = utc_now()
     records: list[tuple[Any, ...]] = []
     for ticker, ticker_rows in by_ticker.items():
         prior_shares: float | None = None
         prior_managers: set[str] | None = None
-        for asof_date, period, payload in sorted(ticker_rows, key=lambda item: item[0]):
+        # Quarter-over-quarter diff: consecutive period_of_report snapshots.
+        for period, payload in sorted(ticker_rows, key=lambda item: item[0]):
             shares = float(payload["shares"] or 0.0)
             delta = (shares - prior_shares) / prior_shares if prior_shares and prior_shares > 0.0 else None
             prior_shares = shares
@@ -256,7 +300,7 @@ def aggregate_for_tickers(conn: sqlite3.Connection, tickers: set[str], *, source
             records.append(
                 (
                     ticker,
-                    asof_date,
+                    str(payload["asof_date"] or "") or period,
                     period,
                     shares,
                     float(payload["value"] or 0.0),
@@ -326,6 +370,7 @@ def main() -> int:
     processed = 0
     matched_holdings = 0
     matched_archives = 0
+    archives_missing_filing_date = 0
     with connect_market_db(market_db) as conn:
         for archive in archives:
             filing_rows_by_key: dict[str, tuple[Any, ...]] = {}
@@ -335,7 +380,17 @@ def main() -> int:
                 infotable_member = zip_member_for(zf, "INFOTABLE")
                 if not submission_member or not infotable_member:
                     continue
-                _, submission_rows = read_zip_csv(zf, submission_member)
+                submission_fields, submission_rows = read_zip_csv(zf, submission_member)
+                # Without a filing-date column every matched holding would fail
+                # the date-window check and be dropped silently; make that loud.
+                if not {"FILING_DATE", "FILEDASOFDATE"} & {str(field).strip().upper() for field in submission_fields}:
+                    print(
+                        f"ERROR: {archive.name}: SUBMISSION member {submission_member} has no "
+                        f"FILING_DATE/FILEDASOFDATE column (fields: {submission_fields}); skipping archive",
+                        file=sys.stderr,
+                    )
+                    archives_missing_filing_date += 1
+                    continue
                 submissions = {
                     first_present(row, "ACCESSION_NUMBER", "accession_number").strip(): row
                     for row in submission_rows
@@ -409,6 +464,7 @@ def main() -> int:
         "archives_seen": len(archives),
         "archives_processed": processed,
         "archives_with_matches": matched_archives,
+        "archives_missing_filing_date_column": archives_missing_filing_date,
         "matched_holdings": matched_holdings,
         "snapshot_rows_upserted": snapshot_rows,
         "start_date": start_date.isoformat(),

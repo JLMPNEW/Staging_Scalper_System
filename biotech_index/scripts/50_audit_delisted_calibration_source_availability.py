@@ -7,7 +7,6 @@ import json
 import re
 import sqlite3
 import sys
-import time
 from collections import Counter
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -20,7 +19,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from biotech_index.core.db import connect  # noqa: E402
 from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
 
 
@@ -151,6 +149,19 @@ def normalize_cusip(raw: object) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(raw or "").upper())[:9]
 
 
+def candidate_cusip(raw: object) -> str:
+    """Accept a candidate identifier as a CUSIP only when it is exactly 9 alphanumeric chars.
+
+    Candidate sheets sometimes carry a 12-char OpenFIGI identifier (BBG...) in the
+    cusip_or_figi column; truncating it to 9 chars would mint a bogus CUSIP, so
+    anything that is not a clean 9-char non-FIGI identifier maps to blank.
+    """
+    text = re.sub(r"[^A-Z0-9]", "", str(raw or "").upper())
+    if len(text) == 9 and not text.startswith("BBG"):
+        return text
+    return ""
+
+
 def parse_int(raw: object, default: int = 0) -> int:
     try:
         return int(float(str(raw or "").strip()))
@@ -186,7 +197,7 @@ def read_csv(path: Path) -> list[dict[str, str]]:
             clean = {str(key): str(value or "").strip() for key, value in row.items()}
             clean["ticker"] = normalize_ticker(clean.get("ticker"))
             clean["cik"] = normalize_cik(clean.get("cik"))
-            clean["cusip"] = normalize_cusip(clean.get("cusip") or clean.get("cusip_or_figi"))
+            clean["cusip"] = candidate_cusip(clean.get("cusip") or clean.get("cusip_or_figi"))
             rows.append(clean)
     return rows
 
@@ -302,20 +313,22 @@ def candidate_scope_reasons(row: dict[str, str]) -> list[str]:
 def company_ids_for_candidate(conn: sqlite3.Connection | None, ticker: str, cik: str) -> list[int]:
     if conn is None or not table_exists(conn, "companies"):
         return []
-    parts: list[str] = []
-    params: list[Any] = []
-    if ticker:
-        parts.append("UPPER(ticker) = ?")
-        params.append(ticker)
+    # Prefer CIK-only matching: delisted tickers are frequently reused by
+    # unrelated issuers, so a ticker match (with no date window) can attribute
+    # the ticker-reuser's SEC filings to the delisted candidate.  Only fall
+    # back to ticker matching when the candidate has no CIK.
     if cik:
-        parts.append("printf('%010d', CAST(cik AS INTEGER)) = ?")
-        params.append(cik)
-    if not parts:
+        where_sql = "printf('%010d', CAST(cik AS INTEGER)) = ?"
+        params: tuple[Any, ...] = (cik,)
+    elif ticker:
+        where_sql = "UPPER(ticker) = ?"
+        params = (ticker,)
+    else:
         return []
     try:
         rows = conn.execute(
-            f"SELECT company_id FROM companies WHERE {' OR '.join(parts)}",
-            tuple(params),
+            f"SELECT company_id FROM companies WHERE {where_sql}",
+            params,
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -346,7 +359,7 @@ def sec_local_counts(conn: sqlite3.Connection | None, ticker: str, cik: str) -> 
             )
             or 0
         )
-    fact_rows = latest_filed = 0, ""
+    fact_rows = (0, "")
     if conn is not None and table_exists(conn, "financial_fact_observations") and cik:
         result = count_and_dates(
             conn,

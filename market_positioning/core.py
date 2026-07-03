@@ -55,10 +55,13 @@ def parse_date(raw: object) -> date | None:
     if not text or text.lower() in {"nan", "none", "null"}:
         return None
     for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%Y%m%d", "%d-%b-%Y", "%d-%B-%Y"):
-        try:
-            return datetime.strptime(text[: min(10, len(text))], fmt).date()
-        except ValueError:
-            pass
+        # Try the full text first: DD-MON-YYYY (SEC 13F style, e.g. 31-JAN-2025)
+        # is 11 chars and would be corrupted by a fixed 10-char slice.
+        for candidate in (text, text[: min(10, len(text))]):
+            try:
+                return datetime.strptime(candidate, fmt).date()
+            except ValueError:
+                pass
     try:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
     except ValueError:

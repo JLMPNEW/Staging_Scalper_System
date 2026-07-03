@@ -690,9 +690,9 @@ def main() -> None:
     selection_mode = "all_removed_status_filter" if args.all_removed else "source_review_rows"
     policy_overrides = load_policy_overrides(policy_overrides_path, ticker_filter=ticker_filter)
     trial_status_overrides = {
-        (str(row.get("ticker") or "").strip().upper(), str(row.get("nct_id") or "").strip().upper()): row
+        (normalize_ticker(row.get("ticker")), str(row.get("nct_id") or "").strip().upper()): row
         for row in AUDIT_HELPERS.load_trial_status_overrides(trial_status_overrides_csv)
-        if str(row.get("ticker") or "").strip() and str(row.get("nct_id") or "").strip()
+        if normalize_ticker(row.get("ticker")) and str(row.get("nct_id") or "").strip()
     }
 
     scan_rows: list[dict[str, Any]] = []

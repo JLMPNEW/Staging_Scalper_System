@@ -214,7 +214,7 @@ def load_trial_status_overrides(path: Path | None) -> list[dict[str, str]]:
 
 
 def apply_trial_status_override(evidence: dict[str, Any], overrides: dict[tuple[str, str], dict[str, str]]) -> dict[str, Any]:
-    ticker = str(evidence.get("ticker") or "").strip().upper()
+    ticker = normalize_ticker(evidence.get("ticker"))
     nct_id = str(evidence.get("nct_id") or "").strip().upper()
     override = overrides.get((ticker, nct_id))
     evidence["outcome_override_applied"] = False
@@ -408,7 +408,13 @@ def load_aliases_by_company(
     return out
 
 
-def load_trial_rows(conn: sqlite3.Connection, company_id: int, *, asof_date: date) -> dict[str, tuple[sqlite3.Row, list[TrialLink]]]:
+def load_trial_rows(
+    conn: sqlite3.Connection,
+    company_id: int,
+    *,
+    asof_date: date,
+    historical_asof: bool = False,
+) -> tuple[dict[str, tuple[sqlite3.Row, list[TrialLink]]], int]:
     rows = conn.execute(
         """
         WITH latest_snapshot AS (
@@ -431,6 +437,7 @@ def load_trial_rows(conn: sqlite3.Connection, company_id: int, *, asof_date: dat
             COALESCE(s.has_results, t.has_results) AS has_results,
             s.primary_completion_date AS primary_completion_date,
             s.enrollment_count AS enrollment_count,
+            s.asof_date AS snapshot_asof_date,
             '' AS raw_hash,
             t.raw_json,
             l.match_role, l.match_method, l.confidence
@@ -443,8 +450,16 @@ def load_trial_rows(conn: sqlite3.Connection, company_id: int, *, asof_date: dat
         (asof_date.isoformat(), company_id),
     ).fetchall()
     grouped: dict[str, tuple[sqlite3.Row, list[TrialLink]]] = {}
+    missing_snapshot_ncts: set[str] = set()
     for row in rows:
         nct_id = str(row["nct_id"] or "")
+        if historical_asof and row["snapshot_asof_date"] is None:
+            # For an explicit historical asof, a trial without any snapshot on
+            # or before that date was not visible at asof. Falling back to the
+            # current trials row would leak look-ahead status/phase into the
+            # audit, so exclude the trial and count it instead.
+            missing_snapshot_ncts.add(nct_id)
+            continue
         link = TrialLink(
             nct_id=nct_id,
             match_role=str(row["match_role"] or ""),
@@ -455,7 +470,7 @@ def load_trial_rows(conn: sqlite3.Connection, company_id: int, *, asof_date: dat
             grouped[nct_id] = (row, [link])
         else:
             grouped[nct_id][1].append(link)
-    return grouped
+    return grouped, len(missing_snapshot_ncts)
 
 
 def load_sponsors(conn: sqlite3.Connection, nct_id: str) -> list[str]:
@@ -1163,6 +1178,10 @@ def main() -> None:
     asof_date = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
     if asof_date is None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
+    # Historical audits must not fall back to current trials-table values for
+    # trials without a snapshot at asof; live runs (asof today/latest) keep the
+    # trials-table fallback.
+    historical_asof = asof_date < datetime.now(timezone.utc).date()
     status_filter = {
         value.lower()
         for value in normalize_string_list(cfg_get(config, "ctgov_audit.status_filter"), ["keep", "review"])
@@ -1197,9 +1216,9 @@ def main() -> None:
     trial_status_overrides_csv = resolve_optional_path(cfg_get(config, "ctgov_audit.trial_status_overrides_csv"), base_dir=base_dir)
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     trial_status_overrides = {
-        (str(row.get("ticker") or "").strip().upper(), str(row.get("nct_id") or "").strip().upper()): row
+        (normalize_ticker(row.get("ticker")), str(row.get("nct_id") or "").strip().upper()): row
         for row in load_trial_status_overrides(trial_status_overrides_csv)
-        if str(row.get("ticker") or "").strip() and str(row.get("nct_id") or "").strip()
+        if normalize_ticker(row.get("ticker")) and str(row.get("nct_id") or "").strip()
     }
 
     audit_rows: list[dict[str, Any]] = []
@@ -1227,10 +1246,36 @@ def main() -> None:
         company_ids = {company.company_id for company in companies}
         aliases_by_company = load_aliases_by_company(conn, company_ids=company_ids)
         sponsors_by_nct = load_sponsors_by_nct(conn)
+        orphan_link_rows = conn.execute(
+            """
+            SELECT l.nct_id, COUNT(*) AS link_count
+            FROM trial_company_links l
+            LEFT JOIN trials t ON t.nct_id = l.nct_id
+            WHERE t.nct_id IS NULL
+            GROUP BY l.nct_id
+            ORDER BY l.nct_id
+            """
+        ).fetchall()
+        orphan_link_count = sum(int(row["link_count"] or 0) for row in orphan_link_rows)
+        if orphan_link_count:
+            LOGGER.warning(
+                "trial_company_links has %d row(s) across %d NCT id(s) with no trials match "
+                "(e.g. program-owner overrides for unsynced NCTs); these are invisible to the audit: sample=%s",
+                orphan_link_count,
+                len(orphan_link_rows),
+                ";".join(str(row["nct_id"]) for row in orphan_link_rows[:10]),
+            )
         LOGGER.info("Loaded %d active companies for CTGov audit", len(companies))
+        missing_snapshot_trials = 0
         for idx, company in enumerate(companies, start=1):
             aliases, manual_aliases = aliases_by_company.get(company.company_id, ([], []))
-            trial_rows = load_trial_rows(conn, company.company_id, asof_date=asof_date)
+            trial_rows, missing_snapshot_count = load_trial_rows(
+                conn,
+                company.company_id,
+                asof_date=asof_date,
+                historical_asof=historical_asof,
+            )
+            missing_snapshot_trials += missing_snapshot_count
             company_evidence: list[dict[str, Any]] = []
             for nct_id, (row, links) in trial_rows.items():
                 study = extract_trial_payload(str(row["raw_json"] or ""))
@@ -1267,6 +1312,12 @@ def main() -> None:
             audit_rows.append(audit)
             if idx % 50 == 0:
                 LOGGER.info("Audited %d/%d companies", idx, len(companies))
+        if missing_snapshot_trials:
+            LOGGER.warning(
+                "Historical asof=%s: excluded %d linked trial row(s) with no snapshot on/before asof (not visible at asof)",
+                asof_date.isoformat(),
+                missing_snapshot_trials,
+            )
         signature = db_signature(conn)
 
     audit_fields = [
@@ -1430,6 +1481,10 @@ def main() -> None:
     manifest = {
         "created_at": utc_now(),
         "asof_date": asof_date.isoformat(),
+        "historical_asof": historical_asof,
+        "historical_missing_snapshot_trials_excluded": missing_snapshot_trials,
+        "orphan_trial_link_rows": orphan_link_count,
+        "orphan_trial_link_ncts": len(orphan_link_rows),
         "db_path": str(db_path),
         "db_signature": signature,
         "company_count": len(audit_rows),

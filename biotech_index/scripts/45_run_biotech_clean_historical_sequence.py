@@ -213,7 +213,15 @@ def snap_to_available_market_dates(db_path: Path, dates: list[str]) -> list[str]
         if idx < 0:
             raise RuntimeError(f"No market date available on or before requested historical as-of {raw}")
         snapped.append(market_dates[idx].isoformat())
-    return list(dict.fromkeys(snapped))
+    snapped_unique = list(dict.fromkeys(snapped))
+    if len(snapped_unique) < len(snapped):
+        LOGGER.warning(
+            "Snapping the weekly grid to market days collapsed duplicate dates: "
+            "%d requested dates -> %d unique grid dates.",
+            len(snapped),
+            len(snapped_unique),
+        )
+    return snapped_unique
 
 
 def default_market_history_start(first_scoring_asof: str) -> str:
@@ -358,6 +366,11 @@ def read_dated_expected_tickers(
 ) -> tuple[set[str], str]:
     dated_path = base_output_dir / compact_date(asof) / configured_universe_name
     if not dated_path.exists():
+        LOGGER.warning(
+            "Dated universe CSV is missing for %s; falling back to the CURRENT universe: %s",
+            asof,
+            dated_path,
+        )
         return set(fallback_tickers), "current_universe_fallback"
     out: set[str] = set()
     with dated_path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -366,7 +379,14 @@ def read_dated_expected_tickers(
                 ticker = str(row.get("ticker") or "").strip().upper()
                 if ticker:
                     out.add(ticker)
-    return (out, "dated_universe") if out else (set(fallback_tickers), "current_universe_fallback")
+    if out:
+        return out, "dated_universe"
+    LOGGER.warning(
+        "Dated universe CSV has no scoring_include tickers for %s; falling back to the CURRENT universe: %s",
+        asof,
+        dated_path,
+    )
+    return set(fallback_tickers), "current_universe_fallback"
 
 
 def run_command(
@@ -641,6 +661,11 @@ def panel_qa(
             short_pct_min = int(round(expected_count * min_short_pct_coverage))
             failures: list[str] = []
             warnings: list[str] = []
+            if expected_dates is not None and not has_dated_universe:
+                # An explicit historical grid must have a per-date PIT universe;
+                # silently downgrading to current-universe parity hides
+                # survivorship gaps, so treat it as a hard panel-QA failure.
+                failures.append("missing_dated_universe")
             if has_dated_universe:
                 if row["daily_features_rows"] != expected_count:
                     failures.append("daily_features_row_count")

@@ -25,7 +25,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv  # noqa: E402
+from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.liquidity import finite_float  # noqa: E402
@@ -366,7 +366,7 @@ def main() -> int:  # noqa: C901
             "cost_summary.json": sha256_file(cost_summary_path),
         },
     }
-    metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8")
+    write_manifest(metrics_path, metrics)
     LOGGER.info("[%s] ablation: AQR net Sharpe=%.3f vs AQR+rot=%.3f (delta=%s); turnover=%.3f, incr cost=%.2f bps -> %s",
                 ablation_status, aqr_sharpe, rot_sharpe, metrics["net_sharpe_delta"],
                 turnover, metrics["incremental_rotation_cost_bps_of_aum"], metrics_path)

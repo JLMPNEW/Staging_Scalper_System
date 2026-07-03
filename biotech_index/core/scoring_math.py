@@ -197,17 +197,42 @@ def score_growth(
     return _score_growth_legacy(growth, default=default)
 
 
-def normalize_pct(raw: object, default: float | None = None) -> float | None:
-    """Normalize vendor percentage inputs to decimal form."""
+def normalize_pct(raw: object, default: float | None = None, *, assume: str = "auto") -> float | None:
+    """Normalize vendor percentage inputs to decimal form.
+
+    ``assume="auto"`` keeps the legacy heuristic (|value| > 2.0 treated as a
+    percent and divided by 100), ``assume="decimal"`` trusts the input as
+    already-decimal (use when the producing field's unit is verified), and
+    ``assume="percent"`` always divides by 100.
+    """
     try:
         value = float(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
     if not math.isfinite(value):
         return default
+    if assume == "decimal":
+        return value
+    if assume == "percent":
+        return value / 100.0
+    if assume != "auto":
+        raise ValueError(f"normalize_pct assume must be 'auto', 'decimal', or 'percent', got {assume!r}")
     if abs(value) > 2.0:
         return value / 100.0
     return value
+
+
+def _first_present(mapping: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
+    """First non-None value among candidate keys.
+
+    ``dict.get(key, fallback)`` chains never reach the fallback when the key is
+    present with an explicit None; this helper coalesces those cases.
+    """
+    for key in keys:
+        value = mapping.get(key)
+        if value is not None:
+            return value
+    return default
 
 
 def _linear_score(value: float, points: list[tuple[float, float]]) -> float:
@@ -241,10 +266,12 @@ def score_commercial_entry_quality(
     falling knife, and still showing enough relative strength to avoid low-growth
     value traps.
     """
-    dist_high = normalize_pct(distance_from_52w_high_pct)
-    price_200d = normalize_pct(price_vs_200d_pct)
-    ret_3m = normalize_pct(return_3m_pct)
-    rel_strength = normalize_pct(relative_strength_3m_vs_xbi)
+    # Producer units verified decimal: scripts/17_* compute these as ratio-1.0
+    # deltas, so genuine >200% values must not be re-divided by 100.
+    dist_high = normalize_pct(distance_from_52w_high_pct, assume="decimal")
+    price_200d = normalize_pct(price_vs_200d_pct, assume="decimal")
+    ret_3m = normalize_pct(return_3m_pct, assume="decimal")
+    rel_strength = normalize_pct(relative_strength_3m_vs_xbi, assume="decimal")
     dist_score = (
         55.0
         if dist_high is None
@@ -289,9 +316,9 @@ def score_commercial_overextension(
     mature_defensive_score: object = None,
 ) -> float:
     """Commercial overextension score where higher is worse."""
-    dist_high = normalize_pct(distance_from_52w_high_pct)
-    price_200d = normalize_pct(price_vs_200d_pct)
-    ret_3m = normalize_pct(return_3m_pct)
+    dist_high = normalize_pct(distance_from_52w_high_pct, assume="decimal")
+    price_200d = normalize_pct(price_vs_200d_pct, assume="decimal")
+    ret_3m = normalize_pct(return_3m_pct, assume="decimal")
     near_high = 0.0 if dist_high is None else _linear_score(dist_high, [(-0.20, 0.0), (-0.08, 35.0), (-0.02, 75.0), (0.05, 100.0)])
     ma_extension = 0.0 if price_200d is None else _linear_score(price_200d, [(0.10, 0.0), (0.25, 45.0), (0.45, 85.0), (0.70, 100.0)])
     short_squeeze = 0.0 if ret_3m is None else _linear_score(ret_3m, [(0.10, 0.0), (0.30, 35.0), (0.55, 75.0), (0.85, 100.0)])
@@ -309,10 +336,11 @@ def score_valuation_growth_fit(
 ) -> float:
     """Score whether valuation is justified by commercial growth/profitability."""
     qval = clamp(_float_or_default(quality_adjusted_valuation_score, 50.0))
-    fwd_growth = normalize_pct(forward_revenue_growth_pct)
-    trailing_growth = normalize_pct(revenue_yoy_growth_pct)
+    # Producer units verified decimal (scripts/18 and 19 pct_change/ratio outputs).
+    fwd_growth = normalize_pct(forward_revenue_growth_pct, assume="decimal")
+    trailing_growth = normalize_pct(revenue_yoy_growth_pct, assume="decimal")
     growth_score = score_growth(fwd_growth if fwd_growth is not None else trailing_growth, default=45.0, curve=GROWTH_CURVE_SMOOTH_ZERO)
-    ebitda_margin = normalize_pct(forward_ebitda_margin_pct)
+    ebitda_margin = normalize_pct(forward_ebitda_margin_pct, assume="decimal")
     margin_score = (
         55.0
         if ebitda_margin is None
@@ -337,7 +365,9 @@ def score_commercial_expected_return_overlay(
         relative_strength_3m_vs_xbi=commercial.get("relative_strength_3m_vs_xbi"),
     )
     valuation_growth_fit = score_valuation_growth_fit(
-        quality_adjusted_valuation_score=commercial.get("quality_adjusted_valuation_score", commercial.get("valuation_score", 50.0)),
+        quality_adjusted_valuation_score=_first_present(
+            commercial, "quality_adjusted_valuation_score", "valuation_score", default=50.0
+        ),
         forward_revenue_growth_pct=forward_guidance.get("forward_revenue_growth_pct"),
         revenue_yoy_growth_pct=commercial.get("revenue_yoy_growth_pct"),
         forward_ebitda_margin_pct=forward_guidance.get("forward_ebitda_margin_pct"),
@@ -353,13 +383,13 @@ def score_commercial_expected_return_overlay(
     leverage = clamp(_float_or_default(commercial.get("leverage_score"), 50.0))
     guidance = clamp(
         _float_or_default(
-            forward_guidance.get("quality_adjusted_guidance_score", forward_guidance.get("guidance_score")),
+            _first_present(forward_guidance, "quality_adjusted_guidance_score", "guidance_score"),
             35.0,
         )
     )
     institutional_upside = clamp(
         _float_or_default(
-            commercial.get("institutional_upside_capacity_score", commercial.get("upside_capacity_score")),
+            _first_present(commercial, "institutional_upside_capacity_score", "upside_capacity_score"),
             50.0,
         )
     )

@@ -39,7 +39,6 @@ NUMBER_RE = re.compile(r"[-+]?\(?\$?[0-9][0-9,]*(?:\.[0-9]+)?\)?")
 ACCESSION_RE = re.compile(r"(\d{10}-\d{2}-\d{6})")
 ACCEPTED_RE = re.compile(r"ACCEPTANCE-DATETIME:\s*(\d{14})", re.I)
 PERIOD_RE = re.compile(r"CONFORMED PERIOD OF REPORT:\s*(\d{8})", re.I)
-VALUE_THOUSANDS_RE = re.compile(r"(?:VALUE|MARKET\s+VALUE).{0,40}(?:X\s*\$?\s*1000|\\$000|000S|THOUS)", re.I)
 
 
 def parse_args() -> argparse.Namespace:
@@ -265,28 +264,42 @@ def parse_period(text: str) -> str:
 
 
 def value_is_thousands(text: str) -> bool:
-    sample = text[:80000]
-    if VALUE_THOUSANDS_RE.search(sample):
-        return True
-    # Legacy 13F-HR text tables overwhelmingly report VALUE in thousands even
-    # when the header is mangled or split by HTML tags.
+    # Legacy 13F-HR text tables report VALUE in thousands by SEC convention.
+    # Header markers (e.g. "VALUE (X$1000)") can only *confirm* thousands;
+    # there is no reliable "whole dollars" signal to distinguish, so honestly
+    # default to thousands regardless of header mangling.
     return True
 
 
-def extract_numbers_after_cusip(line: str, cusip: str) -> tuple[float | None, float | None]:
-    upper = line.upper()
-    idx = upper.find(cusip)
-    tail = line[idx + len(cusip) :] if idx >= 0 else line
+_CUSIP_PATTERNS: dict[str, re.Pattern[str]] = {}
+
+
+def cusip_pattern(cusip: str) -> re.Pattern[str]:
+    """Compile a token-boundary pattern for a 9-char CUSIP.
+
+    Matching the CUSIP as a bare substring of the fully-concatenated
+    normalized line lets any 9-char window of an unrelated identifier/number
+    run produce a phantom holding.  Require non-alphanumeric (or line-edge)
+    boundaries around the CUSIP in the original cleaned line, while still
+    allowing short whitespace/dash separators inside it because fixed-width
+    tables often split the issuer/issue/check-digit groups.
+    """
+    pattern = _CUSIP_PATTERNS.get(cusip)
+    if pattern is None:
+        body = r"[\s\-]{0,2}".join(re.escape(char) for char in cusip)
+        pattern = re.compile(rf"(?<![A-Z0-9]){body}(?![A-Z0-9])")
+        _CUSIP_PATTERNS[cusip] = pattern
+    return pattern
+
+
+def extract_numbers_after_cusip(line: str, tail_start: int) -> tuple[float | None, float | None]:
+    tail = line[tail_start:]
     numbers = [to_float(match.group(0)) for match in NUMBER_RE.finditer(tail)]
     numbers = [value for value in numbers if value is not None]
     if len(numbers) >= 2:
         return numbers[0], numbers[1]
-    # Some fixed-width lines have the CUSIP separated or normalized; fall back
-    # to the last two plausible numeric fields on the line.
-    all_numbers = [to_float(match.group(0)) for match in NUMBER_RE.finditer(line)]
-    all_numbers = [value for value in all_numbers if value is not None]
-    if len(all_numbers) >= 2:
-        return all_numbers[-2], all_numbers[-1]
+    # Do NOT guess from elsewhere on the line: the trailing numbers are often
+    # voting-authority columns, so callers must skip the line instead.
     return None, None
 
 
@@ -304,15 +317,22 @@ def parse_matching_holdings(
         line = clean_line(raw)
         if len(line) < 9:
             continue
-        norm = normalized_line(line)
+        upper = line.upper()
         for cusip, mapped in cusip_map.items():
-            if cusip not in norm:
+            cusip_match = cusip_pattern(cusip).search(upper)
+            if cusip_match is None:
                 continue
-            upper = line.upper()
             put_call = "PUT" if re.search(r"\bPUT\b", upper) else "CALL" if re.search(r"\bCALL\b", upper) else ""
             if put_call:
                 continue
-            value, shares = extract_numbers_after_cusip(line, cusip)
+            value, shares = extract_numbers_after_cusip(line, cusip_match.end())
+            if value is None and shares is None:
+                print(
+                    f"WARNING: could not locate value/shares after CUSIP {cusip} in {source_file}; "
+                    f"skipped line: {line[:200]}",
+                    file=sys.stderr,
+                )
+                continue
             if shares is None or shares <= 0:
                 continue
             market_value = value * 1000.0 if value is not None and thousands else value
@@ -337,12 +357,44 @@ def parse_matching_holdings(
     return matches
 
 
+def aggregate_holding_rows(holding_rows: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+    """Pre-aggregate duplicate (filing_key, ticker, cusip) holding rows.
+
+    One 13F filing can report the same issuer CUSIP on several table lines
+    (SOLE/SHARED/NONE investment-discretion splits).  The holdings table keys
+    on (filing_key, ticker, cusip), so upserting the raw lines would let the
+    last line win and undercount the position.  Sum shares and market_value
+    across the duplicate lines -- preferring plain share rows over put/call
+    rows when both appear -- and keep the other fields from the row with the
+    largest share count.  Row tuple layout: [0]=filing_key, [3]=ticker,
+    [4]=cusip, [8]=shares, [9]=market_value, [12]=put_call.
+    """
+    grouped: dict[tuple[Any, Any, Any], list[tuple[Any, ...]]] = {}
+    for row in holding_rows:
+        grouped.setdefault((row[0], row[3], row[4]), []).append(row)
+    out: list[tuple[Any, ...]] = []
+    for rows in grouped.values():
+        share_rows = [row for row in rows if not str(row[12] or "").strip()]
+        rows = share_rows or rows
+        if len(rows) == 1:
+            out.append(rows[0])
+            continue
+        shares = [float(row[8]) for row in rows if row[8] is not None]
+        values = [float(row[9]) for row in rows if row[9] is not None]
+        merged = list(max(rows, key=lambda row: float(row[8] or 0.0)))
+        merged[8] = sum(shares) if shares else None
+        merged[9] = sum(values) if values else None
+        out.append(tuple(merged))
+    return out
+
+
 def upsert_records(
     conn: sqlite3.Connection,
     *,
     filing_rows: list[tuple[Any, ...]],
     holding_rows: list[tuple[Any, ...]],
 ) -> None:
+    holding_rows = aggregate_holding_rows(holding_rows)
     with conn:
         conn.executemany(
             """
@@ -390,7 +442,7 @@ def aggregate_for_tickers(conn: sqlite3.Connection, tickers: set[str], *, source
     placeholders = ",".join("?" for _ in tickers)
     rows = conn.execute(
         f"""
-        SELECT ticker, filing_date AS asof_date, period_of_report,
+        SELECT ticker, filing_date, period_of_report,
                COALESCE(NULLIF(manager_cik, ''), NULLIF(manager_name, ''), filing_key) AS manager_key,
                COALESCE(shares, 0.0) AS shares,
                COALESCE(market_value, 0.0) AS market_value
@@ -399,30 +451,42 @@ def aggregate_for_tickers(conn: sqlite3.Connection, tickers: set[str], *, source
           AND source = ?
           AND UPPER(COALESCE(share_type, '')) IN ('', 'SH')
           AND COALESCE(put_call, '') = ''
-        ORDER BY ticker, filing_date
+        ORDER BY ticker, period_of_report, filing_date
         """,
         tuple(sorted(tickers)) + (source,),
     ).fetchall()
-    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    # Group holdings by period_of_report (quarter) so each snapshot aggregates
+    # ALL managers that reported for that quarter.  13F filing dates for one
+    # quarter are spread over ~45 days, so grouping by filing_date fragments
+    # the quarter and makes the new/exiting-buyer diff compare disjoint
+    # per-day filer subsets.  The snapshot's asof_date column carries
+    # MAX(filing_date) of the included filings, which keeps the snapshot
+    # point-in-time safe (only visible once every included filing existed).
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
-        key = (str(row["ticker"]), str(row["asof_date"]), str(row["period_of_report"] or ""))
-        bucket = grouped.setdefault(key, {"shares": 0.0, "value": 0.0, "managers": set()})
+        period = str(row["period_of_report"] or "") or str(row["filing_date"] or "")
+        key = (str(row["ticker"]), period)
+        bucket = grouped.setdefault(key, {"shares": 0.0, "value": 0.0, "managers": set(), "asof_date": ""})
         bucket["shares"] += float(row["shares"] or 0.0)
         bucket["value"] += float(row["market_value"] or 0.0)
+        filing_date = str(row["filing_date"] or "")
+        if filing_date > str(bucket["asof_date"]):
+            bucket["asof_date"] = filing_date
         manager_key = str(row["manager_key"] or "")
         if manager_key:
             bucket["managers"].add(manager_key)
 
-    by_ticker: dict[str, list[tuple[str, str, dict[str, Any]]]] = defaultdict(list)
-    for (ticker, asof_date, period), payload in grouped.items():
-        by_ticker[ticker].append((asof_date, period, payload))
+    by_ticker: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
+    for (ticker, period), payload in grouped.items():
+        by_ticker[ticker].append((period, payload))
 
     now = utc_now()
     records: list[tuple[Any, ...]] = []
     for ticker, ticker_rows in by_ticker.items():
         prior_shares: float | None = None
         prior_managers: set[str] | None = None
-        for asof_date, period, payload in sorted(ticker_rows, key=lambda item: item[0]):
+        # Quarter-over-quarter diff: consecutive period_of_report snapshots.
+        for period, payload in sorted(ticker_rows, key=lambda item: item[0]):
             shares = float(payload["shares"] or 0.0)
             delta = (shares - prior_shares) / prior_shares if prior_shares and prior_shares > 0.0 else None
             prior_shares = shares
@@ -437,7 +501,7 @@ def aggregate_for_tickers(conn: sqlite3.Connection, tickers: set[str], *, source
             records.append(
                 (
                     ticker,
-                    asof_date,
+                    str(payload["asof_date"] or "") or period,
                     period,
                     shares,
                     float(payload["value"] or 0.0),

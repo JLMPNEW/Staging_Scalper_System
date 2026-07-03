@@ -266,6 +266,7 @@ def summarize_spread_samples(
     snapshot: list[dict[str, Any]] = []
     for ticker in sorted(grouped):
         valid: list[tuple[float, date]] = []
+        extreme: list[float] = []
         reasons: list[str] = []
         hard_fail_reasons: list[str] = []
         for row in grouped[ticker]:
@@ -273,24 +274,33 @@ def summarize_spread_samples(
             reason = str(row.get("reason", "")).strip()
             if reason:
                 reasons.append(reason)
-                if "half_spread_bps>=" in reason or "spread_bps>=" in reason:
-                    hard_fail_reasons.append(reason)
-            if status != "ok":
-                continue
             try:
                 half = finite_float(row.get("half_spread_bps"), name=f"{ticker}.half_spread_bps")
             except ValueError:
-                continue
+                half = None
             raw_day = str(row.get("bar_date_et", "")).strip()
             try:
                 sample_day = date.fromisoformat(raw_day)
             except ValueError:
+                sample_day = None
+            age_ok = sample_day is not None and 0 <= (as_of_date - sample_day).days <= max_stale_days
+            if status != "ok":
+                # extreme samples marked invalid by the collector stay VISIBLE to the audit as a
+                # hard failure (never silently replaced by the fallback default) — but only while
+                # fresh: a stale extreme print must not poison the name forever
+                if ("half_spread_bps>=" in reason or "spread_bps>=" in reason) and (sample_day is None or age_ok):
+                    hard_fail_reasons.append(reason)
+                    if half is not None and age_ok:
+                        extreme.append(half)
                 continue
-            age_days = (as_of_date - sample_day).days
-            if half >= 0 and half <= max_half_spread_bps and 0 <= age_days <= max_stale_days:
+            if half is None or sample_day is None:
+                continue
+            # boundary matches the collector: a half-spread AT the cap is extreme, not valid
+            if 0 <= half < max_half_spread_bps and age_ok:
                 valid.append((half, sample_day))
-            elif half > max_half_spread_bps and 0 <= age_days <= max_stale_days:
+            elif half >= max_half_spread_bps and age_ok:
                 hard_fail_reasons.append(f"half_spread_bps>={max_half_spread_bps:g}")
+                extreme.append(half)
         if len(valid) >= min_valid_samples:
             values = [half for half, _sample_day in valid]
             latest_day = max(sample_day for _half, sample_day in valid)
@@ -341,10 +351,12 @@ def summarize_spread_samples(
                 "valid_sample_count": len(valid),
                 "latest_sample_date_et": "",
                 "latest_sample_age_days": "",
-                "median_half_spread_bps": "",
-                "max_half_spread_bps": "",
-                "min_half_spread_bps": "",
-                "spread_source": "",
+                # a hard-failed name carries its OBSERVED extreme spread so the audit's
+                # extreme-spread gate and per-row flag fire on the real number, not on a blank
+                "median_half_spread_bps": round(float(statistics.median(extreme)), 6) if extreme else "",
+                "max_half_spread_bps": round(max(extreme), 6) if extreme else "",
+                "min_half_spread_bps": round(min(extreme), 6) if extreme else "",
+                "spread_source": "ibkr_historical_bid_ask" if extreme else "",
                 "spread_status": "failed",
                 "spread_reason": reason,
             })

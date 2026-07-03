@@ -273,10 +273,15 @@ def load_fact_rows(conn: sqlite3.Connection, company_id: int, asof_date: date) -
         FROM company_facts_quarterly
         WHERE company_id = ?
           AND period_end <= ?
-          AND (filed_date IS NULL OR filed_date = '' OR filed_date <= ?)
+          AND (
+                (filed_date IS NOT NULL AND filed_date != '' AND filed_date <= ?)
+                -- Rows without a filed_date could leak look-ahead data into historical
+                -- rebuilds; only admit them once a typical filing lag has elapsed.
+                OR ((filed_date IS NULL OR filed_date = '') AND date(period_end, '+45 days') <= ?)
+          )
         ORDER BY period_end DESC, filed_date DESC
         """,
-        (company_id, asof_date.isoformat(), asof_date.isoformat()),
+        (company_id, asof_date.isoformat(), asof_date.isoformat(), asof_date.isoformat()),
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -296,10 +301,15 @@ def load_fact_rows_bulk(conn: sqlite3.Connection, company_ids: list[int], asof_d
         FROM company_facts_quarterly
         WHERE company_id IN ({placeholders})
           AND period_end <= ?
-          AND (filed_date IS NULL OR filed_date = '' OR filed_date <= ?)
+          AND (
+                (filed_date IS NOT NULL AND filed_date != '' AND filed_date <= ?)
+                -- Rows without a filed_date could leak look-ahead data into historical
+                -- rebuilds; only admit them once a typical filing lag has elapsed.
+                OR ((filed_date IS NULL OR filed_date = '') AND date(period_end, '+45 days') <= ?)
+          )
         ORDER BY company_id, period_end DESC, filed_date DESC
         """,
-        tuple(company_ids) + (asof_date.isoformat(), asof_date.isoformat()),
+        tuple(company_ids) + (asof_date.isoformat(), asof_date.isoformat(), asof_date.isoformat()),
     ).fetchall()
     out: dict[int, list[dict[str, Any]]] = {company_id: [] for company_id in company_ids}
     for row in rows:
@@ -392,7 +402,14 @@ def amount_for_period(row: dict[str, Any], field: str, proxies: list[str]) -> fl
     return value
 
 
-def ttm_amount(rows: list[dict[str, Any]], field: str, proxies: list[str]) -> float | None:
+def ttm_amount(
+    rows: list[dict[str, Any]],
+    field: str,
+    proxies: list[str],
+    *,
+    asof_date: date | None = None,
+    max_fy_age_days: int = 550,
+) -> float | None:
     quarterly: list[float] = []
     for row in rows:
         value = to_float(row.get(field))
@@ -408,6 +425,13 @@ def ttm_amount(rows: list[dict[str, Any]], field: str, proxies: list[str]) -> fl
         return sum(quarterly) / len(quarterly) * 4.0
     for row in rows:
         if str(row.get("fiscal_period") or "").upper() == "FY":
+            # Staleness bound (mirrors script 16): reject FY fallback rows whose
+            # period_end is older than max_fy_age_days before asof.
+            period_end = parse_date(row.get("period_end"))
+            if asof_date is not None and period_end is not None:
+                age_days = (asof_date - period_end).days
+                if age_days < 0 or age_days > max_fy_age_days:
+                    continue
             value = to_float(row.get(field))
             if value is not None:
                 return value
@@ -733,14 +757,14 @@ def build_feature(company: dict[str, Any], rows: list[dict[str, Any]], market: d
     if latest_period_date is None:
         latest_period_date = asof_date
 
-    ttm_revenue = ttm_amount(rows, "revenue", proxies)
-    gross_profit_ttm = ttm_amount(rows, "gross_profit", proxies)
-    operating_income_ttm = ttm_amount(rows, "operating_income", proxies)
-    net_income_ttm = ttm_amount(rows, "net_income", proxies)
-    operating_cash_flow_ttm = ttm_amount(rows, "operating_cash_flow", proxies)
-    free_cash_flow_ttm = ttm_amount(rows, "free_cash_flow", proxies)
-    rd_expense_ttm = ttm_amount(rows, "rd_expense", proxies)
-    sgna_expense_ttm = ttm_amount(rows, "sgna_expense", proxies)
+    ttm_revenue = ttm_amount(rows, "revenue", proxies, asof_date=asof_date)
+    gross_profit_ttm = ttm_amount(rows, "gross_profit", proxies, asof_date=asof_date)
+    operating_income_ttm = ttm_amount(rows, "operating_income", proxies, asof_date=asof_date)
+    net_income_ttm = ttm_amount(rows, "net_income", proxies, asof_date=asof_date)
+    operating_cash_flow_ttm = ttm_amount(rows, "operating_cash_flow", proxies, asof_date=asof_date)
+    free_cash_flow_ttm = ttm_amount(rows, "free_cash_flow", proxies, asof_date=asof_date)
+    rd_expense_ttm = ttm_amount(rows, "rd_expense", proxies, asof_date=asof_date)
+    sgna_expense_ttm = ttm_amount(rows, "sgna_expense", proxies, asof_date=asof_date)
     partial_ttm_proxy_fields = sorted(
         {
             proxy[len("partial_quarter_annualized_") :]

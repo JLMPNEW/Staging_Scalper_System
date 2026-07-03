@@ -45,7 +45,7 @@ from biotech_index.core.scoring_math import score_growth
 
 LOGGER = logging.getLogger("parse_forward_guidance")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-PARSER_LOGIC_VERSION = "2026-04-27-forward-guidance-parser-v2"
+PARSER_LOGIC_VERSION = "2026-07-03-forward-guidance-parser-v3"
 SQLITE_PARAM_CHUNK_SIZE = 800
 
 GUIDANCE_FIELDS = [
@@ -177,6 +177,13 @@ METRIC_PATTERNS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Base metrics whose patterns also match inside their adjusted variants
+# ("ebitda" matches inside "adjusted ebitda"); used to avoid double counting.
+ADJUSTED_METRIC_BASES = {
+    "adjusted_ebitda": "ebitda",
+    "adjusted_eps": "eps",
+}
+
 DEFAULT_GUIDANCE_CUE_PATTERNS = (
     r"guidance",
     r"outlook",
@@ -214,7 +221,13 @@ TAG_RE = re.compile(r"<[^>]+>")
 WHITESPACE_RE = re.compile(r"\s+")
 AMOUNT_UNIT_RE = r"billion|billions|million|millions|thousand|thousands|bn|mm|m|k|b"
 AMOUNT_RE = rf"(?:\$\s*(\d+(?:,\d{{3}})*(?:\.\d+)?)\s*({AMOUNT_UNIT_RE})?|(\d+(?:,\d{{3}})*(?:\.\d+)?)\s*({AMOUNT_UNIT_RE}))"
-RANGE_CONNECTOR_RE = r"(?:\s*(?:-|–|—|to|and|through)\s*)"
+# Leading amount of a range: allow a unit-less bare number ("500 to 550 million")
+# so the trailing unit can be applied to both bounds. Bare 4-digit years are
+# excluded so "in 2026 to $500 million" cannot produce a bogus low bound.
+AMOUNT_LEAD_RE = rf"(?:\$\s*(\d+(?:,\d{{3}})*(?:\.\d+)?)\s*({AMOUNT_UNIT_RE})?|(?!20\d{{2}}\b)(\d+(?:,\d{{3}})*(?:\.\d+)?)\s*({AMOUNT_UNIT_RE})?)"
+# "and" is intentionally excluded: it merges two different metrics' amounts
+# ("revenue of $50M and EBITDA of $12M") into one bogus range.
+RANGE_CONNECTOR_RE = r"(?:\s*(?:-|–|—|to|through)\s*)"
 GUIDANCE_CUE_RE = re.compile(
     r"\b(guidance|outlook|expects?|expected|anticipates?|anticipated|projects?|projected|forecasts?|forecasted|guides?|range|reaffirms?|reiterates?|provides|provided|raise|raises|lower|lowers|target)\b",
     re.IGNORECASE,
@@ -384,6 +397,10 @@ def money_value(raw_number: str, raw_unit: str | None, default_unit: str | None,
         return value * 1_000_000.0, "usd"
     if unit in {"thousand", "thousands", "k"}:
         return value * 1_000.0, "usd"
+    if not unit:
+        # No unit token and no document-level default: treating the number as
+        # raw dollars is almost always a ~1e6 scale error, so reject the match.
+        return None, ""
     return value, "usd"
 
 
@@ -406,6 +423,24 @@ def pct_change(current: float | None, previous: float | None) -> float | None:
 
 def metric_regex(metric: str) -> str:
     return r"(?:" + "|".join(METRIC_PATTERNS[metric]) + r")"
+
+
+def matched_window_metrics(window: str) -> list[str]:
+    """Metrics matched in a window, dropping a base metric (ebitda/eps) whose
+    matches all sit inside spans of its adjusted variant so the same phrase is
+    not double-counted as two metrics."""
+    matched = [metric for metric in METRIC_PATTERNS if re.search(metric_regex(metric), window, re.IGNORECASE)]
+    for adjusted_metric, base_metric in ADJUSTED_METRIC_BASES.items():
+        if adjusted_metric not in matched or base_metric not in matched:
+            continue
+        adjusted_spans = [match.span() for match in re.finditer(metric_regex(adjusted_metric), window, re.IGNORECASE)]
+        base_standalone = any(
+            not any(a_start <= match.start() and match.end() <= a_end for a_start, a_end in adjusted_spans)
+            for match in re.finditer(metric_regex(base_metric), window, re.IGNORECASE)
+        )
+        if not base_standalone:
+            matched.remove(base_metric)
+    return matched
 
 
 def extract_year(window: str, asof_date: date) -> int | None:
@@ -434,11 +469,11 @@ def parse_metric_values(metric: str, window: str) -> tuple[float | None, float |
     per_share = metric in {"eps", "adjusted_eps"}
     window_default_unit = default_money_unit_from_text(window)
     range_after = re.compile(
-        metric_pat + r".{0,160}?" + AMOUNT_RE + RANGE_CONNECTOR_RE + AMOUNT_RE,
+        metric_pat + r".{0,160}?" + AMOUNT_LEAD_RE + RANGE_CONNECTOR_RE + AMOUNT_RE,
         re.IGNORECASE | re.DOTALL,
     )
     range_before = re.compile(
-        AMOUNT_RE + RANGE_CONNECTOR_RE + AMOUNT_RE + r".{0,160}?" + metric_pat,
+        AMOUNT_LEAD_RE + RANGE_CONNECTOR_RE + AMOUNT_RE + r".{0,160}?" + metric_pat,
         re.IGNORECASE | re.DOTALL,
     )
     single_after = re.compile(metric_pat + r".{0,140}?" + AMOUNT_RE, re.IGNORECASE | re.DOTALL)
@@ -571,12 +606,10 @@ def detect_guidance(
         if guidance_year is not None and guidance_year < asof_date.year:
             continue
         period_label = extract_period_label(window, guidance_year)
-        window_metric_count = sum(
-            1 for metric_name in METRIC_PATTERNS if re.search(metric_regex(metric_name), window, re.IGNORECASE)
-        )
-        for metric in METRIC_PATTERNS:
-            if not re.search(metric_regex(metric), window, re.IGNORECASE):
-                continue
+        window_metrics = matched_window_metrics(window)
+        # Count distinct economic metrics: adjusted_X and X are the same metric.
+        window_metric_count = len({ADJUSTED_METRIC_BASES.get(metric, metric) for metric in window_metrics})
+        for metric in window_metrics:
             parsed = parse_metric_values(metric, window)
             if parsed is None:
                 continue
@@ -705,6 +738,8 @@ def load_guidance_overrides(path: Path | None, companies_by_ticker: dict[str, di
         return []
 
     records: list[GuidanceRecord] = []
+    skipped_invalid = 0
+    skipped_asof = 0
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         missing_headers = [field for field in OVERRIDE_FIELDS if field not in (reader.fieldnames or [])]
@@ -733,6 +768,20 @@ def load_guidance_overrides(path: Path | None, companies_by_ticker: dict[str, di
                     raise ValueError("one of low_value, high_value, midpoint_value is required")
                 guidance_year = to_int(row.get("guidance_year"))
                 filing_dt = parse_date(row.get("filing_date")) or asof_date
+                if filing_dt > asof_date:
+                    skipped_asof += 1
+                    LOGGER.info(
+                        "Skipping forward guidance override not yet visible at asof=%s (filing_date=%s) at %s:%d: %s",
+                        asof_date.isoformat(), filing_dt.isoformat(), path, line_no, ticker,
+                    )
+                    continue
+                if guidance_year is not None and guidance_year < asof_date.year:
+                    skipped_asof += 1
+                    LOGGER.info(
+                        "Skipping stale forward guidance override (guidance_year=%d < asof year %d) at %s:%d: %s",
+                        guidance_year, asof_date.year, path, line_no, ticker,
+                    )
+                    continue
                 source_name = str(row.get("source_name") or "manual_forward_guidance_override").strip()
                 source_url = str(row.get("source_url") or "").strip()
                 source_excerpt = str(row.get("source_excerpt") or "").strip()
@@ -779,8 +828,14 @@ def load_guidance_overrides(path: Path | None, companies_by_ticker: dict[str, di
                         source_payload=json.dumps(payload, ensure_ascii=True, sort_keys=True),
                     )
                 )
-            except Exception as exc:
+            except (ValueError, KeyError, TypeError) as exc:
+                skipped_invalid += 1
                 LOGGER.warning("Ignoring invalid forward guidance override at %s:%d: %s", path, line_no, exc)
+    if skipped_invalid or skipped_asof:
+        LOGGER.warning(
+            "Skipped forward guidance override rows: invalid=%d asof_gated=%d file=%s",
+            skipped_invalid, skipped_asof, path,
+        )
     return records
 
 
@@ -1697,7 +1752,18 @@ def build_feature_row(
     revenue_mid = revenue.midpoint_value if revenue else None
     revenue_growth = pct_change(revenue_mid, ttm_revenue)
     ebitda_mid = ebitda.midpoint_value if ebitda else None
-    ebitda_margin = ebitda_mid / revenue_mid if ebitda_mid is not None and revenue_mid is not None and revenue_mid != 0 else None
+    # Only compute the forward margin when both records guide the same fiscal
+    # year; mixing years produces a meaningless ratio.
+    ebitda_margin = (
+        ebitda_mid / revenue_mid
+        if ebitda_mid is not None
+        and revenue_mid is not None
+        and revenue_mid != 0
+        and ebitda is not None
+        and revenue is not None
+        and ebitda.guidance_year == revenue.guidance_year
+        else None
+    )
     eps_mid = eps.midpoint_value if eps else None
     confidence_values = [record.confidence for record in by_metric.values()]
     confidence = max(confidence_values) if confidence_values else 0.0

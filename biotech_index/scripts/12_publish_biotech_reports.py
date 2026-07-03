@@ -1163,9 +1163,13 @@ def build_index_summary(
     weights: dict[str, float] | None = None,
     score_field: str = "opportunity_score",
     bucket_field: str = "bucket",
+    top_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     values = [to_float(row.get(score_field)) for row in scores]
-    top_values = values[:top_n]
+    # Breadth metrics come from the full universe (`scores`); top-N strength comes
+    # from the published ranked eligible rows when provided.
+    top_source = scores if top_rows is None else top_rows
+    top_values = [to_float(row.get(score_field)) for row in top_source[:top_n]]
     top_n_avg_score = round(sum(top_values) / len(top_values), 4) if top_values else 0.0
     median_score = round(median(values), 4) if values else 0.0
     full_universe_avg_score = round(sum(values) / len(values), 4) if values else 0.0
@@ -2220,6 +2224,9 @@ def build_trial_validation_rows(
     score_by_ticker = {str(row.get("ticker") or "").upper(): row for row in scores}
     selected_source = selected_score_rows if selected_score_rows is not None else scores[:top_n]
     if selected_score_rows is not None:
+        # The published rank column must match the allocation ranks used for selection;
+        # tickers only available from the production-ranked fallback keep a blank rank.
+        score_by_ticker = {ticker: {**row, "rank": ""} for ticker, row in score_by_ticker.items()}
         for row in selected_score_rows:
             ticker = str(row.get("ticker") or "").upper()
             if ticker:
@@ -2550,9 +2557,10 @@ def main() -> None:
                 weights=index_weights,
                 score_field="allocation_opportunity_score",
                 bucket_field="allocation_bucket",
+                top_rows=allocation_ranked_rows,
             )
             top_rows = allocation_ranked_rows[:top_n]
-            discovery_top_limit = max(1, int(tier_settings["research_rank_max"]))
+            discovery_top_limit = max(20, int(tier_settings["research_rank_max"]))
             discovery_top_rows = sorted(
                 (
                     dict(row)

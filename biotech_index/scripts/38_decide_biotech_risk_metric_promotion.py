@@ -99,6 +99,7 @@ def compare_holdout_modes(
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     blocking: list[str] = []
+    evaluated_top10 = False
     for key in sorted(set(baseline).intersection(challenger)):
         base = baseline[key]
         cand = challenger[key]
@@ -116,6 +117,8 @@ def compare_holdout_modes(
             "delta_loss20_rate_pct": round(cand.loss20_rate_pct - base.loss20_rate_pct, 6),
         }
         rows.append(row)
+        if base.top_n == 10:
+            evaluated_top10 = True
         if base.top_n == 10 and cand.lcb_pct < base.lcb_pct:
             blocking.append(
                 f"{base.horizon_days}d Top10 LCB degraded "
@@ -131,6 +134,8 @@ def compare_holdout_modes(
                 f"{base.horizon_days}d Top10 20% loss rate increased "
                 f"{cand.loss20_rate_pct - base.loss20_rate_pct:.2f} pct points"
             )
+    if not evaluated_top10:
+        blocking.append("top10_comparison_missing")
     missing = sorted(set(baseline).symmetric_difference(challenger))
     if missing:
         blocking.append(f"mode comparison has missing horizon/top_n keys: {missing}")
@@ -148,6 +153,8 @@ def evaluate_routed_discovery(path: Path) -> dict[str, Any]:
     blocking: list[str] = []
     warnings: list[str] = []
     comparisons: list[dict[str, Any]] = []
+    if not rows:
+        blocking.append("no_comparison_rows")
     for row in rows:
         horizon = to_int(row.get("horizon_days"))
         top_n = to_int(row.get("top_n"))
@@ -165,11 +172,12 @@ def evaluate_routed_discovery(path: Path) -> dict[str, Any]:
                 "updated_late_clinical_share_pct": round(updated_late_share, 6),
             }
         )
-        if delta_lcb < 0.0:
+        # Non-finite deltas (blank/missing columns) must block rather than silently pass.
+        if not math.isfinite(delta_lcb) or delta_lcb < 0.0:
             blocking.append(f"{horizon}d Top{top_n} routed discovery LCB degraded {delta_lcb:.2f} pct points")
-        if delta_pf < 0.0:
+        if not math.isfinite(delta_pf) or delta_pf < 0.0:
             blocking.append(f"{horizon}d Top{top_n} routed discovery profit factor degraded {delta_pf:.2f}")
-        if delta_loss20 > 3.0:
+        if not math.isfinite(delta_loss20) or delta_loss20 > 3.0:
             blocking.append(
                 f"{horizon}d Top{top_n} routed discovery 20% loss rate increased {delta_loss20:.2f} pct points"
             )
@@ -221,6 +229,13 @@ def evaluate_cohort_discovery(path: Path) -> list[dict[str, Any]]:
     return decisions
 
 
+def is_breadth_only_issue(issue: str) -> bool:
+    """True only when every "|"-delimited gate fail token is a breadth-gate token."""
+    reasons = issue.split(": ", 1)[1] if ": " in issue else issue
+    tokens = [token.strip() for token in reasons.split("|") if token.strip()]
+    return bool(tokens) and all(token.startswith("improved_unique_ticker_rate_lt_") for token in tokens)
+
+
 def evaluate_routed_discovery_robustness(path: Path) -> dict[str, Any]:
     """Read the strict routed-discovery robustness gate if it exists.
 
@@ -264,7 +279,7 @@ def evaluate_routed_discovery_robustness(path: Path) -> dict[str, Any]:
     raw_status = str(payload.get("status") or "").strip().lower()
     if raw_status == "pass" and not blocking:
         status = "operational_shadow_discovery"
-    elif blocking and all("improved_unique_ticker_rate_lt_" in issue for issue in blocking):
+    elif blocking and all(is_breadth_only_issue(issue) for issue in blocking):
         status = "shadow_candidate_pending_breadth"
     else:
         status = "reject"

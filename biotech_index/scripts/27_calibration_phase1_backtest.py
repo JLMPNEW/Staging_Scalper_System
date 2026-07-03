@@ -235,6 +235,7 @@ def load_snapshot_dates(
         """
         SELECT d.asof_date
         FROM daily_scores d
+        INNER JOIN multibagger_scores_daily m ON m.asof_date = d.asof_date
         GROUP BY d.asof_date
         ORDER BY d.asof_date
         """
@@ -1065,7 +1066,7 @@ def build_topn_rows(rows: list[dict[str, Any]], horizons: list[int], top_ns: lis
                     ]
                     if not candidates:
                         continue
-                    candidates.sort(key=lambda row: (to_float(row.get(score_key), -1e9) or -1e9), reverse=True)
+                    candidates.sort(key=lambda row: to_float(row.get(score_key), -1e9), reverse=True)
                     selected = candidates[:top_n]
                     selected_rets = [to_float(row.get(ret_key)) for row in selected]
                     selected_rets = [ret for ret in selected_rets if ret is not None]
@@ -1124,7 +1125,7 @@ def build_topn_risk_adjusted_rows(
                     ]
                     if not candidates:
                         continue
-                    candidates.sort(key=lambda row: (to_float(row.get(score_key), -1e9) or -1e9), reverse=True)
+                    candidates.sort(key=lambda row: to_float(row.get(score_key), -1e9), reverse=True)
                     selected = candidates[:top_n]
                     selected_rets = [to_float(row.get(ret_key)) for row in selected]
                     selected_rets = [ret for ret in selected_rets if ret is not None]
@@ -1193,13 +1194,13 @@ def build_topn_risk_adjusted_rows(
 
 def top_rows_by_score(rows: list[dict[str, Any]], score_key: str, top_n: int) -> list[dict[str, Any]]:
     candidates = [row for row in rows if to_float(row.get(score_key)) is not None]
-    candidates.sort(key=lambda row: (to_float(row.get(score_key), -1e9) or -1e9, str(row.get("ticker") or "")), reverse=True)
+    candidates.sort(key=lambda row: (to_float(row.get(score_key), -1e9), str(row.get("ticker") or "")), reverse=True)
     return candidates[:top_n]
 
 
 def gate_rows_by_top_pct(rows: list[dict[str, Any]], score_key: str, top_pct: float) -> list[dict[str, Any]]:
     candidates = [row for row in rows if to_float(row.get(score_key)) is not None]
-    candidates.sort(key=lambda row: (to_float(row.get(score_key), -1e9) or -1e9, str(row.get("ticker") or "")), reverse=True)
+    candidates.sort(key=lambda row: (to_float(row.get(score_key), -1e9), str(row.get("ticker") or "")), reverse=True)
     if not candidates:
         return []
     keep_count = max(1, math.ceil(len(candidates) * max(0.0, min(1.0, top_pct))))

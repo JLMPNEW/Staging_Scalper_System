@@ -250,7 +250,7 @@ def main() -> int:  # noqa: C901
         "n_sells": sum(1 for r in trade_rows if r["side"] == "sell"),
         "gross_traded_notional": round(sum(float(r["trade_notional"]) for r in trade_rows), 2),
     }
-    trade_meta_path.write_text(json.dumps(trade_meta, indent=2, sort_keys=True), encoding="utf-8")
+    write_manifest(trade_meta_path, trade_meta)
 
     try:
         comm_base = commission(config, "base")
@@ -344,7 +344,7 @@ def main() -> int:  # noqa: C901
             "impact=deferred (no ADV/volume impact model)"
         ),
     }
-    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    write_manifest(summary_path, summary)
 
     try:
         min_frac = finite_float(

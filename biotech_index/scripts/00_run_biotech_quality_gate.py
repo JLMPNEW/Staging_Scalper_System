@@ -46,6 +46,11 @@ def parse_args() -> argparse.Namespace:
         help="Also run the current biotech Pyright baseline. This is opt-in until the existing type backlog is resolved.",
     )
     parser.add_argument("--skip-pytest", action="store_true", help="Skip pytest regression tests.")
+    parser.add_argument(
+        "--allow-empty-gate",
+        action="store_true",
+        help="Allow running with all substantive checks skipped (compileall only). Off by default because that passes vacuously.",
+    )
     return parser.parse_args()
 
 
@@ -77,6 +82,12 @@ def run_step(step: GateStep) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.skip_pytest and args.skip_ruff and not args.pyright and not args.allow_empty_gate:
+        raise SystemExit(
+            "Refusing to run the quality gate with --skip-pytest and --skip-ruff together: "
+            "compileall alone passes vacuously. Re-enable at least one substantive check "
+            "(pytest, ruff, or --pyright) or pass --allow-empty-gate to override."
+        )
     steps = [
         GateStep("compileall", ["__compile_biotech_sources__"]),
     ]

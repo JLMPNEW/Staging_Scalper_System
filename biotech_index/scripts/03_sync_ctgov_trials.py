@@ -48,7 +48,9 @@ def merge_unique_studies(results: Iterable[SyncResult]) -> dict[str, dict[str, A
     signatures: dict[str, str] = {}
     owners: dict[str, str] = {}
     collision_count = 0
-    for result in results:
+    # Results arrive in as_completed (thread-finish) order; sort by ticker so
+    # shared-NCT collision resolution is stable run-to-run.
+    for result in sorted(results, key=lambda result: result.ticker):
         for nct_id, study in result.studies.items():
             signature = study_signature(study)
             if nct_id not in unique_studies:

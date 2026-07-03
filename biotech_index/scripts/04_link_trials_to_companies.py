@@ -202,15 +202,18 @@ def load_program_owner_overrides(
         return []
     companies_by_ticker = {company.ticker: company for company in companies}
     overrides: list[ProgramOwnerOverride] = []
+    total_rows = 0
+    skipped_rows = 0
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
             raise ValueError(f"Program owner overrides CSV has no header: {path}")
         for line_no, row in enumerate(reader, start=2):
+            total_rows += 1
             try:
                 if not as_bool(row.get("enabled", "true")):
                     continue
-                ticker = str(row.get("ticker") or "").strip().upper()
+                ticker = normalize_ticker(row.get("ticker"))
                 nct_id = str(row.get("nct_id") or "").strip().upper()
                 if not ticker or not nct_id:
                     continue
@@ -242,8 +245,13 @@ def load_program_owner_overrides(
                         source_name=source_name,
                     )
                 )
-            except Exception as exc:
+            except (ValueError, TypeError, KeyError) as exc:
+                skipped_rows += 1
                 LOGGER.warning("Ignoring invalid program owner override at %s:%d: %s", path, line_no, exc)
+    if skipped_rows:
+        LOGGER.warning("Skipped %d/%d invalid program owner override row(s) in %s", skipped_rows, total_rows, path)
+        if skipped_rows == total_rows:
+            raise ValueError(f"All {total_rows} program owner override row(s) failed to parse: {path}")
     return overrides
 
 
@@ -263,9 +271,11 @@ def build_links(
     token_index: defaultdict[str, list[tuple[frozenset[str], CompanyAliases]]] = defaultdict(list)
     single_token_index: defaultdict[str, list[CompanyAliases]] = defaultdict(list)
 
+    name_token_union: dict[int, frozenset[str]] = {}
     for company in company_list:
         if company.ticker:
             ticker_index[company.ticker].append(company)
+        name_token_union[company.company_id] = frozenset().union(*company.alias_tokens) if company.alias_tokens else frozenset()
         for alias in company.alias_norms:
             if alias:
                 exact_index[alias].append(company)
@@ -314,7 +324,16 @@ def build_links(
 
         for token in sponsor_tokens:
             for company in ticker_index.get(token, []):
-                remember(candidates, company, "ticker_token_match", 0.90)
+                # A sponsor word equal to a ticker is weak on its own (e.g. Sage
+                # Bionetworks vs SAGE = Sage Therapeutics). Only treat it as a
+                # strong link when the sponsor also shares a meaningful company
+                # name token beyond the ticker word itself; otherwise record a
+                # low-confidence method that audits treat as a weak link.
+                corroborating_tokens = (name_token_union.get(company.company_id, frozenset()) - {company.ticker}) & sponsor_tokens
+                if corroborating_tokens:
+                    remember(candidates, company, "ticker_token_match", 0.90)
+                else:
+                    remember(candidates, company, "ticker_token_uncorroborated", 0.72)
 
         checked_token_sets: set[tuple[frozenset[str], int]] = set()
         for token in sponsor_tokens:

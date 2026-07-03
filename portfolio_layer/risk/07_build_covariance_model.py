@@ -29,7 +29,7 @@ from scipy.spatial.distance import squareform  # noqa: E402
 from sklearn.covariance import OAS, LedoitWolf  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv  # noqa: E402
+from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.covariance_utils import safe_cond, stabilize_covariance, symmetrize  # noqa: E402
@@ -282,7 +282,7 @@ def main() -> int:  # noqa: C901
             "return_outliers.csv": {"sha256": sha256_file(outliers_path), "rows": len(outlier_rows)},
         },
     }
-    meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+    write_manifest(meta_path, meta)
     LOGGER.info("Covariance %dx%d (direct=%d shrunk=%d) cond=%.1f clipped=%d clusters=%d -> %s",
                 n, n, len(direct), len(shrunk), condition, n_clipped, meta["n_clusters"], cov_path)
     return 0

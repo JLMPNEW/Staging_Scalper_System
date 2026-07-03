@@ -201,8 +201,7 @@ transaction_costs:
     low: 1.00
     base: 1.125                            # reported/sealed assumption
     worst_case: 1.25                       # used for conservative trade/no-trade decisions
-  rebalance_horizon_days: 21               # default; sensitivity reported at 10 / 21 / 63
-  horizon_sensitivity_days: [10, 21, 63]
+  rebalance_horizon_days: 21
   no_trade_buffer_drag: 0.0                # extra buffer added to cost in the utility>cost test (weight units)
   enable_provisional_mu_no_trade: false    # Stage 11 turns on realized-alpha-calibrated utility gating
   half_spread_bps_default: 5.0             # provisional (config) until bid/ask data exists
@@ -297,6 +296,7 @@ black_litterman_fusion:
   enabled_in_production: false
   tau: 0.05
   delta: 2.5                                # equilibrium prior pi = delta * Sigma * w_bench
+  risk_aversion: 5.0                        # gamma of the Stage 7 tier1 BL solve (independent of optimizer.risk_aversion)
   return_space: "excess"                    # no explicit CASH asset in the Stage 7 baseline
   alpha_units_policy: "B_annualized_calibrated"   # preserve Stage 1 calibrated annual alpha (no z-rescale)
   base_gross_exposure: 1.0
@@ -338,7 +338,6 @@ black_litterman_fusion:
     CRISIS: 0.40
     default: 0.85
   foreign_activation_policy: "respect_active_flag"   # allocate foreign only if macro active_flag==1
-  cost_overlay_namespace: "blacklitterman"
 
 # Stage 8 - multi-horizon sleeves + risk-allocation engine (SHADOW-ONLY proposal over the Stage 7 book).
 # Re-allocates RISK (not capital): factor-neutralized, diversified (effective bets), risk where IR is
@@ -386,7 +385,6 @@ sleeves:
   projection:
     max_iterations: 50
     rc_tolerance: 0.01                       # converged when max |sleeve RC share - budget| < this
-  net_sharpe_degradation_tolerance: 0.0      # ablation (30) WARN threshold
 
 # Stage 8.5 - holdings ledger / broker statement ingestion.
 # The raw source is a sealed IB Activity Statement CSV saved under IB_reports/.
@@ -409,10 +407,10 @@ holdings_ledger:
 exit_engine:
   enabled_in_production: false
   phase: "phase1_actual_equity_holdings"
-  scope: "ledger_actual_holdings"
-  signal_source: "latest_sealed_scores_on_or_before_ledger"
+  # scope, signal source, and target-gap source are FIXED behaviors of exits/33 (ledger actual
+  # holdings; latest sealed scores <= ledger as-of; Stage 8 sleeve proposal, diagnostic only) —
+  # documented here as comments, not knobs, so nobody edits a value that nothing reads.
   max_signal_lag_days: 10
-  target_gap_source: "stage8_sleeve_proposal"     # diagnostic only; never generates buys in Stage 9
   actions:
     hard_exit_fraction: 1.0
     soft_exit_fraction: 0.5
@@ -489,3 +487,18 @@ calibration_targets:
 calibration_panel:
   dir: "calibration_panel"                 # under paths.output_dir; one subdir per targets build
   rotation_lookback_trading_days: 504      # panel slice fed to the rotation builders (>= ma_days + slope)
+
+# Stage 11 - first-pass empirical alpha calibration (research/68). RESEARCH ONLY: approved slopes
+# feed Stage 1 / Stage 7 only after Stage 11 OOS validation (69/16) passes. Approval is deliberately
+# conservative — overlapping forward windows are not independent evidence, so short test spans
+# reject with insufficient_independent_windows by design.
+alpha_calibration:
+  dir: "alpha_calibration"                 # under paths.output_dir; one subdir per panel build
+  target: "excess_sector"                  # excess_sector | excess_spy | raw | resid_sector
+  ridge_shrinkage: 0.25                    # pooled slope = sum(zy) / (sum(z^2) + shrinkage*n)
+  min_cross_section_names: 8               # per-date Fama-MacBeth regressions need this many names
+  min_observations: 200                    # approval floor: pooled rows per (pipeline, horizon)
+  min_dates: 8                             # approval floor: usable snapshot dates
+  min_independent_windows: 3               # approval floor: non-overlapping label windows in the span
+  approve_t_min: 2.0                       # |Fama-MacBeth t| must reach this
+  min_sign_consistency: 0.55               # fraction of per-date slopes agreeing with the mean sign

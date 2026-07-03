@@ -34,6 +34,16 @@ DEFAULT_TARGET_COHORT = "commercial_profitable_quality_or_mature"
 TARGET_COHORT = DEFAULT_TARGET_COHORT
 DEFAULT_HORIZONS = [20, 60, 120]
 DEFAULT_TOP_N = [10, 20]
+TRADING_BARS_PER_CALENDAR_YEAR = 252.0
+CALENDAR_DAYS_PER_YEAR = 365.25
+DEFAULT_EMBARGO_BUFFER_CALENDAR_DAYS = 10
+# Minimum-sample gates before acceptance thresholds are honored (mirrors the
+# phase-2 guards in 30_calibrate_speculative_alpha.py).
+MIN_GATE_OBSERVATIONS = 30
+MIN_GATE_ASOF_DATES = 8
+# Profit factor is inconclusive with too few losing observations because a
+# zero-loss sample returns the 999.0 sentinel.
+MIN_GATE_LOSS_COUNT = 3
 
 
 @dataclass(frozen=True)
@@ -313,6 +323,7 @@ def summarize(values: list[float], *, lcb_z: float) -> dict[str, float]:
             "p10_return_pct": 0.0,
             "win_rate_pct": 0.0,
             "profit_factor": 0.0,
+            "loss_count": 0.0,
             "large_loss_20pct_rate_pct": 0.0,
             "large_loss_40pct_rate_pct": 0.0,
             "top3_gain_contribution_pct": 0.0,
@@ -324,6 +335,7 @@ def summarize(values: list[float], *, lcb_z: float) -> dict[str, float]:
         "p10_return_pct": percentile(values, 0.10) * 100.0,
         "win_rate_pct": (sum(1 for value in values if value > 0) / len(values)) * 100.0,
         "profit_factor": profit_factor(values),
+        "loss_count": float(sum(1 for value in values if value < 0)),
         "large_loss_20pct_rate_pct": (sum(1 for value in values if value <= -0.20) / len(values)) * 100.0,
         "large_loss_40pct_rate_pct": (sum(1 for value in values if value <= -0.40) / len(values)) * 100.0,
         "top3_gain_contribution_pct": top3_gain_contribution_pct(values),
@@ -481,7 +493,25 @@ def select_for_date(rows: list[dict[str, Any]], spec: PolicySpec, top_n: int) ->
     return selected
 
 
-def split_map_for_horizon(observation_rows: list[dict[str, Any]], horizon: int, train_fraction: float) -> dict[str, str]:
+def minimum_calendar_embargo_days_for_horizon(
+    horizon_bars: int,
+    *,
+    buffer_days: int = DEFAULT_EMBARGO_BUFFER_CALENDAR_DAYS,
+) -> int:
+    """Convert a trading-bar horizon into the calendar-day embargo needed to avoid split leakage."""
+    return int(
+        math.ceil(max(0, int(horizon_bars)) * CALENDAR_DAYS_PER_YEAR / TRADING_BARS_PER_CALENDAR_YEAR)
+        + max(0, int(buffer_days))
+    )
+
+
+def split_map_for_horizon(
+    observation_rows: list[dict[str, Any]],
+    horizon: int,
+    train_fraction: float,
+    *,
+    embargo_days: int | None = None,
+) -> dict[str, str]:
     baseline_dates = sorted(
         {
             str(row.get("asof_date") or "")
@@ -503,7 +533,29 @@ def split_map_for_horizon(observation_rows: list[dict[str, Any]], horizon: int, 
     bounded = max(0.10, min(0.90, float(train_fraction)))
     split_idx = int(math.floor(len(dates) * bounded))
     split_idx = max(1, min(len(dates) - 1, split_idx))
-    return {**{d: "train" for d in dates[:split_idx]}, **{d: "test" for d in dates[split_idx:]}}
+    train_dates = dates[:split_idx]
+    test_dates = dates[split_idx:]
+    effective_embargo_days = (
+        int(embargo_days) if embargo_days is not None else minimum_calendar_embargo_days_for_horizon(horizon)
+    )
+    if effective_embargo_days > 0 and train_dates and test_dates:
+        first_test_date = parse_date(test_dates[0])
+        if first_test_date is not None:
+            embargo_start = first_test_date - timedelta(days=effective_embargo_days)
+            kept_train_dates = [
+                text for text in train_dates if (parsed := parse_date(text)) is not None and parsed < embargo_start
+            ]
+            dropped_count = len(train_dates) - len(kept_train_dates)
+            if dropped_count:
+                LOGGER.info(
+                    "Horizon %sd: embargoed %d train as-of dates within %d calendar days before first test date %s.",
+                    horizon,
+                    dropped_count,
+                    effective_embargo_days,
+                    test_dates[0],
+                )
+            train_dates = kept_train_dates
+    return {**{d: "train" for d in train_dates}, **{d: "test" for d in test_dates}}
 
 
 def selected_ticker_text(rows: list[dict[str, Any]], limit: int = 10) -> str:
@@ -589,8 +641,12 @@ def summarize_candidate_rows(
     top_n_values: list[int],
     train_fraction: float,
     lcb_z: float,
+    embargo_days: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[tuple[str, int, int, str], dict[str, Any]]]:
-    split_maps = {horizon: split_map_for_horizon(observations, horizon, train_fraction) for horizon in horizons}
+    split_maps = {
+        horizon: split_map_for_horizon(observations, horizon, train_fraction, embargo_days=embargo_days)
+        for horizon in horizons
+    }
     grouped: dict[tuple[str, int, int, str], list[dict[str, Any]]] = defaultdict(list)
     for row in observations:
         if row.get("net_return") is None:
@@ -654,6 +710,26 @@ def summarize_candidate_rows(
     return summary_rows, summary_by_key
 
 
+def sample_sufficient(summary: dict[str, Any]) -> bool:
+    """Minimum-sample gate before acceptance thresholds are honored."""
+    return (
+        float(summary.get("selected_n") or 0.0) >= MIN_GATE_OBSERVATIONS
+        and float(summary.get("asof_dates") or 0.0) >= MIN_GATE_ASOF_DATES
+    )
+
+
+def profit_factor_gate(summary: dict[str, Any], threshold: float) -> bool:
+    """Profit-factor gate; inconclusive (fails) without enough losing observations.
+
+    profit_factor() returns a 999.0 sentinel when a sample has zero losses, so
+    a low-loss sample must not pass the gate on the sentinel alone.
+    """
+    return (
+        float(summary.get("loss_count") or 0.0) >= MIN_GATE_LOSS_COUNT
+        and float(summary.get("profit_factor") or 0.0) >= threshold
+    )
+
+
 def acceptance_rows(
     specs: list[PolicySpec],
     summary_by_key: dict[tuple[str, int, int, str], dict[str, Any]],
@@ -664,29 +740,41 @@ def acceptance_rows(
         row60 = summary_by_key.get((spec.candidate_id, 20, 60, "test"), {})
         row120_top10 = summary_by_key.get((spec.candidate_id, 10, 120, "test"), {})
         row120_top20 = summary_by_key.get((spec.candidate_id, 20, 120, "test"), {})
+        sample_ok = all(sample_sufficient(row) for row in (row20, row60, row120_top10))
         min_promotion_pass = (
-            float(row60.get("profit_factor") or 0.0) >= 0.80
+            sample_ok
+            and profit_factor_gate(row60, 0.80)
             and float(row60.get("date_improvement_rate_vs_baseline_pct") or 0.0) >= 60.0
-            and float(row20.get("profit_factor") or 0.0) >= 0.90
+            and profit_factor_gate(row20, 0.90)
             and float(row20.get("date_improvement_rate_vs_baseline_pct") or 0.0) >= 55.0
             and float(row120_top10.get("mean_return_pct") or 0.0) >= 4.75
             and float(row120_top10.get("lcb_return_pct") or 0.0) >= 2.75
-            and float(row120_top10.get("profit_factor") or 0.0) >= 1.75
+            and profit_factor_gate(row120_top10, 1.75)
             and float(row120_top10.get("top3_gain_contribution_pct") or 999.0) <= 40.0
         )
         strict_promotion_pass = (
             min_promotion_pass
-            and float(row60.get("profit_factor") or 0.0) >= 1.00
-            and float(row20.get("profit_factor") or 0.0) >= 1.00
-            and float(row120_top20.get("profit_factor") or 0.0) >= 1.15
+            and sample_sufficient(row120_top20)
+            and profit_factor_gate(row60, 1.00)
+            and profit_factor_gate(row20, 1.00)
+            and profit_factor_gate(row120_top20, 1.15)
         )
         fail_reasons: list[str] = []
         if not min_promotion_pass and spec.candidate_id != "baseline_current_ranking":
             checks = [
+                ("insufficient_sample", sample_ok),
+                (
+                    "60d_top20_insufficient_losses",
+                    float(row60.get("loss_count") or 0.0) >= MIN_GATE_LOSS_COUNT,
+                ),
                 ("60d_top20_pf_lt_0.80", float(row60.get("profit_factor") or 0.0) >= 0.80),
                 (
                     "60d_top20_date_improvement_lt_60",
                     float(row60.get("date_improvement_rate_vs_baseline_pct") or 0.0) >= 60.0,
+                ),
+                (
+                    "20d_top20_insufficient_losses",
+                    float(row20.get("loss_count") or 0.0) >= MIN_GATE_LOSS_COUNT,
                 ),
                 ("20d_top20_pf_lt_0.90", float(row20.get("profit_factor") or 0.0) >= 0.90),
                 (
@@ -695,6 +783,10 @@ def acceptance_rows(
                 ),
                 ("120d_top10_mean_lt_4.75", float(row120_top10.get("mean_return_pct") or 0.0) >= 4.75),
                 ("120d_top10_lcb_lt_2.75", float(row120_top10.get("lcb_return_pct") or 0.0) >= 2.75),
+                (
+                    "120d_top10_insufficient_losses",
+                    float(row120_top10.get("loss_count") or 0.0) >= MIN_GATE_LOSS_COUNT,
+                ),
                 ("120d_top10_pf_lt_1.75", float(row120_top10.get("profit_factor") or 0.0) >= 1.75),
                 (
                     "120d_top10_top3_gain_contribution_gt_40",
@@ -845,6 +937,12 @@ def main() -> None:
     )
     if not 0.10 <= train_fraction <= 0.90:
         raise ValueError(f"--train-fraction must be between 0.10 and 0.90, got {train_fraction}")
+    configured_embargo_days = cfg_get(
+        config,
+        "biotech_scoring.commercial_growth_policy_calibration.embargo_days",
+        None,
+    )
+    embargo_days = int(configured_embargo_days) if configured_embargo_days is not None else None
     specs = candidate_specs()
     market_sources = calibration_market_sources(config)
     with connect_readonly(db_path) as conn:
@@ -878,6 +976,7 @@ def main() -> None:
         top_n_values=top_n_values,
         train_fraction=train_fraction,
         lcb_z=float(args.lcb_z),
+        embargo_days=embargo_days,
     )
     accept_rows = acceptance_rows(specs, summary_by_key)
 
@@ -898,6 +997,7 @@ def main() -> None:
         "p10_return_pct",
         "win_rate_pct",
         "profit_factor",
+        "loss_count",
         "large_loss_20pct_rate_pct",
         "large_loss_40pct_rate_pct",
         "top3_gain_contribution_pct",

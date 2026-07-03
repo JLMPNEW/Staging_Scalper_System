@@ -429,6 +429,28 @@ def maybe_skip_company_master(
     return [step for step in steps if step.name != "company_master"]
 
 
+def ensure_final_scoring_universe_for_skip_ctgov(config: dict[str, Any], *, base_dir: Path) -> None:
+    """--skip-ctgov relies on a previously generated final scoring universe CSV.
+
+    Downstream steps (e.g. sec_filings) and final validation read this CSV, which
+    is normally refreshed by the CTGov steps; fail fast with a clear error instead
+    of letting a later step crash on the missing file.
+    """
+    universe_csv = resolve_path(
+        cfg_get(
+            config,
+            "sec_filings.final_scoring_universe_csv",
+            "../output/biotech_index_reports/ctgov_final_scoring_universe.csv",
+        ),
+        base_dir=base_dir,
+    )
+    if not universe_csv.exists():
+        raise FileNotFoundError(
+            "--skip-ctgov requires an existing final scoring universe CSV from a prior CTGov run: "
+            f"missing {universe_csv}"
+        )
+
+
 def parse_clock_time(raw: object, default: str = "16:15") -> dt_time:
     text = str(raw or default).strip()
     for fmt in ("%H:%M:%S", "%H:%M"):
@@ -459,15 +481,101 @@ def business_day_age(start: date, end: date) -> int:
     return age
 
 
-def default_pipeline_asof(config: dict[str, Any]) -> date:
+def snap_asof_to_latest_trading_date(
+    candidate: date,
+    *,
+    db_path: Path,
+    config: dict[str, Any],
+    max_snap_gap_days: int = 4,
+) -> date:
+    """Snap a weekday-derived asof candidate to the latest available market bar date.
+
+    Sat/Sun-only weekday logic resolves a weekday market holiday to a non-trading
+    day, which fails downstream coverage validation and inflates Form 4 staleness.
+    Prefer the primary scoring source's bars; fall back to any source. Keep the
+    weekday-based candidate (with a warning) when the DB has no usable bars yet
+    (fresh install) or the newest bar is more than max_snap_gap_days behind the
+    candidate (stale market data; this run will sync the missing dates).
+    """
+    if not db_path.exists():
+        LOGGER.warning(
+            "Cannot snap asof %s to a trading date because the database does not exist yet: %s",
+            candidate.isoformat(),
+            db_path,
+        )
+        return candidate
+    latest: date | None = None
+    try:
+        with connect(db_path) as conn:
+            table_row = conn.execute(
+                "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='market_bars_daily'"
+            ).fetchone()
+            if not table_row or int(table_row["n"]) <= 0:
+                LOGGER.warning(
+                    "Cannot snap asof %s to a trading date because market_bars_daily does not exist yet (fresh install?).",
+                    candidate.isoformat(),
+                )
+                return candidate
+            for source in scoring_market_sources(config):
+                row = conn.execute(
+                    "SELECT MAX(bar_date) AS latest FROM market_bars_daily WHERE source = ? AND bar_date <= ?",
+                    (source, candidate.isoformat()),
+                ).fetchone()
+                latest = parse_db_date(row["latest"] if row else None)
+                if latest is not None:
+                    break
+            if latest is None:
+                row = conn.execute(
+                    "SELECT MAX(bar_date) AS latest FROM market_bars_daily WHERE bar_date <= ?",
+                    (candidate.isoformat(),),
+                ).fetchone()
+                latest = parse_db_date(row["latest"] if row else None)
+    except sqlite3.Error as exc:
+        LOGGER.warning("Cannot snap asof %s to a trading date: %s", candidate.isoformat(), exc)
+        return candidate
+    if latest is None:
+        LOGGER.warning(
+            "No market bars found at or before %s; keeping weekday-based asof (fresh install?).",
+            candidate.isoformat(),
+        )
+        return candidate
+    if latest == candidate:
+        return candidate
+    gap_days = (candidate - latest).days
+    if gap_days > max_snap_gap_days:
+        LOGGER.warning(
+            "Newest market bar %s is %d calendar day(s) before candidate asof %s; keeping weekday-based asof "
+            "because the market data looks stale rather than the candidate being a holiday.",
+            latest.isoformat(),
+            gap_days,
+            candidate.isoformat(),
+        )
+        return candidate
+    LOGGER.warning(
+        "Snapped pipeline asof from weekday-based %s to latest available trading date %s (weekday market holiday).",
+        candidate.isoformat(),
+        latest.isoformat(),
+    )
+    return latest
+
+
+def default_pipeline_asof(config: dict[str, Any], db_path: Path | None = None) -> date:
     market_timezone = str(cfg_get(config, "ib_market_data.market_timezone", "America/New_York"))
     market_close_time = parse_clock_time(cfg_get(config, "ib_market_data.market_close_time", "16:15"))
     guard_enabled = as_bool(cfg_get(config, "ib_market_data.market_close_guard", True))
     now_local = datetime.now(timezone.utc).astimezone(ZoneInfo(market_timezone))
     local_today = now_local.date()
     if guard_enabled and (local_today.weekday() >= 5 or now_local.time() < market_close_time):
-        return previous_business_day(local_today)
-    return local_today
+        candidate = previous_business_day(local_today)
+    else:
+        candidate = local_today
+    # Weekday logic alone treats a weekday market holiday as a trading day. A past
+    # candidate's bars must already be synced if it was a trading day, so snap it to
+    # the latest available bar date. A same-day candidate is left as-is because this
+    # run has not synced today's bars yet, so absence of bars proves nothing.
+    if db_path is not None and candidate < local_today:
+        candidate = snap_asof_to_latest_trading_date(candidate, db_path=db_path, config=config)
+    return candidate
 
 
 def pipeline_steps(
@@ -928,6 +1036,23 @@ def run_step(
             "stdout_tail": text_tail(stdout_text),
             "stderr_tail": text_tail(stderr_text),
         }
+    except Exception as exc:
+        # Spawn/communicate failures (e.g. FileNotFoundError, OSError) must be
+        # recorded as a failed timing row instead of leaving a row stuck at
+        # status="running"; the caller treats the failed row like any other step failure.
+        elapsed = round(time.monotonic() - start, 3)
+        LOGGER.exception("Step %s failed to launch or complete: %s", step.name, exc)
+        return {
+            "run_started_at": run_started_at,
+            "mode": mode,
+            "step": step.name,
+            "status": "failed",
+            "elapsed_sec": elapsed,
+            "returncode": -1,
+            "command": " ".join(command),
+            "stdout_tail": text_tail(stdout_text),
+            "stderr_tail": text_tail((stderr_text or "") + f"\n{type(exc).__name__}: {exc}"),
+        }
     elapsed = round(time.monotonic() - start, 3)
     returncode = int(process.returncode if process.returncode is not None else -1)
     status = "success" if returncode == 0 else "failed"
@@ -1143,6 +1268,20 @@ def read_form4_snapshot_date(conn: sqlite3.Connection, snapshot_table: str) -> t
     return best_raw, best_source
 
 
+def form4_raw_filing_tables_present(
+    conn: sqlite3.Connection,
+    sources: list[tuple[str, str]],
+) -> bool:
+    for table, _field in sources:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if row is not None:
+            return True
+    return False
+
+
 def read_form4_raw_filing_date(
     conn: sqlite3.Connection,
     sources: list[tuple[str, str]],
@@ -1242,6 +1381,7 @@ def validate_form4_preflight(
     raw_filing_raw = ""
     raw_filing_source = ""
     raw_filing_age_days: int | str = ""
+    raw_filing_tables_exist = False
 
     if max_staleness_days < 0:
         raise ValueError("biotech_refresh.form4_preflight.max_staleness_days must be >= 0")
@@ -1255,6 +1395,7 @@ def validate_form4_preflight(
                 snapshot_raw, snapshot_source = read_form4_snapshot_date(conn, snapshot_table)
                 if raw_filing_check_enabled:
                     raw_filing_raw, raw_filing_source = read_form4_raw_filing_date(conn, raw_filing_sources)
+                    raw_filing_tables_exist = form4_raw_filing_tables_present(conn, raw_filing_sources)
         except sqlite3.Error as exc:
             failures.append(f"Form 4 database cannot be opened read-only: {form4_db_path} ({type(exc).__name__}: {exc})")
 
@@ -1282,14 +1423,22 @@ def validate_form4_preflight(
         if raw_filing_check_enabled:
             raw_filing_date = parse_db_date(raw_filing_raw)
             if raw_filing_date is None:
-                message = (
-                    f"Form 4 raw filing date is unavailable in {form4_db_path}; "
-                    f"checked sources={raw_filing_sources}"
-                )
-                if raw_filing_required:
-                    failures.append(message)
+                if not raw_filing_tables_exist:
+                    # A minimal staging copy may carry only the snapshot state table;
+                    # the raw-filing freshness check is inapplicable, not a failure.
+                    LOGGER.info(
+                        "Form 4 raw filing tables absent in %s; skipping raw filing freshness check.",
+                        form4_db_path,
+                    )
                 else:
-                    warnings.append(message)
+                    message = (
+                        f"Form 4 raw filing date is unavailable in {form4_db_path}; "
+                        f"checked sources={raw_filing_sources}"
+                    )
+                    if raw_filing_required:
+                        failures.append(message)
+                    else:
+                        warnings.append(message)
             else:
                 raw_filing_age_days = (
                     business_day_age(raw_filing_date, target_date)
@@ -1673,6 +1822,7 @@ def validate_final_outputs(
     asof: str,
     run_started_at: str,
     mode: str,
+    skipped_market_sources: set[str] | None = None,
 ) -> dict[str, Any]:
     start = time.monotonic()
     LOGGER.info("Starting final_output_validation")
@@ -1696,8 +1846,14 @@ def validate_final_outputs(
     )
     multibagger_scores_csv = multibagger_output_dir / str(cfg_get(config, "multibagger.scores_csv", "biotech_multibagger_scores.csv"))
     multibagger_candidates_csv = multibagger_output_dir / str(cfg_get(config, "multibagger.candidates_csv", "biotech_multibagger_candidates.csv"))
-    scoring_sources = scoring_market_sources(config)
-    preferred_market_sources = {scoring_sources[0]} if scoring_sources else set()
+    scoring_sources = [source for source in scoring_market_sources(config) if source]
+    # Only require coverage from sources this run could actually have refreshed:
+    # with --skip-yahoo the primary source is legitimately absent for the asof and
+    # scoring used the configured fallback (e.g. interactive_brokers).
+    skipped = skipped_market_sources or set()
+    candidate_market_sources = [source for source in scoring_sources if source not in skipped]
+    if not candidate_market_sources:
+        candidate_market_sources = scoring_sources
     multibagger_required_columns = list(MULTIBAGGER_SCORE_BASE_REQUIRED_COLUMNS)
     if as_bool(cfg_get(config, "multibagger.tier1_interaction.enabled", False)):
         multibagger_required_columns.extend(MULTIBAGGER_SCORE_TIER1_REQUIRED_COLUMNS)
@@ -1713,16 +1869,29 @@ def validate_final_outputs(
             "multibagger_scores_daily",
         ):
             validate_table_coverage(conn, table=table, asof=asof, expected_tickers=expected_tickers)
-        for source in sorted(source for source in preferred_market_sources if source):
-            # Market features can include extra symbols from the vendor cache; downstream layers filter to the final universe.
-            validate_table_coverage(
-                conn,
-                table="market_features_daily",
-                asof=asof,
-                expected_tickers=expected_tickers,
-                source=source,
-                allow_extra=True,
-            )
+        market_coverage_failures: list[str] = []
+        for source in candidate_market_sources:
+            try:
+                # Market features can include extra symbols from the vendor cache; downstream layers filter to the final universe.
+                validate_table_coverage(
+                    conn,
+                    table="market_features_daily",
+                    asof=asof,
+                    expected_tickers=expected_tickers,
+                    source=source,
+                    allow_extra=True,
+                )
+            except RuntimeError as exc:
+                market_coverage_failures.append(str(exc))
+                continue
+            LOGGER.info("market_features_daily coverage satisfied by source=%s for asof=%s", source, asof)
+            break
+        else:
+            if candidate_market_sources:
+                raise RuntimeError(
+                    "market_features_daily coverage failed for every candidate scoring source "
+                    f"({','.join(candidate_market_sources)}): " + " || ".join(market_coverage_failures)
+                )
         validate_table_required_columns(
             conn,
             table="daily_scores",
@@ -1788,7 +1957,7 @@ def main() -> None:
             raise ValueError(f"Invalid --asof date: {args.asof}")
         asof = parsed_asof.isoformat()
     else:
-        asof = default_pipeline_asof(config).isoformat()
+        asof = default_pipeline_asof(config, db_path=db_path).isoformat()
     LOGGER.info("Pipeline as-of date: %s", asof)
     timing_csv = resolve_path(
         cfg_get(config, "biotech_refresh.timing_csv", "../output/biotech_index_reports/biotech_refresh_timing.csv"),
@@ -1830,6 +1999,8 @@ def main() -> None:
         mode=args.mode,
         selected_steps=selected_steps,
     )
+    if args.skip_ctgov and not args.history_restatement and any(step.name == "sec_filings" for step in steps):
+        ensure_final_scoring_universe_for_skip_ctgov(config, base_dir=base_dir)
     history_dates: list[str] = []
     if args.history_restatement:
         with connect(db_path) as conn:
@@ -2057,6 +2228,11 @@ def main() -> None:
             )
             write_timing_csv(timing_csv, timing_rows)
             try:
+                skipped_market_sources: set[str] = set()
+                if args.skip_yahoo:
+                    skipped_market_sources.add("yahoo_adjusted")
+                if args.skip_ib:
+                    skipped_market_sources.add("interactive_brokers")
                 timing_rows[-1] = validate_final_outputs(
                     config,
                     base_dir=base_dir,
@@ -2064,6 +2240,7 @@ def main() -> None:
                     asof=asof,
                     run_started_at=run_started_at,
                     mode=args.mode,
+                    skipped_market_sources=skipped_market_sources,
                 )
             except Exception as exc:
                 timing_rows[-1] = {

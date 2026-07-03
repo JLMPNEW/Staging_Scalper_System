@@ -40,6 +40,7 @@ SOURCE = "interactive_brokers"
 SQLITE_PARAM_CHUNK_SIZE = 800
 MIN_RETURN_BASE_PRICE = 0.01
 INCREMENTAL_FETCH_BUFFER_DAYS = 3
+ADJUSTMENT_DISCONTINUITY_TOLERANCE = 0.005
 
 
 def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
@@ -139,8 +140,17 @@ def to_float(raw: object) -> float | None:
     return value if math.isfinite(value) else None
 
 
-def as_bool(raw: object) -> bool:
-    return str(raw or "").strip().lower() in {"1", "true", "yes", "y"}
+def as_bool(raw: object, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "enabled", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
+        return False
+    return default
 
 
 def parse_clock_time(raw: object, default: str = "16:15") -> dt_time:
@@ -232,18 +242,23 @@ def load_companies(conn: sqlite3.Connection, *, scoring_tickers: set[str], ticke
 
 
 def load_latest_shares(conn: sqlite3.Connection, company_id: int, asof_date: date) -> float | None:
+    # Rows without a filed_date are treated as available only after a ~45-day
+    # reporting lag past period_end, to avoid look-ahead at period end.
     row = conn.execute(
         """
         SELECT shares_outstanding
         FROM company_facts_quarterly
         WHERE company_id = ?
           AND period_end <= ?
-          AND (filed_date IS NULL OR filed_date = '' OR filed_date <= ?)
+          AND (
+                (filed_date IS NOT NULL AND filed_date != '' AND filed_date <= ?)
+                OR ((filed_date IS NULL OR filed_date = '') AND DATE(period_end, '+45 days') <= ?)
+              )
           AND shares_outstanding IS NOT NULL
         ORDER BY period_end DESC, filed_date DESC
         LIMIT 1
         """,
-        (company_id, asof_date.isoformat(), asof_date.isoformat()),
+        (company_id, asof_date.isoformat(), asof_date.isoformat(), asof_date.isoformat()),
     ).fetchone()
     return to_float(row["shares_outstanding"]) if row else None
 
@@ -252,6 +267,29 @@ def pct_return(values: list[float], days: int) -> float | None:
     if len(values) <= days or abs(values[-days - 1]) < MIN_RETURN_BASE_PRICE:
         return None
     return (values[-1] / values[-days - 1]) - 1.0
+
+
+def close_on_or_before(series: list[tuple[date, float]], day: date) -> float | None:
+    for bar_day, value in reversed(series):
+        if bar_day <= day:
+            return value
+    return None
+
+
+def benchmark_return_between(series: list[tuple[date, float]], start_day: date, end_day: date) -> float | None:
+    """Benchmark return over the same calendar span as the company return."""
+    if not series or start_day >= end_day:
+        return None
+    start_close = close_on_or_before(series, start_day)
+    end_close = close_on_or_before(series, end_day)
+    if start_close is None or end_close is None or abs(start_close) < MIN_RETURN_BASE_PRICE:
+        return None
+    return (end_close / start_close) - 1.0
+
+
+def window_average(values: list[float | None], window: int) -> float | None:
+    usable = [value for value in values[-window:] if value is not None]
+    return sum(usable) / len(usable) if usable else None
 
 
 def score_liquidity(avg_dollar_volume_20d: float | None) -> float:
@@ -356,18 +394,31 @@ def fetch_bars(
     for bar in bars:
         bar_date = bar.date.isoformat() if hasattr(bar.date, "isoformat") else str(bar.date)
         bar_day = parse_date(bar_date[:10])
+        open_value = to_float(bar.open)
+        high_value = to_float(bar.high)
+        low_value = to_float(bar.low)
+        close_value = to_float(bar.close)
         out.append(
             {
                 "ticker": ticker,
                 "bar_date": bar_date[:10],
                 "source": SOURCE,
-                "open": to_float(bar.open),
-                "high": to_float(bar.high),
-                "low": to_float(bar.low),
-                "close": to_float(bar.close),
+                "open": open_value,
+                "high": high_value,
+                "low": low_value,
+                "close": close_value,
                 "volume": to_float(bar.volume),
                 "wap": to_float(getattr(bar, "average", None)),
                 "price_adjustment": price_adjustment,
+                # Shared market_bars_daily semantics: TRADES bars are unadjusted,
+                # so raw_* mirror the OHLC values and adj_close is unknown (NULL);
+                # ADJUSTED_LAST bars are fully adjusted, so adj_close = close and
+                # the raw values are unknowable from the IB response (NULL).
+                "raw_open": None if is_adjusted else open_value,
+                "raw_high": None if is_adjusted else high_value,
+                "raw_low": None if is_adjusted else low_value,
+                "raw_close": None if is_adjusted else close_value,
+                "adj_close": close_value if is_adjusted else None,
                 "is_adjusted": is_adjusted,
                 "is_provisional": 1 if provisional_asof and bar_day == asof_date else 0,
                 "what_to_show": used_what_to_show,
@@ -391,11 +442,55 @@ def filter_bars_from_start(bars: list[dict[str, Any]], start_date: date | None) 
     return [row for row in bars if (day := parse_bar_day(row)) is not None and day >= start_date]
 
 
+def bars_adjustment_modes(bars: list[dict[str, Any]]) -> set[int]:
+    return {int(row.get("is_adjusted") or 0) for row in bars}
+
+
+def adjustment_mode_mismatch(existing: list[dict[str, Any]], fetched: list[dict[str, Any]]) -> bool:
+    """True when fetched bars carry a different adjustment mode than stored bars.
+
+    Merging ADJUSTED_LAST and TRADES bars into one series produces a "mixed"
+    close series that corrupts return features, so it is never allowed.
+    """
+    existing_modes = bars_adjustment_modes(existing)
+    fetched_modes = bars_adjustment_modes(fetched)
+    return bool(existing_modes and fetched_modes and existing_modes != fetched_modes)
+
+
+def adjustment_discontinuity(
+    existing: list[dict[str, Any]],
+    fetched: list[dict[str, Any]],
+    tolerance: float = ADJUSTMENT_DISCONTINUITY_TOLERANCE,
+) -> bool:
+    """Detect an adjustment-basis change on overlapping bar dates.
+
+    The incremental refetch window overlaps stored bars; when a new split or
+    dividend shifts the adjusted series, closes for the same dates diverge
+    beyond a small tolerance and the stored history must be refetched in full
+    instead of splicing stale-adjusted history onto freshly adjusted bars.
+    """
+    existing_by_date = {
+        str(row.get("bar_date") or "")[:10]: to_float(row.get("close"))
+        for row in existing
+        if not int(row.get("is_provisional") or 0)
+    }
+    for row in fetched:
+        if int(row.get("is_provisional") or 0):
+            continue
+        stored_close = existing_by_date.get(str(row.get("bar_date") or "")[:10])
+        fetched_close = to_float(row.get("close"))
+        if stored_close is None or fetched_close is None or stored_close <= 0 or fetched_close <= 0:
+            continue
+        if abs(fetched_close / stored_close - 1.0) > tolerance:
+            return True
+    return False
+
+
 def load_bars_from_db(conn: sqlite3.Connection, ticker: str, *, start_date: date, asof_date: date) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT ticker, bar_date, source, open, high, low, close, volume, wap,
-               price_adjustment, is_adjusted, is_provisional, data_quality
+               price_adjustment, raw_close, adj_close, is_adjusted, is_provisional, data_quality
         FROM market_bars_daily
         WHERE source = ?
           AND ticker = ?
@@ -420,6 +515,8 @@ def load_bars_from_db(conn: sqlite3.Connection, ticker: str, *, start_date: date
                 "volume": to_float(row["volume"]),
                 "wap": to_float(row["wap"]),
                 "price_adjustment": str(row["price_adjustment"] or ("adjusted" if is_adjusted else "raw")),
+                "raw_close": to_float(row["raw_close"]),
+                "adj_close": to_float(row["adj_close"]),
                 "is_adjusted": is_adjusted,
                 "is_provisional": int(row["is_provisional"] or 0),
                 "what_to_show": "ADJUSTED_LAST" if is_adjusted else "",
@@ -568,7 +665,7 @@ def common_value(rows: list[dict[str, Any]], key: str, default: Any = None) -> A
 def build_market_rows(
     company: Company,
     bars: list[dict[str, Any]],
-    xbi_closes: list[float],
+    xbi_series: list[tuple[date, float]],
     shares: float | None,
     asof_date: date,
     *,
@@ -582,7 +679,7 @@ def build_market_rows(
         if (to_float(row.get("close")) is not None and (to_float(row.get("close")) or 0.0) > 0.0)
     ]
     closes = [to_float(row.get("close")) or 0.0 for row in usable_bars]
-    volumes = [to_float(row.get("volume")) or 0.0 for row in usable_bars]
+    volumes = [to_float(row.get("volume")) for row in usable_bars]
     if not closes:
         raise ValueError(f"No usable close prices for {company.ticker}")
     continuity = continuity_report(
@@ -592,9 +689,23 @@ def build_market_rows(
         max_missing_days=continuity_max_missing_days,
     )
     close = closes[-1]
-    dollar_volumes = [closes[idx] * volumes[idx] for idx in range(min(len(closes), len(volumes)))]
-    avg_volume_20d = sum(volumes[-20:]) / min(20, len(volumes)) if volumes else None
-    avg_dollar_volume_20d = sum(dollar_volumes[-20:]) / min(20, len(dollar_volumes)) if dollar_volumes else None
+    # Dollar volume uses the raw close when available (TRADES bars). ADJUSTED_LAST
+    # bars carry no raw close, so the adjusted close is used there and historical
+    # dollar volume is biased by later splits/dividends.
+    raw_closes = [
+        to_float(row.get("raw_close"))
+        if to_float(row.get("raw_close")) is not None and (to_float(row.get("raw_close")) or 0.0) > 0.0
+        else to_float(row.get("close")) or 0.0
+        for row in usable_bars
+    ]
+    # Bars with a missing volume are excluded from the averages (numerator and
+    # denominator) instead of being counted as zero-volume days.
+    dollar_volumes = [
+        raw_closes[idx] * volumes[idx] if volumes[idx] is not None else None
+        for idx in range(min(len(raw_closes), len(volumes)))
+    ]
+    avg_volume_20d = window_average(volumes, 20)
+    avg_dollar_volume_20d = window_average(dollar_volumes, 20)
     window_52w = usable_bars[-260:]
     high_52w = max((to_float(row.get("high")) or to_float(row.get("close")) or 0.0 for row in window_52w), default=None)
     low_52w = min((to_float(row.get("low")) or to_float(row.get("close")) or close for row in window_52w), default=None)
@@ -602,7 +713,14 @@ def build_market_rows(
     sma_200 = sum(closes[-200:]) / min(200, len(closes)) if closes else None
     return_1m = pct_return(closes, 21)
     return_3m = pct_return(closes, 63)
-    xbi_return_3m = pct_return(xbi_closes, 63) if xbi_closes else None
+    # Align the benchmark 3m return to the company's own 63-bar calendar span so
+    # tickers with missing bars do not compare mismatched windows.
+    return_3m_start_day = parse_bar_day(usable_bars[-64]) if len(usable_bars) > 63 else None
+    return_3m_end_day = parse_bar_day(usable_bars[-1]) if usable_bars else None
+    if return_3m_start_day is not None and return_3m_end_day is not None:
+        xbi_return_3m = benchmark_return_between(xbi_series, return_3m_start_day, return_3m_end_day)
+    else:
+        xbi_return_3m = pct_return([value for _, value in xbi_series], 63) if xbi_series else None
     relative_strength = return_3m - xbi_return_3m if return_3m is not None and xbi_return_3m is not None else None
     price_vs_200d = (close / sma_200 - 1.0) if sma_200 else None
     distance_52w = (close / high_52w - 1.0) if high_52w else None
@@ -678,21 +796,38 @@ def build_market_rows(
     return snapshot, features
 
 
-def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], snapshots: list[dict[str, Any]], features: list[dict[str, Any]]) -> None:
+def upsert_market_rows(
+    conn: sqlite3.Connection,
+    *,
+    bars: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+    features: list[dict[str, Any]],
+    replace_bar_tickers: set[str] | None = None,
+) -> None:
     now = utc_now()
     with conn:
+        for ticker in sorted(replace_bar_tickers or ()):
+            # The adjustment basis changed for this ticker; drop the stored history
+            # so stale-basis bars cannot be spliced onto the refetched series.
+            conn.execute("DELETE FROM market_bars_daily WHERE source = ? AND ticker = ?", (SOURCE, ticker))
         if bars:
             conn.executemany(
                 """
                 INSERT INTO market_bars_daily(
                     ticker, bar_date, source, open, high, low, close, volume, wap,
-                    price_adjustment, is_adjusted, is_provisional, data_quality, created_at, updated_at
+                    price_adjustment, raw_open, raw_high, raw_low, raw_close, adj_close,
+                    is_adjusted, is_provisional, data_quality, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(ticker, bar_date, source) DO UPDATE SET
                     open = excluded.open, high = excluded.high, low = excluded.low, close = excluded.close,
                     volume = excluded.volume, wap = excluded.wap,
                     price_adjustment = excluded.price_adjustment,
+                    raw_open = excluded.raw_open,
+                    raw_high = excluded.raw_high,
+                    raw_low = excluded.raw_low,
+                    raw_close = excluded.raw_close,
+                    adj_close = excluded.adj_close,
                     is_adjusted = excluded.is_adjusted,
                     is_provisional = excluded.is_provisional,
                     data_quality = excluded.data_quality,
@@ -710,6 +845,11 @@ def upsert_market_rows(conn: sqlite3.Connection, *, bars: list[dict[str, Any]], 
                         row["volume"],
                         row["wap"],
                         row.get("price_adjustment"),
+                        row.get("raw_open"),
+                        row.get("raw_high"),
+                        row.get("raw_low"),
+                        row.get("raw_close"),
+                        row.get("adj_close"),
                         int(row.get("is_adjusted") or 0),
                         int(row.get("is_provisional") or 0),
                         row["data_quality"],
@@ -907,6 +1047,11 @@ def main() -> None:
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     global SOURCE
     SOURCE = str(cfg_get(config, "ib_market_data.source", SOURCE) or SOURCE).strip() or SOURCE
+    if SOURCE == "yahoo_adjusted":
+        raise ValueError(
+            "ib_market_data.source must not be 'yahoo_adjusted'; that market_bars_daily key space "
+            "belongs to the Yahoo sync script and the two would clobber each other"
+        )
     output_csv = resolve_path(
         cfg_get(config, "ib_market_data.output_csv", "../output/biotech_index_reports/ib_market_features.csv"),
         base_dir=base_dir,
@@ -1009,6 +1154,8 @@ def main() -> None:
                     )
 
             all_bars: list[dict[str, Any]] = []
+            # Tickers whose stored bar history must be replaced (adjustment basis changed).
+            replace_bar_tickers: set[str] = set()
             fetched_tickers: list[str] = []
             skipped_tickers: list[str] = []
             stale_feature_tickers: list[str] = []
@@ -1052,6 +1199,29 @@ def main() -> None:
                         provisional_asof=asof_decision.provisional_asof,
                     )
                     xbi_fetched = filter_bars_from_start(xbi_fetched, start_date)
+                    if not full_refresh and xbi_existing and xbi_fetched and (
+                        adjustment_mode_mismatch(xbi_existing, xbi_fetched)
+                        or adjustment_discontinuity(xbi_existing, xbi_fetched)
+                    ):
+                        refetch_mode = str(xbi_fetched[0].get("what_to_show") or "") or what_to_show
+                        LOGGER.info("XBI adjustment basis changed; refetching full history what_to_show=%s", refetch_mode)
+                        # Never splice bars with a different adjustment basis onto stored history.
+                        xbi_fetched = []
+                        xbi_fetched = fetch_bars(
+                            ib,
+                            "XBI",
+                            currency="USD",
+                            duration=duration,
+                            sleep_sec=sleep_sec,
+                            asof_date=asof_date,
+                            what_to_show=refetch_mode,
+                            fallback_what_to_show="",
+                            use_rth=use_rth,
+                            provisional_asof=asof_decision.provisional_asof,
+                        )
+                        xbi_fetched = filter_bars_from_start(xbi_fetched, start_date)
+                        xbi_existing = []
+                        replace_bar_tickers.add("XBI")
                     all_bars.extend(xbi_fetched)
                     LOGGER.info("XBI benchmark fetched bars=%d duration=%s", len(xbi_fetched), xbi_fetch_duration)
                 except Exception as exc:
@@ -1066,8 +1236,14 @@ def main() -> None:
             xbi_bars = xbi_fetched if full_refresh else merge_bar_rows(xbi_existing, xbi_fetched, asof_date=asof_date)
             xbi_ordered = sorted_bar_rows(xbi_bars)
             reference_dates = reference_dates_from_bars(xbi_ordered, asof_date)
-            xbi_closes = [value for value in (to_float(row.get("close")) for row in xbi_ordered) if value is not None and value > 0]
-            if not xbi_closes:
+            xbi_series = [
+                (day, value)
+                for row in xbi_ordered
+                if (day := parse_bar_day(row)) is not None
+                and (value := to_float(row.get("close"))) is not None
+                and value > 0
+            ]
+            if not xbi_series:
                 raise RuntimeError("IB market sync has no usable XBI benchmark bars")
             snapshots: list[dict[str, Any]] = []
             features: list[dict[str, Any]] = []
@@ -1123,6 +1299,33 @@ def main() -> None:
                                 provisional_asof=asof_decision.provisional_asof,
                             )
                             fetched_bars = filter_bars_from_start(fetched_bars, start_date)
+                            if not full_refresh and existing_bars and fetched_bars and (
+                                adjustment_mode_mismatch(existing_bars, fetched_bars)
+                                or adjustment_discontinuity(existing_bars, fetched_bars)
+                            ):
+                                refetch_mode = str(fetched_bars[0].get("what_to_show") or "") or what_to_show
+                                LOGGER.info(
+                                    "Adjustment basis changed for %s; refetching full history what_to_show=%s",
+                                    company.ticker,
+                                    refetch_mode,
+                                )
+                                # Never splice bars with a different adjustment basis onto stored history.
+                                fetched_bars = []
+                                fetched_bars = fetch_bars(
+                                    ib,
+                                    company.ticker,
+                                    currency=company.currency or "USD",
+                                    duration=duration,
+                                    sleep_sec=sleep_sec,
+                                    asof_date=asof_date,
+                                    what_to_show=refetch_mode,
+                                    fallback_what_to_show="",
+                                    use_rth=use_rth,
+                                    provisional_asof=asof_decision.provisional_asof,
+                                )
+                                fetched_bars = filter_bars_from_start(fetched_bars, start_date)
+                                existing_bars = []
+                                replace_bar_tickers.add(company.ticker)
                             all_bars.extend(fetched_bars)
                             fetched_tickers.append(company.ticker)
                         except Exception as exc:
@@ -1143,7 +1346,7 @@ def main() -> None:
                     snapshot, feature = build_market_rows(
                         company,
                         bars,
-                        xbi_closes,
+                        xbi_series,
                         shares,
                         asof_date,
                         reference_dates=reference_dates,
@@ -1172,9 +1375,10 @@ def main() -> None:
             unique_hard_failed_tickers = list(dict.fromkeys(hard_failed_tickers))
             hard_failed_ticker_set = set(unique_hard_failed_tickers)
             all_bars = [row for row in all_bars if str(row.get("ticker") or "").upper() not in hard_failed_ticker_set]
+            replace_bar_tickers -= hard_failed_ticker_set
             if companies and not features:
                 raise RuntimeError(f"IB market sync produced no company feature rows; failed_tickers={','.join(failed_tickers)}")
-            upsert_market_rows(conn, bars=all_bars, snapshots=snapshots, features=features)
+            upsert_market_rows(conn, bars=all_bars, snapshots=snapshots, features=features, replace_bar_tickers=replace_bar_tickers)
             hard_failed_company_ids = {company.company_id for company in companies if company.ticker in set(unique_hard_failed_tickers)}
             delete_market_rows_for_companies(conn, company_ids=hard_failed_company_ids, asof_date=asof_date, source=SOURCE)
             successful_companies = [company for company in companies if company.company_id not in hard_failed_company_ids]

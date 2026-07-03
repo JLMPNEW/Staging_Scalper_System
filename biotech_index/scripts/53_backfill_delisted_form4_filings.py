@@ -351,6 +351,7 @@ def main() -> int:
     output_rows: list[dict[str, Any]] = []
     document_fetches = 0
     written = 0
+    ledger_fetch_failures = 0
     try:
         for idx, row in enumerate(candidates, start=1):
             candidate_payload: list[dict[str, Any]] = []
@@ -362,7 +363,18 @@ def main() -> int:
             company_id = company_id_for(conn, calibration_ticker)
             if not cik:
                 continue
-            submissions, filings = load_sec_form4_ledger(cik, user_agent=user_agent, sleep_sec=float(args.sleep_sec))
+            try:
+                submissions, filings = load_sec_form4_ledger(cik, user_agent=user_agent, sleep_sec=float(args.sleep_sec))
+            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                # One dead/missing CIK (e.g. a 404 submissions ledger) must not
+                # abort the whole multi-issuer backfill.
+                ledger_fetch_failures += 1
+                print(
+                    f"WARNING: [{idx}/{len(candidates)}] {ticker} cik={cik} ledger fetch failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
             sec_name = str(submissions.get("name") or "")
             sec_tickers = "|".join(str(item) for item in (submissions.get("tickers") or []))
             kept = 0
@@ -451,6 +463,7 @@ def main() -> int:
         "output_rows": len(output_rows),
         "db_rows_written": written,
         "document_fetches": document_fetches,
+        "ledger_fetch_failures": ledger_fetch_failures,
         "metadata_only": bool(args.metadata_only),
         "dry_run": bool(args.dry_run),
         "db_path": str(db_path),

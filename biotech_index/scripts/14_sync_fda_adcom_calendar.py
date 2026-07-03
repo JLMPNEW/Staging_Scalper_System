@@ -30,9 +30,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from biotech_index.core.db import (  # noqa: E402
+    connect,
+    ensure_table_optional_columns,
+    finish_run,
+    init_db,
+    start_run,
+    utc_now,
+)
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
-from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
 
 LOGGER = logging.getLogger("sync_fda_adcom_calendar")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -323,14 +329,25 @@ def match_company_id(
             return alias_map[candidate]
         if candidate_type != "company":
             continue
-        # Try word-level prefix match (≥3 chars) as fallback
+        # Try 8-char prefix match as fallback, but require at least two shared
+        # meaningful tokens so a single overlapping word cannot mislink two
+        # different companies with similar leading names.
         matched_company_ids: set[int] = set()
-        candidate_tokens = set(candidate.split())
+        candidate_tokens = {token for token in candidate.split() if len(token) >= 3}
         for alias_key, cid in alias_map.items():
             if len(alias_key) >= 8 and len(candidate) >= 8:
                 if alias_key.startswith(candidate[:8]) or candidate.startswith(alias_key[:8]):
-                    if candidate_tokens.intersection(set(alias_key.split())):
+                    alias_tokens = {token for token in alias_key.split() if len(token) >= 3}
+                    shared_tokens = candidate_tokens & alias_tokens
+                    if len(shared_tokens) >= 2:
                         matched_company_ids.add(cid)
+                    elif shared_tokens:
+                        LOGGER.debug(
+                            "Skipping near-match AdCom alias candidate=%r alias=%r shared_tokens=%s",
+                            candidate,
+                            alias_key,
+                            ",".join(sorted(shared_tokens)),
+                        )
         if len(matched_company_ids) == 1:
             return next(iter(matched_company_ids))
     return None
@@ -387,9 +404,12 @@ def parse_adcom_entries(
             entry.get("company") or entry.get("companyName") or entry.get("sponsor") or entry.get("applicant") or ""
         ).strip()
         indication = str(entry.get("indication") or entry.get("topic") or clean_title or "").strip()
+        # Vote outcomes only become public after the meeting occurs, so even
+        # when vote storage is enabled, only persist them for meetings strictly
+        # before the asof date to avoid look-ahead in historical runs.
         vote_result = (
             str(entry.get("vote") or entry.get("voteResult") or entry.get("vote_result") or "").strip()
-            if include_vote_results
+            if include_vote_results and meeting_date < asof_date
             else ""
         )
         source_url = str(entry.get("url") or entry.get("sourceUrl") or entry.get("source_url") or "").strip()
@@ -418,6 +438,7 @@ def upsert_adcom_events(
     events: list[dict[str, Any]],
     *,
     now: str,
+    announced_date: str,
 ) -> tuple[int, int, int]:
     inserted = 0
     updated = 0
@@ -440,16 +461,25 @@ def upsert_adcom_events(
                 (ev["company_id"], ev["meeting_date"], drug_name, drug_name),
             ).fetchone()
             if existing:
+                # Preserve previously captured non-empty committee/indication/
+                # vote_result values when a rerun (e.g. with votes disabled)
+                # supplies empty strings; keep the first-seen announced_date.
                 conn.execute(
                     """
                     UPDATE fda_adcom_events
-                    SET ticker=?, committee=?, indication=?, vote_result=?, source=?, source_url=?, updated_at=?
+                    SET ticker=?,
+                        committee=COALESCE(NULLIF(?, ''), committee),
+                        indication=COALESCE(NULLIF(?, ''), indication),
+                        vote_result=COALESCE(NULLIF(?, ''), vote_result),
+                        source=?, source_url=?,
+                        announced_date=COALESCE(announced_date, ?),
+                        updated_at=?
                     WHERE event_id=?
                     """,
                     (
                         ev["ticker"], ev["committee"], ev["indication"],
                         ev["vote_result"], ev["source"], ev["source_url"],
-                        now, existing[0],
+                        announced_date, now, existing[0],
                     ),
                 )
                 updated += 1
@@ -457,14 +487,14 @@ def upsert_adcom_events(
                 conn.execute(
                     """
                     INSERT INTO fda_adcom_events
-                    (company_id, ticker, meeting_date, committee, drug_name, indication, vote_result, source, source_url, created_at, updated_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    (company_id, ticker, meeting_date, committee, drug_name, indication, vote_result, source, source_url, announced_date, created_at, updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         ev["company_id"], ev["ticker"], ev["meeting_date"],
                         ev["committee"], drug_name, ev["indication"],
                         ev["vote_result"], ev["source"], ev["source_url"],
-                        now, now,
+                        announced_date, now, now,
                     ),
                 )
                 inserted += 1
@@ -513,6 +543,9 @@ def main() -> None:
     run_id: int | None = None
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         init_db(conn)
+        # announced_date records first public visibility of each AdCom event for
+        # point-in-time filtering downstream; legacy rows stay NULL until re-seen.
+        ensure_table_optional_columns(conn, "fda_adcom_events", {"announced_date": "TEXT"})
         try:
             run_id = start_run(conn, run_type="sync_fda_adcom_calendar", input_path=None)
             now = utc_now()
@@ -552,7 +585,9 @@ def main() -> None:
             )
             matched = sum(1 for e in events if e["company_id"] is not None)
             LOGGER.info("Parsed %d AdCom entries, %d matched to universe tickers", len(events), matched)
-            inserted, updated, skipped_unmatched = upsert_adcom_events(conn, events, now=now)
+            inserted, updated, skipped_unmatched = upsert_adcom_events(
+                conn, events, now=now, announced_date=utc_today().isoformat()
+            )
             LOGGER.info(
                 "AdCom sync: inserted=%d updated=%d skipped_unmatched=%d total_events=%d",
                 inserted,

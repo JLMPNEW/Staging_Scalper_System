@@ -23,7 +23,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.config import load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file  # noqa: E402
+from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
@@ -68,7 +68,8 @@ def trailing_complete_window(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return window
 
 
-def required_float(mapping: dict[str, object], key: str, *, positive: bool = False) -> float:
+def required_float(mapping: dict[str, object], key: str, *, positive: bool = False,
+                   non_negative: bool = False) -> float:
     if key not in mapping:
         raise KeyError(key)
     value = float(str(mapping[key]))
@@ -76,6 +77,8 @@ def required_float(mapping: dict[str, object], key: str, *, positive: bool = Fal
         raise ValueError(f"{key} is not finite: {mapping[key]!r}")
     if positive and value <= 0:
         raise ValueError(f"{key} must be positive: {mapping[key]!r}")
+    if non_negative and value < 0:
+        raise ValueError(f"{key} must be >= 0: {mapping[key]!r}")
     return value
 
 
@@ -163,7 +166,7 @@ def main() -> int:
         return 1
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     try:
-        one_way_cost_base_usd = required_float(summary, "one_way_cost_base_usd")
+        one_way_cost_base_usd = required_float(summary, "one_way_cost_base_usd", non_negative=True)
         aum_usd = required_float(summary, "aum_usd", positive=True)
     except (KeyError, TypeError, ValueError) as exc:
         LOGGER.error("Invalid cost_summary.json schema for net replay: %s", exc)
@@ -219,7 +222,7 @@ def main() -> int:
             "returns_panel.csv": sha256_file(returns_path),
         },
     }
-    metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8")
+    write_manifest(metrics_path, metrics)
     LOGGER.info("NET REPLAY (diag): gross cum=%.4f -> net cum=%.4f (one-way cost %.2f bps of AUM); invested=%.3f -> %s",
                 gross["cumulative_return"], net["cumulative_return"], net["one_way_cost_drag_bps"], float(w.sum()), metrics_path)
     return 0

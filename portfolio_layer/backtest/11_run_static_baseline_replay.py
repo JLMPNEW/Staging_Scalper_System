@@ -184,7 +184,7 @@ def main() -> int:
         f"benchmark_{benchmark}": perf_stats(bench_ret),
     }
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
-    metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8")
+    write_manifest(metrics_path, metrics)
 
     curve_rows = []
     cum = (1.0 + port_ret).cumprod()

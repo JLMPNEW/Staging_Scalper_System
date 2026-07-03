@@ -198,10 +198,15 @@ def load_fact_rows(conn: sqlite3.Connection, company_id: int, asof_date: date) -
         FROM company_facts_quarterly
         WHERE company_id = ?
           AND period_end <= ?
-          AND (filed_date IS NULL OR filed_date = '' OR filed_date <= ?)
+          AND (
+                (filed_date IS NOT NULL AND filed_date != '' AND filed_date <= ?)
+                -- Rows without a filed_date could leak look-ahead data into historical
+                -- rebuilds; only admit them once a typical filing lag has elapsed.
+                OR ((filed_date IS NULL OR filed_date = '') AND date(period_end, '+45 days') <= ?)
+          )
         ORDER BY period_end DESC, filed_date DESC
         """,
-        (company_id, asof_date.isoformat(), asof_date.isoformat()),
+        (company_id, asof_date.isoformat(), asof_date.isoformat(), asof_date.isoformat()),
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -221,10 +226,15 @@ def load_fact_rows_bulk(conn: sqlite3.Connection, company_ids: list[int], asof_d
         FROM company_facts_quarterly
         WHERE company_id IN ({placeholders})
           AND period_end <= ?
-          AND (filed_date IS NULL OR filed_date = '' OR filed_date <= ?)
+          AND (
+                (filed_date IS NOT NULL AND filed_date != '' AND filed_date <= ?)
+                -- Rows without a filed_date could leak look-ahead data into historical
+                -- rebuilds; only admit them once a typical filing lag has elapsed.
+                OR ((filed_date IS NULL OR filed_date = '') AND date(period_end, '+45 days') <= ?)
+          )
         ORDER BY company_id, period_end DESC, filed_date DESC
         """,
-        tuple(company_ids) + (asof_date.isoformat(), asof_date.isoformat()),
+        tuple(company_ids) + (asof_date.isoformat(), asof_date.isoformat(), asof_date.isoformat()),
     ).fetchall()
     out: dict[int, list[dict[str, Any]]] = {company_id: [] for company_id in company_ids}
     for row in rows:
@@ -235,13 +245,16 @@ def load_fact_rows_bulk(conn: sqlite3.Connection, company_ids: list[int], asof_d
 
 
 def dedup_fact_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[tuple[str, str, str]] = set()
+    # Key intentionally excludes form so an amendment (e.g. 10-Q/A) supersedes the
+    # original filing instead of both surviving and double-counting in TTM sums.
+    # Rows arrive ordered period_end DESC, filed_date DESC, so the first row seen
+    # per (period_end, fiscal_period) is the latest-filed one.
+    seen: set[tuple[str, str]] = set()
     out: list[dict[str, Any]] = []
     for row in rows:
         key = (
             str(row.get("period_end") or ""),
             str(row.get("fiscal_period") or ""),
-            str(row.get("form") or ""),
         )
         if key in seen:
             continue
@@ -566,6 +579,10 @@ def compute_survival_row(
         missing.append("working_capital_ratio")
 
     total_debt, _ = latest_nonnull(rows, "total_debt")
+    if total_debt is not None and total_debt < 0.0:
+        # Negative reported total_debt is a benign data artifact; clamp to zero so the
+        # ratio cannot go negative (the negative-cash stress case is handled via 999.0).
+        total_debt = 0.0
     if total_debt is not None and total_debt > 0 and cash is not None and cash <= 0:
         debt_to_cash = 999.0
     else:
@@ -669,11 +686,9 @@ def compute_survival_row(
     elif runway >= float(cfg_get(config, "financial_survival.min_high_quality_runway_months", 18)):
         score += 5.0
     if debt_to_cash is not None:
-        if debt_to_cash < 0.0:
-            # Negative ratio means liabilities exceed assets with a sign flip —
-            # treat as extreme stress, same penalty as debt > cash.
-            score -= 15.0
-        elif debt_to_cash > 1.0:
+        # Ratio is non-negative by construction (negative total_debt is clamped to 0
+        # upstream and negative cash routes to the 999.0 sentinel).
+        if debt_to_cash > 1.0:
             score -= 15.0
         elif debt_to_cash > 0.5:
             score -= 8.0

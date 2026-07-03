@@ -269,3 +269,92 @@ sources:
     priority: 70
     status: active
     notes: Required for delisted historical price coverage before promotable OOS calibration. The active price basis is controlled by norgate_delisted_import.price_adjustment_mode and recorded per bar in fact_price_ohlcv.price_adjustment. CAPITAL is split/capital-action adjusted and excludes ordinary-dividend total return.
+
+  - source_id: sec_insider_upstream
+    stage: positioning
+    source_name: SEC Form 4 upstream database
+    source_owner: local_SEC_FORM4_Runner
+    source_type: sqlite_read_only
+    base_url: C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: SEC
+    raw_schema:
+      - sec_insider_sqlite
+    canonical_tables:
+      - fact_sec_form4_transaction
+    feature_stages:
+      - positioning
+    subsector_scope: industrials
+    priority: 80
+    status: active
+    notes: Read-only upstream Form 4 database normalized into industrials.sqlite positioning facts.
+
+  - source_id: sec_ownership_direct
+    stage: positioning
+    source_name: SEC direct ownership filings
+    source_owner: SEC
+    source_type: rest_json_archive_xml
+    base_url: https://data.sec.gov/submissions/
+    documentation_url: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: SEC
+    raw_schema:
+      - sec_submissions_and_ownership_xml
+    canonical_tables:
+      - fact_sec_form4_transaction
+    feature_stages:
+      - positioning
+      - insider_signals
+    subsector_scope: industrials
+    priority: 81
+    status: planned
+    notes: Optional future industrials-owned Forms 3/4/5 ingestion from SEC ownership XML; Stage 5 does not require it.
+
+  - source_id: market_positioning_upstream
+    stage: positioning
+    source_name: Market positioning upstream database
+    source_owner: local_market_positioning
+    source_type: sqlite_read_only
+    base_url: C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: mixed
+    data_owner: SEC_FINRA_local
+    raw_schema:
+      - market_positioning_sqlite
+    canonical_tables:
+      - fact_13f_positioning
+      - fact_short_interest
+      - fact_ibkr_borrow_snapshot
+    feature_stages:
+      - positioning
+    subsector_scope: industrials
+    priority: 82
+    status: active
+    notes: Read-only local market positioning database for 13F, FINRA short-interest, and IBKR borrow features.
+
+  - source_id: industrials_positioning_composite
+    stage: positioning
+    source_name: Industrials positioning composite features
+    source_owner: local_industrials
+    source_type: derived_feature
+    base_url: industrials.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: local
+    raw_schema:
+      - industrials_positioning_facts
+    canonical_tables:
+      - feature_positioning
+    feature_stages:
+      - positioning
+      - scoring
+    subsector_scope: industrials
+    priority: 83
+    status: active
+    notes: Derived insider, institutional, short-interest, and borrow-rate feature layer owned by industrials.sqlite.

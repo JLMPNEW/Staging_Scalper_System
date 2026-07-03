@@ -41,6 +41,7 @@ DEFAULT_SOURCE = "yahoo_adjusted"
 DEFAULT_BENCHMARK = "XBI"
 SQLITE_PARAM_CHUNK_SIZE = 800
 MIN_RETURN_BASE_PRICE = 0.01
+ADJUSTMENT_DISCONTINUITY_TOLERANCE = 0.005
 
 
 def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
@@ -285,18 +286,23 @@ def load_companies(
 
 
 def load_latest_shares(conn: sqlite3.Connection, company_id: int, asof_date: date) -> float | None:
+    # Rows without a filed_date are treated as available only after a ~45-day
+    # reporting lag past period_end, to avoid look-ahead at period end.
     row = conn.execute(
         """
         SELECT shares_outstanding
         FROM company_facts_quarterly
         WHERE company_id = ?
           AND period_end <= ?
-          AND (filed_date IS NULL OR filed_date = '' OR filed_date <= ?)
+          AND (
+                (filed_date IS NOT NULL AND filed_date != '' AND filed_date <= ?)
+                OR ((filed_date IS NULL OR filed_date = '') AND DATE(period_end, '+45 days') <= ?)
+              )
           AND shares_outstanding IS NOT NULL
         ORDER BY period_end DESC, filed_date DESC
         LIMIT 1
         """,
-        (company_id, asof_date.isoformat(), asof_date.isoformat()),
+        (company_id, asof_date.isoformat(), asof_date.isoformat(), asof_date.isoformat()),
     ).fetchone()
     return to_float(row["shares_outstanding"]) if row else None
 
@@ -470,6 +476,35 @@ def merge_bars(existing: list[dict[str, Any]], fetched: list[dict[str, Any]]) ->
     return sorted_bar_rows(list(by_date.values()))
 
 
+def adjustment_discontinuity(
+    existing: list[dict[str, Any]],
+    fetched: list[dict[str, Any]],
+    tolerance: float = ADJUSTMENT_DISCONTINUITY_TOLERANCE,
+) -> bool:
+    """Detect an adjustment-basis change on overlapping bar dates.
+
+    The rolling refetch window overlaps stored bars; when a new split or
+    dividend shifts the adjusted series, closes for the same dates diverge
+    beyond a small tolerance and the older stored bars carry a stale adjustment
+    factor, so the ticker must be refetched from the full history start.
+    """
+    existing_by_date = {
+        str(row.get("bar_date") or "")[:10]: to_float(row.get("close"))
+        for row in existing
+        if not int(row.get("is_provisional") or 0)
+    }
+    for row in fetched:
+        if int(row.get("is_provisional") or 0):
+            continue
+        stored_close = existing_by_date.get(str(row.get("bar_date") or "")[:10])
+        fetched_close = to_float(row.get("close"))
+        if stored_close is None or fetched_close is None or stored_close <= 0 or fetched_close <= 0:
+            continue
+        if abs(fetched_close / stored_close - 1.0) > tolerance:
+            return True
+    return False
+
+
 def reference_dates_from_bars(bars: list[dict[str, Any]], asof_date: date) -> list[date]:
     return sorted({day for row in bars if (day := parse_bar_day(row)) is not None and day <= asof_date})
 
@@ -535,6 +570,29 @@ def pct_return(values: list[float], days: int) -> float | None:
     return (values[-1] / values[-days - 1]) - 1.0
 
 
+def close_on_or_before(series: list[tuple[date, float]], day: date) -> float | None:
+    for bar_day, value in reversed(series):
+        if bar_day <= day:
+            return value
+    return None
+
+
+def benchmark_return_between(series: list[tuple[date, float]], start_day: date, end_day: date) -> float | None:
+    """Benchmark return over the same calendar span as the company return."""
+    if not series or start_day >= end_day:
+        return None
+    start_close = close_on_or_before(series, start_day)
+    end_close = close_on_or_before(series, end_day)
+    if start_close is None or end_close is None or abs(start_close) < MIN_RETURN_BASE_PRICE:
+        return None
+    return (end_close / start_close) - 1.0
+
+
+def window_average(values: list[float | None], window: int) -> float | None:
+    usable = [value for value in values[-window:] if value is not None]
+    return sum(usable) / len(usable) if usable else None
+
+
 def score_liquidity(avg_dollar_volume_20d: float | None) -> float:
     if avg_dollar_volume_20d is None:
         return 0.0
@@ -575,7 +633,7 @@ def common_value(rows: list[dict[str, Any]], key: str, default: Any = None) -> A
 def build_market_rows(
     company: Company,
     bars: list[dict[str, Any]],
-    xbi_closes: list[float],
+    xbi_series: list[tuple[date, float]],
     shares: float | None,
     asof_date: date,
     *,
@@ -590,7 +648,7 @@ def build_market_rows(
         if (to_float(row.get("close")) is not None and (to_float(row.get("close")) or 0.0) > 0.0)
     ]
     closes = [to_float(row.get("close")) or 0.0 for row in usable_bars]
-    volumes = [to_float(row.get("volume")) or 0.0 for row in usable_bars]
+    volumes = [to_float(row.get("volume")) for row in usable_bars]
     if not closes:
         raise ValueError(f"No usable adjusted close prices for {company.ticker}")
     continuity = continuity_report(
@@ -606,10 +664,15 @@ def build_market_rows(
         else to_float(row.get("close")) or 0.0
         for row in usable_bars
     ]
-    dollar_volumes = [raw_closes[idx] * volumes[idx] for idx in range(min(len(raw_closes), len(volumes)))]
-    avg_volume_20d = sum(volumes[-20:]) / min(20, len(volumes)) if volumes else None
-    avg_dollar_volume_20d = sum(dollar_volumes[-20:]) / min(20, len(dollar_volumes)) if dollar_volumes else None
-    avg_dollar_volume_60d = sum(dollar_volumes[-60:]) / min(60, len(dollar_volumes)) if dollar_volumes else None
+    # Bars with a missing volume are excluded from the averages (numerator and
+    # denominator) instead of being counted as zero-volume days.
+    dollar_volumes = [
+        raw_closes[idx] * volumes[idx] if volumes[idx] is not None else None
+        for idx in range(min(len(raw_closes), len(volumes)))
+    ]
+    avg_volume_20d = window_average(volumes, 20)
+    avg_dollar_volume_20d = window_average(dollar_volumes, 20)
+    avg_dollar_volume_60d = window_average(dollar_volumes, 60)
     window_52w = usable_bars[-260:]
     high_52w = max(
         (
@@ -633,7 +696,14 @@ def build_market_rows(
     sma_200 = sum(closes[-200:]) / min(200, len(closes)) if closes else None
     return_1m = pct_return(closes, 21)
     return_3m = pct_return(closes, 63)
-    xbi_return_3m = pct_return(xbi_closes, 63) if xbi_closes else None
+    # Align the benchmark 3m return to the company's own 63-bar calendar span so
+    # tickers with missing bars do not compare mismatched windows.
+    return_3m_start_day = parse_bar_day(usable_bars[-64]) if len(usable_bars) > 63 else None
+    return_3m_end_day = parse_bar_day(usable_bars[-1]) if usable_bars else None
+    if return_3m_start_day is not None and return_3m_end_day is not None:
+        xbi_return_3m = benchmark_return_between(xbi_series, return_3m_start_day, return_3m_end_day)
+    else:
+        xbi_return_3m = pct_return([value for _, value in xbi_series], 63) if xbi_series else None
     relative_strength = return_3m - xbi_return_3m if return_3m is not None and xbi_return_3m is not None else None
     price_vs_200d = (close / sma_200 - 1.0) if sma_200 else None
     distance_52w = (close / high_52w - 1.0) if high_52w else None
@@ -1087,10 +1157,46 @@ def main() -> None:
                 start_date=history_start_date,
                 asof_date=asof_date,
             )
+            if (
+                benchmark_fetched
+                and benchmark_existing
+                and benchmark_start > history_start_date
+                and adjustment_discontinuity(benchmark_existing, benchmark_fetched)
+            ):
+                LOGGER.info(
+                    "Benchmark %s adjustment basis changed; refetching full history from %s",
+                    benchmark_ticker,
+                    history_start_date.isoformat(),
+                )
+                try:
+                    benchmark_fetched = fetch_yahoo_bars(
+                        benchmark_ticker,
+                        start_date=history_start_date,
+                        asof_date=asof_date,
+                        source=benchmark_source,
+                        provisional_asof=asof_decision.provisional_asof,
+                    )
+                    benchmark_existing = []
+                except Exception as exc:
+                    # Never splice re-adjusted bars onto the stale stored series.
+                    benchmark_fetched = []
+                    benchmark_refresh_failed = True
+                    LOGGER.warning(
+                        "Benchmark %s full-history refetch failed; using existing DB bars: %s",
+                        benchmark_ticker,
+                        exc,
+                    )
             benchmark_bars = merge_bars(benchmark_existing, benchmark_fetched)
             benchmark_ordered = sorted_bar_rows(benchmark_bars)
             reference_dates = reference_dates_from_bars(benchmark_ordered, asof_date)
-            xbi_closes = [value for value in (to_float(row.get("close")) for row in benchmark_ordered) if value is not None and value > 0]
+            xbi_series = [
+                (day, value)
+                for row in benchmark_ordered
+                if (day := parse_bar_day(row)) is not None
+                and (value := to_float(row.get("close"))) is not None
+                and value > 0
+            ]
+            xbi_closes = [value for _, value in xbi_series]
             if not xbi_closes:
                 if args.allow_partial:
                     LOGGER.warning(
@@ -1138,6 +1244,35 @@ def main() -> None:
                         start_date=history_start_date,
                         asof_date=asof_date,
                     )
+                    if (
+                        fetched
+                        and existing
+                        and fetch_start > history_start_date
+                        and adjustment_discontinuity(existing, fetched)
+                    ):
+                        LOGGER.info(
+                            "Adjustment basis changed for %s; refetching full history from %s",
+                            company.ticker,
+                            history_start_date.isoformat(),
+                        )
+                        # Never splice re-adjusted bars onto the stale stored series.
+                        fetched = []
+                        try:
+                            fetched = fetch_yahoo_bars(
+                                company.price_ticker,
+                                start_date=history_start_date,
+                                asof_date=asof_date,
+                                source=source,
+                                provisional_asof=asof_decision.provisional_asof,
+                            )
+                            existing = []
+                        except Exception as exc:
+                            fetch_error = exc
+                            LOGGER.warning(
+                                "Yahoo adjusted full-history refetch failed for %s; using existing DB bars: %s",
+                                company.ticker,
+                                exc,
+                            )
                     bars = merge_bars(existing, fetched)
                     if not bars and fetch_error is not None:
                         raise fetch_error
@@ -1147,7 +1282,7 @@ def main() -> None:
                     snapshot, feature = build_market_rows(
                         company,
                         bars,
-                        xbi_closes,
+                        xbi_series,
                         shares,
                         asof_date,
                         source=source,

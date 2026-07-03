@@ -660,7 +660,15 @@ def form4_metrics(
             if cluster_max >= min_cluster:
                 cluster_dates.add(event_date.isoformat())
 
-    ratio = sell_value_180 / buy_value_180 if sell_value_180 > 0 and buy_value_180 > 0 else None if sell_value_180 > 0 else 0.0
+    if sell_value_180 > 0 and buy_value_180 <= 0:
+        # Sentinel: sell-only activity has no finite ratio. 999.0 ensures the
+        # sell_ratio > 4.0 penalty in score_governance still triggers instead of the
+        # None value being coerced to 0.0 and escaping the penalty entirely.
+        ratio: float | None = 999.0
+    elif sell_value_180 > 0:
+        ratio = sell_value_180 / buy_value_180
+    else:
+        ratio = 0.0
     open_market_buy_count = max(0, buy_count - planned_buy_count)
     return {
         "insider_buy_count_90d": buy_count,
@@ -1197,9 +1205,14 @@ def load_sec_governance_inputs_bulk(
     docs_by_company: dict[int, list[dict[str, Any]]] = {company_id: [] for company_id in company_ids}
     for row in rows:
         docs_by_company.setdefault(int(row["company_id"]), []).append(dict(row))
+    # Count distinct campaigns rather than raw filing rows: a 13D plus its /A
+    # amendments should register once. sec_filings has no explicit filer column,
+    # but the first 10 digits of an EDGAR accession number are the submitting
+    # filer's CIK, so distinct accession prefixes approximate distinct filers
+    # (imperfect when a shared filing agent submits for multiple owners).
     activist_rows = conn.execute(
         f"""
-        SELECT company_id, COUNT(*) AS n
+        SELECT company_id, COUNT(DISTINCT substr(accession_nodash, 1, 10)) AS n
         FROM sec_filings
         WHERE company_id IN ({company_placeholders})
           AND filing_date >= ?

@@ -183,7 +183,7 @@ def main() -> int:  # noqa: C901
     rec("signal_current", "PASS" if score_ok else "FAIL",
         "Stage 1 signal hard gates PASS and stocks_scores hash current" if score_ok else "score signal stale or failed")
 
-    max_lag = int(finite_default(cfg_get(config, "exit_engine.max_signal_lag_days", 10), 10.0))
+    max_lag = int(round(finite_default(cfg_get(config, "exit_engine.max_signal_lag_days", 10), 10.0)))
     lag_days = date_lag_days(signal_as_of, ledger_as_of)
     rec("pit_signal_asof_lte_ledger_asof", "PASS" if lag_days >= 0 and lag_days <= max_lag else "FAIL",
         f"signal_as_of={signal_as_of}, ledger_as_of={ledger_as_of}, lag_days={lag_days}, max={max_lag}")

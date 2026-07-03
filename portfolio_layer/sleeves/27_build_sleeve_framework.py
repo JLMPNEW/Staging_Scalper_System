@@ -179,33 +179,41 @@ def main() -> int:  # noqa: C901
             "ticker", "event_type", "event_date", "event_asof_date", "source_pipeline",
             "confidence", "source_artifact", "source_sha256",
         }
-        header = set(event_rows[0].keys()) if event_rows else set()
+        # a header-only file is "zero events", not "missing every field" — read the raw header
+        with events_path.open(encoding="utf-8", newline="") as handle:
+            raw_header = handle.readline().strip()
+        header = {h.strip() for h in raw_header.split(",") if h.strip()}
         missing_event_fields = sorted(required_event_fields - header)
         if missing_event_fields:
+            # a failed contract must not route names into short_catalyst from unverifiable rows
             rec("short_catalyst_contract", "FAIL", f"missing event fields: {missing_event_fields}")
-        horizons = cfg_get(config, "sleeves.sleeve_defs.short_catalyst.horizon_months", [1, 3]) or [1, 3]
-        max_days = int(max(float(v) for v in horizons) * 31) if horizons else 93
-        for row in read_csv(events_path):
-            ev_asof = _parse_iso_date(row.get("event_asof_date"))
-            ev_date = _parse_iso_date(row.get("event_date"))
-            tkr = str(row.get("ticker", "")).strip().upper()
-            if (
-                tkr
-                and run_date is not None
-                and ev_asof is not None
-                and ev_date is not None
-                and ev_asof <= run_date
-                and run_date <= ev_date <= run_date + timedelta(days=max_days)
-            ):
-                catalyst_tickers.add(tkr)
-        if not missing_event_fields:
+        elif not event_rows:
+            rec("short_catalyst_contract", "WARN", "catalyst events contract present but has zero rows")
+        else:
+            horizons = cfg_get(config, "sleeves.sleeve_defs.short_catalyst.horizon_months", [1, 3]) or [1, 3]
+            max_days = int(max(float(v) for v in horizons) * 31) if horizons else 93
+            for row in event_rows:
+                ev_asof = _parse_iso_date(row.get("event_asof_date"))
+                ev_date = _parse_iso_date(row.get("event_date"))
+                tkr = str(row.get("ticker", "")).strip().upper()
+                if (
+                    tkr
+                    and run_date is not None
+                    and ev_asof is not None
+                    and ev_date is not None
+                    and ev_asof <= run_date
+                    and run_date <= ev_date <= run_date + timedelta(days=max_days)
+                ):
+                    catalyst_tickers.add(tkr)
             rec("short_catalyst_contract", "PASS", f"catalyst events active: {len(catalyst_tickers)} PIT events")
     else:
         rec("short_catalyst_contract", "WARN",
             "short_catalyst disabled (no events/catalyst_events.csv contract); Phase 1 long_core+medium_rotation only")
 
     # --- sleeve assignment (exactly one per held name) ---
-    positive_pipes = {p for p, s in rotation_state.items() if s == "Positive"}
+    medium_state = str(cfg_get(config, "sleeves.sleeve_defs.medium_rotation.rotation_state", "Positive")).strip()
+    long_core_driver = str(cfg_get(config, "sleeves.sleeve_defs.long_core.driver", "final_score")).strip()
+    positive_pipes = {p for p, s in rotation_state.items() if s == medium_state}
     assign_rows = []
     sleeve_of: dict[str, str] = {}
     for ticker in sorted(held):
@@ -214,9 +222,9 @@ def main() -> int:  # noqa: C901
         if ticker in catalyst_tickers:
             sleeve, reason = "short_catalyst", "pit_catalyst_event"
         elif pipe in positive_pipes:
-            sleeve, reason = "medium_rotation", f"rotation_state_positive:{pipe}"
+            sleeve, reason = "medium_rotation", f"rotation_state_{medium_state.lower()}:{pipe}"
         else:
-            sleeve, reason = "long_core", "final_score_driver"
+            sleeve, reason = "long_core", f"{long_core_driver}_driver"
         sleeve_of[ticker] = sleeve
         parsed_final_score = _f(srow.get("final_score"))
         parsed_score_confidence = _f(srow.get("score_confidence"))
@@ -224,15 +232,28 @@ def main() -> int:  # noqa: C901
             "ticker": ticker, "source_pipeline": pipe, "sleeve": sleeve, "reason": reason,
             "weight": round(held[ticker], 10),
             "final_score": round(0.0 if parsed_final_score is None else parsed_final_score, 10),
-            "score_confidence": round(0.0 if parsed_score_confidence is None else parsed_score_confidence, 8),
+            "score_confidence": round(0.5 if parsed_score_confidence is None else parsed_score_confidence, 8),
             "rating": str(srow.get("rating", "")).strip(),
             "sector_name": sector_by_ticker.get(ticker, pipe),
             "rotation_state": rotation_state.get(pipe, ""),
         })
 
-    partition_ok = len(sleeve_of) == len(held) and all(t in sleeve_of for t in held)
-    rec("partition_complete_disjoint", "PASS" if partition_ok else "FAIL",
-        f"{len(held)} held names -> exactly one sleeve each" if partition_ok else "partition_incomplete")
+    assigned = [str(r["ticker"]) for r in assign_rows]
+    partition_problems: list[str] = []
+    if len(assigned) != len(set(assigned)):
+        partition_problems.append("duplicate_assignments")
+    if set(assigned) != set(held):
+        partition_problems.append(f"assigned!=held:{sorted(set(assigned) ^ set(held))[:5]}")
+    unknown_sleeves = sorted({str(r["sleeve"]) for r in assign_rows}
+                             - {"short_catalyst", "medium_rotation", "long_core"})
+    if unknown_sleeves:
+        partition_problems.append(f"unknown_sleeves:{unknown_sleeves}")
+    misrouted = sorted(t for t, s in sleeve_of.items() if s == "short_catalyst" and t not in catalyst_tickers)
+    if misrouted:
+        partition_problems.append(f"catalyst_without_event:{misrouted[:5]}")
+    rec("partition_complete_disjoint", "PASS" if not partition_problems else "FAIL",
+        f"{len(held)} held names -> exactly one known sleeve each, catalyst routing event-backed"
+        if not partition_problems else "; ".join(partition_problems))
 
     # --- risk model on the held (non-CASH) book ---
     cov = pd.read_csv(art["covariance"], index_col=0)

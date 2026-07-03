@@ -177,8 +177,10 @@ def load_delisting_events(event_files: list[Path], hint_files: list[Path], *, pa
             last_bar_day = date.fromisoformat(last_bar)
             if last_bar_day >= panel_end_day:
                 continue  # still trading through the panel edge; not a delisting hint
-            if (panel_end_day - last_bar_day).days <= stale_tail_days:
-                continue  # too close to panel edge to distinguish a live stale import from a delisting
+            if (panel_end_day - last_bar_day).days <= stale_tail_days * 2:
+                continue  # calendar-day allowance for a trading-day threshold (same convention as
+                          # the delist_match classification window); too close to the panel edge to
+                          # distinguish a live-but-stale import from a real delisting
             events[ticker] = {"ticker": ticker, "delist_date": last_bar, "delist_reason": "norgate_import_hint",
                               "terminal_value": "", "source": path.name}
     for path in event_files:
@@ -220,15 +222,16 @@ def load_cached(cache_dir: Path, ticker: str, *, start: date, end: date,
         return None
     actual_first = min(dates)
     actual_last = max(dates)
-    fetched_from = str(payload.get("fetched_from") or min(dates))
+    # fetched_from records the REQUESTED window start of the fetch that wrote the cache (a name that
+    # listed after that date legitimately has no earlier bars). Legacy caches without the stamp fall
+    # back to the first actual bar — conservative: they refetch once and then carry the stamp.
+    fetched_from = str(payload.get("fetched_from") or actual_first)
     fetched_through = str(payload.get("fetched_through") or actual_last)
-    # Metadata can be stale or optimistic after a cache-format change. Require the actual cached
-    # bars to cover the requested left edge so a widened development window cannot silently reuse a
-    # shorter historical cache.
-    if fetched_from > start.isoformat() or actual_first > start.isoformat():
-        return None
-    today_et = datetime.now(tz=ZoneInfo("UTC")).astimezone(ZoneInfo("America/New_York")).date()
-    if end >= today_et and payload.get("right_edge_final") is not True:
+    if fetched_from > start.isoformat():
+        return None  # cache window starts after the requested left edge; a wider window needs a refetch
+    # A cache whose right edge was a non-final (intraday) close may only be served when the requested
+    # end stays strictly inside it — if end reaches fetched_through, the partial bar would be used.
+    if payload.get("right_edge_final") is not True and end.isoformat() >= fetched_through:
         return None
     # A cache is current when it was fetched through the panel edge — or, for a name with a known
     # delisting comfortably inside the cached window, through delist+30d (its series can never grow).
@@ -246,13 +249,15 @@ def load_cached(cache_dir: Path, ticker: str, *, start: date, end: date,
 
 
 def write_cache(cache_dir: Path, ticker: str, *, bars: list[tuple[str, float]], provider: str,
-                source_symbol: str, fetched_through: date) -> None:
+                source_symbol: str, fetched_from: date, fetched_through: date) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    first_bar = min((d for d, _ in bars), default=fetched_through.isoformat())
     edge_final, edge_detail = _panel_end_is_final(fetched_through)
     write_manifest(_cache_path(cache_dir, ticker), {
         "ticker": ticker, "provider": provider, "source_symbol": source_symbol,
-        "cached_at": utc_now(), "fetched_from": first_bar, "fetched_through": fetched_through.isoformat(),
+        "cached_at": utc_now(),
+        # the REQUESTED fetch window, not the first available bar — a post-window IPO must not
+        # look like a truncated cache (that would force a permanent refetch of every recent listing)
+        "fetched_from": fetched_from.isoformat(), "fetched_through": fetched_through.isoformat(),
         "right_edge_final": edge_final, "right_edge_final_detail": edge_detail,
         "bars": [{"date": d, "adjclose": v} for d, v in bars],
     })
@@ -386,7 +391,7 @@ def main() -> int:  # noqa: C901
         bars = [(d, v) for d, v in bars if d <= end.isoformat()]
         if status == "ok" and bars:
             write_cache(cache_dir, ticker, bars=bars, provider=provider,
-                        source_symbol=source_symbol, fetched_through=end)
+                        source_symbol=source_symbol, fetched_from=start, fetched_through=end)
         return ticker, bars, status, provider, source_symbol, False
 
     series: dict[str, dict[str, float]] = {}
@@ -462,8 +467,13 @@ def main() -> int:  # noqa: C901
             status, complete = "source_seam_unverified", 0
         elif event:
             delist = event["delist_date"]
+            trades_past_event = bool(last_bar) and last_bar > delist and tail_gap <= stale_tail
             gap = abs((date.fromisoformat(last_bar) - date.fromisoformat(delist)).days) if last_bar else 999
-            if gap <= delist_match * 2:  # calendar-day allowance for a trading-day threshold
+            if trades_past_event:
+                # the series is alive at the panel edge despite a recorded event: the hint/event is
+                # stale or wrong (e.g. import stopped, relisting) — a live name must stay active
+                status, complete = "active_covered", 1
+            elif gap <= delist_match * 2:  # calendar-day allowance for a trading-day threshold
                 status, complete = "delisted_covered", 1
             else:
                 status, complete = "ended_uncovered", 0
@@ -511,17 +521,31 @@ def main() -> int:  # noqa: C901
     rec("returns_never_fabricated", "PASS" if fabricated == 0 else "FAIL",
         "returns require current and prior observed prices" if fabricated == 0 else f"{fabricated} fabricated cells")
     coverage_by_ticker = {str(c["ticker"]): c for c in coverage_rows}
-    malformed_universe = [
-        t for t in equities
-        if t not in coverage_by_ticker or not coverage_by_ticker[t].get("status")
-        or str(coverage_by_ticker[t].get("status")) not in {
-            "active_covered", "delisted_covered", "ended_uncovered", "no_price_data", "source_seam_unverified"
-        }
-    ]
+    # Real invariants recomputed against the sealed prices frame (not the loop's own variables):
+    #   observation_count matches the actual non-NaN cells; no_price_data <=> zero observations;
+    #   survivorship_complete=1 only for active/delisted-covered; delisted_covered needs an event date.
+    classification_bad: list[str] = []
+    for t in equities:
+        row = coverage_by_ticker.get(t)
+        if row is None:
+            classification_bad.append(f"{t}:missing_coverage_row")
+            continue
+        actual_obs = int(prices[t].notna().sum()) if t in prices.columns else 0
+        status_t = str(row.get("status"))
+        complete_t = int(row.get("survivorship_complete", 0))
+        if int(row.get("observation_count", -1)) != actual_obs:
+            classification_bad.append(f"{t}:obs={row.get('observation_count')}!=panel:{actual_obs}")
+        elif (actual_obs == 0) != (status_t == "no_price_data"):
+            classification_bad.append(f"{t}:obs={actual_obs}:status={status_t}")
+        elif complete_t == 1 and status_t not in {"active_covered", "delisted_covered"}:
+            classification_bad.append(f"{t}:complete=1:status={status_t}")
+        elif status_t == "delisted_covered" and not str(row.get("delist_date", "")):
+            classification_bad.append(f"{t}:delisted_covered_without_event")
     no_price_count = sum(1 for t in equities if coverage_by_ticker.get(t, {}).get("status") == "no_price_data")
-    rec("snapshot_universe_price_status", "PASS" if not malformed_universe else "FAIL",
-        f"{len(equities)} snapshot tickers classified; no_price_data={no_price_count}"
-        if not malformed_universe else f"malformed {malformed_universe[:8]}")
+    rec("snapshot_universe_price_status", "PASS" if not classification_bad else "FAIL",
+        f"{len(equities)} snapshot tickers; classification consistent with sealed panel; "
+        f"no_price_data={no_price_count}"
+        if not classification_bad else f"inconsistent {classification_bad[:8]}")
     frac_detail = []
     below = []
     for pipe, flags in sorted(complete_by_pipe.items()):

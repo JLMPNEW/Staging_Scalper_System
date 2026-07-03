@@ -1147,7 +1147,7 @@ def component_scores(row: dict[str, Any], config: dict[str, Any]) -> dict[str, f
         valuation = to_float(row.get("valuation_score"), valuation_default)
     valuation = clamp(valuation_default if valuation is None else valuation)
     return {
-        "clinical_opportunity": score_value(row, "clinical_opportunity_score", to_float(row.get("opportunity_score"), 50.0) or 50.0),
+        "clinical_opportunity": score_value(row, "clinical_opportunity_score", to_float(row.get("opportunity_score"), 50.0)),
         "commercial_value": score_value(
             row,
             "commercial_value_score",
@@ -1275,28 +1275,13 @@ def split_maps_for_baseline_candidate_observations(
     horizons: list[int],
     train_fraction: float,
 ) -> dict[int, dict[str, str]]:
-    split_maps: dict[int, dict[str, str]] = {}
-    for horizon in horizons:
-        dates = sorted(
-            {
-                str(row.get("asof_date") or "")
-                for row in observations
-                if str(row.get("candidate_id") or "") == "baseline_current_config"
-                and int(row.get("horizon_days") or 0) == horizon
-                and row.get("net_return") is not None
-            }
-        )
-        if len(dates) < 2:
-            split_maps[horizon] = {asof_date: "train" for asof_date in dates}
-            continue
-        bounded_fraction = max(0.10, min(0.90, float(train_fraction)))
-        split_idx = int(math.floor(len(dates) * bounded_fraction))
-        split_idx = max(1, min(len(dates) - 1, split_idx))
-        split_maps[horizon] = {
-            **{asof_date: "train" for asof_date in dates[:split_idx]},
-            **{asof_date: "test" for asof_date in dates[split_idx:]},
-        }
-    return split_maps
+    # Anchor the split on the baseline candidate's dates, but delegate to the same
+    # shared split-map builder used by build_baseline_summary so both artifacts share
+    # one train/test boundary implementation.
+    baseline_rows = [
+        row for row in observations if str(row.get("candidate_id") or "") == "baseline_current_config"
+    ]
+    return split_maps_for_observations(baseline_rows, horizons=horizons, train_fraction=train_fraction)
 
 
 def build_candidate_observations(

@@ -333,6 +333,8 @@ def recommendation_for(
     min_observations: int,
     min_asof_dates: int,
 ) -> str:
+    # Multiplicity caveat: this verdict is emitted per cohort/horizon cell with no
+    # multiple-comparisons correction; treat individual flags as descriptive, not confirmatory.
     if sample_n < min_observations or asof_dates < min_asof_dates:
         return "insufficient_sample"
     if mean_pct < 0.0 and lcb_pct < 0.0 and pf < 1.0:

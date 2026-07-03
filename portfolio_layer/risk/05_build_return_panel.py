@@ -437,16 +437,10 @@ def main() -> int:
         expected_query_symbols = {str(segment["query_symbol"]) for segment in segments}
 
         if ticker in existing_seed and not alias_applied:
+            # Seed bars carry no split events; do NOT write them into the price cache — that would
+            # overwrite a previously fetched entry's real split_events and blind the split-artifact
+            # detector for every later --reuse-price-cache run.
             bars = existing_seed[ticker]
-            write_cached_bars(
-                price_cache_dir,
-                ticker,
-                "existing_price_snapshot",
-                bars,
-                [],
-                query_symbol=ticker,
-                source_symbol=ticker,
-            )
             return bars, [], "ok", "existing_price_snapshot", ticker, ticker, False, "", "", ""
 
         # Aliased (reused-ticker) names skip the cache so the start-date floor is always re-applied and
@@ -563,6 +557,11 @@ def main() -> int:
                 f"{query_symbol}:{segment['segment']}:"
                 f"{status if bars or status != 'ok' else 'empty_after_segment_floor'}"
             )
+        if "stooq_us_daily" in providers and len(set(providers)) > 1:
+            # Stooq serves dividend-UNadjusted closes; splicing it against adjusted Yahoo/lineage
+            # segments fabricates a level jump at the seam. Refuse the splice: the name routes to
+            # coverage as a failed fetch instead of sealing a mixed-basis series.
+            statuses.append(f"{ticker}:cross_provider_adjustment_splice_refused:{'+'.join(sorted(set(providers)))}")
         if combined_bars and not statuses:
             bars = sorted(combined_bars.items())
             provider = providers[0] if len(set(providers)) == 1 else "lineage:" + "+".join(providers)
@@ -780,6 +779,15 @@ def main() -> int:
         ],
         "price_history_overrides": price_history_overrides,
         "fallbacks_enabled": {"stooq_us_daily": enable_stooq},
+        # Stooq closes are dividend-unadjusted; the panel-level policy below does not hold for these
+        # names. Recorded per ticker so consumers (covariance review, Stage 11 calibration) can see
+        # exactly which series carry a different adjustment basis.
+        "adjustment_policy_exceptions": {
+            "stooq_us_daily_close_unadjusted_dividends": sorted(
+                str(r["ticker"]) for r in fetch_rows
+                if r["status"] == "ok" and r["rows"] > 0 and "stooq" in str(r["provider"])
+            ),
+        },
         "files": {
             "prices_adjclose.csv": {"sha256": sha256_file(prices_path), "rows": len(prices)},
             "returns_panel.csv": {"sha256": sha256_file(returns_path), "rows": len(returns)},

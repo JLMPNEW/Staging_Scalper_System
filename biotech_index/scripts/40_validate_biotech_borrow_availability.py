@@ -706,7 +706,19 @@ def main() -> None:
     )
     train_fraction = float(args.train_fraction or validation_cfg.get("train_fraction", 0.70))
     train_fraction = max(0.10, min(0.90, train_fraction))
-    embargo_days = int(args.embargo_days if args.embargo_days is not None else validation_cfg.get("embargo_days", max(horizons)))
+    # Horizons are trading bars; convert to calendar days for the embargo default
+    # so forward-return overlap cannot leak across the split (see scripts 27/28).
+    default_embargo_days = math.ceil(max(horizons) * 365.25 / 252.0) + 10
+    embargo_days = int(
+        args.embargo_days if args.embargo_days is not None else validation_cfg.get("embargo_days", default_embargo_days)
+    )
+    if embargo_days < default_embargo_days:
+        LOGGER.warning(
+            "Configured embargo_days=%d is below the leakage-safe calendar-day default %d for a %d-bar horizon; honoring configured value.",
+            embargo_days,
+            default_embargo_days,
+            max(horizons),
+        )
     market_sources_raw = args.market_sources if str(args.market_sources or "").strip() else None
     market_sources = [
         str(source).strip()

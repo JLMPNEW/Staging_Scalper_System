@@ -19,6 +19,27 @@ def build_universe(scores_path: Any, risk_cfg: dict[str, Any]) -> list[dict[str,
             t = str(r.get("ticker", "")).strip().upper()
             if t:
                 universe[t] = {"ticker": t, "role": "scored", "source_pipeline": str(r.get("source_pipeline", ""))}
+    # Issuer-level dedup via ticker_aliases: if two contract tickers map to the same issuer_id
+    # (e.g. a predecessor and its post-migration active symbol both slip through Stage 1), keeping
+    # both would seal two near-identical columns and double the issuer's weight under per-name caps.
+    # Keep the alias entry's active_ticker; drop the other.
+    by_issuer: dict[str, list[str]] = {}
+    aliases = risk_cfg.get("ticker_aliases", {}) or {}
+    for t in universe:
+        issuer = str((aliases.get(t) or {}).get("issuer_id", "")).strip()
+        if issuer:
+            by_issuer.setdefault(issuer, []).append(t)
+    for issuer, tickers in by_issuer.items():
+        if len(tickers) < 2:
+            continue
+        keep = next(
+            (t for t in sorted(tickers)
+             if str((aliases.get(t) or {}).get("active_ticker", "")).strip().upper() == t),
+            sorted(tickers)[0],
+        )
+        for t in tickers:
+            if t != keep:
+                universe.pop(t, None)
     instruments: list[str] = []
     instruments += [str(x).upper() for x in risk_cfg.get("benchmark_tickers", [])]
     instruments += [str(x).upper() for x in risk_cfg.get("hedge_rotation_etfs", [])]
@@ -114,6 +135,14 @@ def to_returns(prices: pd.DataFrame, frequency: str) -> pd.DataFrame:
     """Simple returns on the aligned panel. Missing bars stay NaN — never fabricated as zero."""
     px = prices
     if frequency == "weekly":
-        px = prices.resample("W-FRI").last()
+        # Take the last observation per W-FRI bin but label each bin with its last ACTUAL trading
+        # day, never the bin's nominal Friday — a mid-week as-of must not get a future-dated row.
+        grouper = prices.groupby(pd.Grouper(freq="W-FRI"))
+        px = grouper.last()
+        actual_last = grouper.apply(lambda g: g.index.max() if len(g) else pd.NaT)
+        keep = actual_last.notna()
+        px = px.loc[keep]
+        px.index = pd.DatetimeIndex(actual_last[keep])
+        px.index.name = prices.index.name
     returns = px.pct_change(fill_method=None)
     return returns.iloc[1:]

@@ -802,16 +802,29 @@ def main() -> None:
                             result.text_errors,
                         )
             write_csv(output_csv, rows_out)
-            status = (
-                "success"
-                if error_count == 0 and text_error_count == 0
-                else "failed"
-                if (not args.allow_partial or (companies and error_count == len(companies)))
-                else "partial"
+            total_filings = len(rows_out)
+            # Isolated filing-text fetch failures should not fail the whole run:
+            # only treat text errors as severe when they exceed 10% of filings
+            # (or when no filing rows were produced at all).
+            severe_text_errors = text_error_count > 0 and (
+                total_filings == 0 or text_error_count > max(1, total_filings // 10)
             )
+            if error_count == 0 and text_error_count == 0:
+                status = "success"
+            elif args.allow_partial and not (companies and error_count == len(companies)):
+                status = "partial"
+            elif error_count == 0 and not severe_text_errors:
+                status = "partial"
+                LOGGER.warning(
+                    "Marking run partial: %d/%d filings had text fetch errors (below 10%% hard-fail threshold).",
+                    text_error_count,
+                    total_filings,
+                )
+            else:
+                status = "failed"
             message = f"companies={len(companies)} errors={error_count} text_errors={text_error_count} output={output_csv}"
             finish_run(conn, run_id=run_id, status=status, row_count=len(rows_out), message=message)
-            if status != "success" and not args.allow_partial:
+            if status == "failed" and not args.allow_partial:
                 raise SystemExit(2)
         except BaseException as exc:
             if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):

@@ -332,6 +332,18 @@ def finite_or_none(value: float | None) -> float | None:
     return value if value is not None and math.isfinite(value) else None
 
 
+def optional_float(raw: object) -> float | None:
+    """Parse a float but preserve None for absent/blank/unparseable values."""
+    text = str(raw if raw is not None else "").strip()
+    if not text or text.lower() in {"nan", "none", "null"}:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
 def to_int(raw: object, default: int = 0) -> int:
     return int(round(to_float(raw, float(default))))
 
@@ -395,6 +407,18 @@ def apply_trial_status_overrides(evidence_df: pd.DataFrame, overrides_df: pd.Dat
     ]:
         if column not in out.columns:
             out[column] = ""
+    # Columns the override branches read/write; ensure they exist so CSVs lacking them
+    # do not raise KeyError.
+    for column, default in [
+        ("exclusion_reasons", ""),
+        ("is_active_status", ""),
+        ("is_therapeutic", ""),
+        ("qualifying_trial", ""),
+        ("trial_score", ""),
+        ("overall_status", ""),
+    ]:
+        if column not in out.columns:
+            out[column] = default
 
     for override in overrides_df.to_dict("records"):
         if not as_bool(override.get("enabled", "true")):
@@ -664,7 +688,8 @@ def indication_success_probability(
     phase2_rate = bounded_float(area_rates.get("phase2"), general_rates["phase2"], low=0.01, high=0.99)
     general_phase3 = bounded_float(general_rates.get("phase3"), DEFAULT_INDICATION_SUCCESS_RATES["general"]["phase3"], low=0.01, high=0.99)
     general_phase2 = bounded_float(general_rates.get("phase2"), DEFAULT_INDICATION_SUCCESS_RATES["general"]["phase2"], low=0.01, high=0.99)
-    phase3_count = max(0, active_phase3_trials + active_pivotal_trials)
+    # Pivotal trials are a subset of phase-3 trials; take the max rather than summing to avoid double-counting.
+    phase3_count = max(0, active_phase3_trials, active_pivotal_trials)
     phase2_count = max(0, active_phase2_trials, phase2_3_trials - phase3_count)
     total = phase2_count + phase3_count
     if total <= 0:
@@ -687,11 +712,13 @@ def load_ticker_feature_csv(path: Path | None) -> dict[str, dict[str, Any]]:
     return out
 
 
-def load_forward_catalyst_calendar(path: Path | None, asof_date: date, *, lookahead_days: int) -> dict[str, dict[str, Any]]:
+def load_forward_catalyst_calendar(path: Path | None, asof_date: date, *, lookahead_days: int) -> dict[str, list[dict[str, Any]]]:
     df = read_optional_csv(path)
     if df.empty:
         return {}
-    out: dict[str, dict[str, Any]] = {}
+    # Keep ALL upcoming events per ticker (sorted nearest-first) so scoring can
+    # fall back to another source when e.g. a nearer ctgov event fails its guardrail.
+    out: dict[str, list[dict[str, Any]]] = {}
     for record in cast(list[dict[str, Any]], cast(Any, df).to_dict("records")):
         ticker = normalize_ticker(record.get("ticker") or record.get("symbol"))
         event_date = parse_date(record.get("event_date") or record.get("catalyst_date") or record.get("date"))
@@ -700,40 +727,28 @@ def load_forward_catalyst_calendar(path: Path | None, asof_date: date, *, lookah
         days_until = (event_date - asof_date).days
         if days_until < 0 or days_until > lookahead_days:
             continue
-        candidate = {**record, "event_date": event_date.isoformat(), "days_until": days_until}
-        current = out.get(ticker)
-        if current is None or days_until < to_int(current.get("days_until"), 999999):
-            out[ticker] = candidate
+        out.setdefault(ticker, []).append({**record, "event_date": event_date.isoformat(), "days_until": days_until})
+    for events in out.values():
+        events.sort(key=lambda item: to_int(item.get("days_until"), 999999))
     return out
 
 
-def forward_catalyst_signal(
-    row: dict[str, Any] | None,
+def _score_forward_catalyst_row(
+    row: dict[str, Any],
     *,
     lookahead_days: int,
-    ctgov_include_in_primary_score: bool = False,
-    ctgov_primary_score_min: float = 60.0,
+    ctgov_include_in_primary_score: bool,
+    ctgov_primary_score_min: float,
 ) -> dict[str, Any]:
-    if not row:
-        return {
-            "forward_catalyst_nearest_days": "",
-            "forward_catalyst_event_date": "",
-            "forward_catalyst_event_type": "",
-            "forward_catalyst_source": "",
-            "forward_catalyst_source_url": "",
-            "forward_catalyst_confidence": "",
-            "forward_catalyst_asof_date": "",
-            "forward_catalyst_score": 0.0,
-            "forward_catalyst_unfiltered_score": 0.0,
-            "ctgov_forward_catalyst_score": 0.0,
-            "ctgov_forward_catalyst_guardrail_pass": 0.0,
-        }
     days_until = to_int(row.get("days_until"), 999999)
     event_type = str(row.get("event_type") or row.get("catalyst_type") or "catalyst").strip().lower()
     source = str(row.get("source") or row.get("source_name") or "").strip()
     source_key = source.lower().replace("-", "_").replace(" ", "_")
     is_ctgov = "ctgov" in source_key or "clinicaltrials" in source_key
-    confidence = normalize_pct_decimal(row.get("confidence") or row.get("confidence_pct"), 0.65) or 0.65
+    confidence_parsed = normalize_pct_decimal(row.get("confidence") or row.get("confidence_pct"))
+    # Sentinel default: only fall back to 0.65 when the field is missing/unparseable,
+    # so a legitimate 0.0 confidence is preserved.
+    confidence = 0.65 if confidence_parsed is None else confidence_parsed
     proximity = max(0.0, 1.0 - min(days_until, lookahead_days) / max(1.0, float(lookahead_days)))
     type_multiplier = 1.0
     if any(token in event_type for token in ["pdufa", "approval", "phase 3", "phase3", "pivotal", "topline"]):
@@ -758,6 +773,61 @@ def forward_catalyst_signal(
     }
 
 
+def forward_catalyst_signal(
+    rows: dict[str, Any] | list[dict[str, Any]] | None,
+    *,
+    lookahead_days: int,
+    ctgov_include_in_primary_score: bool = False,
+    ctgov_primary_score_min: float = 60.0,
+) -> dict[str, Any]:
+    candidates = [rows] if isinstance(rows, dict) else list(rows or [])
+    candidates = [row for row in candidates if row]
+    if not candidates:
+        return {
+            "forward_catalyst_nearest_days": None,
+            "forward_catalyst_event_date": "",
+            "forward_catalyst_event_type": "",
+            "forward_catalyst_source": "",
+            "forward_catalyst_source_url": "",
+            "forward_catalyst_confidence": "",
+            "forward_catalyst_asof_date": "",
+            "forward_catalyst_score": 0.0,
+            "forward_catalyst_unfiltered_score": 0.0,
+            "ctgov_forward_catalyst_score": 0.0,
+            "ctgov_forward_catalyst_guardrail_pass": 0.0,
+        }
+    scored = [
+        _score_forward_catalyst_row(
+            row,
+            lookahead_days=lookahead_days,
+            ctgov_include_in_primary_score=ctgov_include_in_primary_score,
+            ctgov_primary_score_min=ctgov_primary_score_min,
+        )
+        for row in candidates
+    ]
+    # Choose the event yielding the best valid (non-guardrail-zeroed) primary score so a
+    # nearer low-confidence ctgov event cannot shadow a real catalyst (e.g. a PDUFA) from
+    # another source. Ties (including all-zero primaries) fall back to the nearest event.
+    best = max(
+        scored,
+        key=lambda item: (
+            to_float(item.get("forward_catalyst_score"), 0.0),
+            -to_int(item.get("forward_catalyst_nearest_days"), 999999),
+        ),
+    )
+    # Preserve the ctgov shadow-signal fields from the strongest ctgov candidate even when
+    # a non-ctgov event is chosen for the primary feature fields.
+    ctgov_scored = [item for item in scored if to_float(item.get("ctgov_forward_catalyst_score"), 0.0) > 0.0]
+    if ctgov_scored:
+        best_ctgov = max(ctgov_scored, key=lambda item: to_float(item.get("ctgov_forward_catalyst_score"), 0.0))
+        best = {
+            **best,
+            "ctgov_forward_catalyst_score": best_ctgov["ctgov_forward_catalyst_score"],
+            "ctgov_forward_catalyst_guardrail_pass": best_ctgov["ctgov_forward_catalyst_guardrail_pass"],
+        }
+    return best
+
+
 def short_interest_signal(row: dict[str, Any] | None) -> dict[str, Any]:
     if not row:
         return {
@@ -768,8 +838,8 @@ def short_interest_signal(row: dict[str, Any] | None) -> dict[str, Any]:
             "float_shares_source": "",
             "float_shares_asof_date": "",
             "float_shares_source_asof_date": "",
-            "float_shares_staleness_days": "",
-            "float_shares_measurement_staleness_days": "",
+            "float_shares_staleness_days": None,
+            "float_shares_measurement_staleness_days": None,
             "float_shares_proxy_flag": 0.0,
             "public_float_usd": 0.0,
             "public_float_price_date": "",
@@ -817,8 +887,8 @@ def short_interest_signal(row: dict[str, Any] | None) -> dict[str, Any]:
         "float_shares_source": str(row.get("float_shares_source") or ""),
         "float_shares_asof_date": str(row.get("float_shares_asof_date") or ""),
         "float_shares_source_asof_date": str(row.get("float_shares_source_asof_date") or ""),
-        "float_shares_staleness_days": to_float(row.get("float_shares_staleness_days"), 0.0) or 0.0,
-        "float_shares_measurement_staleness_days": to_float(row.get("float_shares_measurement_staleness_days"), 0.0) or 0.0,
+        "float_shares_staleness_days": optional_float(row.get("float_shares_staleness_days")),
+        "float_shares_measurement_staleness_days": optional_float(row.get("float_shares_measurement_staleness_days")),
         "float_shares_proxy_flag": 1.0 if to_float(row.get("float_shares_proxy_flag"), 0.0) > 0.0 else 0.0,
         "public_float_usd": to_float(row.get("public_float_usd"), 0.0) or 0.0,
         "public_float_price_date": str(row.get("public_float_price_date") or ""),
@@ -832,7 +902,7 @@ def short_interest_signal(row: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def borrow_availability_signal(row: dict[str, Any] | None) -> dict[str, float]:
+def borrow_availability_signal(row: dict[str, Any] | None) -> dict[str, Any]:
     if not row:
         return {
             "borrow_rate_current": 0.0,
@@ -840,8 +910,8 @@ def borrow_availability_signal(row: dict[str, Any] | None) -> dict[str, float]:
             "shortable_data_available_flag": 0.0,
             "borrow_fee_stale_flag": 1.0,
             "shortable_stale_flag": 1.0,
-            "borrow_fee_staleness_days": "",
-            "shortable_staleness_days": "",
+            "borrow_fee_staleness_days": None,
+            "shortable_staleness_days": None,
             "borrow_fee_history_count_30d": 0.0,
             "borrow_fee_history_count_90d": 0.0,
             "borrow_rate_30d_avg": 0.0,
@@ -1048,15 +1118,24 @@ def load_fda_adcom_events(
     """Return company_id → list of upcoming AdCom meeting dicts."""
     cutoff = asof_date.isoformat()
     max_meeting_date = (asof_date + timedelta(days=lookahead_days)).isoformat()
+    # Point-in-time guard: exclude meetings announced after asof. NULL announced_date
+    # means a legacy row predating announcement tracking (treated as already known).
+    has_announced_date = any(
+        str(col[1]) == "announced_date"
+        for col in conn.execute("PRAGMA table_info(fda_adcom_events)").fetchall()
+    )
+    announced_filter = "AND (announced_date IS NULL OR announced_date <= ?)" if has_announced_date else ""
+    params: tuple[str, ...] = (cutoff, max_meeting_date, cutoff) if has_announced_date else (cutoff, max_meeting_date)
     rows = conn.execute(
-        """
+        f"""
         SELECT company_id, ticker, meeting_date, committee, drug_name, indication, vote_result, source_url
         FROM fda_adcom_events
         WHERE meeting_date >= ?
           AND meeting_date <= ?
+          {announced_filter}
         ORDER BY company_id, meeting_date
         """,
-        (cutoff, max_meeting_date),
+        params,
     ).fetchall()
     result: dict[int, list[dict[str, Any]]] = {}
     for r in rows:
@@ -1593,6 +1672,7 @@ def load_recent_sec_event_summary(
                     "latest_event_type": "",
                     "recency_days": "",
                     "recency_basis": "",
+                    "sec_catalyst_days_until_event": "",
                     "max_event_age_days": "",
                     "event_types": [],
                     "future_pdufa_event_count": 0,
@@ -1640,8 +1720,18 @@ def load_recent_sec_event_summary(
                     recency["latest_filing_date"] = filing_date
                     recency["latest_event_date"] = event_date
                     recency["latest_event_type"] = event_type
+                    # NOTE: for basis "pdufa_event_date_proximity", age_days is actually the
+                    # number of days UNTIL the future PDUFA event, not an age since a past
+                    # event. It is kept in recency_days/max_event_age_days for backward
+                    # compatibility with existing consumers, and additionally exposed under
+                    # the unambiguous sec_catalyst_days_until_event key below.
                     recency["recency_days"] = "" if age_days is None else age_days
                     recency["recency_basis"] = recency_basis
+                    recency["sec_catalyst_days_until_event"] = (
+                        age_days
+                        if recency_basis == "pdufa_event_date_proximity" and age_days is not None
+                        else ""
+                    )
         if per_company_seen.get(company_id, 0) >= 5:
             continue
         bucket["recent_events"].append(
@@ -1849,7 +1939,7 @@ def compute_feature_row(
     sec_events: dict[str, Any] | None,
     indication_success_settings: dict[str, Any] | None = None,
     forward_catalyst_ctgov_settings: dict[str, Any] | None = None,
-    forward_catalyst: dict[str, Any] | None = None,
+    forward_catalyst: dict[str, Any] | list[dict[str, Any]] | None = None,
     short_interest: dict[str, Any] | None = None,
     borrow_availability: dict[str, Any] | None = None,
     institutional_ownership: dict[str, Any] | None = None,
@@ -2526,6 +2616,7 @@ def compute_feature_row(
             "sec_catalyst_recency_basis": sec_catalyst_recency_basis,
             "sec_catalyst_event_types": sec_catalyst_event_types,
             "sec_catalyst_max_event_age_days": sec_catalyst_recency.get("max_event_age_days", ""),
+            "sec_catalyst_days_until_event": sec_catalyst_recency.get("sec_catalyst_days_until_event", ""),
             "sec_catalyst_future_pdufa_event_count": sec_catalyst_recency.get("future_pdufa_event_count", 0),
             "recent_events": list(sec_events.get("recent_events", []) if sec_events else []),
         },

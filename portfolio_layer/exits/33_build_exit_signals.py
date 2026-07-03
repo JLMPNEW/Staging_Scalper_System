@@ -195,7 +195,7 @@ def _classify(
                 action_hint = "soft_exit"
                 requires_review = True
                 reason = f"rating={rating} is in soft-exit ratings"
-            elif final_score is not None and review_score is not None and final_score < review_score:
+            elif final_score is not None and review_score is not None and final_score <= review_score:
                 exit_signal = "weak_score_review"
                 action_hint = "review"
                 requires_review = True
@@ -307,7 +307,7 @@ def main() -> int:  # noqa: C901
     ledger_manifest = load_json(art["ledger_manifest.json"])
     score_manifest = load_json(art["score_manifest.json"])
     lag_days = date_lag_days(signal_as_of, ledger_as_of)
-    max_lag = int(finite_default(cfg_get(config, "exit_engine.max_signal_lag_days", 10), 10.0))
+    max_lag = int(round(finite_default(cfg_get(config, "exit_engine.max_signal_lag_days", 10), 10.0)))
     checks: list[dict[str, str]] = []
 
     def rec(check: str, status: str, detail: str) -> None:

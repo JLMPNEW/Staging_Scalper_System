@@ -438,7 +438,12 @@ def gate_status(row: dict[str, Any], settings: dict[str, Any]) -> tuple[str, lis
         return "diagnostic_only", reasons
     if to_float(row["delta_lcb_pct"], -1e9) < float(settings["min_lcb_delta_pct"]):
         reasons.append("lcb_delta_negative")
-    if to_float(row["delta_profit_factor"], -1e9) < float(settings["min_profit_factor_delta"]):
+    current_pf = to_float(row["current_profit_factor"], math.nan)
+    routed_pf = to_float(row["routed_profit_factor"], math.nan)
+    if current_pf >= 999.0 or routed_pf >= 999.0:
+        # Zero-loss sentinel profit factor makes the delta meaningless; treat as inconclusive-fail.
+        reasons.append("insufficient_losses")
+    elif to_float(row["delta_profit_factor"], -1e9) < float(settings["min_profit_factor_delta"]):
         reasons.append("profit_factor_delta_negative")
     if to_float(row["delta_loss20_rate_pct"], 1e9) > float(settings["max_loss20_delta_pct"]):
         reasons.append(f"loss20_delta_gt_{float(settings['max_loss20_delta_pct']):g}pct")
@@ -490,7 +495,13 @@ def main() -> int:
 
     legacy_rows = load_selected_rows(legacy_dir / "tier1_selected_ticker_diagnostics.csv", cohorts_by_date_ticker)
     predictive_rows = load_selected_rows(predictive_dir / "tier1_selected_ticker_diagnostics.csv", cohorts_by_date_ticker)
-    current_selection = build_mode_selection(legacy_rows, horizons=horizons, top_n_values=top_n_values)
+    # Apply the same operational-guardrail exclusions to the baseline so the
+    # routed-vs-current delta is not confounded by the exclusion set.
+    current_selection = build_mode_selection(
+        [row for row in legacy_rows if row.ticker not in operational_excluded_tickers],
+        horizons=horizons,
+        top_n_values=top_n_values,
+    )
     routed_selection = build_routed_selection(
         legacy_rows=legacy_rows,
         predictive_rows=predictive_rows,
@@ -571,7 +582,9 @@ def main() -> int:
         if promotion_rows and all(row["gate_status"] == "pass" for row in promotion_rows)
         else "fail",
         "promotion_rows": promotion_rows,
-        "test_top20_rows": [row for row in output_rows if row["evaluation_split"] == "test" and int(row["top_n"]) == 20],
+        # Key name kept for downstream compatibility; contents follow the
+        # config-driven promotion_top_n rather than a hardcoded Top20.
+        "test_top20_rows": promotion_rows,
         "source_artifacts": {
             "legacy_selected_diagnostics": str(legacy_dir / "tier1_selected_ticker_diagnostics.csv"),
             "predictive_selected_diagnostics": str(predictive_dir / "tier1_selected_ticker_diagnostics.csv"),

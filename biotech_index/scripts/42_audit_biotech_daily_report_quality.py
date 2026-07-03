@@ -22,7 +22,6 @@ from biotech_index.core.db import connect  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-DEFAULT_ASOF = "2026-06-05"
 
 
 FORM4_FIELDS = [
@@ -113,7 +112,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
-    parser.add_argument("--asof", type=str, default=DEFAULT_ASOF)
+    parser.add_argument(
+        "--asof",
+        type=str,
+        default="",
+        help="Report date (YYYY-MM-DD). Defaults to the latest dated report directory.",
+    )
     parser.add_argument("--prior-asof", type=str, default="")
     parser.add_argument("--report-dir", type=Path, default=None)
     parser.add_argument("--prior-report-dir", type=Path, default=None)
@@ -179,15 +183,16 @@ def status_row(check: str, status: str, value: object, details: str = "") -> dic
     return {"check": check, "status": status, "value": value, "details": details}
 
 
-def latest_prior_report_dir(base_output_dir: Path, asof: str) -> Path | None:
-    current = date_dir_name(asof)
+def latest_prior_report_dir(base_output_dir: Path, asof: str | None) -> Path | None:
+    """Latest dated report dir; when asof is provided, only dirs strictly before it."""
+    current = date_dir_name(asof) if asof else ""
     candidates: list[Path] = []
     if not base_output_dir.exists():
         return None
     for path in base_output_dir.iterdir():
         if not path.is_dir() or not path.name.isdigit() or len(path.name) != 8:
             continue
-        if path.name >= current:
+        if current and path.name >= current:
             continue
         if (path / "biotech_daily_scores.csv").exists():
             candidates.append(path)
@@ -219,24 +224,27 @@ def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
-def load_daily_score_source_rows(db_path: Path, asof: str, fields: list[str]) -> list[dict[str, Any]]:
+def load_daily_score_source_rows(db_path: Path, asof: str, fields: list[str]) -> tuple[list[dict[str, Any]], str]:
+    """Return (rows, error). A non-empty error means the DB surface could not be audited."""
     try:
         with connect(db_path, timeout_sec=10.0) as conn:
             columns = table_columns(conn, "daily_scores")
             if "asof_date" not in columns:
-                return []
+                return [], "daily_scores table is missing the asof_date column"
             select_fields = [field for field in fields if field in columns]
             if not select_fields:
-                return []
+                return [], "daily_scores table has none of the requested source fields"
             ticker_expr = "ticker" if "ticker" in columns else "'' AS ticker"
             selected = ", ".join([ticker_expr, *select_fields])
             rows = conn.execute(
                 f"SELECT {selected} FROM daily_scores WHERE asof_date = ?",
                 (asof,),
             ).fetchall()
-            return [dict(row) for row in rows]
-    except Exception:  # noqa: BLE001 - caller falls back to published CSV surface.
-        return []
+            if not rows:
+                return [], f"daily_scores has no rows for asof_date={asof}"
+            return [dict(row) for row in rows], ""
+    except Exception as exc:  # noqa: BLE001 - surfaced as an explicit FAIL check downstream.
+        return [], f"{type(exc).__name__}: {exc}"
 
 
 def report_surface_rows(rows: list[dict[str, Any]], fields: list[str], *, report_name: str) -> list[dict[str, Any]]:
@@ -454,7 +462,13 @@ def main() -> None:
     config = load_yaml(args.config)
     base_dir = args.config.resolve().parent
     base_output_dir = resolve_path(cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
-    asof = parse_date_token(args.asof)
+    if args.asof:
+        asof = parse_date_token(args.asof)
+    else:
+        latest_dir = latest_prior_report_dir(base_output_dir, None)
+        if latest_dir is None:
+            raise SystemExit(f"No dated report directories found under {base_output_dir}; pass --asof.")
+        asof = parse_date_token(latest_dir.name)
     report_dir = args.report_dir.resolve() if args.report_dir else base_output_dir / date_dir_name(asof)
     prior_report_dir = args.prior_report_dir.resolve() if args.prior_report_dir else None
     if prior_report_dir is None:
@@ -479,8 +493,10 @@ def main() -> None:
     allocation_violations = allocation_leakage_audit(allocation_rows)
     discovery_violations = discovery_action_audit(discovery_rows)
     source_fields = sorted(set(FORM4_FIELDS + BORROW_SHORT_13F_FIELDS + CTGOV_FIELDS))
-    db_source_rows = load_daily_score_source_rows(db_path, asof, source_fields)
-    source_population_rows = db_source_rows or allocation_rows or daily_rows
+    db_source_rows, db_read_error = load_daily_score_source_rows(db_path, asof, source_fields)
+    # Shadow-column checks must run against the DB surface; the published CSVs lack
+    # the shadow columns and would make those checks vacuously pass.
+    source_population_rows = db_source_rows
     data_population = [
         {"group": "form4_daily_scores_db", **row} for row in field_population(source_population_rows, FORM4_FIELDS)
     ] + [
@@ -544,15 +560,31 @@ def main() -> None:
             }
         )
 
+    snapshot_raw = str(form4_state.get("form4_snapshot_date") or "").strip()
+    try:
+        snapshot_status = "PASS" if date.fromisoformat(snapshot_raw) >= date.fromisoformat(asof) else "WARN"
+    except ValueError:
+        snapshot_status = "FAIL" if snapshot_raw.startswith("error:") else "WARN"
     summary_rows = [
         status_row("asof", "INFO", asof, f"report_dir={report_dir}"),
         status_row("prior_asof_dir", "INFO", prior_report_dir.name if prior_report_dir else "", str(prior_report_dir or "")),
+        status_row(
+            "db_read",
+            "FAIL" if db_read_error else "PASS",
+            len(db_source_rows),
+            db_read_error or f"daily_scores source rows read for asof={asof}",
+        ),
         status_row("allocation_file_rank_purpose", "PASS" if not allocation_violations else "FAIL", len(allocation_violations), "Allocation list must be allocation-only and investible."),
         status_row("discovery_file_rank_purpose", "PASS" if not discovery_violations else "FAIL", len(discovery_violations), "Discovery list must be discovery-only; avoid bucket names must be research-only."),
         status_row("form4_staging_db_exists", "PASS" if form4_state.get("form4_db_exists") else "FAIL", form4_state.get("form4_db_exists"), str(form4_state.get("form4_db_path"))),
         status_row("form4_staging_boundary", "PASS" if form4_state.get("form4_db_is_staging") else "FAIL", form4_state.get("form4_db_is_staging"), str(form4_state.get("form4_db_path"))),
-        status_row("form4_snapshot_date", "PASS" if str(form4_state.get("form4_snapshot_date")) >= asof else "WARN", form4_state.get("form4_snapshot_date"), "Snapshot should be current for same-day pipeline consistency."),
-        status_row("ctgov_shadow_guardrail", "PASS" if not ctgov_guardrail_violations else "FAIL", len(ctgov_guardrail_violations), "CTGov should remain shadow-only unless its guardrail passes."),
+        status_row("form4_snapshot_date", snapshot_status, form4_state.get("form4_snapshot_date"), "Snapshot should be a valid ISO date at or after the report date."),
+        status_row(
+            "ctgov_shadow_guardrail",
+            "FAIL" if db_read_error else ("PASS" if not ctgov_guardrail_violations else "FAIL"),
+            len(ctgov_guardrail_violations),
+            db_read_error or "CTGov should remain shadow-only unless its guardrail passes.",
+        ),
     ]
     for group in [
         "form4_daily_scores_db",
@@ -561,22 +593,37 @@ def main() -> None:
     ]:
         rows = [row for row in data_population if row.get("group") == group]
         populated = sum(1 for row in rows if (to_float(row.get("populated_rows"), 0.0) or 0.0) > 0.0)
+        missing_columns = sum(1 for row in rows if (to_float(row.get("column_present"), 0.0) or 0.0) <= 0.0)
+        if missing_columns:
+            group_status = "FAIL"
+        elif populated == len(rows):
+            group_status = "PASS"
+        else:
+            group_status = "WARN"
         summary_rows.append(
             status_row(
                 f"{group}_field_population",
-                "PASS" if populated == len(rows) else "WARN",
+                group_status,
                 f"{populated}/{len(rows)}",
-                "Every expected field should have at least one populated row; zero may be valid for sparse shadow signals but needs review.",
+                f"missing_columns={missing_columns}. Absent columns are a FAIL; zero-populated present columns "
+                "may be valid for sparse shadow signals but need review.",
             )
         )
     report_surface_fields = [row for row in data_population if row.get("group") == "allocation_top_candidates_field_surface"]
     report_surface_present = sum(1 for row in report_surface_fields if (to_float(row.get("column_present"), 0.0) or 0.0) > 0.0)
+    report_surface_unpopulated = sum(1 for row in report_surface_fields if (to_float(row.get("populated_rows"), 0.0) or 0.0) <= 0.0)
+    if report_surface_present < len(report_surface_fields):
+        surface_status = "FAIL"
+    elif report_surface_unpopulated:
+        surface_status = "WARN"
+    else:
+        surface_status = "PASS"
     summary_rows.append(
         status_row(
             "allocation_report_shadow_field_surface",
-            "PASS" if report_surface_present == len(report_surface_fields) else "WARN",
+            surface_status,
             f"{report_surface_present}/{len(report_surface_fields)}",
-            "Top allocation report should expose the shadow factor fields for auditability.",
+            "Top allocation report should expose the shadow factor fields for auditability; absent columns are a FAIL.",
         )
     )
 

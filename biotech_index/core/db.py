@@ -882,6 +882,7 @@ CREATE TABLE IF NOT EXISTS fda_adcom_events (
     drug_name TEXT,
     indication TEXT,
     vote_result TEXT,
+    announced_date TEXT,
     source TEXT NOT NULL DEFAULT 'fda_calendar',
     source_url TEXT,
     created_at TEXT NOT NULL,
@@ -1406,6 +1407,12 @@ FORWARD_GUIDANCE_OPTIONAL_COLUMNS = {
     "guidance_unique_key": "TEXT",
 }
 
+FDA_ADCOM_OPTIONAL_COLUMNS = {
+    # First public visibility of the meeting; NULL on legacy rows that predate
+    # announcement tracking. Used for point-in-time filtering in script 10.
+    "announced_date": "TEXT",
+}
+
 GOVERNANCE_EVENT_OPTIONAL_COLUMNS = {
     "open_market_buy_count_90d": "INTEGER",
     "regulatory_setback_count_365d": "INTEGER",
@@ -1548,6 +1555,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         ON fda_adcom_events(company_id, meeting_date)
         """
     )
+    ensure_table_optional_columns(conn, "fda_adcom_events", FDA_ADCOM_OPTIONAL_COLUMNS)
     ensure_state_tables_created_at(conn)
     ensure_table_optional_columns(conn, "sec_event_parse_state", SEC_EVENT_PARSE_STATE_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "forward_guidance_parse_state", FORWARD_GUIDANCE_PARSE_STATE_OPTIONAL_COLUMNS)
@@ -1562,15 +1570,25 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# PRAGMA user_version marker for one-time data repairs; bump when adding a new repair.
+_BLANK_NUMERIC_REPAIR_VERSION = 1
+
+
 def _repair_blank_numeric_nulls_in_daily_scores(conn: sqlite3.Connection) -> None:
     """Convert blank-string values to NULL for REAL/INTEGER columns in daily_scores.
 
     Prior to the PRAGMA-driven db_value fix in 11_score_biotech_index.py, the scorer
     wrote empty strings instead of NULL for optional numeric fields when a value was
     absent.  This one-time repair corrects existing rows so that IS NOT NULL filters
-    and SQL aggregates work correctly.  Each UPDATE is a no-op after the first run
-    because SQLite skips rows where the value is already NULL or non-empty.
+    and SQL aggregates work correctly.  Guarded by PRAGMA user_version so the
+    full-table UPDATE scans run exactly once per database, not on every init_db call.
     """
+    try:
+        current_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+    except Exception:
+        current_version = 0
+    if current_version >= _BLANK_NUMERIC_REPAIR_VERSION:
+        return
     _NUMERIC_TYPE_KEYWORDS = {"REAL", "INTEGER", "INT", "NUMERIC", "FLOAT", "DOUBLE"}
     try:
         pragma_rows = conn.execute("PRAGMA table_info(daily_scores)").fetchall()
@@ -1584,6 +1602,7 @@ def _repair_blank_numeric_nulls_in_daily_scores(conn: sqlite3.Connection) -> Non
             conn.execute(
                 f"UPDATE daily_scores SET {col_sql} = NULL WHERE {col_sql} = ''"
             )
+    conn.execute(f"PRAGMA user_version = {int(_BLANK_NUMERIC_REPAIR_VERSION)}")
 
 
 def ensure_company_optional_columns(conn: sqlite3.Connection) -> None:

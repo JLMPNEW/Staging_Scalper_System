@@ -1475,7 +1475,11 @@ calibration:
     output_dir: "../output/biotech_index_reports/calibration_phase1"
     exclude_current_removals: false
     train_fraction: 0.70
-    embargo_days: 120
+    # Calendar-day embargo. The 120-trading-bar horizon spans roughly 174 calendar
+    # days; use 185 calendar days (mirroring tier1) to prevent train/test
+    # forward-return overlap. Phase 1 has no auto_expand_embargo_to_horizon_calendar_days
+    # option, so this literal value must cover the max configured horizon.
+    embargo_days: 185
     bootstrap_iterations: 200
     horizons:
       - 60

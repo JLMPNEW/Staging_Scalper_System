@@ -49,8 +49,11 @@ WEIGHT_PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "w_loss20": (0.40, 2.00),
     "w_loss40": (0.40, 2.00),
     "w_top3": (0.20, 1.50),
-    "w_train_test_gap": (0.00, 1.50),
 }
+# Fixed (not Optuna-searched) penalty on the train->test overfit gap. If this were a
+# searched parameter with a 0.0 lower bound, the maximizer would drive it to 0 and the
+# objective would collapse to raw test_score (optimizing directly against the test split).
+TRAIN_TEST_GAP_PENALTY = 0.75
 
 
 def parse_args() -> argparse.Namespace:
@@ -499,7 +502,11 @@ def parse_weight_bounds(raw: str) -> dict[str, tuple[float, float]]:
     return bounds
 
 
-def build_score_normalizers(rows: list[dict[str, Any]]) -> dict[str, tuple[float, float]]:
+def normalizer_group_key(row: dict[str, Any]) -> tuple[str, str]:
+    return (str(row.get("horizon_days") or ""), str(row.get("top_n") or ""))
+
+
+def build_score_normalizers(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str], tuple[float, float]]:
     metric_names = (
         "lcb_return_pct",
         "mean_return_pct",
@@ -510,33 +517,39 @@ def build_score_normalizers(rows: list[dict[str, Any]]) -> dict[str, tuple[float
         "large_loss_40pct_rate_pct",
         "top3_gain_contribution_pct",
     )
-    normalizers: dict[str, tuple[float, float]] = {}
-    for split in ("train", "test"):
-        prefix = f"{split}_selected_"
-        for metric_name in metric_names:
-            key = prefix + metric_name
-            values = [to_float(row.get(key), None) for row in rows]
-            clean = [float(value) for value in values if value is not None]
-            if not clean:
-                normalizers[key] = (0.0, 1.0)
-                continue
-            avg = sum(clean) / len(clean)
-            variance = sum((value - avg) ** 2 for value in clean) / max(1, len(clean))
-            std = math.sqrt(variance)
-            normalizers[key] = (avg, std if std > 1e-9 else 1.0)
+    # Normalize within each (horizon_days, top_n) group so long horizons (with
+    # mechanically larger return magnitudes) do not dominate the pooled z-scores.
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(normalizer_group_key(row), []).append(row)
+    normalizers: dict[tuple[str, str, str], tuple[float, float]] = {}
+    for group_key, group_rows in groups.items():
+        for split in ("train", "test"):
+            prefix = f"{split}_selected_"
+            for metric_name in metric_names:
+                key = prefix + metric_name
+                values = [to_float(row.get(key), None) for row in group_rows]
+                clean = [float(value) for value in values if value is not None]
+                if not clean:
+                    normalizers[group_key + (key,)] = (0.0, 1.0)
+                    continue
+                avg = sum(clean) / len(clean)
+                variance = sum((value - avg) ** 2 for value in clean) / max(1, len(clean))
+                std = math.sqrt(variance)
+                normalizers[group_key + (key,)] = (avg, std if std > 1e-9 else 1.0)
     return normalizers
 
 
 def normalized_metric(
     row: dict[str, Any],
     key: str,
-    normalizers: dict[str, tuple[float, float]],
+    normalizers: dict[tuple[str, str, str], tuple[float, float]],
     *,
     default: float = 0.0,
     clip: float = 3.0,
 ) -> float:
     value = metric(row, key, default)
-    avg, std = normalizers.get(key, (0.0, 1.0))
+    avg, std = normalizers.get(normalizer_group_key(row) + (key,), (0.0, 1.0))
     z_value = (value - avg) / max(1e-9, std)
     return max(-clip, min(clip, z_value))
 
@@ -546,7 +559,7 @@ def trial_candidate_score(
     params: dict[str, float],
     *,
     split: str,
-    normalizers: dict[str, tuple[float, float]],
+    normalizers: dict[tuple[str, str, str], tuple[float, float]],
 ) -> float:
     prefix = f"{split}_selected_"
     lcb = normalized_metric(row, prefix + "lcb_return_pct", normalizers)
@@ -632,7 +645,8 @@ def run_optuna_trials(
         trial.set_user_attr("test_profit_factor", selected.get("test_selected_profit_factor", ""))
         trial.set_user_attr("test_large_loss_20pct_rate_pct", selected.get("test_selected_large_loss_20pct_rate_pct", ""))
         trial.set_user_attr("test_top3_gain_contribution_pct", selected.get("test_selected_top3_gain_contribution_pct", ""))
-        return test_score - params["w_train_test_gap"] * gap
+        trial.set_user_attr("train_test_gap_penalty", TRAIN_TEST_GAP_PENALTY)
+        return test_score - TRAIN_TEST_GAP_PENALTY * gap
 
     startup_trials = int(n_startup_trials) if int(n_startup_trials) > 0 else min(25, max(1, int(n_trials) // 10))
     try:
@@ -841,6 +855,42 @@ def main() -> None:
         LOGGER.info("Optuna candidate optimizer %s: survivors=%d output_dir=%s", status, len(survivors), output_dir)
         return
 
+    if len(survivors) < 2:
+        # With a single survivor every z-scored metric is 0, so every trial objective is 0
+        # and the "best" Optuna trial would be arbitrary. Emit the survivor deterministically.
+        best = {"selection_method": "single_survivor_short_circuit", **survivors[0]}
+        write_csv(output_dir / "optuna_trial_results.csv", [])
+        write_csv(output_dir / "optuna_best_candidate.csv", [best])
+        write_json(
+            output_dir / "optuna_optimizer_manifest.json",
+            {
+                "status": "success",
+                "optimizer_type": "gated_candidate_survivor_meta_optimizer",
+                "reason": "single_survivor_short_circuit",
+                "db_path": str(db_path),
+                "input_dir": str(input_dir),
+                "feature_ic_dir": str(feature_ic_dir),
+                "sequence_dir": str(sequence_dir),
+                "start_asof": args.start_asof,
+                "end_asof": args.end_asof,
+                "survivor_count": len(survivors),
+                "trial_count": 0,
+                "best": best,
+                "ic_class_counts": ic_class_counts,
+                "elapsed_sec": round(time.perf_counter() - start, 3),
+                "notes": [
+                    "Only one candidate structure survived calibration constraints; Optuna trials were skipped.",
+                    "Weight search over a single survivor is degenerate (all normalized objectives are 0).",
+                ],
+            },
+        )
+        LOGGER.info(
+            "Optuna candidate optimizer short-circuit: single survivor %s emitted deterministically without trials (output_dir=%s)",
+            survivors[0].get("optimizer_candidate_key", ""),
+            output_dir,
+        )
+        return
+
     trial_rows, best = run_optuna_trials(
         survivors,
         n_trials=args.n_trials,
@@ -870,6 +920,7 @@ def main() -> None:
             "top_k_survivors": max(1, int(args.top_k_survivors)),
             "timeout_sec": args.timeout_sec,
             "weight_bounds": weight_bounds,
+            "train_test_gap_penalty": TRAIN_TEST_GAP_PENALTY,
             "calibration_manifest_status": calibration_manifest.get("status", ""),
             "best": best,
             "ic_class_counts": ic_class_counts,

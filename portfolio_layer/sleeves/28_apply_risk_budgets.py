@@ -321,9 +321,9 @@ def main() -> int:  # noqa: C901
          "market_share": round(factor_after["market_share"], 6),
          "max_sector_share": round(factor_after["max_sector_share"], 6)},
     ])
-    out["effective_bets.json"].write_text(json.dumps(
-        {"before": enb_before, "after": enb_after,
-         "improvement": round(enb_after["enb"] - enb_before["enb"], 4)}, indent=2, sort_keys=True), encoding="utf-8")
+    write_manifest(out["effective_bets.json"],
+                   {"before": enb_before, "after": enb_after,
+                    "improvement": round(enb_after["enb"] - enb_before["enb"], 4)})
     throttle_apply = bool(cfg_get(config, "sleeves.drawdown_throttle.apply", False))
     dd_limit = _f_default(cfg_get(config, "sleeves.drawdown_throttle.dd_limit", 0.15), 0.15)
     simulated_throttle = {
@@ -343,10 +343,7 @@ def main() -> int:  # noqa: C901
             },
         ],
     }
-    out["drawdown_throttle_simulation.json"].write_text(
-        json.dumps(simulated_throttle, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    write_manifest(out["drawdown_throttle_simulation.json"], simulated_throttle)
 
     # ---- proposal-level sanity (improvement-relative; hard gates live in 29) ----
     sum_ok = abs(realized_invested + final_cash - 1.0) <= 1e-6

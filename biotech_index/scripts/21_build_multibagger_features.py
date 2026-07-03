@@ -338,6 +338,9 @@ def score_survival(commercial: dict[str, Any], survival: dict[str, Any]) -> floa
         base = clamp(to_float(survival.get("financial_survival_score"), 45.0))
         debt_to_cash = to_optional_float(survival.get("debt_to_cash"))
         runway = to_optional_float(survival.get("cash_runway_months"))
+        # debt_to_cash is non-negative by construction upstream (script 16 clamps
+        # negative total_debt to 0 and routes negative-cash cases to a 999.0
+        # sentinel), so the > 1.5 check also correctly penalizes the sentinel.
         if debt_to_cash is not None and debt_to_cash > 1.5:
             base -= 10.0
         if runway is not None and runway >= 24:

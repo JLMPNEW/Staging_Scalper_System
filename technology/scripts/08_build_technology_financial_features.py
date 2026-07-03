@@ -1166,12 +1166,14 @@ def build_ticker_features(
         feature["ev_operating_income"] = None
         feature["fcf_yield"] = None
         if market_cap is not None and valuation_currency_ready and flow_rate is not None and balance_rate is not None:
-            # EV requires both balance-sheet legs; a missing value is not a zero.
-            total_debt = safe_float(feature.get("total_debt"))
-            cash_and_equivalents = safe_float(feature.get("cash_and_equivalents"))
-            enterprise_value = None
-            if total_debt is not None and cash_and_equivalents is not None:
-                enterprise_value = market_cap + total_debt * balance_rate - cash_and_equivalents * balance_rate
+            # EV = market_cap + total_debt - cash = market_cap - net_cash, where
+            # net_cash (cash - total_debt) is the canonical field the locked model
+            # was calibrated on. It is NULL only when BOTH balance-sheet legs are
+            # absent, so this still avoids fabricating EV from a fully missing
+            # balance sheet while restoring valuation for net-cash-rich names that
+            # legitimately carry ~zero of one leg.
+            net_cash = safe_float(feature.get("net_cash"))
+            enterprise_value = market_cap - net_cash * balance_rate if net_cash is not None else None
             gp_ttm_usd = safe_float(feature.get("gross_profit_ttm"))
             oi_ttm_usd = safe_float(feature.get("operating_income_ttm"))
             fcf_ttm_usd = safe_float(feature.get("free_cash_flow_ttm"))

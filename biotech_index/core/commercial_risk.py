@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Mapping
 
 from biotech_index.core.scoring_math import clamp as _clamp
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _to_float(raw: object, default: float | None = None) -> float | None:
@@ -31,6 +34,26 @@ def _bool_numeric(raw: object) -> bool:
         if token in {"0", "false", "f", "no", "n", "disabled", "off", ""}:
             return False
     return (_to_float(raw, 0.0) or 0.0) > 0.0
+
+
+def _ordered_thresholds(context: str, *, upper: float, lower: float) -> tuple[float, float]:
+    """Return ``(upper, lower)`` with ``upper > lower``.
+
+    Misordered configured thresholds are swapped (and equal values nudged) with
+    a warning instead of raising mid-scoring in _decline_score/_scale_above.
+    """
+    if upper > lower:
+        return upper, lower
+    LOGGER.warning(
+        "Misordered %s thresholds (upper=%.6g, lower=%.6g); normalizing to a safe ordering.",
+        context,
+        upper,
+        lower,
+    )
+    upper, lower = max(upper, lower), min(upper, lower)
+    if upper <= lower:
+        upper = lower + 1e-9
+    return upper, lower
 
 
 def _decline_score(value: float | None, *, moderate: float, severe: float) -> float:
@@ -105,6 +128,15 @@ def commercial_risk_overlay_fields(
     high_upside_score = _setting(settings, "high_upside_capacity_score", 85.0)
     fragility_threshold = _setting(settings, "commercial_fragility_threshold", 70.0)
     revenue_min = _setting(settings, "commercial_stage_revenue_min", 50_000_000.0)
+
+    # Normalize configured threshold pairs once here so misordered settings
+    # cannot raise inside _decline_score/_scale_above during scoring.
+    moderate_yoy, severe_yoy = _ordered_thresholds("revenue_decline_yoy", upper=moderate_yoy, lower=severe_yoy)
+    moderate_qoq, severe_qoq = _ordered_thresholds("revenue_decline_qoq", upper=moderate_qoq, lower=severe_qoq)
+    weak_growth, low_growth = _ordered_thresholds("growth_weakness", upper=weak_growth, lower=low_growth)
+    severe_pe, high_pe = _ordered_thresholds("pe_ratio", upper=severe_pe, lower=high_pe)
+    severe_ev_sales, high_ev_sales = _ordered_thresholds("ev_to_sales", upper=severe_ev_sales, lower=high_ev_sales)
+    severe_ps, high_ps = _ordered_thresholds("price_to_sales", upper=severe_ps, lower=high_ps)
 
     yoy_decline = _decline_score(yoy, moderate=moderate_yoy, severe=severe_yoy)
     qoq_decline = _decline_score(qoq, moderate=moderate_qoq, severe=severe_qoq)

@@ -370,7 +370,9 @@ def main() -> int:  # noqa: C901
     d = meta28.get("diagnostics") or {}
     det_bad = []
     for key, val in (("enb_after", enb_after), ("idio_after", factor_after["idiosyncratic_share"]), ("rc_max_after", rc_max)):
-        if d.get(key) is not None and abs(float(d[key]) - float(val)) > 1e-4:
+        if d.get(key) is None:
+            det_bad.append(f"{key}:missing_from_28_diagnostics")  # absent seal must FAIL, not skip
+        elif abs(float(d[key]) - float(val)) > 1e-4:
             det_bad.append(f"{key}:{d.get(key)}!={val:.6f}")
     rec("recompute_matches_28", "PASS" if not det_bad else "FAIL",
         "29 recompute matches 28 sealed diagnostics" if not det_bad else f"{det_bad}")

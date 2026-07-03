@@ -138,10 +138,17 @@ def _to_float(raw: object, default: float = 0.0) -> float:
 
 
 def _as_bool(raw: object) -> bool:
+    # Mirrors commercial_risk._bool_numeric: numeric inputs (1.0, "1.0") are
+    # truthy when > 0, alongside the usual boolean string tokens.
     if isinstance(raw, bool):
         return raw
-    text = str(raw if raw is not None else "").strip().lower()
-    return text in {"1", "true", "yes", "y", "on"}
+    if isinstance(raw, str):
+        token = raw.strip().lower()
+        if token in {"1", "true", "yes", "y", "on"}:
+            return True
+        if token in {"0", "false", "no", "n", "off", ""}:
+            return False
+    return _to_float(raw, 0.0) > 0.0
 
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:

@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv  # noqa: E402
+from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.costs.cost_common import (  # noqa: E402
@@ -57,8 +57,10 @@ def load_weight_map(path: Path) -> dict[str, float]:
     for r in read_csv(path):
         t = str(r.get("ticker", "")).strip()
         if t and t.upper() != "CASH":
-            parsed_weight = finite_float(r.get("weight"), name=f"{path}:{t}.weight")
-            weight = 0.0 if parsed_weight is None else parsed_weight
+            raw_weight = r.get("weight")
+            if raw_weight in (None, ""):
+                raw_weight = 0.0  # blank cell = no prior position (finite_float raises on blank)
+            weight = finite_float(raw_weight, name=f"{path}:{t}.weight")
             if weight < 0:
                 raise ValueError(f"Prior weight for {t} must be non-negative, got {weight}")
             if t in out:
@@ -159,7 +161,7 @@ def main() -> int:
         "gross_traded_notional": round(sum(r["trade_notional"] for r in rows), 2),
     }
     meta_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+    write_manifest(meta_path, meta)
     LOGGER.info("Trade list: %d trades (%d buys / %d sells) vs prior=%s, AUM=$%.0f -> %s",
                 n, meta["n_buys"], meta["n_sells"], prior_source, aum, trade_path)
     return 0

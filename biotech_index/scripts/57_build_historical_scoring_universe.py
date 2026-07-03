@@ -172,6 +172,7 @@ def live_universe_rows(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     included: list[dict[str, Any]] = []
     audit: list[dict[str, Any]] = []
+    historical_asof = asof < date.today()
     for row in root_rows:
         ticker = normalize_ticker(row.get("ticker"))
         if not ticker or not as_bool(row.get("scoring_include"), False):
@@ -180,9 +181,22 @@ def live_universe_rows(
         if not company:
             audit.append({"ticker": ticker, "decision": "exclude", "reason": "missing_company_row"})
             continue
-        if int(company.get("is_active") or 0) <= 0:
-            audit.append({"ticker": ticker, "decision": "exclude", "reason": "inactive_current_company"})
-            continue
+        is_active = int(company.get("is_active") or 0) > 0
+        if not is_active:
+            # For historical asof dates, current is_active is survivorship-biased:
+            # a company that was trading on asof but delisted later must stay in
+            # the point-in-time universe.  Membership is decided by as-of price
+            # bars; fall back to the is_active gate only when no usable bar data
+            # exists on/near asof.
+            if not historical_asof:
+                audit.append({"ticker": ticker, "decision": "exclude", "reason": "inactive_current_company"})
+                continue
+            bars_ok, _ = usable_latest_price(prices.get(ticker), asof, max_staleness_days=max_price_staleness_days)
+            if not bars_ok:
+                audit.append(
+                    {"ticker": ticker, "decision": "exclude", "reason": "inactive_current_company_no_asof_price_data"}
+                )
+                continue
         company_id = int(company["company_id"])
         price_ticker = ticker
         window = prices.get(price_ticker)
@@ -206,7 +220,13 @@ def live_universe_rows(
             }
         )
         included.append(out)
-        audit.append({"ticker": ticker, "decision": "include", "reason": "active_with_price_history"})
+        audit.append(
+            {
+                "ticker": ticker,
+                "decision": "include",
+                "reason": "active_with_price_history" if is_active else "inactive_now_but_priced_on_asof",
+            }
+        )
     return included, audit
 
 
@@ -362,7 +382,10 @@ def main() -> int:
         "max_price_staleness_days": max(0, int(args.max_price_staleness_days)),
         "source_policy": {
             "delisted": "included only inside price_start_date..min(price_end_date,terminal_date) and with price history on/before asof",
-            "current": "included only when active and with price history on/before asof",
+            "current": (
+                "included when active with price history on/before asof; for historical asof dates, "
+                "currently-inactive names are kept when usable as-of price bars exist (survivorship correction)"
+            ),
             "missing_historical_feeds": "left null/availability-flagged by downstream feature builders; never forward-filled from future dates",
         },
     }

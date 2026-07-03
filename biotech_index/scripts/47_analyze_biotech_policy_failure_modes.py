@@ -254,25 +254,29 @@ def load_cohort_map(
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
-        date_placeholders = ",".join("?" for _ in date_list)
+        # Chunk both tickers and dates so total bound parameters stay <= 900,
+        # below SQLite's default 999-variable limit.
         for i in range(0, len(ticker_list), 250):
             batch = ticker_list[i : i + 250]
             ticker_placeholders = ",".join("?" for _ in batch)
-            query = f"""
-                SELECT
-                    upper(ticker) AS ticker,
-                    asof_date,
-                    biotech_calibration_cohort,
-                    biotech_primary_cohort,
-                    allocation_bucket,
-                    bucket,
-                    biotech_cohort_reason_codes
-                FROM daily_scores
-                WHERE upper(ticker) IN ({ticker_placeholders})
-                  AND asof_date IN ({date_placeholders})
-            """
-            for row in conn.execute(query, [*batch, *date_list]):
-                out[(str(row["asof_date"]), str(row["ticker"]))] = dict(row)
+            for j in range(0, len(date_list), 650):
+                date_batch = date_list[j : j + 650]
+                date_placeholders = ",".join("?" for _ in date_batch)
+                query = f"""
+                    SELECT
+                        upper(ticker) AS ticker,
+                        asof_date,
+                        biotech_calibration_cohort,
+                        biotech_primary_cohort,
+                        allocation_bucket,
+                        bucket,
+                        biotech_cohort_reason_codes
+                    FROM daily_scores
+                    WHERE upper(ticker) IN ({ticker_placeholders})
+                      AND asof_date IN ({date_placeholders})
+                """
+                for row in conn.execute(query, [*batch, *date_batch]):
+                    out[(str(row["asof_date"]), str(row["ticker"]))] = dict(row)
     finally:
         conn.close()
     return out
@@ -309,6 +313,8 @@ def reason_breakdown_rows(
             for reason in reason_tokens(row.get(column)):
                 grouped[(column, reason)].append(row)
     out: list[dict[str, Any]] = []
+    # Multiplicity caveat: these per-reason/per-cohort summaries are many parallel comparisons
+    # with no multiple-testing correction; treat individual extremes as descriptive, not confirmatory.
     for (reason_column, reason), reason_rows in sorted(grouped.items()):
         summary = summarize_rows(reason_rows, return_column, lcb_z=lcb_z)
         out.append(
@@ -358,7 +364,7 @@ def example_rows(
     max_rows: int,
     reverse: bool,
 ) -> list[dict[str, Any]]:
-    ranked = sorted(rows, key=lambda row: to_float(row.get(return_column), -1e9) or -1e9, reverse=reverse)
+    ranked = sorted(rows, key=lambda row: to_float(row.get(return_column), -1e9), reverse=reverse)
     out: list[dict[str, Any]] = []
     for row in ranked[: max(0, max_rows)]:
         out.append(

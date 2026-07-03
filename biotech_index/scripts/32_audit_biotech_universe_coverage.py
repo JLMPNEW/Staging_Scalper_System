@@ -177,13 +177,22 @@ def load_active_unscored_rows(conn: sqlite3.Connection, asof_date: str, market_s
                cv.asof_date AS commercial_asof, cv.data_quality AS commercial_data_quality
         FROM companies c
         LEFT JOIN daily_scores s ON s.company_id = c.company_id AND s.asof_date = ?
-        LEFT JOIN market_features_daily mf ON mf.company_id = c.company_id AND mf.asof_date = ? AND mf.source = ?
+        LEFT JOIN market_features_daily mf
+            ON mf.company_id = c.company_id
+           AND mf.source = ?
+           AND mf.asof_date = (
+                SELECT MAX(mf2.asof_date)
+                FROM market_features_daily mf2
+                WHERE mf2.company_id = c.company_id
+                  AND mf2.source = ?
+                  AND mf2.asof_date <= ?
+           )
         LEFT JOIN forward_guidance_features_daily fg ON fg.company_id = c.company_id AND fg.asof_date = ?
         LEFT JOIN commercial_value_features_daily cv ON cv.company_id = c.company_id AND cv.asof_date = ?
         WHERE c.is_active = 1 AND s.company_id IS NULL
         ORDER BY c.ticker
         """,
-        (asof_date, asof_date, market_source, asof_date, asof_date),
+        (asof_date, market_source, market_source, asof_date, asof_date, asof_date),
     ).fetchall()
 
 

@@ -25,12 +25,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, refresh_sec_latest_documents, start_run, utc_now
 from biotech_index.core.logging_utils import configure_utc_logging
-from biotech_index.core.pipeline_guards import read_final_scoring_tickers
+from biotech_index.core.pipeline_guards import normalize_ticker, read_final_scoring_tickers
 
 
 LOGGER = logging.getLogger("parse_sec_biotech_events")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-PARSER_LOGIC_VERSION = "2026-06-11-sec-event-parser-v4"
+PARSER_LOGIC_VERSION = "2026-07-03-sec-event-parser-v5"
 SQLITE_PARAM_CHUNK_SIZE = 800
 
 
@@ -463,7 +463,19 @@ def stale_event_value_date(event_value: str, *, filing_date: str, max_age_years:
     return bool(years and max(years) < filing_dt.year - max_age_years)
 
 
-def should_skip(rule: EventRule, window: str, *, filing_date: str) -> bool:
+def partial_hold_suppression(match_context: str) -> bool:
+    # Suppress only when "partial" directly precedes the matched "clinical hold"
+    # (allowing a couple of intervening words); a partial hold mentioned elsewhere
+    # in the surrounding window must not mask a genuine full clinical hold event.
+    context_lower = match_context.lower()
+    hold_idx = context_lower.rfind("clinical hold")
+    if hold_idx < 0:
+        return False
+    preceding = context_lower[max(0, hold_idx - 40) : hold_idx]
+    return bool(re.search(r"\bpartial\b(?:\s+\w+){0,2}\s*$", preceding))
+
+
+def should_skip(rule: EventRule, window: str, *, filing_date: str, match_context: str = "") -> bool:
     if rule.event_type in {"clinical_hold", "partial_clinical_hold"} and NEGATED_HOLD.search(window):
         return True
     if rule.event_type in {"clinical_hold", "partial_clinical_hold"} and GENERIC_RISK_FACTOR.search(window):
@@ -478,7 +490,7 @@ def should_skip(rule: EventRule, window: str, *, filing_date: str) -> bool:
         return True
     if rule.event_type == "going_concern_confirmed" and ALLEV_GOING_CONCERN.search(window):
         return True
-    if rule.event_type == "clinical_hold" and "partial clinical hold" in window.lower():
+    if rule.event_type == "clinical_hold" and partial_hold_suppression(match_context):
         return True
     if rule.event_type in {"nda_bla_accepted", "regulatory_submission"} and GENERIC_NDA_BLA.search(window):
         return True
@@ -524,7 +536,8 @@ def detect_events(row: FilingText, *, min_confidence: float, max_per_type: int) 
         for pattern in rule.patterns:
             for match in pattern.finditer(scan_text):
                 window = extract_window(scan_text, match.start(), match.end())
-                if should_skip(rule, window, filing_date=row.filing_date):
+                match_context = scan_text[max(0, match.start() - 40) : match.end()]
+                if should_skip(rule, window, filing_date=row.filing_date, match_context=match_context):
                     continue
                 dedupe_key = (rule.event_type, hashlib.sha256(window.lower().encode("utf-8", errors="ignore")).hexdigest())
                 if dedupe_key in seen_windows:
@@ -1138,7 +1151,7 @@ def main() -> None:
     min_confidence = float(cfg_get(config, "sec_event_parser.min_confidence", 0.65))
     max_per_type = int(cfg_get(config, "sec_event_parser.max_events_per_filing_type", 1))
     parser_signature = build_parser_signature(min_confidence=min_confidence, max_per_type=max_per_type)
-    ticker_filter = {x.strip().upper().replace(".", "-") for x in args.tickers.split(",") if x.strip()}
+    ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
     scope_label = "tickers_arg" if ticker_filter else "all_db_companies"
     if not ticker_filter and not args.all_db_companies:
         if final_universe_csv is None:

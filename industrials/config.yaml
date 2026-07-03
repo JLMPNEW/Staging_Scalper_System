@@ -151,6 +151,39 @@ fx_rates:
     - EURUSD
     - ILSUSD
 
+positioning_import:
+  source_id: "industrials_positioning_composite"
+  form4_source_id: "sec_insider_upstream"
+  direct_ownership_source_id: "sec_ownership_direct"
+  market_positioning_source_id: "market_positioning_upstream"
+  positioning_overrides_csv: "defense/system_csvs/defense_positioning_overrides.csv"
+  start_date: "2000-01-01"
+  include_historical_members: true
+  positioning_universe_csv: "../output/industrials_cache/positioning/defense_positioning_universe.csv"
+  output_csv: "../output/industrials/defense/stage5/positioning_import_coverage.csv"
+  feature_output_csv: "../output/industrials/defense/stage5/positioning_feature_coverage.csv"
+  lookback_days:
+    insider: 90
+    short_change: 92
+  require_upstream_13f_for_gate: true
+  require_upstream_short_for_gate: true
+  require_upstream_borrow_for_gate: true
+  require_direct_ownership_for_gate: false
+  upstream_form4_gate_exempt_tickers: []
+  upstream_13f_gate_exempt_tickers: []
+  upstream_short_gate_exempt_tickers:
+    - DPC
+  upstream_short_pct_float_gate_exempt_tickers: []
+  upstream_borrow_gate_exempt_tickers: []
+
+upstream_databases:
+  form4:
+    db_path: "${SEC_INSIDER_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite}"
+    access_mode: "read_only"
+  market_positioning:
+    db_path: "${MARKET_POSITIONING_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite}"
+    access_mode: "read_only"
+
 scoring_policy:
   defense_eligibility_policy_csv: "defense/system_csvs/defense_scoring_eligibility_policy.csv"
 

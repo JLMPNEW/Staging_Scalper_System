@@ -118,10 +118,18 @@ def load_universe_name_map(path: Path | None) -> dict[str, str]:
         ticker = normalize_ticker(row.get("ticker") or row.get("symbol"))
         if not ticker:
             continue
-        for key in ("company_name", "issuer_name", "name"):
-            normalized = normalize_issuer_name(row.get(key))
-            if normalized:
-                out.setdefault(normalized, ticker)
+        for key in (
+            "company_name",
+            "issuer_name",
+            "name",
+            "institutional_13f_issuer_alias",
+            "issuer_alias",
+            "company_name_alias",
+        ):
+            for raw_name in str(row.get(key) or "").split(";"):
+                normalized = normalize_issuer_name(raw_name)
+                if normalized:
+                    out.setdefault(normalized, ticker)
     return out
 
 
@@ -149,6 +157,23 @@ def load_universe_exchange_map(path: Path | None) -> dict[str, str]:
         exchange = str(row.get("exchange") or row.get("primary_exchange") or "").strip().upper()
         if ticker and exchange:
             out[ticker] = aliases.get(exchange.replace(" ", ""), aliases.get(exchange, exchange))
+    return out
+
+
+def load_universe_ibkr_symbol_map(path: Path | None) -> dict[str, str]:
+    if path is None or not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    for row in read_csv_rows(path):
+        ticker = normalize_ticker(row.get("ticker") or row.get("symbol"))
+        ibkr_ticker = str(
+            row.get("ibkr_ticker")
+            or row.get("ibkr_symbol")
+            or row.get("interactive_brokers_ticker")
+            or ""
+        ).strip().upper()
+        if ticker and ibkr_ticker:
+            out[ticker] = ibkr_ticker
     return out
 
 
@@ -280,8 +305,13 @@ def finra_short_interest_records(
                 if api_ticker not in scoped_tickers:
                     continue
                 short_shares = to_float(row.get("currentShortShareNumber"))
-                avg_daily_volume = to_float(row.get("averageShortShareNumber"))
                 days_to_cover = to_float(row.get("daysToCoverNumber"))
+                if days_to_cover is None:
+                    # FINRA frequently omits daysToCoverNumber; derive it from the
+                    # short position and the average daily share volume when possible.
+                    avg_daily_shares = to_float(row.get("averageShortShareNumber"))
+                    if short_shares is not None and avg_daily_shares is not None and avg_daily_shares > 0:
+                        days_to_cover = round(short_shares / avg_daily_shares, 4)
                 records.append(
                     (
                         api_ticker,
@@ -892,6 +922,7 @@ def sync_ibkr_borrow_availability(
 
     tickers = load_universe_tickers(tickers_csv)
     primary_exchange_by_ticker = load_universe_exchange_map(tickers_csv)
+    ibkr_symbol_by_ticker = load_universe_ibkr_symbol_map(tickers_csv)
     if max_tickers and max_tickers > 0:
         tickers = tickers[:max_tickers]
     if not tickers:
@@ -910,12 +941,13 @@ def sync_ibkr_borrow_availability(
             try:
                 if not ib.isConnected():
                     raise RuntimeError("IBKR connection lost during borrow fee history sync")
-                contracts = ib.qualifyContracts(Stock(ticker, "SMART", "USD"))
+                ibkr_symbol = ibkr_symbol_by_ticker.get(ticker, ticker)
+                contracts = ib.qualifyContracts(Stock(ibkr_symbol, "SMART", "USD"))
                 if not contracts:
                     primary_exchange = primary_exchange_by_ticker.get(ticker, "")
                     if primary_exchange:
                         contracts = ib.qualifyContracts(
-                            Stock(ticker, "SMART", "USD", primaryExchange=primary_exchange)
+                            Stock(ibkr_symbol, "SMART", "USD", primaryExchange=primary_exchange)
                         )
                 if not contracts:
                     failed_tickers.append(ticker)

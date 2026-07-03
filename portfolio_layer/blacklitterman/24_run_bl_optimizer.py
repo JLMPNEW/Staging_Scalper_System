@@ -396,7 +396,8 @@ def main() -> int:  # noqa: C901
     )
 
     finite_bad = []
-    for key in ("exp_return_ann", "vol_ann", "sharpe_ann", "objective_value", "cash_weight", "risky_gross_exposure"):
+    for key in ("exp_return_ann", "vol_ann", "sharpe_ann", "objective_value", "cash_weight",
+                "risky_gross_exposure", "portfolio_sum_weight"):
         if _f(metrics.get(key)) is None:
             finite_bad.append(key)
     _record(
@@ -421,11 +422,16 @@ def main() -> int:  # noqa: C901
         "metrics": metrics,
         "checks": checks,
         "outputs_sha256": {
-            "bl_target_weights.csv": sha256_file(target_path),
-            "bl_optimizer_summary.csv": sha256_file(summary_path),
-            "validation/bl_optimizer_validation.csv": sha256_file(validation_path),
-            "optimizer/weights_long_only.csv": sha256_file(native_dir / "weights_long_only.csv"),
-            "optimizer/optimization_results.csv": sha256_file(native_dir / "optimization_results.csv"),
+            name: (sha256_file(path) if path.exists() else "MISSING")
+            for name, path in (
+                ("bl_target_weights.csv", target_path),
+                ("bl_optimizer_summary.csv", summary_path),
+                ("validation/bl_optimizer_validation.csv", validation_path),
+                # tier1 native outputs can be legitimately absent on a failed solve; the
+                # tier1_native_outputs_present check records the FAIL — the manifest must still seal
+                ("optimizer/weights_long_only.csv", native_dir / "weights_long_only.csv"),
+                ("optimizer/optimization_results.csv", native_dir / "optimization_results.csv"),
+            )
         },
         "source_sha256": {
             name: sha256_file(PACKAGE_ROOT / "blacklitterman" / name)

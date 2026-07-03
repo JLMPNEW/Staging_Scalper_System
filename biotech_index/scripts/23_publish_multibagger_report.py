@@ -386,7 +386,7 @@ def build_summary(rows: list[dict[str, Any]], candidate_rows: list[dict[str, Any
         "tier1_context_count": sum(1 for value in tier1_available if value),
         "tier1_missing_count": sum(1 for value in tier1_available if not value),
         "tier1_high_confidence_allocation_count": sum(1 for tier in tier1_tiers if tier == "high_confidence_allocation"),
-        "tier1_allocation_candidate_count": sum(1 for row in rows if as_bool(row.get("tier1_allocation_eligible"))),
+        "tier1_allocation_candidate_count": sum(1 for tier in tier1_tiers if tier == "allocation_candidate"),
         "tier1_research_watchlist_count": sum(1 for row in rows if as_bool(row.get("tier1_research_watchlist"))),
         "tier1_low_priority_count": sum(1 for tier in tier1_tiers if tier == "low_priority"),
         "tier1_rank_cap_veto_count": sum(1 for row in rows if as_bool(row.get("tier1_rank_quality_cap_vetoed"))),

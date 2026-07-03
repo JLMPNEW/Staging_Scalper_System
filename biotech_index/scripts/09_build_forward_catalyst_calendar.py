@@ -184,9 +184,11 @@ def confidence_for_event(event_type: str, raw_confidence: object) -> float:
     confidence = to_float(raw_confidence, 0.0)
     if confidence > 2.0:
         confidence /= 100.0
-    if confidence <= 0.0:
-        return 0.0
     floor = EVENT_TYPE_CONFIDENCE_FLOOR.get(event_type, 0.60)
+    if confidence <= 0.0:
+        # Parser did not assign a confidence; use the event-type default floor
+        # rather than zeroing out an otherwise valid forward event.
+        return round(floor, 6)
     return round(max(floor, min(1.0, confidence)), 6)
 
 
@@ -275,7 +277,9 @@ def load_forward_events(
     output: list[dict[str, Any]] = []
     for row in rows:
         event_type = str(row["event_type"] or "").strip().lower()
-        event_date = parse_date(row["event_date"])
+        # Some event types (e.g. nda_bla_accepted) carry the FDA action date only
+        # in the free-text event_value; fall back to parsing it from there.
+        event_date = parse_date(row["event_date"]) or parse_date(row["event_value"])
         if event_date is None:
             if diagnostics is not None:
                 diagnostics["sec_events_unparseable_event_date"] += 1
@@ -308,6 +312,23 @@ def load_forward_events(
                 "notes": "",
             }
         )
+    # Dedup restatements of the same forward event across amendment filings:
+    # keep one row per (ticker, event_type, event_date), preferring the latest
+    # filing_date, then the highest confidence.
+    deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in output:
+        key = (str(item["ticker"]), str(item["event_type"]), str(item["event_date"]))
+        current = deduped.get(key)
+        if current is None:
+            deduped[key] = item
+            continue
+        if diagnostics is not None:
+            diagnostics["sec_events_deduped_restated_rows"] += 1
+        candidate_rank = (str(item["filing_date"]), to_float(item.get("confidence"), 0.0))
+        current_rank = (str(current["filing_date"]), to_float(current.get("confidence"), 0.0))
+        if candidate_rank > current_rank:
+            deduped[key] = item
+    output = list(deduped.values())
     output.sort(
         key=lambda item: (
             str(item["ticker"]),

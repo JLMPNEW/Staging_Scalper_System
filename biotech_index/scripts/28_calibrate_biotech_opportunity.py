@@ -2862,7 +2862,8 @@ def mature_defensive_score(observation: Mapping[str, Any], *, growth_drag_curve:
 
 
 def expected_return_quality_score(observation: Mapping[str, Any]) -> float:
-    risk = clamp(to_float(observation.get("risk_for_penalty_score_raw"), observation.get("risk_score_raw")) or 100.0)
+    risk_raw = finite_float(to_float(observation.get("risk_for_penalty_score_raw"), observation.get("risk_score_raw")))
+    risk = clamp(100.0 if risk_raw is None else risk_raw)
     value_trap = clamp(to_float(observation.get("diag_value_trap_score"), 0.0))
     mature_drag = clamp(to_float(observation.get("diag_mature_defensive_score"), 0.0))
     score = (
@@ -3583,7 +3584,7 @@ def load_observations(
                 raw_scores.get("institutional_accumulation_score"),
                 institutional_shadow.get("institutional_accumulation_score"),
                 50.0,
-            ) or 50.0
+            )
             new_institutional_buyer_count = first_float(
                 row.get("new_institutional_buyer_count"),
                 institutional_shadow.get("new_institutional_buyer_count"),
@@ -3607,7 +3608,7 @@ def load_observations(
                 raw_scores.get("insider_accumulation_score"),
                 insider_shadow.get("insider_accumulation_score"),
                 50.0,
-            ) or 50.0
+            )
             observation = {
                 "asof_date": str(row["asof_date"]),
                 "company_id": company_id,
@@ -3863,16 +3864,27 @@ def load_observations(
             # forwarded into the observation dict above.  Add them here so that
             # the IC monitor (43_validate_biotech_feature_ic_monotonicity.py)
             # can compute information coefficients for FDA factors.
-            # adcom_nearest_days: keep None when no meeting is scheduled so
-            # completed_rows() skips those tickers (correct IC population).
+            # adcom_nearest_days / adcom_score: keep None when no meeting is
+            # scheduled so completed_rows() skips those tickers (correct IC
+            # population).  The binary flags default to 0.0 because "no meeting
+            # scheduled" is meaningful signal (not missing data); otherwise a
+            # NULL-when-absent DB convention would shrink their IC population
+            # to meeting-havers only.
             observation.update(
                 {
                     k: to_float(row.get(k))
                     for k in (
                         "adcom_nearest_days",
+                        "adcom_score",
+                    )
+                }
+            )
+            observation.update(
+                {
+                    k: to_float(row.get(k), 0.0)
+                    for k in (
                         "adcom_within_60d_flag",
                         "adcom_within_120d_flag",
-                        "adcom_score",
                         "adcom_committee_oncology_flag",
                     )
                 }
@@ -6097,7 +6109,11 @@ def attach_current_config_spreads(rows: list[dict[str, Any]], *, params: Calibra
     if not baseline_by_policy_group:
         LOGGER.warning("No current_config baseline rows found; current-config objective fields will be empty.")
     if not raw_baseline_by_group:
-        LOGGER.warning("No raw_legacy_score current_config baseline found; raw baseline objective fields will be empty.")
+        # Candidate-grid chunks are built per selection policy, so chunks for
+        # policies other than raw_legacy_score legitimately have no raw
+        # baseline.  attach_raw_baseline_spreads() fills those fields in a
+        # single global pass over the concatenated grid in main().
+        LOGGER.debug("No raw_legacy_score current_config baseline in this chunk; raw baseline fields deferred to global pass.")
 
     for row in rows:
         base_key = tuple(str(row.get(group_key) or "") for group_key in group_keys)
@@ -6122,6 +6138,47 @@ def attach_current_config_spreads(rows: list[dict[str, Any]], *, params: Calibra
                 raw_baseline,
                 spread_key,
             )
+
+
+def attach_raw_baseline_spreads(rows: list[dict[str, Any]], *, params: CalibrationParams) -> None:
+    """Fill raw_legacy_score baseline objective/spread fields across the full grid.
+
+    Candidate-grid chunks are built per selection policy, so only the
+    raw_legacy_score chunk can compute the raw baseline locally; every other
+    policy's chunk leaves those fields blank.  This global pass recomputes the
+    raw baseline from the concatenated candidate rows (including cached chunks
+    loaded via --resume) and fills any raw-baseline fields still blank.
+    """
+    group_keys = ["sample", "evaluation_split", "horizon_days", "top_n"]
+    raw_baseline_by_group: dict[tuple[str, ...], dict[str, Any]] = {}
+    for row in rows:
+        if str(row.get("candidate_name") or "") != CURRENT_CONFIG_CANDIDATE_NAME:
+            continue
+        if str(row.get("selection_policy_name") or "") != "raw_legacy_score":
+            continue
+        base_key = tuple(str(row.get(group_key) or "") for group_key in group_keys)
+        raw_baseline_by_group[base_key] = unprefix(row, "selected_")
+    if not raw_baseline_by_group:
+        LOGGER.warning("No raw_legacy_score current_config baseline found; raw baseline objective fields will be empty.")
+        return
+
+    def is_blank(value: Any) -> bool:
+        return value is None or str(value).strip() == ""
+
+    for row in rows:
+        base_key = tuple(str(row.get(group_key) or "") for group_key in group_keys)
+        raw_baseline = raw_baseline_by_group.get(base_key)
+        if not raw_baseline:
+            continue
+        selected = unprefix(row, "selected_")
+        if is_blank(row.get("calibration_objective_vs_raw_current_config")):
+            row["calibration_objective_vs_raw_current_config"] = rounded(
+                robust_objective(selected, raw_baseline, params=params)
+            )
+        for spread_key in SPREAD_KEYS:
+            field = f"selected_minus_raw_current_config_{spread_key}"
+            if is_blank(row.get(field)):
+                row[field] = summary_metric_spread(selected, raw_baseline, spread_key)
 
 
 def medium_term_scope_name(medium_term_horizons: list[int]) -> str:
@@ -7594,7 +7651,24 @@ def main() -> None:
         observation_cache_path = progress_csv_path(output_dir, "tier1_observations_with_forward_returns.csv")
         observation_cache_manifest_path = progress_csv_path(output_dir, "tier1_observations_with_forward_returns_manifest.json")
         terminal_events_by_ticker = load_terminal_events()
+        # Scoring-relevant config subtrees that shape observation content but
+        # are not captured by the explicit signature fields below.  Hashing
+        # them ensures a config change invalidates --resume observation caches.
+        scoring_config_subtrees = {
+            "sec_event_weights": cfg_get(config, "biotech_features.sec_event_weights", {}) or {},
+            "sec_event_recency_decay": cfg_get(config, "biotech_features.sec_event_recency_decay", {}) or {},
+            "sec_event_parser_lookback_days": cfg_get(config, "sec_event_parser.lookback_days", 730),
+            "borrow_availability_validation": cfg_get(config, "biotech_reports.borrow_availability_validation", {}) or {},
+            "borrow_overlay_thresholds": cfg_get(config, "calibration.tier1.borrow_overlay_thresholds", {}) or {},
+            "commercial_risk_overlay": cfg_get(config, "biotech_scoring.commercial_risk_overlay", {}) or {},
+            "rank_quality_caps": cfg_get(config, "biotech_scoring.rank_quality_caps", {}) or {},
+            "missing_score_defaults": cfg_get(config, "biotech_scoring.missing_score_defaults", {}) or {},
+        }
+        scoring_config_hash = hashlib.sha256(
+            json.dumps(scoring_config_subtrees, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
         observation_cache_signature = {
+            "scoring_config_hash": scoring_config_hash,
             "start_asof": start_asof.isoformat() if start_asof else "",
             "end_asof": end_asof.isoformat() if end_asof else "",
             "snapshot_dates": snapshot_dates,
@@ -7751,6 +7825,9 @@ def main() -> None:
                         resume=bool(args.resume),
                     )
                 )
+    # Per-policy chunks cannot see the raw_legacy_score baseline; fill the raw
+    # baseline objective/spread fields in one global pass over all chunks.
+    attach_raw_baseline_spreads(candidate_rows, params=params)
     write_csv(progress_csv_path(output_dir, "tier1_weight_calibration_grid.csv"), candidate_rows)
     best_rows = build_best_rows(
         candidate_rows,

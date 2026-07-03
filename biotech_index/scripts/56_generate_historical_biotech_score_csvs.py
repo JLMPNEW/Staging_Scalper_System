@@ -839,7 +839,16 @@ def prepare_score_rows_for_export(
             pit_membership_valid = delisted_membership_valid(delisted_info, asof_day)
         else:
             pit_membership_valid = bool(ticker and raw_universe_status not in {"remove", "excluded", "inactive"})
-        ticker_market = market_context.get(ticker, {})
+        # Delisted score rows are keyed by the norgate/calibration symbol
+        # (e.g. AKAOQ-202106), but market_bars_daily keys their bars by the
+        # original ticker (e.g. AKAO) — the same price ticker script 57 uses.
+        # Look market context up under the price ticker; the row keeps its own ticker.
+        price_bar_ticker = ticker
+        if delisted_info:
+            mapped_bar_ticker = str(delisted_info.get("canonical_ticker") or "").strip().upper()
+            if mapped_bar_ticker:
+                price_bar_ticker = mapped_bar_ticker
+        ticker_market = market_context.get(price_bar_ticker) or market_context.get(ticker) or {}
         latest_price_date = str(ticker_market.get("latest_price_date") or "")
         avg60 = to_float(ticker_market.get("avg_dollar_volume_60d"), None)
         has_price_data = bool(latest_price_date)
@@ -995,9 +1004,10 @@ def prepare_score_rows_for_export(
         pit_valid = True
         if asof_day is not None:
             asof_check = asof_day.isoformat()
+            # Enforce the same column list as validate_score_csv so a row with a
+            # future-dated source is marked not PIT-valid (ineligible) here
+            # instead of only failing whole-CSV validation later.
             for date_column in SOURCE_DATE_COLUMNS_NOT_AFTER_ASOF:
-                if date_column in {"latest_price_date", "forward_catalyst_asof_date"}:
-                    continue
                 parsed = parse_date(row.get(date_column))
                 if parsed is not None and parsed.isoformat() > asof_check:
                     pit_valid = False
@@ -1146,8 +1156,11 @@ def validate_score_csv(
         cohort = str(row.get("biotech_primary_cohort") or "").strip()
         if cohort and cohort not in ALLOWED_CALIBRATION_COHORTS:
             failures.append(f"old_or_unknown_cohort:{ticker}:{cohort}")
-        # These columns were added in scoring v2.  Pre-v2 historical rows will
-        # have blank values; only validate when the field is actually populated.
+        # production_score_source / production_rank_score_field are in
+        # REQUIRED_NONBLANK_COLUMNS, so pre-v2 CSVs with blank values are NOT
+        # accepted (they already fail the blank-column check above).  The
+        # truthiness guard below only keeps a blank value from also raising a
+        # redundant wrong-value failure here.
         src = str(row.get("production_score_source") or "").strip()
         if src and src != "legacy_allocation":
             failures.append(f"production_source_not_allocation:{ticker}")
@@ -1246,6 +1259,12 @@ def main() -> None:
         else as_bool(cfg_get(config, "biotech_historical_sequence.survivorship_corrected_panel", True), True)
     )
     strict_oos_start_date = parse_date(cfg_get(config, "biotech_historical_sequence.strict_oos_start_date", ""))
+    if strict_oos_start_date is None:
+        LOGGER.warning(
+            "biotech_historical_sequence.strict_oos_start_date is blank/unset: no row in this run will ever "
+            "get calibration_sample_role='strict_oos' or oos_score_valid_flag=1. Set the config value once a "
+            "strict OOS lock date exists."
+        )
     model_metadata = cfg_get(config, "biotech_scoring.model_metadata", {}) or {}
     if not isinstance(model_metadata, dict):
         model_metadata = {}
@@ -1315,10 +1334,24 @@ def main() -> None:
                             asof=asof,
                             delisted_metadata=delisted_metadata,
                         )
+                    # Include the original/historical price tickers for delisted
+                    # rows so their market bars (keyed by the original ticker)
+                    # are found alongside the score-row tickers.
+                    context_tickers: set[str] = set()
+                    for score_row in score_rows:
+                        row_ticker = str(score_row.get("ticker") or "").strip().upper()
+                        if not row_ticker:
+                            continue
+                        context_tickers.add(row_ticker)
+                        row_delisted_info = delisted_metadata.get(row_ticker)
+                        if row_delisted_info:
+                            bar_ticker = str(row_delisted_info.get("canonical_ticker") or "").strip().upper()
+                            if bar_ticker:
+                                context_tickers.add(bar_ticker)
                     market_context = load_market_context(
                         conn,
                         asof,
-                        tickers={str(row.get("ticker") or "").strip().upper() for row in score_rows},
+                        tickers=context_tickers,
                     )
                     score_rows = prepare_score_rows_for_export(
                         score_rows,
@@ -1412,6 +1445,11 @@ def main() -> None:
         "carry_forward_scores": bool(args.carry_forward_scores),
         "survivorship_corrected_panel": bool(survivorship_corrected_panel),
         "strict_oos_start_date": strict_oos_start_date.isoformat() if strict_oos_start_date is not None else "",
+        "strict_oos_start_date_warning": (
+            ""
+            if strict_oos_start_date is not None
+            else "strict_oos_start_date is blank: strict_oos role and oos_score_valid_flag=1 are never emitted"
+        ),
         "stage11_sidecar_name": str(args.stage11_sidecar_name),
         "delisted_calibration_universe_count": len(delisted_metadata),
         "oos_contract_rules": {

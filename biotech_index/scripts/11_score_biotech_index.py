@@ -144,6 +144,19 @@ PORTFOLIO_LAYER_CONTRACT_FIELDS = [
     "forward_catalyst_asof_date",
 ]
 
+# data_provenance source dates used to derive pit_valid; blank dates pass.
+PIT_PROVENANCE_DATE_FIELDS = (
+    "source_snapshot_asof_date",
+    "price_data_asof_date",
+    "feature_data_asof_date",
+    "clinical_data_asof_date",
+    "financial_data_asof_date",
+    "short_interest_asof_date",
+    "institutional_data_asof_date",
+    "insider_data_asof_date",
+    "borrow_data_asof_date",
+)
+
 
 @dataclass(frozen=True)
 class TaxonomyOverride:
@@ -244,6 +257,20 @@ QUALITY_GUARDRAIL_SELECTION_POLICIES = frozenset(
         "core_veto_event_soft_drag_quality_guardrail_borrow_discovery_only",
     }
 )
+# Policies whose promised semantics are NOT implemented by
+# apply_production_selection_policy (no branch applies their hard veto, risk
+# cap, or targeted soft filter). They remain in PRODUCTION_SELECTION_POLICIES
+# for calibration bookkeeping but must not be promoted to the production
+# selection_policy until their semantics are ported.
+UNSUPPORTED_PRODUCTION_SELECTION_POLICIES = frozenset(
+    {
+        "hard_weakness_veto",
+        "hard_veto_soft_drag",
+        "investable_core_risk_cap",
+        "core_veto_event_drag_toxic_soft_filter",
+    }
+)
+SUPPORTED_PRODUCTION_POLICIES = PRODUCTION_SELECTION_POLICIES - UNSUPPORTED_PRODUCTION_SELECTION_POLICIES
 
 
 @dataclass(frozen=True)
@@ -1156,13 +1183,27 @@ def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]]) -> None:
         allocation_bucket = str(row.get("allocation_bucket") or row.get("bucket") or "").strip().lower()
         native_score_field = str(row.get("production_rank_score_field") or "opportunity_score").strip() or "opportunity_score"
         native_score_value = to_float(row.get(native_score_field), to_float(row.get("production_rank_score"), math.nan))
-        missing_score = not math.isfinite(native_score_value) or native_score_value <= 0.0
+        # A zero produced by a veto/cap is a real production score, not a missing one.
+        score_zeroed_by_veto = (
+            math.isfinite(native_score_value)
+            and native_score_value <= 0.0
+            and (rank_cap_vetoed or core_veto)
+        )
+        missing_score = not math.isfinite(native_score_value) or (
+            native_score_value <= 0.0 and not score_zeroed_by_veto
+        )
         price_data_available = bool(str(row.get("price_data_asof_date") or row.get("latest_price_date") or "").strip())
-        pit_valid = True
+        pit_valid = not any(
+            source_date_after_asof(row.get(field), row.get("asof_date"))
+            for field in PIT_PROVENANCE_DATE_FIELDS
+        )
 
         if missing_score:
             status = "excluded"
             reason = "missing_score"
+        elif score_zeroed_by_veto:
+            status = "excluded"
+            reason = "score_zeroed_by_veto"
         elif not investible:
             status = "excluded"
             reason = "not_investible"
@@ -1202,6 +1243,7 @@ def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]]) -> None:
             ticker
             and calibration_eligible
             and not missing_score
+            and not score_zeroed_by_veto
             and price_data_available
             and pit_valid
         )
@@ -1217,6 +1259,9 @@ def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]]) -> None:
         elif missing_score:
             research_status = "missing_score"
             research_reason = "missing_score"
+        elif score_zeroed_by_veto:
+            research_status = "score_zeroed_by_veto"
+            research_reason = "score_zeroed_by_veto"
         elif not price_data_available:
             research_status = "missing_price_data"
             research_reason = "missing_price_data"
@@ -1343,8 +1388,10 @@ def commercial_risk_policy_penalty(fields: dict[str, Any], settings: dict[str, A
         score = to_float(fields.get(field), 0.0) or 0.0
         max_penalty = to_float(settings.get(setting), 0.0) or 0.0
         penalty += max(0.0, max_penalty) * max(0.0, min(100.0, score)) / 100.0
+    # Any configured cap >= 0 applies (0 disables the overlay entirely); only a
+    # missing-but-defaulted negative value leaves the penalty uncapped.
     max_total = to_float(settings.get("max_total_penalty"), 25.0)
-    return min(penalty, max_total) if max_total is not None and max_total > 0.0 else penalty
+    return min(penalty, max_total) if math.isfinite(max_total) and max_total >= 0.0 else penalty
 
 
 def rank_quality_cap_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -1523,7 +1570,8 @@ def core_structural_veto_reasons(
     if verified_active <= 0.0 and not has_business_anchor:
         reasons.append("no_active_trial_no_business_anchor")
 
-    addv = to_float(sec_liq.get("median_addv20", sec_liq.get("avg_dollar_volume_20d")), math.nan)
+    # first_nonblank coalesces present-but-None/blank median_addv20 to the fallback field.
+    addv = to_float(first_nonblank(sec_liq.get("median_addv20"), sec_liq.get("avg_dollar_volume_20d")), math.nan)
     min_addv20 = float(settings.get("min_addv20") or 0.0)
     if min_addv20 > 0.0 and (not math.isfinite(addv) or addv < min_addv20):
         reasons.append("illiquid")
@@ -2035,6 +2083,27 @@ def score_rows(
     bucket_settings = bucket_params(config)
     cohort_policy = cohort_policy_settings(config)
     selection_policy = str(production_baseline["selection_policy"])
+    if selection_policy in PRODUCTION_SELECTION_POLICIES and selection_policy not in SUPPORTED_PRODUCTION_POLICIES:
+        raise ValueError(
+            "biotech_scoring.production_baseline.selection_policy="
+            f"{selection_policy!r} is a known calibration policy name whose semantics are not "
+            "implemented by apply_production_selection_policy; promoting it would silently "
+            f"diverge from its promised behavior. Supported policies: {sorted(SUPPORTED_PRODUCTION_POLICIES)}"
+        )
+    # Only fail when the veto is EXPLICITLY disabled; an absent config block keeps
+    # the settings default so minimal/partial configs (tests, ad-hoc runs) still work.
+    explicit_veto_enabled = cfg_get(config, "biotech_scoring.core_structural_veto.enabled", None)
+    if (
+        selection_policy.startswith(("core_veto", "core_structural_veto"))
+        and explicit_veto_enabled is not None
+        and not core_veto_settings["enabled"]
+    ):
+        raise ValueError(
+            "biotech_scoring.production_baseline.selection_policy="
+            f"{selection_policy!r} promises a core structural veto but "
+            "biotech_scoring.core_structural_veto.enabled is false; the veto would never fire. "
+            "Enable the veto or select a non-core_veto policy."
+        )
     apply_core_veto_to_rank = bool(core_veto_settings["enabled"] and core_veto_settings["apply_to_rank"])
     force_core_veto_avoid = bool(core_veto_settings["enabled"] and core_veto_settings["force_avoid_bucket"])
     production_score_field = production_rank_score_field(config)
@@ -2084,6 +2153,10 @@ def score_rows(
         )
         if not isinstance(borrow_availability, dict):
             borrow_availability = {}
+        # PIT guard (mirrors sanitize_short_interest_for_pit): blank shadow blocks
+        # whose data_provenance source date is after the scoring asof_date.
+        if source_date_after_asof(data_provenance.get("borrow_data_asof_date"), row.get("asof_date")):
+            borrow_availability = {}
         institutional_ownership = (
             shadow_signals.get("institutional_ownership", {})
             if isinstance(shadow_signals, dict)
@@ -2091,12 +2164,16 @@ def score_rows(
         )
         if not isinstance(institutional_ownership, dict):
             institutional_ownership = {}
+        if source_date_after_asof(data_provenance.get("institutional_data_asof_date"), row.get("asof_date")):
+            institutional_ownership = {}
         insider_activity = (
             shadow_signals.get("insider_activity", {})
             if isinstance(shadow_signals, dict)
             else {}
         )
         if not isinstance(insider_activity, dict):
+            insider_activity = {}
+        if source_date_after_asof(data_provenance.get("insider_data_asof_date"), row.get("asof_date")):
             insider_activity = {}
         fda_adcom = (
             shadow_signals.get("fda_adcom", {})
@@ -3252,14 +3329,26 @@ def score_rows(
     enrich_biotech_cohort_rank_stats(scored)
     apply_biotech_cohort_policy(scored, cohort_policy)
     enrich_portfolio_layer_contract_rows(scored)
-    scored.sort(
-        key=lambda item: (
-            1 if production_rank_blocked(item, apply_core_veto_to_rank=apply_core_veto_to_rank) else 0,
-            -clamp(to_float(item.get("allocation_opportunity_score"), to_float(item.get("opportunity_score"), 0.0))),
-            clamp(to_float(item.get("allocation_risk_score"), to_float(item.get("risk_score"), 100.0))),
-            str(item["ticker"]),
+    if production_score_field == "discovery_opportunity_score":
+        # routed_discovery is active: rank must follow the routed production score,
+        # not the legacy allocation score.
+        scored.sort(
+            key=lambda item: (
+                1 if production_rank_blocked(item, apply_core_veto_to_rank=apply_core_veto_to_rank) else 0,
+                -clamp(to_float(item.get("production_rank_score"), 0.0)),
+                clamp(to_float(item.get("production_rank_risk_score"), 100.0)),
+                str(item["ticker"]),
+            )
         )
-    )
+    else:
+        scored.sort(
+            key=lambda item: (
+                1 if production_rank_blocked(item, apply_core_veto_to_rank=apply_core_veto_to_rank) else 0,
+                -clamp(to_float(item.get("allocation_opportunity_score"), to_float(item.get("opportunity_score"), 0.0))),
+                clamp(to_float(item.get("allocation_risk_score"), to_float(item.get("risk_score"), 100.0))),
+                str(item["ticker"]),
+            )
+        )
     for idx, row in enumerate(scored, start=1):
         row["rank"] = idx
     if missing_catalyst_raw:

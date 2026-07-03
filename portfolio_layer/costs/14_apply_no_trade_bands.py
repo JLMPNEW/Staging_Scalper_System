@@ -73,8 +73,10 @@ def load_prior(path: Path | None) -> dict[str, float]:
         ticker = str(r.get("ticker", "")).strip()
         if not ticker or ticker.upper() == "CASH":
             continue
-        parsed_weight = finite_float(r.get("weight"), name=f"{path}:{ticker}.weight")
-        weight = 0.0 if parsed_weight is None else parsed_weight
+        raw_weight = r.get("weight")
+        if raw_weight in (None, ""):
+            raw_weight = 0.0  # blank cell = no prior position (finite_float raises on blank)
+        weight = finite_float(raw_weight, name=f"{path}:{ticker}.weight")
         if weight < 0:
             raise ValueError(f"Prior weight for {ticker} must be non-negative, got {weight}")
         if ticker in out:
@@ -285,8 +287,20 @@ def main() -> int:  # noqa: C901
     asset_sum = sum(final.values())
     cash_weight = gross - asset_sum
     if cash_weight < -1e-8:
-        LOGGER.error("Cost-adjusted book is over-invested: assets=%.10f gross=%.10f cash=%.10f", asset_sum, gross, cash_weight)
-        return 1
+        # Suppressed sells kept prior weights above the gross budget (possible on a rebalance whose
+        # target de-grosses the book). Scale the whole asset block back to the budget — a pure
+        # proportional de-risking that keeps every no-trade decision, recorded per name.
+        scale = gross / asset_sum
+        LOGGER.warning(
+            "Suppressed sells over-invest the book (assets=%.10f > gross=%.10f); scaling all "
+            "positions by %.8f to restore the budget", asset_sum, gross, scale,
+        )
+        final = {t: w * scale for t, w in final.items()}
+        for d in decisions:
+            d["decision"] = f"{d['decision']}+budget_rescale" if d["ticker"] in final else d["decision"]
+            d["reason"] = f"{d['reason']};budget_rescale={scale:.8f}" if d["ticker"] in final else d["reason"]
+        asset_sum = sum(final.values())
+        cash_weight = gross - asset_sum
     if abs(cash_weight) <= 1e-10:
         cash_weight = 0.0
 

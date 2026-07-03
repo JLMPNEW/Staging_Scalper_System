@@ -26,7 +26,7 @@ from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, init_db, utc_now
 from biotech_index.core.http_cache import CachedHttpClient, HostThrottle
 from biotech_index.core.logging_utils import configure_utc_logging
-from biotech_index.core.text_norm import alias_token_sets, names_match, normalize_ticker
+from biotech_index.core.text_norm import alias_token_sets, names_match, normalize_org_name, normalize_ticker
 
 
 LOGGER = logging.getLogger("reconcile_ctgov_nct_seeds")
@@ -197,7 +197,10 @@ def company_context(conn: sqlite3.Connection, ticker: str) -> tuple[dict[str, An
     ).fetchone()
     if company is None:
         return None, set(), []
-    aliases = {str(company["ticker"] or ""), str(company["company_name"] or "")}
+    aliases = {
+        normalize_org_name(str(company["ticker"] or "")),
+        normalize_org_name(str(company["company_name"] or "")),
+    }
     alias_rows = conn.execute(
         """
         SELECT alias_raw, alias_norm
@@ -207,8 +210,8 @@ def company_context(conn: sqlite3.Connection, ticker: str) -> tuple[dict[str, An
         (int(company["company_id"]),),
     ).fetchall()
     for row in alias_rows:
-        aliases.add(str(row["alias_raw"] or ""))
-        aliases.add(str(row["alias_norm"] or ""))
+        aliases.add(normalize_org_name(str(row["alias_raw"] or "")))
+        aliases.add(normalize_org_name(str(row["alias_norm"] or "")))
     norm_aliases = {alias for alias in aliases if alias.strip()}
     return dict(company), norm_aliases, alias_token_sets(norm_aliases)
 
@@ -651,23 +654,6 @@ def main() -> None:
                                     "confidence": "0.95",
                                     "link_from_search": "false",
                                     "notes": f"Exact NCT refresh seed from NCT-first reconciliation; relation={relation or 'sponsor'}",
-                                    "enabled": "true",
-                                }
-                            )
-                            existing_search_keys.add(key)
-                            search_added = True
-                    elif args.apply_overrides and recommendation == "needs_program_owner_review" and seed.expected_relation == "program":
-                        key = (seed.ticker.upper(), seed.nct_id.upper(), "QUERY.TERM")
-                        if key not in existing_search_keys:
-                            search_rows_to_add.append(
-                                {
-                                    "ticker": seed.ticker,
-                                    "search_term": seed.nct_id,
-                                    "query_field": "query.term",
-                                    "source": f"{source_tag}_review",
-                                    "confidence": "0.95",
-                                    "link_from_search": "false",
-                                    "notes": "Exact NCT refresh seed pending program-owner review; does not create program link.",
                                     "enabled": "true",
                                 }
                             )

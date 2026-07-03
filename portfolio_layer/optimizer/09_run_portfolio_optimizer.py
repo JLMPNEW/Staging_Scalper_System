@@ -24,7 +24,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv  # noqa: E402
+from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.db import connect, finish_run, start_run  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
@@ -233,7 +233,9 @@ def main() -> int:  # noqa: C901
         return 1
 
     mu_raw = np.array([_f(scores[t].get("final_score")) for t in universe])
-    conf = np.array([_f(scores[t].get("score_confidence"), 1.0) for t in universe])
+    # neutral 0.5 default matches the adapters' missing-confidence convention (and Stage 8's);
+    # the sealed contract always carries score_confidence, so this only guards a malformed row
+    conf = np.array([_f(scores[t].get("score_confidence"), 0.5) for t in universe])
     mu_used = mu_raw * conf if use_conf else mu_raw
     sigma = covariance.loc[universe, universe].to_numpy(dtype=float)
 
@@ -288,9 +290,9 @@ def main() -> int:  # noqa: C901
                                         "objective_value", "solver_attempts")},
     }
     meta_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+    write_manifest(meta_path, meta)
 
-    with connect(db_path) as conn:
+    with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         run_id = start_run(conn, run_type="run_portfolio_optimizer", input_path=scores_path)
         finish_run(conn, run_id=run_id, status="success", row_count=len(held),
                    message=f"as_of={run_as_of} held={len(held)} universe={len(universe)} excluded={len(excluded)}")

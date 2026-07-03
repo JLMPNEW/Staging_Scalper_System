@@ -493,13 +493,13 @@ def main() -> int:  # noqa: C901
                 "returns_panel.csv": sha256_file(paths_required["returns_panel.csv"]),
             },
         }
-        replay_path.write_text(json.dumps(replay_payload, indent=2, sort_keys=True), encoding="utf-8")
+        write_manifest(replay_path, replay_payload)
         rec("bl_vs_aqr_net_static_replay_diagnostic", "WARN",
             f"in-sample only; common_rows={len(common_index)}; BL net Sharpe={bl_sharpe:.4f}, "
             f"AQR net Sharpe={aqr_sharpe:.4f}, delta={delta:.4f}")
     except Exception as exc:  # noqa: BLE001 - diagnostic failure should be visible but non-blocking.
         replay_payload = {"error": f"{type(exc).__name__}: {exc}"}
-        replay_path.write_text(json.dumps(replay_payload, indent=2, sort_keys=True), encoding="utf-8")
+        write_manifest(replay_path, replay_payload)
         rec("bl_vs_aqr_net_static_replay_diagnostic", "WARN", f"diagnostic unavailable: {type(exc).__name__}: {exc}")
 
     validation_path.parent.mkdir(parents=True, exist_ok=True)

@@ -166,6 +166,27 @@ def _expected_liquidity_universe(run_dir: Path) -> set[str]:
             universe_source = ""
     if "stocks_scores.csv:investable_eligible" in universe_source or "investable_scores" in universe_source:
         return scores
+    # 05c's trade-list / target-weights universe modes (including the "auto:" prefixed variants):
+    # the snapshot legitimately covers only traded/held names, so that is the expected universe.
+    if "trade_list" in universe_source:
+        trade_path = run_dir / "costs" / "trade_list.csv"
+        if trade_path.exists():
+            return {
+                str(r.get("ticker", "")).strip().upper()
+                for r in read_csv(trade_path)
+                if str(r.get("ticker", "")).strip()
+                and _safe_float(r.get("trade_notional"), 0.0) > 0
+            }
+    if "target_weights" in universe_source:
+        target_path = run_dir / "optimizer" / "target_weights.csv"
+        if target_path.exists():
+            return {
+                str(r.get("ticker", "")).strip().upper()
+                for r in read_csv(target_path)
+                if str(r.get("ticker", "")).strip()
+                and str(r.get("ticker", "")).strip().upper() != "CASH"
+                and _safe_float(r.get("weight"), 0.0) > 0
+            }
 
     coverage_path = run_dir / "risk" / "risk_coverage.csv"
     if not coverage_path.exists():

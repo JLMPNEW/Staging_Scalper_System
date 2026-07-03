@@ -362,6 +362,17 @@ def upsert_market_bars(
         if close is None or adj_close is None:
             continue
         raw_close = safe_float(row.get("Unadjusted Close")) or close
+        # The NONE-adjusted Norgate frame supplies raw OHLC while AdjClose carries
+        # the total-return close. Scale open/high/low by the per-bar adjustment
+        # factor so the stored is_adjusted=1 bar has an internally consistent
+        # OHLC range; the unadjusted values are preserved in the raw_* columns.
+        factor = (adj_close / raw_close) if raw_close else None
+        raw_open = safe_float(row.get("Open"))
+        raw_high = safe_float(row.get("High"))
+        raw_low = safe_float(row.get("Low"))
+        adj_open = raw_open * factor if raw_open is not None and factor is not None else None
+        adj_high = raw_high * factor if raw_high is not None and factor is not None else None
+        adj_low = raw_low * factor if raw_low is not None and factor is not None else None
         adjustment = json.dumps(
             {
                 "adjustment": "norgate_total_return_adj_close",
@@ -405,19 +416,19 @@ def upsert_market_bars(
                 ticker,
                 pandas_index_date(idx),
                 source_id,
-                safe_float(row.get("Open")),
-                safe_float(row.get("High")),
-                safe_float(row.get("Low")),
+                adj_open,
+                adj_high,
+                adj_low,
                 adj_close,
                 safe_float(row.get("Volume")),
                 None,
                 adjustment,
-                safe_float(row.get("Open")),
-                safe_float(row.get("High")),
-                safe_float(row.get("Low")),
+                raw_open,
+                raw_high,
+                raw_low,
                 raw_close,
                 adj_close,
-                (adj_close / raw_close) if raw_close else None,
+                factor,
                 safe_float(row.get("Dividend")),
                 None,
                 "norgatedata_total_return",

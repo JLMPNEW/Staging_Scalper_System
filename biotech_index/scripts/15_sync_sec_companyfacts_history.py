@@ -12,7 +12,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -279,7 +279,7 @@ def fiscal_sort_key(obs: dict[str, Any]) -> tuple[str, str, str]:
     )
 
 
-def parse_observations(payload: dict[str, Any], *, company: Company, cutoff: date) -> list[dict[str, Any]]:
+def parse_observations(payload: dict[str, Any], *, company: Company, cutoff: date, asof: date | None = None) -> list[dict[str, Any]]:
     facts = payload.get("facts", {}) if isinstance(payload, dict) else {}
     observations: list[dict[str, Any]] = []
     if not isinstance(facts, dict):
@@ -303,12 +303,22 @@ def parse_observations(payload: dict[str, Any], *, company: Company, cutoff: dat
                     end_date = parse_date(entry.get("end"))
                     if end_date is None or end_date < cutoff:
                         continue
+                    # Point-in-time guard: a historical --asof run must not ingest
+                    # facts whose period ends or whose filing occurred after asof.
+                    # asof=None (legacy callers) skips the upper bound (live semantics).
+                    if asof is not None and end_date > asof:
+                        continue
+                    filed_date = parse_date(entry.get("filed"))
+                    if asof is not None and filed_date is not None and filed_date > asof:
+                        continue
                     form = str(entry.get("form") or "").upper()
                     if not form or form not in ALLOWED_FORMS:
                         continue
                     value = to_float(entry.get("val"))
                     if value is None:
                         continue
+                    start_date = parse_date(entry.get("start"))
+                    duration_days = (end_date - start_date).days if start_date is not None else None
                     fy_text = str(entry.get("fy") or "")
                     observations.append(
                         {
@@ -321,6 +331,7 @@ def parse_observations(payload: dict[str, Any], *, company: Company, cutoff: dat
                             "value": value,
                             "period_start": str(entry.get("start") or ""),
                             "period_end": end_date.isoformat(),
+                            "duration_days": duration_days,
                             "fiscal_year": int(fy_text) if fy_text.isdigit() else None,
                             "fiscal_period": str(entry.get("fp") or ""),
                             "form": form,
@@ -332,6 +343,17 @@ def parse_observations(payload: dict[str, Any], *, company: Company, cutoff: dat
                         }
                     )
     return observations
+
+
+def observation_duration_days(obs: dict[str, Any]) -> int | None:
+    duration = obs.get("duration_days")
+    if duration is not None:
+        return int(duration)
+    start = parse_date(obs.get("period_start"))
+    end = parse_date(obs.get("period_end"))
+    if start is None or end is None:
+        return None
+    return (end - start).days
 
 
 def prefer_observation(current: dict[str, Any] | None, candidate: dict[str, Any]) -> dict[str, Any]:
@@ -347,7 +369,22 @@ def prefer_observation(current: dict[str, Any] | None, candidate: dict[str, Any]
         return candidate
     if candidate_unit == "SHARES" and current_unit != "SHARES":
         return candidate
-    return candidate if fiscal_sort_key(candidate) >= fiscal_sort_key(current) else current
+    # Flow (duration) facts: a 10-Q tags both the discrete 3-month value and the
+    # YTD value with the same period_end/fp/form, so pick by duration -- shortest
+    # for Q1-Q4 rows (keeps 3-month over YTD; semiannual IFRS filers with only a
+    # ~182-day fact are unaffected) and longest for FY rows (keeps the annual
+    # value over a Q4-only fact tagged FY). Instant balance-sheet facts have no
+    # period_start, so duration is None and this preference is skipped.
+    candidate_duration = observation_duration_days(candidate)
+    current_duration = observation_duration_days(current)
+    if candidate_duration is not None and current_duration is not None and candidate_duration != current_duration:
+        if str(candidate.get("fiscal_period") or "").upper() == "FY":
+            return candidate if candidate_duration > current_duration else current
+        return candidate if candidate_duration < current_duration else current
+    # Prefer the EARLIEST-filed observation so stored values stay point-in-time
+    # (first-reported) instead of absorbing restatements from later filings that
+    # re-report the same period as a comparative.
+    return current if fiscal_sort_key(current) <= fiscal_sort_key(candidate) else candidate
 
 
 def normalize_rows(observations: list[dict[str, Any]], *, company_id: int) -> list[dict[str, Any]]:
@@ -380,6 +417,12 @@ def normalize_rows(observations: list[dict[str, Any]], *, company_id: int) -> li
                 "_source_concepts": {},
             },
         )
+        # Known limitation: concepts for one (period_end, fp, form) row can come
+        # from different accessions (e.g. a concept first tagged only in a later
+        # comparative filing). The row is stamped with the MAX filed_date /
+        # accession across the observations actually used, so filed_date remains
+        # a conservative "all inputs available by" bound; with the earliest-filed
+        # preference above this normally reflects first-reported data.
         if fiscal_sort_key(obs) >= (str(row.get("filed_date") or ""), str(row.get("form") or ""), str(row.get("accession_nodash") or "")):
             row["filed_date"] = obs.get("filed_date")
             row["accession_nodash"] = obs.get("accession_nodash")
@@ -694,6 +737,7 @@ def fetch_companyfacts_result(
     max_retries: int,
     throttle: HostThrottle,
     cutoff: date,
+    asof: date | None = None,
     latest_source_filing_date: str,
     http: CachedHttpClient | None = None,
 ) -> CompanyFactsFetchResult:
@@ -722,7 +766,7 @@ def fetch_companyfacts_result(
                 headers=headers,
                 ttl_hours=ttl_hours,
             )
-        observations = parse_observations(payload, company=company, cutoff=cutoff)
+        observations = parse_observations(payload, company=company, cutoff=cutoff, asof=asof)
         normalized = normalize_rows(observations, company_id=company.company_id)
         return CompanyFactsFetchResult(
             company=company,
@@ -1228,7 +1272,12 @@ def main() -> None:
     asof_obj = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
     if asof_obj is None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
-    cutoff = asof_obj - timedelta(days=max(1, lookback_years) * 366)
+    lookback = max(1, lookback_years)
+    try:
+        cutoff = asof_obj.replace(year=asof_obj.year - lookback)
+    except ValueError:
+        # Feb 29 asof with no leap day in the target year.
+        cutoff = asof_obj.replace(year=asof_obj.year - lookback, day=28)
     ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     asof = asof_obj.isoformat()
@@ -1340,6 +1389,7 @@ def main() -> None:
                     max_retries=max_retries,
                     throttle=throttle,
                     cutoff=cutoff,
+                    asof=asof_obj,
                     latest_source_filing_date=latest_source_dates.get(company.company_id, ""),
                     http=get_thread_http_client(),
                 )
@@ -1365,6 +1415,7 @@ def main() -> None:
                                 max_retries=max_retries,
                                 throttle=throttle,
                                 cutoff=cutoff,
+                                asof=asof_obj,
                                 latest_source_filing_date=latest_source_dates.get(company.company_id, ""),
                                 http=http_client,
                             )

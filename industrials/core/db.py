@@ -696,6 +696,109 @@ CREATE TABLE IF NOT EXISTS feature_financial_statement (
     FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
 );
 
+CREATE TABLE IF NOT EXISTS fact_sec_form4_transaction (
+    ticker TEXT NOT NULL,
+    accession_number TEXT NOT NULL,
+    nonderiv_trans_sk TEXT NOT NULL,
+    rptowner_cik TEXT NOT NULL DEFAULT '',
+    source_id TEXT NOT NULL,
+    filing_date TEXT,
+    period_of_report TEXT,
+    transaction_date TEXT,
+    transaction_code TEXT,
+    acquired_disposed_code TEXT,
+    transaction_shares REAL,
+    transaction_price_per_share REAL,
+    transaction_value REAL,
+    shares_owned_following_transaction REAL,
+    direct_or_indirect_ownership TEXT,
+    reporting_owner_name TEXT,
+    reporting_owner_relationship TEXT,
+    reporting_owner_title TEXT,
+    is_director INTEGER,
+    is_officer INTEGER,
+    is_ten_percent_owner INTEGER,
+    is_open_market_purchase INTEGER NOT NULL DEFAULT 0,
+    is_open_market_sale INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, accession_number, nonderiv_trans_sk, rptowner_cik, source_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_13f_positioning (
+    ticker TEXT NOT NULL,
+    asof_date TEXT NOT NULL,
+    period_of_report TEXT,
+    source_id TEXT NOT NULL,
+    institutional_shares REAL,
+    institutional_value REAL,
+    manager_count INTEGER,
+    institutional_ownership_delta_pct REAL,
+    new_buyer_count INTEGER,
+    exiting_holder_count INTEGER,
+    net_buyer_count INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, asof_date, source_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_short_interest (
+    ticker TEXT NOT NULL,
+    settlement_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    asof_date TEXT,
+    publication_date TEXT,
+    short_interest_shares REAL,
+    float_shares REAL,
+    short_interest_pct_float REAL,
+    days_to_cover REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, settlement_date, source_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_ibkr_borrow_snapshot (
+    ticker TEXT NOT NULL,
+    asof_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    con_id TEXT,
+    borrow_fee_rate REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, asof_date, source_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS feature_positioning (
+    ticker TEXT NOT NULL,
+    asof_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    model_family TEXT NOT NULL DEFAULT 'defense',
+    insider_purchase_count_90d INTEGER NOT NULL DEFAULT 0,
+    insider_purchase_value_90d REAL,
+    insider_sale_count_90d INTEGER NOT NULL DEFAULT 0,
+    insider_sale_value_90d REAL,
+    insider_cluster_buyers_90d INTEGER NOT NULL DEFAULT 0,
+    insider_net_value_90d REAL,
+    latest_institutional_shares REAL,
+    latest_institutional_value REAL,
+    latest_manager_count INTEGER,
+    institutional_ownership_delta_pct REAL,
+    latest_short_interest_shares REAL,
+    latest_short_interest_pct_float REAL,
+    latest_days_to_cover REAL,
+    short_interest_change_3m REAL,
+    latest_borrow_fee_rate REAL,
+    positioning_quality TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, asof_date, source_id, model_family),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
 CREATE TABLE IF NOT EXISTS data_quality_issues (
     issue_id INTEGER PRIMARY KEY AUTOINCREMENT,
     detected_at TEXT NOT NULL,
@@ -782,6 +885,21 @@ CREATE INDEX IF NOT EXISTS idx_fact_fx_rate_lookup
 
 CREATE INDEX IF NOT EXISTS idx_feature_financial_statement_ticker_asof
     ON feature_financial_statement(model_family, ticker, asof_date);
+
+CREATE INDEX IF NOT EXISTS idx_fact_sec_form4_transaction_ticker_date
+    ON fact_sec_form4_transaction(ticker, transaction_date);
+
+CREATE INDEX IF NOT EXISTS idx_fact_13f_positioning_ticker_asof
+    ON fact_13f_positioning(ticker, asof_date);
+
+CREATE INDEX IF NOT EXISTS idx_fact_short_interest_ticker_settle
+    ON fact_short_interest(ticker, settlement_date);
+
+CREATE INDEX IF NOT EXISTS idx_fact_ibkr_borrow_snapshot_ticker_asof
+    ON fact_ibkr_borrow_snapshot(ticker, asof_date);
+
+CREATE INDEX IF NOT EXISTS idx_feature_positioning_asof
+    ON feature_positioning(model_family, asof_date);
 
 CREATE INDEX IF NOT EXISTS idx_data_quality_issues_stage_ticker
     ON data_quality_issues(stage, ticker);

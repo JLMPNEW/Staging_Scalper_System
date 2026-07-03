@@ -1,0 +1,19 @@
+ticker,source_ticker,ibkr_ticker,cusip,institutional_13f_issuer_alias,institutional_13f_exempt,institutional_13f_exemption_reason,institutional_13f_exempt_until,short_interest_exempt,exemption_reason,short_pct_float_exempt,short_pct_float_exemption_reason,form4_exempt,form4_exemption_reason,form4_cik,form4_security_title_regex,form4_security_title_exclude_regex,notes
+HEI,,HEI,422806109,,0,,,0,,0,,0,,0000046619,^(?!.*CLASS A).*COMMON STOCK.*,,SEC Form 4 issuer CIK is shared across HEI and HEI-A; route non-Class A common-stock rows to HEI.
+HEI-A,HEIA,HEI A,422806208,,0,,,0,,0,,0,,0000046619,CLASS A.*COMMON STOCK,,FINRA uses compact class-share symbol; IBKR uses spaced class symbol; SEC 13F Class A CUSIP; route Class A Form 4 rows from parent CIK.
+MOG-A,MOGA,MOG A,615394202,,0,,,0,,0,,0,,0000067887,CLASS A.*COMMON,,FINRA uses compact class-share symbol; IBKR uses spaced class symbol; SEC 13F Class A CUSIP; route Class A Form 4 rows from parent CIK.
+MOG-B,MOGB,MOG B,615394301,,0,,,0,,0,,0,,0000067887,CLASS B.*COMMON,,FINRA uses compact class-share symbol; IBKR uses spaced class symbol; SEC 13F Class B CUSIP; route Class B Form 4 rows from parent CIK.
+ISSC,,,45769N105,,0,,,0,,0,,0,,,,,SEC 13F CUSIP for Innovative Solutions & Support / Innovative Aerosystems lineage.
+ARXS,,,04339D105,,1,NEW_LISTING_LAG_Q2_2026_13F_DERA,2026-08-15,0,,1,RECENT_ISSUER_NO_SEC_SHARE_DENOMINATOR,0,,,,,New April 2026 IPO; initial 13F footprint expected in Q2 2026 DERA release after mid-August 2026.
+AVEX,,,00835T107,,1,NEW_LISTING_LAG_Q2_2026_13F_DERA,2026-08-15,0,,1,RECENT_ISSUER_NO_SEC_SHARE_DENOMINATOR,0,,,,,June 2026 listing; initial 13F footprint expected in Q2 2026 DERA release; SEC facts expose only 1000-share shell stubs.
+DPC,,,JE00BPK4NV88,DPC HOLDINGS PLC,1,NEW_LISTING_LAG_Q2_2026_13F_DERA,2026-08-15,1,NEW_ISSUER_SHORT_EXEMPTION,0,,0,,,,,June 2026 Jersey/UK issuer; use ISIN/CINS and DPC HOLDINGS PLC alias until SEC 13F cross-reference appears.
+DUKR,,,903448207,,1,NEW_LISTING_LAG_Q2_2026_13F_DERA,2026-08-15,0,,0,,0,,,,,May 2026 IPO; initial 13F footprint expected in Q2 2026 DERA release after mid-August 2026.
+ELMT,,,289395105,,1,NEW_LISTING_LAG_Q2_2026_13F_DERA,2026-08-15,0,,0,,0,,,,,April 2026 IPO; initial 13F footprint expected in Q2 2026 DERA release after mid-August 2026.
+HAWK,,,420201105,,1,NEW_LISTING_LAG_Q2_2026_13F_DERA,2026-08-15,0,,0,,0,,,,,May 2026 IPO; initial 13F footprint expected in Q2 2026 DERA release after mid-August 2026.
+MDA,,,,,0,,,0,,1,FPI_NO_SEC_SHARE_DENOMINATOR,1,FPI_SECTION16_EXEMPT,,,,Foreign private issuer; Form 4/Section 16 exempt; SEC FPI text facts do not expose a usable share denominator yet.
+SPCX,,,84615Q103,,1,NEW_LISTING_LAG_Q2_2026_13F_DERA,2026-08-15,0,,1,RECENT_IPO_NO_SEC_SHARE_DENOMINATOR,0,,,,,June 2026 IPO; initial 13F footprint expected in Q2 2026 DERA release after mid-August 2026.
+CAE,,,,,0,,,0,,0,,1,FPI_SECTION16_EXEMPT,,,,Foreign private issuer; insiders are Section 16 exempt and do not file SEC Form 4.
+EMBJ,,,,,0,,,0,,0,,1,FPI_SECTION16_EXEMPT,,,,Foreign private issuer; insiders are Section 16 exempt and do not file SEC Form 4.
+MOB,,,,,0,,,0,,0,,1,FPI_SECTION16_EXEMPT,,,,Foreign private issuer; insiders are Section 16 exempt and do not file SEC Form 4.
+SIDU,,,,,0,,,0,,0,,0,,0001879726,,,Force validated SEC issuer CIK for Sidus Space Form 4 import.
+XTIA,,,,,0,,,0,,0,,0,,0001529113,,,Force validated SEC issuer CIK for XTI Aerospace post-2024 / INPX lineage Form 4 import.

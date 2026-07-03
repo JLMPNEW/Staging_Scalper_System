@@ -177,8 +177,15 @@ def _stock_trade_lots(
         lots[symbol].extend(dict(row) for row in seed_rows)
     issues: list[str] = []
     ignored_closed: list[str] = []
-    closed_statement_qty: dict[str, float] = defaultdict(float)
     stock_trades = sorted((r for r in trades if r.get("asset_category") == "Stocks"), key=_trade_sort_key)
+    # Untracked (fully closed intra-statement) symbols: net sells against the TOTAL statement buys,
+    # order-independently — a short-then-cover sequence must not emit a spurious pre-report WARN.
+    closed_statement_qty: dict[str, float] = defaultdict(float)
+    for row in stock_trades:
+        symbol = str(row.get("symbol", "")).strip().upper()
+        qty = _f(row.get("quantity"))
+        if symbol and symbol not in tracked_symbols and qty > 0:
+            closed_statement_qty[symbol] += qty
     for row in stock_trades:
         symbol = str(row.get("symbol", "")).strip().upper()
         qty = _f(row.get("quantity"))
@@ -186,8 +193,7 @@ def _stock_trade_lots(
             continue
         if symbol not in tracked_symbols:
             if qty > 0:
-                closed_statement_qty[symbol] += qty
-                continue
+                continue  # already pooled above
             close_qty = -qty
             available = closed_statement_qty.get(symbol, 0.0)
             used = min(available, close_qty)
@@ -541,6 +547,9 @@ def main() -> int:
         return 1
     source_sha = (meta30.get("raw_source") or {}).get("sha256", "")
     statement_sources = read_csv(input_paths["broker_statement_sources.csv"])
+    if not statement_sources:
+        LOGGER.error("broker_statement_sources.csv has zero rows (damaged import artifact); re-run 30")
+        return 1
     open_positions = read_csv(input_paths["broker_open_positions.csv"])
     net_stock_positions = read_csv(input_paths["broker_net_stock_positions.csv"])
     trades = read_csv(input_paths["broker_trades.csv"])
