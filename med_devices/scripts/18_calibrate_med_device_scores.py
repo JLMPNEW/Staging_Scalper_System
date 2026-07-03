@@ -33,6 +33,13 @@ OUTPUT_FIELDS = [
     "hit_rate",
     "recommendation",
 ]
+SEGMENT_FIELDS = (
+    ("classification", "classification"),
+    ("entry_status", "entry_status"),
+    ("rank_bucket", "rank_bucket"),
+    ("subsector", "subsector"),
+    ("scoring_model_version", "scoring_model_version"),
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -108,17 +115,22 @@ def recommendation(count: int, mean_return: str, *, min_count: int = 20) -> str:
     return "negative_signal_review_gate_or_weight"
 
 
+def validate_segment_columns(rows: list[dict[str, str]], *, input_csv: Path) -> None:
+    if not rows:
+        return
+    missing = [field_name for field_name, _ in SEGMENT_FIELDS if field_name not in rows[0]]
+    if missing:
+        raise RuntimeError(
+            f"Backtest input {input_csv} is missing expected segment columns: {', '.join(missing)}. "
+            "Regenerate the backtest CSV before calibrating."
+        )
+
+
 def calibrate(rows: list[dict[str, str]], *, thresholds: list[float]) -> list[dict[str, Any]]:
     horizons = return_horizons(rows)
     out: list[dict[str, Any]] = []
     for horizon in horizons:
-        for field_name, calibration_type in (
-            ("classification", "classification"),
-            ("entry_status", "entry_status"),
-            ("rank_bucket", "rank_bucket"),
-            ("subsector", "subsector"),
-            ("scoring_model_version", "scoring_model_version"),
-        ):
+        for field_name, calibration_type in SEGMENT_FIELDS:
             for segment in sorted({row.get(field_name, "") for row in rows}):
                 segment_rows = [row for row in rows if row.get(field_name, "") == segment]
                 count, avg, med, hit = stats_for(segment_rows, horizon=horizon)
@@ -206,6 +218,7 @@ def main() -> None:
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else input_csv.with_name("med_device_score_calibration.csv")
     thresholds = [float(item.strip()) for item in str(args.thresholds or "60,65,70,75").split(",") if item.strip()]
     rows = read_csv(input_csv)
+    validate_segment_columns(rows, input_csv=input_csv)
     calibration_rows = calibrate(rows, thresholds=thresholds)
     write_csv(output_csv, calibration_rows)
     LOGGER.info("Calibration complete: output=%s rows=%d source=%s", output_csv, len(calibration_rows), input_csv)

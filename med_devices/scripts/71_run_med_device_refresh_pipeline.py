@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -106,8 +106,10 @@ def build_steps(
     skip_ibkr_borrow: bool,
     skip_form4_runner: bool,
     import_positioning_sources: str,
+    oos_score_valid: bool = True,
 ) -> list[Step]:
     asof_args = ["--asof", asof] if asof else []
+    scoring_args = [*asof_args, "--oos-score-valid"] if oos_score_valid else list(asof_args)
     sec_args = ["--refresh-cache"] if force_refresh else []
     form4_args = [*asof_args, "--skip-feature-build", "--skip-coverage-audit"]
     if skip_form4_runner:
@@ -165,7 +167,7 @@ def build_steps(
             Step("68_update_form4_canonical", "stage_7", "Update SEC Form 4 canonical/import path", py_script("med_devices/scripts/68_update_med_device_form4_canonical.py"), form4_args, pass_db=False, network=True, optional=True),
             Step("60_build_insider_activity_features", "stage_7", "Build insider-activity features", py_script("med_devices/scripts/60_build_med_device_insider_activity_features.py"), asof_args),
             Step("67_audit_external_positioning", "stage_7", "Audit external-positioning source coverage", py_script("med_devices/scripts/67_audit_med_device_external_positioning_coverage.py"), asof_args, optional=True),
-            Step("13_build_daily_scores", "stage_8", "Build daily composite scores", py_script("med_devices/scripts/13_build_med_device_daily_scores.py"), asof_args),
+            Step("13_build_daily_scores", "stage_8", "Build daily composite scores", py_script("med_devices/scripts/13_build_med_device_daily_scores.py"), scoring_args),
             Step("16_publish_review_pack", "stage_8", "Publish dated score review pack", py_script("med_devices/scripts/16_publish_med_device_score_review_pack.py"), asof_args),
             Step("74_build_analyst_review", "stage_8", "Build analyst review queue", py_script("med_devices/scripts/74_build_med_device_analyst_review_queue.py"), asof_args),
             Step("72_validate_production_outputs", "stage_8", "Run final production QA gate", py_script("med_devices/scripts/72_validate_med_device_production_outputs.py"), asof_args),
@@ -329,12 +331,34 @@ def main() -> int:
         output_dir / "med_devices_refresh_dry_run_steps.csv" if args.dry_run else production_latest_csv
     )
 
+    # --oos-score-valid is passed for the normal next-morning refresh but dropped
+    # when the resolved as-of falls outside the strict-OOS replay window. The
+    # window comes from the same config key script 13 enforces
+    # (scoring.oos_replay_window_days), so the two scripts can never disagree.
+    oos_score_valid = True
+    oos_drop_note = ""
+    if asof:
+        replay_window_days = int(cfg_get(config, "scoring.oos_replay_window_days", 5))
+        try:
+            asof_age_days: int | None = (date.today() - date.fromisoformat(asof)).days
+        except ValueError:
+            asof_age_days = None
+        if asof_age_days is None or not 0 <= asof_age_days <= replay_window_days:
+            oos_score_valid = False
+            oos_drop_note = (
+                f"NOTE: --asof {asof} is outside the {replay_window_days}-day strict-OOS replay window "
+                "(scoring.oos_replay_window_days); dropping --oos-score-valid for 13_build_daily_scores. "
+                "Rows will publish oos_score_valid_flag=0; strict-OOS promotion requires the PIT backfill "
+                "path (med_devices/scripts/21_backfill_med_device_historical_scores.py) plus "
+                "med_devices/scripts/76_mark_med_device_oos_provenance.py."
+            )
     steps = build_steps(
         asof=asof,
         force_refresh=bool(args.force_refresh),
         skip_ibkr_borrow=bool(args.skip_ibkr_borrow),
         skip_form4_runner=bool(args.skip_form4_runner),
         import_positioning_sources=str(args.import_positioning_sources or ""),
+        oos_score_valid=oos_score_valid,
     )
     validate_step_order(steps)
     steps = apply_optional_step_config(steps, configured_optional_step_ids(config))
@@ -360,6 +384,11 @@ def main() -> int:
             retry_optional=bool(args.retry_optional),
         ).intersection({step.step_id for step in selected})
     planned = [step for step in selected if step.step_id not in resume_skipped_ids]
+    # Next-morning refreshes for the prior trading date keep --oos-score-valid;
+    # anything outside the shared replay window already had the flag dropped
+    # above, so retrospectively computed rows can never self-certify strict_oos.
+    if oos_drop_note and any(step.step_id == "13_build_daily_scores" for step in planned):
+        print(oos_drop_note)
     rows: list[dict[str, Any]] = [
         {
             "run_id": run_id,

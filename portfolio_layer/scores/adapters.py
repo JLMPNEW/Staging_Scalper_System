@@ -85,13 +85,11 @@ def _research_reason(*, eligible: bool, reason: str) -> str:
     return "ok" if eligible else (reason or "not_calibration_research_eligible")
 
 
-def _has_column_value(row: dict[str, str], column: str) -> bool:
-    return column in row and str(row.get(column, "")).strip() != ""
-
-
 def _oos_score_valid(row: dict[str, str], cfg: dict[str, Any], *, default_requires_oos: bool = True) -> bool:
     require_oos = bool(cfg.get("require_oos_score_valid", default_requires_oos))
-    if _has_column_value(row, "oos_score_valid_flag"):
+    if "oos_score_valid_flag" in row:
+        # the column exists: a blank cell is a missing assertion and fails CLOSED (not oos-valid),
+        # rather than falling through to the column-absent policy default
         return _truthy(row.get("oos_score_valid_flag"))
     return not require_oos
 
@@ -135,10 +133,15 @@ def _survivorship_corrected(row: dict[str, str]) -> bool:
 
 
 def _stage11_research_allowed(row: dict[str, str], *, source_role: str, oos_score_valid: bool) -> bool:
+    if source_role == "excluded":
+        # an explicit source-level exclusion wins over contradictory eligibility flags (fail closed)
+        return False
     return bool((source_role == "strict_oos" and oos_score_valid) or _survivorship_corrected(row))
 
 
 def _research_guard_reason(row: dict[str, str], *, source_role: str, oos_score_valid: bool) -> str:
+    if source_role == "excluded":
+        return "source_role_excluded"
     if source_role != "strict_oos" and not _survivorship_corrected(row):
         return "dashboard_snapshot_not_survivorship_corrected_use_sector_diagnostics_panel"
     if source_role == "strict_oos" and not oos_score_valid:
@@ -289,8 +292,6 @@ def _adapt_tech_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
                 raw_research_eligible
                 and _stage11_research_allowed(r, source_role=source_role, oos_score_valid=oos_score_valid)
             )
-            if eligible:
-                research_eligible = True
             research_reason = str(r.get("research_calibration_reason") or r.get("calibration_status_reason") or "").strip()
             if not research_reason:
                 research_reason = _research_reason(
@@ -299,6 +300,10 @@ def _adapt_tech_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
                 )
             if raw_research_eligible and not research_eligible:
                 research_reason = _research_guard_reason(r, source_role=source_role, oos_score_valid=oos_score_valid)
+            if eligible:
+                # investable implies research-eligible (contract invariant); reason must match
+                research_eligible = True
+                research_reason = "ok"
         else:
             research_eligible = calib_ok and complete and (oos_score_valid or not require_oos_score_valid)
             research_reason = _research_reason(

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import json
 import math
 import os
@@ -100,6 +101,7 @@ SCORE_FIELDS = [
     "composite_percentile",
     "cohort_percentile",
     "fundamental_quality_score",
+    "fundamental_quality_component_weight",
     "durable_growth_score",
     "durable_growth_score_legacy",
     "durable_growth_alpha_score",
@@ -154,6 +156,7 @@ SCORE_FIELDS = [
     "quality_value_interaction_score",
     "fda_technical_interaction_score",
     "reimbursement_score",
+    "reimbursement_component_weight",
     "reimbursement_status",
     "direct_code_evidence",
     "payment_rate_evidence",
@@ -163,6 +166,7 @@ SCORE_FIELDS = [
     "diagnostics_lab_flag",
     "unknown_reimbursement_flag",
     "valuation_score",
+    "valuation_component_weight",
     "technical_entry_score",
     "technical_trend_quality_score",
     "technical_relative_strength_score",
@@ -204,6 +208,7 @@ SCORE_FIELDS = [
     "insider_activity_score",
     "insider_data_quality_score",
     "sentiment_catalyst_score",
+    "sentiment_catalyst_component_weight",
     "value_trap_score",
     "data_completeness_score",
     "live_component_count",
@@ -302,11 +307,50 @@ assert "feature_data_asof_date" in set(SCORE_FIELDS), (
     "if that field is ever removed from SCORE_FIELDS the daily-only composite fields will be silently dropped. "
     "Update the injection loop below before removing it."
 )
-DAILY_COMPOSITE_FIELDS = []
+# Single source of truth for the daily composite CSV contract shared with script 13's
+# builder copy of med_device_daily_composite_scores.csv. Script 13 additionally emits
+# company_id (right after rank); the review pack intentionally omits it.
+DAILY_COMPOSITE_CONTRACT_FIELDS = []
 for field in SCORE_FIELDS:
-    DAILY_COMPOSITE_FIELDS.append(field)
+    DAILY_COMPOSITE_CONTRACT_FIELDS.append(field)
+    if field == "rank":
+        DAILY_COMPOSITE_CONTRACT_FIELDS.append("company_id")
     if field == "feature_data_asof_date":
-        DAILY_COMPOSITE_FIELDS.extend(extra for extra in DAILY_COMPOSITE_EXTRA_FIELDS if extra not in SCORE_FIELDS)
+        DAILY_COMPOSITE_CONTRACT_FIELDS.extend(extra for extra in DAILY_COMPOSITE_EXTRA_FIELDS if extra not in SCORE_FIELDS)
+REVIEW_PACK_OMITTED_CONTRACT_FIELDS = {"company_id"}
+DAILY_COMPOSITE_FIELDS = [
+    field for field in DAILY_COMPOSITE_CONTRACT_FIELDS if field not in REVIEW_PACK_OMITTED_CONTRACT_FIELDS
+]
+
+
+def _script13_composite_fieldnames() -> list[str]:
+    module_name = "med_device_daily_scores_builder"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return list(existing.FIELDNAMES)
+    script13_path = PACKAGE_ROOT / "scripts" / "13_build_med_device_daily_scores.py"
+    spec = importlib.util.spec_from_file_location(module_name, script13_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load composite score builder module from {script13_path}")
+    module = importlib.util.module_from_spec(spec)
+    # Register before exec so dataclass definitions inside script 13 can resolve their module.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return list(module.FIELDNAMES)
+
+
+_SCRIPT13_CONTRACT_DRIFT = [
+    field for field in _script13_composite_fieldnames() if field not in set(DAILY_COMPOSITE_CONTRACT_FIELDS)
+]
+assert not _SCRIPT13_CONTRACT_DRIFT, (
+    "Script 13 FIELDNAMES drifted outside the daily composite contract: "
+    f"{_SCRIPT13_CONTRACT_DRIFT}. Add the new fields to SCORE_FIELDS / DAILY_COMPOSITE_EXTRA_FIELDS "
+    "(or the contract injection above) so both composite CSV headers stay aligned."
+)
 DAILY_COMPOSITE_FIELD_DEFAULTS: dict[str, Any] = {
     "score_scale_min": 0.0,
     "score_scale_max": 100.0,
@@ -318,7 +362,6 @@ DAILY_COMPOSITE_FIELD_DEFAULTS: dict[str, Any] = {
     "calibration_sample_role": "excluded_from_research_calibration",
     "stage11_calibration_input_eligible_flag": 0,
     "stage11_calibration_input_reason": "missing_research_calibration_metadata",
-    "stage11_calibration_panel_source": "med_devices_survivorship_corrected_score_review_pack",
     "survivorship_corrected_panel_flag": 0,
 }
 REIMBURSEMENT_LATEST_FIELDS = [
@@ -330,6 +373,9 @@ REIMBURSEMENT_LATEST_FIELDS = [
     "capital_equipment_flag",
     "diagnostics_lab_flag",
     "unknown_reimbursement_flag",
+]
+FDA_LATEST_FIELDS = [
+    "fda_data_available",
 ]
 CALIBRATED_BASELINE_FIELDS = [
     "calibrated_baseline_status",
@@ -391,6 +437,7 @@ def load_score_rows(conn: Any, *, asof: str) -> list[dict[str, Any]]:
         alias="latest_fda",
         column="fda_data_available",
         default_sql="0",
+        output_name="fda_data_available_latest",
     )
     dedup_class_i_expr = optional_column_expr(
         fda_columns,
@@ -506,7 +553,7 @@ def load_score_rows(conn: Any, *, asof: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
-        for field in REIMBURSEMENT_LATEST_FIELDS:
+        for field in (*REIMBURSEMENT_LATEST_FIELDS, *FDA_LATEST_FIELDS):
             latest_key = f"{field}_latest"
             if latest_key in item:
                 item[field] = item.pop(latest_key)
@@ -628,6 +675,9 @@ def clean_row(row: dict[str, Any], *, fieldnames: list[str] | None = None) -> di
     )
     item["top_positive_drivers"] = decode_driver_list(item.get("top_positive_drivers_json"))
     item["top_negative_drivers"] = decode_driver_list(item.get("top_negative_drivers_json"))
+    research_reason = str(item.get("research_calibration_reason") or "").strip()
+    if research_reason and item.get("stage11_calibration_input_reason") in {None, ""}:
+        item["stage11_calibration_input_reason"] = research_reason
     output_fields = fieldnames if fieldnames is not None else SCORE_FIELDS
     return {
         field: DAILY_COMPOSITE_FIELD_DEFAULTS.get(field, "") if item.get(field) in {None, ""} else item[field]
@@ -645,26 +695,41 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
     os.replace(tmp_name, path)
 
 
+def calibration_eligible_flag_value(row: dict[str, Any]) -> str:
+    raw = row.get("calibration_eligible_flag")
+    return "" if raw in {None, ""} else str(raw)
+
+
 def classification_counts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    counts: dict[str, int] = {}
+    counts: dict[tuple[str, str], int] = {}
     for row in rows:
         classification = str(row.get("classification") or "unclassified")
-        counts[classification] = counts.get(classification, 0) + 1
+        key = (classification, calibration_eligible_flag_value(row))
+        counts[key] = counts.get(key, 0) + 1
     return [
-        {"classification": classification, "calibration_eligible_flag": "", "count": count}
-        for classification, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        {"classification": classification, "calibration_eligible_flag": flag, "count": count}
+        for (classification, flag), count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     ]
 
 
 def reimbursement_status_counts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    counts: dict[str, int] = {}
+    counts: dict[tuple[str, str], int] = {}
     for row in rows:
         status = str(row.get("reimbursement_status") or "unknown")
-        counts[status] = counts.get(status, 0) + 1
+        key = (status, calibration_eligible_flag_value(row))
+        counts[key] = counts.get(key, 0) + 1
     return [
-        {"reimbursement_status": status, "calibration_eligible_flag": "", "count": count}
-        for status, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        {"reimbursement_status": status, "calibration_eligible_flag": flag, "count": count}
+        for (status, flag), count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     ]
+
+
+def collapse_count_rows(items: list[dict[str, Any]], key: str) -> list[tuple[str, int]]:
+    totals: dict[str, int] = {}
+    for row in items:
+        label = str(row[key])
+        totals[label] = totals.get(label, 0) + int(row["count"])
+    return sorted(totals.items(), key=lambda item: (-item[1], item[0]))
 
 
 def write_markdown(
@@ -747,10 +812,10 @@ def write_markdown(
         f"Scoring model version: `{model_version}`",
         "",
         "## Classification Counts",
-        *[f"- {row['classification']}: {row['count']}" for row in counts],
+        *[f"- {label}: {count}" for label, count in collapse_count_rows(counts, "classification")],
         "",
         "## Reimbursement Status Counts",
-        *[f"- {row['reimbursement_status']}: {row['count']}" for row in reimbursement_counts],
+        *[f"- {label}: {count}" for label, count in collapse_count_rows(reimbursement_counts, "reimbursement_status")],
         "",
         "## Tier-1 Long Candidates",
         *(line_items(tier1) or ["- None"]),
@@ -864,7 +929,11 @@ def write_markdown(
         *line_items(bottom25, include_reason=True),
         "",
     ]
-    path.write_text("\n".join(content), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        tmp_name = handle.name
+        handle.write("\n".join(content))
+    os.replace(tmp_name, path)
 
 
 def dated_output_dir(base_output_dir: Path, asof: str) -> Path:

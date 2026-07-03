@@ -86,6 +86,18 @@ def parse_iso_date(raw: str) -> date | None:
         return None
 
 
+def truthy_flag(raw: Any) -> bool:
+    text = str(raw or "").strip().lower()
+    if text in {"1", "1.0", "true", "yes", "y", "t"}:
+        return True
+    if text in {"", "0", "0.0", "false", "no", "n", "f", "none", "null", "nan"}:
+        return False
+    try:
+        return float(text) != 0.0
+    except ValueError:
+        return False
+
+
 def latest_score_asof(conn: sqlite3.Connection) -> str:
     value = scalar(conn, "SELECT MAX(asof_date) FROM med_device_daily_scores")
     if not value:
@@ -171,6 +183,9 @@ def main() -> int:
         allowed_decisions=allowed_decisions,
     )
 
+    if not db_path.exists():
+        # connecting would CREATE an empty DB file at the configured path and then fail confusingly
+        raise FileNotFoundError(f"med_devices database not found: {db_path}")
     with sqlite3.connect(db_path, timeout=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0) or 30.0)) as conn:
         conn.row_factory = sqlite3.Row
         asof = str(args.asof or "").strip() or latest_score_asof(conn)
@@ -276,6 +291,53 @@ def main() -> int:
             expected=0,
             details="Inactive/delisted tickers cannot remain in the production score surface.",
         )
+        explicit_asof = str(args.asof or "").strip()
+        max_score_asof = scalar(conn, "SELECT MAX(asof_date) FROM med_device_daily_scores")
+        add_check(
+            checks,
+            check_id="explicit_asof_matches_latest_score_asof",
+            severity="WARNING",
+            passed=not explicit_asof or explicit_asof == max_score_asof,
+            observed=f"asof={asof};max_asof_date={max_score_asof}",
+            expected="explicit --asof equals MAX(asof_date)",
+            details="An explicit --asof behind the latest scored date validates a stale surface; confirm this is intentional.",
+        )
+        composite_score_min = float(cfg_get(config, f"{CONFIG_KEY}.composite_score_min", 0.0) or 0.0)
+        composite_score_max = float(cfg_get(config, f"{CONFIG_KEY}.composite_score_max", 100.0) or 100.0)
+        if "composite_score" in table_columns(conn, "med_device_daily_scores"):
+            out_of_range_scores = count_rows(
+                conn,
+                """
+                SELECT COUNT(*)
+                FROM med_device_daily_scores
+                WHERE asof_date = ?
+                  AND composite_score IS NOT NULL
+                  AND (composite_score < ? OR composite_score > ?)
+                """,
+                (asof, composite_score_min, composite_score_max),
+            )
+            add_check(
+                checks,
+                check_id="composite_score_within_scale",
+                severity="WARNING",
+                passed=out_of_range_scores == 0,
+                observed=out_of_range_scores,
+                expected=0,
+                details=f"composite_score must stay within the published score scale [{composite_score_min}, {composite_score_max}].",
+            )
+        overrides_enabled = bool(cfg_get(config, "med_devices_analyst_review.enable_portfolio_overrides", False))
+        add_check(
+            checks,
+            check_id="analyst_portfolio_overrides_not_enabled",
+            severity="CRITICAL",
+            passed=not overrides_enabled,
+            observed=overrides_enabled,
+            expected=False,
+            details=(
+                "med_devices_analyst_review.enable_portfolio_overrides must stay false: the override pathway is "
+                "shadow-only and scoring never applies overrides, so enabling it would be silently ignored."
+            ),
+        )
         critical_decision_issues = [
             issue for issue in decision_issues if str(issue.get("severity") or "").upper() == "CRITICAL"
         ]
@@ -353,7 +415,7 @@ def main() -> int:
                   AND COALESCE(analyst_portfolio_override_applied, 0) = 1
                   AND LOWER(COALESCE(analyst_review_decision, '')) = 'approve'
                   AND COALESCE(analyst_review_expires_at, '') <> ''
-                  AND analyst_review_expires_at < ?
+                  AND SUBSTR(analyst_review_expires_at, 1, 10) < ?
                 """,
                 (asof, asof),
             )
@@ -364,7 +426,11 @@ def main() -> int:
                 passed=expired_approval_overrides == 0,
                 observed=expired_approval_overrides,
                 expected=0,
-                details="Expired analyst approvals cannot affect portfolio eligibility.",
+                details=(
+                    "Expired analyst approvals cannot affect portfolio eligibility. "
+                    "Override pathway shadow-only: analyst_portfolio_override_applied is always 0 while "
+                    "enable_portfolio_overrides is false, so this check is vacuous until overrides are implemented."
+                ),
             )
             expired_applied_decisions = count_rows(
                 conn,
@@ -374,7 +440,7 @@ def main() -> int:
                 WHERE asof_date = ?
                   AND COALESCE(TRIM(analyst_review_decision), '') <> ''
                   AND COALESCE(analyst_review_expires_at, '') <> ''
-                  AND analyst_review_expires_at < ?
+                  AND SUBSTR(analyst_review_expires_at, 1, 10) < ?
                 """,
                 (asof, asof),
             )
@@ -389,13 +455,18 @@ def main() -> int:
             )
             future_applied_decisions = count_rows(
                 conn,
+                # date-truncate: reviewed_at may carry a timestamp. Intentional same-day semantics:
+                # scoring applies a decision only when reviewed_at < asof (is_reviewed_before_asof),
+                # i.e. reviewed_at >= asof means a decision never applies on its own review date.
+                # The validator tolerates the same-day boundary (only strictly-future dates fail),
+                # so it is strictly looser than scoring and can never false-fail.
                 """
                 SELECT COUNT(*)
                 FROM med_device_daily_scores
                 WHERE asof_date = ?
                   AND COALESCE(TRIM(analyst_review_decision), '') <> ''
                   AND COALESCE(analyst_reviewed_at, '') <> ''
-                  AND analyst_reviewed_at >= ?
+                  AND SUBSTR(analyst_reviewed_at, 1, 10) > ?
                 """,
                 (asof, asof),
             )
@@ -431,7 +502,11 @@ def main() -> int:
                 passed=hard_gate_bypass_overrides == 0,
                 observed=hard_gate_bypass_overrides,
                 expected=0,
-                details="Analyst approvals cannot bypass inactive, hard-red, or confirmed regulatory-risk blocks.",
+                details=(
+                    "Analyst approvals cannot bypass inactive, hard-red, or confirmed regulatory-risk blocks. "
+                    "Override pathway shadow-only: analyst_portfolio_override_applied is always 0 while "
+                    "enable_portfolio_overrides is false, so this check is vacuous until overrides are implemented."
+                ),
             )
             undocumented_overrides = count_rows(
                 conn,
@@ -454,7 +529,11 @@ def main() -> int:
                 passed=undocumented_overrides == 0,
                 observed=undocumented_overrides,
                 expected=0,
-                details="Any applied analyst portfolio override must have a reason and owner.",
+                details=(
+                    "Any applied analyst portfolio override must have a reason and owner. "
+                    "Override pathway shadow-only: analyst_portfolio_override_applied is always 0 while "
+                    "enable_portfolio_overrides is false, so this check is vacuous until overrides are implemented."
+                ),
             )
             analyst_negative_decisions_in_candidates = count_rows(
                 conn,
@@ -559,6 +638,64 @@ def main() -> int:
             observed=duplicate_count,
             expected=0,
             details="Production CSV cannot contain duplicate ticker rows.",
+        )
+
+    _, dated_daily_rows = read_csv_rows(dated_daily_csv)
+    _, dated_candidate_rows = read_csv_rows(dated_portfolio_candidate_csv)
+    # keyed on file existence, not row counts: a truncated/empty CSV must fail the
+    # reconciliation below instead of silently skipping it (missing files already
+    # fail the *_exists checks above)
+    if dated_daily_csv.exists() and dated_portfolio_candidate_csv.exists():
+        daily_candidate_tickers = {
+            str(row.get("ticker") or "").strip().upper()
+            for row in dated_daily_rows
+            if str(row.get("ticker") or "").strip() and truthy_flag(row.get("portfolio_candidate_gate"))
+        }
+        candidate_file_tickers = {
+            str(row.get("ticker") or "").strip().upper()
+            for row in dated_candidate_rows
+            if str(row.get("ticker") or "").strip()
+        }
+        candidate_mismatch = sorted(
+            (daily_candidate_tickers - candidate_file_tickers)
+            | (candidate_file_tickers - daily_candidate_tickers)
+        )
+        add_check(
+            checks,
+            check_id="portfolio_candidate_csv_matches_daily_gate",
+            severity="CRITICAL",
+            passed=not candidate_mismatch,
+            observed=",".join(candidate_mismatch[:25]),
+            expected="dated portfolio-candidate CSV tickers exactly equal daily portfolio_candidate_gate=1 tickers",
+            details="Portfolio-layer handoff CSV must be an exact materialization of the production candidate gate.",
+        )
+        candidate_bad_gate = sorted(
+            str(row.get("ticker") or "").strip().upper()
+            for row in dated_candidate_rows
+            if not truthy_flag(row.get("portfolio_candidate_gate"))
+        )
+        add_check(
+            checks,
+            check_id="portfolio_candidate_csv_all_rows_gate_true",
+            severity="CRITICAL",
+            passed=not candidate_bad_gate,
+            observed=",".join(candidate_bad_gate[:25]),
+            expected=0,
+            details="Every row in med_device_score_review_portfolio_candidates.csv must have portfolio_candidate_gate=1.",
+        )
+        candidate_negative_decisions = sorted(
+            str(row.get("ticker") or "").strip().upper()
+            for row in dated_candidate_rows
+            if str(row.get("analyst_review_decision") or "").strip().lower() in {"reject", "data_fix_needed"}
+        )
+        add_check(
+            checks,
+            check_id="portfolio_candidate_csv_excludes_negative_analyst_decisions",
+            severity="CRITICAL",
+            passed=not candidate_negative_decisions,
+            observed=",".join(candidate_negative_decisions[:25]),
+            expected=0,
+            details="Portfolio candidate CSV must not include active analyst reject/data_fix_needed decisions.",
         )
 
     required_review_files = [str(item) for item in cfg_get(config, f"{CONFIG_KEY}.review_pack_required_files", []) or []]

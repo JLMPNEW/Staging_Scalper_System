@@ -21,7 +21,7 @@ from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.fda_mapping_governance import DEFAULT_EXCLUDED_METHODS, audit_fda_mapping_governance  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
-from med_devices.core.point_in_time import parse_iso_date, row_is_effective_asof  # noqa: E402
+from med_devices.core.point_in_time import parse_iso_date, row_is_effective_asof, warn_pit_invariant_violations  # noqa: E402
 from med_devices.core.text_norm import normalize_org_name, normalize_submission_identifier, normalize_ticker  # noqa: E402
 
 
@@ -230,7 +230,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def allow_missing_static_pit_metadata(config: dict[str, Any]) -> bool:
-    return str(cfg_get(config, "historical_backfill.allow_missing_static_pit_metadata", True)).strip().lower() in {
+    return str(cfg_get(config, "historical_backfill.allow_missing_static_pit_metadata", False)).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -401,7 +401,7 @@ def load_company_footprints(
     path: Path | None,
     *,
     asof: date | str | None = None,
-    include_missing_pit_metadata: bool = True,
+    include_missing_pit_metadata: bool = False,
 ) -> list[CompanyFootprint]:
     if path is None:
         return []
@@ -411,6 +411,7 @@ def load_company_footprints(
     _, by_ticker = load_company_lookup(conn)
     out: list[CompanyFootprint] = []
     for row in read_csv_flexible(path):
+        warn_pit_invariant_violations(row, context="fda_footprint_csv", logger=LOGGER, require_reviewed_at=True)
         if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
             continue
         ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
@@ -455,7 +456,7 @@ def build_aliases(
     footprint_csv: Path | None = None,
     footprints: list[CompanyFootprint] | None = None,
     asof: date | str | None = None,
-    include_missing_pit_metadata: bool = True,
+    include_missing_pit_metadata: bool = False,
 ) -> list[CompanyAlias]:
     companies = conn.execute(
         """
@@ -524,7 +525,9 @@ def build_aliases(
             """
         ).fetchall()
         for row in alias_rows:
-            if not row_is_effective_asof(dict(row), asof, include_missing=include_missing_pit_metadata):
+            alias_row = dict(row)
+            warn_pit_invariant_violations(alias_row, context="dim_company_alias", logger=LOGGER)
+            if not row_is_effective_asof(alias_row, asof, include_missing=include_missing_pit_metadata):
                 continue
             add(
                 int(row["company_id"]),
@@ -539,6 +542,7 @@ def build_aliases(
         extra_rows = read_csv_flexible(extra_alias_csv)
         loaded = 0
         for row in extra_rows:
+            warn_pit_invariant_violations(row, context="extra_alias_csv", logger=LOGGER, require_reviewed_at=True)
             if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
                 continue
             ticker = normalize_ticker(row_get(row, "ticker", "mapped_ticker", "symbol"))
@@ -734,7 +738,7 @@ def load_manual_overrides(
     path: Path | None,
     *,
     asof: date | str | None = None,
-    include_missing_pit_metadata: bool = True,
+    include_missing_pit_metadata: bool = False,
 ) -> dict[tuple[str, str], ManufacturerMatch]:
     if path is None:
         return {}
@@ -746,6 +750,7 @@ def load_manual_overrides(
     rows = read_csv_flexible(path)
     loaded = 0
     for row in rows:
+        warn_pit_invariant_violations(row, context="fda_manual_overrides_csv", logger=LOGGER, require_reviewed_at=True)
         if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
             continue
         method = row_get(row, "mapping_method", "method") or "manual_override"
@@ -815,7 +820,7 @@ def load_product_line_overrides(
     path: Path | None,
     *,
     asof: date | str | None = None,
-    include_missing_pit_metadata: bool = True,
+    include_missing_pit_metadata: bool = False,
 ) -> list[ProductLineOverride]:
     if path is None:
         return []
@@ -825,6 +830,7 @@ def load_product_line_overrides(
     _, by_ticker = load_company_lookup(conn)
     out: list[ProductLineOverride] = []
     for row in read_csv_flexible(path):
+        warn_pit_invariant_violations(row, context="fda_product_line_overrides_csv", logger=LOGGER, require_reviewed_at=True)
         if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
             continue
         ticker = normalize_ticker(row_get(row, "ticker", "mapped_ticker", "symbol"))

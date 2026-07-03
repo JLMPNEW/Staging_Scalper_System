@@ -5,6 +5,7 @@ import argparse
 import csv
 import math
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean, median
 from typing import Any
@@ -122,6 +123,8 @@ OUTPUT_FIELDS = [
     "net_recommendation",
     "factor_neutral_recommendation",
     "production_recommendation",
+    "generated_asof",
+    "valid_from",
 ]
 
 
@@ -673,6 +676,10 @@ def main() -> None:
         accepted_field="factor_neutral_spearman_ic_excess_bh_accepted",
     )
     apply_recommendations(out, min_obs=min_obs, min_abs_ic=min_abs_ic, min_t_stat=min_t_stat)
+    generated_asof = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for row in out:
+        row["generated_asof"] = generated_asof
+        row["valid_from"] = generated_asof
     write_csv(output_csv, out)
     technical_out = [row for row in out if str(row.get("component") or "").startswith("technical_")]
     write_csv(technical_output_csv, technical_out)

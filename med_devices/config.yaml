@@ -102,7 +102,7 @@ med_devices_universe:
   benchmark_tickers:
     - IHI
     - XHE
-  subsectors:
+  subsectors:  # documentation-only, not read by code
     - cardiovascular_devices
     - diabetes_technology
     - diagnostics_equipment
@@ -585,7 +585,6 @@ fda_core_ingestion:
 
 fda_entity_linking:
   output_csv: "../output/med_devices_reports/med_device_fda_entity_mapping.csv"
-  source_id: "openfda_device"
   min_auto_confidence: 75.0
   high_confidence_threshold: 90.0
   token_score_weight: 100.0
@@ -749,6 +748,8 @@ fda_features:
   footprint_csv: "data/fda_company_footprints.csv"
   manual_footprint_evidence_csv: "data/fda_manual_footprint_evidence.csv"
   source_id: "openfda_device"
+  # Raising this delays FDA event effect by the ingestion lag (user decision pending).
+  publication_lag_days: 0
   normalization:
     revenue_floor: 100000000.0
   recall_decay_half_life_days: 730.0
@@ -1029,7 +1030,6 @@ ibkr_borrow_ingestion:
   enabled: true
 borrow_features:
   output_csv: "../output/med_devices_reports/med_device_borrow_features.csv"
-  source_id: "ibkr_borrow"
   max_snapshot_staleness_days: 10
   no_data_score: 50.0
   no_data_quality_score: 0.0
@@ -1041,10 +1041,10 @@ finra_short_volume_ingestion:
   output_csv: "../output/med_devices_reports/med_device_finra_short_volume.csv"
   source_id: "finra_regsho_short_volume"
   base_url_template: "https://cdn.finra.org/equity/regsho/daily/CNMSshvol{yyyymmdd}.txt"
-  start_date: "2019-01-01"
   max_days_per_run: 30
   request_sleep_sec: 0.25
-  refresh_existing: false
+  download_retries: 3
+  retry_sleep_sec: 2.0
 short_interest_ingestion:
   output_csv: "../output/med_devices_reports/med_device_exchange_short_interest.csv"
   source_id: "exchange_short_interest"
@@ -1087,7 +1087,7 @@ sec_form4_ingestion:
   output_csv: "../output/med_devices_reports/med_device_sec_form4_transactions.csv"
   source_id: "sec_form4_edgar"
   input_csv: ""
-  source_mode: "external_sec_form4_runner"
+  user_agent: "${MED_DEVICES_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
   direct_edgar_enabled: true
   cache_dir: "../output/med_devices_cache/sec_form4"
   start_date: "2019-01-01"
@@ -1107,8 +1107,8 @@ insider_activity_features:
   filing_lag_days: 2
   lookback_days: 90
 external_positioning_import:
-  market_positioning_db_path: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
-  sec_form4_db_path: "C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite"
+  market_positioning_db_path: "${MED_DEVICES_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/market_positioning.sqlite"
+  sec_form4_db_path: "${MED_DEVICES_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/sec_insider.sqlite"
   sec_form4_runner_config_path: "../SEC_FORM4_Runner/config_sec_form4_orchestrator_staging.yaml"
   sec_form4_runner_profile: "weekly"
   sec_form4_runner_timeout_sec: 1800
@@ -1144,7 +1144,7 @@ market_positioning_update:
 
 scoring:
   model_family: "med_devices"
-  model_version: "med_device_score_v22_2026_06_support_guarded_calibration"
+  model_version: "med_device_score_v23_2026_07_oos_lock_pit_policy"
   scoring_contract_version: "stocks_scores_v1"
   output_csv: "../output/med_devices_reports/med_device_daily_composite_scores.csv"
   review_pack_dir: "../output/med_devices_reports/score_review_pack"
@@ -1530,7 +1530,7 @@ scoring:
       enabled: true
       calibration_status: "production_eligible"
       calibration_status_reason: "promoted_to_calibrated_baseline_2026_06_07;gate_validation_n20_unique3_hit85_lcb5_78pct"
-      calibration_confidence: "medium"
+      calibration_confidence: "medium"  # documentation-only, not read by code
       validation_note: "Promoted as calibrated-baseline gate policy after refreshed gate calibration: 120d validation n=20, 3 tickers, 15.00% ticker coverage, hit 85.00%, LCB +5.78%. Optuna component policy remains shadow-only for comparison."
       tier1_safety_policy:
         allow_safe_core_gate_substitution: true
@@ -1575,7 +1575,7 @@ scoring:
       enabled: true
       calibration_status: "restricted_research_only"
       calibration_status_reason: "held_as_60d_watchlist_after_2026_06_17_rebuild;n35_unique2_hit85_71_lcb25_62pct_requires_third_ticker_support"
-      calibration_confidence: "watchlist_concentrated"
+      calibration_confidence: "watchlist_concentrated"  # documentation-only, not read by code
       validation_note: "Held as 60-day watchlist rather than production seed: 120d validation n=35, 2 tickers of 12, hit 85.71%, LCB +25.62%, but validation is concentrated in CBLL and MASI. Promote only after broader ticker support or explicit concentration acceptance."
       tier1_safety_policy:
         allow_safe_core_gate_substitution: false
@@ -1596,7 +1596,7 @@ scoring:
       enabled: true
       calibration_status: "production_eligible"
       calibration_status_reason: "promoted_score_template_after_2019_rebuild_ic_review_2026_06_08;valuation_quality_liquidity_full_support"
-      calibration_confidence: "medium"
+      calibration_confidence: "medium"  # documentation-only, not read by code
       validation_note: "Promoted cohort score template after rebuilt 2019-2026 IC review: valuation, fundamental quality, and technical liquidity passed gross/net/factor-neutral IC at 60d and 120d with 10/10 ticker support. Gate thresholds remain conservative pending Optuna holdout."
       score_template:
         template_id: "healthcare_services_value_quality_liquidity_v1"
@@ -1628,7 +1628,7 @@ scoring:
       enabled: true
       calibration_status: "production_eligible"
       calibration_status_reason: "promoted_with_monitoring_after_2026_06_17_rebuild;n55_unique3_hit63_64_lcb10_49pct_nonpositive_60d_median"
-      calibration_confidence: "medium_monitoring"
+      calibration_confidence: "medium_monitoring"  # documentation-only, not read by code
       validation_note: "Promoted with monitoring: 120d validation n=55, 3 tickers of 11, 27.27% ticker coverage, hit 63.64%, LCB +10.49%. Keep monitoring flag because the 60d median was nonpositive and CNMD/GMED/ZBH are correlated mid-cap ortho names."
       gates:
         composite_min: 50
@@ -1645,7 +1645,7 @@ scoring:
       enabled: true
       calibration_status: "production_eligible"
       calibration_status_reason: "promoted_watchlist_score_template_after_2019_rebuild_ic_review_2026_06_08;volatility_quality_value_full_support"
-      calibration_confidence: "low_watchlist"
+      calibration_confidence: "low_watchlist"  # documentation-only, not read by code
       validation_note: "Activated non-Tier-1 watchlist score template after rebuilt IC review: low-volatility technical profile and valuation passed 60d/120d IC with 13/13 ticker support. Keep template out of Tier 1 until Optuna/walk-forward clears loss and LCB guardrails."
       tier1_safety_policy:
         allow_safe_core_gate_substitution: false
@@ -1765,6 +1765,8 @@ historical_backfill:
   publish_review_packs: true
   run_oos_validation: true
   allow_missing_static_pit_metadata: false
+  # Re-run FDA entity linking per as-of date during backfill (script 21); default off.
+  relink_fda_per_asof: false
   new_daily_columns_required_from: "2026-06-26"
   oos_validation_csv: "../output/med_devices_reports/oos_validation/med_device_historical_snapshot_oos_validation.csv"
   manifest_csv: "../output/med_devices_reports/historical_backfill/weekly_score_backfill_manifest.csv"
@@ -2138,6 +2140,7 @@ calibration:
     candidate_max_fda_event_risk: "35,40"
     max_grid_size: 20000
 
+# documentation-only, not read by code
 stage_plan:
   stage_1:
     name: "data_engineering_api_ingestion_database_build"

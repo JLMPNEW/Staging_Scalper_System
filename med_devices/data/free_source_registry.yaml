@@ -181,6 +181,56 @@ sources:
     status: planned
     notes: "Daily short-volume pressure source; paired with exchange short-interest facts for velocity features."
 
+  - source_id: exchange_short_interest
+    stage: stage_1
+    source_name: "Exchange reported short interest snapshots"
+    source_owner: "Nasdaq"
+    source_type: txt_or_csv
+    base_url: "https://www.nasdaqtrader.com/dynamic/symdir/shortinterest.txt"
+    documentation_url: "https://www.nasdaqtrader.com/trader.aspx?id=symboldirdefs"
+    authentication_required: false
+    free_key_required: false
+    rate_limit_notes: "Download the current snapshot file with caching and modest request pacing."
+    refresh_frequency: twice_monthly
+    terms_url: "https://www.nasdaqtrader.com/Trader.aspx?id=TraderTerms"
+    data_owner: Nasdaq
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - fact_short_interest
+    canonical_tables:
+      - fact_short_interest
+    feature_stages:
+      - short_interest
+    priority: 63
+    status: planned
+    notes: "True exchange short-interest settlement snapshots; primary source for short-interest features."
+
+  - source_id: finra_equity_short_interest
+    stage: stage_1
+    source_name: "FINRA equity short interest snapshots"
+    source_owner: "Financial Industry Regulatory Authority"
+    source_type: bulk_download
+    base_url: "https://cdn.finra.org/equity/otcmarket/biweekly"
+    documentation_url: "https://www.finra.org/finra-data/browse-catalog/equity-short-interest"
+    authentication_required: false
+    free_key_required: false
+    rate_limit_notes: "Download biweekly files with caching and modest request pacing."
+    refresh_frequency: twice_monthly
+    terms_url: "https://www.finra.org/terms-of-use"
+    data_owner: FINRA
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - fact_short_interest
+    canonical_tables:
+      - fact_short_interest
+    feature_stages:
+      - short_interest
+    priority: 65
+    status: planned
+    notes: "Biweekly FINRA settlement snapshots imported from the shared market_positioning staging DB. Replaces the retired finra_short_interest registry id."
+
   - source_id: sec_13f_edgar
     stage: stage_1
     source_name: "SEC Form 13F institutional holdings"
@@ -230,6 +280,31 @@ sources:
     priority: 64
     status: planned
     notes: "Shadow-only insider open-market buy/sell and cluster activity source."
+
+  - source_id: norgate_us_equities_total_return
+    stage: survivorship_backfill
+    source_name: "Norgate Data US Equities"
+    source_owner: "Norgate Data"
+    source_type: licensed_local_database
+    base_url: "https://norgatedata.com/"
+    documentation_url: "https://norgatedata.com/python.php"
+    authentication_required: true
+    free_key_required: false
+    rate_limit_notes: "Local licensed Windows database; no HTTP rate limit during local reads."
+    refresh_frequency: one_time_backfill_then_manual_refresh
+    terms_url: "https://norgatedata.com/eula.php"
+    data_owner: "Norgate Data"
+    raw_schema:
+      - "norgatedata.price_timeseries raw OHLCV plus total-return adjusted close"
+    canonical_tables:
+      - fact_price_ohlcv
+    feature_stages:
+      - med_devices_calibration
+      - med_devices_backtest
+      - survivorship_backfill
+    priority: 15
+    status: active
+    notes: "Historical/delisted med-device price backfill. Rows preserve internal historical ticker keys and record source_symbol in price_adjustment."
 
   - source_id: yahoo_finance_backup
     stage: stage_1
@@ -498,29 +573,6 @@ sources:
     feature_stages:
       - sentiment_catalyst
     priority: 150
-    status: planned
-
-  - source_id: finra_short_interest
-    stage: stage_1
-    source_name: "FINRA short interest files"
-    source_owner: "FINRA"
-    source_type: bulk_download
-    base_url: "https://www.finra.org/finra-data/browse-catalog/equity-short-interest/data"
-    documentation_url: "https://www.finra.org/finra-data/browse-catalog/equity-short-interest"
-    authentication_required: false
-    free_key_required: false
-    refresh_frequency: twice_monthly
-    terms_url: "https://www.finra.org/terms-of-use"
-    data_owner: FINRA
-    raw_schema:
-      - raw_api_responses
-    staging_tables:
-      - stg_short_interest
-    canonical_tables:
-      - fact_short_interest
-    feature_stages:
-      - sentiment_catalyst
-    priority: 160
     status: planned
 
   - source_id: fred

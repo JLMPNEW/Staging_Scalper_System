@@ -148,7 +148,7 @@ def main() -> None:
         else None
     )
     user_agent = args.user_agent or str(
-        cfg_get(config, "market_positioning_update.user_agent", cfg_get(config, "sec_filings.user_agent", DEFAULT_USER_AGENT))
+        cfg_get(config, "market_positioning_update.user_agent", cfg_get(config, "sec_ingestion.user_agent", DEFAULT_USER_AGENT))
     )
     timeout_sec = args.timeout_sec
     if timeout_sec is None:

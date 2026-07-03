@@ -124,6 +124,14 @@ def _company_is_active(company: dict[str, Any] | None) -> bool:
     return int(company.get("is_active") or 0) == 1 and str(company.get("universe_status") or "").strip().lower() == "keep"
 
 
+def _company_is_review_status(company: dict[str, Any] | None) -> bool:
+    # universe_status='review' companies are still active and scored, so a mapping to them
+    # is a warning (surface for follow-up), not a critical QA-gate blocker
+    if not company:
+        return False
+    return int(company.get("is_active") or 0) == 1 and str(company.get("universe_status") or "").strip().lower() == "review"
+
+
 def _issue(
     *,
     severity: str,
@@ -202,7 +210,18 @@ def _audit_mapping_rows(
             )
         if ticker:
             company = active_companies.get(ticker)
-            if not _company_is_active(company):
+            if _company_is_review_status(company):
+                issues.append(
+                    _issue(
+                        severity="warning",
+                        issue_type="mapped_to_review_status_ticker",
+                        source="fda_entity_mapping",
+                        row=row,
+                        observed=f"ticker={ticker}",
+                        recommended_action="Resolve the universe review status; the ticker is still active and scored.",
+                    )
+                )
+            elif not _company_is_active(company):
                 issues.append(
                     _issue(
                         severity="critical",
@@ -277,7 +296,18 @@ def _audit_overrides(
                 )
             continue
         company = active_companies.get(ticker) if ticker else None
-        if ticker and not _company_is_active(company):
+        if ticker and _company_is_review_status(company):
+            issues.append(
+                _issue(
+                    severity="warning",
+                    issue_type="mapped_to_review_status_ticker",
+                    source="manual_overrides",
+                    row=row,
+                    observed=f"ticker={ticker}",
+                    recommended_action="Resolve the universe review status; the ticker is still active and scored.",
+                )
+            )
+        elif ticker and not _company_is_active(company):
             issues.append(
                 _issue(
                     severity="critical",
@@ -294,7 +324,29 @@ def _audit_overrides(
             except ValueError:
                 company_id = -1
             company_by_id = companies_by_id.get(company_id)
-            if not _company_is_active(company_by_id):
+            if _company_is_review_status(company_by_id):
+                issues.append(
+                    _issue(
+                        severity="warning",
+                        issue_type="mapped_to_review_status_ticker",
+                        source="manual_overrides",
+                        row=row,
+                        observed=f"company_id={company_id_raw}",
+                        recommended_action="Resolve the universe review status; the company is still active and scored.",
+                    )
+                )
+                if ticker and str(company_by_id.get("ticker") or "").upper() != ticker:
+                    issues.append(
+                        _issue(
+                            severity="critical",
+                            issue_type="override_ticker_company_id_mismatch",
+                            source="manual_overrides",
+                            row=row,
+                            observed=f"ticker={ticker};company_id_ticker={company_by_id.get('ticker')}",
+                            recommended_action="Correct either ticker or company_id so they reference the same company.",
+                        )
+                    )
+            elif not _company_is_active(company_by_id):
                 issues.append(
                     _issue(
                         severity="critical",

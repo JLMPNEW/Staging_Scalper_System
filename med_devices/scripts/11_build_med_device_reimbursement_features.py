@@ -22,7 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
-from med_devices.core.point_in_time import row_is_effective_asof  # noqa: E402
+from med_devices.core.point_in_time import row_is_effective_asof, warn_pit_invariant_violations  # noqa: E402
 from med_devices.core.text_norm import normalize_org_name, normalize_ticker  # noqa: E402
 
 
@@ -254,7 +254,7 @@ def latest_asof(conn: Any) -> str:
 
 
 def allow_missing_static_pit_metadata(config: dict[str, Any]) -> bool:
-    return str(cfg_get(config, "historical_backfill.allow_missing_static_pit_metadata", True)).strip().lower() in {
+    return str(cfg_get(config, "historical_backfill.allow_missing_static_pit_metadata", False)).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -335,7 +335,7 @@ def load_company_classifications(
     path: Path | None,
     *,
     asof: date | str | None = None,
-    include_missing_pit_metadata: bool = True,
+    include_missing_pit_metadata: bool = False,
 ) -> dict[str, ReimbursementClassification]:
     if path is None or not path.exists():
         return {}
@@ -343,6 +343,7 @@ def load_company_classifications(
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
+            warn_pit_invariant_violations(row, context="reimbursement_classification_csv", logger=LOGGER, require_reviewed_at=True)
             if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
                 continue
             ticker = normalize_ticker(row_get(row, "ticker", "symbol"))

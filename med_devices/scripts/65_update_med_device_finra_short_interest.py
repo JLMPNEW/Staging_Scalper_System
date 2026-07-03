@@ -180,7 +180,7 @@ def main() -> None:
     if sleep_sec is None:
         sleep_sec = to_float(cfg_get(config, "market_positioning_update.finra_short_interest.sleep_sec", 0.05), 0.05)
     user_agent = str(
-        cfg_get(config, "market_positioning_update.user_agent", cfg_get(config, "sec_filings.user_agent", DEFAULT_USER_AGENT))
+        cfg_get(config, "market_positioning_update.user_agent", cfg_get(config, "sec_ingestion.user_agent", DEFAULT_USER_AGENT))
     )
 
     messages: list[str] = []

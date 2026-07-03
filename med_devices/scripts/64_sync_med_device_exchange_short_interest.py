@@ -23,11 +23,13 @@ if str(PROJECT_ROOT) not in sys.path:
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
+from med_devices.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
 from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("sync_med_device_exchange_short_interest")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+SOURCE_REGISTRY = PACKAGE_ROOT / "data" / "free_source_registry.yaml"
 DEFAULT_NASDAQ_SHORT_INTEREST_URL = "https://www.nasdaqtrader.com/dynamic/symdir/shortinterest.txt"
 FIELDNAMES = [
     "ticker",
@@ -105,19 +107,10 @@ def first_value(row: dict[str, Any], aliases: list[str]) -> object:
 
 
 def ensure_source(conn: Any, source_id: str) -> None:
-    now = utc_now()
-    conn.execute(
-        """
-        INSERT INTO source_registry(
-            source_id, stage, source_name, source_type, base_url,
-            authentication_required, free_key_required, priority, status, created_at, updated_at
-        )
-        VALUES (?, 'stage_1', 'Exchange reported short interest snapshots', 'txt_or_csv',
-                'https://www.nasdaqtrader.com/dynamic/symdir/shortinterest.txt', 0, 0, 63, 'planned', ?, ?)
-        ON CONFLICT(source_id) DO UPDATE SET updated_at = excluded.updated_at
-        """,
-        (source_id, now, now),
-    )
+    sources = [row for row in load_source_registry(SOURCE_REGISTRY) if str(row.get("source_id")) == source_id]
+    if not sources:
+        raise SystemExit(f"source_id {source_id!r} is not defined in {SOURCE_REGISTRY}")
+    upsert_source_registry(conn, sources)
 
 
 def load_company_map(conn: Any) -> dict[str, dict[str, Any]]:

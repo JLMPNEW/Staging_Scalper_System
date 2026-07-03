@@ -23,6 +23,7 @@ from med_devices.core.market_policy import scoring_market_sources  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+REVIEW_PACK_CORE_COLUMNS = ("asof_date", "ticker")
 DEFAULT_REQUIRED_REVIEW_PACK_FILES = (
     "med_device_daily_composite_scores.csv",
     "med_device_score_review_portfolio_candidates.csv",
@@ -113,9 +114,32 @@ def make_chunks(asofs: list[str], *, chunk_size: int) -> list[Chunk]:
     return chunks
 
 
+def review_pack_csv_complete(path: Path) -> bool:
+    # Mirrors script 21's review_pack_csv_complete: a header carrying the core
+    # columns plus at least one non-empty data row.
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.reader(handle)
+            header = next(reader, None)
+            if header is None:
+                return False
+            columns = {str(item or "").strip() for item in header}
+            if not set(REVIEW_PACK_CORE_COLUMNS).issubset(columns):
+                return False
+            return any(any(str(cell or "").strip() for cell in row) for row in reader)
+    except (OSError, csv.Error):
+        return False
+
+
 def review_pack_complete(review_pack_base_dir: Path, asof: str) -> bool:
     output_dir = review_pack_base_dir / asof
-    return all((output_dir / name).exists() and (output_dir / name).stat().st_size > 0 for name in DEFAULT_REQUIRED_REVIEW_PACK_FILES)
+    for name in DEFAULT_REQUIRED_REVIEW_PACK_FILES:
+        path = output_dir / name
+        if not path.exists() or path.stat().st_size == 0:
+            return False
+        if name.lower().endswith(".csv") and not review_pack_csv_complete(path):
+            return False
+    return True
 
 
 def chunk_complete(review_pack_base_dir: Path, chunk: Chunk) -> bool:

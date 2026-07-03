@@ -27,6 +27,7 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 )
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
+from portfolio_layer.scores.adapters import _truthy as adapter_truthy  # noqa: E402
 
 
 LOGGER = logging.getLogger("validate_score_contract")
@@ -82,6 +83,103 @@ def row_flag(row: dict[str, str], field: str) -> bool:
         return int(float(str(row.get(field, "0")).strip() or "0")) != 0
     except (TypeError, ValueError):
         return False
+
+
+# Contract eligibility_reason prefixes that legitimately demote an upstream gate=1 row: the adapter
+# fails investability CLOSED when the score is not a valid frozen OOS model (pre-lock historical
+# files), when the candidate status forbids it, or when the score itself is a missing-value sentinel.
+MED_HANDOFF_DEMOTION_PREFIXES = ("not_oos_score_valid", "missing_score", "failed_portfolio_candidate_gate")
+
+
+def validate_med_devices_handoff(
+    *,
+    run_dir: Path,
+    score_rows: list[dict[str, str]],
+) -> tuple[list[str], list[str]]:
+    """Validate that med-devices optimizer eligibility follows its published gate, demotion-aware.
+
+    Stage 1 intentionally reads the full med-device daily composite file so the non-investable
+    population remains available for score context and diagnostics. The portfolio optimizer must
+    see (a) NO med-device name the sector did not gate, and (b) every gated name, unless the
+    contract records a recognized fail-closed demotion (e.g. pre-lock rows are gate=1 but
+    oos_score_valid=0 and the adapter demotes them by design) or cross-sector duplicate
+    resolution assigned the ticker to another pipeline.
+
+    Returns (errors, warnings). Warnings do not fail the hard gate: an entirely demoted gate set
+    is legitimate on pre-lock historical dates but must stay visible in the validation artifact.
+    """
+    raw_path = run_dir / "raw" / "med_devices_scores.csv"
+    if not raw_path.exists():
+        return [f"missing_raw_source:{raw_path}"], []
+    raw_rows = read_csv(raw_path)
+    if not raw_rows:
+        return ["raw_source_empty"], []
+    required = {"ticker", "portfolio_candidate_gate", "portfolio_candidate_score", "analyst_review_decision"}
+    missing = sorted(required - set(raw_rows[0].keys()))
+    if missing:
+        return [f"raw_source_missing_columns:{missing}"], []
+    # the raw gate must parse with the exact adapter semantics (adapters._truthy), or values the
+    # adapter accepts (e.g. "true", "2") make this comparison false-diverge from Stage 1 output
+    gate_tickers = {
+        str(row.get("ticker", "")).strip().upper()
+        for row in raw_rows
+        if str(row.get("ticker", "")).strip() and adapter_truthy(row.get("portfolio_candidate_gate"))
+    }
+    med_rows = {
+        str(row.get("ticker", "")).strip().upper(): row
+        for row in score_rows
+        if str(row.get("source_pipeline", "")).strip() == "med_devices"
+    }
+    any_pipeline = {str(row.get("ticker", "")).strip().upper() for row in score_rows}
+    stage1_tickers = {
+        t for t, row in med_rows.items() if str(row.get("investable_eligible", "")).strip() == "1"
+    }
+    errors: list[str] = []
+    extra_in_stage1 = sorted(stage1_tickers - gate_tickers)
+    if extra_in_stage1:
+        errors.append(f"stage1_investable_beyond_gate:{extra_in_stage1[:20]}")
+    unexplained: list[str] = []
+    for ticker in sorted(gate_tickers - stage1_tickers):
+        row = med_rows.get(ticker)
+        if row is not None:
+            reason = str(row.get("eligibility_reason", "")).strip()
+            if not reason.startswith(MED_HANDOFF_DEMOTION_PREFIXES):
+                unexplained.append(f"{ticker}:reason={reason[:60] or '<empty>'}")
+        elif ticker in any_pipeline:
+            continue  # cross-sector duplicate resolved to another pipeline; still optimizer-visible
+        else:
+            unexplained.append(f"{ticker}:dropped_from_contract")
+    if unexplained:
+        errors.append(f"gate_tickers_demoted_without_recognized_reason:{unexplained[:20]}")
+    negative_gate_tickers = sorted(
+        str(row.get("ticker", "")).strip().upper()
+        for row in raw_rows
+        if adapter_truthy(row.get("portfolio_candidate_gate"))
+        and str(row.get("analyst_review_decision", "")).strip().lower() in {"reject", "data_fix_needed"}
+    )
+    if negative_gate_tickers:
+        errors.append(f"negative_analyst_decisions_in_gate:{negative_gate_tickers[:20]}")
+
+    def _rank_1_to_10(row: dict[str, str]) -> bool:
+        try:
+            return 1 <= int(float(str(row.get("rank", "")).strip())) <= 10
+        except (TypeError, ValueError):
+            return False
+
+    top_non_candidate_tickers = sorted(
+        str(row.get("ticker", "")).strip().upper()
+        for row in raw_rows
+        if not adapter_truthy(row.get("portfolio_candidate_gate")) and _rank_1_to_10(row)
+    )
+    if top_non_candidate_tickers:
+        LOGGER.info(
+            "Med-devices top-score rows excluded from optimizer by portfolio_candidate_gate: %s",
+            top_non_candidate_tickers,
+        )
+    warnings: list[str] = []
+    if gate_tickers and not stage1_tickers:
+        warnings.append(f"all_gate_tickers_demoted_or_reassigned:{sorted(gate_tickers)[:20]}")
+    return errors, warnings
 
 
 def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
@@ -245,9 +343,12 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
                f"{len(bad_alpha)} rows exceed {max_abs_expected_alpha}; first={bad_alpha[:10]}"
            ))
 
-    # 6c. native score scale sanity
+    # 6c. native score scale sanity (missing-score sentinel rows are neutralized upstream; their
+    # sentinel native value is exempt from the range gate, mirroring 02)
     bad_native_range = []
     for r in rows:
+        if str(r.get("missing_score_flag", "")).strip() in ("1", "1.0"):
+            continue
         pipeline = str(r.get("source_pipeline", "")).strip()
         native = parse_float(r.get("native_score"))
         range_cfg = native_range_by_pipeline.get(pipeline, global_native_range)
@@ -331,7 +432,7 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
 
     # 9. eligibility populated
     bad_elig = [
-        r["ticker"]
+        r.get("ticker", "<missing>")
         for r in rows
         if str(r.get("investable_eligible", "")).strip() not in ("0", "1")
         or not str(r.get("eligibility_reason", "")).strip()
@@ -389,6 +490,23 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         "Stage 1 investable rows are strict OOS, strict OOS rows have valid OOS scores, and source roles are not upgraded"
         if not invariant_errors
         else f"{len(invariant_errors)} invariant errors; first={invariant_errors[:10]}",
+    )
+
+    med_handoff_errors, med_handoff_warnings = validate_med_devices_handoff(run_dir=run_dir, score_rows=rows)
+    record(
+        "med_devices_portfolio_handoff_gate",
+        "PASS" if not med_handoff_errors else "FAIL",
+        "med_devices investable_eligible tickers exactly match upstream portfolio_candidate_gate=1; "
+        "active reject/data_fix_needed rows are excluded"
+        if not med_handoff_errors
+        else f"{len(med_handoff_errors)} errors; first={med_handoff_errors[:5]}",
+    )
+    record(
+        "med_devices_gate_demotion_profile",
+        "PASS" if not med_handoff_warnings else "WARN",
+        "at least one upstream gate ticker reaches investable_eligible=1"
+        if not med_handoff_warnings
+        else f"optimizer receives zero investable med-device names; {med_handoff_warnings[0]}",
     )
 
     # 10. point-in-time source dates and staleness
@@ -472,7 +590,7 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
             "calibration_research_eligible": sum(
                 1 for r in srows if str(r.get("calibration_research_eligible", "")).strip() == "1"
             ),
-            "source_asof": next((r["source_asof_date"] for r in srows), ""),
+            "source_asof": next((r.get("source_asof_date", "") for r in srows), ""),
             "final_score_min": round(min(finals), 6) if finals else None,
             "final_score_max": round(max(finals), 6) if finals else None,
         }

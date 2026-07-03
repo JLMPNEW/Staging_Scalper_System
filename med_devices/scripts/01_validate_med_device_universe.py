@@ -152,6 +152,8 @@ FIELDNAMES = [
     "latest_close",
     "avg_dollar_volume_60d",
     "trading_bar_count",
+    "shares_outstanding",
+    "estimated_market_cap",
     "input_industry",
     "input_index",
 ]
@@ -683,6 +685,30 @@ def companyfacts_summary(companyfacts: dict[str, Any], asof_date: date, policy: 
     )
 
 
+def shares_outstanding(companyfacts: dict[str, Any], asof_date: date) -> float:
+    facts = companyfacts.get("facts", {}).get("dei", {})
+    payload = facts.get("EntityCommonStockSharesOutstanding", {}) if isinstance(facts, dict) else {}
+    units = payload.get("units", {}) if isinstance(payload, dict) else {}
+    if not isinstance(units, dict):
+        return 0.0
+    best_value = 0.0
+    best_date: date | None = None
+    for observations in units.values():
+        if not isinstance(observations, list):
+            continue
+        for obs in observations:
+            if not isinstance(obs, dict):
+                continue
+            end_date = parse_date(obs.get("end"))
+            value = normalize_float(obs.get("val"))
+            if end_date is None or end_date > asof_date or value <= 0.0:
+                continue
+            if best_date is None or end_date > best_date:
+                best_date = end_date
+                best_value = value
+    return best_value
+
+
 def yahoo_symbol(ticker: str) -> str:
     return normalize_ticker(ticker).replace("-", ".")
 
@@ -919,6 +945,7 @@ def validate_one(
             )
             summary, facts_reasons = companyfacts_summary(companyfacts, asof_date, policy)
             out.update(summary)
+            out["shares_outstanding"] = shares_outstanding(companyfacts, asof_date)
         except Exception as exc:
             LOGGER.warning("SEC companyfacts validation failed for %s CIK%s: %s", ticker, cik, exc)
             facts_reasons = ["companyfacts_fetch_failed"]
@@ -945,6 +972,10 @@ def validate_one(
     except Exception as exc:
         LOGGER.warning("Yahoo market validation failed for %s: %s", ticker, exc)
         market_reasons = ["market_fetch_failed"]
+
+    shares = normalize_float(out.get("shares_outstanding"))
+    latest_close = normalize_float(out.get("latest_close"))
+    out["estimated_market_cap"] = round(shares * latest_close, 2) if shares > 0.0 and latest_close > 0.0 else ""
 
     out["sec_submissions_status"] = status_from_reasons(submissions_reasons)
     out["companyfacts_status"] = status_from_reasons(facts_reasons)
@@ -1037,6 +1068,23 @@ def main() -> None:
         if action == "keep":
             bucket = str(row.get("calibration_bucket") or "")
             calibration_counts[bucket] = calibration_counts.get(bucket, 0) + 1
+    # WARNING-level market-cap floor check: violators stay in the keep universe (the floor is
+    # not a hard exclusion here), but the tickers are surfaced for operator review
+    market_cap_min = normalize_float(cfg_get(config, "med_devices_universe.market_cap_min", 0.0))
+    if market_cap_min > 0.0:
+        below_market_cap = sorted(
+            str(row.get("ticker") or "")
+            for row in keep_rows
+            if normalize_float(row.get("estimated_market_cap")) > 0.0
+            and normalize_float(row.get("estimated_market_cap")) < market_cap_min
+        )
+        if below_market_cap:
+            LOGGER.warning(
+                "WARNING check below_market_cap_min: %d keep tickers below med_devices_universe.market_cap_min=%.0f: %s",
+                len(below_market_cap),
+                market_cap_min,
+                ",".join(below_market_cap),
+            )
     LOGGER.info("Wrote validation audit: %s", output_csv)
     LOGGER.info("Wrote keep-only universe: %s", keep_csv)
     LOGGER.info("Wrote clean keep ticker file: %s", clean_tickers_csv)

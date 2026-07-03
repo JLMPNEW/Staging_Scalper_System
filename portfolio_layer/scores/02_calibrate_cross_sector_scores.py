@@ -194,9 +194,13 @@ def main() -> int:
                     overrides[t] = pipeline
         else:
             LOGGER.warning("canonical pipeline overrides CSV not found: %s", ov_path)
-    invalid_overrides = sorted({pipeline for pipeline in overrides.values() if pipeline not in calib_by_family})
+    enabled_families = {
+        str(s["model_family"]) for s in cfg_get(config, "score_contract.sectors", [])
+        if bool(s.get("enabled", True))
+    }
+    invalid_overrides = sorted({pipeline for pipeline in overrides.values() if pipeline not in enabled_families})
     if invalid_overrides:
-        LOGGER.error("canonical pipeline overrides contain unknown pipelines: %s", invalid_overrides)
+        LOGGER.error("canonical pipeline overrides reference unknown or disabled pipelines: %s", invalid_overrides)
         return 1
 
     # Calibrate native scores. Percentile/rating must wait until after duplicate resolution so each
@@ -247,7 +251,10 @@ def main() -> int:
             except ValueError as exc:
                 LOGGER.error("%s", exc)
                 return 1
-            if native < native_min or native > native_max:
+            missing_score_flag = row_flag(r, "missing_score_flag")
+            # Missing-score sentinel rows are neutralized (final_score forced 0, pct 0, avoid); their
+            # sentinel native value (e.g. a negative placeholder) must not hard-fail the range gates.
+            if not missing_score_flag and (native < native_min or native > native_max):
                 LOGGER.error(
                     "%s:%s native_score %.6f outside configured range [%.6f, %.6f]",
                     pipeline,
@@ -257,7 +264,7 @@ def main() -> int:
                     native_max,
                 )
                 return 1
-            if abs(final_score) > max_abs_expected_alpha:
+            if not missing_score_flag and abs(final_score) > max_abs_expected_alpha:
                 LOGGER.error(
                     "%s:%s final_score %.6f exceeds max_abs_expected_alpha %.6f",
                     pipeline,
@@ -266,7 +273,6 @@ def main() -> int:
                     max_abs_expected_alpha,
                 )
                 return 1
-            missing_score_flag = row_flag(r, "missing_score_flag")
             contract_rows.append({
                 "as_of_date": run_as_of, "ticker": r["ticker"], "source_pipeline": pipeline,
                 "sector": r["sector"], "industry": r["industry"], "industry_aggregate": r["industry_aggregate"],

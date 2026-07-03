@@ -6,6 +6,7 @@ import csv
 import json
 import logging
 import math
+import sqlite3
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -146,195 +147,6 @@ TIER1_TEMPLATE_ROLES = {
     TIER1_TEMPLATE_ROLE_RESEARCH,
 }
 STAGE11_CALIBRATION_PANEL_SOURCE = "med_devices_survivorship_corrected_score_review_pack"
-OPTIONAL_DAILY_SCORE_COLUMNS = {
-    "score_model_version": "TEXT DEFAULT ''",
-    "model_family": "TEXT DEFAULT ''",
-    "model_version": "TEXT DEFAULT ''",
-    "scoring_contract_version": "TEXT DEFAULT ''",
-    "sector": "TEXT DEFAULT ''",
-    "industry": "TEXT DEFAULT ''",
-    "country": "TEXT DEFAULT ''",
-    "currency": "TEXT DEFAULT ''",
-    "score_confidence": "REAL DEFAULT 0.0",
-    "eligibility_reason": "TEXT DEFAULT ''",
-    "oos_score_valid_flag": "INTEGER DEFAULT 0",
-    "native_score_field": "TEXT DEFAULT ''",
-    "native_score_value": "REAL DEFAULT 0.0",
-    "score_zero_is_missing_flag": "INTEGER DEFAULT 0",
-    "score_scale_min": "REAL DEFAULT 0.0",
-    "score_scale_max": "REAL DEFAULT 100.0",
-    "score_neutral_value": "REAL DEFAULT 50.0",
-    "universe_status": "TEXT DEFAULT ''",
-    "historical_universe_source": "TEXT DEFAULT ''",
-    "price_start_date": "TEXT DEFAULT ''",
-    "price_end_date": "TEXT DEFAULT ''",
-    "terminal_date": "TEXT DEFAULT ''",
-    "historical_price_ticker": "TEXT DEFAULT ''",
-    "calibration_only": "INTEGER DEFAULT 0",
-    "latest_price_date": "TEXT DEFAULT ''",
-    "source_snapshot_asof_date": "TEXT DEFAULT ''",
-    "price_data_asof_date": "TEXT DEFAULT ''",
-    "feature_data_asof_date": "TEXT DEFAULT ''",
-    "recovery_type": "TEXT DEFAULT ''",
-    "equity_recovery": "INTEGER DEFAULT 0",
-    "drop_otc_tape": "INTEGER DEFAULT 0",
-    "financial_data_asof_date": "TEXT DEFAULT ''",
-    "short_interest_asof_date": "TEXT DEFAULT ''",
-    "institutional_data_asof_date": "TEXT DEFAULT ''",
-    "insider_data_asof_date": "TEXT DEFAULT ''",
-    "borrow_data_asof_date": "TEXT DEFAULT ''",
-    "forward_catalyst_event_date": "TEXT DEFAULT ''",
-    "forward_catalyst_event_type": "TEXT DEFAULT ''",
-    "forward_catalyst_nearest_days": "INTEGER DEFAULT NULL",
-    "forward_catalyst_source": "TEXT DEFAULT ''",
-    "forward_catalyst_confidence": "REAL DEFAULT NULL",
-    "forward_catalyst_asof_date": "TEXT DEFAULT ''",
-    "avg_dollar_volume_60d_available_flag": "INTEGER DEFAULT 0",
-    "calibration_status": "TEXT DEFAULT 'production_eligible'",
-    "calibration_status_reason": "TEXT DEFAULT ''",
-    "calibration_eligible_flag": "INTEGER DEFAULT 1",
-    "research_calibration_input_eligible_flag": "INTEGER DEFAULT 0",
-    "research_calibration_status": "TEXT DEFAULT ''",
-    "research_calibration_reason": "TEXT DEFAULT ''",
-    "calibration_sample_role": "TEXT DEFAULT ''",
-    "stage11_calibration_input_eligible_flag": "INTEGER DEFAULT 0",
-    "stage11_calibration_input_reason": "TEXT DEFAULT ''",
-    "stage11_calibration_panel_source": "TEXT DEFAULT ''",
-    "survivorship_corrected_panel_flag": "INTEGER DEFAULT 0",
-    "cohort_score_template_id": "TEXT DEFAULT ''",
-    "cohort_score_template_spec": "TEXT DEFAULT ''",
-    "cohort_score_template_tier1_role": "TEXT DEFAULT ''",
-    "cohort_score_template_tier1_eligible": "INTEGER DEFAULT 0",
-    "single_product_risk_flag": "INTEGER DEFAULT 0",
-    "binary_event_risk_flag": "INTEGER DEFAULT 0",
-    "tier1_safety_status": "TEXT DEFAULT ''",
-    "tier1_safety_reason": "TEXT DEFAULT ''",
-    "passed_tier1_safety_gate": "INTEGER DEFAULT 1",
-    "portfolio_candidate_gate": "INTEGER DEFAULT 0",
-    "portfolio_candidate_status": "TEXT DEFAULT ''",
-    "portfolio_candidate_reason": "TEXT DEFAULT ''",
-    "portfolio_candidate_score": "REAL DEFAULT 0.0",
-    "analyst_review_decision": "TEXT DEFAULT ''",
-    "analyst_review_reason": "TEXT DEFAULT ''",
-    "analyst_review_owner": "TEXT DEFAULT ''",
-    "analyst_reviewed_at": "TEXT DEFAULT ''",
-    "analyst_review_expires_at": "TEXT DEFAULT ''",
-    "analyst_portfolio_override_applied": "INTEGER DEFAULT 0",
-    "safe_core_score": "REAL DEFAULT 0.0",
-    "safe_core_percentile": "REAL DEFAULT 0.0",
-    "safe_core_cohort_percentile": "REAL DEFAULT 0.0",
-    "safe_core_rank": "INTEGER DEFAULT 0",
-    "safe_core_status": "TEXT DEFAULT ''",
-    "safe_core_reason": "TEXT DEFAULT ''",
-    "passed_safe_core_gate": "INTEGER DEFAULT 0",
-    "safe_core_model_version": "TEXT DEFAULT ''",
-    "legacy_all_gates_gate": "INTEGER DEFAULT 0",
-    "legacy_gate_misses": "TEXT DEFAULT ''",
-    "ic_tilted_composite_score": "REAL DEFAULT 0.0",
-    "ic_tilted_composite_delta": "REAL DEFAULT 0.0",
-    "ic_tilted_composite_mode": "TEXT DEFAULT ''",
-    "ic_tilted_component_ics_json": "TEXT DEFAULT '{}'",
-    "durable_growth_score_legacy": "REAL DEFAULT 50.0",
-    "durable_growth_alpha_score": "REAL DEFAULT 50.0",
-    "durable_growth_growth_score": "REAL DEFAULT 50.0",
-    "durable_growth_quality_score": "REAL DEFAULT 50.0",
-    "durable_growth_efficiency_score": "REAL DEFAULT 50.0",
-    "durable_growth_capital_discipline_score": "REAL DEFAULT 50.0",
-    "durable_growth_evidence_quality_score": "REAL DEFAULT 0.0",
-    "durable_growth_component_count": "INTEGER DEFAULT 0",
-    "durable_growth_signal_mode": "TEXT DEFAULT ''",
-    "durable_growth_signal_direction": "TEXT DEFAULT ''",
-    "durable_growth_signal_reliability": "REAL DEFAULT 0.0",
-    "durable_growth_score_source": "TEXT DEFAULT ''",
-    "durable_growth_gate_mode": "TEXT DEFAULT ''",
-    "durable_growth_policy_reason": "TEXT DEFAULT ''",
-    "durable_growth_gate_excluded": "INTEGER DEFAULT 0",
-    "durable_growth_component_weight": "REAL DEFAULT 0.0",
-    "durable_growth_repair_flag": "INTEGER DEFAULT 0",
-    "durable_growth_repair_reason": "TEXT DEFAULT ''",
-    "durable_growth_validation_status": "TEXT DEFAULT ''",
-    "durable_growth_validation_reason": "TEXT DEFAULT ''",
-    "durable_growth_production_state": "TEXT DEFAULT ''",
-    "fda_product_score_legacy": "REAL DEFAULT 0.0",
-    "fda_alpha_score": "REAL DEFAULT 0.0",
-    "fda_safety_score": "REAL DEFAULT 0.0",
-    "fda_clearance_velocity_raw": "REAL DEFAULT 0.0",
-    "fda_clearance_velocity_score": "REAL DEFAULT 50.0",
-    "fda_clearance_acceleration_raw": "REAL DEFAULT 0.0",
-    "fda_clearance_acceleration_score": "REAL DEFAULT 50.0",
-    "fda_evidence_quality_score": "REAL DEFAULT 0.0",
-    "fda_event_risk_score": "REAL DEFAULT 0.0",
-    "fda_event_risk_breadth_adjusted_score": "REAL DEFAULT 0.0",
-    "fda_safety_breadth_adjusted_score": "REAL DEFAULT 50.0",
-    "fda_distinct_device_category_count": "INTEGER DEFAULT 0",
-    "fda_recall_count_raw": "INTEGER DEFAULT 0",
-    "fda_recall_count_per_category": "REAL DEFAULT 0.0",
-    "fda_class_i_recall_count": "INTEGER DEFAULT 0",
-    "fda_warning_letter_count_36m": "INTEGER DEFAULT 0",
-    "fda_mdr_death_injury_count_24m": "INTEGER DEFAULT 0",
-    "fda_mdr_malfunction_count_24m": "INTEGER DEFAULT 0",
-    "fda_mdr_malfunction_count_per_category": "REAL DEFAULT 0.0",
-    "fda_breadth_adjustment_applied": "INTEGER DEFAULT 0",
-    "fda_signal_mode": "TEXT DEFAULT ''",
-    "fda_signal_direction": "TEXT DEFAULT ''",
-    "fda_signal_reliability": "REAL DEFAULT 0.0",
-    "fda_score_source": "TEXT DEFAULT ''",
-    "fda_gate_mode": "TEXT DEFAULT ''",
-    "fda_policy_reason": "TEXT DEFAULT ''",
-    "fda_gate_excluded": "INTEGER DEFAULT 0",
-    "fda_component_weight": "REAL DEFAULT 0.0",
-    "fda_data_available": "INTEGER DEFAULT 0",
-    "quality_value_interaction_score": "REAL DEFAULT 50.0",
-    "fda_technical_interaction_score": "REAL DEFAULT 50.0",
-    "technical_gate_mode": "TEXT DEFAULT ''",
-    "technical_overlay_status": "TEXT DEFAULT ''",
-    "technical_policy_reason": "TEXT DEFAULT ''",
-    "technical_gate_excluded": "INTEGER DEFAULT 0",
-    "technical_component_weight": "REAL DEFAULT 0.0",
-    "passed_technical_breakdown_veto": "INTEGER DEFAULT 1",
-    "pullback_candidate_tag": "INTEGER DEFAULT 0",
-    "pullback_candidate_reason": "TEXT DEFAULT ''",
-    "pullback_candidate_template_id": "TEXT DEFAULT ''",
-    "technical_trend_quality_score": "REAL DEFAULT 0.0",
-    "technical_relative_strength_score": "REAL DEFAULT 0.0",
-    "technical_liquidity_score": "REAL DEFAULT 0.0",
-    "technical_volume_breakout_score": "REAL DEFAULT 0.0",
-    "technical_volatility_risk_score": "REAL DEFAULT 0.0",
-    "technical_setup_score": "REAL DEFAULT 0.0",
-    "technical_core_score": "REAL DEFAULT 0.0",
-    "technical_alpha_score": "REAL DEFAULT 0.0",
-    "technical_pullback_score": "REAL DEFAULT 0.0",
-    "technical_overextension_score": "REAL DEFAULT 0.0",
-    "technical_breakdown_flag": "INTEGER DEFAULT 0",
-    "technical_liquidity_gate_flag": "INTEGER DEFAULT 0",
-    "technical_signal_mode": "TEXT DEFAULT ''",
-    "technical_signal_direction": "TEXT DEFAULT ''",
-    "technical_signal_reliability": "REAL DEFAULT 0.0",
-    "technical_score_source": "TEXT DEFAULT ''",
-    "technical_entry_status_score": "REAL DEFAULT 0.0",
-    "technical_entry_status_score_source": "TEXT DEFAULT ''",
-    "borrow_availability_score": "REAL DEFAULT 50.0",
-    "borrow_fee_score": "REAL DEFAULT 50.0",
-    "borrow_squeeze_risk_score": "REAL DEFAULT 50.0",
-    "borrow_pressure_score": "REAL DEFAULT 50.0",
-    "borrow_data_quality_score": "REAL DEFAULT 0.0",
-    "short_interest_score": "REAL DEFAULT 50.0",
-    "short_pressure_score": "REAL DEFAULT 50.0",
-    "short_squeeze_score": "REAL DEFAULT 50.0",
-    "short_volume_score": "REAL DEFAULT 50.0",
-    "short_interest_velocity_score": "REAL DEFAULT 50.0",
-    "days_to_cover_score": "REAL DEFAULT 50.0",
-    "short_data_quality_score": "REAL DEFAULT 0.0",
-    "institutional_accumulation_score": "REAL DEFAULT 50.0",
-    "institutional_crowding_score": "REAL DEFAULT 50.0",
-    "institutional_breadth_score": "REAL DEFAULT 50.0",
-    "institutional_flow_data_quality_score": "REAL DEFAULT 0.0",
-    "insider_net_buy_score": "REAL DEFAULT 50.0",
-    "insider_cluster_buy_score": "REAL DEFAULT 50.0",
-    "insider_selling_pressure_score": "REAL DEFAULT 50.0",
-    "insider_activity_score": "REAL DEFAULT 50.0",
-    "insider_data_quality_score": "REAL DEFAULT 0.0",
-}
 ALLOWED_FEATURE_TABLES = {
     "feature_financial_valuation",
     "feature_fda_product_risk",
@@ -390,12 +202,6 @@ FIELDNAMES = [
     "institutional_data_asof_date",
     "insider_data_asof_date",
     "borrow_data_asof_date",
-    "forward_catalyst_event_date",
-    "forward_catalyst_event_type",
-    "forward_catalyst_nearest_days",
-    "forward_catalyst_source",
-    "forward_catalyst_confidence",
-    "forward_catalyst_asof_date",
     "subsector",
     "composite_score",
     "raw_composite_score",
@@ -447,6 +253,7 @@ FIELDNAMES = [
     "ic_tilted_component_ics_json",
     "cohort_percentile",
     "fundamental_quality_score",
+    "fundamental_quality_component_weight",
     "durable_growth_score",
     "durable_growth_score_legacy",
     "durable_growth_alpha_score",
@@ -502,6 +309,7 @@ FIELDNAMES = [
     "quality_value_interaction_score",
     "fda_technical_interaction_score",
     "reimbursement_score",
+    "reimbursement_component_weight",
     "reimbursement_status",
     "direct_code_evidence",
     "payment_rate_evidence",
@@ -511,6 +319,7 @@ FIELDNAMES = [
     "diagnostics_lab_flag",
     "unknown_reimbursement_flag",
     "valuation_score",
+    "valuation_component_weight",
     "technical_entry_score",
     "technical_trend_quality_score",
     "technical_relative_strength_score",
@@ -552,6 +361,7 @@ FIELDNAMES = [
     "insider_activity_score",
     "insider_data_quality_score",
     "sentiment_catalyst_score",
+    "sentiment_catalyst_component_weight",
     "value_trap_score",
     "data_completeness_score",
     "live_component_count",
@@ -629,7 +439,7 @@ class ScoreRow:
     eligibility_reason: str = ""
     oos_score_valid_flag: int = 0
     native_score_field: str = "composite_score"
-    native_score_value: float = 0.0
+    native_score_value: float | None = None
     score_zero_is_missing_flag: int = 0
     score_scale_min: float = 0.0
     score_scale_max: float = 100.0
@@ -653,12 +463,6 @@ class ScoreRow:
     institutional_data_asof_date: str = ""
     insider_data_asof_date: str = ""
     borrow_data_asof_date: str = ""
-    forward_catalyst_event_date: str = ""
-    forward_catalyst_event_type: str = ""
-    forward_catalyst_nearest_days: int | None = None
-    forward_catalyst_source: str = ""
-    forward_catalyst_confidence: float | None = None
-    forward_catalyst_asof_date: str = ""
     composite_score: float = 0.0
     raw_composite_score: float = 0.0
     composite_percentile: float = 0.0
@@ -927,6 +731,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tickers", type=str, default="")
     parser.add_argument("--max-tickers", type=int, default=0)
     parser.add_argument("--include-historical-members", action="store_true")
+    parser.add_argument(
+        "--oos-score-valid",
+        action="store_true",
+        help=(
+            "Mark eligible active rows as strict-OOS production scores. "
+            "Routine daily refreshes should pass this; historical backfills should not. "
+            "Honored only when the as-of date is within scoring.oos_replay_window_days "
+            "(default 5) of today; older or future as-of dates publish "
+            "oos_score_valid_flag=0 and require script 76 for strict-OOS promotion."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1172,9 +987,10 @@ def load_financial_rows(
             ))
         )
           AND f.asof_date = (
-            SELECT MAX(asof_date)
-            FROM feature_financial_valuation
-            WHERE asof_date <= ?
+            SELECT MAX(f2.asof_date)
+            FROM feature_financial_valuation f2
+            WHERE f2.company_id = f.company_id
+              AND f2.asof_date <= ?
         )
         ORDER BY f.ticker
         """,
@@ -1990,9 +1806,9 @@ def value_trap_discount(value_trap_score: float, *, start: float = 40.0) -> floa
 
 def cross_sectional_percentile_rank(rows: list[ScoreRow]) -> None:
     pairs = [
-        (idx, row.raw_composite_score)
+        (idx, row.composite_score)
         for idx, row in enumerate(rows)
-        if row.raw_composite_score is not None and math.isfinite(row.raw_composite_score)
+        if row.composite_score is not None and math.isfinite(row.composite_score)
     ]
     if len(pairs) <= 1:
         for row in rows:
@@ -2008,9 +1824,9 @@ def cohort_percentile_rank(rows: list[ScoreRow]) -> None:
     by_cohort: dict[str, list[tuple[int, float]]] = {}
     for idx, row in enumerate(rows):
         cohort = row.calibration_cohort or row.subsector or "unknown"
-        if row.raw_composite_score is None or not math.isfinite(row.raw_composite_score):
+        if row.composite_score is None or not math.isfinite(row.composite_score):
             continue
-        by_cohort.setdefault(cohort, []).append((idx, row.raw_composite_score))
+        by_cohort.setdefault(cohort, []).append((idx, row.composite_score))
     for pairs in by_cohort.values():
         if len(pairs) <= 1:
             for idx, _ in pairs:
@@ -2438,7 +2254,7 @@ def normalize_universe_status(raw: object, *, company_is_active: bool) -> str:
     return "active" if company_is_active else "historical"
 
 
-def apply_research_calibration_metadata(row: ScoreRow) -> None:
+def apply_research_calibration_metadata(row: ScoreRow, *, oos_score_valid: bool) -> None:
     """Publish explicit Stage 11 research-calibration eligibility metadata."""
     row.oos_score_valid_flag = 0
     row.score_scale_min = 0.0
@@ -2457,11 +2273,13 @@ def apply_research_calibration_metadata(row: ScoreRow) -> None:
     if native_score_value is None:
         reasons.append("missing_native_score")
     elif native_score_value <= 0.0:
-        reasons.append("zero_or_negative_native_score")
+        # A composite of exactly 0.0 with live components is indistinguishable from a
+        # missing-data placeholder, so it is excluded as an ambiguous sentinel.
+        reasons.append("zero_score_ambiguous_sentinel")
     if composite_score is None:
         reasons.append("missing_composite_score")
     elif composite_score <= 0.0:
-        reasons.append("zero_or_negative_composite_score")
+        reasons.append("zero_score_ambiguous_sentinel")
     if int(row.live_component_count or 0) <= 0:
         reasons.append("no_live_components")
 
@@ -2477,7 +2295,8 @@ def apply_research_calibration_metadata(row: ScoreRow) -> None:
     row.research_calibration_input_eligible_flag = 1
     row.research_calibration_status = "eligible"
     row.research_calibration_reason = "valid_research_calibration_input"
-    row.calibration_sample_role = "research_calibration_input"
+    row.oos_score_valid_flag = int(bool(oos_score_valid) and int(row.calibration_only or 0) == 0)
+    row.calibration_sample_role = "strict_oos" if row.oos_score_valid_flag == 1 else "research_calibration_input"
     row.stage11_calibration_input_eligible_flag = 1
     row.stage11_calibration_input_reason = "ok"
 
@@ -3205,6 +3024,24 @@ def durable_float_from_payload(item: dict[str, Any], key: str) -> float | None:
     return None
 
 
+def feature_payload_source(item: dict[str, Any]) -> str:
+    payload = item.get("payload_json") if item else None
+    if not payload:
+        return ""
+    try:
+        parsed = json.loads(str(payload))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    return str(parsed.get("source") or "").strip()
+
+
+def feature_payload_is_self_authored(item: dict[str, Any]) -> bool:
+    """True when the feature row was written back by a prior daily-score run (daily_score_* source)."""
+    return feature_payload_source(item).startswith("daily_score_")
+
+
 def first_not_none(*values: float | None) -> float | None:
     for value in values:
         if value is not None:
@@ -3268,6 +3105,19 @@ def selected_durable_growth_legacy(
         if source == "alpha":
             return neutral, neutral, neutral, neutral, neutral, 0.0, 0, "durable_growth_alpha_score_missing"
     if source in {"legacy", "alpha_when_available"} and item:
+        if proxy is not None and feature_payload_is_self_authored(item):
+            # Row was written back by a prior daily-score run; prefer the freshly
+            # computed same-day proxy over the stale persisted copy.
+            return (
+                proxy.legacy_score,
+                proxy.growth_score,
+                proxy.quality_score,
+                proxy.efficiency_score,
+                proxy.capital_discipline_score,
+                proxy.evidence_quality_score,
+                proxy.component_count,
+                proxy.source,
+            )
         legacy = to_float(item.get("durable_growth_score_legacy"))
         if legacy is None:
             legacy = to_float(item.get("score"))
@@ -3518,6 +3368,10 @@ def selected_technical_score(item: dict[str, Any], *, neutral: float, source: st
 def technical_score_available(item: dict[str, Any], *, source: str) -> bool:
     if not item:
         return False
+    if str(item.get("data_quality_status") or "").strip().lower() == "fail":
+        # Failed technical data quality means the row carries no usable signal and must
+        # not count as a live component.
+        return False
     if source in {"alpha", "alpha_when_available"}:
         if to_float(item.get("technical_alpha_score")) is not None:
             return True
@@ -3565,6 +3419,11 @@ def cohort_pullback_candidate_profiles(config: dict[str, Any]) -> dict[str, Pull
     raw_section = cfg_get(config, "scoring.pullback_candidate_tags", {}) or {}
     if not isinstance(raw_section, dict):
         raise ValueError("scoring.pullback_candidate_tags must be a mapping when provided")
+    if not bool_from_raw(cfg_get(config, "scoring.pullback_candidate_tags.report_only", True), True):
+        raise SystemExit(
+            "scoring.pullback_candidate_tags.report_only=false is not implemented; "
+            "pullback candidate tags are report-only and never gate classification"
+        )
     if not bool_from_raw(raw_section.get("enabled"), False):
         return {}
     raw_profiles = raw_section.get("cohorts", {}) or {}
@@ -3876,7 +3735,7 @@ def calibrated_baseline_candidate_status(
     if not row.passed_fda_manual_review_gate or row.hard_red_flag:
         return None
     min_checks = [
-        ("raw_composite_score", "composite_min"),
+        ("composite_score", "composite_min"),
         ("cohort_percentile", "cohort_percentile_min"),
         ("fundamental_quality_score", "fundamental_quality_min"),
         ("durable_growth_score", "durable_growth_min"),
@@ -3966,6 +3825,11 @@ def load_analyst_review_decisions_for_scoring(
     *,
     base_dir: Path,
 ) -> list[analyst_review_core.AnalystReviewDecision]:
+    if bool_from_raw(cfg_get(config, "med_devices_analyst_review.enable_portfolio_overrides", False), False):
+        raise SystemExit(
+            "med_devices_analyst_review.enable_portfolio_overrides is enabled in config but the "
+            "analyst portfolio override pathway is not implemented; approve decisions remain shadow-only"
+        )
     decision_path = resolve_path(
         cfg_get(config, "med_devices_analyst_review.decisions_csv", "data/analyst_review_decisions.csv"),
         base_dir=base_dir,
@@ -4034,6 +3898,8 @@ def apply_analyst_review_decision(
             f"previous_status={previous_status};"
             f"previous_reason={previous_reason}"
         )
+    # Shadow-only: approve decisions never widen the portfolio gate; the override pathway
+    # is unimplemented and load_analyst_review_decisions_for_scoring aborts if enabled.
     row.analyst_portfolio_override_applied = 0
 
 
@@ -4161,7 +4027,7 @@ def classify(
     row.max_position_size_feasible = max_position_size(row.avg_dollar_volume_60d)
     row.min_position_size_feasible = min_position_size(row.max_position_size_feasible)
     row.passed_raw_score_gate = int(
-        row.raw_composite_score >= gates["composite_min"]
+        row.composite_score >= gates["composite_min"]
         and row.cohort_percentile >= gates.get("cohort_percentile_min", 0.0)
     )
     row.passed_fundamental_gate = int(row.fundamental_quality_score >= gates["fundamental_quality_min"])
@@ -4251,7 +4117,7 @@ def classify(
     row.passed_fda_manual_review_gate = int(not manual_regulatory_state and not row.hard_red_flag)
 
     if not row.passed_raw_score_gate:
-        if row.raw_composite_score < gates["composite_min"]:
+        if row.composite_score < gates["composite_min"]:
             reasons.append("composite_below_gate")
         if row.cohort_percentile < gates.get("cohort_percentile_min", 0.0):
             reasons.append("cohort_percentile_below_gate")
@@ -4422,7 +4288,7 @@ def classify(
     elif row.valuation_score >= 75.0 and row.fundamental_quality_score < gates["fundamental_quality_min"]:
         row.classification = "cheap_but_needs_proof"
         row.classification_reason = "cheap_but_fundamental_below_gate"
-    elif not row.passed_value_trap_gate and row.raw_composite_score >= gates["watchlist_min"]:
+    elif not row.passed_value_trap_gate and row.composite_score >= gates["watchlist_min"]:
         row.classification = "cheap_but_needs_proof"
         row.classification_reason = "value_trap_soft_gate"
     elif tier1_restricted and base_investability_gate:
@@ -4454,7 +4320,7 @@ def classify(
                 if not overlay_reasons
                 else "all_tier1_active_gates_passed;" + ";".join(overlay_reasons)
             )
-    elif row.raw_composite_score >= gates["watchlist_min"]:
+    elif row.composite_score >= gates["watchlist_min"]:
         row.classification = "watchlist"
         row.classification_reason = "raw_score_above_watchlist_floor"
     else:
@@ -4473,6 +4339,7 @@ def build_rows(
     ticker_filter: set[str],
     max_tickers: int,
     include_historical_members: bool,
+    oos_score_valid: bool,
 ) -> list[ScoreRow]:
     financial_rows = load_financial_rows(
         conn,
@@ -4636,6 +4503,10 @@ def build_rows(
         sentiment_proxy_item = sentiment_proxy.get(company_id)
         has_sentiment_proxy = sentiment_proxy_item is not None
         sentiment_table_score = to_float(sentiment_item.get("score")) if sentiment_item else None
+        if sentiment_table_score is not None and has_sentiment_proxy and feature_payload_is_self_authored(sentiment_item):
+            # Row was written back by a prior daily-score run; prefer the freshly
+            # computed same-day proxy over the stale persisted copy.
+            sentiment_table_score = None
         has_durable_live_score = durable_growth_score_available(durable_item, durable_proxy_item, source=durable_source)
         has_sentiment_live_score = sentiment_table_score is not None or has_sentiment_proxy
         fda_hard_flag = int(fda_item.get("hard_red_flag") or 0) if fda_item else 0
@@ -4691,13 +4562,9 @@ def build_rows(
             source=active_durable_growth_score_source,
         )
         durable_score = durable_selection.alpha_score
-        sentiment_score = (
-            score_or(
-                sentiment_item.get("score"),
-                sentiment_proxy_item.score if sentiment_proxy_item is not None else neutral_sentiment,
-            )
-            if sentiment_item
-            else sentiment_proxy_item.score if sentiment_proxy_item is not None else neutral_sentiment
+        sentiment_score = score_or(
+            sentiment_table_score,
+            sentiment_proxy_item.score if sentiment_proxy_item is not None else neutral_sentiment,
         )
         technical_score, active_technical_score_source = (
             selected_technical_score(technical_item, neutral=neutral_technical, source=technical_source)
@@ -4742,6 +4609,9 @@ def build_rows(
         if fda_policy.gate_mode in {FDA_GATE_RISK_VETO_ONLY, FDA_GATE_OVERLAY_ONLY, FDA_GATE_DISABLED}:
             effective_weights["fda_product"] = 0.0
             fda_component_weight = 0.0
+        # Intentional asymmetry with FDA: technical overlay/breakdown-veto/disabled gate
+        # modes keep effective_weights["technical_entry"] active in the composite; the
+        # gate policy only relaxes classification, it does not remove the signal.
         effective_weights.setdefault("technical_liquidity", 0.0)
         effective_weights.setdefault("technical_volatility_risk", 0.0)
         effective_weights.setdefault("fda_alpha", 0.0)
@@ -5146,7 +5016,12 @@ def build_rows(
             if active_score_template is not None
             else fixed_weight_composite
         )
-        raw_composite_discounted = round(clamp(raw_composite * value_trap_discount(row.value_trap_score)), 2)
+        # Neutral-fallback value_trap (no feature data) carries no trap evidence, so the
+        # discount only applies when the component value came from real data.
+        value_trap_factor = (
+            value_trap_discount(row.value_trap_score) if score_field_available["value_trap_score"] else 1.0
+        )
+        raw_composite_discounted = round(clamp(raw_composite * value_trap_factor), 2)
         component_ics = profile_for_cohort(row.calibration_cohort, ic_tilt_component_ics, cohort_profile_alias_map, {})
         if ic_tilt_policy.get("enabled") and component_ics:
             ic_tilted_raw = ic_blended_score(
@@ -5159,7 +5034,7 @@ def build_rows(
                 neutral=DEFAULT_NEUTRAL_SCORE,
             )
             row.ic_tilted_composite_score = round(
-                clamp(ic_tilted_raw * value_trap_discount(row.value_trap_score)),
+                clamp(ic_tilted_raw * value_trap_factor),
                 2,
             )
             row.ic_tilted_composite_delta = round(row.ic_tilted_composite_score - raw_composite_discounted, 2)
@@ -5177,23 +5052,24 @@ def build_rows(
             row.ic_tilted_composite_delta = 0.0
             row.ic_tilted_composite_mode = "disabled" if not ic_tilt_policy.get("enabled") else "fallback_no_valid_ic"
             row.ic_tilted_component_ics_json = "{}"
+        # raw_composite_score persists the true pre-discount composite; composite_score is
+        # the value-trap-discounted (and optionally IC-replaced) production value.
         row.raw_composite_score = round(
-            clamp(raw_composite_discounted),
+            clamp(raw_composite),
             2,
         )
-        row.composite_score = row.raw_composite_score
+        row.composite_score = round(clamp(raw_composite_discounted), 2)
         composite_score_value = to_float(row.composite_score)
-        row.native_score_value = composite_score_value if composite_score_value is not None else 0.0
-        row.score_zero_is_missing_flag = int(
-            (composite_score_value is None or composite_score_value == 0.0)
-            and row.live_component_count == 0
-        )
+        row.native_score_value = composite_score_value
+        # No live components means the composite is pure neutral filler, so the stored
+        # value is a missing-data sentinel regardless of its numeric level.
+        row.score_zero_is_missing_flag = int(row.live_component_count == 0)
         rows.append(row)
     if rank_composite:
         cross_sectional_percentile_rank(rows)
     else:
         for row in rows:
-            row.composite_percentile = row.raw_composite_score
+            row.composite_percentile = row.composite_score
     cohort_percentile_rank(rows)
     for row in rows:
         row.safe_core_score = safe_core_risk_adjusted_score(row)
@@ -5236,12 +5112,12 @@ def build_rows(
             profile_for_cohort(row.calibration_cohort, pullback_candidate_profiles, cohort_profile_alias_map),
         )
         row.eligibility_reason = row.portfolio_candidate_reason or row.safe_core_reason or row.tier1_safety_reason or row.review_reason
-        apply_research_calibration_metadata(row)
+        apply_research_calibration_metadata(row, oos_score_valid=oos_score_valid)
         row.top_positive_drivers, row.top_negative_drivers = score_drivers(row)
     rows.sort(
         key=lambda item: (
             -item.composite_percentile,
-            -item.raw_composite_score,
+            -item.composite_score,
             -item.fundamental_quality_score,
             -item.data_completeness_score,
             item.ticker,
@@ -5265,12 +5141,31 @@ def build_rows(
 
 
 def ensure_daily_score_policy_columns(conn: Any) -> None:
+    """Backfill med_device_daily_scores columns missing from the live table.
+
+    Delegates to med_devices.core.db as the single source of truth: init_db() builds
+    the canonical schema (DDL plus optional-column migration) on an in-memory
+    reference connection, and the live table is patched with any columns it lacks.
+    """
     if not table_exists(conn, "med_device_daily_scores"):
         return
     existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(med_device_daily_scores)").fetchall()}
-    for column, ddl in OPTIONAL_DAILY_SCORE_COLUMNS.items():
-        if column not in existing:
+    reference = sqlite3.connect(":memory:")
+    reference.row_factory = sqlite3.Row
+    try:
+        init_db(reference)
+        for column_info in reference.execute("PRAGMA table_info(med_device_daily_scores)").fetchall():
+            column = str(column_info["name"])
+            if column in existing:
+                continue
+            if column_info["pk"] or (column_info["notnull"] and column_info["dflt_value"] is None):
+                continue
+            ddl = str(column_info["type"] or "TEXT")
+            if column_info["dflt_value"] is not None:
+                ddl = f"{ddl} DEFAULT {column_info['dflt_value']}"
             conn.execute(f"ALTER TABLE med_device_daily_scores ADD COLUMN {quote_identifier(column)} {ddl}")
+    finally:
+        reference.close()
 
 
 def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) -> int:
@@ -5321,12 +5216,6 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "institutional_data_asof_date",
         "insider_data_asof_date",
         "borrow_data_asof_date",
-        "forward_catalyst_event_date",
-        "forward_catalyst_event_type",
-        "forward_catalyst_nearest_days",
-        "forward_catalyst_source",
-        "forward_catalyst_confidence",
-        "forward_catalyst_asof_date",
         "scoring_model_version",
         "composite_score",
         "raw_composite_score",
@@ -5378,6 +5267,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "ic_tilted_component_ics_json",
         "cohort_percentile",
         "fundamental_quality_score",
+        "fundamental_quality_component_weight",
         "durable_growth_score",
         "durable_growth_score_legacy",
         "durable_growth_alpha_score",
@@ -5433,6 +5323,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "quality_value_interaction_score",
         "fda_technical_interaction_score",
         "reimbursement_score",
+        "reimbursement_component_weight",
         "reimbursement_status",
         "direct_code_evidence",
         "payment_rate_evidence",
@@ -5442,6 +5333,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "diagnostics_lab_flag",
         "unknown_reimbursement_flag",
         "valuation_score",
+        "valuation_component_weight",
         "technical_entry_score",
         "technical_trend_quality_score",
         "technical_relative_strength_score",
@@ -5483,6 +5375,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "insider_activity_score",
         "insider_data_quality_score",
         "sentiment_catalyst_score",
+        "sentiment_catalyst_component_weight",
         "value_trap_score",
         "rank",
         "data_completeness_score",
@@ -5594,12 +5487,6 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.institutional_data_asof_date,
                 row.insider_data_asof_date,
                 row.borrow_data_asof_date,
-                row.forward_catalyst_event_date,
-                row.forward_catalyst_event_type,
-                row.forward_catalyst_nearest_days,
-                row.forward_catalyst_source,
-                row.forward_catalyst_confidence,
-                row.forward_catalyst_asof_date,
                 row.scoring_model_version,
                 row.composite_score,
                 row.raw_composite_score,
@@ -5651,6 +5538,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.ic_tilted_component_ics_json,
                 row.cohort_percentile,
                 row.fundamental_quality_score,
+                row.fundamental_quality_component_weight,
                 row.durable_growth_score,
                 row.durable_growth_score_legacy,
                 row.durable_growth_alpha_score,
@@ -5706,6 +5594,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.quality_value_interaction_score,
                 row.fda_technical_interaction_score,
                 row.reimbursement_score,
+                row.reimbursement_component_weight,
                 row.reimbursement_status,
                 row.direct_code_evidence,
                 row.payment_rate_evidence,
@@ -5715,6 +5604,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.diagnostics_lab_flag,
                 row.unknown_reimbursement_flag,
                 row.valuation_score,
+                row.valuation_component_weight,
                 row.technical_entry_score,
                 row.technical_trend_quality_score,
                 row.technical_relative_strength_score,
@@ -5756,6 +5646,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.insider_activity_score,
                 row.insider_data_quality_score,
                 row.sentiment_catalyst_score,
+                row.sentiment_catalyst_component_weight,
                 row.value_trap_score,
                 row.rank,
                 row.data_completeness_score,
@@ -5857,6 +5748,29 @@ def main() -> None:
         run_id = start_run(conn, run_type="build_med_device_daily_scores", input_path=config_path)
         try:
             asof = args.asof.strip() or latest_financial_asof(conn)
+            oos_score_valid = bool(args.oos_score_valid)
+            if oos_score_valid:
+                # A rerun for an older as-of date recomputes scores from today's
+                # database, so later filings/revisions can alter the features and
+                # the run cannot self-certify strict OOS. Mirror the technology
+                # replay-window rule: honor --oos-score-valid only when the as-of
+                # is within the live-capture window of today (never in the
+                # future); everything else stays fail-closed at flag=0.
+                replay_window_days = int(cfg_get(config, "scoring.oos_replay_window_days", 5))
+                try:
+                    asof_age_days: int | None = (date.today() - date.fromisoformat(asof)).days
+                except ValueError:
+                    asof_age_days = None
+                if asof_age_days is None or not 0 <= asof_age_days <= replay_window_days:
+                    oos_score_valid = False
+                    LOGGER.warning(
+                        "--oos-score-valid ignored: asof=%s is outside the %d-day strict-OOS replay window "
+                        "(scoring.oos_replay_window_days); publishing oos_score_valid_flag=0. Strict-OOS "
+                        "promotion for this as-of requires the PIT backfill/validation path plus "
+                        "med_devices/scripts/76_mark_med_device_oos_provenance.py.",
+                        asof,
+                        replay_window_days,
+                    )
             preflight_required_features(conn, asof=asof)
             preflight_feature_freshness(
                 conn,
@@ -5872,6 +5786,7 @@ def main() -> None:
                 ticker_filter=ticker_filter,
                 max_tickers=int(args.max_tickers),
                 include_historical_members=bool(args.include_historical_members),
+                oos_score_valid=oos_score_valid,
             )
             replace_asof = not ticker_filter and int(args.max_tickers) <= 0
             upserted = upsert_rows(conn, rows, replace_asof=replace_asof)

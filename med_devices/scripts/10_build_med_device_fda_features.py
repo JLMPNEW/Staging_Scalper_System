@@ -11,7 +11,7 @@ import math
 import re
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,7 @@ from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.fda_states import MANUAL_FDA_REVIEW_STATES, normalize_fda_state  # noqa: E402
-from med_devices.core.point_in_time import row_is_effective_asof  # noqa: E402
+from med_devices.core.point_in_time import row_is_effective_asof, warn_pit_invariant_violations  # noqa: E402
 from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 
 
@@ -345,6 +345,7 @@ class FdaFeaturePolicy:
     innovation_approval_12m_log_weight: float = 24.0
     breadth_adjustment_min_device_categories: int = 3
     warning_letter_event_weight: float = 20.0
+    publication_lag_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -462,7 +463,7 @@ def parse_method_set(raw: object, default: set[str]) -> set[str]:
 
 
 def allow_missing_static_pit_metadata(config: dict[str, Any]) -> bool:
-    return str(cfg_get(config, "historical_backfill.allow_missing_static_pit_metadata", True)).strip().lower() in {
+    return str(cfg_get(config, "historical_backfill.allow_missing_static_pit_metadata", False)).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -476,7 +477,7 @@ def load_excluded_fda_manufacturer_ids(
     *,
     base_dir: Path,
     asof: date | str | None = None,
-    include_missing_pit_metadata: bool = True,
+    include_missing_pit_metadata: bool = False,
 ) -> set[int]:
     raw_path = str(
         cfg_get(
@@ -509,6 +510,7 @@ def load_excluded_fda_manufacturer_ids(
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
+            warn_pit_invariant_violations(row, context="fda_manufacturer_overrides_csv", logger=LOGGER, require_reviewed_at=True)
             if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
                 continue
             method = str(row.get("mapping_method") or row.get("method") or "").strip().lower()
@@ -609,6 +611,7 @@ def fda_feature_policy(config: dict[str, Any]) -> FdaFeaturePolicy:
             "fda_features.event_risk_breadth_adjustment.warning_letter_event_weight",
             20.0,
         ),
+        publication_lag_days=max(0, int(cfg_get(config, "fda_features.publication_lag_days", 0))),
     )
 
 
@@ -804,7 +807,7 @@ def load_review_overrides(
     path: Path | None,
     *,
     asof: date | None = None,
-    include_missing_pit_metadata: bool = True,
+    include_missing_pit_metadata: bool = False,
 ) -> dict[str, dict[str, str]]:
     if path is None:
         return {}
@@ -813,6 +816,7 @@ def load_review_overrides(
         return {}
     out: dict[str, dict[str, str]] = {}
     for row in read_csv_flexible(path):
+        warn_pit_invariant_violations(row, context="fda_review_override_csv", logger=LOGGER, require_reviewed_at=True)
         if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
             continue
         ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
@@ -827,7 +831,7 @@ def load_footprint_overrides(
     path: Path | None,
     *,
     asof: date | None = None,
-    include_missing_pit_metadata: bool = True,
+    include_missing_pit_metadata: bool = False,
 ) -> dict[str, dict[str, str]]:
     if path is None:
         return {}
@@ -836,6 +840,7 @@ def load_footprint_overrides(
         return {}
     out: dict[str, dict[str, str]] = {}
     for row in read_csv_flexible(path):
+        warn_pit_invariant_violations(row, context="fda_footprint_csv", logger=LOGGER, require_reviewed_at=True)
         if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
             continue
         ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
@@ -850,7 +855,7 @@ def load_manual_footprint_evidence(
     path: Path | None,
     *,
     asof: date | None = None,
-    include_missing_pit_metadata: bool = True,
+    include_missing_pit_metadata: bool = False,
 ) -> dict[str, dict[str, str]]:
     if path is None:
         return {}
@@ -859,6 +864,7 @@ def load_manual_footprint_evidence(
         return {}
     out: dict[str, dict[str, str]] = {}
     for row in read_csv_flexible(path):
+        warn_pit_invariant_violations(row, context="fda_manual_footprint_evidence_csv", logger=LOGGER, require_reviewed_at=True)
         if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
             continue
         ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
@@ -1136,9 +1142,12 @@ def count_approvals(
     exclude_product_codes: set[str] | None = None,
     excluded_manufacturer_ids: set[int] | None = None,
 ) -> None:
-    long_start = months_before(asof, policy.long_months).isoformat()
-    medium_start = months_before(asof, policy.medium_months).isoformat()
-    short_start = months_before(asof, policy.short_months).isoformat()
+    # openFDA event dates are gated at asof minus publication_lag_days so events not yet
+    # published on asof are excluded from historical feature windows.
+    event_asof = asof - timedelta(days=policy.publication_lag_days)
+    long_start = months_before(event_asof, policy.long_months).isoformat()
+    medium_start = months_before(event_asof, policy.medium_months).isoformat()
+    short_start = months_before(event_asof, policy.short_months).isoformat()
     exclusion_sql, exclusion_params = fda_exclusion_clause("fda_manufacturer_id", excluded_manufacturer_ids or set())
     rows = conn.execute(
         f"""
@@ -1150,7 +1159,7 @@ def count_approvals(
           AND decision_date >= ?
           {exclusion_sql}
         """,
-        (row.company_id, asof.isoformat(), long_start, *exclusion_params),
+        (row.company_id, event_asof.isoformat(), long_start, *exclusion_params),
     ).fetchall()
     product_codes: set[str] = set()
     for item in rows:
@@ -1197,9 +1206,10 @@ def count_recalls(
     policy: FdaFeaturePolicy,
     excluded_manufacturer_ids: set[int] | None = None,
 ) -> None:
-    long_start = months_before(asof, policy.long_months).isoformat()
-    medium_start = months_before(asof, policy.medium_months).isoformat()
-    short_start = months_before(asof, policy.short_months).isoformat()
+    event_asof = asof - timedelta(days=policy.publication_lag_days)
+    long_start = months_before(event_asof, policy.long_months).isoformat()
+    medium_start = months_before(event_asof, policy.medium_months).isoformat()
+    short_start = months_before(event_asof, policy.short_months).isoformat()
     exclusion_sql, exclusion_params = fda_exclusion_clause("fda_manufacturer_id", excluded_manufacturer_ids or set())
     rows = conn.execute(
         f"""
@@ -1214,7 +1224,7 @@ def count_recalls(
           AND COALESCE(recall_initiation_date, center_classification_date) >= ?
           {exclusion_sql}
         """,
-        (row.company_id, asof.isoformat(), long_start, *exclusion_params),
+        (row.company_id, event_asof.isoformat(), long_start, *exclusion_params),
     ).fetchall()
     for item in rows:
         event_date = str(item["event_date"] or "")
@@ -1252,8 +1262,9 @@ def count_adverse_events(
     policy: FdaFeaturePolicy,
     excluded_manufacturer_ids: set[int] | None = None,
 ) -> None:
-    medium_start = months_before(asof, policy.medium_months)
-    previous_start = months_before(asof, policy.medium_months * 2)
+    event_asof = asof - timedelta(days=policy.publication_lag_days)
+    medium_start = months_before(event_asof, policy.medium_months)
+    previous_start = months_before(event_asof, policy.medium_months * 2)
     exclusion_sql, exclusion_params = fda_exclusion_clause("e.fda_manufacturer_id", excluded_manufacturer_ids or set())
     rows = conn.execute(
         f"""
@@ -1268,7 +1279,7 @@ def count_adverse_events(
           AND COALESCE(e.report_date, e.event_date) >= ?
           {exclusion_sql}
         """,
-        (row.company_id, asof.isoformat(), previous_start.isoformat(), *exclusion_params),
+        (row.company_id, event_asof.isoformat(), previous_start.isoformat(), *exclusion_params),
     ).fetchall()
     for item in rows:
         event_day = parse_date(item["report_date"])
@@ -1298,7 +1309,8 @@ def count_device_categories(
     policy: FdaFeaturePolicy,
     excluded_manufacturer_ids: set[int] | None = None,
 ) -> None:
-    long_start = months_before(asof, policy.long_months).isoformat()
+    event_asof = asof - timedelta(days=policy.publication_lag_days)
+    long_start = months_before(event_asof, policy.long_months).isoformat()
     approval_exclusion_sql, approval_exclusion_params = fda_exclusion_clause(
         "fda_manufacturer_id",
         excluded_manufacturer_ids or set(),
@@ -1347,15 +1359,15 @@ def count_device_categories(
         """,
         (
             row.company_id,
-            asof.isoformat(),
+            event_asof.isoformat(),
             long_start,
             *approval_exclusion_params,
             row.company_id,
-            asof.isoformat(),
+            event_asof.isoformat(),
             long_start,
             *recall_exclusion_params,
             row.company_id,
-            asof.isoformat(),
+            event_asof.isoformat(),
             long_start,
             *adverse_exclusion_params,
         ),

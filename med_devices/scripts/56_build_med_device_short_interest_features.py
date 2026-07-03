@@ -92,6 +92,16 @@ def normalize_pct(raw: float | None) -> float | None:
     return value
 
 
+def cfg_source_ids(config: dict[str, Any], key: str, default: list[str]) -> list[str]:
+    raw = cfg_get(config, key, None)
+    if raw is None:
+        return list(default)
+    if isinstance(raw, str):
+        raw = [raw]
+    out = [str(value).strip() for value in raw if str(value).strip()]
+    return out or list(default)
+
+
 def load_companies(conn: Any) -> list[dict[str, Any]]:
     return [
         dict(row)
@@ -116,12 +126,20 @@ def load_short_interest(conn: Any, *, asof: str, config: dict[str, Any]) -> dict
     if not conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='fact_short_interest'").fetchone():
         return {}
     fallback_lag_days = int(cfg_get(config, "short_interest_features.publication_lag_days", 8))
+    source_ids = cfg_source_ids(
+        config,
+        "short_interest_features.short_interest_source_ids",
+        ["exchange_short_interest", "finra_equity_short_interest"],
+    )
+    source_placeholders = ",".join("?" for _ in source_ids)
+    priority_case = " ".join(f"WHEN ? THEN {index}" for index in range(len(source_ids)))
     rows = conn.execute(
-        """
+        f"""
         SELECT si.*, dc.company_id AS mapped_company_id
         FROM fact_short_interest si
         LEFT JOIN dim_company dc ON dc.ticker = si.ticker
         WHERE si.settlement_date <= ?
+          AND si.source_id IN ({source_placeholders})
           AND COALESCE(
                 NULLIF(SUBSTR(si.publication_date, 1, 10), ''),
                 date(si.settlement_date, '+' || ? || ' days')
@@ -129,10 +147,10 @@ def load_short_interest(conn: Any, *, asof: str, config: dict[str, Any]) -> dict
         ORDER BY
             COALESCE(si.company_id, dc.company_id),
             si.settlement_date DESC,
-            CASE WHEN si.source_id = 'finra_equity_short_interest' THEN 0 ELSE 1 END,
+            CASE si.source_id {priority_case} ELSE {len(source_ids)} END,
             si.source_id
         """,
-        (asof, fallback_lag_days, asof),
+        (asof, *source_ids, fallback_lag_days, asof, *source_ids),
     ).fetchall()
     out: dict[int, list[dict[str, Any]]] = {}
     seen_dates: dict[int, set[str]] = {}
@@ -159,19 +177,26 @@ def load_short_volume_stats(
     if asof_date is None:
         return {}
     publication_lag_days = int(cfg_get(config, "short_interest_features.short_volume_publication_lag_days", 1))
+    source_ids = cfg_source_ids(
+        config,
+        "short_interest_features.short_volume_source_ids",
+        ["finra_regsho_short_volume"],
+    )
+    source_placeholders = ",".join("?" for _ in source_ids)
     available_end_date = asof_date - timedelta(days=max(0, publication_lag_days))
     available_end = available_end_date.isoformat()
     cur_start = (available_end_date - timedelta(days=lookback_days)).isoformat()
     prior_start = (available_end_date - timedelta(days=2 * lookback_days)).isoformat()
     rows = conn.execute(
-        """
+        f"""
         SELECT v.*, dc.company_id AS mapped_company_id
         FROM fact_finra_short_volume v
         LEFT JOIN dim_company dc ON dc.ticker = v.ticker
         WHERE v.trade_date <= ?
           AND v.trade_date > ?
+          AND v.source_id IN ({source_placeholders})
         """,
-        (available_end, prior_start),
+        (available_end, prior_start, *source_ids),
     ).fetchall()
     current: dict[int, list[float]] = {}
     prior: dict[int, list[float]] = {}
@@ -204,8 +229,18 @@ def score_company(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     neutral = float(cfg_get(config, "short_interest_features.no_data_score", 50.0))
+    velocity_lookback_days = int(cfg_get(config, "short_interest_features.velocity_settlement_lookback_days", 60))
     latest = short_interest_rows[0] if short_interest_rows else {}
-    previous = short_interest_rows[1] if len(short_interest_rows) > 1 else {}
+    previous: dict[str, Any] = {}
+    if len(short_interest_rows) > 1:
+        latest_settlement = parse_date(str(latest.get("settlement_date") or ""))
+        prev_settlement = parse_date(str(short_interest_rows[1].get("settlement_date") or ""))
+        if (
+            latest_settlement is not None
+            and prev_settlement is not None
+            and (latest_settlement - prev_settlement).days <= max(1, velocity_lookback_days)
+        ):
+            previous = short_interest_rows[1]
     short_interest = to_float(latest.get("short_interest"))
     pct_float = normalize_pct(to_float(latest.get("short_interest_pct_float")))
     if pct_float is None:

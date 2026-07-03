@@ -83,6 +83,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--asof", type=str, default="")
+    parser.add_argument(
+        "--allow-backdated",
+        action="store_true",
+        help="Allow an --asof more than 3 calendar days in the past; live snapshots are otherwise rejected as backdated.",
+    )
     parser.add_argument("--tickers", type=str, default="")
     parser.add_argument("--max-tickers", type=int, default=0)
     parser.add_argument("--skip-ib", action="store_true", help="Skip IB and use Yahoo fallback directly.")
@@ -629,8 +634,16 @@ def main() -> None:
         init_db(conn)
         upsert_source_registry(conn, load_source_registry(SOURCE_REGISTRY))
         asof = args.asof.strip() or latest_market_asof(conn)
-        if parse_date(asof) is None:
+        asof_parsed = parse_date(asof)
+        if asof_parsed is None:
             raise ValueError(f"Invalid as-of date: {asof}")
+        if args.asof.strip() and not args.allow_backdated:
+            age_days = (datetime.now(timezone.utc).date() - asof_parsed).days
+            if age_days > 3:
+                raise SystemExit(
+                    f"--asof {asof} is {age_days} calendar days old; live IB/Yahoo snapshots would be stamped with a "
+                    "backdated as-of date. Pass --allow-backdated to override for repair/backfill runs."
+                )
         companies = load_companies(conn, ticker_filter=ticker_filter, max_tickers=int(args.max_tickers))
         run_id = start_run(conn, run_type="sync_med_device_market_snapshots", input_path=config_path)
         rows: list[dict[str, Any]] = []

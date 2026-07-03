@@ -25,10 +25,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, init_db  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
+from med_devices.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
 
 
 LOGGER = logging.getLogger("import_med_device_norgate_delisted_prices")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+SOURCE_REGISTRY = PACKAGE_ROOT / "data" / "free_source_registry.yaml"
 DEFAULT_MEMBERSHIP_CSV = PACKAGE_ROOT / "data" / "med_device_historical_membership.csv"
 DEFAULT_OUTPUT = (
     PROJECT_ROOT
@@ -200,63 +202,11 @@ def fetch_prices(norgatedata: Any, symbol: str, start_date: str, end_date: str) 
     return raw
 
 
-def ensure_source(conn: sqlite3.Connection, source_id: str, timestamp: str) -> None:
-    conn.execute(
-        """
-        INSERT INTO source_registry(
-            source_id, stage, source_name, source_owner, source_type, base_url, documentation_url,
-            authentication_required, free_key_required, api_key_env, rate_limit_notes, refresh_frequency,
-            terms_url, data_owner, raw_schema, staging_tables, canonical_tables, feature_stages,
-            priority, status, notes, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(source_id) DO UPDATE SET
-            stage = excluded.stage,
-            source_name = excluded.source_name,
-            source_owner = excluded.source_owner,
-            source_type = excluded.source_type,
-            base_url = excluded.base_url,
-            documentation_url = excluded.documentation_url,
-            authentication_required = excluded.authentication_required,
-            free_key_required = excluded.free_key_required,
-            rate_limit_notes = excluded.rate_limit_notes,
-            refresh_frequency = excluded.refresh_frequency,
-            terms_url = excluded.terms_url,
-            data_owner = excluded.data_owner,
-            raw_schema = excluded.raw_schema,
-            staging_tables = excluded.staging_tables,
-            canonical_tables = excluded.canonical_tables,
-            feature_stages = excluded.feature_stages,
-            priority = excluded.priority,
-            status = excluded.status,
-            notes = excluded.notes,
-            updated_at = excluded.updated_at
-        """,
-        (
-            source_id,
-            "survivorship_backfill",
-            "Norgate Data US Equities",
-            "Norgate Data",
-            "licensed_local_database",
-            "https://norgatedata.com/",
-            "https://norgatedata.com/python.php",
-            1,
-            0,
-            "",
-            "Local licensed Windows database; no HTTP rate limit during local reads.",
-            "one_time_backfill_then_manual_refresh",
-            "https://norgatedata.com/eula.php",
-            "Norgate Data",
-            "norgatedata.price_timeseries raw OHLCV plus total-return adjusted close",
-            "",
-            "fact_price_ohlcv",
-            "med_devices_calibration,med_devices_backtest,survivorship_backfill",
-            15,
-            "active",
-            "Historical/delisted med-device price backfill. Rows preserve internal historical ticker keys and record source_symbol in price_adjustment.",
-            timestamp,
-            timestamp,
-        ),
-    )
+def ensure_source(conn: sqlite3.Connection, source_id: str) -> None:
+    sources = [row for row in load_source_registry(SOURCE_REGISTRY) if str(row.get("source_id")) == source_id]
+    if not sources:
+        raise SystemExit(f"source_id {source_id!r} is not defined in {SOURCE_REGISTRY}")
+    upsert_source_registry(conn, sources)
 
 
 def start_ingestion(conn: sqlite3.Connection, source_id: str, timestamp: str) -> int:
@@ -383,7 +333,7 @@ def main() -> int:
         try:
             if conn is not None:
                 init_db(conn)
-                ensure_source(conn, args.source_id, started)
+                ensure_source(conn, args.source_id)
                 run_id = start_ingestion(conn, args.source_id, started)
 
             for member in members:

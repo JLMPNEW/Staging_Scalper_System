@@ -20,10 +20,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
+from med_devices.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
 from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+SOURCE_REGISTRY = PACKAGE_ROOT / "data" / "free_source_registry.yaml"
 FIELDNAMES = ["source_table", "rows_imported"]
 
 
@@ -69,19 +71,18 @@ def parse_sec_date(raw: object) -> str:
     return text
 
 
-def ensure_source(conn: Any, source_id: str, *, name: str, source_type: str = "local_staging_db") -> None:
-    now = utc_now()
-    conn.execute(
-        """
-        INSERT INTO source_registry(
-            source_id, stage, source_name, source_type, base_url,
-            authentication_required, free_key_required, priority, status, created_at, updated_at
-        )
-        VALUES (?, 'stage_1', ?, ?, 'local_staging_db', 0, 0, 65, 'planned', ?, ?)
-        ON CONFLICT(source_id) DO UPDATE SET updated_at = excluded.updated_at
-        """,
-        (source_id, name, source_type, now, now),
-    )
+def ensure_source(conn: Any, source_id: str) -> None:
+    sources = [row for row in load_source_registry(SOURCE_REGISTRY) if str(row.get("source_id")) == source_id]
+    if not sources:
+        raise SystemExit(f"source_id {source_id!r} is not defined in {SOURCE_REGISTRY}")
+    upsert_source_registry(conn, sources)
+
+
+def required_config_path(config: dict[str, Any], key: str) -> Path:
+    raw = str(cfg_get(config, key, "") or "").strip()
+    if not raw or raw.lower() == "none":
+        raise SystemExit(f"Missing required config value {key!r}; set it to the staging DB path or pass the CLI override.")
+    return Path(raw).expanduser().resolve()
 
 
 def company_map(conn: Any) -> dict[str, dict[str, Any]]:
@@ -137,7 +138,7 @@ def parse_sources(raw: str) -> set[str]:
 
 def import_short_interest(conn: Any, mp_conn: sqlite3.Connection, *, companies: dict[str, dict[str, Any]], start: str, asof: str) -> int:
     source_id = "finra_equity_short_interest"
-    ensure_source(conn, source_id, name="FINRA equity short interest snapshots")
+    ensure_source(conn, source_id)
     tickers = sorted(companies)
     rows = mp_conn.execute(
         f"""
@@ -192,7 +193,7 @@ def import_short_interest(conn: Any, mp_conn: sqlite3.Connection, *, companies: 
 
 def import_borrow(conn: Any, mp_conn: sqlite3.Connection, *, companies: dict[str, dict[str, Any]], start: str, asof: str) -> int:
     source_id = "ibkr_borrow"
-    ensure_source(conn, source_id, name="Interactive Brokers shortable shares and borrow fee", source_type="broker_api")
+    ensure_source(conn, source_id)
     tickers = sorted(companies)
     share_rows = mp_conn.execute(
         f"""
@@ -277,7 +278,7 @@ def import_borrow(conn: Any, mp_conn: sqlite3.Connection, *, companies: dict[str
 
 def import_13f_snapshots(conn: Any, mp_conn: sqlite3.Connection, *, companies: dict[str, dict[str, Any]], start: str, asof: str) -> int:
     source_id = "sec_13f_edgar"
-    ensure_source(conn, source_id, name="SEC Form 13F institutional holdings")
+    ensure_source(conn, source_id)
     tickers = sorted(companies)
     raw_rows = mp_conn.execute(
         f"""
@@ -388,7 +389,7 @@ def import_13f_snapshots(conn: Any, mp_conn: sqlite3.Connection, *, companies: d
 
 def import_form4(conn: Any, form4_conn: sqlite3.Connection, *, companies: dict[str, dict[str, Any]], start: str, asof: str) -> int:
     source_id = "sec_form4_edgar"
-    ensure_source(conn, source_id, name="SEC Form 4 insider transactions")
+    ensure_source(conn, source_id)
     tickers = sorted(companies)
     companies_by_cik: dict[str, dict[str, Any]] = {}
     for company in companies.values():
@@ -528,12 +529,12 @@ def main() -> None:
     market_db = (
         args.market_positioning_db.expanduser().resolve()
         if args.market_positioning_db
-        else Path(str(cfg_get(config, "external_positioning_import.market_positioning_db_path"))).expanduser().resolve()
+        else required_config_path(config, "external_positioning_import.market_positioning_db_path")
     )
     form4_db = (
         args.sec_form4_db.expanduser().resolve()
         if args.sec_form4_db
-        else Path(str(cfg_get(config, "external_positioning_import.sec_form4_db_path"))).expanduser().resolve()
+        else required_config_path(config, "external_positioning_import.sec_form4_db_path")
     )
     sources = parse_sources(args.sources)
     start = args.history_start.strip() or str(cfg_get(config, "external_positioning_import.history_start", "2019-01-01"))

@@ -90,7 +90,9 @@ DECISION_PRIORITY = {
     DECISION_WATCHLIST: 3,
     DECISION_DEFER: 4,
 }
-GLOBAL_CATEGORY_VALUES = {"", "*", "all", "any"}
+# shared wildcard set for both calibration_cohort and review_category matching
+GLOBAL_MATCH_VALUES = {"", "*", "all", "any"}
+GLOBAL_CATEGORY_VALUES = GLOBAL_MATCH_VALUES
 
 
 @dataclass(frozen=True)
@@ -372,12 +374,12 @@ def decision_matches(
     if decision.key_ticker != normalize_ticker(ticker):
         return False
     decision_cohort = decision.key_cohort
-    if decision_cohort and decision_cohort not in {"*", "all"} and decision_cohort != normalize_key(cohort):
+    if decision_cohort not in GLOBAL_MATCH_VALUES and decision_cohort != normalize_key(cohort):
         return False
     if review_categories is None:
         return True
     decision_category = decision.key_category
-    return decision_category in GLOBAL_CATEGORY_VALUES or decision_category in review_categories
+    return decision_category in GLOBAL_MATCH_VALUES or decision_category in review_categories
 
 
 def matching_decisions(

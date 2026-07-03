@@ -17,7 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from med_devices.core.fda_states import MANUAL_FDA_REVIEW_STATES  # noqa: E402
+from med_devices.core.fda_states import MANUAL_FDA_REVIEW_STATES, normalize_fda_state  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 
 
@@ -33,6 +33,15 @@ HARD_EXCLUDED_CLASSIFICATIONS = {
     "avoid_confirmed_regulatory_risk",
     "data_review_required",
 }
+KNOWN_FDA_REVIEW_STATES = frozenset(
+    {
+        "",
+        "cleared",
+        "no_mapped_fda_records",
+        "regulatory_watch",
+        *MANUAL_FDA_REVIEW_STATES,
+    }
+)
 GATE_PAIRS = (
     ("raw_composite_score", "raw_score_min"),
     ("cohort_percentile", "cohort_percentile_min"),
@@ -307,10 +316,19 @@ def load_frozen_baseline(path: Path | None) -> dict[tuple[str, int], dict[str, s
     return out
 
 
+def validate_fda_review_states(rows: list[dict[str, str]]) -> None:
+    unknown = sorted({normalize_fda_state(row.get("fda_review_state")) for row in rows} - KNOWN_FDA_REVIEW_STATES)
+    if unknown:
+        LOGGER.error(
+            "Unrecognized fda_review_state values will not match manual-review exclusions: %s",
+            ", ".join(unknown),
+        )
+
+
 def passes_static_exclusions(row: dict[str, str]) -> bool:
-    if str(row.get("classification") or "") in HARD_EXCLUDED_CLASSIFICATIONS:
+    if str(row.get("classification") or "").strip().lower() in HARD_EXCLUDED_CLASSIFICATIONS:
         return False
-    if str(row.get("fda_review_state") or "") in MANUAL_FDA_REVIEW_STATES:
+    if normalize_fda_state(row.get("fda_review_state")) in MANUAL_FDA_REVIEW_STATES:
         return False
     return True
 
@@ -461,9 +479,20 @@ def yaml_number(raw: object) -> str:
     return str(raw or "") if value is None else f"{value:g}"
 
 
-def write_config_fragment(path: Path, rows: list[dict[str, Any]], *, baseline_version: str) -> None:
+def write_config_fragment(path: Path, rows: list[dict[str, Any]], *, baseline_version: str, reference_horizon: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    eligible = [row for row in rows if row["horizon_days"] == 120 and row["baseline_seed_status"] == PRODUCTION_BASELINE_SEED]
+    eligible = [
+        row
+        for row in rows
+        if row["horizon_days"] == reference_horizon and row["baseline_seed_status"] == PRODUCTION_BASELINE_SEED
+    ]
+    seed_row_count = sum(1 for row in rows if row["baseline_seed_status"] == PRODUCTION_BASELINE_SEED)
+    if not eligible and seed_row_count:
+        LOGGER.warning(
+            "Config fragment has no production_baseline_seed rows at reference_horizon=%dd although %d seed rows exist at other horizons.",
+            reference_horizon,
+            seed_row_count,
+        )
     lines = [
         "# Generated calibrated-baseline seed fragment.",
         "# Review manually before copying into med_devices/config.yaml.",
@@ -628,6 +657,7 @@ def main() -> None:
             "Calibrated baseline validation window produced zero rows: "
             f"panel_csv={panel_csv} validation_start_asof={validation_start} validation_end_asof={validation_end}"
         )
+    validate_fda_review_states(rows)
     recommendations = {row["calibration_cohort"]: row for row in read_csv(recommendations_csv)}
     comparison_rows: list[dict[str, Any]] = []
     constituent_rows: list[dict[str, Any]] = []
@@ -702,7 +732,7 @@ def main() -> None:
 
     write_csv(comparison_csv, comparison_rows, COMPARISON_FIELDS)
     write_csv(constituents_csv, constituent_rows, CONSTITUENT_FIELDS)
-    write_config_fragment(fragment_yaml, comparison_rows, baseline_version=baseline_version)
+    write_config_fragment(fragment_yaml, comparison_rows, baseline_version=baseline_version, reference_horizon=reference_horizon)
     snapshot_rows = build_baseline_snapshot_rows(comparison_rows, baseline_version=baseline_version)
     if snapshot_csv is not None:
         write_csv(snapshot_csv, snapshot_rows, BASELINE_SNAPSHOT_FIELDS)

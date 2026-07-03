@@ -486,6 +486,11 @@ def lcb(values: list[float], z: float = 1.64) -> float:
 
 
 def component_score(row: dict[str, Any], field: str, direction: str) -> float:
+    if field.endswith("_raw"):
+        raise ValueError(
+            f"Template component {field!r} is an unbounded *_raw field and cannot be clamped as a 0-100 score; "
+            "use its *_score counterpart."
+        )
     value = score_or(row.get(field), 50.0)
     if direction == "positive":
         return value

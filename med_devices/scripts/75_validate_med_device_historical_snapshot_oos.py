@@ -4,9 +4,11 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import re
+import sqlite3
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -200,8 +202,9 @@ def validate_daily_csv(
     asof: str,
     checks: list[dict[str, Any]],
     new_daily_columns_required_from: date | None,
-) -> None:
+) -> dict[str, Any]:
     artifact = str(path)
+    summary: dict[str, Any] = {"row_count": None, "score_model_versions": set()}
     if not path.exists():
         add_check(
             checks,
@@ -214,9 +217,16 @@ def validate_daily_csv(
             expected="exists",
             details="Dated daily composite CSV is required for OOS snapshot validation.",
         )
-        return
+        return summary
     fields, rows = read_csv_rows(path)
     field_set = set(fields)
+    summary["row_count"] = len(rows)
+    if "score_model_version" in field_set:
+        summary["score_model_versions"] = {
+            str(row.get("score_model_version") or "").strip()
+            for row in rows
+            if str(row.get("score_model_version") or "").strip()
+        }
     missing = sorted(CORE_REQUIRED_DAILY_COLUMNS - field_set)
     add_check(
         checks,
@@ -351,6 +361,26 @@ def validate_daily_csv(
             observed=invalid_status_rows,
             expected=0,
             details="Research calibration status must be eligible or excluded.",
+        )
+        publisher_defaulted_stage11_rows = sum(
+            1
+            for row in rows
+            if not str(row.get("stage11_calibration_panel_source") or "").strip()
+            or not str(row.get("research_calibration_status") or "").strip()
+        )
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="daily_stage11_metadata_not_publisher_defaulted",
+            severity=post_migration_severity,
+            passed=publisher_defaulted_stage11_rows == 0,
+            observed=publisher_defaulted_stage11_rows,
+            expected=0,
+            details=(
+                "Rows carrying Stage 11 columns must publish real Stage 11 metadata; empty "
+                "stage11_calibration_panel_source or research_calibration_status indicates publisher defaults."
+            ),
         )
         inconsistent_research_rows = 0
         inconsistent_stage11_rows = 0
@@ -525,6 +555,40 @@ def validate_daily_csv(
         expected=0,
         details="Every row in the dated CSV must match the folder as-of date.",
     )
+    ticker_counts: dict[str, int] = {}
+    for row in rows:
+        ticker = str(row.get("ticker") or "").strip()
+        if ticker:
+            ticker_counts[ticker] = ticker_counts.get(ticker, 0) + 1
+    duplicate_ticker_rows = sum(count - 1 for count in ticker_counts.values() if count > 1)
+    add_check(
+        checks,
+        asof=asof,
+        artifact=artifact,
+        check_id="daily_no_duplicate_tickers",
+        severity="CRITICAL",
+        passed=duplicate_ticker_rows == 0,
+        observed=duplicate_ticker_rows,
+        expected=0,
+        details="Each ticker must appear at most once per dated daily snapshot.",
+    )
+    out_of_range_composite_rows = sum(
+        1
+        for row in rows
+        if (composite := parse_float(row.get("composite_score"))) is not None
+        and (composite < 0.0 or composite > 100.0)
+    )
+    add_check(
+        checks,
+        asof=asof,
+        artifact=artifact,
+        check_id="daily_composite_score_range",
+        severity="CRITICAL",
+        passed=out_of_range_composite_rows == 0,
+        observed=out_of_range_composite_rows,
+        expected=0,
+        details="Composite scores must stay within the published 0..100 scale.",
+    )
     target = parse_iso_date(asof)
     future_decisions = sum(
         1
@@ -588,6 +652,7 @@ def validate_daily_csv(
         expected=0,
         details="Expired analyst decisions cannot be applied to dated snapshots.",
     )
+    return summary
 
 
 def static_source_paths(config: dict[str, Any], *, base_dir: Path) -> list[tuple[str, Path]]:
@@ -658,6 +723,15 @@ def validate_static_sources(
                 and reviewed_at < start_date
             )
         backdated_share = rows_backdated_to_start / len(rows) if rows else 0.0
+        uniform_restamped_valid_from = False
+        if start_date is not None and rows:
+            valid_from_values = {parse_date(row_value(row, *START_DATE_COLUMNS)) for row in rows}
+            if len(valid_from_values) == 1:
+                only_valid_from = next(iter(valid_from_values))
+                uniform_restamped_valid_from = only_valid_from is not None and only_valid_from in {
+                    start_date,
+                    start_date - timedelta(days=1),
+                }
         not_effective_asof = sum(
             1
             for row in rows
@@ -716,15 +790,25 @@ def validate_static_sources(
                 "apply row_is_effective_asof() before using them in dated snapshots."
             ),
         )
+        # PIT policy: "Event-dated rows apply historically." Neither ordering of
+        # reviewed_at versus valid_from is a violation (reviewed_at > valid_from is
+        # the expected honest pattern for event-dated rows; reviewed_at < valid_from
+        # is ordinary review-before-effectiveness provenance), so no per-row
+        # reviewed_at/valid_from ordering check exists here. Mass-restamping is
+        # still caught by static_source_backdated_metadata_detector below, which
+        # anchors on the backfill start_asof.
         add_check(
             checks,
             asof=asof,
             artifact=artifact,
             check_id="static_source_backdated_metadata_detector",
             severity="CRITICAL",
-            passed=backdated_share < 0.50,
-            observed=f"{rows_backdated_to_start}/{len(rows)}",
-            expected="<50% rows with valid_from equal to the backfill start and reviewed_at before valid_from",
+            passed=backdated_share < 0.50 and not uniform_restamped_valid_from,
+            observed=f"{rows_backdated_to_start}/{len(rows)} uniform_restamp={int(uniform_restamped_valid_from)}",
+            expected=(
+                "<50% rows with valid_from equal to the backfill start and reviewed_at before valid_from; "
+                "no file where 100% of rows share one valid_from equal to the backfill start (or start minus one day)"
+            ),
             details=(
                 "Mass restamping static override files to the first historical as-of can embed future-known "
                 "taxonomy/FDA/reimbursement decisions into old snapshots. Restamp rows to true reviewed/effective dates."
@@ -746,20 +830,167 @@ def validate_static_sources(
         )
 
 
+COMPONENT_IC_PROVENANCE_COLUMNS = ("generated_asof", "valid_from")
+
+
+def validate_component_ic_provenance(
+    path: Path,
+    *,
+    asof: str,
+    checks: list[dict[str, Any]],
+) -> None:
+    artifact = f"component_ic:{path}"
+    if not path.exists():
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="component_ic_provenance",
+            severity="CRITICAL",
+            passed=False,
+            observed="missing",
+            expected="exists with generated_asof/valid_from provenance",
+            details=(
+                "calibration.component_ic_csv shapes IC-tilted composites; it must exist and carry "
+                "point-in-time provenance for strict OOS validation."
+            ),
+        )
+        return
+    fields, rows = read_csv_rows(path)
+    lowered_fields = {field.strip().lower() for field in fields}
+    provenance_columns = [column for column in COMPONENT_IC_PROVENANCE_COLUMNS if column in lowered_fields]
+    if not provenance_columns:
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="component_ic_provenance",
+            severity="CRITICAL",
+            passed=False,
+            observed="missing_columns=" + ",".join(COMPONENT_IC_PROVENANCE_COLUMNS),
+            expected="generated_asof or valid_from column",
+            details=(
+                "calibration.component_ic_csv shapes IC-tilted composites; without a generated_asof/valid_from "
+                "column the IC panel can embed look-ahead information into historical snapshots."
+            ),
+        )
+        return
+    invalid_provenance_rows = sum(
+        1 for row in rows if parse_date(row_value(row, *provenance_columns)) is None
+    )
+    add_check(
+        checks,
+        asof=asof,
+        artifact=artifact,
+        check_id="component_ic_provenance",
+        severity="CRITICAL",
+        passed=invalid_provenance_rows == 0,
+        observed=invalid_provenance_rows,
+        expected=0,
+        details=(
+            "Every component IC row must carry a parseable generated_asof/valid_from provenance value. "
+            "The check PASSES whenever provenance columns are present and parseable; a recent generated_asof "
+            "does not fail historical as-of dates."
+        ),
+    )
+    if invalid_provenance_rows:
+        return
+    target = parse_date(asof)
+    generated_dates = [
+        generated
+        for row in rows
+        if (generated := parse_date(row_value(row, *provenance_columns))) is not None
+    ]
+    max_generated = max(generated_dates) if generated_dates else None
+    ic_pit_available = target is None or max_generated is None or max_generated <= target
+    add_check(
+        checks,
+        asof=asof,
+        artifact=artifact,
+        check_id="component_ic_pit_availability",
+        severity="WARNING",
+        passed=ic_pit_available,
+        observed=f"generated_asof={max_generated.isoformat() if max_generated else ''} asof={asof}",
+        expected="asof on/after generated_asof for PIT-available IC tilt",
+        details=(
+            "IC tilt is LIVE-ONLY by policy decision: the component IC panel carries generated_asof/valid_from "
+            "provenance, and as-of dates earlier than generated_asof cannot use the IC tilt point-in-time. "
+            "This is a WARNING (not CRITICAL) until a PIT-clean IC history exists; consumers must not apply "
+            "the IC tilt to historical snapshots dated before generated_asof."
+        ),
+    )
+
+
+def validate_daily_db_reconciliation(
+    *,
+    asof: str,
+    artifact: str,
+    csv_row_count: int,
+    db_conn: sqlite3.Connection | None,
+    db_path: Path | None,
+    checks: list[dict[str, Any]],
+) -> None:
+    if db_conn is None:
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="daily_db_row_count_reconciliation",
+            severity="WARNING",
+            passed=False,
+            observed="db_unavailable",
+            expected="med_device_daily_scores row count matches daily CSV",
+            details=f"med_devices database not available for reconciliation: {db_path}",
+        )
+        return
+    try:
+        row = db_conn.execute(
+            "SELECT COUNT(*) FROM med_device_daily_scores WHERE asof_date = ?",
+            (asof,),
+        ).fetchone()
+        db_count = int(row[0]) if row else 0
+    except sqlite3.Error as exc:
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="daily_db_row_count_reconciliation",
+            severity="WARNING",
+            passed=False,
+            observed=f"db_error={exc}",
+            expected="med_device_daily_scores row count matches daily CSV",
+            details=f"med_devices database query failed during reconciliation: {db_path}",
+        )
+        return
+    add_check(
+        checks,
+        asof=asof,
+        artifact=artifact,
+        check_id="daily_db_row_count_reconciliation",
+        severity="CRITICAL",
+        passed=db_count == csv_row_count,
+        observed=f"csv={csv_row_count} db={db_count}",
+        expected="csv row count equals med_device_daily_scores count for the as-of date",
+        details="Published dated daily CSVs must reconcile with the med_device_daily_scores table.",
+    )
+
+
 def write_checks(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = ["asof_date", "artifact", "check_id", "severity", "status", "observed", "expected", "details"]
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    tmp_path = path.with_name(path.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(tmp_path, path)
 
 
 def diagnostic_checks_from_strict(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     diagnostic_rows: list[dict[str, Any]] = []
     for row in rows:
         out = dict(row)
-        if out.get("check_id") == "static_source_rows_have_pit_metadata_values":
+        if out.get("check_id") == "static_source_rows_have_pit_metadata_values" and out.get("status") == "FAIL":
             out["status"] = "PASS"
             out["details"] = f"{out.get('details', '')} Diagnostic mode permits missing PIT metadata."
         diagnostic_rows.append(out)
@@ -772,23 +1003,65 @@ def build_checks(
     base_dir: Path,
     reports_root: Path,
     asofs: list[str],
+    start_asof: str,
     new_daily_columns_required_from: date | None,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     static_paths = static_source_paths(config, base_dir=base_dir)
-    for asof in asofs:
-        validate_daily_csv(
-            reports_root / asof / "med_device_daily_composite_scores.csv",
-            asof=asof,
-            checks=checks,
-            new_daily_columns_required_from=new_daily_columns_required_from,
-        )
-        validate_static_sources(
-            static_paths,
-            asof=asof,
-            start_asof=asofs[0],
-            checks=checks,
-        )
+    component_ic_raw = str(cfg_get(config, "calibration.component_ic_csv", "") or "").strip()
+    component_ic_path = resolve_path(component_ic_raw, base_dir=base_dir) if component_ic_raw else None
+    db_raw = str(cfg_get(config, "paths.database_path", "") or "").strip()
+    db_path = resolve_path(db_raw, base_dir=base_dir) if db_raw else None
+    db_conn: sqlite3.Connection | None = None
+    if db_path is not None and db_path.exists():
+        db_conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    score_model_versions: set[str] = set()
+    try:
+        for asof in asofs:
+            daily_path = reports_root / asof / "med_device_daily_composite_scores.csv"
+            daily_summary = validate_daily_csv(
+                daily_path,
+                asof=asof,
+                checks=checks,
+                new_daily_columns_required_from=new_daily_columns_required_from,
+            )
+            score_model_versions |= daily_summary["score_model_versions"]
+            if daily_summary["row_count"] is not None:
+                validate_daily_db_reconciliation(
+                    asof=asof,
+                    artifact=str(daily_path),
+                    csv_row_count=daily_summary["row_count"],
+                    db_conn=db_conn,
+                    db_path=db_path,
+                    checks=checks,
+                )
+            validate_static_sources(
+                static_paths,
+                asof=asof,
+                start_asof=start_asof,
+                checks=checks,
+            )
+            if component_ic_path is not None:
+                validate_component_ic_provenance(
+                    component_ic_path,
+                    asof=asof,
+                    checks=checks,
+                )
+    finally:
+        if db_conn is not None:
+            db_conn.close()
+    distinct_versions = sorted(score_model_versions)
+    add_check(
+        checks,
+        asof="ALL",
+        artifact="panel:daily_score_model_version",
+        check_id="panel_single_score_model_version",
+        severity="CRITICAL",
+        passed=len(distinct_versions) <= 1,
+        observed=",".join(distinct_versions),
+        expected="at most one distinct non-empty score_model_version across validated asofs",
+        details="Mixed score model versions inside one validated panel break calibration comparability.",
+    )
     return checks
 
 
@@ -800,13 +1073,20 @@ def main() -> int:
     reports_root = (
         args.reports_root.expanduser().resolve()
         if args.reports_root
-        else resolve_path("../output/med_devices_reports/score_review_pack", base_dir=base_dir)
+        else resolve_path(
+            cfg_get(config, "scoring.review_pack_dir", "../output/med_devices_reports/score_review_pack"),
+            base_dir=base_dir,
+        )
     )
     output_csv = (
         args.output_csv.expanduser().resolve()
         if args.output_csv
         else resolve_path(
-            "../output/med_devices_reports/oos_validation/med_device_historical_snapshot_oos_validation.csv",
+            cfg_get(
+                config,
+                "historical_backfill.oos_validation_csv",
+                "../output/med_devices_reports/oos_validation/med_device_historical_snapshot_oos_validation.csv",
+            ),
             base_dir=base_dir,
         )
     )
@@ -832,11 +1112,19 @@ def main() -> int:
             "Invalid historical_backfill.new_daily_columns_required_from date: "
             f"{new_daily_columns_raw!r}. Use YYYY-MM-DD or leave blank."
         )
+    config_start_asof = str(cfg_get(config, "historical_backfill.start_asof", "") or "").strip()
+    if config_start_asof and parse_date(config_start_asof) is None:
+        raise RuntimeError(
+            "Invalid historical_backfill.start_asof date: "
+            f"{config_start_asof!r}. Use YYYY-MM-DD or leave blank."
+        )
+    detector_start_asof = config_start_asof or asofs[0]
     checks = build_checks(
         config=config,
         base_dir=base_dir,
         reports_root=reports_root,
         asofs=asofs,
+        start_asof=detector_start_asof,
         new_daily_columns_required_from=new_daily_columns_required_from,
     )
     write_checks(output_csv, checks)
@@ -849,6 +1137,19 @@ def main() -> int:
     diagnostic_critical_failures = sum(
         1 for row in diagnostic_checks if row["severity"] == "CRITICAL" and row["status"] == "FAIL"
     )
+    if args.allow_missing_static_pit_metadata:
+        downgraded_failures = sum(
+            1
+            for row in checks
+            if row["check_id"] == "static_source_rows_have_pit_metadata_values" and row["status"] == "FAIL"
+        )
+        if downgraded_failures:
+            print(
+                "WARNING: --allow-missing-static-pit-metadata downgraded "
+                f"{downgraded_failures} failing static PIT metadata check(s) in the diagnostic CSV; "
+                "the strict output CSV remains authoritative.",
+                file=sys.stderr,
+            )
     diagnostic_note = f" diagnostic_output={diagnostic_output_csv}" if diagnostic_written else ""
     print(
         f"oos_validation_output={output_csv}{diagnostic_note} "

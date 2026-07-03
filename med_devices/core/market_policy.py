@@ -39,6 +39,8 @@ def scoring_market_sources(config: dict[str, Any]) -> list[str]:
         return normalize_source_list(raw_sources, DEFAULT_SCORING_MARKET_SOURCES)
     primary = str(cfg_get(config, "market_data_policy.scoring_primary_source", "") or "").strip()
     fallback = cfg_get(config, "market_data_policy.scoring_fallback_sources", None)
+    if not primary and fallback is None:
+        return list(DEFAULT_SCORING_MARKET_SOURCES)
     fallback_sources = normalize_source_list(fallback, ["ib_market_data"]) if fallback is not None else ["ib_market_data"]
     return normalize_source_list([primary, *fallback_sources], DEFAULT_SCORING_MARKET_SOURCES)
 
@@ -73,8 +75,12 @@ def row_date(raw: object) -> date | None:
 
 def is_adjusted_price_row(row: dict[str, Any]) -> bool:
     adjusted_raw = row.get("is_adjusted")
-    if str(adjusted_raw or "").strip().lower() in {"1", "true", "t", "yes", "y", "on"}:
+    flag = "" if adjusted_raw is None else str(adjusted_raw).strip().lower()
+    if flag in {"1", "true", "t", "yes", "y", "on"}:
         return True
+    if flag:
+        # Explicit non-truthy flag (e.g. "0", "false") means unadjusted; skip the heuristic.
+        return False
     try:
         adj_close = float(str(row.get("adj_close")).strip())
     except (TypeError, ValueError):
@@ -95,9 +101,12 @@ def select_latest_rows_by_source_priority(
     entity_key: str = "ticker",
     source_key: str = "source_id",
     date_key: str = "bar_date",
+    drop_stale: bool = False,
+    allow_unlisted_sources: bool = True,
+    selection_meta: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     priority = source_priority_index(source_priority)
-    candidates: list[tuple[tuple[str, int, int, int], str, dict[str, Any]]] = []
+    candidates: list[tuple[tuple[str, int, int, int], str, dict[str, Any], dict[str, Any]]] = []
     max_age = max(0, int(max_staleness_days))
     for row in rows:
         row_dict = dict(row)
@@ -107,15 +116,32 @@ def select_latest_rows_by_source_priority(
         item_date = row_date(row_dict.get(date_key))
         age_days = (asof_date - item_date).days if item_date is not None else 999_999
         stale_rank = 1 if age_days > max_age else 0
+        if drop_stale and stale_rank:
+            continue
         source = str(row_dict.get(source_key) or "").strip().lower()
+        if not allow_unlisted_sources and source not in priority:
+            continue
         priority_rank = priority.get(source, 999)
         # Negative ordinal makes a newer row sort before an older row once source/staleness are equal.
         recency_rank = -(item_date.toordinal() if item_date is not None else 0)
-        candidates.append(((entity, stale_rank, priority_rank, recency_rank), entity, row_dict))
+        policy_flags = []
+        if stale_rank:
+            policy_flags.append("stale")
+        if source not in priority:
+            policy_flags.append("unlisted_source")
+        meta = {
+            "source": source,
+            "bar_date": str(row_dict.get(date_key) or ""),
+            "bar_age_days": age_days,
+            "policy_status": ";".join(policy_flags) if policy_flags else "ok",
+        }
+        candidates.append(((entity, stale_rank, priority_rank, recency_rank), entity, row_dict, meta))
 
     candidates.sort(key=lambda item: item[0])
     selected: dict[str, dict[str, Any]] = {}
-    for _, entity, row_dict in candidates:
+    for _, entity, row_dict, meta in candidates:
         if entity not in selected:
             selected[entity] = row_dict
+            if selection_meta is not None:
+                selection_meta[entity] = meta
     return selected

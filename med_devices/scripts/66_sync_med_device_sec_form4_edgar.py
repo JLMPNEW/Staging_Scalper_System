@@ -483,7 +483,7 @@ def build_rows(
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
     user_agent = str(
-        cfg_get(config, "sec_form4_ingestion.user_agent", cfg_get(config, "sec_filings.user_agent", "med-devices-research/1.0"))
+        cfg_get(config, "sec_form4_ingestion.user_agent", cfg_get(config, "sec_ingestion.user_agent", "med-devices-research/1.0"))
     )
     timeout_sec = float(cfg_get(config, "sec_form4_ingestion.timeout_sec", 30.0))
     retries = int(cfg_get(config, "sec_form4_ingestion.download_retries", 3))
