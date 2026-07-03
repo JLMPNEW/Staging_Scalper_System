@@ -1146,6 +1146,7 @@ scoring:
   model_family: "med_devices"
   model_version: "med_device_score_v23_2026_07_oos_lock_pit_policy"
   scoring_contract_version: "stocks_scores_v1"
+  oos_replay_window_days: 5
   output_csv: "../output/med_devices_reports/med_device_daily_composite_scores.csv"
   review_pack_dir: "../output/med_devices_reports/score_review_pack"
   backtest_output_csv: "../output/med_devices_reports/med_device_score_backtest.csv"

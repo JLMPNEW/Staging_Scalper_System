@@ -26,8 +26,9 @@ to enable it; it is not part of the default stage list.
 
 Manifest semantics: the manifest is merged on write. Rows from prior runs are
 preserved unless this run produced a row for the same asof+stages key, and a
-prior 'success' row is never demoted by a resume skip. --dry-run never writes
-the manifest.
+prior 'success' row is never demoted by a resume skip. A forced rebuild
+intentionally replaces prior success rows with the fresh run result. --dry-run
+never writes the manifest.
 """
 from __future__ import annotations
 
@@ -961,7 +962,7 @@ def main() -> None:
         stages_to_run = list(per_asof_stages)
         review_pack_dir = dated_output_dir(review_pack_base_dir, asof) if policy.publish_review_packs else None
         try:
-            manifest_resume = manifest_statuses.get(asof) == "success"
+            manifest_resume = (not args.force) and manifest_statuses.get(asof) == "success"
             if manifest_resume or policy.skip_existing:
                 with read_connection(db_path, timeout_sec=timeout_sec) as conn:
                     existing_rows, expected_rows, existing_complete = existing_score_status(

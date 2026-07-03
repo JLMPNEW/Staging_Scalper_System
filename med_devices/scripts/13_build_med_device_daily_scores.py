@@ -9,7 +9,7 @@ import math
 import sqlite3
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -5758,7 +5758,7 @@ def main() -> None:
                 # future); everything else stays fail-closed at flag=0.
                 replay_window_days = int(cfg_get(config, "scoring.oos_replay_window_days", 5))
                 try:
-                    asof_age_days: int | None = (date.today() - date.fromisoformat(asof)).days
+                    asof_age_days: int | None = (datetime.now(timezone.utc).date() - date.fromisoformat(asof)).days
                 except ValueError:
                     asof_age_days = None
                 if asof_age_days is None or not 0 <= asof_age_days <= replay_window_days:

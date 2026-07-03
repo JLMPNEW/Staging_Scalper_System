@@ -48,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-asof", default="")
     parser.add_argument("--chunk-size", type=int, default=7, help="Market dates per script-21 child run.")
     parser.add_argument("--resume", action="store_true", help="Skip chunks whose dated review-pack folders are complete.")
+    parser.add_argument("--force", action="store_true", help="Passed through to script 21 so child runs rebuild existing as-of dates.")
     parser.add_argument("--stop-after-chunks", type=int, default=0)
     parser.add_argument("--no-run-setup", action="store_true", help="Passed through to script 21 for every child chunk.")
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -170,6 +171,7 @@ def run_chunk(
     db_path: Path | None,
     log_dir: Path,
     no_run_setup: bool,
+    force: bool,
 ) -> tuple[int, Path]:
     log_path = log_dir / f"daily_snapshot_chunk_{chunk.start_asof}_{chunk.end_asof}.log"
     command = [
@@ -186,6 +188,8 @@ def run_chunk(
     ]
     if no_run_setup:
         command.append("--no-run-setup")
+    if force:
+        command.append("--force")
     if db_path is not None:
         command.extend(["--db", str(db_path)])
     print(
@@ -258,6 +262,7 @@ def main() -> int:
             db_path=db_path,
             log_dir=log_dir,
             no_run_setup=bool(args.no_run_setup),
+            force=bool(args.force),
         )
         status = "success" if returncode == 0 and chunk_complete(review_pack_base_dir, chunk) else "failed"
         message = f"returncode={returncode}"
