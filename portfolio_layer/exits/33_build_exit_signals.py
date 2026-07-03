@@ -43,6 +43,11 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 SOURCE_FILES = ["exit_common.py", "33_build_exit_signals.py"]
 
 
+def finite_default(value: Any, default: float) -> float:
+    parsed = finite_float(value)
+    return default if parsed is None else parsed
+
+
 def iso_date_arg(raw: str) -> str:
     try:
         date.fromisoformat(raw)
@@ -135,8 +140,8 @@ def _classify(
     soft_score = finite_float(cfg_get(config, "exit_engine.score_decay.soft_exit_final_score_below", -0.10))
     review_score = finite_float(cfg_get(config, "exit_engine.score_decay.review_final_score_below", -0.05))
     min_conf = finite_float(cfg_get(config, "exit_engine.score_decay.min_score_confidence_review", 0.25))
-    review_loss = finite_float(cfg_get(config, "exit_engine.position_risk.review_unrealized_loss_pct", -0.35)) or -0.35
-    review_weight = finite_float(cfg_get(config, "exit_engine.position_risk.review_actual_weight_pct", 0.15)) or 0.15
+    review_loss = finite_default(cfg_get(config, "exit_engine.position_risk.review_unrealized_loss_pct", -0.35), -0.35)
+    review_weight = finite_default(cfg_get(config, "exit_engine.position_risk.review_actual_weight_pct", 0.15), 0.15)
     not_scored_action = str(cfg_get(config, "exit_engine.coverage_policy.not_scored_action", "review")).strip()
     not_investable_action = str(cfg_get(config, "exit_engine.coverage_policy.scored_not_investable_action", "soft_exit")).strip()
 
@@ -302,7 +307,7 @@ def main() -> int:  # noqa: C901
     ledger_manifest = load_json(art["ledger_manifest.json"])
     score_manifest = load_json(art["score_manifest.json"])
     lag_days = date_lag_days(signal_as_of, ledger_as_of)
-    max_lag = int(cfg_get(config, "exit_engine.max_signal_lag_days", 10) or 10)
+    max_lag = int(finite_default(cfg_get(config, "exit_engine.max_signal_lag_days", 10), 10.0))
     checks: list[dict[str, str]] = []
 
     def rec(check: str, status: str, detail: str) -> None:

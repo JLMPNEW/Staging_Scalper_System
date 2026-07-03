@@ -69,7 +69,6 @@ cohorts:
       - LMT
       - GD
       - NOC
-      - HONAV
       - LHX
       - AXON
       - ESLT
@@ -114,4 +113,3 @@ cohorts:
       - MNTS
       - HOVR
       - BKSY
-

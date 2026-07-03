@@ -18,6 +18,7 @@ END_DATE_COLUMNS = (
     "valid_to",
     "effective_to",
     "end_date",
+    "expires_at",
 )
 REVIEW_DATE_COLUMNS = (
     "reviewed_at",

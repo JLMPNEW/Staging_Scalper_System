@@ -77,16 +77,24 @@ def parse_finite(value: object, label: str) -> float:
     return parsed
 
 
+def row_flag(row: dict, field: str) -> int:
+    try:
+        return 1 if int(float(str(row.get(field, "0")).strip() or "0")) != 0 else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def resolve_calibration_anchor(value: object, label: str, rows: list[dict[str, str]]) -> float:
     """Resolve numeric calibration anchors; `median` centers each sector on its current scored population."""
     raw = str(value).strip().lower() if value is not None else ""
     if raw == "median":
-        values = [
-            parsed
-            for parsed in (parse_finite(r.get("native_score"), f"{label}:native_score") for r in rows)
-        ]
+        values = []
+        for r in rows:
+            parsed = parse_finite(r.get("native_score"), f"{label}:native_score")
+            if not row_flag(r, "missing_score_flag"):
+                values.append(parsed)
         if not values:
-            raise ValueError(f"{label}=median requires at least one finite native_score")
+            raise ValueError(f"{label}=median requires at least one finite non-missing native_score")
         return float(median(values))
     return parse_finite(value, label)
 
@@ -97,8 +105,13 @@ def assign_percentiles_and_ratings(rows: list[dict], bands: dict[str, float]) ->
     for row in rows:
         by_pipeline.setdefault(str(row["source_pipeline"]), []).append(row)
     for sector_rows in by_pipeline.values():
-        natives = [float(row["native_score"]) for row in sector_rows]
-        for row, pct in zip(sector_rows, percentiles_within(natives)):
+        ranked_rows = [row for row in sector_rows if not row_flag(row, "missing_score_flag")]
+        natives = [float(row["native_score"]) for row in ranked_rows]
+        for row in sector_rows:
+            if row_flag(row, "missing_score_flag"):
+                row["within_sector_percentile"] = 0.0
+                row["rating"] = "avoid"
+        for row, pct in zip(ranked_rows, percentiles_within(natives)):
             row["within_sector_percentile"] = round(pct, 4)
             row["rating"] = rating_for_percentile(pct, bands)
 
@@ -181,6 +194,10 @@ def main() -> int:
                     overrides[t] = pipeline
         else:
             LOGGER.warning("canonical pipeline overrides CSV not found: %s", ov_path)
+    invalid_overrides = sorted({pipeline for pipeline in overrides.values() if pipeline not in calib_by_family})
+    if invalid_overrides:
+        LOGGER.error("canonical pipeline overrides contain unknown pipelines: %s", invalid_overrides)
+        return 1
 
     # Calibrate native scores. Percentile/rating must wait until after duplicate resolution so each
     # name is ranked against the final sleeve population, not the pre-dedup collected population.
@@ -249,10 +266,11 @@ def main() -> int:
                     max_abs_expected_alpha,
                 )
                 return 1
+            missing_score_flag = row_flag(r, "missing_score_flag")
             contract_rows.append({
                 "as_of_date": run_as_of, "ticker": r["ticker"], "source_pipeline": pipeline,
                 "sector": r["sector"], "industry": r["industry"], "industry_aggregate": r["industry_aggregate"],
-                "final_score": round(final_score, 6),
+                "final_score": round(0.0 if missing_score_flag else final_score, 6),
                 "rating": "", "within_sector_percentile": "",
                 "score_confidence": round(score_confidence, 4),
                 "investable_eligible": int(r["investable_eligible"]),
@@ -265,6 +283,8 @@ def main() -> int:
                     r.get("stage1_sample_role") or r.get("calibration_sample_role") or "excluded"
                 ).strip() or "excluded",
                 "oos_score_valid_flag": int(r.get("oos_score_valid_flag") or 0),
+                "missing_score_flag": missing_score_flag,
+                "survivorship_corrected_panel_flag": row_flag(r, "survivorship_corrected_panel_flag"),
                 "source_asof_date": r["source_asof_date"],
                 "staleness_days": staleness_days(run_as_of, r["source_asof_date"]),
                 "score_version": score_version,
@@ -325,6 +345,41 @@ def main() -> int:
         })
 
     final_rows = list(best.values())
+    final_by_pipeline: dict[str, list[dict]] = {}
+    for row in final_rows:
+        final_by_pipeline.setdefault(str(row["source_pipeline"]), []).append(row)
+    for pipeline, rows in final_by_pipeline.items():
+        calib = calib_by_family.get(pipeline, {})
+        try:
+            neutral = resolve_calibration_anchor(calib.get("neutral", 50.0), f"{pipeline}:calibration.neutral", rows)
+            scale = parse_finite(calib.get("scale", 50.0), f"{pipeline}:calibration.scale")
+            alpha_full = parse_finite(
+                calib.get("expected_alpha_at_full", 0.15),
+                f"{pipeline}:calibration.expected_alpha_at_full",
+            )
+        except ValueError as exc:
+            LOGGER.error("%s", exc)
+            return 1
+        for row in rows:
+            if row_flag(row, "missing_score_flag"):
+                row["final_score"] = 0.0
+                continue
+            final_score = expected_alpha(
+                float(row["native_score"]),
+                neutral=neutral,
+                scale=scale,
+                expected_alpha_at_full=alpha_full,
+            )
+            if abs(final_score) > max_abs_expected_alpha:
+                LOGGER.error(
+                    "%s:%s final_score %.6f exceeds max_abs_expected_alpha %.6f after dedup calibration",
+                    pipeline,
+                    row["ticker"],
+                    final_score,
+                    max_abs_expected_alpha,
+                )
+                return 1
+            row["final_score"] = round(final_score, 6)
     assign_percentiles_and_ratings(final_rows, bands)
     final_rows = sorted(final_rows, key=lambda r: (r["source_pipeline"], -float(r["final_score"])))
     out_path = run_dir / "stocks_scores.csv"

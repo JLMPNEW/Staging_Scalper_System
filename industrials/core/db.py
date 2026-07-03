@@ -104,6 +104,23 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("ifrs-full", "ContractLiabilitiesCurrent", "deferred_revenue_current", "balance_sheet", "instant", priority=10),
     _xbrl_concept("ifrs-full", "ContractLiabilitiesNoncurrent", "deferred_revenue_noncurrent", "balance_sheet", "instant", priority=10),
     _xbrl_concept("ifrs-full", "ContractLiabilities", "deferred_revenue_total", "balance_sheet", "instant", priority=10),
+    _xbrl_concept("sec-text", "Revenue", "revenue", "income_statement", "duration", priority=200),
+    _xbrl_concept("sec-text", "CostOfRevenue", "cost_of_sales", "income_statement", "duration", priority=200, sign_policy="positive_abs"),
+    _xbrl_concept("sec-text", "GrossProfit", "gross_profit", "income_statement", "duration", priority=200),
+    _xbrl_concept("sec-text", "OperatingIncomeLoss", "operating_income", "income_statement", "duration", priority=200),
+    _xbrl_concept("sec-text", "NetIncomeLoss", "net_income", "income_statement", "duration", priority=200),
+    _xbrl_concept("sec-text", "Assets", "assets", "balance_sheet", "instant", priority=200),
+    _xbrl_concept("sec-text", "Liabilities", "liabilities", "balance_sheet", "instant", priority=200),
+    _xbrl_concept("sec-text", "Equity", "equity", "balance_sheet", "instant", priority=200),
+    _xbrl_concept("sec-text", "CashAndCashEquivalents", "cash_and_equivalents", "balance_sheet", "instant", priority=200),
+    _xbrl_concept("sec-text", "Inventory", "inventory", "balance_sheet", "instant", priority=200),
+    _xbrl_concept("sec-text", "AccountsReceivable", "accounts_receivable", "balance_sheet", "instant", priority=200),
+    _xbrl_concept("sec-text", "AccountsPayable", "accounts_payable", "balance_sheet", "instant", priority=200),
+    _xbrl_concept("sec-text", "OperatingCashFlow", "operating_cash_flow", "cash_flow", "duration", priority=200),
+    _xbrl_concept("sec-text", "Capex", "capex", "cash_flow", "duration", priority=200, sign_policy="positive_abs"),
+    _xbrl_concept("sec-text", "ResearchAndDevelopment", "research_and_development", "income_statement", "duration", priority=200, sign_policy="positive_abs"),
+    _xbrl_concept("sec-text", "DilutedShares", "diluted_shares", "income_statement", "duration", priority=200),
+    _xbrl_concept("sec-text", "DebtTotal", "debt_total", "balance_sheet", "instant", priority=200),
 ]
 
 
@@ -632,6 +649,10 @@ CREATE TABLE IF NOT EXISTS feature_financial_statement (
     accounts_receivable_usd REAL,
     accounts_payable_usd REAL,
     revenue_ttm REAL,
+    revenue_stub_annualized REAL,
+    revenue_stub_annualized_usd REAL,
+    revenue_stub_period_days REAL,
+    revenue_stub_quality TEXT,
     gross_profit_ttm REAL,
     operating_income_ttm REAL,
     net_income_ttm REAL,
@@ -861,6 +882,10 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "feature_financial_statement", "contract_liabilities", "REAL")
     ensure_column(conn, "feature_financial_statement", "book_to_bill", "REAL")
     ensure_column(conn, "feature_financial_statement", "funded_backlog", "REAL")
+    ensure_column(conn, "feature_financial_statement", "revenue_stub_annualized", "REAL")
+    ensure_column(conn, "feature_financial_statement", "revenue_stub_annualized_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "revenue_stub_period_days", "REAL")
+    ensure_column(conn, "feature_financial_statement", "revenue_stub_quality", "TEXT")
     ensure_column(conn, "feature_financial_statement", "development_stage", "TEXT")
     ensure_column(conn, "feature_financial_statement", "financial_confidence", "REAL NOT NULL DEFAULT 0.0")
     ensure_column(conn, "feature_financial_statement", "financial_fallback_status", "TEXT")

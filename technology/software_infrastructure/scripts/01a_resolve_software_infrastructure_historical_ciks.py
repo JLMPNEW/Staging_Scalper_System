@@ -11,6 +11,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -231,6 +232,17 @@ def candidates_from_html(text: str, *, source: str) -> list[SecCandidate]:
     return list(deduped.values())
 
 
+BARE_TICKER_MAX_AGE_DAYS = 730
+
+
+def membership_end_date(row: dict[str, str]) -> date | None:
+    text = str(row.get("end_date") or "").strip()[:10]
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
 def query_terms(row: dict[str, str]) -> list[str]:
     ticker = str(row.get("internal_ticker") or "").strip().upper()
     terms = list(QUERY_OVERRIDES.get(ticker, []))
@@ -240,8 +252,18 @@ def query_terms(row: dict[str, str]) -> list[str]:
     source_name = str(row.get("notes") or "").strip()
     if source_name:
         terms.append(source_name)
+    # Bare exchange-ticker browse queries resolve recycled symbols to their
+    # CURRENT SEC owner. Rows whose membership ended more than
+    # BARE_TICKER_MAX_AGE_DAYS ago are the recycling risk, so those rows must
+    # resolve through name-based queries only.
+    end_date = membership_end_date(row)
+    ticker_query_allowed = end_date is not None and (date.today() - end_date).days <= BARE_TICKER_MAX_AGE_DAYS
     exchange_ticker = str(row.get("exchange_ticker") or "").strip().upper()
-    if exchange_ticker and exchange_ticker not in {ticker, "VG", "SAIL", "INFA", "SWI", "CA"}:
+    if (
+        exchange_ticker
+        and ticker_query_allowed
+        and exchange_ticker not in {ticker, "VG", "SAIL", "INFA", "SWI", "CA"}
+    ):
         terms.append(exchange_ticker)
     out: list[str] = []
     seen: set[str] = set()
@@ -253,7 +275,7 @@ def query_terms(row: dict[str, str]) -> list[str]:
     return out
 
 
-def resolve_cik(row: dict[str, str], *, cache_dir: Path, user_agent: str, sleep_sec: float) -> dict[str, Any]:
+def resolve_cik(row: dict[str, str], *, cache_dir: Path, user_agent: str, sleep_sec: float, min_score: float) -> dict[str, Any]:
     ticker = str(row.get("internal_ticker") or "").strip().upper()
     expected_name = str(row.get("company_name") or "").strip()
     if ticker in MANUAL_CIK_OVERRIDES:
@@ -300,7 +322,7 @@ def resolve_cik(row: dict[str, str], *, cache_dir: Path, user_agent: str, sleep_
         "match_score": round(score, 4),
         "query": query,
         "method": f"sec_browse_name_match:{candidate.source}",
-        "status": "resolved" if score > 0 else "review",
+        "status": "resolved" if score >= min_score else "review",
         "candidate_count": len(all_candidates),
         "errors": "; ".join(errors),
     }
@@ -324,15 +346,30 @@ def main() -> int:
     audit_rows: list[dict[str, Any]] = []
     unresolved: list[str] = []
     for row in rows:
-        resolution = resolve_cik(row, cache_dir=args.cache_dir, user_agent=user_agent, sleep_sec=args.sleep_sec)
+        resolution = resolve_cik(
+            row,
+            cache_dir=args.cache_dir,
+            user_agent=user_agent,
+            sleep_sec=args.sleep_sec,
+            min_score=args.min_score,
+        )
         cik = normalize_cik(resolution.get("cik"))
         score = float(resolution.get("match_score") or 0.0)
         status = str(resolution.get("status") or "")
-        if not cik or (status != "resolved" and score < args.min_score):
+        low_confidence = not cik or score < args.min_score
+        if low_confidence:
             unresolved.append(str(row.get("internal_ticker") or ""))
 
         out = dict(row)
-        out["cik"] = cik
+        if low_confidence:
+            # Never write a low-confidence candidate CIK into the seed CSV;
+            # downstream loaders must not ingest it. The full candidate detail
+            # stays in the audit CSV for manual review.
+            out["cik"] = ""
+            out["cik_resolution_status"] = "review"
+        else:
+            out["cik"] = cik
+            out["cik_resolution_status"] = "resolved"
         output_rows.append(out)
         audit_rows.append(
             {

@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.core.config import cfg_get, load_yaml, resolve_optional_path, resolve_path  # noqa: E402
 from biotech_index.core.db import connect, finish_run, init_db, start_run  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.report_inputs import dated_output_dir, resolve_dated_report_input_csv  # noqa: E402
 
 
 LOGGER = logging.getLogger("publish_biotech_reports")
@@ -621,42 +622,6 @@ def parse_date_text(raw: object) -> str:
         raise ValueError(f"Invalid date: {text}") from exc
 
 
-def compact_asof(asof_date: str) -> str:
-    parsed = parse_date_text(asof_date)
-    return datetime.strptime(parsed, "%Y-%m-%d").strftime("%Y%m%d") if parsed else str(asof_date).replace("-", "")
-
-
-def dated_output_dir(base_output_dir: Path, asof_date: str) -> Path:
-    compact = compact_asof(asof_date)
-    return base_output_dir if base_output_dir.name == compact else base_output_dir / compact
-
-
-def resolve_report_input_csv(configured_path: Path, *, base_output_dir: Path, asof_date: str) -> Path:
-    if configured_path.exists():
-        return configured_path
-    dated_candidate = dated_output_dir(base_output_dir, asof_date) / configured_path.name
-    if dated_candidate.exists():
-        return dated_candidate
-    candidates = sorted(
-        base_output_dir.glob(f"*/{configured_path.name}"),
-        key=lambda path: (
-            1 if path.parent.name.isdigit() and len(path.parent.name) == 8 else 0,
-            path.parent.name,
-            path.stat().st_mtime,
-        ),
-        reverse=True,
-    )
-    if candidates:
-        LOGGER.warning(
-            "Configured report input not found at %s or %s; using latest dated copy %s",
-            configured_path,
-            dated_candidate,
-            candidates[0],
-        )
-        return candidates[0]
-    return configured_path
-
-
 def to_float(raw: object, default: float = 0.0) -> float:
     if raw is None:
         return default
@@ -672,6 +637,17 @@ def to_float(raw: object, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default
+
+
+def first_nonblank_float(*values: object, default: float = 0.0) -> float:
+    for value in values:
+        if str(value if value is not None else "").strip():
+            return to_float(value, default)
+    return default
+
+
+def allocation_score_value(row: dict[str, Any], default: float = 0.0) -> float:
+    return first_nonblank_float(row.get("allocation_opportunity_score"), row.get("opportunity_score"), default=default)
 
 
 def as_bool(raw: object, default: bool = False) -> bool:
@@ -761,7 +737,14 @@ def apply_action_tier(
         research_flag = 1
     else:
         tier = "low_priority"
-        reason = f"score<{research_score_min:g} or rank>{research_rank_max}"
+        if rank <= 0:
+            reason = "missing_or_invalid_rank"
+        elif score < research_score_min and rank > research_rank_max:
+            reason = f"score<{research_score_min:g} and rank>{research_rank_max}"
+        elif score < research_score_min:
+            reason = f"score<{research_score_min:g}"
+        else:
+            reason = f"rank>{research_rank_max}"
         allocation_flag = 0
         research_flag = 0
 
@@ -778,7 +761,7 @@ def allocation_sort_key(row: dict[str, Any]) -> tuple[int, int, int, int, float,
         1 if listing_status_not_clean(row.get("listing_status")) else 0,
         1 if str(row.get("allocation_bucket") or row.get("bucket") or "").lower() == "avoid" else 0,
         1 if to_float(row.get("rank_quality_cap_vetoed"), 0.0) > 0.0 else 0,
-        -to_float(row.get("allocation_opportunity_score", row.get("opportunity_score")), 0.0),
+        -allocation_score_value(row),
         to_float(row.get("allocation_risk_score", row.get("risk_score")), 100.0),
         str(row.get("ticker") or ""),
     )
@@ -796,7 +779,7 @@ def build_allocation_ranked_rows(
     allocation_score_min = float(settings["allocation_score_min"])
     eligible: list[dict[str, Any]] = []
     for row in rows:
-        allocation_score = to_float(row.get("allocation_opportunity_score", row.get("opportunity_score")), 0.0)
+        allocation_score = allocation_score_value(row)
         allocation_bucket = str(row.get("allocation_bucket") or row.get("bucket") or "").strip().lower()
         if to_float(row.get("biotech_cohort_investible_flag"), 1.0) <= 0.0:
             continue
@@ -831,7 +814,7 @@ def apply_discovery_action_framework(row: dict[str, Any], settings: dict[str, fl
     out = dict(row)
     allocation_rank = int(to_float(out.get("allocation_rank"), 0.0))
     discovery_rank = int(to_float(out.get("discovery_rank"), 0.0))
-    allocation_score = to_float(out.get("allocation_opportunity_score", out.get("opportunity_score")), 0.0)
+    allocation_score = allocation_score_value(out)
     discovery_score = to_float(out.get("discovery_opportunity_score"), 0.0)
     allocation_rank_max = int(settings["allocation_rank_max"])
     high_confidence_score_min = float(settings["high_confidence_score_min"])
@@ -870,7 +853,12 @@ def apply_discovery_action_framework(row: dict[str, Any], settings: dict[str, fl
     elif discovery_candidate and listing_blocked:
         discovery_action_tier = "research_only_listing_status_not_clean"
         discovery_action_reason = f"discovery_candidate_but_listing_status={out.get('listing_status')}"
-    elif discovery_rank > 0 and discovery_rank <= allocation_rank_max and discovery_score >= high_confidence_score_min:
+    elif (
+        discovery_rank > 0
+        and discovery_rank <= allocation_rank_max
+        and discovery_score >= high_confidence_score_min
+        and not allocation_blocked
+    ):
         discovery_action_tier = "high_confidence_discovery"
         discovery_action_reason = f"discovery_rank<={allocation_rank_max} and discovery_score>={high_confidence_score_min:g}"
     elif discovery_candidate:
@@ -942,17 +930,20 @@ def validate_ranked_outputs(
     for row in discovery_rows:
         ticker = str(row.get("ticker") or "")
         allocation_bucket = str(row.get("allocation_bucket") or row.get("bucket") or "").strip().lower()
+        discovery_tier = str(row.get("discovery_action_tier") or "")
+        dual_tier = str(row.get("dual_consensus_tier") or "")
+        non_candidate_tiers = {"low_priority", "blocked_by_rank_quality_cap"}
         if str(row.get("rank_source") or "") != "discovery_opportunity_score":
             errors.append(f"discovery_rank_source_not_discovery_score:{ticker}")
         if (
             allocation_bucket != "avoid"
             and listing_status_not_clean(row.get("listing_status"))
-            and str(row.get("discovery_action_tier") or "") != "research_only_listing_status_not_clean"
+            and discovery_tier not in {"research_only_listing_status_not_clean", *non_candidate_tiers}
         ):
             errors.append(f"discovery_non_clean_listing_not_research_only:{ticker}:{row.get('listing_status')}")
-        if allocation_bucket == "avoid" and str(row.get("discovery_action_tier") or "") != "research_only_allocation_avoid":
+        if allocation_bucket == "avoid" and discovery_tier not in {"research_only_allocation_avoid", *non_candidate_tiers}:
             errors.append(f"discovery_avoid_not_research_only:{ticker}")
-        if allocation_bucket == "avoid" and str(row.get("dual_consensus_tier") or "") != "research_only_allocation_avoid":
+        if allocation_bucket == "avoid" and dual_tier not in {"research_only_allocation_avoid", *non_candidate_tiers}:
             errors.append(f"discovery_avoid_dual_tier_not_research_only:{ticker}")
 
     max_late_commercial = int(
@@ -1267,14 +1258,16 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "asof_date": row.get("asof_date", ""),
         "company_id": row.get("company_id", ""),
         "rank": row.get("rank", ""),
+        "top_evidence_json": row.get("top_evidence_json", ""),
         "ticker": row.get("ticker", ""),
         "listing_status": row.get("listing_status", ""),
         "company_name": row.get("company_name", ""),
         "bucket": row.get("bucket", ""),
         "opportunity_score": row.get("opportunity_score", ""),
-        "allocation_opportunity_score": row.get(
-            "allocation_opportunity_score",
+        "allocation_opportunity_score": first_nonblank(
+            row.get("allocation_opportunity_score"),
             score_components.get("allocation_opportunity_score", "") if isinstance(score_components, dict) else "",
+            row.get("opportunity_score", ""),
         ),
         "allocation_bucket": row.get(
             "allocation_bucket",
@@ -1613,8 +1606,8 @@ def build_cohort_diagnostics(rows: list[dict[str, Any]], *, asof_date: str) -> l
                 "avg_investment_score": mean_numeric(cohort_rows, "investment_score"),
                 "avg_taxonomy_confidence": mean_numeric(cohort_rows, "biotech_cohort_confidence"),
                 "avg_cohort_reliability_score": mean_numeric(cohort_rows, "biotech_cohort_reliability_score"),
-                "review_required_count": sum(1 for row in cohort_rows if str(row.get("biotech_taxonomy_review_required") or "").strip() in {"1", "1.0", "true", "True"}),
-                "sparse_data_count": sum(1 for row in cohort_rows if str(row.get("biotech_cohort_sparse_data_flag") or "").strip() in {"1", "1.0", "true", "True"}),
+                "review_required_count": sum(1 for row in cohort_rows if as_bool(row.get("biotech_taxonomy_review_required"))),
+                "sparse_data_count": sum(1 for row in cohort_rows if as_bool(row.get("biotech_cohort_sparse_data_flag"))),
                 "non_investible_count": sum(1 for row in cohort_rows if to_float(row.get("biotech_cohort_investible_flag"), 1.0) <= 0.0),
                 "global_fallback_count": sum(1 for row in cohort_rows if str(row.get("biotech_cohort_calibration_mode") or "") == "global_fallback"),
                 "cohort_specific_count": sum(1 for row in cohort_rows if str(row.get("biotech_cohort_calibration_mode") or "") == "cohort_specific"),
@@ -1808,6 +1801,9 @@ def build_shadow_top_rows(
             "latest_positive_sec_event_age_days": row.get("latest_positive_sec_event_age_days", ""),
             "latest_positive_sec_event_type": row.get("latest_positive_sec_event_type", ""),
         }
+        for field in SHADOW_SCORE_FIELDS:
+            if field not in shadow_row or not str(shadow_row.get(field) if shadow_row.get(field) is not None else "").strip():
+                shadow_row[field] = first_nonblank(row.get(field), row.get(f"diag_{field}"), "")
         out.append(apply_action_tier(shadow_row, tier_settings, score_field="shadow_score"))
     return out
 
@@ -2093,18 +2089,30 @@ def validate_top_score_fields(sample_row: dict[str, Any]) -> None:
         )
 
 
-def load_previous_scores(conn: sqlite3.Connection, prev_asof: str) -> dict[int, dict[str, Any]]:
+def build_previous_allocation_scores(
+    conn: sqlite3.Connection,
+    prev_asof: str,
+    tier_settings: dict[str, float],
+) -> dict[int, dict[str, Any]]:
     if not prev_asof:
         return {}
-    rows = conn.execute(
-        """
-        SELECT company_id, opportunity_score, rank, bucket
-        FROM daily_scores
-        WHERE asof_date = ?
-        """,
-        (prev_asof,),
-    ).fetchall()
-    return {int(row["company_id"]): dict(row) for row in rows}
+    previous_rows = [flatten_score_row(row) for row in load_scores(conn, prev_asof)]
+    previous_allocation_rows = build_allocation_ranked_rows(previous_rows, tier_settings)
+    out: dict[int, dict[str, Any]] = {}
+    for row in previous_allocation_rows:
+        try:
+            company_id = int(row.get("company_id") or 0)
+        except (TypeError, ValueError):
+            company_id = 0
+        if company_id <= 0:
+            continue
+        out[company_id] = {
+            "company_id": row.get("company_id", ""),
+            "opportunity_score": allocation_score_value(row),
+            "rank": row.get("allocation_rank", row.get("rank", "")),
+            "bucket": row.get("allocation_bucket", row.get("bucket", "")),
+        }
+    return out
 
 
 def build_alerts(
@@ -2127,12 +2135,12 @@ def build_alerts(
                     "ticker": row.get("ticker", ""),
                     "company_name": row.get("company_name", ""),
                     "alert_type": "initial_top_candidate",
-                    "current_score": row.get("opportunity_score", ""),
+                    "current_score": allocation_score_value(row),
                     "previous_score": "",
                     "score_change": "",
                     "current_rank": row.get("rank", ""),
                     "previous_rank": "",
-                    "current_bucket": row.get("bucket", ""),
+                    "current_bucket": row.get("allocation_bucket", row.get("bucket", "")),
                     "previous_bucket": "",
                     "previous_asof_date": "",
                 }
@@ -2158,10 +2166,10 @@ def build_alerts(
             prev_rank = ""
             prev_bucket = ""
         else:
-            current_score = to_float(row.get("opportunity_score"))
+            current_score = allocation_score_value(row)
             prev_score_value = to_float(prev.get("opportunity_score"))
             delta = current_score - prev_score_value
-            current_bucket = str(row.get("bucket") or "")
+            current_bucket = str(row.get("allocation_bucket") or row.get("bucket") or "")
             prev_bucket_value = str(prev.get("bucket") or "")
             if delta >= score_change_min:
                 alert_type = "score_jump"
@@ -2186,12 +2194,12 @@ def build_alerts(
                 "ticker": row.get("ticker", ""),
                 "company_name": row.get("company_name", ""),
                 "alert_type": alert_type,
-                "current_score": row.get("opportunity_score", ""),
+                "current_score": allocation_score_value(row),
                 "previous_score": prev_score,
                 "score_change": score_change,
                 "current_rank": row.get("rank", ""),
                 "previous_rank": prev_rank,
-                "current_bucket": row.get("bucket", ""),
+                "current_bucket": row.get("allocation_bucket", row.get("bucket", "")),
                 "previous_bucket": prev_bucket,
                 "previous_asof_date": prev_asof,
             }
@@ -2211,6 +2219,11 @@ def build_trial_validation_rows(
 ) -> list[dict[str, Any]]:
     score_by_ticker = {str(row.get("ticker") or "").upper(): row for row in scores}
     selected_source = selected_score_rows if selected_score_rows is not None else scores[:top_n]
+    if selected_score_rows is not None:
+        for row in selected_score_rows:
+            ticker = str(row.get("ticker") or "").upper()
+            if ticker:
+                score_by_ticker[ticker] = row
     selected = {str(row.get("ticker") or "").upper() for row in selected_source if str(row.get("ticker") or "").strip()}
     extra_selected = {str(ticker or "").strip().upper() for ticker in extra_tickers if str(ticker or "").strip()}
     missing_extra = sorted(ticker for ticker in extra_selected if ticker not in score_by_ticker)
@@ -2409,9 +2422,9 @@ def build_trial_validation_summary_rows(
     return out
 
 
-def build_evidence_cards(scores: list[dict[str, Any]], features: dict[int, dict[str, Any]], top_n: int) -> list[dict[str, Any]]:
+def build_evidence_cards(scores: list[dict[str, Any]], features: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
-    for row in scores[:top_n]:
+    for row in scores:
         company_id = int(to_float(row.get("company_id"), 0.0) or 0)
         if company_id <= 0:
             LOGGER.warning("Skipping evidence card row without a valid company_id: ticker=%s", row.get("ticker", ""))
@@ -2495,10 +2508,11 @@ def main() -> None:
             trial_validation_summary_csv = output_dir / str(
                 cfg_get(config, "biotech_reports.trial_validation_summary_csv", "biotech_top_trial_validation_summary.csv")
             )
-            ctgov_evidence_csv = resolve_report_input_csv(
+            ctgov_evidence_csv = resolve_dated_report_input_csv(
                 configured_ctgov_evidence_csv,
                 base_output_dir=base_output_dir,
                 asof_date=asof_date,
+                logger=LOGGER,
             )
             assert_output_paths_writable(
                 [
@@ -2519,20 +2533,18 @@ def main() -> None:
                 raise ValueError(f"No daily_scores rows found for asof_date={asof_date}")
             features = load_features(conn, asof_date)
             prev_asof = previous_score_date(conn, asof_date)
-            previous = load_previous_scores(conn, prev_asof)
 
-            flattened_rows = [
-                apply_action_tier(flatten_score_row(row), tier_settings, score_field="allocation_opportunity_score")
-                for row in scores
-            ]
+            flattened_rows = [flatten_score_row(row) for row in scores]
             allocation_ranked_rows = build_allocation_ranked_rows(flattened_rows, tier_settings)
+            previous = build_previous_allocation_scores(conn, prev_asof, tier_settings)
             allocation_rows_by_ticker = {
                 str(row.get("ticker") or "").upper(): row
                 for row in allocation_ranked_rows
                 if str(row.get("ticker") or "").strip()
             }
+            allocation_summary_rows = sorted(flattened_rows, key=allocation_sort_key)
             summary = build_index_summary(
-                allocation_ranked_rows,
+                allocation_summary_rows,
                 asof_date,
                 top_n,
                 weights=index_weights,
@@ -2540,6 +2552,7 @@ def main() -> None:
                 bucket_field="allocation_bucket",
             )
             top_rows = allocation_ranked_rows[:top_n]
+            discovery_top_limit = max(1, int(tier_settings["research_rank_max"]))
             discovery_top_rows = sorted(
                 (
                     dict(row)
@@ -2552,7 +2565,7 @@ def main() -> None:
                     to_float(row.get("discovery_risk_score"), 100.0),
                     str(row.get("ticker") or ""),
                 ),
-            )[:20]
+            )[:discovery_top_limit]
             for discovery_rank, row in enumerate(discovery_top_rows, start=1):
                 ticker = str(row.get("ticker") or "").upper()
                 allocation_row = allocation_rows_by_ticker.get(ticker)
@@ -2561,7 +2574,7 @@ def main() -> None:
                 row["rank_purpose"] = "discovery"
                 row["rank_source"] = "discovery_opportunity_score"
                 row["allocation_rank"] = allocation_row.get("allocation_rank", "") if allocation_row else ""
-                row["allocation_opportunity_score"] = row.get("allocation_opportunity_score", row.get("opportunity_score", ""))
+                row["allocation_opportunity_score"] = first_nonblank(row.get("allocation_opportunity_score"), row.get("opportunity_score", ""))
                 row["allocation_action_tier"] = allocation_row.get("action_tier", "not_in_allocation_top") if allocation_row else "not_in_allocation_top"
                 row["allocation_action_tier_reason"] = (
                     allocation_row.get("action_tier_reason", "") if allocation_row else "did_not_pass_allocation_top_filters"
@@ -2597,7 +2610,7 @@ def main() -> None:
                 shadow_rows=shadow_top_rows,
             )
             alerts = build_alerts(
-                current_scores=scores,
+                current_scores=allocation_ranked_rows,
                 previous_scores=previous,
                 prev_asof=prev_asof,
                 score_change_min=score_change_min,
@@ -2605,7 +2618,7 @@ def main() -> None:
                 bucket_transition_enabled=bucket_transition_enabled,
                 top_n=top_n,
             )
-            cards = build_evidence_cards(top_rows, features, top_n)
+            cards = build_evidence_cards(top_rows, features)
             trial_validation_rows = build_trial_validation_rows(
                 scores=flattened_rows,
                 evidence_rows=apply_trial_status_overrides(

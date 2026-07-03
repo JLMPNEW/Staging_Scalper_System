@@ -248,6 +248,10 @@ def existing_coverage_row(conn: Any, job: PriceJob, *, source_id: str, start_dat
         return None
     if last_bar_date < end_date:
         return None
+    # Coverage must satisfy both ends: refetch when the requested window starts
+    # before the earliest stored bar.
+    if start_date < first_bar_date:
+        return None
     latest = conn.execute(
         """
         SELECT close, adj_close, price_adjustment, is_adjusted
@@ -499,7 +503,7 @@ def finish_ingestion_run(conn: Any, ingestion_run_id: int, *, status: str, reque
     )
 
 
-def upsert_result(conn: Any, result: FetchResult, *, ingestion_run_id: int) -> tuple[int, int]:
+def upsert_result(conn: Any, result: FetchResult, *, ingestion_run_id: int, write_market_snapshot: bool = True) -> tuple[int, int]:
     now = utc_now()
     response_hash = hashlib.sha256(result.payload_text.encode("utf-8", errors="replace")).hexdigest()
     conn.execute(
@@ -593,7 +597,11 @@ def upsert_result(conn: Any, result: FetchResult, *, ingestion_run_id: int) -> t
             ),
         )
     latest_bar = result.bars[-1] if result.bars else None
-    if latest_bar is not None:
+    if latest_bar is not None and not write_market_snapshot:
+        # Yahoo meta carries live quote fields (regularMarketPrice/marketCap);
+        # keying them under a historical bar date would fabricate history.
+        LOGGER.info("Skipping fact_market_snapshot for %s: historical asof run.", result.job.ticker)
+    elif latest_bar is not None:
         conn.execute(
             """
             INSERT INTO fact_market_snapshot(
@@ -664,7 +672,9 @@ def main() -> None:
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     start = parse_date(args.start_date) or parse_date(cfg_get(config, "yahoo_price_ingestion.start_date")) or date(2016, 1, 1)
-    end = parse_date(args.asof) or date.today()
+    asof_arg = parse_date(args.asof)
+    end = asof_arg or date.today()
+    is_current_run = asof_arg is None or asof_arg >= date.today()
     if end < start:
         raise ValueError(f"asof date {end} is before start date {start}")
     output_csv = (
@@ -719,7 +729,13 @@ def main() -> None:
         if not bool(args.force_refresh):
             jobs_to_fetch: list[PriceJob] = []
             for job in jobs:
-                coverage_row = existing_coverage_row(conn, job, source_id=SOURCE_ID_DEFAULT, start_date=start, end_date=end)
+                coverage_row = existing_coverage_row(
+                    conn,
+                    job,
+                    source_id=SOURCE_ID_DEFAULT,
+                    start_date=max(start, ticker_start_overrides.get(job.ticker, start)),
+                    end_date=end,
+                )
                 if coverage_row is None:
                     jobs_to_fetch.append(job)
                 else:
@@ -780,7 +796,9 @@ def main() -> None:
                     (RUN_TYPE, *processed),
                 )
             for result in sorted(results, key=lambda item: item.job.ticker):
-                bars_upserted, actions_upserted = upsert_result(conn, result, ingestion_run_id=ingestion_run_id)
+                bars_upserted, actions_upserted = upsert_result(
+                    conn, result, ingestion_run_id=ingestion_run_id, write_market_snapshot=is_current_run
+                )
                 total_bars += bars_upserted
                 total_actions += actions_upserted
                 if result.error:

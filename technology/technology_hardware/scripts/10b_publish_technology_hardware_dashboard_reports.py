@@ -656,7 +656,13 @@ def main() -> int:
     cards = scorecards(ranks)
     cohorts = cohort_summary(score_rows)
     component_summaries = component_summary(detail_components)
-    flags = risk_flags(score_rows_with_candidate_fields, current_asof=asof)
+    # score_rows come straight from the DB and never carry the filing date, so
+    # enrich them from the filings lookup or the stale_sec_filing flag is dead.
+    score_rows_for_risk_flags = [
+        {**row, "latest_sec_filing_date": filings.get(str(row["ticker"]), {}).get("filing_date", "")}
+        for row in score_rows_with_candidate_fields
+    ]
+    flags = risk_flags(score_rows_for_risk_flags, current_asof=asof)
     queue = review_queue(flags, ranks)
     if args.historical_mode:
         backtest_rows = []

@@ -34,6 +34,7 @@ CIK = "0001474432"
 NEW_COMPANY_NAME = "Everpure, Inc."
 OLD_COMPANY_NAME = "Pure Storage, Inc."
 SOURCE_ID = "technology_hardware_ticker_seed"
+EXPECTED_MODEL_FAMILY = "technology_hardware"
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,6 +68,29 @@ def count_ticker(conn: sqlite3.Connection, table: str, ticker: str) -> int:
         (ticker,),
     ).fetchone()
     return int(row["n"] or 0) if row is not None else 0
+
+
+def assert_ticker_scoped_to_family(conn: sqlite3.Connection, ticker: str, model_family: str) -> None:
+    """Abort when the ticker is claimed by another model family.
+
+    The generic re-key loop below rewrites every ticker-bearing table without
+    model_family scoping, so a cross-family ticker would be silently corrupted.
+    """
+    offending: dict[str, list[str]] = {}
+    for table in ("dim_technology_taxonomy", "dim_universe_membership"):
+        rows = conn.execute(
+            f"SELECT DISTINCT model_family FROM {quote_ident(table)} WHERE ticker = ? AND model_family <> ?",
+            (ticker, model_family),
+        ).fetchall()
+        families = sorted(str(row["model_family"]) for row in rows)
+        if families:
+            offending[table] = families
+    if offending:
+        raise RuntimeError(
+            f"Refusing {OLD_TICKER} -> {NEW_TICKER} re-key: ticker {ticker} also belongs to model families "
+            f"outside {model_family!r}: {offending}. The generic ticker re-key is not model_family scoped and "
+            "would rewrite the other family's rows; resolve the cross-family membership first."
+        )
 
 
 def source_id_or_none(conn: sqlite3.Connection, source_id: str) -> str | None:
@@ -131,6 +155,7 @@ def insert_identifier(
 
 
 def apply_migration(conn: sqlite3.Connection, *, dry_run: bool) -> dict[str, Any]:
+    assert_ticker_scoped_to_family(conn, OLD_TICKER, EXPECTED_MODEL_FAMILY)
     old_company = conn.execute(
         "SELECT * FROM dim_company WHERE ticker = ? OR cik = ? ORDER BY CASE WHEN ticker = ? THEN 0 ELSE 1 END LIMIT 1",
         (OLD_TICKER, CIK, OLD_TICKER),
@@ -186,14 +211,26 @@ def apply_migration(conn: sqlite3.Connection, *, dry_run: bool) -> dict[str, Any
                 """,
                 (NEW_COMPANY_NAME, CIK, now, company_id),
             )
+            # The generic loop above already re-keyed dim_security.ticker from
+            # PSTG to P, so target the post-migration key here; this statement
+            # only reactivates the listing.
+            before = conn.total_changes
             conn.execute(
                 """
                 UPDATE dim_security
-                SET ticker = ?, listing_status = 'active', updated_at = ?
+                SET listing_status = 'active', updated_at = ?
                 WHERE company_id = ? AND ticker = ?
                 """,
-                (NEW_TICKER, now, company_id, OLD_TICKER),
+                (now, company_id, NEW_TICKER),
             )
+            dim_security_activated = conn.total_changes - before
+            update_counts["dim_security_listing_status_activated"] = dim_security_activated
+            if dim_security_activated == 0:
+                raise RuntimeError(
+                    f"dim_security listing_status activation affected 0 rows for company_id={company_id} "
+                    f"ticker={NEW_TICKER!r}; expected the re-keyed {OLD_TICKER} -> {NEW_TICKER} security row. "
+                    "Migration rolled back."
+                )
             insert_alias(conn, company_id=company_id, alias_raw=NEW_TICKER, source_id=source_id)
             insert_alias(conn, company_id=company_id, alias_raw=OLD_TICKER, source_id=source_id)
             insert_alias(conn, company_id=company_id, alias_raw=NEW_COMPANY_NAME, source_id=source_id)

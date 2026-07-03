@@ -6,7 +6,6 @@ import argparse
 import csv
 import json
 import logging
-import os
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -420,6 +419,11 @@ def main() -> int:
     finally:
         conn.close()
 
+    if not report_rows:
+        raise SystemExit(
+            f"No historical membership rows found in {membership_csv}; "
+            "run 01b_load_semiconductor_historical_membership.py before importing delisted prices."
+        )
     with output_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(report_rows[0].keys()))
         writer.writeheader()

@@ -4,6 +4,7 @@ import argparse
 import csv
 import logging
 import math
+import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -558,7 +559,9 @@ def build_raw_rows(
             financial_source,
             model_family,
             asof,
-            "asof_date DESC, fiscal_period_end DESC",
+            # fiscal_period_end first: an amendment (10-K/A) carries a newer
+            # asof_date but an older period; the newest reported period wins.
+            "fiscal_period_end DESC, asof_date DESC",
         )
         positioning = latest_row(
             conn,
@@ -601,8 +604,10 @@ def build_raw_rows(
                 row[key] = market[key]
             bench_value = market[relative_strength_market_field]
             row["rel_strength_bench_3m"] = bench_value
-            # Deprecated compatibility alias for older semiconductor reports/configs.
-            row["rel_strength_soxx_3m"] = bench_value
+            # rel_strength_soxx_3m must always hold the true SOXX-relative value;
+            # aliasing the configured benchmark here put QQQ data under a SOXX
+            # name for non-semiconductor families.
+            row["rel_strength_soxx_3m"] = market["rel_strength_soxx_3m"]
         if financial is not None:
             for key in (
                 "revenue_yoy_growth",
@@ -767,7 +772,11 @@ def load_preserved_overlays(
             """,
             (source_id, model_family, asof.isoformat()),
         ).fetchall()
-    except Exception:  # noqa: BLE001 - table may not exist on first run
+    except sqlite3.OperationalError as exc:
+        # Missing table on first run is expected; anything else (locked DB,
+        # disk error) must not silently discard Stage 6B overlay state.
+        if "no such table" not in str(exc).lower():
+            raise
         return {}
     return {normalize_ticker(row["ticker"]): dict(row) for row in rows}
 
@@ -1039,7 +1048,9 @@ def upsert_component_rows(
                 (source_id, model_family, build_asof, *overlay_names),
             ).fetchall()
             loaded_overlay_keys = {(normalize_ticker(row["ticker"]), str(row["component_name"])) for row in existing}
-        except Exception:  # noqa: BLE001 - table may not exist on first run
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
             loaded_overlay_keys = set()
     for row in rows:
         for component_name in component_names:
@@ -1153,7 +1164,14 @@ def run_scoring_feature_build(settings: ScoringFeatureSettings) -> None:
             if not universe:
                 raise ValueError(f"No active universe rows found for model_family={model_family}.")
             with conn:
-                conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (settings.run_type,))
+                if ticker_filter:
+                    # Subset builds must not erase the full-universe issue log.
+                    conn.execute(
+                        f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({qmarks(sorted(ticker_filter))})",
+                        (settings.run_type, *sorted(ticker_filter)),
+                    )
+                else:
+                    conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (settings.run_type,))
                 upsert_component_defs(
                     conn,
                     model_family=model_family,
@@ -1310,14 +1328,15 @@ def validate_scoring_feature_contract(settings: ScoringFeatureSettings) -> int:
 
         component_count = scalar(
             conn,
-            """
+            f"""
             SELECT COUNT(*)
             FROM feature_scoring_component
             WHERE source_id = ?
               AND model_family = ?
               AND asof_date = ?
+              AND ticker IN ({ph})
             """,
-            (source_id, model_family, asof.isoformat()),
+            (source_id, model_family, asof.isoformat(), *universe),
         )
         expected_component_count = len(universe) * len(expected_components)
         if component_count != expected_component_count:

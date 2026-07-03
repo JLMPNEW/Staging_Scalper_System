@@ -55,6 +55,7 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 SOURCE_FILES = [
     "contract.py",
     "taxonomy.py",
+    "20_run_macro_serving.py",
     "21_build_macro_contract.py",
     "22_validate_macro_contract.py",
 ]
@@ -88,6 +89,8 @@ def _source_hashes(config_path: Path, serving_db_path: Path, run_dir: Path) -> d
         "config.yaml": config_path,
         "stocks_scores.csv": run_dir / "stocks_scores.csv",
         "manifest.json": run_dir / "manifest.json",
+        "optimizer/target_weights.csv": run_dir / "optimizer" / "target_weights.csv",
+        "optimizer/optimizer_manifest.json": run_dir / "optimizer" / "optimizer_manifest.json",
     }
     paths.update(sqlite_snapshot_inputs(serving_db_path))
     for name in SOURCE_FILES:
@@ -95,6 +98,33 @@ def _source_hashes(config_path: Path, serving_db_path: Path, run_dir: Path) -> d
         if path.exists():
             paths[f"source/{name}"] = path
     return {name: sha256_file(path) for name, path in paths.items() if path.exists()}
+
+
+def _load_sealed_optimizer_targets(run_dir: Path) -> tuple[list[dict[str, str]] | None, list[str]]:
+    """Load Stage 3 target weights only when their optimizer manifest still seals them."""
+    target_path = run_dir / "optimizer" / "target_weights.csv"
+    if not target_path.exists():
+        return None, []
+
+    manifest_path = run_dir / "optimizer" / "optimizer_manifest.json"
+    errors: list[str] = []
+    if not manifest_path.exists():
+        return None, ["optimizer_manifest.json missing for existing target_weights.csv"]
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, [f"optimizer_manifest.json unreadable:{type(exc).__name__}"]
+
+    if manifest.get("acceptance") != "PASS":
+        errors.append(f"optimizer_manifest acceptance={manifest.get('acceptance')}")
+    sealed = (manifest.get("provenance_sha256") or {}).get("target_weights.csv")
+    actual = sha256_file(target_path)
+    if sealed != actual:
+        errors.append(f"target_weights.csv hash mismatch manifest={str(sealed)[:12]} actual={actual[:12]}")
+    if errors:
+        return None, errors
+    return read_csv(target_path), []
 
 
 def _coverage_flag(value: Any) -> int | str:
@@ -338,8 +368,10 @@ def main() -> int:
         return 1
 
     score_rows = read_csv(scores_path)
-    target_path = run_dir / "optimizer" / "target_weights.csv"
-    target_rows = read_csv(target_path) if target_path.exists() else None
+    target_rows, optimizer_errors = _load_sealed_optimizer_targets(run_dir)
+    if optimizer_errors:
+        LOGGER.error("Stage 3 optimizer target contract is not sealed/current: %s", optimizer_errors[:8])
+        return 1
 
     taxonomy = sleeve_taxonomy(config)
     conn = open_macro_serving_db(serving_db_path)
@@ -415,6 +447,7 @@ def main() -> int:
         "serving_db_path": str(serving_db_path),
         "source_dates": source_dates,
         "sleeve_taxonomy": taxonomy,
+        "stock_fallback_policy": str(cfg_get(config, "macro.stock_fallback_policy", "")),
         "counts": {
             "score_rows": len(score_rows),
             "sector_rows": len(sector_fit),

@@ -276,6 +276,8 @@ def main() -> int:
                 "calibration_sample_role": row.calibration_sample_role,
                 "stage1_sample_role": row.stage1_sample_role,
                 "oos_score_valid_flag": row.oos_score_valid_flag,
+                "missing_score_flag": row.missing_score_flag,
+                "survivorship_corrected_panel_flag": row.survivorship_corrected_panel_flag,
                 "source_asof_date": row.source_asof_date,
             })
 

@@ -95,6 +95,19 @@ def build_oos_provenance(
 
     model_available_on_asof = asof_date is not None and production_start_date is not None and asof_date >= production_start_date
     outside_training_window = asof_date is not None and train_end_date is not None and asof_date > train_end_date
+    # A historical-mode run recomputes scores from today's database, so later
+    # filings/revisions can alter the features. Strict OOS provenance requires
+    # a contemporaneous capture: replays qualify only when the asof is within
+    # a short live-capture window of the run date (default 5 calendar days,
+    # covering T-1/weekend daily backfills). Deep retroactive replays remain
+    # calibration inputs, never strict OOS.
+    replay_window_days = int(cfg_get(config, "oos_calibration_standards.allow_replay_oos_within_days", 5) or 0)
+    # Lower bound rejects future as-of dates: a negative age would otherwise
+    # satisfy `<= replay_window_days` and mislabel a future replay as live.
+    replay_within_live_window = (
+        not historical_mode
+        or (asof_date is not None and 0 <= (date.today() - asof_date).days <= replay_window_days)
+    )
     oos_score_valid = int(
         scoring_weights_frozen
         and bool(model_available_on_asof)
@@ -102,6 +115,7 @@ def build_oos_provenance(
         and feature_pit == 1
         and future_return_excluded == 1
         and (not historical_mode or non_pit_omitted == 1)
+        and bool(replay_within_live_window)
     )
     if not model_available_on_asof:
         reasons.append("model_not_available_on_asof")
@@ -109,6 +123,8 @@ def build_oos_provenance(
         reasons.append("asof_in_or_before_calibration_training_window")
     if historical_mode and non_pit_omitted != 1:
         reasons.append("historical_non_pit_sections_not_omitted")
+    if not replay_within_live_window:
+        reasons.append("historical_replay_beyond_live_capture_window")
 
     invalid_reason = "" if oos_score_valid else ";".join(dict.fromkeys(reasons))
     calibration_usage = "oos_score" if oos_score_valid else "calibration_input_only" if calibration_input_valid else "not_oos_valid"

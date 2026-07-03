@@ -63,7 +63,8 @@ def base_target_weights(score_rows: list[dict[str, str]], target_rows: list[dict
             if weight > 0.0:
                 by_pipe[pipe] += weight
     if by_pipe:
-        return dict(by_pipe)
+        total = sum(by_pipe.values())
+        return {pipe: value / total for pipe, value in by_pipe.items()} if total > 0 else {}
 
     for row in score_rows:
         if str(row.get("investable_eligible", "")).strip() != "1":
@@ -79,8 +80,28 @@ def base_target_weights(score_rows: list[dict[str, str]], target_rows: list[dict
     return {pipe: value / total for pipe, value in by_pipe.items()} if total > 0 else {}
 
 
+def _row_signature(row: sqlite3.Row) -> tuple[tuple[str, Any], ...]:
+    return tuple((key, row[key]) for key in row.keys())
+
+
 def _row_by_key(rows: list[sqlite3.Row], column: str) -> dict[str, sqlite3.Row]:
-    return {norm_key(row[column]): row for row in rows if row[column] is not None}
+    """Map normalized names to rows only when the name is unambiguous.
+
+    MacroLayer industry names are not guaranteed globally unique for a given date. If a
+    taxonomy key would match multiple different rows, dropping that key is safer than letting
+    SQLite row order pick an arbitrary sector. The caller then falls back to aggregate/sector.
+    """
+    grouped: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    for row in rows:
+        if row[column] is not None:
+            key = norm_key(row[column])
+            if key:
+                grouped[key].append(row)
+    out: dict[str, sqlite3.Row] = {}
+    for key, matches in grouped.items():
+        if len({_row_signature(row) for row in matches}) == 1:
+            out[key] = matches[0]
+    return out
 
 
 def _best_named_row(
@@ -170,4 +191,3 @@ def select_sleeve_macro_fit(
         fallback_reason="no_macro_fit",
         staleness_days="",
     )
-

@@ -87,6 +87,11 @@ def _f(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def _f_default(value: Any, default: float) -> float:
+    parsed = _f(value)
+    return default if parsed is None else parsed
+
+
 def _recorded_hash(manifest: dict, name: str) -> str | None:
     prov = manifest.get("provenance_sha256") or {}
     if name in prov:
@@ -353,7 +358,7 @@ def main() -> int:  # noqa: C901
             alpha_bad.append(t)
             continue
         tier1_rating = _tier1_rating(r.get("rating"))
-        score_conf = _f(r.get("score_confidence")) or 0.0
+        score_conf = _f_default(r.get("score_confidence"), 0.0)
         view_rows.append({
             "ticker": t,
             "source_pipeline": pipe,
@@ -384,7 +389,7 @@ def main() -> int:  # noqa: C901
     stage3_weights: dict[str, float] = {}
     for tr in read_csv(art["target_weights"]):
         t = str(tr.get("ticker", "")).strip().upper()
-        w = _f(tr.get("weight")) or 0.0
+        w = _f_default(tr.get("weight"), 0.0)
         stage3_weights[t] = w
         p = pipe_of.get(t)
         if p and w > 0:
@@ -406,12 +411,12 @@ def main() -> int:  # noqa: C901
     if baseline_source in {"strategic", "strategic_weights", "policy", "policy_weights"}:
         raw_strategic = cfg_get(config, "black_litterman_fusion.strategic_sector_weights", {}) or {}
         missing = [p for p in pipelines if _f(raw_strategic.get(p)) is None]
-        negative = [p for p in pipelines if (_f(raw_strategic.get(p)) or 0.0) < 0.0]
+        negative = [p for p in pipelines if _f_default(raw_strategic.get(p), 0.0) < 0.0]
         if missing:
             baseline_bad.append(f"missing_strategic_weights={missing}")
         if negative:
             baseline_bad.append(f"negative_strategic_weights={negative}")
-        base_by_pipe = {p: max(0.0, _f(raw_strategic.get(p)) or 0.0) for p in pipelines}
+        base_by_pipe = {p: max(0.0, _f_default(raw_strategic.get(p), 0.0)) for p in pipelines}
         if sum(base_by_pipe.values()) <= 0.0:
             baseline_bad.append("strategic_weight_sum<=0")
             base_by_pipe = dict(stage3_by_pipe)
@@ -432,12 +437,12 @@ def main() -> int:  # noqa: C901
         f"source={baseline_source_label}; weights={{{', '.join(f'{p}:{base_by_pipe.get(p, 0.0):.4f}' for p in pipelines)}}}"
         if not baseline_bad else f"{baseline_bad[:8]}")
 
-    fit_scores = [_f(macro_sector.get(p, {}).get("macro_fit_score")) or 0.0 for p in pipelines]
+    fit_scores = [_f_default(macro_sector.get(p, {}).get("macro_fit_score"), 0.0) for p in pipelines]
     fit_z = dict(zip(pipelines, _zscores(fit_scores)))
-    shift_scale = _f(bl.get("macro_sector_shift_scale")) or 0.05
-    max_shift = _f(bl.get("macro_sector_max_shift")) or 0.10
-    max_rel_shift = _f(bl.get("macro_sector_max_relative_shift")) or 0.50
-    min_floor = _f(bl.get("macro_sector_min_weight_floor")) or 0.0
+    shift_scale = _f_default(bl.get("macro_sector_shift_scale"), 0.05)
+    max_shift = _f_default(bl.get("macro_sector_max_shift"), 0.10)
+    max_rel_shift = _f_default(bl.get("macro_sector_max_relative_shift"), 0.50)
+    min_floor = _f_default(bl.get("macro_sector_min_weight_floor"), 0.0)
     shift_mode = str(bl.get("macro_sector_shift_mode", "relative_with_floor")).strip().lower()
     shifted = {}
     raw_shift_by_pipe = {}
@@ -463,7 +468,7 @@ def main() -> int:  # noqa: C901
         "target_weight": round(sector_target.get(p, 0.0), 10),
         "baseline_weight": round(base_by_pipe.get(p, 0.0), 10),
         "baseline_source": baseline_source_label,
-        "macro_fit_score": round(_f(macro_sector.get(p, {}).get("macro_fit_score")) or 0.0, 8),
+        "macro_fit_score": round(_f_default(macro_sector.get(p, {}).get("macro_fit_score"), 0.0), 8),
         "macro_fit_z": round(fit_z.get(p, 0.0), 8),
         "raw_shift": round(raw_shift_by_pipe.get(p, 0.0), 10),
         "clipped_shift": round(clipped_shift.get(p, 0.0), 10),
@@ -514,8 +519,8 @@ def main() -> int:  # noqa: C901
     regime_rows = read_csv(art["macro_regime"])
     regime_label = str(regime_rows[0].get("active_current_regime", "")).strip() if regime_rows else ""
     gross_map = cfg_get(config, "black_litterman_fusion.regime_to_gross_scalar", {}) or {}
-    base_gross = _f(bl.get("base_gross_exposure")) or 1.0
-    regime_scalar = _f(gross_map.get(regime_label, gross_map.get("default", 0.85))) or 0.85
+    base_gross = _f_default(bl.get("base_gross_exposure"), 1.0)
+    regime_scalar = _f_default(gross_map.get(regime_label, gross_map.get("default", 0.85)), 0.85)
     gross_exposure = round(base_gross * regime_scalar, 8)
 
     # ---- foreign budget (respect active_flag) ----
@@ -523,12 +528,12 @@ def main() -> int:  # noqa: C901
     fb_row = fb[0] if fb else {}
     policy = str(bl.get("foreign_activation_policy", "respect_active_flag")).strip()
     active = str(fb_row.get("active_flag", "0")).strip() == "1"
-    macro_budget = _f(fb_row.get("foreign_budget")) or 0.0
+    macro_budget = _f_default(fb_row.get("foreign_budget"), 0.0)
     if policy == "respect_active_flag" and not active:
         fmin, fmax = 0.0, 0.0
     else:
-        fmin = _f(fb_row.get("min_budget")) or 0.0
-        fmax = _f(fb_row.get("max_budget")) or 0.0
+        fmin = _f_default(fb_row.get("min_budget"), 0.0)
+        fmax = _f_default(fb_row.get("max_budget"), 0.0)
     foreign_rows = [{
         "region": "FOREIGN", "min_budget": round(fmin, 8), "max_budget": round(fmax, 8),
         "active_flag": 1 if active else 0, "macro_foreign_budget": round(macro_budget, 8),
@@ -539,7 +544,7 @@ def main() -> int:  # noqa: C901
     rec("alpha_views_finite", "PASS" if not alpha_bad and view_rows else "FAIL",
         f"{len(view_rows)} annual-alpha views" if not alpha_bad and view_rows else f"non_finite={alpha_bad[:8]}")
 
-    rng_bad = [r["ticker"] for r in view_rows if abs(_f(r["expected_alpha_annual"]) or 0.0) > 2.0]
+    rng_bad = [r["ticker"] for r in view_rows if abs(_f_default(r["expected_alpha_annual"], 0.0)) > 2.0]
     rec("alpha_units_annualized", "PASS" if cov_units == "annualized" and not rng_bad else "FAIL",
         f"covariance_units={cov_units}; |alpha|<=200%/yr" if cov_units == "annualized" and not rng_bad
         else f"cov_units={cov_units} out_of_range={rng_bad[:8]}")
@@ -560,7 +565,7 @@ def main() -> int:  # noqa: C901
         if not not_in_cov else f"missing_from_cov={not_in_cov[:8]}")
 
     # feasibility: sector budgets sum, foreign within gross, per-name caps satisfy budgets
-    max_w = _f(bl.get("max_weight_per_name")) or 0.05
+    max_w = _f_default(bl.get("max_weight_per_name"), 0.05)
     n_by_pipe: dict[str, int] = {p: 0 for p in pipelines}
     for r in view_rows:
         n_by_pipe[r["source_pipeline"]] = n_by_pipe.get(r["source_pipeline"], 0) + 1
@@ -579,17 +584,17 @@ def main() -> int:  # noqa: C901
     # ---- generated, sealed optimizer config (run-local sealed paths only) ----
     price_start, price_end = _price_panel_date_range(art["prices"])
     tier1_conf_by_rating = {
-        "Strong Buy": _f((cfg_get(config, "black_litterman_fusion.confidence_by_rating", {}) or {}).get("strong_buy")) or 0.90,
-        "Buy": _f((cfg_get(config, "black_litterman_fusion.confidence_by_rating", {}) or {}).get("buy")) or 0.70,
-        "Hold": _f((cfg_get(config, "black_litterman_fusion.confidence_by_rating", {}) or {}).get("hold")) or 0.50,
-        "Sell": _f((cfg_get(config, "black_litterman_fusion.confidence_by_rating", {}) or {}).get("reduce")) or 0.35,
-        "Strong Sell": _f((cfg_get(config, "black_litterman_fusion.confidence_by_rating", {}) or {}).get("avoid")) or 0.20,
-        "FOREIGN": _f((cfg_get(config, "black_litterman_fusion.confidence_by_rating", {}) or {}).get("foreign")) or 0.50,
+        "Strong Buy": _f_default((cfg_get(config, "black_litterman_fusion.confidence_by_rating", {}) or {}).get("strong_buy"), 0.90),
+        "Buy": _f_default((cfg_get(config, "black_litterman_fusion.confidence_by_rating", {}) or {}).get("buy"), 0.70),
+        "Hold": _f_default((cfg_get(config, "black_litterman_fusion.confidence_by_rating", {}) or {}).get("hold"), 0.50),
+        "Sell": _f_default((cfg_get(config, "black_litterman_fusion.confidence_by_rating", {}) or {}).get("reduce"), 0.35),
+        "Strong Sell": _f_default((cfg_get(config, "black_litterman_fusion.confidence_by_rating", {}) or {}).get("avoid"), 0.20),
+        "FOREIGN": _f_default((cfg_get(config, "black_litterman_fusion.confidence_by_rating", {}) or {}).get("foreign"), 0.50),
     }
     cash_weight = round(max(0.0, 1.0 - gross_exposure), 8)
     us_min = round(max(0.0, gross_exposure - fmax), 8)
     us_max = round(max(0.0, gross_exposure - fmin), 8)
-    sector_cap_band = _f(bl.get("macro_sector_cap_band")) or 0.03
+    sector_cap_band = _f_default(bl.get("macro_sector_cap_band"), 0.03)
     foreign_candidates = read_csv(art["foreign_etfs_optimizer"])
     max_foreign_etfs = len(foreign_candidates) if fmax > 0.0 else 0
     gen_config = {
@@ -630,7 +635,7 @@ def main() -> int:  # noqa: C901
         },
         "optimization": {
             "solver": "ECOS",
-            "risk_aversion": _f(bl.get("risk_aversion")) or 5.0,
+            "risk_aversion": _f_default(bl.get("risk_aversion"), 5.0),
             "hhi_penalty": 0.0,
             "turnover_penalty": 0.0,
             "long_only": {
@@ -650,25 +655,25 @@ def main() -> int:  # noqa: C901
             "manual_shrink_delta": 0.20,
             "kendall_manual_shrink_delta": 0.20,
             "psd_eigen_floor": 1e-8,
-            "max_cov_condition": _f(cfg_get(config, "risk_panel.max_condition_number", None)) or 1e8,
+            "max_cov_condition": _f_default(cfg_get(config, "risk_panel.max_condition_number", None), 1e8),
             "scenarios": {"shock": {"enabled": False}, "bootstrap": {"enabled": False}},
         },
         "diversification": {"use_cluster_caps": False},
         "black_litterman": {
-            "tau": _f(bl.get("tau")) or 0.05,
-            "delta": _f(bl.get("delta")) or 2.5,
+            "tau": _f_default(bl.get("tau"), 0.05),
+            "delta": _f_default(bl.get("delta"), 2.5),
             "return_space": str(bl.get("return_space", "excess")),
             "alpha_units_policy": str(bl.get("alpha_units_policy", "B_annualized_calibrated")),
             "alpha_input_mode": "absolute_annual",
             "alpha_column": "ExpectedAlphaAnnual",
             "confidence_by_rating": tier1_conf_by_rating,
-            "min_confidence": _f(bl.get("min_confidence")) or 0.15,
-            "max_confidence": _f(bl.get("max_confidence")) or 0.95,
-            "score_confidence_boost": _f(bl.get("score_confidence_boost")) or 0.10,
+            "min_confidence": _f_default(bl.get("min_confidence"), 0.15),
+            "max_confidence": _f_default(bl.get("max_confidence"), 0.95),
+            "score_confidence_boost": _f_default(bl.get("score_confidence_boost"), 0.10),
             "use_score_confidence_in_omega": True,
             "use_sector_state_alpha_multiplier": True,
             "sector_state_alpha_multipliers": dict(cfg_get(config, "black_litterman_fusion.sector_state_alpha_multipliers", {}) or {}),
-            "sector_alpha_scale_annual": _f(bl.get("sector_alpha_scale_annual")) or 0.03,
+            "sector_alpha_scale_annual": _f_default(bl.get("sector_alpha_scale_annual"), 0.03),
             "include_sector_in_alpha": True,
             "include_foreign_in_alpha": True,
             "benchmark_weight_source": "csv",
@@ -726,7 +731,7 @@ def main() -> int:  # noqa: C901
     opt_stock_required = {"Ticker", "sector", "Rating", "FinalScore"}
     opt_stock_bad = sorted(opt_stock_required - set(OPT_STOCK_FIELDS))
     bad_ratings = sorted({str(r["Rating"]) for r in opt_stock_rows} - set(TIER1_RATING_ORDER))
-    bench_sum = sum(_f(r.get("Weight")) or 0.0 for r in benchmark_rows)
+    bench_sum = sum(_f_default(r.get("Weight"), 0.0) for r in benchmark_rows)
     contract_bad = path_bad + returns_bad + opt_stock_bad
     if bad_ratings:
         contract_bad.append(f"bad_ratings={bad_ratings}")
@@ -743,8 +748,8 @@ def main() -> int:  # noqa: C901
         cov_contract_bad.append("covariance_csv_not_stage2_artifact")
     if str(risk_cfg.get("covariance_units", "")).lower() != "annualized":
         cov_contract_bad.append(f"covariance_units={risk_cfg.get('covariance_units')}")
-    cov_cond = _f(cov_meta.get("condition_number")) or float("inf")
-    max_cond = _f(risk_cfg.get("max_cov_condition")) or 0.0
+    cov_cond = _f_default(cov_meta.get("condition_number"), float("inf"))
+    max_cond = _f_default(risk_cfg.get("max_cov_condition"), 0.0)
     if max_cond <= 0.0 or cov_cond > max_cond:
         cov_contract_bad.append(f"condition_number={cov_cond:.3e}>max={max_cond:.3e}")
     tier1_ppy = _tier1_periods_per_year(str((gen_config.get("returns") or {}).get("frequency", "")))
@@ -771,8 +776,16 @@ def main() -> int:  # noqa: C901
         mx = _f(band.get("max"))
         if mn is None or mx is None or abs(mn - expected[0]) > 1e-9 or abs(mx - expected[1]) > 1e-9:
             budget_bad.append(f"{sleeve}:got=({mn},{mx}) expected={expected}")
-    if abs((us_max + fmax + cash_weight) - 1.0) > 1e-8:
-        budget_bad.append(f"budget_max_sum={us_max + fmax + cash_weight:.10f}")
+    if not (0.0 <= fmin <= fmax <= gross_exposure + 1e-8):
+        budget_bad.append(f"foreign_band_invalid=[{fmin:.10f},{fmax:.10f}] gross={gross_exposure:.10f}")
+    if not (0.0 <= us_min <= us_max <= gross_exposure + 1e-8):
+        budget_bad.append(f"us_band_invalid=[{us_min:.10f},{us_max:.10f}] gross={gross_exposure:.10f}")
+    if abs((us_min + fmax) - gross_exposure) > 1e-8:
+        budget_bad.append(f"min_us_plus_max_foreign={us_min + fmax:.10f}!={gross_exposure:.10f}")
+    if abs((us_max + fmin) - gross_exposure) > 1e-8:
+        budget_bad.append(f"max_us_plus_min_foreign={us_max + fmin:.10f}!={gross_exposure:.10f}")
+    if abs((gross_exposure + cash_weight) - 1.0) > 1e-8:
+        budget_bad.append(f"gross_plus_cash={gross_exposure + cash_weight:.10f}!=1")
     rec("regime_budget_contract", "PASS" if not budget_bad else "FAIL",
         f"gross={gross_exposure:.4f}; cash={cash_weight:.4f}; foreign=[{fmin:.4f},{fmax:.4f}]"
         if not budget_bad else f"{budget_bad[:8]}")

@@ -103,9 +103,10 @@ def main() -> int:  # noqa: C901
     prices_path = risk_dir / "prices_adjclose.csv"
     returns_path = risk_dir / "returns_panel.csv"
     risk_coverage_path = risk_dir / "risk_coverage.csv"
+    scores_path = run_dir / "stocks_scores.csv"
     for required in (
         sector_path, sector_opt_path, foreign_path, foreign_opt_path, meta_path,
-        risk_manifest_path, prices_path, returns_path, risk_coverage_path,
+        risk_manifest_path, prices_path, returns_path, risk_coverage_path, scores_path,
     ):
         if not required.exists():
             LOGGER.error("Run 17 / Stage 2 first; missing %s", required)
@@ -232,7 +233,7 @@ def main() -> int:  # noqa: C901
         "exact columns + State enum + ScorePct/Score domains" if not schema_bad else f"{schema_bad[:8]}")
 
     # 4. SectorName domain == source_pipeline set in stocks_scores.csv, bijective with sector_etf_map.
-    pipelines = {str(r.get("source_pipeline", "")).strip() for r in read_csv(run_dir / "stocks_scores.csv")
+    pipelines = {str(r.get("source_pipeline", "")).strip() for r in read_csv(scores_path)
                  if str(r.get("source_pipeline", "")).strip()}
     etf_map = {str(k).strip(): str(v).strip().upper() for k, v in (meta.get("sector_etf_map") or {}).items()}
     foreign_market_map = {
@@ -295,7 +296,6 @@ def main() -> int:  # noqa: C901
         if str(r.get("trend_gate")) == "fail" and m > 1.0 + 1e-9:
             tilt_bad.append(f"{r.get('source_pipeline')}:downtrend_mult>{1.0}")
     target_path = opt_dir / "target_weights.csv"
-    scores_path = run_dir / "stocks_scores.csv"
     gross = float(cfg_get(config, "optimizer.gross_exposure", 1.0))
     max_weight = float(cfg_get(config, "optimizer.max_weight_per_name", 0.05))
     if not target_path.exists() or not scores_path.exists():
@@ -359,7 +359,8 @@ def main() -> int:  # noqa: C901
             consist_bad.append(f"{r.get('SectorName')}:scorepct_mismatch")
         if str(r.get("State")) != str(c.get("state")):
             consist_bad.append(f"{r.get('SectorName')}:state_mismatch")
-        if str(c.get("trend_state")) == "down" and str(c.get("state")) != "Negative":
+        present = str(c.get("present_in_panel", "1")).strip().lower() in {"1", "1.0", "true", "yes", "y"}
+        if present and str(c.get("trend_state")) == "down" and str(c.get("state")) != "Negative":
             consist_bad.append(f"{r.get('SectorName')}:downtrend_not_negative")
     rec("canonical_optimizer_consistent", "PASS" if not consist_bad else "FAIL",
         "optimizer rows mirror canonical + State derivation correct" if not consist_bad else f"{consist_bad[:8]}")

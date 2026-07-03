@@ -97,6 +97,16 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+LEDGER_CHAIN_FIELDS = ("previous_snapshot_sha256", "ledger_content_sha256")
+
+
+def ledger_content_sha256(payload: dict[str, Any]) -> str:
+    """Hash of the canonical ledger JSON excluding the chain fields themselves."""
+    content = {key: value for key, value in payload.items() if key not in LEDGER_CHAIN_FIELDS}
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def csv_row_count(path: Path) -> int | str:
     if not path.exists() or path.suffix.lower() != ".csv":
         return ""
@@ -541,7 +551,8 @@ def main() -> int:
     challenger_reference = matching_backtest(backtest_rows, challenger_model_name, "top_decile", "score_weight", "long_only")
     production_reference = matching_backtest(backtest_rows, production_model_name, "top_decile", "score_weight", "long_only")
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    snapshot_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # Microsecond suffix so two runs in the same second cannot overwrite a snapshot.
+    snapshot_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
 
     artifacts = [
         artifact_row("technology_config", "input_config", config_path),
@@ -671,12 +682,20 @@ def main() -> int:
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     snapshot_json = snapshot_dir / f"software_infrastructure_lockbox_ledger_{snapshot_stamp}.json"
 
+    # Hash chain: each snapshot records the sha256 of the previous snapshot
+    # file (or "" for the first) plus a content hash of its own payload.
+    previous_snapshots = sorted(snapshot_dir.glob("software_infrastructure_lockbox_ledger_*.json"))
+    lockbox["previous_snapshot_sha256"] = sha256_file(previous_snapshots[-1]) if previous_snapshots else ""
+    lockbox["ledger_content_sha256"] = ledger_content_sha256(lockbox)
+
     lockbox_json.write_text(json.dumps(lockbox, indent=2, sort_keys=True, default=str), encoding="utf-8")
     snapshot_json.write_text(json.dumps(lockbox, indent=2, sort_keys=True, default=str), encoding="utf-8")
     write_csv(lockbox_csv, artifacts)
     manifest = {
         "generated_at_utc": generated_at,
         "snapshot_id": lockbox["snapshot_id"],
+        "previous_snapshot_sha256": lockbox["previous_snapshot_sha256"],
+        "ledger_content_sha256": lockbox["ledger_content_sha256"],
         "database_path": str(db_path),
         "production_model_status": lockbox["production_model_status"],
         "production_model_name": lockbox["production_model_name"],

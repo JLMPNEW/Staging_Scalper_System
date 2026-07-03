@@ -130,7 +130,11 @@ def main() -> int:  # noqa: C901
     universe_counts = Counter(universe)
     duplicate_universe = sorted(t for t, count in universe_counts.items() if t and count > 1)
     book_set = {t for t in universe if t}
-    held = [r for r in rows if (finite_float(r.get("weight")) or 0.0) > 0]
+    held = []
+    for r in rows:
+        parsed_weight = finite_float(r.get("weight"))
+        if parsed_weight is not None and parsed_weight > 0:
+            held.append(r)
 
     # 1. exact optimizer universe: every eligible scored/risk-covered/cov-backed name is present once,
     # and no other name is in the optimizer book.

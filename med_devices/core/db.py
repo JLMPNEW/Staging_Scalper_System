@@ -1084,6 +1084,7 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     currency TEXT DEFAULT '',
     score_confidence REAL DEFAULT 0.0,
     eligibility_reason TEXT DEFAULT '',
+    oos_score_valid_flag INTEGER DEFAULT 0,
     native_score_field TEXT DEFAULT '',
     native_score_value REAL DEFAULT 0.0,
     score_zero_is_missing_flag INTEGER DEFAULT 0,
@@ -1127,6 +1128,10 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     research_calibration_status TEXT DEFAULT '',
     research_calibration_reason TEXT DEFAULT '',
     calibration_sample_role TEXT DEFAULT '',
+    stage11_calibration_input_eligible_flag INTEGER DEFAULT 0,
+    stage11_calibration_input_reason TEXT DEFAULT '',
+    stage11_calibration_panel_source TEXT DEFAULT '',
+    survivorship_corrected_panel_flag INTEGER DEFAULT 0,
     cohort_score_template_id TEXT DEFAULT '',
     cohort_score_template_spec TEXT DEFAULT '',
     cohort_score_template_tier1_role TEXT DEFAULT '',
@@ -1733,6 +1738,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             # confidence / provenance fields
             "score_confidence": "REAL DEFAULT 0.0",
             "eligibility_reason": "TEXT DEFAULT ''",
+            "oos_score_valid_flag": "INTEGER DEFAULT 0",
             "native_score_field": "TEXT DEFAULT ''",
             "native_score_value": "REAL DEFAULT 0.0",
             "score_zero_is_missing_flag": "INTEGER DEFAULT 0",
@@ -1780,6 +1786,10 @@ def init_db(conn: sqlite3.Connection) -> None:
             "research_calibration_status": "TEXT DEFAULT ''",
             "research_calibration_reason": "TEXT DEFAULT ''",
             "calibration_sample_role": "TEXT DEFAULT ''",
+            "stage11_calibration_input_eligible_flag": "INTEGER DEFAULT 0",
+            "stage11_calibration_input_reason": "TEXT DEFAULT ''",
+            "stage11_calibration_panel_source": "TEXT DEFAULT ''",
+            "survivorship_corrected_panel_flag": "INTEGER DEFAULT 0",
             "cohort_score_template_id": "TEXT DEFAULT ''",
             "cohort_score_template_spec": "TEXT DEFAULT ''",
             "cohort_score_template_tier1_role": "TEXT DEFAULT ''",
@@ -2038,8 +2048,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     current_user_version_row = conn.execute("PRAGMA user_version").fetchone()
     current_user_version = int(current_user_version_row[0] if current_user_version_row is not None else 0)
-    if current_user_version < 3:
-        conn.execute("PRAGMA user_version = 3")
+    if current_user_version < 5:
+        conn.execute("PRAGMA user_version = 5")
     conn.commit()
 
 

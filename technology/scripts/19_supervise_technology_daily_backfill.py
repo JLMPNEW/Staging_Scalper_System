@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from typing import Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = PROJECT_ROOT / "technology" / "scripts" / "18_backfill_technology_historical_dashboard_reports.py"
-DEFAULT_DB = Path("C:/Users/josel/Documents/STAGING/DB/technology.sqlite")
+DEFAULT_DB = Path(os.environ.get("TECHNOLOGY_DB_DIR", "C:/Users/josel/Documents/STAGING/DB")) / "technology.sqlite"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "output" / "technology_reports" / "historical_backfill" / "logs"
 DEFAULT_START_DATE = "2019-01-04"
 MARKET_SOURCE_ID = "yahoo_finance_adjusted"

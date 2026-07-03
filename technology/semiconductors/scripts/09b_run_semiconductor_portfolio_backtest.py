@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import importlib.util
 import json
 import logging
@@ -257,7 +256,7 @@ def drawdown(values: list[float]) -> tuple[float, list[float]]:
     return max_dd, curve
 
 
-def summarize_returns(rows: list[dict[str, Any]], horizon: int) -> dict[str, Any]:
+def summarize_returns(rows: list[dict[str, Any]], horizon: int, *, expected_periods: int = 0) -> dict[str, Any]:
     returns = [float(row["net_return"]) for row in rows]
     excess = [float(row["excess_return"]) for row in rows if row.get("excess_return") not in ("", None)]
     if not returns:
@@ -270,6 +269,12 @@ def summarize_returns(rows: list[dict[str, Any]], horizon: int) -> dict[str, Any
     max_dd, _curve = drawdown(returns)
     return {
         "periods": len(returns),
+        # Skipped panel dates (thin cross-sections, missing weights) are
+        # invisible to the annualization above, which compounds only realized
+        # periods. Surface the gap so readers can judge the coverage instead
+        # of changing the return math.
+        "periods_skipped": max(0, expected_periods - len(returns)) if expected_periods else 0,
+        "coverage_fraction": len(returns) / expected_periods if expected_periods else "",
         "total_return": total,
         "annualized_return": annualized,
         "annualized_vol": vol,
@@ -541,7 +546,7 @@ def main() -> int:
             )
             all_periods.extend(period_rows)
             all_holdings.extend(holding_rows)
-            metrics = summarize_returns(period_rows, int(horizons[0]))
+            metrics = summarize_returns(period_rows, int(horizons[0]), expected_periods=len(panel_dates))
             if metrics:
                 summary_rows.append(
                     {
@@ -568,12 +573,19 @@ def main() -> int:
     write_csv(output_dir / "semiconductor_portfolio_backtest_summary.csv", summary_rows)
     write_csv(output_dir / "semiconductor_portfolio_backtest_periods.csv", all_periods)
     write_csv(output_dir / "semiconductor_portfolio_backtest_holdings.csv", all_holdings)
+    model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors"))
     manifest = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "database_path": str(db_path),
         "panel_rows": len(panel),
         "panel_dates": len(panel_dates),
         "date_range": [panel_dates[0].isoformat(), panel_dates[-1].isoformat()],
+        # Report-only simulation: the panel deliberately runs through the
+        # latest bar, so it mixes the calibration training window with
+        # post-lock data and must not be read as out-of-sample evidence.
+        "sample_basis": "in_sample_training_window_plus_post_lock",
+        "calibration_train_end_date": str(cfg_get(config, f"oos_calibration_standards.families.{model_family}.calibration_train_end_date", "") or ""),
+        "calibration_lock_date": str(cfg_get(config, f"oos_calibration_standards.families.{model_family}.calibration_lock_date", "") or ""),
         "horizon_days": int(horizons[0]),
         "models": [item["model_name"] for item in candidates],
         "portfolio_specs": [spec.__dict__ for spec in specs],

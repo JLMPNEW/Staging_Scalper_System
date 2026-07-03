@@ -442,6 +442,25 @@ def load_wsts_series(conn: Any, source_id: str, dataset_type: str, region: str) 
     return {str(row["period_month"]): float(row["value_millions_usd"]) for row in rows if row["value_millions_usd"] is not None}
 
 
+def restrict_series_to_asof(series: dict[str, float], asof: date, publication_lag_days: int) -> dict[str, float]:
+    """Keep only months that were already published at asof.
+
+    WSTS releases each month's billings roughly 5-7 weeks after month END,
+    i.e. `publication_lag_days` (~80) measured from the month START. Without
+    this availability cutoff, historical rebuilds read the latest workbook
+    into every backfilled asof (look-ahead). For asof=today the cutoff is a
+    no-op: every published month satisfies month_start + lag <= today.
+    """
+    out: dict[str, float] = {}
+    for month_key, value in series.items():
+        month_start = parse_date(month_key)
+        if month_start is None:
+            continue
+        if month_start + timedelta(days=publication_lag_days) <= asof:
+            out[month_key] = value
+    return out
+
+
 def fallback_sector_cycle(conn: Any, *, source_id: str, model_family: str, asof: date, reason: str) -> dict[str, Any]:
     prior = conn.execute(
         """
@@ -485,16 +504,20 @@ def build_sector_cycle_features() -> None:
     output_csv = resolve_path(cfg_get(config, "semiconductor_sector_overlays.wsts.feature_output_csv"), base_dir=paths.base_dir)
     max_staleness_days = int(cfg_get(config, "semiconductor_sector_overlays.wsts.max_staleness_days", 60))
     min_history_years = int(cfg_get(config, "semiconductor_sector_overlays.wsts.min_history_years", 10))
+    publication_lag_days = int(cfg_get(config, "semiconductor_sector_overlays.wsts.publication_lag_days_from_month_start", 80))
     asof = parse_asof(args.asof)
     with connect(paths.db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
         load_registry(conn, paths)
         run_id = start_run(conn, run_type="build_semiconductor_sector_cycle_features", input_path=paths.config_path)
         try:
-            monthly_world = load_wsts_series(conn, raw_source_id, "monthly", "Worldwide")
-            mma_world = load_wsts_series(conn, raw_source_id, "3mma", "Worldwide")
-            if not monthly_world:
+            monthly_world_all = load_wsts_series(conn, raw_source_id, "monthly", "Worldwide")
+            monthly_world = restrict_series_to_asof(monthly_world_all, asof, publication_lag_days)
+            mma_world = restrict_series_to_asof(load_wsts_series(conn, raw_source_id, "3mma", "Worldwide"), asof, publication_lag_days)
+            if not monthly_world_all:
                 feature = fallback_sector_cycle(conn, source_id=feature_source_id, model_family=model_family, asof=asof, reason="missing_wsts_monthly_worldwide")
+            elif not monthly_world:
+                feature = fallback_sector_cycle(conn, source_id=feature_source_id, model_family=model_family, asof=asof, reason="wsts_not_yet_available_at_asof")
             else:
                 latest_month = parse_date(max(monthly_world))
                 if latest_month is None:
@@ -508,7 +531,7 @@ def build_sector_cycle_features() -> None:
                     change_3mma = pct_change(latest_3mma, value_at(mma_world, latest_month, 3))
                     region_scores: list[float] = []
                     for region in sorted(WSTS_REGIONS - {"Worldwide"}):
-                        series = load_wsts_series(conn, raw_source_id, "monthly", region)
+                        series = restrict_series_to_asof(load_wsts_series(conn, raw_source_id, "monthly", region), asof, publication_lag_days)
                         region_yoy = pct_change(value_at(series, latest_month), value_at(series, latest_month, 12))
                         if region_yoy is not None:
                             region_scores.append(1.0 if region_yoy > 0 else 0.0)
@@ -519,7 +542,10 @@ def build_sector_cycle_features() -> None:
                     sector_score = clamp(yoy_score * 0.35 + accel_score * 0.25 + six_month_score * 0.15 + breadth_score * 0.25)
                     latest_month_end = date(latest_month.year, latest_month.month, 28) + timedelta(days=4)
                     latest_month_end = latest_month_end - timedelta(days=latest_month_end.day)
-                    stale_days = (asof - latest_month_end).days
+                    # The availability cutoff guarantees asof >= month_start + lag,
+                    # so this cannot go negative; the clamp guards manual asof
+                    # overrides ahead of the availability calendar.
+                    stale_days = max(0, (asof - latest_month_end).days)
                     stale = int(stale_days > max_staleness_days)
                     history_months = len(monthly_world)
                     reasons: list[str] = []
@@ -532,6 +558,14 @@ def build_sector_cycle_features() -> None:
                     quality = 1.0
                     if reasons:
                         quality = 0.75 if history_months >= min_history_years * 12 and yoy is not None else 0.5
+                    # pct_to_score pins at 0/100 once |yoy| >= 50/scale (20% YoY at
+                    # scale=250). The scoring model is locked (2026-06-15), so the
+                    # saturation is only surfaced as a review note without touching
+                    # quality/status; rescaling is deferred to the next calibration
+                    # window.
+                    review_notes = list(reasons)
+                    if yoy is not None and abs(yoy) * 250.0 >= 50.0:
+                        review_notes.append(f"sector_cycle_yoy_score_saturated_yoy={yoy:.4f}")
                     feature = {
                         "asof_date": asof.isoformat(),
                         "source_id": feature_source_id,
@@ -549,7 +583,7 @@ def build_sector_cycle_features() -> None:
                         "stale_data": stale,
                         "source_status": "success" if not reasons else "review",
                         "data_quality_status": "complete" if not reasons else "review",
-                        "review_reason": ";".join(reasons),
+                        "review_reason": ";".join(review_notes),
                     }
             upsert_sector_cycle_feature(conn, feature)
             write_csv(output_csv, [feature], list(feature.keys()))
@@ -616,10 +650,6 @@ def capex_duration_class(days: int) -> str:
 
 def calendar_period_from_end(end: date) -> str:
     return f"CY{end.year}Q{(end.month - 1) // 3 + 1}"
-
-
-def quarter_end(year: int, quarter: int) -> date:
-    return date(year, quarter * 3, 1).replace(day=28) + timedelta(days=4) - timedelta(days=(date(year, quarter * 3, 1).replace(day=28) + timedelta(days=4)).day)
 
 
 def duration_days(start: object, end: object) -> int | None:
@@ -761,7 +791,24 @@ def period_shift(calendar_period: str, quarters: int) -> str:
     return f"CY{year}Q{quarter}"
 
 
-def latest_capex_by_ticker_period(conn: Any, source_id: str) -> dict[tuple[str, str], dict[str, Any]]:
+def capex_fact_available_at(row_dict: dict[str, Any], asof: date) -> bool:
+    """Point-in-time availability gate for one SEC capex fact.
+
+    A fact becomes known on its SEC filed date. Facts missing a filed date
+    (rare companyfacts gaps) are assumed available 90 days after the calendar
+    period end - late enough to be conservative for historical asofs while
+    still usable when asof is today.
+    """
+    filed = parse_date(row_dict.get("filed_date"))
+    if filed is not None:
+        return filed <= asof
+    period_end = parse_date(row_dict.get("period_end_date"))
+    if period_end is None:
+        return False
+    return period_end + timedelta(days=90) <= asof
+
+
+def latest_capex_by_ticker_period(conn: Any, source_id: str, asof: date) -> dict[tuple[str, str], dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT *
@@ -788,6 +835,11 @@ def latest_capex_by_ticker_period(conn: Any, source_id: str) -> dict[tuple[str, 
 
     for row in rows:
         row_dict = dict(row)
+        # Look-ahead guard: only facts already filed (or presumed filed) at
+        # asof participate in the feature; historical rebuilds must not see
+        # today's full filing history.
+        if not capex_fact_available_at(row_dict, asof):
+            continue
         period = str(row["calendar_period"])
         if "_" in period:
             spans.append(row_dict)
@@ -888,7 +940,7 @@ def build_big_tech_capex_features() -> None:
         load_registry(conn, paths)
         run_id = start_run(conn, run_type="build_big_tech_capex_features", input_path=paths.config_path)
         try:
-            facts = latest_capex_by_ticker_period(conn, raw_source_id)
+            facts = latest_capex_by_ticker_period(conn, raw_source_id, asof)
             periods = sorted({period for _, period in facts if capex_calendar_key(period)})
             feature: dict[str, Any]
             selected_period = ""
@@ -898,7 +950,9 @@ def build_big_tech_capex_features() -> None:
                 if len(available) >= min_companies:
                     selected_period = period
                     break
-            if not selected_period:
+            if not facts:
+                feature = fallback_big_tech_capex(conn, source_id=feature_source_id, model_family=model_family, asof=asof, reason="big_tech_capex_not_yet_available_at_asof")
+            elif not selected_period:
                 feature = fallback_big_tech_capex(conn, source_id=feature_source_id, model_family=model_family, asof=asof, reason="missing_common_big_tech_capex_period")
             else:
                 prior_year = period_shift(selected_period, -4)
@@ -922,7 +976,10 @@ def build_big_tech_capex_features() -> None:
                 latest_period_end = max(str(row["period_end_date"]) for row in current_rows)
                 latest_filed = max(str(row["filed_date"] or "") for row in current_rows)
                 latest_end_date = parse_date(latest_period_end)
-                stale_days = (asof - latest_end_date).days if latest_end_date else 9999
+                # Facts are filed after their period end and the availability
+                # filter guarantees filed_date <= asof, so this cannot go
+                # negative; the clamp guards manual asof overrides.
+                stale_days = max(0, (asof - latest_end_date).days) if latest_end_date else 9999
                 stale = int(stale_days > max_staleness_days)
                 reasons: list[str] = []
                 if len(yoy_tickers) < len(companies):
@@ -1060,8 +1117,10 @@ def apply_semiconductor_overlay_scores() -> None:
                 if normalize_ticker(row["ticker"])
             ]
             now = utc_now()
-            sector_score = float(sector["sector_cycle_score"] or 50.0)
-            capex_score = float(capex["big_tech_capex_score"] or 50.0)
+            # Explicit None checks: `or 50.0` would coerce a legitimate 0.0
+            # score to neutral.
+            sector_score = float(sector["sector_cycle_score"]) if sector["sector_cycle_score"] is not None else 50.0
+            capex_score = float(capex["big_tech_capex_score"]) if capex["big_tech_capex_score"] is not None else 50.0
             sector_quality = float(sector["component_quality"] or 0.0)
             capex_quality = float(capex["component_quality"] or 0.0)
             overlay_score = clamp(sector_score * 0.60 + capex_score * 0.40)

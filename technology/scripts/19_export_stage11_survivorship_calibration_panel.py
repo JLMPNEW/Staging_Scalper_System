@@ -17,7 +17,7 @@ import math
 import sqlite3
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +43,7 @@ from technology.core.scoring_features import (  # noqa: E402
     build_raw_rows,
     cfg_ticker_set,
     finalize_rows,
-    load_preserved_overlays,
+    OVERLAY_SCORE_FIELDS,
     safe_float,
 )
 from technology.core.text_norm import normalize_ticker  # noqa: E402
@@ -69,6 +69,8 @@ class FamilySpec:
     scoring_config_key: str
     research_config_key: str
     diagnostics_config_key: str
+    dashboard_dir_key: str
+    dashboard_dir_default: str
     output_prefix: str
     calibrated_settings: Any
 
@@ -88,6 +90,8 @@ register_family(
         scoring_config_key="semiconductor_scoring_features",
         research_config_key="semiconductor_research",
         diagnostics_config_key="semiconductor_signal_diagnostics",
+        dashboard_dir_key="semiconductor_dashboard_reports.output_dir",
+        dashboard_dir_default="../output/technology_reports/semi_dashboard",
         output_prefix="semiconductor",
         calibrated_settings=SEMICONDUCTOR_CALIBRATED_SETTINGS,
     )
@@ -99,6 +103,8 @@ register_family(
         scoring_config_key="technology_hardware_scoring_features",
         research_config_key="technology_hardware_research",
         diagnostics_config_key="technology_hardware_signal_diagnostics",
+        dashboard_dir_key="technology_hardware_dashboard_reports.output_dir",
+        dashboard_dir_default="../output/technology_reports/technology_hardware/dashboard",
         output_prefix="technology_hardware",
         calibrated_settings=TECHNOLOGY_HARDWARE_CALIBRATED_SETTINGS,
     )
@@ -110,6 +116,8 @@ register_family(
         scoring_config_key="software_infrastructure_scoring_features",
         research_config_key="software_infrastructure_research",
         diagnostics_config_key="software_infrastructure_signal_diagnostics",
+        dashboard_dir_key="software_infrastructure_dashboard_reports.output_dir",
+        dashboard_dir_default="../output/technology_reports/software_infrastructure/dashboard",
         output_prefix="software_infrastructure",
         calibrated_settings=SOFTWARE_INFRASTRUCTURE_CALIBRATED_SETTINGS,
     )
@@ -229,6 +237,7 @@ FEATURE_FIELDS = [
     "geo_customer_risk_score",
     "sector_overlay_quality",
     "sector_overlay_status",
+    "sector_overlay_feature_asof_date",
     "quality_component_quality",
     "growth_component_quality",
     "valuation_component_quality",
@@ -243,6 +252,12 @@ FEATURE_FIELDS = [
     "financial_quality",
     "positioning_quality",
     "feature_status",
+    "market_feature_override_flag",
+    "market_feature_override_basis",
+    "relative_strength_benchmark_ticker",
+    "rel_strength_smh_3m",
+    "rel_strength_qqq_3m",
+    "rel_strength_spy_3m",
 ]
 
 PRICE_FIELDS = [
@@ -257,6 +272,10 @@ PRICE_FIELDS = [
     "latest_price_date",
     "historical_price_ticker",
     "price_data_asof_date",
+    "price_series_selected_source_id",
+    "price_series_available_source_ids",
+    "price_series_source_count",
+    "price_series_spliced_flag",
 ]
 
 STAGE11_FIELDS = [
@@ -284,7 +303,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calendar-ticker", default=DEFAULT_CALENDAR_TICKER)
     parser.add_argument("--horizons", default=",".join(str(item) for item in DEFAULT_HORIZONS))
     parser.add_argument("--max-price-staleness-days", type=int, default=None)
+    parser.add_argument(
+        "--max-overlay-staleness-days",
+        type=int,
+        default=45,
+        help=(
+            "Preserved Stage 6B overlays older than this many calendar days before the as-of date "
+            "fall back to the neutral/not_loaded overlay path."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--output-layout",
+        choices=("stage11_calibration", "dashboard_snapshot"),
+        default="stage11_calibration",
+        help=(
+            "stage11_calibration writes under output/technology_reports/stage11_calibration/<family>; "
+            "dashboard_snapshot writes sidecar files into each family's dated dashboard folder."
+        ),
+    )
     parser.add_argument("--combined-only", action="store_true", help="Skip per-date snapshot CSV files.")
     return parser.parse_args()
 
@@ -374,7 +411,10 @@ def resolve_dates(
         ).fetchall()
     ]
     if frequency == "panel21":
-        dates = dates[::21]
+        selected = dates[::21]
+        if selected and selected[-1] != dates[-1]:
+            selected.append(dates[-1])
+        dates = selected
     return dates
 
 
@@ -407,9 +447,53 @@ def price_source_ids(config: dict[str, Any], spec: FamilySpec) -> list[str]:
     return list(dict.fromkeys(values))
 
 
+def output_dir_for_family(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+    spec: FamilySpec,
+    output_dir: Path | None,
+    output_layout: str,
+) -> Path:
+    if output_layout == "dashboard_snapshot":
+        if output_dir is not None:
+            return output_dir
+        return resolve_path(cfg_get(config, spec.dashboard_dir_key, spec.dashboard_dir_default), base_dir=base_dir)
+    root = (
+        output_dir
+        if output_dir is not None
+        else resolve_path(cfg_get(config, "paths.output_dir"), base_dir=base_dir) / DEFAULT_OUTPUT_SUBDIR
+    )
+    return root / spec.model_family
+
+
 def benchmark_ticker(config: dict[str, Any], spec: FamilySpec) -> str:
     default = "SMH" if spec.model_family == "semiconductors" else "QQQ"
     return normalize_ticker(cfg_get(config, f"{spec.diagnostics_config_key}.benchmark_ticker", default) or default)
+
+
+REL_STRENGTH_FIELD_TO_BENCHMARK = {
+    "rel_strength_smh_3m": "SMH",
+    "rel_strength_soxx_3m": "SOXX",
+    "rel_strength_qqq_3m": "QQQ",
+    "rel_strength_spy_3m": "SPY",
+    "rel_strength_bench_3m": "",
+}
+
+
+def relative_strength_field(config: dict[str, Any], spec: FamilySpec) -> str:
+    return str(
+        cfg_get(config, f"{spec.scoring_config_key}.relative_strength_market_field", "rel_strength_soxx_3m")
+        or "rel_strength_soxx_3m"
+    )
+
+
+def relative_strength_benchmark(config: dict[str, Any], spec: FamilySpec) -> str:
+    field = relative_strength_field(config, spec)
+    mapped = REL_STRENGTH_FIELD_TO_BENCHMARK.get(field, "")
+    if mapped:
+        return mapped
+    return benchmark_ticker(config, spec)
 
 
 def membership_score(row: sqlite3.Row) -> tuple[int, int, float, str]:
@@ -465,14 +549,22 @@ def load_pit_members(conn: sqlite3.Connection, spec: FamilySpec, asof: str) -> l
         """,
         (spec.model_family, asof, asof),
     ).fetchall()
-    by_ticker: dict[str, sqlite3.Row] = {}
+    grouped: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
         ticker = normalize_ticker(row["ticker"])
         if not ticker:
             continue
-        current = by_ticker.get(ticker)
-        if current is None or membership_score(row) > membership_score(current):
-            by_ticker[ticker] = row
+        grouped.setdefault(ticker, []).append(row)
+
+    by_ticker: dict[str, sqlite3.Row] = {}
+    for ticker, ticker_rows in grouped.items():
+        company_ids = {int(row["company_id"]) for row in ticker_rows if row["company_id"] is not None}
+        if len(company_ids) > 1:
+            raise ValueError(
+                f"{spec.model_family} {asof}: overlapping PIT membership rows reuse ticker={ticker} "
+                f"across company_id values={sorted(company_ids)}"
+            )
+        by_ticker[ticker] = max(ticker_rows, key=membership_score)
 
     members: list[dict[str, Any]] = []
     for ticker in sorted(by_ticker):
@@ -523,6 +615,9 @@ class PriceSeries:
     ticker: str
     dates: list[str]
     rows: dict[str, dict[str, Any]]
+    selected_source_id: str
+    available_source_ids: list[str]
+    spliced_flag: int = 0
 
     def index_at_or_before(self, asof: str) -> int:
         return bisect.bisect_right(self.dates, asof) - 1
@@ -607,7 +702,9 @@ class PriceSeries:
         return values
 
     def trailing_dollar_volume(self, idx: int, window: int) -> float | None:
-        start = max(0, idx - window + 1)
+        start = idx - window + 1
+        if start < 0:
+            return None
         values: list[float] = []
         for item_idx in range(start, idx + 1):
             price = self.adj_close_at_index(item_idx)
@@ -636,8 +733,7 @@ def load_price_series(
         return {}
     q_tickers = ",".join("?" for _ in tickers)
     q_sources = ",".join("?" for _ in source_ids)
-    source_priority = {source_id: idx for idx, source_id in enumerate(source_ids)}
-    by_ticker_date: dict[str, dict[str, dict[str, Any]]] = {}
+    by_ticker_source: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
     params = [*sorted(tickers), *source_ids, start_date]
     rows = conn.execute(
         f"""
@@ -646,7 +742,7 @@ def load_price_series(
         WHERE ticker IN ({q_tickers})
           AND source_id IN ({q_sources})
           AND bar_date >= ?
-          AND (adj_close IS NOT NULL OR close IS NOT NULL)
+          AND adj_close IS NOT NULL
         ORDER BY ticker, bar_date, source_id
         """,
         params,
@@ -654,21 +750,43 @@ def load_price_series(
     for row in rows:
         ticker = normalize_ticker(row["ticker"])
         bar_date = str(row["bar_date"])
-        existing = by_ticker_date.setdefault(ticker, {}).get(bar_date)
         source_id = str(row["source_id"])
-        if existing is None or source_priority.get(source_id, 999) < source_priority.get(str(existing["source_id"]), 999):
-            adj_close = safe_float(row["adj_close"])
-            close = safe_float(row["close"])
-            by_ticker_date[ticker][bar_date] = {
-                "source_id": source_id,
-                "close": close if close is not None else adj_close,
-                "adj_close": adj_close if adj_close is not None else close,
-                "volume": safe_float(row["volume"]),
-            }
-    return {
-        ticker: PriceSeries(ticker=ticker, dates=sorted(rows_by_date), rows=rows_by_date)
-        for ticker, rows_by_date in by_ticker_date.items()
-    }
+        adj_close = safe_float(row["adj_close"])
+        if adj_close is None:
+            continue
+        close = safe_float(row["close"])
+        by_ticker_source.setdefault(ticker, {}).setdefault(source_id, {})[bar_date] = {
+            "source_id": source_id,
+            "close": close if close is not None else adj_close,
+            "adj_close": adj_close,
+            "volume": safe_float(row["volume"]),
+        }
+    out: dict[str, PriceSeries] = {}
+    for ticker, rows_by_source in by_ticker_source.items():
+        available_sources = [source_id for source_id in source_ids if rows_by_source.get(source_id)]
+        if not available_sources:
+            continue
+        # Pick the deepest/freshest source instead of first-configured-with-any-rows,
+        # so a stub series cannot beat a full delisted history. Tiebreak keeps the
+        # configured priority order.
+        selected_source = max(
+            available_sources,
+            key=lambda source_id: (
+                max(rows_by_source[source_id]),
+                len(rows_by_source[source_id]),
+                -source_ids.index(source_id),
+            ),
+        )
+        rows_by_date = rows_by_source[selected_source]
+        out[ticker] = PriceSeries(
+            ticker=ticker,
+            dates=sorted(rows_by_date),
+            rows=rows_by_date,
+            selected_source_id=selected_source,
+            available_source_ids=available_sources,
+            spliced_flag=0,
+        )
+    return out
 
 
 def annotate_prices(
@@ -693,6 +811,10 @@ def annotate_prices(
                 "latest_price_date": "",
                 "historical_price_ticker": row.get("ticker", ""),
                 "price_data_asof_date": "",
+                "price_series_selected_source_id": "",
+                "price_series_available_source_ids": "",
+                "price_series_source_count": 0,
+                "price_series_spliced_flag": 0,
             }
         )
         for horizon in horizons:
@@ -718,6 +840,10 @@ def annotate_prices(
             "latest_price_date": latest_price_date,
             "historical_price_ticker": row.get("ticker", ""),
             "price_data_asof_date": latest_price_date,
+            "price_series_selected_source_id": series.selected_source_id,
+            "price_series_available_source_ids": ",".join(series.available_source_ids),
+            "price_series_source_count": len(series.available_source_ids),
+            "price_series_spliced_flag": series.spliced_flag,
         }
     )
     ready_flags: list[int] = []
@@ -731,22 +857,22 @@ def annotate_prices(
     row["stage11_forward_return_join_ready_all_flag"] = int(all(ready_flags)) if ready_flags else 0
 
 
-def realized_volatility(prices: list[float]) -> float | None:
-    if len(prices) < 20:
+def realized_volatility(prices: list[float], *, lookback: int) -> float | None:
+    if len(prices) < 2:
         return None
     returns: list[float] = []
     for prev, cur in zip(prices, prices[1:]):
         if prev > 0 and cur > 0:
             returns.append(math.log(cur / prev))
-    if len(returns) < 20:
+    if len(returns) < max(20, lookback // 2):
         return None
     mean = sum(returns) / len(returns)
-    variance = sum((item - mean) ** 2 for item in returns) / len(returns)
+    variance = sum((item - mean) ** 2 for item in returns) / (len(returns) - 1)
     return math.sqrt(variance) * math.sqrt(252.0)
 
 
 def max_drawdown(prices: list[float]) -> float | None:
-    if not prices:
+    if len(prices) < 20:
         return None
     peak = prices[0]
     worst = 0.0
@@ -757,11 +883,12 @@ def max_drawdown(prices: list[float]) -> float | None:
     return worst
 
 
-def apply_market_price_fallback(
+def apply_market_price_override(
     row: dict[str, Any],
     *,
     series: PriceSeries | None,
-    benchmark: PriceSeries | None,
+    benchmarks: dict[str, PriceSeries],
+    relative_strength_market_field: str,
     asof: str,
     max_staleness_days: int,
     min_trading_days: int,
@@ -779,31 +906,79 @@ def apply_market_price_fallback(
     if adj_close is None or adj_close <= 0:
         return
 
-    trailing_60 = series.trailing_prices(idx, 60)
+    trailing_vol = series.trailing_prices(idx, 61)
     trailing_252 = series.trailing_prices(idx, 252)
     ret_3m = series.pct_return(idx, 63)
     ret_12m_ex_1m = series.pct_return(idx, 231, end_offset=21)
-    bench_ret_3m: float | None = None
-    if benchmark is not None:
-        bench_idx = benchmark.index_at_or_before(asof)
-        if bench_idx >= 0:
-            bench_ret_3m = benchmark.pct_return(bench_idx, 63)
-    rel_strength = ret_3m - bench_ret_3m if ret_3m is not None and bench_ret_3m is not None else None
+    rel_strength_values: dict[str, float | None] = {}
+    for field, benchmark_ticker_value in REL_STRENGTH_FIELD_TO_BENCHMARK.items():
+        if field == "rel_strength_bench_3m" or not benchmark_ticker_value:
+            continue
+        benchmark = benchmarks.get(benchmark_ticker_value)
+        bench_ret_3m: float | None = None
+        if benchmark is not None:
+            bench_idx = benchmark.index_at_or_before(asof)
+            if bench_idx >= 0:
+                bench_ret_3m = benchmark.pct_return(bench_idx, 63)
+        rel_strength_values[field] = ret_3m - bench_ret_3m if ret_3m is not None and bench_ret_3m is not None else None
     avg_dollar_volume_60d = series.trailing_dollar_volume(idx, 60)
     high_52w = max(trailing_252) if trailing_252 else None
+    relative_benchmark = REL_STRENGTH_FIELD_TO_BENCHMARK.get(relative_strength_market_field, "")
 
     row["market_feature_asof_date"] = str(price["price_date"])
     row["market_quality"] = "complete" if idx + 1 >= min_trading_days else "review"
+    row["market_feature_override_flag"] = 1
+    row["market_feature_override_basis"] = "local_price_series_production_formula_parity"
+    row["relative_strength_benchmark_ticker"] = relative_benchmark
     row["latest_price"] = adj_close
     row["ret_3m"] = ret_3m
     row["ret_12m_ex_1m"] = ret_12m_ex_1m
-    row["rel_strength_bench_3m"] = rel_strength
-    row["rel_strength_soxx_3m"] = rel_strength
-    row["realized_vol_60d"] = realized_volatility(trailing_60)
+    row["rel_strength_smh_3m"] = rel_strength_values.get("rel_strength_smh_3m")
+    row["rel_strength_soxx_3m"] = rel_strength_values.get("rel_strength_soxx_3m")
+    row["rel_strength_qqq_3m"] = rel_strength_values.get("rel_strength_qqq_3m")
+    row["rel_strength_spy_3m"] = rel_strength_values.get("rel_strength_spy_3m")
+    row["rel_strength_bench_3m"] = rel_strength_values.get(relative_strength_market_field)
+    row["realized_vol_60d"] = realized_volatility(trailing_vol, lookback=60)
     row["max_drawdown_12m"] = max_drawdown(trailing_252)
-    row["distance_from_52w_high"] = adj_close / high_52w - 1.0 if high_52w and high_52w > 0 else None
+    row["distance_from_52w_high"] = (
+        adj_close / high_52w - 1.0 if len(trailing_252) >= 20 and high_52w and high_52w > 0 else None
+    )
     row["avg_dollar_volume_60d"] = avg_dollar_volume_60d
-    row["low_liquidity_flag"] = int(avg_dollar_volume_60d is not None and avg_dollar_volume_60d < liquidity_threshold)
+    row["low_liquidity_flag"] = int(
+        liquidity_threshold > 0 and (avg_dollar_volume_60d is None or avg_dollar_volume_60d < liquidity_threshold)
+    )
+
+
+def load_pit_preserved_overlays(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    model_family: str,
+    asof: str,
+) -> dict[str, dict[str, Any]]:
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT ticker, asof_date, {", ".join(OVERLAY_SCORE_FIELDS)}
+            FROM feature_scoring_input
+            WHERE source_id = ?
+              AND model_family = ?
+              AND asof_date <= ?
+              AND sector_overlay_status <> 'not_loaded'
+            ORDER BY ticker, asof_date DESC
+            """,
+            (source_id, model_family, asof),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        ticker = normalize_ticker(row["ticker"])
+        if ticker and ticker not in out:
+            item = dict(row)
+            item["sector_overlay_feature_asof_date"] = row["asof_date"]
+            out[ticker] = item
+    return out
 
 
 def build_pit_scores(
@@ -813,28 +988,38 @@ def build_pit_scores(
     members: list[dict[str, Any]],
     asof: str,
     price_series: dict[str, PriceSeries],
-    benchmark_series: PriceSeries | None,
+    benchmark_series: dict[str, PriceSeries],
     max_price_staleness_days: int,
+    max_overlay_staleness_days: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     scoring_source, model_source, model_version, contract_version = source_ids_for_family(config, spec)
     input_sources = cfg_get(config, f"{spec.scoring_config_key}.input_sources", {}) or {}
     market_source = str(input_sources.get("market") or MARKET_SOURCE_ID)
     financial_source = str(input_sources.get("financial") or "sec_companyfacts")
     positioning_source = str(input_sources.get("positioning") or "technology_positioning_composite")
-    relative_strength_field = str(
-        cfg_get(config, f"{spec.scoring_config_key}.relative_strength_market_field", "rel_strength_soxx_3m")
-        or "rel_strength_soxx_3m"
-    )
+    relative_strength_market_field = relative_strength_field(config, spec)
     neutral_score = float(cfg_get(config, f"{spec.scoring_config_key}.neutral_score", 50.0))
     overlay_default_quality = float(cfg_get(config, f"{spec.scoring_config_key}.sector_overlay_default_quality", 0.0))
     min_trading_days = int(cfg_get(config, "market_data_policy.min_trading_days_for_full_features", 252))
     liquidity_threshold = float(cfg_get(config, "market_data_policy.min_avg_dollar_volume_60d_for_full_features", 5000000.0))
-    preserved_overlays = load_preserved_overlays(
+    preserved_overlays = load_pit_preserved_overlays(
         conn,
         source_id=scoring_source,
         model_family=spec.model_family,
-        asof=parse_iso_date(asof),
+        asof=asof,
     )
+    # Cap preserved-overlay staleness: overlays older than the cap fall back to the
+    # neutral/not_loaded path in finalize_rows, while the stale asof date is still
+    # stamped on the row below for auditability.
+    asof_day = parse_iso_date(asof)
+    fresh_overlays: dict[str, dict[str, Any]] = {}
+    for overlay_ticker, overlay_item in preserved_overlays.items():
+        try:
+            overlay_day = parse_iso_date(overlay_item.get("sector_overlay_feature_asof_date"))
+        except ValueError:
+            continue
+        if (asof_day - overlay_day).days <= max_overlay_staleness_days:
+            fresh_overlays[overlay_ticker] = overlay_item
 
     raw_rows = build_raw_rows(
         conn,
@@ -844,13 +1029,14 @@ def build_pit_scores(
         market_source=market_source,
         financial_source=financial_source,
         positioning_source=positioning_source,
-        relative_strength_market_field=relative_strength_field,
+        relative_strength_market_field=relative_strength_market_field,
     )
     for row in raw_rows:
-        apply_market_price_fallback(
+        apply_market_price_override(
             row,
             series=price_series.get(normalize_ticker(row["ticker"])),
-            benchmark=benchmark_series,
+            benchmarks=benchmark_series,
+            relative_strength_market_field=relative_strength_market_field,
             asof=asof,
             max_staleness_days=max_price_staleness_days,
             min_trading_days=min_trading_days,
@@ -868,8 +1054,11 @@ def build_pit_scores(
         config_key=spec.scoring_config_key,
         neutral_score=neutral_score,
         overlay_default_quality=overlay_default_quality,
-        preserved_overlays=preserved_overlays,
+        preserved_overlays=fresh_overlays,
     )
+    for row in raw_rows:
+        preserved = preserved_overlays.get(normalize_ticker(row["ticker"]))
+        row["sector_overlay_feature_asof_date"] = preserved.get("sector_overlay_feature_asof_date", "") if preserved else ""
 
     component_weights = component_weight_specs(config, spec.calibrated_settings)
     subfeature_specs = subfeature_weight_specs(config, spec.calibrated_settings)
@@ -1056,9 +1245,18 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
 
 
 def summarize_date(rows: list[dict[str, Any]], asof: str, horizons: list[int]) -> dict[str, Any]:
+    price_source_counts: dict[str, int] = {}
+    relative_benchmark_counts: dict[str, int] = {}
+    for row in rows:
+        price_source = str(row.get("price_source_id") or "missing")
+        price_source_counts[price_source] = price_source_counts.get(price_source, 0) + 1
+        rel_benchmark = str(row.get("relative_strength_benchmark_ticker") or "missing")
+        relative_benchmark_counts[rel_benchmark] = relative_benchmark_counts.get(rel_benchmark, 0) + 1
     summary: dict[str, Any] = {
         "asof_date": asof,
         "membership_rows": len(rows),
+        "current_member_rows": sum(1 for row in rows if int(row.get("is_current_member") or 0) == 1),
+        "historical_or_delisted_member_rows": sum(1 for row in rows if int(row.get("is_current_member") or 0) != 1),
         "score_recomputed_rows": sum(1 for row in rows if int(row.get("score_recomputed_pit_flag") or 0) == 1),
         "rank_ready_rows": sum(1 for row in rows if int(row.get("rank_ready_flag") or 0) == 1),
         "stage11_calibration_input_eligible_rows": sum(
@@ -1066,6 +1264,18 @@ def summarize_date(rows: list[dict[str, Any]], asof: str, horizons: list[int]) -
         ),
         "portfolio_candidate_rows": sum(1 for row in rows if int(row.get("portfolio_candidate_gate") or 0) == 1),
         "missing_asof_price_rows": sum(1 for row in rows if int(row.get("price_available_on_asof_flag") or 0) != 1),
+        "overlay_loaded_rows": sum(
+            1
+            for row in rows
+            if str(row.get("sector_overlay_status") or "") not in {"", "not_loaded"}
+            and str(row.get("sector_overlay_feature_asof_date") or "")
+        ),
+        "overlay_not_loaded_rows": sum(1 for row in rows if str(row.get("sector_overlay_status") or "") in {"", "not_loaded"}),
+        "overlay_positive_quality_rows": sum(1 for row in rows if (safe_float(row.get("sector_overlay_quality")) or 0.0) > 0),
+        "price_source_row_counts_json": json.dumps(price_source_counts, sort_keys=True),
+        "price_series_multi_source_available_rows": sum(1 for row in rows if int(row.get("price_series_source_count") or 0) > 1),
+        "price_series_spliced_rows": sum(1 for row in rows if int(row.get("price_series_spliced_flag") or 0) == 1),
+        "relative_strength_benchmark_row_counts_json": json.dumps(relative_benchmark_counts, sort_keys=True),
         "survivorship_corrected_panel_flag": 1,
     }
     for horizon in horizons:
@@ -1120,12 +1330,14 @@ def manifest_payload(
     coverage: list[dict[str, Any]],
     horizons: list[int],
     output_files: list[str],
+    output_layout: str,
 ) -> dict[str, Any]:
     eligible = sum(1 for row in rows if int(row.get("stage11_calibration_input_eligible_flag") or 0) == 1)
     return {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "model_family": spec.model_family,
         "panel_source": PANEL_SOURCE,
+        "output_layout": output_layout,
         "survivorship_corrected_panel_flag": 1,
         "date_count": len(dates),
         "start_date": dates[0] if dates else "",
@@ -1148,26 +1360,36 @@ def export_family(
     conn: sqlite3.Connection,
     *,
     config: dict[str, Any],
+    base_dir: Path,
     spec: FamilySpec,
     dates: list[str],
     horizons: list[int],
-    output_dir: Path,
+    output_dir: Path | None,
+    output_layout: str,
     max_price_staleness_days: int,
+    max_overlay_staleness_days: int,
     combined_only: bool,
 ) -> None:
     all_members: dict[str, list[dict[str, Any]]] = {asof: load_pit_members(conn, spec, asof) for asof in dates}
     tickers = {member["ticker"] for members in all_members.values() for member in members}
-    benchmark = benchmark_ticker(config, spec)
-    if benchmark:
-        tickers.add(benchmark)
+    benchmark_tickers = {ticker for ticker in REL_STRENGTH_FIELD_TO_BENCHMARK.values() if ticker}
+    benchmark_tickers.add(relative_strength_benchmark(config, spec))
+    tickers.update(benchmark_tickers)
     source_ids = price_source_ids(config, spec)
-    price_series = load_price_series(conn, tickers=tickers, source_ids=source_ids, start_date="2010-01-01")
-    benchmark_series = price_series.get(benchmark)
+    price_start = (parse_iso_date(min(dates)) - timedelta(days=550)).isoformat()
+    price_series = load_price_series(conn, tickers=tickers, source_ids=source_ids, start_date=price_start)
+    benchmark_series = {ticker: price_series[ticker] for ticker in benchmark_tickers if ticker in price_series}
 
     family_rows: list[dict[str, Any]] = []
     coverage_rows: list[dict[str, Any]] = []
     written_files: list[str] = []
-    family_dir = output_dir / spec.model_family
+    family_dir = output_dir_for_family(
+        config,
+        base_dir=base_dir,
+        spec=spec,
+        output_dir=output_dir,
+        output_layout=output_layout,
+    )
     for asof in dates:
         members = all_members[asof]
         raw_rows, outputs = build_pit_scores(
@@ -1179,6 +1401,7 @@ def export_family(
             price_series,
             benchmark_series,
             max_price_staleness_days,
+            max_overlay_staleness_days,
         )
         rows = merge_member_score_rows(
             config=config,
@@ -1206,9 +1429,18 @@ def export_family(
         )
 
     family_fieldnames = ordered_fieldnames(family_rows, horizons)
-    combined_path = family_dir / f"{spec.output_prefix}_stage11_survivorship_calibration_panel.csv"
-    coverage_path = family_dir / f"{spec.output_prefix}_stage11_survivorship_calibration_coverage.csv"
-    manifest_path = family_dir / f"{spec.output_prefix}_stage11_survivorship_calibration_manifest.json"
+    if output_layout == "dashboard_snapshot":
+        # Chunked runs must not overwrite the family dashboard root: combined
+        # panel/coverage/manifest files are date-range suffixed under a
+        # stage11_combined subdirectory. Per-asof sidecars above are unchanged.
+        combined_dir = family_dir / "stage11_combined"
+        range_suffix = f"_{dates[0]}_{dates[-1]}"
+    else:
+        combined_dir = family_dir
+        range_suffix = ""
+    combined_path = combined_dir / f"{spec.output_prefix}_stage11_survivorship_calibration_panel{range_suffix}.csv"
+    coverage_path = combined_dir / f"{spec.output_prefix}_stage11_survivorship_calibration_coverage{range_suffix}.csv"
+    manifest_path = combined_dir / f"{spec.output_prefix}_stage11_survivorship_calibration_manifest{range_suffix}.json"
     write_csv(combined_path, family_rows, family_fieldnames)
     coverage_fields = ordered_fieldnames(coverage_rows, horizons)
     write_csv(coverage_path, coverage_rows, coverage_fields)
@@ -1220,6 +1452,7 @@ def export_family(
         coverage=coverage_rows,
         horizons=horizons,
         output_files=written_files,
+        output_layout=output_layout,
     )
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -1232,11 +1465,7 @@ def main() -> int:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    output_dir = (
-        args.output_dir.expanduser().resolve()
-        if args.output_dir
-        else (resolve_path(cfg_get(config, "paths.output_dir"), base_dir=base_dir) / DEFAULT_OUTPUT_SUBDIR)
-    )
+    output_dir = args.output_dir.expanduser().resolve() if args.output_dir else None
     timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 120.0))
     max_staleness = int(
         args.max_price_staleness_days
@@ -1262,11 +1491,14 @@ def main() -> int:
             export_family(
                 conn,
                 config=config,
+                base_dir=base_dir,
                 spec=spec,
                 dates=dates,
                 horizons=horizons,
                 output_dir=output_dir,
+                output_layout=str(args.output_layout),
                 max_price_staleness_days=max_staleness,
+                max_overlay_staleness_days=int(args.max_overlay_staleness_days),
                 combined_only=bool(args.combined_only),
             )
     return 0

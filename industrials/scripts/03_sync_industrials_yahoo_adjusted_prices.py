@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import requests  # type: ignore[reportMissingModuleSource]
 
@@ -349,14 +349,20 @@ def parse_chart_result(job: PriceJob, payload_text: str, source_id: str) -> tupl
     results = chart.get("result")
     if not isinstance(results, list) or not results:
         return [], [], {}, "missing_chart_result"
-    result = results[0] if isinstance(results[0], dict) else {}
-    meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+    if not isinstance(results[0], dict):
+        return [], [], {}, "missing_chart_result"
+    result = cast(dict[str, Any], results[0])
+    raw_meta = result.get("meta")
+    meta = cast(dict[str, Any], raw_meta) if isinstance(raw_meta, dict) else {}
     timestamps = result.get("timestamp") or []
-    indicators = result.get("indicators") if isinstance(result.get("indicators"), dict) else {}
-    quote = (indicators.get("quote") or [{}])[0]
-    adjclose = (indicators.get("adjclose") or [{}])[0]
-    quote = quote if isinstance(quote, dict) else {}
-    adjclose = adjclose if isinstance(adjclose, dict) else {}
+    raw_indicators = result.get("indicators")
+    indicators = cast(dict[str, Any], raw_indicators) if isinstance(raw_indicators, dict) else {}
+    raw_quote = indicators.get("quote")
+    raw_adjclose = indicators.get("adjclose")
+    quote = raw_quote[0] if isinstance(raw_quote, list) and raw_quote and isinstance(raw_quote[0], dict) else {}
+    adjclose = raw_adjclose[0] if isinstance(raw_adjclose, list) and raw_adjclose and isinstance(raw_adjclose[0], dict) else {}
+    quote = cast(dict[str, Any], quote)
+    adjclose = cast(dict[str, Any], adjclose)
     opens = quote.get("open") or []
     highs = quote.get("high") or []
     lows = quote.get("low") or []
@@ -367,8 +373,10 @@ def parse_chart_result(job: PriceJob, payload_text: str, source_id: str) -> tupl
     dividends_by_date: dict[str, float] = {}
     split_by_date: dict[str, float] = {}
     actions: list[CorporateAction] = []
-    events = result.get("events") if isinstance(result.get("events"), dict) else {}
-    dividends = events.get("dividends") if isinstance(events.get("dividends"), dict) else {}
+    raw_events = result.get("events")
+    events = cast(dict[str, Any], raw_events) if isinstance(raw_events, dict) else {}
+    raw_dividends = events.get("dividends")
+    dividends = cast(dict[str, Any], raw_dividends) if isinstance(raw_dividends, dict) else {}
     for raw_event in dividends.values():
         if not isinstance(raw_event, dict):
             continue
@@ -387,7 +395,8 @@ def parse_chart_result(job: PriceJob, payload_text: str, source_id: str) -> tupl
                 raw_value=json.dumps(raw_event, sort_keys=True),
             )
         )
-    splits = events.get("splits") if isinstance(events.get("splits"), dict) else {}
+    raw_splits = events.get("splits")
+    splits = cast(dict[str, Any], raw_splits) if isinstance(raw_splits, dict) else {}
     for raw_event in splits.values():
         if not isinstance(raw_event, dict):
             continue
@@ -515,7 +524,7 @@ def finish_ingestion_run(conn: Any, ingestion_run_id: int, *, status: str, reque
     )
 
 
-def upsert_result(conn: Any, result: FetchResult, *, source_id: str, ingestion_run_id: int) -> tuple[int, int]:
+def upsert_result(conn: Any, result: FetchResult, *, source_id: str, ingestion_run_id: int, request_asof: date) -> tuple[int, int]:
     now = utc_now()
     response_hash = hashlib.sha256(result.payload_text.encode("utf-8", errors="replace")).hexdigest()
     conn.execute(
@@ -533,7 +542,7 @@ def upsert_result(conn: Any, result: FetchResult, *, source_id: str, ingestion_r
             now,
             int(result.status_code),
             response_hash,
-            date.today().isoformat(),
+            request_asof.isoformat(),
             result.payload_text,
             ingestion_run_id,
             now,
@@ -790,7 +799,7 @@ def main() -> None:
                 placeholders = ",".join("?" for _ in processed)
                 conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (RUN_TYPE, *processed))
             for result in sorted(results, key=lambda item: item.job.ticker):
-                bars_upserted, actions_upserted = upsert_result(conn, result, source_id=source_id, ingestion_run_id=ingestion_run_id)
+                bars_upserted, actions_upserted = upsert_result(conn, result, source_id=source_id, ingestion_run_id=ingestion_run_id, request_asof=end)
                 total_bars += bars_upserted
                 total_actions += actions_upserted
                 if result.error:

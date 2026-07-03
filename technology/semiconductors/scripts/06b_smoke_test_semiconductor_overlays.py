@@ -177,6 +177,33 @@ def extract_links(html: str, base_url: str) -> list[str]:
     return links
 
 
+MONTH_NUMBERS = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+
+def parse_year_month(candidate: str) -> tuple[int, int] | None:
+    text = candidate.strip()
+    numeric = re.fullmatch(r"((?:20|19)\d{2})-(\d{2})", text)
+    if numeric:
+        return int(numeric.group(1)), int(numeric.group(2))
+    parts = re.split(r"\s+", text)
+    if len(parts) == 2 and parts[0].lower() in MONTH_NUMBERS:
+        return int(parts[1]), MONTH_NUMBERS[parts[0].lower()]
+    return None
+
+
 def latest_year_month(text: str) -> str:
     candidates: list[str] = []
     month_names = "January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
@@ -186,7 +213,12 @@ def latest_year_month(text: str) -> str:
         candidates.append(f"{match.group(1)} {match.group(2)}")
     for match in re.finditer(r"\b((?:20|19)\d{2})[-/](0[1-9]|1[0-2])\b", text):
         candidates.append(f"{match.group(1)}-{match.group(2)}")
-    return candidates[-1] if candidates else ""
+    # Matches arrive in document order, not chronological order, so pick the
+    # maximum by parsed (year, month) rather than the last regex hit.
+    dated = [(parsed, candidate) for parsed, candidate in ((parse_year_month(candidate), candidate) for candidate in candidates) if parsed is not None]
+    if not dated:
+        return ""
+    return max(dated, key=lambda item: item[0])[1]
 
 
 def parse_xlsx_smoke(body: bytes) -> tuple[int, str, str]:

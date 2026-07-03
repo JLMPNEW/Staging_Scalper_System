@@ -1272,6 +1272,14 @@ biotech_historical_sequence:
   # Mirrors biotech_refresh.step_timeout_sec so both orchestrators share the same
   # default without requiring a CLI --step-timeout-sec override.
   step_timeout_sec: 28800
+  # Historical CSV generation is intended for Stage 11 research calibration, so
+  # rows are evaluated against point-in-time membership and the delisted
+  # calibration universe by default. Use --current-universe-replay only for a
+  # diagnostic replay that must not feed Stage 11.
+  survivorship_corrected_panel: true
+  # Blank means generated history is pre-lock research. Set a YYYY-MM-DD date
+  # only after a formal Stage 11 lockbox/OOS start date is declared.
+  strict_oos_start_date: ""
 
 biotech_refresh:
   timing_csv: "../output/biotech_index_reports/biotech_refresh_timing.csv"

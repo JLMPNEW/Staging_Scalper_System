@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import math
@@ -86,8 +87,26 @@ def _stale_ok(row: dict[str, str], tolerance: int) -> bool:
     return value is not None and 0 <= value <= tolerance
 
 
-def _field_check(rows: list[dict[str, str]], expected: list[str]) -> list[str]:
+def _csv_header(path: Path) -> list[str]:
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            return next(reader, [])
+    except OSError:
+        return []
+
+
+def _field_check(
+    rows: list[dict[str, str]],
+    expected: list[str],
+    *,
+    path: Path | None = None,
+    allow_header_only: bool = False,
+) -> list[str]:
     if not rows:
+        if allow_header_only and path is not None:
+            actual_header = _csv_header(path)
+            return [] if actual_header == expected else [f"columns={actual_header} expected={expected}"]
         return ["no_rows"]
     actual = list(rows[0].keys())
     return [] if actual == expected else [f"columns={actual} expected={expected}"]
@@ -106,6 +125,29 @@ def _table_freshness(
     if bad:
         examples = [f"{r.get('ticker') or r.get('source_pipeline') or label}:{r.get('staleness_days')}" for r in bad[:5]]
         return [f"{label}:stale_or_invalid tolerance={tolerance} examples={examples}"]
+    return []
+
+
+def _sector_freshness(rows: list[dict[str, str]], tolerances: dict[str, Any]) -> list[str]:
+    if not rows:
+        return ["sector_fit:missing"]
+    label_by_level = {
+        "industry": "industry_fit",
+        "industry_aggregate": "industry_aggregate_fit",
+        "sector": "sector_fit",
+    }
+    bad = []
+    for row in rows:
+        level = str(row.get("macro_level", "")).strip()
+        label = label_by_level.get(level, "sector_fit")
+        tolerance = int(tolerances.get(label, tolerances.get("sector_fit", 30)))
+        if not _stale_ok(row, tolerance):
+            bad.append(
+                f"{row.get('source_pipeline') or 'sector_fit'}:{level or 'missing_level'}:"
+                f"{row.get('staleness_days')} tolerance={tolerance}"
+            )
+    if bad:
+        return [f"sector_fit:stale_or_invalid examples={bad[:5]}"]
     return []
 
 
@@ -192,7 +234,16 @@ def main() -> int:  # noqa: C901
         ("macro_foreign_budget", foreign_budget, MACRO_FOREIGN_BUDGET_FIELDS),
         ("macro_foreign_candidates", foreign_candidates, MACRO_FOREIGN_CANDIDATE_FIELDS),
     ]:
-        schema_bad.extend(f"{label}:{msg}" for msg in _field_check(rows, expected))
+        path = file_paths[f"{label}.csv"]
+        schema_bad.extend(
+            f"{label}:{msg}"
+            for msg in _field_check(
+                rows,
+                expected,
+                path=path,
+                allow_header_only=(label == "macro_foreign_candidates"),
+            )
+        )
     rec("macro_contract_schema", "PASS" if not schema_bad else "FAIL",
         "all macro contract files expose exact schemas" if not schema_bad else f"{schema_bad[:8]}")
 
@@ -235,7 +286,7 @@ def main() -> int:  # noqa: C901
     freshness_bad = []
     freshness_bad.extend(_table_freshness(regime, tolerance=int(tol.get("regime", 5)), label="regime"))
     freshness_bad.extend(_table_freshness(country, tolerance=int(tol.get("country_fit", 30)), label="country_fit"))
-    freshness_bad.extend(_table_freshness(sector, tolerance=int(tol.get("sector_fit", 30)), label="sector_fit"))
+    freshness_bad.extend(_sector_freshness(sector, tol))
     freshness_bad.extend(_table_freshness(stock, tolerance=int(tol.get("stock_fit", 30)), label="stock_fit"))
     freshness_bad.extend(_table_freshness(
         foreign_budget,
@@ -318,11 +369,21 @@ def main() -> int:  # noqa: C901
     # 9. Build meta still matches input/source files and artifact hashes.
     meta_bad = []
     inputs = meta.get("inputs_sha256") or {}
+    configured_stock_fallback_policy = str(cfg_get(config, "macro.stock_fallback_policy", ""))
+    if str(meta.get("stock_fallback_policy", "")) != configured_stock_fallback_policy:
+        meta_bad.append("stock_fallback_policy:meta_config_mismatch")
     expected_inputs = {
         "config.yaml": config_path,
         "stocks_scores.csv": scores_path,
         "manifest.json": stage1_manifest_path,
     }
+    optimizer_inputs = {
+        "optimizer/target_weights.csv": run_dir / "optimizer" / "target_weights.csv",
+        "optimizer/optimizer_manifest.json": run_dir / "optimizer" / "optimizer_manifest.json",
+    }
+    for name, path in optimizer_inputs.items():
+        if name in inputs or path.exists():
+            expected_inputs[name] = path
     expected_inputs.update(sqlite_snapshot_inputs(serving_db_path))
     for name, path in expected_inputs.items():
         if not path.exists():
@@ -330,8 +391,9 @@ def main() -> int:  # noqa: C901
             continue
         if inputs.get(name) != sha256_file(path):
             meta_bad.append(f"{name}:input_hash_mismatch")
+    db_prefix = f"{serving_db_path.expanduser().resolve().name}-"
     for recorded_name in inputs:
-        if recorded_name.startswith("macro_serving.sqlite-") and recorded_name not in expected_inputs:
+        if recorded_name.startswith(db_prefix) and recorded_name not in expected_inputs:
             meta_bad.append(f"{recorded_name}:recorded_input_missing")
     for name in SOURCE_FILES:
         path = PACKAGE_ROOT / "macro" / name

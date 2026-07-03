@@ -149,7 +149,6 @@ def validate() -> int:
         ph_all = placeholders(all_tickers)
         ph_universe = placeholders(universe_query)
         params_all = (source_id, *all_tickers)
-        params_universe = (source_id, *universe_query)
 
         price_rows = conn.execute(
             f"""
@@ -295,7 +294,7 @@ def validate() -> int:
         total_bars = scalar(conn, f"SELECT COUNT(*) FROM fact_price_ohlcv WHERE source_id = ? AND ticker IN ({ph_all})", params_all)
         raw_response_count = scalar(
             conn,
-            f"SELECT COUNT(DISTINCT endpoint || COALESCE(query_params_json, '')) FROM raw_api_responses WHERE source_id = ? AND asof_date = ?",
+            "SELECT COUNT(DISTINCT endpoint || COALESCE(query_params_json, '')) FROM raw_api_responses WHERE source_id = ? AND asof_date = ?",
             (source_id, audit_asof.isoformat()),
         )
 

@@ -27,6 +27,17 @@ LOGGER = logging.getLogger("load_defense_universe")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 RUN_TYPE = "load_defense_universe"
 LOAD_STAGE = "defense_universe_load"
+STALE_ACTIVE_TICKER_PURGE_TABLES = (
+    "fact_price_ohlcv",
+    "fact_market_snapshot",
+    "feature_market_technical",
+    "fact_sec_filing",
+    "dim_issuer_reporting_profile",
+    "fact_sec_xbrl_fact_raw",
+    "fact_sec_xbrl_fact",
+    "fact_financial_statement_canonical",
+    "feature_financial_statement",
+)
 
 
 @dataclass(frozen=True)
@@ -449,6 +460,14 @@ def upsert_universe(
     tickers = [company.ticker for company in companies]
     placeholders = ",".join("?" for _ in tickers)
     conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (LOAD_STAGE, *tickers))
+    stale_count = reset_stale_active_seed_entities(
+        conn,
+        model_family=companies[0].model_family,
+        seed_source_id=seed_source_id,
+        incoming_tickers=set(tickers),
+    )
+    if stale_count:
+        LOGGER.info("Removed stale active defense seed entities: count=%d", stale_count)
     conn.execute(
         """
         DELETE FROM dim_universe_membership
@@ -665,6 +684,63 @@ def upsert_universe(
                 severity="warning",
             )
     return len(companies)
+
+
+def reset_stale_active_seed_entities(
+    conn: Any,
+    *,
+    model_family: str,
+    seed_source_id: str,
+    incoming_tickers: set[str],
+) -> int:
+    existing_rows = conn.execute(
+        """
+        SELECT DISTINCT ticker
+        FROM dim_universe_membership
+        WHERE model_family = ?
+          AND membership_source_id = ?
+          AND membership_basis = 'current_source_of_truth'
+        """,
+        (model_family, seed_source_id),
+    ).fetchall()
+    stale_tickers = sorted({str(row["ticker"]) for row in existing_rows} - incoming_tickers)
+    if not stale_tickers:
+        return 0
+
+    placeholders = ",".join("?" for _ in stale_tickers)
+    conn.execute(
+        f"DELETE FROM data_quality_issues WHERE ticker IN ({placeholders})",
+        tuple(stale_tickers),
+    )
+    purge_ticker_scoped_rows(conn, tickers=stale_tickers)
+    deleted = conn.execute(
+        f"""
+        DELETE FROM dim_company
+        WHERE ticker IN ({placeholders})
+          AND is_active = 1
+          AND NOT EXISTS (
+              SELECT 1
+              FROM dim_universe_membership m
+              WHERE m.company_id = dim_company.company_id
+                AND NOT (m.model_family = ? AND m.membership_source_id = ?)
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM dim_delisted_calibration_seed d
+              WHERE d.model_family = ?
+                AND (d.ticker = dim_company.ticker OR d.internal_ticker = dim_company.ticker)
+          )
+        """,
+        (*stale_tickers, model_family, seed_source_id, model_family),
+    ).rowcount
+    return int(deleted if deleted is not None else 0)
+
+
+def purge_ticker_scoped_rows(conn: Any, *, tickers: list[str]) -> None:
+    placeholders = ",".join("?" for _ in tickers)
+    params = tuple(tickers)
+    for table in STALE_ACTIVE_TICKER_PURGE_TABLES:
+        conn.execute(f"DELETE FROM {table} WHERE ticker IN ({placeholders})", params)
 
 
 def main() -> int:

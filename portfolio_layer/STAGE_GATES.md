@@ -811,6 +811,12 @@ constraint, harvest-staggering so realized gains spread over time).
 
 **Goal:** the rigorous gate wrapping the combined system; lockbox period untouched until final.
 
+**Binding protocol:** `docs/LOCKBOX_PROTOCOL.md` (declared 2026-06-27, sealed BEFORE any historical
+replay/calibration result was inspected). It fixes the windows — development 2024-01-02..2025-12-31,
+lockbox 2026-01-01..Open Event — plus purge/embargo rules, the registered comparison arms (payout
+excluded by default), promotion criteria, the one-open policy, and enforcement (`65`/`66`/`16` refuse
+sealed dates without `--lockbox-open`; manifests record the protocol file's sha256).
+
 **Readiness tracker - what exists vs. what Stage 11 still needs:**
 
 | area | current implementation / data status | still required for full Stage 11 |

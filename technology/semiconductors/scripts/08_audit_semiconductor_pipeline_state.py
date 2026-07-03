@@ -254,6 +254,9 @@ def main() -> int:
     rank_ready_exempt = cfg_ticker_set(cfg_get(config, "semiconductor_calibrated_scoring.rank_ready_exempt_tickers", []))
     max_dead_pct = float(cfg_get(config, "semiconductor_scoring_features.max_dead_core_component_pct", 0.20))
     wsts_max_stale_days = int(cfg_get(config, "semiconductor_pipeline_audit.wsts_max_stale_days", 75))
+    wsts_raw_source = str(cfg_get(config, "semiconductor_sector_overlays.wsts.source_id", "wsts_historical_billings"))
+    capex_raw_source = str(cfg_get(config, "semiconductor_sector_overlays.big_tech_capex.source_id", "sec_big_tech_capex"))
+    capex_feature_source = str(cfg_get(config, "semiconductor_sector_overlays.big_tech_capex.feature_source_id", "semiconductor_big_tech_capex_cycle"))
     require_stage8 = cfg_bool(config, "semiconductor_pipeline_audit.require_stage8_outputs", False)
     require_governance = cfg_bool(config, "semiconductor_pipeline_audit.require_governance_reports", True)
     min_historical_membership = int(cfg_get(config, "technology_universe.min_historical_membership_tickers", 20))
@@ -475,20 +478,30 @@ def main() -> int:
             "PASS" if int(wsts_row["rows"] or 0) > 1200 else "FAIL",
             f"{int(wsts_row['rows'] or 0)} rows, latest={wsts_row['max_month'] if wsts_row else None}",
         )
+        # Audit-side escalation only (scoring staleness handling is unchanged):
+        # WARN within 2x the configured cap, FAIL beyond it.
+        if wsts_stale_days is not None and wsts_stale_days <= wsts_max_stale_days:
+            wsts_freshness_status = "PASS"
+        elif wsts_stale_days is not None and wsts_stale_days > 2 * wsts_max_stale_days:
+            wsts_freshness_status = "FAIL"
+        else:
+            wsts_freshness_status = "WARN"
         add_check(
             checks,
             "wsts_freshness",
-            "PASS" if wsts_stale_days is not None and wsts_stale_days <= wsts_max_stale_days else "WARN",
-            f"latest month start {wsts_stale_days} days old (max {wsts_max_stale_days})",
+            wsts_freshness_status,
+            f"latest month start {wsts_stale_days} days old (max {wsts_max_stale_days}, fail beyond {2 * wsts_max_stale_days})",
         )
 
         capex_feature = conn.execute(
             """
             SELECT *
             FROM feature_big_tech_capex_cycle
+            WHERE source_id = ? AND model_family = ?
             ORDER BY asof_date DESC
             LIMIT 1
-            """
+            """,
+            (capex_feature_source, model_family),
         ).fetchone()
         capex_summary = conn.execute(
             """
@@ -499,7 +512,9 @@ def main() -> int:
                    SUM(CASE WHEN duration_days > 120 THEN 1 ELSE 0 END) AS ytd_span_rows,
                    SUM(CASE WHEN duration_days BETWEEN 70 AND 120 THEN 1 ELSE 0 END) AS quarter_span_rows
             FROM fact_big_tech_capex
-            """
+            WHERE source_id = ?
+            """,
+            (capex_raw_source,),
         ).fetchone()
         summary["big_tech_capex"] = dict(capex_summary) if capex_summary else {}
         summary["latest_big_tech_capex_feature"] = dict(capex_feature) if capex_feature else {}
@@ -528,14 +543,15 @@ def main() -> int:
             """
             SELECT source_id, COUNT(*) AS rows
             FROM raw_api_responses
-            WHERE source_id IN ('wsts_historical_billings', 'sec_big_tech_capex')
+            WHERE source_id IN (?, ?)
             GROUP BY source_id
             ORDER BY source_id
             """,
+            (wsts_raw_source, capex_raw_source),
         )
         summary["raw_api_response_counts"] = raw_counts
         raw_by_source = {str(row["source_id"]): int(row["rows"] or 0) for row in raw_counts}
-        for source_id in ("wsts_historical_billings", "sec_big_tech_capex"):
+        for source_id in (wsts_raw_source, capex_raw_source):
             add_check(
                 checks,
                 f"raw_response_{source_id}",
@@ -543,14 +559,23 @@ def main() -> int:
                 f"{raw_by_source.get(source_id, 0)} raw response rows",
             )
 
+        # Residual scoping: only this family's issues should gate the audit.
+        # Family-owned stages carry 'semiconductor' in the name or are the
+        # overlay sync stages; shared technology-wide stages (price/SEC/
+        # positioning syncs) are included only when the issue ticker belongs
+        # to the semiconductor universe.
         issue_rows = fetch_dicts(
             conn,
-            """
+            f"""
             SELECT stage, severity, COALESCE(resolution_status, '') AS resolution_status, COUNT(*) AS rows
             FROM data_quality_issues
+            WHERE stage LIKE '%semiconductor%'
+               OR stage IN ('sync_wsts_billings', 'sync_big_tech_capex')
+               OR ticker IN ({ph})
             GROUP BY stage, severity, COALESCE(resolution_status, '')
             ORDER BY stage, severity, resolution_status
             """,
+            (*tickers,),
         )
         summary["data_quality_issue_summary"] = issue_rows
         unresolved_bad = [

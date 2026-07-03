@@ -172,7 +172,7 @@ def active_companies(conn: Any, *, model_family: str, include_historical: bool) 
         where = "WHERE c.is_active = 1"
     rows = conn.execute(
         f"""
-        SELECT
+        SELECT DISTINCT
             c.ticker,
             c.company_name,
             c.cik,

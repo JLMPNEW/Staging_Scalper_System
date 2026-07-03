@@ -63,7 +63,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--train-dates", type=int, default=36, help="Rolling train window in panel dates.")
     parser.add_argument("--test-dates", type=int, default=6, help="Forward test window in panel dates.")
-    parser.add_argument("--embargo-days", type=int, default=90, help="Calendar-day embargo between train and test.")
+    # 100 (not 90): the 63-trading-day horizon spans ~91 calendar days, so a
+    # 90-day embargo can leave the last train date's forward return window
+    # overlapping the test block by a day or two around weekends/holidays.
+    parser.add_argument("--embargo-days", type=int, default=100, help="Calendar-day embargo between train and test.")
     parser.add_argument("--min-train-dates", type=int, default=24)
     parser.add_argument("--min-test-dates", type=int, default=4)
     return parser.parse_args()
@@ -74,7 +77,7 @@ def stats(values: list[float]) -> dict[str, Any]:
     if not values:
         return {"n": 0, "mean": "", "t_stat": "", "hit_rate": ""}
     mean = sum(values) / n
-    std = math.sqrt(sum((value - mean) ** 2 for value in values) / (n - 1)) if n > 2 else None
+    std = math.sqrt(sum((value - mean) ** 2 for value in values) / (n - 1)) if n >= 2 else None
     t_stat = mean / std * math.sqrt(n) if std and std > 0 else None
     return {
         "n": n,
@@ -249,12 +252,38 @@ def main() -> int:
     upstream_source = str(cfg_get(config, "positioning_import.form4_source_id", "sec_insider_upstream"))
     model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors"))
     short_change_days = int(cfg_get(config, "positioning_import.lookback_days.short_change", 92))
+    include_inactive = bool(cfg_get(config, f"{CONFIG_KEY}.include_inactive_tickers", cfg_get(config, "semiconductor_optuna_calibration.include_inactive_tickers", True)))
 
     with diag.ro_connect(db_path) as conn:
         assert isinstance(conn, sqlite3.Connection)
-        universe = [
-            normalize_ticker(row["ticker"])
-            for row in conn.execute(
+        # Same PIT membership-interval universe as 07/optuna: taking only
+        # dim_company.is_active=1 drops delisted names and injects
+        # survivorship bias into every fold.
+        membership_by_ticker: dict[str, list[tuple[date, date | None]]] = {}
+        if include_inactive:
+            membership_rows = conn.execute(
+                """
+                SELECT m.ticker, m.start_date, m.end_date
+                FROM dim_universe_membership m
+                JOIN dim_technology_taxonomy t
+                  ON t.ticker = m.ticker
+                 AND t.model_family = m.model_family
+                WHERE m.model_family = ?
+                  AND m.point_in_time_flag = 1
+                  AND m.membership_status IN ('active', 'historical', 'inactive', 'review')
+                ORDER BY m.ticker, m.start_date
+                """,
+                (model_family,),
+            ).fetchall()
+            for row in membership_rows:
+                ticker = normalize_ticker(row["ticker"])
+                start_value = diag.parse_date(row["start_date"])
+                if not ticker or start_value is None:
+                    continue
+                membership_by_ticker.setdefault(ticker, []).append((start_value, diag.parse_date(row["end_date"])))
+
+        if not membership_by_ticker:
+            universe_rows = conn.execute(
                 """
                 SELECT c.ticker FROM dim_company c
                 JOIN dim_technology_taxonomy t ON t.ticker = c.ticker AND t.model_family = ?
@@ -262,8 +291,13 @@ def main() -> int:
                 """,
                 (model_family,),
             ).fetchall()
-            if normalize_ticker(row["ticker"])
-        ]
+            for row in universe_rows:
+                ticker = normalize_ticker(row["ticker"])
+                if not ticker:
+                    continue
+                membership_by_ticker[ticker] = [(date(1900, 1, 1), None)]
+
+        universe = sorted(membership_by_ticker)
         prices = diag.load_prices(conn, price_sources, universe + [bench_ticker, "SOXX"])
         bench = prices.get(bench_ticker, diag.PriceSeries())
         soxx = prices.get("SOXX", diag.PriceSeries())
@@ -299,7 +333,8 @@ def main() -> int:
         asof_iso = asof.isoformat()
         feature_rows: list[dict[str, Any]] = []
         fwd_resid: dict[int, dict[str, float]] = {h: {} for h in horizons}
-        for ticker in universe:
+        members = [ticker for ticker in universe if diag.is_member_on_date(membership_by_ticker.get(ticker), asof)]
+        for ticker in members:
             series = prices.get(ticker)
             if series is None or not series.dates:
                 continue

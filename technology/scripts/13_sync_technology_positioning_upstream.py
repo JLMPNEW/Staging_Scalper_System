@@ -89,7 +89,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Rebuild institutional_13f_ownership_snapshots from already-loaded holdings without fetching any source.",
     )
-    parser.add_argument("--force-13f-reprocess", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--finra-max-files", type=int, default=0)
     parser.add_argument("--sec-13f-max-archives", type=int, default=0)
     parser.add_argument("--ibkr-host", default="127.0.0.1")
@@ -249,9 +248,11 @@ def aggregate_13f_ownership_for_tickers(conn: Any, tickers: list[str], *, source
         value = to_float(row["market_value"], 0.0) or 0.0
         bucket = buckets.setdefault(key, {})
         current = bucket.get(manager)
-        if current is None or filing_date > current[0]:
+        # Compare (filing_date, accession) so a distinct accession filed the same
+        # day (e.g. an amendment) replaces the earlier one instead of being dropped.
+        if current is None or (filing_date, accession) > (current[0], current[1]):
             bucket[manager] = (filing_date, accession, shares, value)
-        elif filing_date == current[0] and accession == current[1]:
+        elif (filing_date, accession) == (current[0], current[1]):
             bucket[manager] = (filing_date, accession, current[2] + shares, current[3] + value)
         latest_filing[key] = max(latest_filing.get(key, ""), filing_date)
     records: list[tuple[Any, ...]] = []

@@ -77,6 +77,13 @@ def parse_iso_date(value: object) -> date | None:
         return None
 
 
+def row_flag(row: dict[str, str], field: str) -> bool:
+    try:
+        return int(float(str(row.get(field, "0")).strip() or "0")) != 0
+    except (TypeError, ValueError):
+        return False
+
+
 def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
     configure_utc_logging()
     args = parse_args()
@@ -128,7 +135,8 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         for s in enabled_sectors
         if str(s.get("model_family", ""))
     }
-    max_abs_expected_alpha = parse_float(cfg_get(config, "score_contract.max_abs_expected_alpha", 1.0)) or 1.0
+    parsed_max_abs_expected_alpha = parse_float(cfg_get(config, "score_contract.max_abs_expected_alpha", 1.0))
+    max_abs_expected_alpha = 1.0 if parsed_max_abs_expected_alpha is None else parsed_max_abs_expected_alpha
     bands = {**DEFAULT_RATING_BANDS, **cfg_get(config, "score_contract.rating_bands", {})}
 
     checks: list[dict] = []
@@ -151,12 +159,12 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
            "all contract fields present" if not missing and rows else f"missing/empty: {missing or 'no rows'}")
 
     # 2. non-null keys
-    bad_keys = [r["ticker"] for r in rows if any(not str(r.get(k, "")).strip() for k in KEY_FIELDS)]
+    bad_keys = [r.get("ticker", "<missing>") for r in rows if any(not str(r.get(k, "")).strip() for k in KEY_FIELDS)]
     record("non_null_keys", "PASS" if not bad_keys else "FAIL",
            "all key fields populated" if not bad_keys else f"{len(bad_keys)} rows with empty keys")
 
     # 3. single as-of
-    asofs = {r["as_of_date"] for r in rows}
+    asofs = {str(r.get("as_of_date", "")).strip() for r in rows}
     record("single_as_of", "PASS" if asofs == {run_as_of} else "FAIL", f"as_of values={sorted(asofs)}")
 
     # 3b. required sector/pipeline presence
@@ -183,7 +191,9 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
     # 5. ticker uniqueness
     seen: dict[str, int] = {}
     for r in rows:
-        seen[r["ticker"]] = seen.get(r["ticker"], 0) + 1
+        ticker = str(r.get("ticker", "")).strip()
+        if ticker:
+            seen[ticker] = seen.get(ticker, 0) + 1
     dups = sorted(t for t, c in seen.items() if c > 1)
     record("ticker_uniqueness", "PASS" if not dups else "FAIL",
            "one row per ticker" if not dups else f"duplicates: {dups[:10]}")
@@ -211,6 +221,12 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
             bad_numeric.append(f"{ticker}:stage1_sample_role={r.get('stage1_sample_role')}")
         if str(r.get("oos_score_valid_flag", "")).strip() not in ("0", "1"):
             bad_numeric.append(f"{ticker}:oos_score_valid_flag={r.get('oos_score_valid_flag')}")
+        if str(r.get("missing_score_flag", "")).strip() not in ("0", "1"):
+            bad_numeric.append(f"{ticker}:missing_score_flag={r.get('missing_score_flag')}")
+        if str(r.get("survivorship_corrected_panel_flag", "")).strip() not in ("0", "1"):
+            bad_numeric.append(
+                f"{ticker}:survivorship_corrected_panel_flag={r.get('survivorship_corrected_panel_flag')}"
+            )
         if parse_float(r.get("staleness_days")) is None:
             bad_numeric.append(f"{ticker}:staleness_days=missing_or_non_numeric")
     record("numeric_fields_valid", "PASS" if not bad_numeric else "FAIL",
@@ -255,7 +271,9 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
     # 7. monotonic final_score vs native within sector
     by_pipe_rows: dict[str, list[dict]] = {}
     for r in rows:
-        by_pipe_rows.setdefault(r["source_pipeline"], []).append(r)
+        pipe = str(r.get("source_pipeline", "")).strip()
+        if pipe:
+            by_pipe_rows.setdefault(pipe, []).append(r)
     non_monotone = []
     for pipe, srows in by_pipe_rows.items():
         pairs = [
@@ -263,6 +281,7 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
             for native, final in (
                 (parse_float(r.get("native_score")), parse_float(r.get("final_score")))
                 for r in srows
+                if not row_flag(r, "missing_score_flag")
             )
             if native is not None and final is not None
         ]
@@ -279,6 +298,13 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         valid_rows: list[dict] = []
         for r in srows:
             native = parse_float(r.get("native_score"))
+            if row_flag(r, "missing_score_flag"):
+                actual_pct = parse_float(r.get("within_sector_percentile"))
+                actual_rating = str(r.get("rating", "")).strip()
+                final_score = parse_float(r.get("final_score"))
+                if actual_pct != 0.0 or actual_rating != "avoid" or final_score is None or abs(final_score) > 1e-12:
+                    bad_pct_rating.append(f"{r.get('ticker', '<missing>')}:{pipe}:missing_score_not_neutral_avoid")
+                continue
             if native is None:
                 bad_pct_rating.append(f"{r.get('ticker', '<missing>')}:{pipe}:native_score_unparseable")
                 continue
@@ -291,12 +317,12 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
             actual_pct = parse_float(r.get("within_sector_percentile"))
             if actual_pct is None or abs(actual_pct - expected_pct) > 0.0001:
                 bad_pct_rating.append(
-                    f"{r['ticker']}:{pipe}:pct expected={expected_pct} actual={actual_pct}"
+                    f"{r.get('ticker', '<missing>')}:{pipe}:pct expected={expected_pct} actual={actual_pct}"
                 )
             expected_rating = rating_for_percentile(pct, bands)
             if str(r.get("rating", "")).strip() != expected_rating:
                 bad_pct_rating.append(
-                    f"{r['ticker']}:{pipe}:rating expected={expected_rating} actual={r.get('rating')}"
+                    f"{r.get('ticker', '<missing>')}:{pipe}:rating expected={expected_rating} actual={r.get('rating')}"
                 )
     record("percentile_rating_final_population", "PASS" if not bad_pct_rating else "FAIL",
            "percentile/rating recompute from final sector populations" if not bad_pct_rating else (
@@ -314,6 +340,8 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         or str(r.get("calibration_sample_role", "")).strip() not in SAMPLE_ROLES
         or str(r.get("stage1_sample_role", "")).strip() not in SAMPLE_ROLES
         or str(r.get("oos_score_valid_flag", "")).strip() not in ("0", "1")
+        or str(r.get("missing_score_flag", "")).strip() not in ("0", "1")
+        or str(r.get("survivorship_corrected_panel_flag", "")).strip() not in ("0", "1")
     ]
     record("eligibility_populated", "PASS" if not bad_elig else "FAIL",
            "allocation and calibration eligibility flags in {0,1} with reasons" if not bad_elig else f"{len(bad_elig)} rows bad")
@@ -327,14 +355,34 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         source_role = str(r.get("calibration_sample_role", "")).strip()
         stage1_role = str(r.get("stage1_sample_role", "")).strip()
         oos = str(r.get("oos_score_valid_flag", "")).strip() == "1"
+        missing_score = str(r.get("missing_score_flag", "")).strip() == "1"
+        survivorship_corrected = str(r.get("survivorship_corrected_panel_flag", "")).strip() == "1"
+        eligibility_reason = str(r.get("eligibility_reason", "")).strip().lower()
+        research_reason = str(r.get("calibration_research_reason", "")).strip().lower()
+        final_score = parse_float(r.get("final_score"))
+        percentile = parse_float(r.get("within_sector_percentile"))
+        rating = str(r.get("rating", "")).strip()
         if investable and stage1_role != "strict_oos":
             invariant_errors.append(f"{ticker}:investable_requires_stage1_strict_oos:{stage1_role}")
         if stage1_role == "strict_oos" and not oos:
             invariant_errors.append(f"{ticker}:strict_oos_requires_oos_score_valid")
         if investable and not research:
             invariant_errors.append(f"{ticker}:investable_requires_calibration_research_eligible")
+        if investable and eligibility_reason != "ok":
+            invariant_errors.append(f"{ticker}:investable_requires_ok_reason:{eligibility_reason}")
+        if not investable and eligibility_reason == "ok":
+            invariant_errors.append(f"{ticker}:ineligible_reason_must_not_be_ok")
+        if research and research_reason != "ok":
+            invariant_errors.append(f"{ticker}:research_eligible_requires_ok_reason:{research_reason}")
         if stage1_role == "strict_oos" and source_role != "strict_oos":
             invariant_errors.append(f"{ticker}:stage1_strict_oos_requires_source_strict_oos:{source_role}")
+        if research and stage1_role == "pre_lock_research" and not survivorship_corrected:
+            invariant_errors.append(f"{ticker}:pre_lock_research_requires_survivorship_corrected_panel")
+        if missing_score:
+            if investable or research:
+                invariant_errors.append(f"{ticker}:missing_score_must_not_be_investable_or_research_eligible")
+            if final_score is None or abs(final_score) > 1e-12 or percentile != 0.0 or rating != "avoid":
+                invariant_errors.append(f"{ticker}:missing_score_requires_neutral_avoid_contract")
     record(
         "eligibility_invariants_hold",
         "PASS" if not invariant_errors else "FAIL",
@@ -359,10 +407,10 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
             continue
         d = int(d_float)
         if source_date > run_date or d < 0:
-            future.append((r["source_pipeline"], r["ticker"], r.get("source_asof_date", ""), d))
+            future.append((r.get("source_pipeline", ""), r.get("ticker", ""), r.get("source_asof_date", ""), d))
         row_tolerance = tolerance_by_pipeline.get(str(r.get("source_pipeline", "")).strip(), tolerance)
         if d > row_tolerance:
-            stale.append((r["source_pipeline"], d, row_tolerance))
+            stale.append((r.get("source_pipeline", ""), d, row_tolerance))
     record("source_dates_valid", "PASS" if not bad_dates else "FAIL",
            "run/source dates parse" if not bad_dates else f"{len(bad_dates)} rows have invalid dates")
     record("no_future_sources", "PASS" if not future else "FAIL",

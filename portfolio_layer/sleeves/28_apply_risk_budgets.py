@@ -77,6 +77,11 @@ def _f(value: Any) -> float | None:
     return parsed if parsed == parsed and abs(parsed) != float("inf") else None
 
 
+def _f_default(value: Any, default: float) -> float:
+    parsed = _f(value)
+    return default if parsed is None else parsed
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -218,8 +223,8 @@ def main() -> int:  # noqa: C901
         prior[t] = w
         sleeve_of[t] = str(r.get("sleeve", "")).strip()
         pipe_of[t] = str(r.get("source_pipeline", "")).strip()
-        alpha[t] = _f(r.get("final_score")) or 0.0
-    cash_weight = _f(meta27.get("cash_weight")) or 0.0
+        alpha[t] = _f_default(r.get("final_score"), 0.0)
+    cash_weight = _f_default(meta27.get("cash_weight"), 0.0)
     invested_gross = sum(prior.values())
 
     cov = pd.read_csv(art["covariance"], index_col=0)
@@ -238,10 +243,10 @@ def main() -> int:  # noqa: C901
     for t, s in sleeve_of.items():
         members.setdefault(s, []).append(t)
     sleeve_budgets = dict((meta27.get("regime") or {}).get("sleeve_risk_budgets") or {})
-    tilt = _f(cfg_get(config, "sleeves.within_sleeve_ir_tilt", 0.5)) or 0.5
-    rc_cap = _f(cfg_get(config, "sleeves.per_name_risk_contribution_cap", 0.08)) or 0.08
-    max_weight = _f(cfg_get(config, "sleeves.max_weight_per_name", 0.05)) or 0.05
-    max_iter = int(_f(cfg_get(config, "sleeves.projection.max_iterations", 50)) or 50)
+    tilt = _f_default(cfg_get(config, "sleeves.within_sleeve_ir_tilt", 0.5), 0.5)
+    rc_cap = _f_default(cfg_get(config, "sleeves.per_name_risk_contribution_cap", 0.08), 0.08)
+    max_weight = _f_default(cfg_get(config, "sleeves.max_weight_per_name", 0.05), 0.05)
+    max_iter = int(_f_default(cfg_get(config, "sleeves.projection.max_iterations", 50), 50.0))
 
     target_b = _target_risk_budget(members=members, sleeve_budgets=sleeve_budgets, ir=ir, tilt=tilt, rc_cap=rc_cap)
     weights = solve_risk_budget(cov, target_b, gross=invested_gross, max_weight=max_weight, max_iter=max_iter)
@@ -320,7 +325,7 @@ def main() -> int:  # noqa: C901
         {"before": enb_before, "after": enb_after,
          "improvement": round(enb_after["enb"] - enb_before["enb"], 4)}, indent=2, sort_keys=True), encoding="utf-8")
     throttle_apply = bool(cfg_get(config, "sleeves.drawdown_throttle.apply", False))
-    dd_limit = _f(cfg_get(config, "sleeves.drawdown_throttle.dd_limit", 0.15)) or 0.15
+    dd_limit = _f_default(cfg_get(config, "sleeves.drawdown_throttle.dd_limit", 0.15), 0.15)
     simulated_throttle = {
         "applied_to_weights": throttle_apply,
         "dd_limit": dd_limit,

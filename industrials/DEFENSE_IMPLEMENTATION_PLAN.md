@@ -81,8 +81,8 @@ The delisted-ticker calibration seed is `ticker_mapping/aerospace_defense_delist
 
 Current known universe profile after enrichment:
 
-- 95 total tickers in `industrials/defense/system_csvs/defense_tickers.csv`.
-- 95 investable tickers.
+- 94 total tickers in `industrials/defense/system_csvs/defense_tickers.csv`.
+- 94 investable tickers.
 - No duplicate tickers.
 - No blank fields in the current system CSV.
 - Four current defense calibration cohorts:
@@ -276,7 +276,7 @@ Current defense calibration cohorts:
 
 Acceptance gates:
 
-- Source-of-truth CSV contains exactly 95 unique tickers.
+- Source-of-truth CSV contains exactly 94 unique tickers.
 - Duplicate tickers fail validation.
 - Required identity fields are present or explicitly waived in policy.
 - Missing CIK rows create data-quality issues and are not silently dropped.
@@ -356,7 +356,7 @@ Implementation:
   - `price_history_csv`
   - `issuer_id`
   - `reason`
-- Treat the provided live case as a required pattern: `HONAV` should map to `HONA` effective `2026-06-29` once the event is verified/approved. Because `2026-06-29` is after the current planning date of `2026-06-28`, snapshots before `2026-06-29` must still use `HONAV`; snapshots on or after `2026-06-29` must use the active symbol mapping.
+- Treat active ticker migrations as a reusable corporate-action pattern, but do not add synthetic segment bridges for one-off tickers without standalone public fundamentals. The `HONAV`/`HONA` case was removed from the defense universe to avoid adding parent-segment special handling for a single name.
 
 Acceptance gates:
 
@@ -369,7 +369,7 @@ Acceptance gates:
 Tests:
 
 - Alias CSV schema test.
-- HONAV/HONA effective-date test using dates before and after `2026-06-29`.
+- Effective-date alias routing test using a fixture ticker before and after its migration date.
 - Duplicate active/predecessor rank-ready rejection test.
 - Portfolio alias export validation.
 - Market-data symbol routing test.
@@ -1097,7 +1097,7 @@ Acceptance gates:
 - No duplicate canonical ticker rows remain after alias resolution.
 - Known cross-sleeve collisions, starting with `PLTR`, are pinned in `portfolio_layer/data/canonical_sector_overrides.csv`.
 - Active ticker aliases required for market-data fetching are present in the portfolio-layer alias contract or in a generated patch artifact.
-- The HONAV/HONA class of when-issued to regular-way migration is handled with effective-date logic; snapshots before the effective date use predecessor behavior, and snapshots on/after the effective date use the active market-data symbol.
+- When-issued to regular-way migrations are handled with effective-date logic when included in the universe; `HONAV`/`HONA` is intentionally excluded from defense rather than bridged through parent-segment fundamentals.
 - The `XAR` benchmark used by defense calibration matches the benchmark expected by the portfolio layer for defense excess-return and sleeve-risk calculations.
 - Same-market-date snapshots are immutable unless an explicit replacement workflow records the reason and new hash.
 - Portfolio-layer ingestion receives exactly one final rank CSV for a market date, not multiple competing CSVs.

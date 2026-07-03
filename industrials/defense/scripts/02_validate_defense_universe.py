@@ -259,8 +259,12 @@ def validate_universe() -> int:
         incomplete_issue_count = scalar(
             conn,
             f"""
-            SELECT COUNT(*) FROM data_quality_issues
-            WHERE stage = ? AND issue_type = 'incomplete_identity' AND ticker IN ({ph})
+            SELECT COUNT(DISTINCT ticker)
+            FROM data_quality_issues
+            WHERE stage = ?
+              AND issue_type = 'incomplete_identity'
+              AND resolution_status = 'open'
+              AND ticker IN ({ph})
             """,
             (LOAD_STAGE, *ticker_params),
         )

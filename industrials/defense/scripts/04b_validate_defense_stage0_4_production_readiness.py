@@ -258,7 +258,7 @@ def validate() -> int:
     cik_overrides_csv = resolve_path(cfg_get(config, "industrials_universe.cik_ticker_overrides_csv"), base_dir=base_dir)
     historical_csv = resolve_path(cfg_get(config, "industrials_universe.historical_membership_csv"), base_dir=base_dir)
     aliases_csv = resolve_path(cfg_get(config, "industrials_universe.ticker_aliases_csv"), base_dir=base_dir)
-    expected_active = int(cfg_get(config, "industrials_universe.expected_ticker_count", 95) or 95)
+    expected_active = int(cfg_get(config, "industrials_universe.expected_ticker_count", 0) or 0)
     active_source_id = str(cfg_get(config, "industrials_universe.seed_source_id", "defense_ticker_seed"))
     delisted_source_id = str(cfg_get(config, "industrials_universe.delisted_source_id", "defense_delisted_calibration_seed"))
     alias_source_id = str(cfg_get(config, "industrials_universe.ticker_aliases_source_id", "defense_ticker_alias_seed"))
@@ -279,6 +279,8 @@ def validate() -> int:
     delisted_rows = apply_cik_overrides(csv_rows_by_ticker(delisted_csv), cik_overrides, scope="delisted")
     historical_rows = read_csv_flexible(historical_csv)
     alias_rows = [row for row in read_csv_flexible(aliases_csv) if normalize_ticker(row_get(row, "contract_ticker"))]
+    if expected_active <= 0:
+        expected_active = len(active_rows)
 
     if db_path != configured_db and not args.allow_scratch_db:
         add_check(

@@ -218,11 +218,13 @@ def main() -> int:  # noqa: C901
         else:
             sleeve, reason = "long_core", "final_score_driver"
         sleeve_of[ticker] = sleeve
+        parsed_final_score = _f(srow.get("final_score"))
+        parsed_score_confidence = _f(srow.get("score_confidence"))
         assign_rows.append({
             "ticker": ticker, "source_pipeline": pipe, "sleeve": sleeve, "reason": reason,
             "weight": round(held[ticker], 10),
-            "final_score": round(_f(srow.get("final_score")) or 0.0, 10),
-            "score_confidence": round(_f(srow.get("score_confidence")) or 0.0, 8),
+            "final_score": round(0.0 if parsed_final_score is None else parsed_final_score, 10),
+            "score_confidence": round(0.0 if parsed_score_confidence is None else parsed_score_confidence, 8),
             "rating": str(srow.get("rating", "")).strip(),
             "sector_name": sector_by_ticker.get(ticker, pipe),
             "rotation_state": rotation_state.get(pipe, ""),
@@ -252,7 +254,11 @@ def main() -> int:  # noqa: C901
         rc = risk_contributions(held, cov)
         factor = factor_decomposition(held, cov, market_etf=market_etf, sector_etfs=sector_etfs)
         enb = effective_number_of_bets(held, cov)
-        ir = information_ratios({t: _f(scores.get(t, {}).get("final_score")) or 0.0 for t in held}, rc.sigma)
+        alpha_by_ticker = {}
+        for t in held:
+            parsed_alpha = _f(scores.get(t, {}).get("final_score"))
+            alpha_by_ticker[t] = 0.0 if parsed_alpha is None else parsed_alpha
+        ir = information_ratios(alpha_by_ticker, rc.sigma)
     except ValueError as exc:
         risk_bad.append(str(exc))
     rec("risk_model_computed", "PASS" if not risk_bad else "FAIL",

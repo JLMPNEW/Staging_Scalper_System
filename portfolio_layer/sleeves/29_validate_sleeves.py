@@ -67,6 +67,11 @@ def _f(value: Any) -> float | None:
     return parsed if parsed == parsed and abs(parsed) != float("inf") else None
 
 
+def _f_default(value: Any, default: float) -> float:
+    parsed = _f(value)
+    return default if parsed is None else parsed
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -195,7 +200,7 @@ def main() -> int:  # noqa: C901
         if t and w and w > 0:
             prior[t] = w
             sleeve_of[t] = str(r.get("sleeve", "")).strip()
-            ir_by_ticker[t] = _f(r.get("information_ratio")) or 0.0
+            ir_by_ticker[t] = _f_default(r.get("information_ratio"), 0.0)
     proposal: dict[str, float] = {}
     cash_after = 0.0
     for r in read_csv(art["proposal"]):
@@ -214,9 +219,9 @@ def main() -> int:  # noqa: C901
     missing_factors = sorted(t for t in required_factors if t not in cov.index or t not in cov.columns)
     rec("factor_universe_present", "PASS" if not missing_factors else "FAIL",
         f"all configured factor ETFs present: {required_factors}" if not missing_factors else f"missing={missing_factors}")
-    max_weight = _f(cfg_get(config, "sleeves.max_weight_per_name", 0.05)) or 0.05
-    rc_cap = _f(cfg_get(config, "sleeves.per_name_risk_contribution_cap", 0.08)) or 0.08
-    band = _f(cfg_get(config, "sleeves.sleeve_risk_budget_band", 0.05)) or 0.05
+    max_weight = _f_default(cfg_get(config, "sleeves.max_weight_per_name", 0.05), 0.05)
+    rc_cap = _f_default(cfg_get(config, "sleeves.per_name_risk_contribution_cap", 0.08), 0.08)
+    band = _f_default(cfg_get(config, "sleeves.sleeve_risk_budget_band", 0.05), 0.05)
 
     rc_after = risk_contributions(proposal, cov)
     factor_before = factor_decomposition(prior, cov, market_etf=market_etf, sector_etfs=sector_etfs)
@@ -238,7 +243,7 @@ def main() -> int:  # noqa: C901
         cons_bad.append(f"weight>cap_{max_weight}")
     if invested > prior_gross + 1e-6:
         cons_bad.append(f"added_gross={invested:.6f}>{prior_gross:.6f}")
-    stage7_cash = _f(meta28.get("cash_before")) or 0.0
+    stage7_cash = _f_default(meta28.get("cash_before"), 0.0)
     if cash_after + 1e-8 < stage7_cash:
         cons_bad.append(f"cash={cash_after:.6f}<stage7={stage7_cash:.6f}")
     rec("conservation_no_added_risk", "PASS" if not cons_bad else "FAIL",
@@ -255,7 +260,7 @@ def main() -> int:  # noqa: C901
     after_share: dict[str, float] = {}
     for t, share in rc_after.rc.items():
         after_share[sleeve_of.get(t, "")] = after_share.get(sleeve_of.get(t, ""), 0.0) + share
-    max_iter = int(_f(cfg_get(config, "sleeves.projection.max_iterations", 50)) or 50)
+    max_iter = int(_f_default(cfg_get(config, "sleeves.projection.max_iterations", 50), 50.0))
     feasible_bounds = sleeve_risk_bounds(
         cov,
         sleeve_of,
@@ -293,7 +298,7 @@ def main() -> int:  # noqa: C901
         if not aspirational_miss else f"{aspirational_miss[:8]}")
 
     # 7. IR consistency: large RC without proportional IR is a diagnostic warning, not a hard gate.
-    z_limit = _f(cfg_get(config, "sleeves.ir_outlier_z", 3.0)) or 3.0
+    z_limit = _f_default(cfg_get(config, "sleeves.ir_outlier_z", 3.0), 3.0)
     pressure_rows = []
     for ticker, rc_share in rc_after.rc.items():
         ir = max(0.0, ir_by_ticker.get(ticker, 0.0))
@@ -371,11 +376,11 @@ def main() -> int:  # noqa: C901
         "29 recompute matches 28 sealed diagnostics" if not det_bad else f"{det_bad}")
 
     # ---- WARN-only: absolute Rentech floors (capped by the 2-sector upstream book) ----
-    min_idio = _f(cfg_get(config, "sleeves.factor_risk_caps.min_idiosyncratic_share", 0.50)) or 0.50
-    max_mkt = _f(cfg_get(config, "sleeves.factor_risk_caps.max_market_share", 0.25)) or 0.25
-    max_sec = _f(cfg_get(config, "sleeves.factor_risk_caps.max_sector_share", 0.25)) or 0.25
-    min_enb = _f(cfg_get(config, "sleeves.effective_bets.min_enb", 10.0)) or 10.0
-    min_enb_frac = _f(cfg_get(config, "sleeves.effective_bets.min_enb_fraction", 0.35)) or 0.35
+    min_idio = _f_default(cfg_get(config, "sleeves.factor_risk_caps.min_idiosyncratic_share", 0.50), 0.50)
+    max_mkt = _f_default(cfg_get(config, "sleeves.factor_risk_caps.max_market_share", 0.25), 0.25)
+    max_sec = _f_default(cfg_get(config, "sleeves.factor_risk_caps.max_sector_share", 0.25), 0.25)
+    min_enb = _f_default(cfg_get(config, "sleeves.effective_bets.min_enb", 10.0), 10.0)
+    min_enb_frac = _f_default(cfg_get(config, "sleeves.effective_bets.min_enb_fraction", 0.35), 0.35)
     enb_floor = max(min_enb, min_enb_frac * len(proposal))
     rec("absolute_idiosyncratic_floor", "PASS" if factor_after["idiosyncratic_share"] >= min_idio else "WARN",
         f"idio={factor_after['idiosyncratic_share']:.3f} (floor {min_idio}; upstream 2-sector book limits this)")

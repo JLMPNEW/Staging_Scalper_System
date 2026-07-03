@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
+import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -375,7 +378,36 @@ def resolve_explicit_backtest_end(
     return parse_date(raw)
 
 
-def existing_score_status(conn: Any, asof: date) -> int:
+def expected_score_row_count(conn: Any, asof: date, *, include_historical_members: bool) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT f.company_id) AS n
+        FROM feature_financial_valuation f
+        JOIN dim_company c ON c.company_id = f.company_id
+        WHERE (
+            c.is_active = 1
+            OR (? = 1 AND EXISTS (
+                SELECT 1
+                FROM dim_universe_membership m
+                WHERE m.company_id = c.company_id
+                  AND m.model_family = 'med_devices'
+                  AND m.point_in_time_flag = 1
+                  AND m.start_date <= ?
+                  AND (m.end_date IS NULL OR m.end_date >= ?)
+            ))
+        )
+          AND f.asof_date = (
+            SELECT MAX(asof_date)
+            FROM feature_financial_valuation
+            WHERE asof_date <= ?
+        )
+        """,
+        (1 if include_historical_members else 0, asof.isoformat(), asof.isoformat(), asof.isoformat()),
+    ).fetchone()
+    return int(row["n"] or 0) if row is not None else 0
+
+
+def existing_score_status(conn: Any, asof: date, *, include_historical_members: bool) -> tuple[int, int, bool]:
     row = conn.execute(
         """
         SELECT COUNT(*) AS n
@@ -384,9 +416,10 @@ def existing_score_status(conn: Any, asof: date) -> int:
         """,
         (asof.isoformat(),),
     ).fetchone()
-    if row is None:
-        return 0
-    return int(row["n"] or 0)
+    existing = int(row["n"] or 0) if row is not None else 0
+    expected = expected_score_row_count(conn, asof, include_historical_members=include_historical_members)
+    required = max(1, math.ceil(expected * 0.95)) if expected > 0 else 1
+    return existing, expected, existing >= required
 
 
 def dated_output_dir(base_output_dir: Path, asof: date) -> Path:
@@ -455,10 +488,12 @@ def run_stage(
 def write_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
     fieldnames = ["asof_date", "status", "started_at", "ended_at", "stages", "review_pack_dir", "message"]
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, delete=False) as handle:
+        tmp_name = handle.name
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(tmp_name, path)
 
 
 def validate_backtest_csv(path: Path, *, expected_start: date, expected_end: date) -> None:
@@ -635,8 +670,12 @@ def main() -> None:
         try:
             if policy.skip_existing:
                 with read_connection(db_path, timeout_sec=timeout_sec) as conn:
-                    existing_rows = existing_score_status(conn, asof)
-                if existing_rows > 0:
+                    existing_rows, expected_rows, existing_complete = existing_score_status(
+                        conn,
+                        asof,
+                        include_historical_members=policy.include_historical_members,
+                    )
+                if existing_complete:
                     if policy.publish_review_packs and not review_pack_complete(
                         review_pack_base_dir,
                         asof,
@@ -652,7 +691,7 @@ def main() -> None:
                                 "ended_at": utc_now(),
                                 "stages": ",".join(policy.stages),
                                 "review_pack_dir": str(review_pack_dir or ""),
-                                "message": f"existing_score_rows={existing_rows}",
+                                "message": f"existing_score_rows={existing_rows} expected_score_rows={expected_rows}",
                             }
                         )
                         continue
@@ -685,6 +724,20 @@ def main() -> None:
                     "stages": ",".join(stages_to_run),
                     "review_pack_dir": str(review_pack_dir or ""),
                     "message": f"stage_command_failed exit_code={exc.returncode}",
+                }
+            )
+            write_manifest(manifest_path, manifest_rows)
+            raise
+        except BaseException as exc:
+            manifest_rows.append(
+                {
+                    "asof_date": asof.isoformat(),
+                    "status": "failed",
+                    "started_at": started_at,
+                    "ended_at": utc_now(),
+                    "stages": ",".join(stages_to_run),
+                    "review_pack_dir": str(review_pack_dir or ""),
+                    "message": f"stage_failed {type(exc).__name__}: {exc}",
                 }
             )
             write_manifest(manifest_path, manifest_rows)

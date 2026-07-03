@@ -49,6 +49,36 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def trailing_complete_window(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    raw = df.loc[:, cols].apply(pd.to_numeric, errors="coerce")
+    complete = np.asarray(raw.notna().all(axis=1), dtype=bool)
+    positions = np.flatnonzero(complete)
+    if len(positions) == 0:
+        raise ValueError(f"no complete replay start row across {len(cols)} held names")
+    window = raw.iloc[int(positions[0]):].copy()
+    missing = window.isna()
+    if bool(missing.to_numpy().any()):
+        counts = missing.sum().sort_values(ascending=False)
+        offenders = [(str(t), int(n)) for t, n in counts.items() if int(n) > 0][:10]
+        first_missing = str(window.index[missing.any(axis=1)][0])
+        raise ValueError(
+            "interior missing returns after replay start; refusing to drop halt/crash days "
+            f"(first_missing={first_missing}, offenders={offenders})"
+        )
+    return window
+
+
+def required_float(mapping: dict[str, object], key: str, *, positive: bool = False) -> float:
+    if key not in mapping:
+        raise KeyError(key)
+    value = float(str(mapping[key]))
+    if not np.isfinite(value):
+        raise ValueError(f"{key} is not finite: {mapping[key]!r}")
+    if positive and value <= 0:
+        raise ValueError(f"{key} must be positive: {mapping[key]!r}")
+    return value
+
+
 def perf_stats(returns: pd.Series, ppy: int = 252) -> dict[str, float]:
     r = returns.dropna()
     if r.empty:
@@ -132,7 +162,13 @@ def main() -> int:
         LOGGER.error("Cost manifest is stale for: %s", stale)
         return 1
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    one_way_cost_drag = float(summary.get("one_way_cost_base_usd", 0.0)) / float(summary.get("aum_usd", 1.0))
+    try:
+        one_way_cost_base_usd = required_float(summary, "one_way_cost_base_usd")
+        aum_usd = required_float(summary, "aum_usd", positive=True)
+    except (KeyError, TypeError, ValueError) as exc:
+        LOGGER.error("Invalid cost_summary.json schema for net replay: %s", exc)
+        return 1
+    one_way_cost_drag = one_way_cost_base_usd / aum_usd
     returns = pd.read_csv(returns_path, index_col=0)
     adjusted_rows = read_csv(adjusted_path)
     cash_values = [float(r["weight"]) for r in adjusted_rows if str(r["ticker"]).upper() == "CASH"]
@@ -155,9 +191,10 @@ def main() -> int:
         LOGGER.error("Cost-adjusted weights do not close to 1: invested=%.10f cash=%.10f", float(w.sum()), explicit_cash)
         return 1
 
-    R = returns[held].dropna(how="any")
-    if R.empty:
-        LOGGER.error("No complete-case replay window across %d held names", len(held))
+    try:
+        R = trailing_complete_window(returns, held)
+    except ValueError as exc:
+        LOGGER.error("%s", exc)
         return 1
     gross_ret = pd.Series(R.to_numpy() @ w.reindex(R.columns).to_numpy(), index=R.index)
     gross = perf_stats(gross_ret)

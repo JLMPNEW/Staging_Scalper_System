@@ -6,6 +6,7 @@ import csv
 import hashlib
 import logging
 import math
+import sqlite3
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -151,6 +152,9 @@ def safe_div(num: float | None, den: float | None) -> float | None:
 
 
 def pct_change(value: float | None, prior: float | None) -> float | None:
+    # Growth off a non-positive base is undefined (a negative prior inverts the sign).
+    if prior is None or prior <= 0:
+        return None
     ratio = safe_div(value, prior)
     return ratio - 1.0 if ratio is not None else None
 
@@ -341,7 +345,7 @@ def insert_derived_liabilities(conn: Any, ticker: str, source_id: str) -> int:
         """,
         (ticker, source_id),
     ).fetchall()
-    by_key: dict[tuple[str, str], dict[str, sqlite3.Row]] = defaultdict(dict)  # type: ignore[name-defined]
+    by_key: dict[tuple[str, str], dict[str, sqlite3.Row]] = defaultdict(dict)
     for row in rows:
         by_key[(str(row["accession_number"]), str(row["period_end_date"]))][str(row["canonical_metric"])] = row
     inserted = 0
@@ -1162,11 +1166,12 @@ def build_ticker_features(
         feature["ev_operating_income"] = None
         feature["fcf_yield"] = None
         if market_cap is not None and valuation_currency_ready and flow_rate is not None and balance_rate is not None:
-            enterprise_value = (
-                market_cap
-                + float(safe_float(feature.get("total_debt")) or 0.0) * balance_rate
-                - float(safe_float(feature.get("cash_and_equivalents")) or 0.0) * balance_rate
-            )
+            # EV requires both balance-sheet legs; a missing value is not a zero.
+            total_debt = safe_float(feature.get("total_debt"))
+            cash_and_equivalents = safe_float(feature.get("cash_and_equivalents"))
+            enterprise_value = None
+            if total_debt is not None and cash_and_equivalents is not None:
+                enterprise_value = market_cap + total_debt * balance_rate - cash_and_equivalents * balance_rate
             gp_ttm_usd = safe_float(feature.get("gross_profit_ttm"))
             oi_ttm_usd = safe_float(feature.get("operating_income_ttm"))
             fcf_ttm_usd = safe_float(feature.get("free_cash_flow_ttm"))
@@ -1175,9 +1180,9 @@ def build_ticker_features(
             fcf_ttm_usd = fcf_ttm_usd * flow_rate if fcf_ttm_usd is not None else None
             # Ratios only when the denominator is positive: a negative stored ratio
             # then unambiguously means negative enterprise value (favorably cheap).
-            if gp_ttm_usd is not None and gp_ttm_usd > 0:
+            if enterprise_value is not None and gp_ttm_usd is not None and gp_ttm_usd > 0:
                 feature["ev_gross_profit"] = enterprise_value / gp_ttm_usd
-            if oi_ttm_usd is not None and oi_ttm_usd > 0:
+            if enterprise_value is not None and oi_ttm_usd is not None and oi_ttm_usd > 0:
                 feature["ev_operating_income"] = enterprise_value / oi_ttm_usd
             if fcf_ttm_usd is not None and market_cap > 0:
                 feature["fcf_yield"] = fcf_ttm_usd / market_cap

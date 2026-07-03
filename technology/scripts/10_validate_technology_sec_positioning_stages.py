@@ -313,7 +313,6 @@ def validate() -> int:
             f"SELECT COUNT(DISTINCT ticker) FROM fact_sec_form4_transaction WHERE source_id = ? AND ticker IN ({ph})",
             (form4_source, *tickers),
         )
-        upstream_form4_rows = scalar(conn, "SELECT COUNT(*) FROM fact_sec_form4_transaction WHERE source_id = ?", (form4_source,))
         upstream_form4_rows = scalar(
             conn,
             f"SELECT COUNT(*) FROM fact_sec_form4_transaction WHERE source_id = ? AND ticker IN ({ph})",

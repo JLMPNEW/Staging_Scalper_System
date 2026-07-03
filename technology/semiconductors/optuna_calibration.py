@@ -51,6 +51,15 @@ def parse_args(description: str) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--n-trials", type=int, default=None)
     parser.add_argument("--timeout-sec", type=int, default=None)
+    parser.add_argument(
+        "--allow-post-lock-panel",
+        action="store_true",
+        help=(
+            "Research override: extend the calibration panel past the configured "
+            "calibration_train_end_date. Outputs are stamped post_lock_data_included=true "
+            "and must never be promoted."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -83,6 +92,16 @@ def parse_date(raw: object) -> date | None:
         return datetime.strptime(text, "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def calibration_train_end(config: dict[str, Any]) -> date | None:
+    """Configured calibration train-end date for this family, if declared.
+
+    Calibration runs cap their panel here by default so that no post-lock
+    price bars leak into weight selection after the 2026-06-15 model lock.
+    """
+    model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors"))
+    return parse_date(cfg_get(config, f"oos_calibration_standards.families.{model_family}.calibration_train_end_date", ""))
 
 
 def normalize_weights(raw: dict[str, float]) -> dict[str, float]:
@@ -218,7 +237,7 @@ def stats(values: list[float]) -> dict[str, Any]:
     if not values:
         return {"n": 0, "mean": 0.0, "std": 0.0, "hit_rate": 0.0}
     mean = sum(values) / len(values)
-    std = math.sqrt(sum((value - mean) ** 2 for value in values) / (len(values) - 1)) if len(values) > 2 else 0.0
+    std = math.sqrt(sum((value - mean) ** 2 for value in values) / (len(values) - 1)) if len(values) >= 2 else 0.0
     return {
         "n": len(values),
         "mean": mean,
@@ -230,8 +249,11 @@ def stats(values: list[float]) -> dict[str, Any]:
 def load_wsts_regimes(conn: Any, lag_days: int) -> list[tuple[str, str]]:
     """[(available_date_iso, 'up'|'down')] from worldwide 3MMA billings YoY, sorted.
 
-    WSTS publishes with roughly a 5-7 week lag, so each month only becomes
-    usable `lag_days` after month start. Months without a 12-month-prior value
+    `lag_days` is measured from the month START: WSTS publishes each month's
+    billings roughly 5-7 weeks after the month ENDS, so from the month start
+    the data is only observable ~80 days later (30-31 days of month plus the
+    publication lag). Using a shorter lag would let the regime label see
+    billings before they were public. Months without a 12-month-prior value
     are skipped.
     """
     rows = conn.execute(
@@ -382,7 +404,12 @@ def score_row(row: dict[str, Any], candidate: Candidate, *, neutral_score: float
     return weighted_score / available_weight, weighted_quality / positive_weight if positive_weight > 0 else 0.0, component_scores, component_quality
 
 
-def build_panel(config: dict[str, Any], db_path: Path) -> tuple[list[dict[str, Any]], list[date], list[int]]:
+def build_panel(
+    config: dict[str, Any],
+    db_path: Path,
+    *,
+    panel_end_date: date | None = None,
+) -> tuple[list[dict[str, Any]], list[date], list[int]]:
     diag = load_diagnostics_module()
     model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors"))
     price_sources = diag.research_price_source_ids(config)
@@ -399,7 +426,7 @@ def build_panel(config: dict[str, Any], db_path: Path) -> tuple[list[dict[str, A
     short_change_days = int(cfg_get(config, "positioning_import.lookback_days.short_change", 92))
 
     include_inactive = bool(cfg_get(config, f"{CONFIG_KEY}.include_inactive_tickers", True))
-    regime_lag_days = int(cfg_get(config, f"{CONFIG_KEY}.wsts_regime_lag_days", 45))
+    regime_lag_days = int(cfg_get(config, f"{CONFIG_KEY}.wsts_regime_lag_days", 80))
 
     with diag.ro_connect(db_path) as conn:
         membership_by_ticker, cohort_by_ticker, membership_stats = load_membership_intervals(
@@ -443,7 +470,14 @@ def build_panel(config: dict[str, Any], db_path: Path) -> tuple[list[dict[str, A
 
     start_idx = bisect_right(bench.dates, start)
     max_h = max(horizons)
-    panel_indices = list(range(max(start_idx, beta_lookback + 8), len(bench.dates) - max_h, step))
+    end_limit = len(bench.dates) - max_h
+    if panel_end_date is not None:
+        # Post-lock leakage guard: every forward-return target
+        # (panel_date + max_h bars in the benchmark calendar) must land on or
+        # before the calibration train-end date, so the last usable panel
+        # index is capped accordingly.
+        end_limit = min(end_limit, bisect_right(bench.dates, panel_end_date) - max_h)
+    panel_indices = list(range(max(start_idx, beta_lookback + 8), end_limit, step))
     panel_dates = [bench.dates[idx] for idx in panel_indices]
     panel: list[dict[str, Any]] = []
     for panel_idx in panel_indices:
@@ -789,7 +823,10 @@ def current_candidate_scores(
     scored: list[dict[str, Any]] = []
     for row in out_rows:
         core_score, quality, component_scores, component_quality = score_row(row, candidate, neutral_score=neutral_score)
-        overlay = safe_float(row.get("sector_overlay_score")) or neutral_score
+        # Explicit None check: `or neutral_score` would coerce a legitimate
+        # 0.0 overlay score to neutral.
+        overlay_value = safe_float(row.get("sector_overlay_score"))
+        overlay = overlay_value if overlay_value is not None else neutral_score
         overlay_quality = safe_float(row.get("sector_overlay_quality")) or 0.0
         final_score = core_score * (1.0 - overlay_weight) + overlay * overlay_weight if overlay_quality > 0 else core_score
         scored.append(
@@ -919,7 +956,6 @@ def run_semiconductor_optuna_calibration() -> None:
     timeout_sec = timeout_cfg if timeout_cfg > 0 else None
     seed = int(cfg_get(config, f"{CONFIG_KEY}.random_seed", 357))
     neutral_score = float(cfg_get(config, "semiconductor_calibrated_scoring.neutral_score", 50.0))
-    top_quantile = float(cfg_get(config, f"{CONFIG_KEY}.top_quantile", 0.20))
     max_turnover = float(cfg_get(config, f"{CONFIG_KEY}.max_turnover", 0.55))
     max_top_cohort_share = float(cfg_get(config, f"{CONFIG_KEY}.max_top_cohort_share", 0.45))
     step = int(cfg_get(config, "semiconductor_signal_diagnostics.step_trading_days", 21))
@@ -930,7 +966,16 @@ def run_semiconductor_optuna_calibration() -> None:
         init_db(conn)
         load_registry_into_db(conn, config, base_dir)
 
-    panel, panel_dates, horizons = build_panel(config, db_path)
+    # The panel is capped at the configured calibration train-end date by
+    # default so post-lock bars cannot leak into weight selection; the
+    # --allow-post-lock-panel research override is stamped into the outputs.
+    configured_train_end = calibration_train_end(config)
+    train_end_cap = configured_train_end
+    if args.allow_post_lock_panel:
+        LOGGER.warning("--allow-post-lock-panel set: calibration panel extends past the model lock (research only).")
+        train_end_cap = None
+    post_lock_data_included = train_end_cap is None
+    panel, panel_dates, horizons = build_panel(config, db_path, panel_end_date=train_end_cap)
     train_dates, holdout_dates = split_dates(config, panel_dates, horizons=horizons, step=step)
     LOGGER.info("Stage 8 split: train_dates=%d holdout_dates=%d", len(train_dates), len(holdout_dates))
     if len(train_dates) < 20 or len(holdout_dates) < 8:
@@ -1064,6 +1109,9 @@ def run_semiconductor_optuna_calibration() -> None:
         "study_name": study_name,
         "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
         "git_commit": git_commit,
+        "calibration_train_end_date": configured_train_end.isoformat() if configured_train_end is not None else "",
+        "panel_end_cap_date": train_end_cap.isoformat() if train_end_cap is not None else "",
+        "post_lock_data_included": post_lock_data_included,
         "objective_params": {
             "stability_lambda": eval_kwargs["stability_lambda"],
             "complexity_penalty_per_subfeature": eval_kwargs["complexity_penalty_per_subfeature"],
@@ -1124,7 +1172,16 @@ def run_semiconductor_walk_forward_calibration() -> None:
         init_db(conn)
         load_registry_into_db(conn, config, base_dir)
 
-    panel, panel_dates, horizons = build_panel(config, db_path)
+    # Same post-lock leakage guard as the main calibration path: refit blocks
+    # must not train or test on bars past the configured train-end date unless
+    # the research override is set (and stamped into the summary).
+    configured_train_end = calibration_train_end(config)
+    train_end_cap = configured_train_end
+    if args.allow_post_lock_panel:
+        LOGGER.warning("--allow-post-lock-panel set: walk-forward panel extends past the model lock (research only).")
+        train_end_cap = None
+    post_lock_data_included = train_end_cap is None
+    panel, panel_dates, horizons = build_panel(config, db_path, panel_end_date=train_end_cap)
     min_embargo = int(math.ceil(max(horizons) / max(1, step))) + 1
     embargo = max(min_embargo, int(cfg_get(config, f"{CONFIG_KEY}.embargo_panel_dates", 4)))
     stage7 = stage7_candidate(config)
@@ -1219,6 +1276,9 @@ def run_semiconductor_walk_forward_calibration() -> None:
         "procedure_adds_value": int(wins / len(block_rows) >= 0.5 and improvement_stats["mean"] > 0),
         "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
         "random_seed": seed,
+        "calibration_train_end_date": configured_train_end.isoformat() if configured_train_end is not None else "",
+        "panel_end_cap_date": train_end_cap.isoformat() if train_end_cap is not None else "",
+        "post_lock_data_included": post_lock_data_included,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     write_csv(output_dir / "walk_forward_blocks.csv", block_rows)

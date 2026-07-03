@@ -10,7 +10,7 @@ import math
 import shutil
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +80,13 @@ def safe_int(value: Any) -> int:
         return 0
 
 
+def parse_date_text(value: Any) -> date | None:
+    try:
+        return date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def read_csv_rows(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -99,6 +106,20 @@ def sec_url(row: dict[str, Any] | None) -> str:
     if primary:
         return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_clean}/{primary}"
     return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_clean}/"
+
+
+def research_price_source_ids(config: dict[str, Any]) -> list[str]:
+    """Family price sources: the configured market source plus the Norgate
+    research/backfill sources, matching how the diagnostics scripts scope
+    fact_price_ohlcv reads."""
+    default_source = str(cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted"))
+    raw = cfg_get(config, "semiconductor_research.price_source_ids", None)
+    if isinstance(raw, (list, tuple)):
+        out = [str(value).strip() for value in raw if str(value).strip()]
+        return out or [default_source]
+    if isinstance(raw, str) and raw.strip():
+        return [raw.strip()]
+    return [default_source]
 
 
 def latest_filings(conn: sqlite3.Connection, source_id: str, *, asof: str = "") -> dict[str, dict[str, Any]]:
@@ -128,6 +149,7 @@ def load_latest_score_rows(
     source_id: str,
     baseline_source: str,
     model_family: str,
+    price_source_ids: list[str],
     asof: str = "",
 ) -> list[dict[str, Any]]:
     asof = asof.strip() or scalar(
@@ -141,9 +163,10 @@ def load_latest_score_rows(
     )
     if not asof:
         return []
+    price_ph = ",".join("?" for _ in price_source_ids)
     return fetch_dicts(
         conn,
-        """
+        f"""
         SELECT o.ticker,
                o.asof_date,
                o.source_id AS score_model_version,
@@ -189,9 +212,9 @@ def load_latest_score_rows(
                    AND (m.end_date IS NULL OR m.end_date >= o.asof_date)
                  ORDER BY m.point_in_time_flag DESC, m.is_current_member DESC, m.start_date DESC
                  LIMIT 1) AS terminal_date,
-               (SELECT MIN(p.bar_date) FROM fact_price_ohlcv p WHERE p.ticker = o.ticker) AS price_start_date,
-               (SELECT MAX(p.bar_date) FROM fact_price_ohlcv p WHERE p.ticker = o.ticker) AS price_end_date,
-               (SELECT MAX(p.bar_date) FROM fact_price_ohlcv p WHERE p.ticker = o.ticker AND p.bar_date <= o.asof_date) AS latest_price_date,
+               (SELECT MIN(p.bar_date) FROM fact_price_ohlcv p WHERE p.ticker = o.ticker AND p.source_id IN ({price_ph})) AS price_start_date,
+               (SELECT MAX(p.bar_date) FROM fact_price_ohlcv p WHERE p.ticker = o.ticker AND p.source_id IN ({price_ph})) AS price_end_date,
+               (SELECT MAX(p.bar_date) FROM fact_price_ohlcv p WHERE p.ticker = o.ticker AND p.source_id IN ({price_ph}) AND p.bar_date <= o.asof_date) AS latest_price_date,
                i.calibration_cohort_id,
                i.calibration_cohort,
                i.scoring_contract_version,
@@ -254,7 +277,7 @@ def load_latest_score_rows(
           AND o.asof_date = ?
         ORDER BY o.final_rank IS NULL, o.final_rank, o.ticker
         """,
-        (baseline_source, source_id, model_family, asof),
+        (*price_source_ids, *price_source_ids, *price_source_ids, baseline_source, source_id, model_family, asof),
     )
 
 
@@ -410,8 +433,9 @@ def cohort_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def risk_flags(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def risk_flags(rows: list[dict[str, Any]], *, current_asof: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    asof_date = parse_date_text(current_asof)
 
     def add(row: dict[str, Any], flag: str, severity: str, detail: str) -> None:
         out.append(
@@ -456,6 +480,9 @@ def risk_flags(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         overlay_quality = safe_float(row.get("sector_overlay_quality"))
         if overlay_quality is not None and overlay_quality < 0.50:
             add(row, "low_sector_overlay_quality", "info", f"sector_overlay_quality={overlay_quality:.3f}")
+        filing_date = parse_date_text(row.get("latest_sec_filing_date"))
+        if asof_date and filing_date and (asof_date - filing_date).days > 550:
+            add(row, "stale_sec_filing", "warning", f"latest_sec_filing_date={filing_date.isoformat()}")
         if row.get("review_reason"):
             add(row, "review_reason_present", "info", str(row.get("review_reason")))
     severity_order = {"error": 0, "warning": 1, "info": 2}
@@ -488,7 +515,7 @@ def overlay_summary(conn: sqlite3.Connection, *, model_family: str, config: dict
                 "quality": row.get("component_quality"),
                 "status": row.get("data_quality_status"),
                 "latest_month": row.get("latest_month"),
-                "detail": row.get("reason"),
+                "detail": row.get("review_reason"),
             }
         )
     capex = fetch_dicts(
@@ -511,8 +538,8 @@ def overlay_summary(conn: sqlite3.Connection, *, model_family: str, config: dict
                 "score": row.get("big_tech_capex_score"),
                 "quality": row.get("component_quality"),
                 "status": row.get("data_quality_status"),
-                "latest_month": row.get("latest_period"),
-                "detail": row.get("reason"),
+                "latest_month": row.get("latest_calendar_period"),
+                "detail": row.get("review_reason"),
             }
         )
     return rows
@@ -628,6 +655,7 @@ def main() -> int:
     baseline_source = str(cfg_get(config, f"{CONFIG_KEY}.baseline_feature_source_id", "semiconductor_scoring_contract"))
     filing_source = str(cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions"))
     score_neutral_value = float(cfg_get(config, "semiconductor_calibrated_scoring.neutral_score", 50.0))
+    price_source_ids = research_price_source_ids(config)
 
     with readonly_connect(db_path) as conn:
         score_rows = load_latest_score_rows(
@@ -635,6 +663,7 @@ def main() -> int:
             source_id=stage7_source,
             baseline_source=baseline_source,
             model_family=model_family,
+            price_source_ids=price_source_ids,
             asof=str(args.asof or ""),
         )
         if not score_rows:
@@ -655,7 +684,15 @@ def main() -> int:
         score_neutral_value=score_neutral_value,
     )
     cohorts = cohort_summary(score_rows)
-    flags = risk_flags(score_rows_with_candidate_fields)
+    # risk_flags sees the score rows, not the rank table, so the SEC filing
+    # recency has to be attached here for the stale_sec_filing check.
+    flags = risk_flags(
+        [
+            {**row, "latest_sec_filing_date": filings.get(str(row["ticker"]), {}).get("filing_date", "")}
+            for row in score_rows_with_candidate_fields
+        ],
+        current_asof=asof,
+    )
     queue = review_queue(flags, ranks)
     backtest_path = resolve_path(cfg_get(config, f"{CONFIG_KEY}.backtest_summary_csv"), base_dir=base_dir)
     backtest_rows = [] if args.historical_mode else read_csv_rows(backtest_path)

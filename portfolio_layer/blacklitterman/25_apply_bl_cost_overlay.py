@@ -92,7 +92,12 @@ def _load_weight_map(path: Path | None) -> dict[str, float]:
         ticker = str(row.get("ticker") or row.get("Ticker") or "").strip().upper()
         if not ticker or ticker == "CASH":
             continue
-        weight = finite_float(row.get("weight") or row.get("Weight") or 0.0, name=f"{path}:{ticker}.weight")
+        raw_weight = row.get("weight")
+        if raw_weight in (None, ""):
+            raw_weight = row.get("Weight")
+        if raw_weight in (None, ""):
+            raw_weight = 0.0
+        weight = finite_float(raw_weight, name=f"{path}:{ticker}.weight")
         if weight < 0:
             raise ValueError(f"Prior weight for {ticker} must be non-negative, got {weight}")
         if ticker in out:
@@ -108,7 +113,10 @@ def _load_bl_target(path: Path) -> tuple[dict[str, float], float]:
         ticker = str(row.get("Ticker") or row.get("ticker") or "").strip().upper()
         if not ticker:
             continue
-        weight = finite_float(row.get("Weight") or row.get("weight"), name=f"{path}:{ticker}.Weight")
+        raw_weight = row.get("Weight")
+        if raw_weight in (None, ""):
+            raw_weight = row.get("weight")
+        weight = finite_float(raw_weight, name=f"{path}:{ticker}.Weight")
         if weight < -1e-10:
             raise ValueError(f"BL target weight for {ticker} is negative: {weight}")
         if ticker == "CASH":

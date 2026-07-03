@@ -420,7 +420,14 @@ def financial_subfeatures(rows: list[dict[str, Any]], asof_iso: str) -> dict[str
 
 
 def load_wsts_cycle_series(conn: sqlite3.Connection, lag_days: int) -> list[tuple[str, float]]:
-    """[(available_date_iso, yoy_growth)] from worldwide 3MMA billings, publication-lagged, sorted."""
+    """[(available_date_iso, yoy_growth)] from worldwide 3MMA billings, publication-lagged, sorted.
+
+    `lag_days` is measured from the month START: WSTS publishes each month's
+    billings roughly 5-7 weeks after the month ENDS, so from the month start
+    the data is only observable ~80 days later (30-31 days of month plus the
+    publication lag). A shorter lag would let signals see billings before
+    they were public.
+    """
     rows = conn.execute(
         """
         SELECT period_month, value_millions_usd
@@ -964,7 +971,7 @@ def main() -> int:
             db_path,
             include_inactive,
         )
-        wsts_lag_days = int(cfg_get(config, "semiconductor_optuna_calibration.wsts_regime_lag_days", 45))
+        wsts_lag_days = int(cfg_get(config, "semiconductor_optuna_calibration.wsts_regime_lag_days", 80))
         lag_values_raw = cfg_get(config, f"{CONFIG_KEY}.wsts_lag_sensitivity_days", [30, 45, 60, 75])
         wsts_lag_sensitivity_days = sorted({int(value) for value in lag_values_raw} | {wsts_lag_days})
         wsts_cycles_by_lag = {lag_days: load_wsts_cycle_series(conn, lag_days) for lag_days in wsts_lag_sensitivity_days}
@@ -994,7 +1001,6 @@ def main() -> int:
     panel_indices = [i for i in panel_indices if bench.dates[i] <= end]
     LOGGER.info("Panel dates=%d from %s to %s step=%d", len(panel_indices), bench.dates[panel_indices[0]] if panel_indices else "-", bench.dates[panel_indices[-1]] if panel_indices else "-", step)
 
-    raw_names = [spec[0] for spec in SUBFEATURE_SPECS]
     sub_ic: dict[tuple[str, int], list[float]] = {}
     sub_spread: dict[tuple[str, int], list[float]] = {}
     sub_cov: dict[tuple[str, int], list[int]] = {}

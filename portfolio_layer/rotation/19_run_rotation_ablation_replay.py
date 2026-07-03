@@ -191,6 +191,14 @@ def main() -> int:  # noqa: C901
         seal_errors.append(f"cost_manifest_acceptance={cost_manifest.get('acceptance')}")
     if optimizer_manifest.get("acceptance") != "PASS":
         seal_errors.append(f"optimizer_manifest_acceptance={optimizer_manifest.get('acceptance')}")
+    _verify_manifest_hash(rot_manifest, "sector_rotation.csv", sector_path, seal_errors)
+    _verify_manifest_hash(rot_manifest, "returns_panel.csv", returns_path, seal_errors)
+    _verify_manifest_hash(
+        rot_manifest,
+        "rotation_signals_meta.json",
+        rotation_dir / "rotation_signals_meta.json",
+        seal_errors,
+    )
     _verify_manifest_hash(cost_manifest, "cost_report.csv", cost_report_path, seal_errors)
     _verify_manifest_hash(cost_manifest, "cost_summary.json", cost_summary_path, seal_errors)
     _verify_manifest_hash(cost_manifest, "target_weights.csv", target_path, seal_errors)
@@ -198,7 +206,7 @@ def main() -> int:  # noqa: C901
     if "spread_snapshot.csv" in (cost_manifest.get("provenance_sha256") or {}):
         _verify_manifest_hash(cost_manifest, "spread_snapshot.csv", run_dir / "risk" / "spread_snapshot.csv", seal_errors)
     if seal_errors:
-        LOGGER.error("Stage 4/optimizer seal mismatch: %s", seal_errors[:8])
+        LOGGER.error("Stage 4/optimizer/rotation seal mismatch: %s", seal_errors[:8])
         return 1
 
     gross = float(cfg_get(config, "optimizer.gross_exposure", 1.0))

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import logging
 import math
@@ -230,8 +229,9 @@ def build_weights(scored_rows: list[dict[str, Any]], spec: PortfolioSpec, min_po
 
 
 def turnover(prev: dict[str, float] | None, current: dict[str, float]) -> float:
-    if prev is None:
-        return sum(abs(value) for value in current.values())
+    # First period treats prev as all-zero weights (0.5 * sum|w|) so the
+    # per-dollar cost convention matches subsequent periods.
+    prev = prev or {}
     tickers = set(prev) | set(current)
     return 0.5 * sum(abs(current.get(ticker, 0.0) - prev.get(ticker, 0.0)) for ticker in tickers)
 
@@ -288,6 +288,9 @@ def summarize_returns(rows: list[dict[str, Any]], horizon: int) -> dict[str, Any
     returns = [float(row["net_return"]) for row in rows]
     if not returns:
         return {}
+    excess_vs_benchmark = [
+        value for value in (as_float(row.get("excess_return_vs_benchmark")) for row in rows) if value is not None
+    ]
     periods_per_year = 252.0 / max(1, horizon)
     total = math.prod(1.0 + value for value in returns) - 1.0
     mean_return = sum(returns) / len(returns)
@@ -304,7 +307,7 @@ def summarize_returns(rows: list[dict[str, Any]], horizon: int) -> dict[str, Any
         "avg_period_return": mean_return,
         "median_period_return": statistics.median(returns),
         "max_drawdown": max_dd,
-        "avg_excess_return_vs_qqq": sum(float(row["excess_return_vs_benchmark"]) for row in rows) / len(rows),
+        "avg_excess_return_vs_qqq": sum(excess_vs_benchmark) / len(excess_vs_benchmark) if excess_vs_benchmark else "",
         "avg_excess_return_vs_equal_weight": sum(float(row["excess_return_vs_equal_weight"]) for row in rows) / len(rows),
         "avg_turnover": sum(float(row["turnover"]) for row in rows) / len(rows),
         "avg_stock_turnover": sum(float(row.get("stock_turnover") or 0.0) for row in rows) / len(rows),
@@ -334,7 +337,7 @@ def simulate(
     min_positions: int,
     transaction_cost_bps: float,
     borrow_cost_default_annual_rate: float,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     horizon = int(horizons[0])
     fwd_key = f"fwd_return_{horizon}d"
     bench_key = f"benchmark_return_{horizon}d"
@@ -347,6 +350,7 @@ def simulate(
     previous_hedge_weight: float | None = None
     period_rows: list[dict[str, Any]] = []
     holding_rows: list[dict[str, Any]] = []
+    missing_benchmark_periods = 0
     for asof in sorted(rows_by_date):
         scored: list[dict[str, Any]] = []
         for row in rows_by_date[asof]:
@@ -366,10 +370,16 @@ def simulate(
         if not weights:
             continue
         by_ticker = {str(row["ticker"]): row for row in scored}
-        benchmark_return = as_float(scored[0].get(bench_key)) or 0.0
+        benchmark_return = as_float(scored[0].get(bench_key))
+        if benchmark_return is None:
+            missing_benchmark_periods += 1
+            if spec.exposure_mode in ("hedged_long", "beta_neutral"):
+                # Hedged/beta-neutral legs depend on the benchmark return;
+                # skip this period rather than assuming 0.0.
+                continue
         equal_weight_benchmark_return = sum(float(row[fwd_key]) for row in scored if row.get(fwd_key) is not None) / len(scored)
         stock_return = sum(weight * float(by_ticker[ticker][fwd_key]) for ticker, weight in weights.items() if ticker in by_ticker)
-        hedge_return = hedge_weight * benchmark_return
+        hedge_return = hedge_weight * benchmark_return if benchmark_return is not None else 0.0
         raw_return = stock_return + hedge_return
         effective_weights = dict(weights)
         if hedge_weight:
@@ -411,10 +421,10 @@ def simulate(
                 "borrow_cost": borrow_cost,
                 "total_cost": total_cost,
                 "net_return": net_return,
-                "benchmark_return": benchmark_return,
+                "benchmark_return": benchmark_return if benchmark_return is not None else "",
                 "equal_weight_benchmark_return": equal_weight_benchmark_return,
                 "excess_return": net_return - equal_weight_benchmark_return if short_count == 0 else net_return,
-                "excess_return_vs_benchmark": net_return - benchmark_return,
+                "excess_return_vs_benchmark": net_return - benchmark_return if benchmark_return is not None else "",
                 "excess_return_vs_equal_weight": net_return - equal_weight_benchmark_return,
                 "turnover": period_turnover,
                 "stock_turnover": stock_turnover,
@@ -481,7 +491,7 @@ def simulate(
             )
         previous_stock_weights = dict(weights)
         previous_hedge_weight = hedge_weight
-    return period_rows, holding_rows
+    return period_rows, holding_rows, missing_benchmark_periods
 
 
 def main() -> int:
@@ -506,6 +516,13 @@ def main() -> int:
     transaction_cost_bps = float(cfg_get(config, f"{CONFIG_KEY}.transaction_cost_bps", 20.0))
     borrow_cost_default_annual_rate = float(cfg_get(config, f"{CONFIG_KEY}.borrow_cost_default_annual_rate", 0.0))
     benchmark_ticker = str(cfg_get(config, f"{CONFIG_KEY}.benchmark_ticker", "QQQ"))
+    sample_basis = "in_sample_training_window_plus_post_lock"
+    calibration_train_end_date = str(
+        cfg_get(config, "oos_calibration_standards.families.software_infrastructure.calibration_train_end_date", "")
+    )
+    calibration_lock_date = str(
+        cfg_get(config, "oos_calibration_standards.families.software_infrastructure.calibration_lock_date", "")
+    )
     candidates = load_candidates(config, base_dir)
     specs = portfolio_specs(config)
     if not specs:
@@ -518,7 +535,7 @@ def main() -> int:
         candidate = candidate_item["candidate"]
         model_name = str(candidate_item["model_name"])
         for spec in specs:
-            period_rows, holding_rows = simulate(
+            period_rows, holding_rows, missing_benchmark_periods = simulate(
                 panel,
                 panel_dates,
                 horizons,
@@ -544,6 +561,10 @@ def main() -> int:
                         "weight_method": spec.weight_method,
                         "exposure_mode": spec.exposure_mode,
                         "horizon_days": int(horizons[0]),
+                        "sample_basis": sample_basis,
+                        "calibration_train_end_date": calibration_train_end_date,
+                        "calibration_lock_date": calibration_lock_date,
+                        "missing_benchmark_periods": missing_benchmark_periods,
                         **metrics,
                         "component_weights_json": json.dumps(json_ready_weights(candidate)["component_weights"], sort_keys=True),
                     }
@@ -571,6 +592,9 @@ def main() -> int:
         "panel_dates": len(panel_dates),
         "date_range": [panel_dates[0].isoformat(), panel_dates[-1].isoformat()],
         "horizon_days": int(horizons[0]),
+        "sample_basis": sample_basis,
+        "calibration_train_end_date": calibration_train_end_date,
+        "calibration_lock_date": calibration_lock_date,
         "benchmark_ticker": benchmark_ticker,
         "models": [item["model_name"] for item in candidates],
         "portfolio_specs": [spec.__dict__ for spec in specs],

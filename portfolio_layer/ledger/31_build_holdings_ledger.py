@@ -177,13 +177,24 @@ def _stock_trade_lots(
         lots[symbol].extend(dict(row) for row in seed_rows)
     issues: list[str] = []
     ignored_closed: list[str] = []
+    closed_statement_qty: dict[str, float] = defaultdict(float)
     stock_trades = sorted((r for r in trades if r.get("asset_category") == "Stocks"), key=_trade_sort_key)
     for row in stock_trades:
         symbol = str(row.get("symbol", "")).strip().upper()
-        if symbol not in tracked_symbols:
-            continue
         qty = _f(row.get("quantity"))
         if not symbol or abs(qty) < 1e-12:
+            continue
+        if symbol not in tracked_symbols:
+            if qty > 0:
+                closed_statement_qty[symbol] += qty
+                continue
+            close_qty = -qty
+            available = closed_statement_qty.get(symbol, 0.0)
+            used = min(available, close_qty)
+            closed_statement_qty[symbol] = available - used
+            close_qty -= used
+            if close_qty > 1e-6:
+                ignored_closed.append(f"{symbol}:{close_qty:.6g}")
             continue
         if qty > 0:
             basis = _f(row.get("basis"))
@@ -211,10 +222,7 @@ def _stock_trade_lots(
             lot["cost_basis"] = float(lot["cost_basis"]) * (1.0 - ratio)
             close_qty -= used
         if close_qty > 1e-6:
-            if symbol in tracked_symbols:
-                issues.append(f"{symbol}:sell_exceeds_report_lots:{close_qty:.6f}")
-            else:
-                ignored_closed.append(f"{symbol}:{close_qty:.6g}")
+            issues.append(f"{symbol}:sell_exceeds_report_lots:{close_qty:.6f}")
     return lots, issues, ignored_closed
 
 

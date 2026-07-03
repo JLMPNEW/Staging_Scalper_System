@@ -187,6 +187,42 @@ def parse_csv_set(raw: object) -> set[str]:
     return {item.strip() for item in str(raw or "").split(",") if item.strip()}
 
 
+def is_auto_date(raw: object) -> bool:
+    return str(raw or "").strip().lower() in {"", "auto", "latest", "latest_market_date", "auto_latest_complete"}
+
+
+def valid_asof_dates(rows: list[dict[str, str]]) -> list[str]:
+    dates: set[str] = set()
+    for row in rows:
+        asof = str(row.get("asof_date") or "").strip()[:10]
+        if len(asof) == 10 and asof[4] == "-" and asof[7] == "-":
+            dates.add(asof)
+    return sorted(dates)
+
+
+def resolve_validation_window(
+    rows: list[dict[str, str]],
+    *,
+    validation_start_raw: object,
+    validation_end_raw: object,
+) -> tuple[str, str]:
+    dates = valid_asof_dates(rows)
+    if not dates:
+        raise RuntimeError("Calibrated baseline cannot resolve validation window: panel has no valid asof_date rows.")
+    validation_start = dates[0] if is_auto_date(validation_start_raw) else str(validation_start_raw or "").strip()[:10]
+    validation_end = dates[-1] if is_auto_date(validation_end_raw) else str(validation_end_raw or "").strip()[:10]
+    if not (len(validation_start) == 10 and validation_start[4] == "-" and validation_start[7] == "-"):
+        raise RuntimeError(f"Invalid calibration.validation_start_asof: {validation_start_raw!r}")
+    if not (len(validation_end) == 10 and validation_end[4] == "-" and validation_end[7] == "-"):
+        raise RuntimeError(f"Invalid calibration.validation_end_asof: {validation_end_raw!r}")
+    if validation_start > validation_end:
+        raise RuntimeError(
+            "Invalid calibrated baseline validation window: "
+            f"validation_start_asof={validation_start} validation_end_asof={validation_end}"
+        )
+    return validation_start, validation_end
+
+
 def optional_path(raw: object, *, base_dir: Path) -> Path | None:
     if raw is None or str(raw).strip() == "":
         return None
@@ -440,7 +476,7 @@ def write_config_fragment(path: Path, rows: list[dict[str, Any]], *, baseline_ve
         lines.extend(
             [
                 f"    {cohort}:",
-                f"      calibration_status: production_eligible",
+                "      calibration_status: production_eligible",
                 f"      calibration_status_reason: production_baseline_seed_{baseline_version};support_tier_{row['support_tier']}",
                 "      gates:",
                 f"        composite_min: {yaml_number(row['raw_score_min'])}",
@@ -553,8 +589,8 @@ def main() -> None:
         cfg_get(config, "calibration.calibrated_baseline.freeze_baseline_if_missing", False)
     )
     frozen_baseline = load_frozen_baseline(frozen_baseline_csv)
-    validation_start = str(cfg_get(config, "calibration.validation_start_asof", ""))
-    validation_end = str(cfg_get(config, "calibration.validation_end_asof", ""))
+    validation_start_raw = cfg_get(config, "calibration.validation_start_asof", "")
+    validation_end_raw = cfg_get(config, "calibration.validation_end_asof", "")
     horizons = [int(item.strip()) for item in str(cfg_get(config, "calibration.horizons", "30,60,120")).split(",") if item.strip()]
     reference_horizon = max(horizons)
     min_selected_obs = int(cfg_get(config, "calibration.calibrated_baseline.min_selected_obs", 10))
@@ -576,11 +612,22 @@ def main() -> None:
     watchlist_seed_cohorts = parse_csv_set(cfg_get(config, "calibration.calibrated_baseline.watchlist_seed_cohorts", ""))
     event_driven_excluded_cohorts = parse_csv_set(cfg_get(config, "calibration.calibrated_baseline.event_driven_excluded_cohorts", ""))
 
+    panel_rows = read_csv(panel_csv)
+    validation_start, validation_end = resolve_validation_window(
+        panel_rows,
+        validation_start_raw=validation_start_raw,
+        validation_end_raw=validation_end_raw,
+    )
     rows = [
         row
-        for row in read_csv(panel_csv)
+        for row in panel_rows
         if validation_start <= str(row.get("asof_date") or "")[:10] <= validation_end
     ]
+    if not rows:
+        raise RuntimeError(
+            "Calibrated baseline validation window produced zero rows: "
+            f"panel_csv={panel_csv} validation_start_asof={validation_start} validation_end_asof={validation_end}"
+        )
     recommendations = {row["calibration_cohort"]: row for row in read_csv(recommendations_csv)}
     comparison_rows: list[dict[str, Any]] = []
     constituent_rows: list[dict[str, Any]] = []
@@ -661,6 +708,11 @@ def main() -> None:
         write_csv(snapshot_csv, snapshot_rows, BASELINE_SNAPSHOT_FIELDS)
     frozen_written = False
     if frozen_baseline_csv is not None and freeze_baseline_if_missing and not frozen_baseline_csv.exists():
+        if not snapshot_rows:
+            raise RuntimeError(
+                "Refusing to freeze an empty calibrated baseline snapshot. "
+                f"panel_csv={panel_csv} validation_start_asof={validation_start} validation_end_asof={validation_end}"
+            )
         write_csv(frozen_baseline_csv, snapshot_rows, BASELINE_SNAPSHOT_FIELDS)
         frozen_written = True
     seed_count = sum(

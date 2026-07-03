@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -263,6 +262,7 @@ def main() -> int:
     rows.sort(key=lambda row: float(row["holdout_objective"] or 0.0), reverse=True)
     write_csv(output_dir / "semiconductor_stage7_static_candidate_review.csv", rows)
     write_csv(output_dir / "semiconductor_stage7_static_candidate_weights.csv", weight_rows)
+    model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors"))
     summary = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
@@ -271,6 +271,12 @@ def main() -> int:
         "train_dates": len(train_dates),
         "holdout_dates": len(holdout_dates),
         "horizons": horizons,
+        # Report-only comparison: the panel deliberately runs through the
+        # latest bar, so it mixes the calibration training window with
+        # post-lock data and must not be read as out-of-sample evidence.
+        "sample_basis": "in_sample_training_window_plus_post_lock",
+        "calibration_train_end_date": str(cfg_get(config, f"oos_calibration_standards.families.{model_family}.calibration_train_end_date", "") or ""),
+        "calibration_lock_date": str(cfg_get(config, f"oos_calibration_standards.families.{model_family}.calibration_lock_date", "") or ""),
         "candidates": [
             {
                 "candidate_name": row["candidate_name"],

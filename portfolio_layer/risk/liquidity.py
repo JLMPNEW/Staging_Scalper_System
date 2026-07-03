@@ -185,14 +185,22 @@ def active_symbol_for_ticker(config: dict[str, Any], ticker: str, as_of: str) ->
     """Return the market-data symbol for a contract ticker using risk_panel.ticker_aliases."""
     key = str(ticker).strip().upper()
     aliases = cfg_get(config, "risk_panel.ticker_aliases", []) or []
-    if not isinstance(aliases, list):
+    alias_rows: list[dict[str, Any]] = []
+    if isinstance(aliases, dict):
+        for raw_key, raw_value in aliases.items():
+            if not isinstance(raw_value, dict):
+                continue
+            row = dict(raw_value)
+            row.setdefault("ticker", raw_key)
+            alias_rows.append(row)
+    elif isinstance(aliases, list):
+        alias_rows = [raw for raw in aliases if isinstance(raw, dict)]
+    else:
         return key, None
     run_date = date.fromisoformat(as_of)
     best: dict[str, Any] | None = None
     best_effective = date.min
-    for raw in aliases:
-        if not isinstance(raw, dict):
-            continue
+    for raw in alias_rows:
         alias_ticker = str(raw.get("ticker", "")).strip().upper()
         if alias_ticker != key:
             continue
@@ -259,11 +267,14 @@ def summarize_spread_samples(
     for ticker in sorted(grouped):
         valid: list[tuple[float, date]] = []
         reasons: list[str] = []
+        hard_fail_reasons: list[str] = []
         for row in grouped[ticker]:
             status = str(row.get("status", "")).strip().lower()
             reason = str(row.get("reason", "")).strip()
             if reason:
                 reasons.append(reason)
+                if "half_spread_bps>=" in reason or "spread_bps>=" in reason:
+                    hard_fail_reasons.append(reason)
             if status != "ok":
                 continue
             try:
@@ -278,6 +289,8 @@ def summarize_spread_samples(
             age_days = (as_of_date - sample_day).days
             if half >= 0 and half <= max_half_spread_bps and 0 <= age_days <= max_stale_days:
                 valid.append((half, sample_day))
+            elif half > max_half_spread_bps and 0 <= age_days <= max_stale_days:
+                hard_fail_reasons.append(f"half_spread_bps>={max_half_spread_bps:g}")
         if len(valid) >= min_valid_samples:
             values = [half for half, _sample_day in valid]
             latest_day = max(sample_day for _half, sample_day in valid)
@@ -299,10 +312,13 @@ def summarize_spread_samples(
             })
             continue
 
+        hard_fail = bool(hard_fail_reasons) and len(valid) < min_valid_samples
         reason = "insufficient_valid_samples"
-        if not valid and reasons:
+        if hard_fail:
+            reason = ";".join(sorted(set(hard_fail_reasons))[:3])
+        if not hard_fail and not valid and reasons:
             reason = ";".join(sorted(set(reasons))[:3])
-        if allow_fallback:
+        if allow_fallback and not hard_fail:
             snapshot.append({
                 "as_of_date": as_of,
                 "ticker": ticker,

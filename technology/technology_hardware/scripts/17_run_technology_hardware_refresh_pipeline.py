@@ -114,8 +114,8 @@ def build_steps(*, asof: str, skip_ibkr_borrow: bool, force_refresh: bool) -> li
         Step("08c_validate_walk_forward", "stage_8", "Validate walk-forward calibration output", py_script("technology/technology_hardware/scripts/08c_validate_technology_hardware_walk_forward_calibration.py"), optuna=True),
         Step("09_portfolio_backtest", "stage_9", "Run portfolio backtest reports", py_script("technology/technology_hardware/scripts/09_run_technology_hardware_portfolio_backtest.py"), research=True),
         Step("09_validate_portfolio_backtest", "stage_9", "Validate portfolio backtest reports", py_script("technology/technology_hardware/scripts/09_validate_technology_hardware_portfolio_backtest.py"), pass_db=False, research=True),
-        Step("10b_publish_dashboard", "stage_10", "Publish dashboard/static reports", py_script("technology/technology_hardware/scripts/10b_publish_technology_hardware_dashboard_reports.py")),
-        Step("10b_validate_dashboard", "stage_10", "Validate dashboard/static reports", py_script("technology/technology_hardware/scripts/10b_validate_technology_hardware_dashboard_reports.py"), pass_db=False),
+        Step("10b_publish_dashboard", "stage_10", "Publish dashboard/static reports", py_script("technology/technology_hardware/scripts/10b_publish_technology_hardware_dashboard_reports.py"), asof_args),
+        Step("10b_validate_dashboard", "stage_10", "Validate dashboard/static reports", py_script("technology/technology_hardware/scripts/10b_validate_technology_hardware_dashboard_reports.py"), asof_args, pass_db=False),
         Step("16_publish_governance", "stage_10b", "Publish lockbox ledger and signal registry", py_script("technology/technology_hardware/scripts/16_publish_technology_hardware_lockbox_ledger.py")),
         Step("16_validate_governance", "stage_10b", "Validate lockbox ledger and signal registry", py_script("technology/technology_hardware/scripts/16_validate_technology_hardware_lockbox_ledger.py"), pass_db=False),
     ]
@@ -164,13 +164,33 @@ def selected_steps(steps: list[Step], args: argparse.Namespace, config: dict[str
         and (explicit_only or include_norgate or not step.norgate_backfill)
         and (not args.skip_network or not step.network)
     ]
-    if include_optuna and not include_research:
-        research_steps = [step for step in steps if step.research]
+    if include_optuna and not include_research and not explicit_only:
+        # Stage 8 Optuna needs the Stage 8A signal-diagnostics panel before it
+        # runs, while the Stage 9 backtest reads stage8_best_weights.json and
+        # must run after it. Inserting every research step before 08_run_optuna
+        # would make the backtest consume the previous run's Stage 8 weights.
         existing = {step.step_id for step in out}
-        insertion_idx = max((idx for idx, step in enumerate(out) if step.stage == "stage_7"), default=-1) + 1
-        for step in reversed(research_steps):
-            if step.step_id not in existing and (not args.skip_network or not step.network):
-                out.insert(insertion_idx, step)
+
+        def insertable(step: Step) -> bool:
+            return (
+                step.step_id not in existing
+                and step.step_id not in skipped
+                and (not args.skip_network or not step.network)
+            )
+
+        diagnostics_steps = [step for step in steps if step.research and step.stage == "research"]
+        backtest_steps = [step for step in steps if step.research and step.stage == "stage_9"]
+        pre_optuna_idx = max((idx for idx, step in enumerate(out) if step.stage == "stage_7"), default=-1) + 1
+        for step in reversed(diagnostics_steps):
+            if insertable(step):
+                out.insert(pre_optuna_idx, step)
+        post_optuna_idx = max(
+            (idx for idx, step in enumerate(out) if step.optuna or step.stage in ("stage_7", "research")),
+            default=-1,
+        ) + 1
+        for step in reversed(backtest_steps):
+            if insertable(step):
+                out.insert(post_optuna_idx, step)
     return out
 
 
@@ -224,6 +244,23 @@ def main() -> int:
         return 0
 
     planned = selected_steps(steps, args, config)
+    asof = str(args.asof or "").strip()
+    if asof:
+        # 10b_publish/10b_validate accept --asof and receive it, but the Stage
+        # 10b governance publisher/validator have no --asof support and always
+        # snapshot the latest artifacts; running them under a historical asof
+        # would publish a wrong-asof governance ledger.
+        governance_step_ids = {"16_publish_governance", "16_validate_governance"}
+        blocked = [step.step_id for step in planned if step.step_id in governance_step_ids]
+        if blocked:
+            raise SystemExit(
+                f"--asof {asof} cannot be combined with governance steps {blocked}: "
+                "16_publish_technology_hardware_lockbox_ledger.py does not accept --asof and would "
+                "record latest-run artifacts under a historical label. Skip them with "
+                "--skip-step 16_publish_governance --skip-step 16_validate_governance, or use the "
+                "technology/scripts/18_backfill_technology_historical_dashboard_reports.py flow for "
+                "historical snapshots."
+            )
     rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     started = datetime.now(timezone.utc)

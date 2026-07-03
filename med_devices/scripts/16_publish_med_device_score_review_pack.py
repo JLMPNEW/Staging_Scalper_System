@@ -5,7 +5,9 @@ import argparse
 import csv
 import json
 import math
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -271,10 +273,15 @@ DAILY_COMPOSITE_EXTRA_FIELDS = [
     "score_scale_min",
     "score_scale_max",
     "score_neutral_value",
+    "oos_score_valid_flag",
     "research_calibration_input_eligible_flag",
     "research_calibration_status",
     "research_calibration_reason",
     "calibration_sample_role",
+    "stage11_calibration_input_eligible_flag",
+    "stage11_calibration_input_reason",
+    "stage11_calibration_panel_source",
+    "survivorship_corrected_panel_flag",
     "recovery_type",
     "equity_recovery",
     "drop_otc_tape",
@@ -304,11 +311,26 @@ DAILY_COMPOSITE_FIELD_DEFAULTS: dict[str, Any] = {
     "score_scale_min": 0.0,
     "score_scale_max": 100.0,
     "score_neutral_value": 50.0,
+    "oos_score_valid_flag": 0,
     "research_calibration_input_eligible_flag": 0,
     "research_calibration_status": "excluded",
     "research_calibration_reason": "missing_research_calibration_metadata",
     "calibration_sample_role": "excluded_from_research_calibration",
+    "stage11_calibration_input_eligible_flag": 0,
+    "stage11_calibration_input_reason": "missing_research_calibration_metadata",
+    "stage11_calibration_panel_source": "med_devices_survivorship_corrected_score_review_pack",
+    "survivorship_corrected_panel_flag": 0,
 }
+REIMBURSEMENT_LATEST_FIELDS = [
+    "reimbursement_status",
+    "direct_code_evidence",
+    "payment_rate_evidence",
+    "coverage_policy_evidence",
+    "procedure_bundled_flag",
+    "capital_equipment_flag",
+    "diagnostics_lab_flag",
+    "unknown_reimbursement_flag",
+]
 CALIBRATED_BASELINE_FIELDS = [
     "calibrated_baseline_status",
     "calibrated_baseline_reason",
@@ -464,14 +486,14 @@ def load_score_rows(conn: Any, *, asof: str) -> list[dict[str, Any]]:
             COALESCE(latest_reimbursement.policy_evidence_count, 0) AS reimbursement_policy_evidence_count,
             COALESCE(latest_reimbursement.reimbursement_code_count, 0) AS reimbursement_code_count,
             COALESCE(latest_reimbursement.rate_row_count, 0) AS reimbursement_rate_row_count,
-            COALESCE(latest_reimbursement.reimbursement_status, s.reimbursement_status, '') AS reimbursement_status,
-            COALESCE(latest_reimbursement.direct_code_evidence, s.direct_code_evidence, 0) AS direct_code_evidence,
-            COALESCE(latest_reimbursement.payment_rate_evidence, s.payment_rate_evidence, 0) AS payment_rate_evidence,
-            COALESCE(latest_reimbursement.coverage_policy_evidence, s.coverage_policy_evidence, 0) AS coverage_policy_evidence,
-            COALESCE(latest_reimbursement.procedure_bundled_flag, s.procedure_bundled_flag, 0) AS procedure_bundled_flag,
-            COALESCE(latest_reimbursement.capital_equipment_flag, s.capital_equipment_flag, 0) AS capital_equipment_flag,
-            COALESCE(latest_reimbursement.diagnostics_lab_flag, s.diagnostics_lab_flag, 0) AS diagnostics_lab_flag,
-            COALESCE(latest_reimbursement.unknown_reimbursement_flag, s.unknown_reimbursement_flag, 0) AS unknown_reimbursement_flag
+            COALESCE(latest_reimbursement.reimbursement_status, s.reimbursement_status, '') AS reimbursement_status_latest,
+            COALESCE(latest_reimbursement.direct_code_evidence, s.direct_code_evidence, 0) AS direct_code_evidence_latest,
+            COALESCE(latest_reimbursement.payment_rate_evidence, s.payment_rate_evidence, 0) AS payment_rate_evidence_latest,
+            COALESCE(latest_reimbursement.coverage_policy_evidence, s.coverage_policy_evidence, 0) AS coverage_policy_evidence_latest,
+            COALESCE(latest_reimbursement.procedure_bundled_flag, s.procedure_bundled_flag, 0) AS procedure_bundled_flag_latest,
+            COALESCE(latest_reimbursement.capital_equipment_flag, s.capital_equipment_flag, 0) AS capital_equipment_flag_latest,
+            COALESCE(latest_reimbursement.diagnostics_lab_flag, s.diagnostics_lab_flag, 0) AS diagnostics_lab_flag_latest,
+            COALESCE(latest_reimbursement.unknown_reimbursement_flag, s.unknown_reimbursement_flag, 0) AS unknown_reimbursement_flag_latest
         FROM med_device_daily_scores s
         JOIN dim_company c ON c.company_id = s.company_id
         LEFT JOIN latest_fda ON latest_fda.company_id = s.company_id
@@ -481,7 +503,15 @@ def load_score_rows(conn: Any, *, asof: str) -> list[dict[str, Any]]:
         """,
         (asof, asof, asof),
     ).fetchall()
-    return [dict(row) for row in rows]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        for field in REIMBURSEMENT_LATEST_FIELDS:
+            latest_key = f"{field}_latest"
+            if latest_key in item:
+                item[field] = item.pop(latest_key)
+        out.append(item)
+    return out
 
 
 def decode_driver_list(raw: object) -> str:
@@ -607,10 +637,12 @@ def clean_row(row: dict[str, Any], *, fieldnames: list[str] | None = None) -> di
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, delete=False) as handle:
+        tmp_name = handle.name
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(tmp_name, path)
 
 
 def classification_counts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

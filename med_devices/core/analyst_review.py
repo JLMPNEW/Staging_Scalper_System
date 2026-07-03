@@ -303,6 +303,19 @@ def load_analyst_review_decisions(
                         "details": "Active approve/reject/data_fix_needed decisions require review_owner.",
                     }
                 )
+        if active and decision:
+            reviewed_at_raw = str(row.get("reviewed_at") or "").strip()
+            if not reviewed_at_raw or parse_date(reviewed_at_raw) is None:
+                issues.append(
+                    {
+                        "severity": "CRITICAL",
+                        "issue_type": "missing_or_invalid_reviewed_at",
+                        "row_number": str(row_number),
+                        "ticker": ticker,
+                        "decision": decision,
+                        "details": "Active analyst-review decisions require a parseable reviewed_at date.",
+                    }
+                )
         if allow_override and decision != DECISION_APPROVE:
             issues.append(
                 {
@@ -342,6 +355,11 @@ def is_expired(decision: AnalystReviewDecision, *, asof: date) -> bool:
 def is_reviewed_after_asof(decision: AnalystReviewDecision, *, asof: date) -> bool:
     reviewed_at = parse_date(decision.reviewed_at)
     return reviewed_at is not None and reviewed_at >= asof
+
+
+def is_reviewed_before_asof(decision: AnalystReviewDecision, *, asof: date) -> bool:
+    reviewed_at = parse_date(decision.reviewed_at)
+    return reviewed_at is not None and reviewed_at < asof
 
 
 def decision_matches(
@@ -396,7 +414,7 @@ def effective_decision(
         if decision.active
         and decision.decision
         and not is_expired(decision, asof=target_asof)
-        and not is_reviewed_after_asof(decision, asof=target_asof)
+        and is_reviewed_before_asof(decision, asof=target_asof)
     ]
     candidates.sort(
         key=lambda item: (
@@ -428,7 +446,7 @@ def latest_expired_decision(
         if decision.active
         and decision.decision
         and is_expired(decision, asof=target_asof)
-        and not is_reviewed_after_asof(decision, asof=target_asof)
+        and is_reviewed_before_asof(decision, asof=target_asof)
     ]
     candidates.sort(key=lambda item: (parse_date(item.expires_at) or date.min, -item.row_number), reverse=True)
     return candidates[0] if candidates else None

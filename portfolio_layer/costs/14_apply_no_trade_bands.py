@@ -73,7 +73,8 @@ def load_prior(path: Path | None) -> dict[str, float]:
         ticker = str(r.get("ticker", "")).strip()
         if not ticker or ticker.upper() == "CASH":
             continue
-        weight = finite_float(r.get("weight") or 0.0, name=f"{path}:{ticker}.weight")
+        parsed_weight = finite_float(r.get("weight"), name=f"{path}:{ticker}.weight")
+        weight = 0.0 if parsed_weight is None else parsed_weight
         if weight < 0:
             raise ValueError(f"Prior weight for {ticker} must be non-negative, got {weight}")
         if ticker in out:

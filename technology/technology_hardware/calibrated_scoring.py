@@ -23,13 +23,15 @@ SETTINGS = CalibratedScoringSettings(
     default_model_version="technology_hardware_stage7_calibrated_v1",
     build_run_type="build_technology_hardware_calibrated_scores",
     validation_run_type="validate_technology_hardware_calibrated_scores",
+    # Mirrors technology_hardware_calibrated_scoring.component_weights in
+    # config.yaml so a missing config key fails safe to production weights.
     default_component_weights={
-        "quality": 0.30,
+        "quality": 0.28,
         "valuation": 0.20,
-        "growth": 0.15,
+        "growth": 0.12,
         "market_behavior": 0.15,
         "positioning": 0.10,
-        "risk_control": 0.10,
+        "risk_control": 0.15,
     },
     default_overlay_components=[],
 )
@@ -45,13 +47,15 @@ CHALLENGER_SETTINGS = CalibratedScoringSettings(
     default_model_version="technology_hardware_stage7_calibrated_v1",
     build_run_type="build_technology_hardware_stage7_challenger_scores",
     validation_run_type="validate_technology_hardware_stage7_challenger_scores",
+    # Mirrors technology_hardware_stage7_challenger_scoring.component_weights
+    # in config.yaml (the hardware challenger reuses the production profile).
     default_component_weights={
-        "quality": 0.30,
+        "quality": 0.28,
         "valuation": 0.20,
-        "growth": 0.15,
+        "growth": 0.12,
         "market_behavior": 0.15,
         "positioning": 0.10,
-        "risk_control": 0.10,
+        "risk_control": 0.15,
     },
     default_overlay_components=[],
 )

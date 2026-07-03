@@ -57,7 +57,8 @@ def load_weight_map(path: Path) -> dict[str, float]:
     for r in read_csv(path):
         t = str(r.get("ticker", "")).strip()
         if t and t.upper() != "CASH":
-            weight = finite_float(r.get("weight") or 0.0, name=f"{path}:{t}.weight")
+            parsed_weight = finite_float(r.get("weight"), name=f"{path}:{t}.weight")
+            weight = 0.0 if parsed_weight is None else parsed_weight
             if weight < 0:
                 raise ValueError(f"Prior weight for {t} must be non-negative, got {weight}")
             if t in out:

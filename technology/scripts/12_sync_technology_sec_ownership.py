@@ -209,8 +209,10 @@ def cached_text(
     if cache_path.exists() and not force_refresh:
         return 200, cache_path.read_text(encoding="utf-8", errors="replace"), "cache"
     status, text = request_text(url, headers=headers, timeout_sec=timeout_sec, retries=retries, sleep_sec=sleep_sec)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(text, encoding="utf-8")
+    # Only cache successful responses; a cached error body would replay as 200 forever.
+    if status == 200:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(text, encoding="utf-8")
     time.sleep(sleep_sec)
     return status, text, "live"
 

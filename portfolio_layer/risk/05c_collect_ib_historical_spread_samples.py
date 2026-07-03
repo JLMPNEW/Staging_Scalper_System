@@ -234,22 +234,26 @@ def _tickers_from_trade_list(run_dir: Path) -> list[str]:
     trade_path = run_dir / "costs" / "trade_list.csv"
     if not trade_path.exists():
         return []
-    return sorted({
-        str(r.get("ticker", "")).strip().upper()
-        for r in read_csv(trade_path)
-        if str(r.get("ticker", "")).strip() and finite_float(r.get("trade_notional") or 0.0, name="trade_notional") > 0
-    })
+    tickers: set[str] = set()
+    for r in read_csv(trade_path):
+        ticker = str(r.get("ticker", "")).strip().upper()
+        notional = finite_float(r.get("trade_notional"), name="trade_notional")
+        if ticker and notional is not None and notional > 0:
+            tickers.add(ticker)
+    return sorted(tickers)
 
 
 def _tickers_from_target_weights(run_dir: Path) -> list[str]:
     target_path = run_dir / "optimizer" / "target_weights.csv"
     if not target_path.exists():
         return []
-    return sorted({
-        str(r.get("ticker", "")).strip().upper()
-        for r in read_csv(target_path)
-        if str(r.get("ticker", "")).strip() and finite_float(r.get("weight") or 0.0, name="weight") > 0
-    })
+    tickers: set[str] = set()
+    for r in read_csv(target_path):
+        ticker = str(r.get("ticker", "")).strip().upper()
+        weight = finite_float(r.get("weight"), name="weight")
+        if ticker and weight is not None and weight > 0:
+            tickers.add(ticker)
+    return sorted(tickers)
 
 
 def _tickers_from_scores(run_dir: Path, *, risk_eligible_only: bool) -> list[str]:

@@ -62,6 +62,26 @@ sources:
     status: active
     notes: Primary adjusted historical price source for scoring and backtests.
 
+  - source_id: norgate_us_equities_total_return
+    stage: market_data
+    source_name: Norgate US equities total-return prices (delisted backfill)
+    source_owner: Norgate Data
+    source_type: local_files
+    base_url: local_norgate_export
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: Norgate Data
+    raw_schema: norgate_local_csv
+    canonical_tables:
+      - fact_price_ohlcv
+    feature_stages:
+      - market_data
+      - survivorship_backfill
+    priority: 40
+    status: active
+    notes: Delisted-member price history imported by the per-family 15_import_*_norgate_delisted_prices.py scripts; written only under this source_id.
+
   - source_id: yahoo_fx_rates
     stage: sec_fundamentals
     source_name: Yahoo Finance FX chart data

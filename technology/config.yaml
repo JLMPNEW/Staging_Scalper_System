@@ -30,6 +30,11 @@ technology_universe:
     - software_infrastructure
     - technology_hardware
 
+software_infrastructure_universe:
+  # PIT membership windows for the software family must not silently track the
+  # semiconductor/legacy technology_universe block.
+  optimization_start_date: "2010-01-01"
+
 technology_hardware_universe:
   expected_ticker_count: 73
   seed_csv: "../ticker_mapping/technology_hardware_cleaned.csv"
@@ -100,6 +105,11 @@ oos_calibration_standards:
   # validators and Portfolio Layer fail closed when a score predates the
   # declared production window.
   version: "technology_oos_provenance_v1"
+  # Historical-mode replays recompute from today's database, so they only
+  # qualify as strict OOS when the asof is within this many calendar days of
+  # the run date (covers T-1/weekend daily backfills). Older replays are
+  # calibration inputs, never strict OOS.
+  allow_replay_oos_within_days: 5
   families:
     semiconductors:
       calibration_provenance_version: "technology_oos_provenance_v1"
@@ -407,6 +417,7 @@ semiconductor_scoring_features:
     market: "yahoo_finance_adjusted"
     financial: "sec_companyfacts"
     positioning: "technology_positioning_composite"
+  relative_strength_market_field: "rel_strength_soxx_3m"
   core_component_weights:
     quality: 0.22
     growth: 0.18
@@ -492,6 +503,10 @@ semiconductor_sector_overlays:
     timeout_sec: 30.0
     max_staleness_days: 60
     min_history_years: 10
+    # WSTS publishes monthly billings ~5-7 weeks after month END. Measured from
+    # month START that is ~65-80 days; 80 is the conservative availability lag
+    # used to decide which months are visible at a historical asof.
+    publication_lag_days_from_month_start: 80
     raw_output_csv: "../output/technology_reports/sector_overlays/wsts_billings_sync.csv"
     feature_output_csv: "../output/technology_reports/sector_overlays/wsts_sector_cycle_features.csv"
   big_tech_capex:
@@ -1054,7 +1069,10 @@ semiconductor_optuna_calibration:
   min_holdout_hit_rate: 0.50
   promotion_min_objective_improvement: 0.002
   include_inactive_tickers: true
-  wsts_regime_lag_days: 45
+  # Availability lag from month START. WSTS publishes ~5-7 weeks after month
+  # end (~65-80 days from month start); 45 assumed data ~3-5 weeks before it
+  # actually existed and inflated regime-conditioned ICs.
+  wsts_regime_lag_days: 80
   stability_lambda: 0.10
   complexity_penalty_per_subfeature: 0.0005
   turnover_cost_bps: 20.0

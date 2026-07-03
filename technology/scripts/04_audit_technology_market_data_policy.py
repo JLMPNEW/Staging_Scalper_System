@@ -16,7 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from technology.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from technology.core.db import connect, finish_run, init_db, start_run  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
 from technology.core.text_norm import normalize_ticker  # noqa: E402
 
@@ -27,6 +27,7 @@ RUN_TYPE = "audit_technology_market_data_policy"
 FIELDNAMES = [
     "ticker",
     "company_name",
+    "model_family",
     "is_benchmark",
     "source_id",
     "bar_count",
@@ -45,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--asof", default="", help="Audit as of this YYYY-MM-DD date. Defaults to today.")
+    parser.add_argument("--model-family", default="", help="Limit the audit to one technology model family. Defaults to all families.")
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--allow-partial", action="store_true")
     return parser.parse_args()
@@ -60,30 +62,42 @@ def parse_date(raw: object) -> date | None:
         return None
 
 
-def load_jobs(conn: Any, benchmark_tickers: list[str]) -> list[dict[str, Any]]:
+def load_jobs(conn: Any, benchmark_tickers: list[str], *, model_family: str = "") -> list[dict[str, Any]]:
+    family_filter = "AND t.model_family = ?" if model_family else ""
+    params: tuple[Any, ...] = (model_family,) if model_family else ()
     rows = conn.execute(
-        """
-        SELECT ticker, company_name, 0 AS is_benchmark
-        FROM dim_company
-        WHERE is_active = 1
-        ORDER BY ticker
-        """
+        f"""
+        SELECT DISTINCT c.ticker, c.company_name, t.model_family
+        FROM dim_company c
+        JOIN dim_technology_taxonomy t
+          ON t.ticker = c.ticker
+         {family_filter}
+        WHERE c.is_active = 1
+        ORDER BY t.model_family, c.ticker
+        """,
+        params,
     ).fetchall()
     out = [
-        {"ticker": str(row["ticker"]), "company_name": str(row["company_name"] or ""), "is_benchmark": 0}
+        {
+            "ticker": str(row["ticker"]),
+            "company_name": str(row["company_name"] or ""),
+            "model_family": str(row["model_family"] or ""),
+            "is_benchmark": 0,
+        }
         for row in rows
     ]
     seen = {normalize_ticker(row["ticker"]) for row in out}
     for raw in benchmark_tickers:
         ticker = normalize_ticker(raw)
         if ticker and ticker not in seen:
-            out.append({"ticker": ticker, "company_name": ticker, "is_benchmark": 1})
+            out.append({"ticker": ticker, "company_name": ticker, "model_family": "", "is_benchmark": 1})
             seen.add(ticker)
     return out
 
 
 def audit_ticker(conn: Any, job: dict[str, Any], *, source_id: str, asof: date, max_staleness_days: int, min_days: int) -> dict[str, Any]:
     ticker = normalize_ticker(job["ticker"])
+    # Bound by asof so historical audits never see future bars (negative staleness).
     row = conn.execute(
         """
         SELECT
@@ -92,9 +106,9 @@ def audit_ticker(conn: Any, job: dict[str, Any], *, source_id: str, asof: date, 
             MIN(bar_date) AS first_bar_date,
             MAX(bar_date) AS latest_bar_date
         FROM fact_price_ohlcv
-        WHERE ticker = ? AND source_id = ?
+        WHERE ticker = ? AND source_id = ? AND bar_date <= ?
         """,
-        (ticker, source_id),
+        (ticker, source_id, asof.isoformat()),
     ).fetchone()
     bar_count = int(row["bar_count"] or 0)
     adjusted_count = int(row["adjusted_bar_count"] or 0)
@@ -131,6 +145,7 @@ def audit_ticker(conn: Any, job: dict[str, Any], *, source_id: str, asof: date, 
     return {
         "ticker": ticker,
         "company_name": job["company_name"],
+        "model_family": job.get("model_family", ""),
         "is_benchmark": job["is_benchmark"],
         "source_id": source_id,
         "bar_count": bar_count,
@@ -174,7 +189,7 @@ def main() -> None:
         init_db(conn)
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
-            jobs = load_jobs(conn, benchmark_tickers)
+            jobs = load_jobs(conn, benchmark_tickers, model_family=str(args.model_family or "").strip())
             rows = [audit_ticker(conn, job, source_id=source_id, asof=asof, max_staleness_days=max_staleness_days, min_days=min_days) for job in jobs]
             failed = sum(1 for row in rows if row["status"] == "failed")
             review = sum(1 for row in rows if row["status"] == "review")

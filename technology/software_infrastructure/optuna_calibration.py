@@ -45,6 +45,14 @@ def parse_args(description: str) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--n-trials", type=int, default=None)
     parser.add_argument("--timeout-sec", type=int, default=None)
+    parser.add_argument(
+        "--allow-post-lock-panel",
+        action="store_true",
+        help=(
+            "Calibrate on panel dates past the configured calibration_train_end_date. "
+            "Stamps post_lock_data_included=true in the output JSON."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -306,6 +314,68 @@ def load_panel(config: dict[str, Any], base_dir: Path) -> tuple[list[dict[str, A
     return rows, panel_dates, horizons
 
 
+def calibration_train_end_date(config: dict[str, Any]) -> date:
+    train_end = parse_date(
+        cfg_get(config, "oos_calibration_standards.families.software_infrastructure.calibration_train_end_date", "")
+    )
+    if train_end is None:
+        raise RuntimeError(
+            "Missing oos_calibration_standards.families.software_infrastructure.calibration_train_end_date; "
+            "cannot bound the Stage 8 calibration panel at the model lock."
+        )
+    return train_end
+
+
+def cap_panel_to_train_end(
+    panel: list[dict[str, Any]],
+    panel_dates: list[date],
+    horizons: list[int],
+    config: dict[str, Any],
+    *,
+    allow_post_lock: bool,
+) -> tuple[list[dict[str, Any]], list[date], dict[str, Any]]:
+    """Drop panel dates at/after the calibration lock so no forward-return window crosses it.
+
+    Panel rows carry forward returns of up to max(horizons) trading days, so in
+    addition to dropping asof dates past calibration_train_end_date we trim the
+    trailing ceil(max_horizon / step) panel dates whose forward windows would
+    extend past the lock.
+    """
+    train_end = calibration_train_end_date(config)
+    provenance: dict[str, Any] = {
+        "calibration_train_end_date": train_end.isoformat(),
+        "post_lock_data_included": False,
+        "panel_dates_dropped_for_lock": 0,
+    }
+    if allow_post_lock:
+        provenance["post_lock_data_included"] = True
+        LOGGER.warning(
+            "--allow-post-lock-panel set: calibrating on all %d panel dates without the %s train-end cap.",
+            len(panel_dates),
+            train_end.isoformat(),
+        )
+        return panel, panel_dates, provenance
+    step = int(cfg_get(config, "software_infrastructure_signal_diagnostics.step_trading_days", 21))
+    trailing = int(math.ceil(max(horizons) / max(1, step)))
+    kept = [asof for asof in panel_dates if asof <= train_end]
+    if trailing:
+        kept = kept[:-trailing] if len(kept) > trailing else []
+    dropped = len(panel_dates) - len(kept)
+    provenance["panel_dates_dropped_for_lock"] = dropped
+    if dropped:
+        LOGGER.info(
+            "Capped Stage 8 panel at calibration_train_end_date=%s: kept %d of %d panel dates "
+            "(trailing %d dates trimmed so %d-day forward windows stay inside the lock).",
+            train_end.isoformat(),
+            len(kept),
+            len(panel_dates),
+            trailing,
+            max(horizons),
+        )
+    kept_set = set(kept)
+    return [row for row in panel if row["asof_date"] in kept_set], kept, provenance
+
+
 def top_quantile_rows(scored_rows: list[dict[str, Any]], quantile: float, min_positions: int) -> list[dict[str, Any]]:
     ordered = sorted(scored_rows, key=lambda row: (-float(row["score"]), str(row["ticker"])))
     size = max(min_positions, int(math.ceil(len(ordered) * quantile)))
@@ -539,6 +609,28 @@ def load_eval_kwargs(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+DEFAULT_GATE_HORIZONS = (21, 63)
+
+
+def holdout_gate_value(config: dict[str, Any], gate_prefix: str, horizon: int, default: float) -> float:
+    """Read a horizon-suffixed promotion-gate threshold from config.
+
+    The historical literals (``*_21``/``*_63``) remain the fallback defaults,
+    but only for the original (21, 63) horizons. If the configured diagnostics
+    horizons change, the matching gate key must be added to config explicitly.
+    """
+    key = f"{CONFIG_KEY}.{gate_prefix}_{int(horizon)}"
+    value = cfg_get(config, key, None)
+    if value is None:
+        if int(horizon) in DEFAULT_GATE_HORIZONS:
+            return float(default)
+        raise RuntimeError(
+            f"Missing promotion gate config key '{key}' for configured horizon {horizon}; "
+            "add it when changing software_infrastructure_signal_diagnostics.horizons_trading_days."
+        )
+    return float(value)
+
+
 INFEASIBLE_OBJECTIVE_PENALTY = 1.0
 
 
@@ -688,6 +780,13 @@ def run_software_infrastructure_optuna_calibration() -> None:
     bounds = component_bounds(config)
 
     panel, panel_dates, horizons = load_panel(config, base_dir)
+    panel, panel_dates, lock_provenance = cap_panel_to_train_end(
+        panel,
+        panel_dates,
+        horizons,
+        config,
+        allow_post_lock=bool(args.allow_post_lock_panel),
+    )
     train_dates, holdout_dates = split_dates(config, panel_dates, horizons)
     if len(train_dates) < 40 or len(holdout_dates) < 12:
         raise RuntimeError(f"Insufficient panel dates for Stage 8B: train={len(train_dates)} holdout={len(holdout_dates)}")
@@ -761,13 +860,13 @@ def run_software_infrastructure_optuna_calibration() -> None:
 
     primary = horizons[0]
     secondary = horizons[1] if len(horizons) > 1 else horizons[0]
-    min_ic_primary = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_mean_ic_21", 0.005))
-    min_ic_secondary = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_mean_ic_63", 0.005))
+    min_ic_primary = holdout_gate_value(config, "min_holdout_mean_ic", primary, 0.005)
+    min_ic_secondary = holdout_gate_value(config, "min_holdout_mean_ic", secondary, 0.005)
     min_hit = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_hit_rate", 0.50))
     min_improvement = float(cfg_get(config, f"{CONFIG_KEY}.promotion_min_objective_improvement", 0.002))
     min_fold_win_fraction = float(cfg_get(config, f"{CONFIG_KEY}.min_fold_win_fraction", 0.50))
-    min_spread_primary = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_mean_spread_net_21", 0.0))
-    min_spread_secondary = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_mean_spread_net_63", 0.0))
+    min_spread_primary = holdout_gate_value(config, "min_holdout_mean_spread_net", primary, 0.0)
+    min_spread_secondary = holdout_gate_value(config, "min_holdout_mean_spread_net", secondary, 0.0)
     promotion_candidate = int(
         float(best_holdout.get("objective", 0.0)) >= float(stage7_holdout.get("objective", 0.0)) + min_improvement
         and float(best_holdout.get(f"mean_ic_{primary}", 0.0)) >= min_ic_primary
@@ -824,6 +923,7 @@ def run_software_infrastructure_optuna_calibration() -> None:
         "study_name": study_name,
         "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
         "git_commit": git_commit,
+        **lock_provenance,
         "objective_params": {
             "stability_lambda": eval_kwargs["stability_lambda"],
             "complexity_penalty_per_subfeature": eval_kwargs["complexity_penalty_per_subfeature"],
@@ -907,18 +1007,21 @@ def validate_software_infrastructure_optuna_calibration() -> int:
         candidate = next((row for row in summary_rows if row.get("model") == "stage8_best_candidate"), {})
         promotion_candidate = int(float(candidate.get("promotion_candidate") or 0))
         if promotion_candidate:
+            horizons = [int(value) for value in cfg_get(config, "software_infrastructure_signal_diagnostics.horizons_trading_days", [21, 63])]
+            primary = horizons[0]
+            secondary = horizons[1] if len(horizons) > 1 else horizons[0]
             max_turnover = float(cfg_get(config, f"{CONFIG_KEY}.max_turnover", 0.60))
             max_cohort = float(cfg_get(config, f"{CONFIG_KEY}.max_top_cohort_share", 0.55))
-            min_spread_21 = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_mean_spread_net_21", 0.0))
-            min_spread_63 = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_mean_spread_net_63", 0.0))
+            min_spread_primary = holdout_gate_value(config, "min_holdout_mean_spread_net", primary, 0.0)
+            min_spread_secondary = holdout_gate_value(config, "min_holdout_mean_spread_net", secondary, 0.0)
             if float(candidate.get("holdout_avg_top_turnover") or 1.0) > max_turnover + 0.0001:
                 errors.append(f"Promoted candidate exceeds turnover cap: {candidate.get('holdout_avg_top_turnover')}")
             if float(candidate.get("holdout_avg_top_cohort_share") or 1.0) > max_cohort + 0.0001:
                 errors.append(f"Promoted candidate exceeds cohort cap: {candidate.get('holdout_avg_top_cohort_share')}")
-            if float(candidate.get("holdout_mean_spread_net_21") or 0.0) < min_spread_21 - 0.0001:
-                errors.append(f"Promoted candidate fails 21d spread gate: {candidate.get('holdout_mean_spread_net_21')}")
-            if float(candidate.get("holdout_mean_spread_net_63") or 0.0) < min_spread_63 - 0.0001:
-                errors.append(f"Promoted candidate fails 63d spread gate: {candidate.get('holdout_mean_spread_net_63')}")
+            if float(candidate.get(f"holdout_mean_spread_net_{primary}") or 0.0) < min_spread_primary - 0.0001:
+                errors.append(f"Promoted candidate fails {primary}d spread gate: {candidate.get(f'holdout_mean_spread_net_{primary}')}")
+            if float(candidate.get(f"holdout_mean_spread_net_{secondary}") or 0.0) < min_spread_secondary - 0.0001:
+                errors.append(f"Promoted candidate fails {secondary}d spread gate: {candidate.get(f'holdout_mean_spread_net_{secondary}')}")
         else:
             LOGGER.info("Stage 8B candidate is report-only and not promoted.")
     if errors:
@@ -956,16 +1059,23 @@ def run_software_infrastructure_walk_forward_calibration() -> None:
     bounds = component_bounds(config)
 
     panel, panel_dates, horizons = load_panel(config, base_dir)
+    panel, panel_dates, lock_provenance = cap_panel_to_train_end(
+        panel,
+        panel_dates,
+        horizons,
+        config,
+        allow_post_lock=bool(args.allow_post_lock_panel),
+    )
     min_embargo = int(math.ceil(max(horizons) / max(1, step))) + 1
     embargo = max(min_embargo, int(cfg_get(config, f"{CONFIG_KEY}.embargo_panel_dates", 4)))
     stage7 = stage7_candidate(config)
     primary = horizons[0]
     secondary = horizons[1] if len(horizons) > 1 else horizons[0]
-    min_ic_primary = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_mean_ic_21", 0.005))
-    min_ic_secondary = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_mean_ic_63", 0.005))
+    min_ic_primary = holdout_gate_value(config, "min_holdout_mean_ic", primary, 0.005)
+    min_ic_secondary = holdout_gate_value(config, "min_holdout_mean_ic", secondary, 0.005)
     min_hit = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_hit_rate", 0.50))
-    min_spread_primary = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_mean_spread_net_21", 0.0))
-    min_spread_secondary = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_mean_spread_net_63", 0.0))
+    min_spread_primary = holdout_gate_value(config, "min_holdout_mean_spread_net", primary, 0.0)
+    min_spread_secondary = holdout_gate_value(config, "min_holdout_mean_spread_net", secondary, 0.0)
     min_fold_win_fraction = float(cfg_get(config, f"{CONFIG_KEY}.min_fold_win_fraction", 0.50))
 
     block_rows: list[dict[str, Any]] = []
@@ -1113,6 +1223,7 @@ def run_software_infrastructure_walk_forward_calibration() -> None:
         "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
         "random_seed": seed,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        **lock_provenance,
     }
     write_csv(output_dir / "walk_forward_blocks.csv", block_rows)
     write_csv(output_dir / "walk_forward_summary.csv", [summary])
@@ -1153,16 +1264,19 @@ def validate_software_infrastructure_walk_forward_calibration() -> int:
         except json.JSONDecodeError as exc:
             errors.append(f"Invalid walk_forward_summary.json: {exc}")
     min_blocks = int(cfg_get(config, f"{CONFIG_KEY}.walk_forward.min_test_blocks", 3))
+    horizons = [int(value) for value in cfg_get(config, "software_infrastructure_signal_diagnostics.horizons_trading_days", [21, 63])]
+    primary = horizons[0]
+    secondary = horizons[1] if len(horizons) > 1 else horizons[0]
     if summary:
         if int(summary.get("n_blocks") or 0) < min_blocks:
             errors.append(f"Too few walk-forward blocks: {summary.get('n_blocks')} < {min_blocks}")
         if int(summary.get("procedure_adds_value") or 0):
-            min_spread_21 = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_mean_spread_net_21", 0.0))
-            min_spread_63 = float(cfg_get(config, f"{CONFIG_KEY}.min_holdout_mean_spread_net_63", 0.0))
-            if float(summary.get("mean_refit_spread_net_21") or 0.0) < min_spread_21 - 0.0001:
-                errors.append("procedure_adds_value=1 but 21d spread gate failed")
-            if float(summary.get("mean_refit_spread_net_63") or 0.0) < min_spread_63 - 0.0001:
-                errors.append("procedure_adds_value=1 but 63d spread gate failed")
+            min_spread_primary = holdout_gate_value(config, "min_holdout_mean_spread_net", primary, 0.0)
+            min_spread_secondary = holdout_gate_value(config, "min_holdout_mean_spread_net", secondary, 0.0)
+            if float(summary.get(f"mean_refit_spread_net_{primary}") or 0.0) < min_spread_primary - 0.0001:
+                errors.append(f"procedure_adds_value=1 but {primary}d spread gate failed")
+            if float(summary.get(f"mean_refit_spread_net_{secondary}") or 0.0) < min_spread_secondary - 0.0001:
+                errors.append(f"procedure_adds_value=1 but {secondary}d spread gate failed")
         else:
             LOGGER.info("Stage 8C procedure is report-only and not promotable.")
     blocks_path = output_dir / "walk_forward_blocks.csv"
@@ -1171,7 +1285,12 @@ def validate_software_infrastructure_walk_forward_calibration() -> int:
             rows = list(csv.DictReader(handle))
         if len(rows) < min_blocks:
             errors.append(f"walk_forward_blocks.csv has too few rows: {len(rows)}")
-        missing_cols = {"objective_improvement", "promotion_gate_pass", "refit_mean_spread_net_21", "refit_mean_spread_net_63"} - set(rows[0].keys() if rows else [])
+        missing_cols = {
+            "objective_improvement",
+            "promotion_gate_pass",
+            f"refit_mean_spread_net_{primary}",
+            f"refit_mean_spread_net_{secondary}",
+        } - set(rows[0].keys() if rows else [])
         if missing_cols:
             errors.append(f"walk_forward_blocks.csv missing columns: {sorted(missing_cols)}")
     if errors:

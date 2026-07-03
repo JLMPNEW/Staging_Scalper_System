@@ -202,7 +202,16 @@ def load_current_pit_rows(conn: Any, *, source_id: str, price_source: str, optim
     for row in rows:
         ticker = normalize_ticker(row["ticker"])
         first_price = first_price_date(conn, ticker, price_source)
-        start_date = max(optimization_start, first_price or optimization_start)
+        if first_price is None:
+            LOGGER.warning(
+                "Skipping current PIT membership seed for %s: no local %s adjusted-price bars; "
+                "refusing to claim membership from %s without price evidence.",
+                ticker,
+                price_source,
+                optimization_start,
+            )
+            continue
+        start_date = max(optimization_start, first_price)
         insert_membership(
             conn,
             company_id=int(row["company_id"]),
@@ -401,7 +410,11 @@ def main() -> int:
     membership_csv = args.membership_csv.expanduser().resolve()
     price_source = str(cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted"))
     optimization_start = parse_date_text(
-        cfg_get(config, "technology_universe.optimization_start_date", "2010-01-01"),
+        cfg_get(
+            config,
+            "software_infrastructure_universe.optimization_start_date",
+            cfg_get(config, "technology_universe.optimization_start_date", "2010-01-01"),
+        ),
         field="optimization_start_date",
         ticker="CONFIG",
     )

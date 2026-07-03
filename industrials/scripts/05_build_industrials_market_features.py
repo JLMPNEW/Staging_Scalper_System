@@ -630,16 +630,38 @@ def main() -> None:
             with conn:
                 ph_tickers = placeholders(tickers)
                 ph_sources = placeholders(source_ids)
+                issue_tickers = sorted(
+                    {
+                        normalize_ticker(row["ticker"])
+                        for row in conn.execute(
+                            "SELECT ticker FROM dim_industrials_taxonomy WHERE model_family = ?",
+                            (model_family,),
+                        ).fetchall()
+                        if normalize_ticker(row["ticker"])
+                    }.union(tickers)
+                )
+                ph_issue_tickers = placeholders(issue_tickers)
                 conn.execute(
                     f"""
                     DELETE FROM feature_market_technical
                     WHERE asof_date = ?
                       AND model_family = ?
                       AND source_id IN ({ph_sources})
+                      AND ticker IN ({ph_tickers})
                     """,
-                    (effective_asof.isoformat(), model_family, *source_ids),
+                    (effective_asof.isoformat(), model_family, *source_ids, *tickers),
                 )
-                conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({ph_tickers})", (RUN_TYPE, *tickers))
+                conn.execute(
+                    f"""
+                    DELETE FROM feature_market_technical
+                    WHERE asof_date = ?
+                      AND model_family = ?
+                      AND source_id IN ({ph_sources})
+                      AND ticker NOT IN ({ph_tickers})
+                    """,
+                    (effective_asof.isoformat(), model_family, *source_ids, *tickers),
+                )
+                conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({ph_issue_tickers})", (RUN_TYPE, *issue_tickers))
                 for member in members:
                     ticker = member.ticker
                     rows, feature_source_id = load_first_available_price_rows(
@@ -665,7 +687,7 @@ def main() -> None:
                     upsert_feature(conn, feature)
                     if review_reason:
                         review_count += 1
-                        add_issue(conn, ticker=ticker, source_id=source_id, detail=review_reason)
+                        add_issue(conn, ticker=ticker, source_id=feature_source_id, detail=review_reason)
                     report_rows.append(
                         {
                             "ticker": ticker,

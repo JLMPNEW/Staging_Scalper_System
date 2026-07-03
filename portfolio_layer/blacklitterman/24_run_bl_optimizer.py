@@ -73,6 +73,11 @@ def _f(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def _f_default(value: Any, default: float) -> float:
+    parsed = _f(value)
+    return default if parsed is None else parsed
+
+
 def _metric(metrics: dict[str, Any], key: str, default: float = float("nan")) -> float:
     val = _f(metrics.get(key))
     return val if val is not None else default
@@ -256,8 +261,8 @@ def main() -> int:  # noqa: C901
     foreign = input_meta.get("foreign") or {}
     expected_gross = _f(regime.get("gross_exposure"))
     expected_cash = None if expected_gross is None else max(0.0, 1.0 - expected_gross)
-    expected_fmin = _f(foreign.get("min_budget")) or 0.0
-    expected_fmax = _f(foreign.get("max_budget")) or 0.0
+    expected_fmin = _f_default(foreign.get("min_budget"), 0.0)
+    expected_fmax = _f_default(foreign.get("max_budget"), 0.0)
     budgets = ((generated_config.get("allocation") or {}).get("region_budgets") or {})
     us_band = budgets.get("US") or {}
     cash_band = budgets.get("CASH") or {}
@@ -269,23 +274,39 @@ def main() -> int:  # noqa: C901
     us_metric = _metric(metrics, "net_exposure_us")
     foreign_metric = _metric(metrics, "net_exposure_foreign")
     total_metric = _metric(metrics, "portfolio_sum_weight")
+    metric_values = {
+        "cash_weight": cash_metric,
+        "risky_gross_exposure": risky_metric,
+        "net_exposure_us": us_metric,
+        "net_exposure_foreign": foreign_metric,
+        "portfolio_sum_weight": total_metric,
+    }
+    for metric_name, metric_value in metric_values.items():
+        if not math.isfinite(metric_value):
+            budget_bad.append(f"{metric_name}=nonfinite")
     if expected_gross is None:
         budget_bad.append("expected_gross_missing")
-    elif abs(risky_metric - expected_gross) > tol:
+    elif math.isfinite(risky_metric) and abs(risky_metric - expected_gross) > tol:
         budget_bad.append(f"risky_gross={risky_metric:.10f}!={expected_gross:.10f}")
     if expected_cash is None:
         budget_bad.append("expected_cash_missing")
-    elif abs(cash_metric - expected_cash) > tol:
+    elif math.isfinite(cash_metric) and abs(cash_metric - expected_cash) > tol:
         budget_bad.append(f"cash={cash_metric:.10f}!={expected_cash:.10f}")
-    if abs(total_metric - 1.0) > tol:
+    if math.isfinite(total_metric) and abs(total_metric - 1.0) > tol:
         budget_bad.append(f"portfolio_sum={total_metric:.10f}!=1")
-    if not ((_f(us_band.get("min")) or 0.0) - tol <= us_metric <= (_f(us_band.get("max")) or 0.0) + tol):
+    us_min = _f_default(us_band.get("min"), 0.0)
+    us_max = _f_default(us_band.get("max"), 0.0)
+    foreign_min = _f_default(foreign_band.get("min"), 0.0)
+    foreign_max = _f_default(foreign_band.get("max"), 0.0)
+    cash_min = _f_default(cash_band.get("min"), 0.0)
+    cash_max = _f_default(cash_band.get("max"), 0.0)
+    if math.isfinite(us_metric) and not (us_min - tol <= us_metric <= us_max + tol):
         budget_bad.append(f"us={us_metric:.10f} outside [{us_band.get('min')},{us_band.get('max')}]")
-    if not ((_f(foreign_band.get("min")) or 0.0) - tol <= foreign_metric <= (_f(foreign_band.get("max")) or 0.0) + tol):
+    if math.isfinite(foreign_metric) and not (foreign_min - tol <= foreign_metric <= foreign_max + tol):
         budget_bad.append(f"foreign={foreign_metric:.10f} outside [{foreign_band.get('min')},{foreign_band.get('max')}]")
     if expected_fmax < expected_fmin - tol:
         budget_bad.append(f"foreign_budget_invalid=[{expected_fmin},{expected_fmax}]")
-    if not ((_f(cash_band.get("min")) or 0.0) - tol <= cash_metric <= (_f(cash_band.get("max")) or 0.0) + tol):
+    if math.isfinite(cash_metric) and not (cash_min - tol <= cash_metric <= cash_max + tol):
         budget_bad.append(f"cash={cash_metric:.10f} outside [{cash_band.get('min')},{cash_band.get('max')}]")
     if bool(metrics.get("cash_budget_relaxation_used", False)):
         budget_bad.append(f"cash_budget_relaxation_used slack={metrics.get('cash_max_slack')}")
@@ -329,7 +350,7 @@ def main() -> int:  # noqa: C901
             csv_cash = 0.0
             for _, row in weights_df.iterrows():
                 if str(row.get("Ticker", "")).strip().upper() == "CASH":
-                    csv_cash += _f(row.get("Weight")) or 0.0
+                    csv_cash += _f_default(row.get("Weight"), 0.0)
             if expected_cash is not None and abs(csv_cash - expected_cash) > tol:
                 weight_bad.append(f"csv_cash={csv_cash:.10f}!={expected_cash:.10f}")
     _record(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -14,7 +15,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SUPERVISOR = PROJECT_ROOT / "technology" / "scripts" / "19_supervise_technology_daily_backfill.py"
-DEFAULT_DB = Path("C:/Users/josel/Documents/STAGING/DB/technology.sqlite")
+DEFAULT_DB = Path(os.environ.get("TECHNOLOGY_DB_DIR", "C:/Users/josel/Documents/STAGING/DB")) / "technology.sqlite"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "output" / "technology_reports" / "historical_backfill" / "logs"
 
 
@@ -38,8 +39,12 @@ def utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+def read_json(path: Path) -> dict[str, Any] | None:
+    """Read a status JSON, returning None when it is mid-write or unreadable."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -85,8 +90,8 @@ def main() -> int:
     log_line(log_path, f"WAIT start wait_status={wait_status_path} next_family={args.next_family} next_start_date={args.next_start_date}")
 
     while True:
-        if wait_status_path.exists():
-            payload = read_json(wait_status_path)
+        payload = read_json(wait_status_path) if wait_status_path.exists() else None
+        if payload is not None:
             status = str(payload.get("status", "")).lower()
             completed_through = str(payload.get("completed_through", ""))
             chain_status.update(

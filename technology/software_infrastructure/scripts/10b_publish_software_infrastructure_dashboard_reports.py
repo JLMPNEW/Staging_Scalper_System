@@ -768,8 +768,19 @@ def main() -> int:
         filings = latest_filings(conn, filing_source, asof=asof)
 
     score_rows_with_oos = apply_oos_fields(score_rows, oos_provenance)
+    # Enrich with the latest SEC filing fields so the stale_sec_filing risk
+    # flag (>550 days) evaluates against live data.
+    score_rows_with_filings = [
+        {
+            **row,
+            "latest_sec_form": filings.get(str(row["ticker"]), {}).get("form_type", ""),
+            "latest_sec_filing_date": filings.get(str(row["ticker"]), {}).get("filing_date", ""),
+            "latest_sec_url": sec_url(filings.get(str(row["ticker"]))),
+        }
+        for row in score_rows_with_oos
+    ]
     score_rows_with_candidate_fields = add_portfolio_candidate_fields(
-        score_rows_with_oos,
+        score_rows_with_filings,
         score_neutral_value=score_neutral_value,
     )
     ranks = add_portfolio_candidate_fields(

@@ -24,6 +24,7 @@ from portfolio_layer.exits.exit_common import (  # noqa: E402
     EXIT_ACTION_FIELDS,
     VALID_ACTIONS,
     f0,
+    finite_float,
     latest_run_on_or_before,
     load_json,
     source_hashes,
@@ -54,9 +55,11 @@ def parse_args() -> argparse.Namespace:
 
 def _action_fraction(action: str, config: dict[str, Any]) -> float:
     if action == "hard_exit":
-        return float(cfg_get(config, "exit_engine.actions.hard_exit_fraction", 1.0) or 1.0)
+        parsed = finite_float(cfg_get(config, "exit_engine.actions.hard_exit_fraction", 1.0))
+        return 1.0 if parsed is None else parsed
     if action == "soft_exit":
-        return float(cfg_get(config, "exit_engine.actions.soft_exit_fraction", 0.5) or 0.5)
+        parsed = finite_float(cfg_get(config, "exit_engine.actions.soft_exit_fraction", 0.5))
+        return 0.5 if parsed is None else parsed
     return 0.0
 
 

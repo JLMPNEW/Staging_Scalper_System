@@ -39,6 +39,9 @@ REPORT_FIELDS = [
     "data_quality_status",
     "fx_conversion_status",
     "revenue_usd",
+    "revenue_stub_annualized_usd",
+    "revenue_stub_period_days",
+    "revenue_stub_quality",
     "assets_usd",
     "gross_margin",
     "operating_margin",
@@ -102,6 +105,10 @@ FEATURE_COLUMNS = [
     "accounts_receivable_usd",
     "accounts_payable_usd",
     "revenue_ttm",
+    "revenue_stub_annualized",
+    "revenue_stub_annualized_usd",
+    "revenue_stub_period_days",
+    "revenue_stub_quality",
     "gross_profit_ttm",
     "operating_income_ttm",
     "net_income_ttm",
@@ -794,6 +801,26 @@ def lookup_fx_rate(conn: Any, *, from_currency: str, to_currency: str, asof: dat
     return as_float(row["fx_rate"]) if row is not None else None
 
 
+def lookup_average_fx_rate(conn: Any, *, from_currency: str, to_currency: str, start: date | None, end: date) -> float | None:
+    if from_currency == to_currency:
+        return 1.0
+    if start is None or start > end:
+        return lookup_fx_rate(conn, from_currency=from_currency, to_currency=to_currency, asof=end)
+    row = conn.execute(
+        """
+        SELECT AVG(fx_rate) AS avg_fx_rate
+        FROM fact_fx_rate
+        WHERE from_currency = ?
+          AND to_currency = ?
+          AND rate_date >= ?
+          AND rate_date <= ?
+        """,
+        (from_currency, to_currency, start.isoformat(), end.isoformat()),
+    ).fetchone()
+    average = as_float(row["avg_fx_rate"]) if row is not None else None
+    return average if average is not None else lookup_fx_rate(conn, from_currency=from_currency, to_currency=to_currency, asof=end)
+
+
 def latest_market_values(conn: Any, *, ticker: str, market_source_ids: list[str], model_family: str, asof: date) -> tuple[float | None, float | None]:
     for market_source_id in market_source_ids:
         row = conn.execute(
@@ -889,6 +916,17 @@ def neutral_feature(
     return feature
 
 
+def should_default_missing_revenue_to_zero(*, company: dict[str, Any], profile: dict[str, Any]) -> bool:
+    development_stage = str(company.get("development_stage") or "").strip().lower()
+    reporting_profile = str(profile.get("reporting_profile") or "").strip().upper()
+    fallback_status = str(profile.get("fallback_status") or "").strip().lower()
+    return (
+        development_stage in {"development_stage", "pre_revenue", "pre_commercial", "speculative", "recent_ipo"}
+        or reporting_profile == "RECENT_IPO_DEVELOPMENT_STAGE"
+        or (reporting_profile.endswith("_PARTIAL") and fallback_status == "component_limited" and development_stage != "operating")
+    )
+
+
 def build_feature_from_facts(
     conn: Any,
     *,
@@ -965,6 +1003,10 @@ def build_feature_from_facts(
         if deferred_revenue == 0.0 and selected.get("deferred_revenue_current") is None and selected.get("deferred_revenue_noncurrent") is None:
             deferred_revenue = None
     rpo = metric_value(selected, "remaining_performance_obligation")
+    zero_revenue_defaulted = False
+    if revenue is None and should_default_missing_revenue_to_zero(company=company, profile=profile):
+        revenue = 0.0
+        zero_revenue_defaulted = True
 
     anchor = selected.get("revenue") or selected.get("assets") or next((row for row in selected.values() if row is not None), None)
     if anchor is not None:
@@ -981,34 +1023,68 @@ def build_feature_from_facts(
         )
 
     currency = str(feature.get("reported_currency") or "USD").upper()
-    fx_rate = lookup_fx_rate(conn, from_currency=currency, to_currency="USD", asof=asof)
+    income_anchor = selected.get("revenue") or selected.get("operating_income") or selected.get("net_income") or anchor
+    income_period_end = parse_date(income_anchor.get("period_end")) if income_anchor is not None else None
+    income_period_start = parse_date(income_anchor.get("period_start")) if income_anchor is not None else None
+    balance_anchor = selected.get("assets") or selected.get("liabilities") or selected.get("cash_and_equivalents") or anchor
+    balance_period_end = parse_date(balance_anchor.get("period_end")) if balance_anchor is not None else None
+    fx_income_end = income_period_end or asof
+    fx_balance_end = balance_period_end or fx_income_end
+    fx_rate_income_statement = lookup_average_fx_rate(
+        conn,
+        from_currency=currency,
+        to_currency="USD",
+        start=income_period_start,
+        end=fx_income_end,
+    )
+    fx_rate_balance_sheet = lookup_fx_rate(conn, from_currency=currency, to_currency="USD", asof=fx_balance_end)
     if currency == "USD":
         fx_status = "usd_native"
-    elif fx_rate is not None:
+    elif fx_rate_income_statement is not None and fx_rate_balance_sheet is not None:
         fx_status = "converted_to_usd"
     else:
         fx_status = "missing_fx_rate"
-    if fx_rate is None:
-        fx_rate = 1.0 if currency == "USD" else None
+    if currency == "USD":
+        fx_rate_income_statement = 1.0
+        fx_rate_balance_sheet = 1.0
 
-    def usd(value: float | None) -> float | None:
-        return value * fx_rate if value is not None and fx_rate is not None else None
+    def usd_income(value: float | None) -> float | None:
+        return value * fx_rate_income_statement if value is not None and fx_rate_income_statement is not None else None
 
-    revenue_usd = usd(revenue)
-    gross_profit_usd = usd(gross_profit)
-    operating_income_usd = usd(operating_income)
-    net_income_usd = usd(net_income)
-    operating_cash_flow_usd = usd(operating_cash_flow)
-    capex_usd = usd(capex)
-    free_cash_flow_usd = usd(free_cash_flow)
-    assets_usd = usd(assets)
-    liabilities_usd = usd(liabilities)
-    equity_usd = usd(equity)
-    cash_usd = usd(cash)
-    debt_usd = usd(debt_total)
-    inventory_usd = usd(inventory)
-    receivables_usd = usd(receivables)
-    payables_usd = usd(payables)
+    def usd_balance(value: float | None) -> float | None:
+        return value * fx_rate_balance_sheet if value is not None and fx_rate_balance_sheet is not None else None
+
+    revenue_usd = usd_income(revenue)
+    gross_profit_usd = usd_income(gross_profit)
+    operating_income_usd = usd_income(operating_income)
+    net_income_usd = usd_income(net_income)
+    operating_cash_flow_usd = usd_income(operating_cash_flow)
+    capex_usd = usd_income(capex)
+    free_cash_flow_usd = usd_income(free_cash_flow)
+    assets_usd = usd_balance(assets)
+    liabilities_usd = usd_balance(liabilities)
+    equity_usd = usd_balance(equity)
+    cash_usd = usd_balance(cash)
+    debt_usd = usd_balance(debt_total)
+    inventory_usd = usd_balance(inventory)
+    receivables_usd = usd_balance(receivables)
+    payables_usd = usd_balance(payables)
+    revenue_row = selected.get("revenue")
+    revenue_stub_annualized: float | None = None
+    revenue_stub_period_days: float | None = None
+    revenue_stub_quality: str | None = None
+    reporting_profile = str(profile.get("reporting_profile") or "").strip().upper()
+    revenue_row_days = duration_days(revenue_row) if revenue_row is not None else None
+    if revenue is not None and revenue_row is not None and revenue_row_days is not None and 45 <= revenue_row_days < 300 and not is_annual_fact(revenue_row):
+        revenue_stub_annualized = revenue * 365.0 / revenue_row_days
+        revenue_stub_period_days = float(revenue_row_days)
+        if reporting_profile in {"RECENT_PUBLIC_STUB", "RECENT_IPO_DEVELOPMENT_STAGE"}:
+            revenue_stub_quality = "recent_public_stub_observation_only"
+        elif reporting_profile in {"FPI_HYBRID_STUB_LOADED", "FPI_HYBRID_LOADED"}:
+            revenue_stub_quality = "fpi_hybrid_interim_annualized_observation_only"
+        else:
+            revenue_stub_quality = "interim_revenue_annualized_observation_only"
+    revenue_stub_annualized_usd = usd_income(revenue_stub_annualized)
     market_cap, latest_price = latest_market_values(conn, ticker=ticker, market_source_ids=market_source_ids, model_family=model_family, asof=asof)
     enterprise_value = market_cap + (debt_usd or 0.0) - (cash_usd or 0.0) if market_cap is not None else None
 
@@ -1040,6 +1116,8 @@ def build_feature_from_facts(
         ]
     }
     revenue_ttm_local = ttm_results["revenue"].value
+    if revenue_ttm_local is None and zero_revenue_defaulted:
+        revenue_ttm_local = 0.0
     gross_profit_ttm_local = ttm_results["gross_profit"].value
     operating_income_ttm_local = ttm_results["operating_income"].value
     net_income_ttm_local = ttm_results["net_income"].value
@@ -1055,18 +1133,23 @@ def build_feature_from_facts(
     quality_flags: list[str] = []
     if revenue is None:
         reasons.append("missing_revenue")
+    elif zero_revenue_defaulted:
+        quality_flags.append("development_stage_missing_revenue_defaulted_to_zero")
     if assets is None:
         reasons.append("missing_assets")
     if operating_income is None and net_income is None:
         reasons.append("missing_income_metrics")
     if fx_status == "missing_fx_rate":
         reasons.append(f"missing_fx_rate_{currency}_USD")
-    revenue_row = selected.get("revenue")
     if revenue_row is not None and not is_annual_fact(revenue_row):
         reasons.append("revenue_not_annual")
+        if revenue_stub_annualized is not None:
+            quality_flags.append("revenue_stub_annualized_observation_only")
     for metric, result in ttm_results.items():
         if result.value is None and result.quality_flag:
             quality_flags.append(result.quality_flag)
+    if revenue is not None and revenue > 0 and revenue_ttm_local is None and str(company.get("development_stage") or "").lower() != "operating":
+        quality_flags.append("revenue_transition_ttm_incomplete")
     if free_cash_flow_ttm_local is None and (
         operating_cash_flow_ttm_local is None or capex_ttm_local is None
     ):
@@ -1081,8 +1164,8 @@ def build_feature_from_facts(
     feature.update(
         {
             "fx_conversion_status": fx_status,
-            "fx_rate_income_statement": fx_rate,
-            "fx_rate_balance_sheet": fx_rate,
+            "fx_rate_income_statement": fx_rate_income_statement,
+            "fx_rate_balance_sheet": fx_rate_balance_sheet,
             "revenue": revenue,
             "cost_of_sales": cost_of_sales,
             "gross_profit": gross_profit,
@@ -1118,11 +1201,15 @@ def build_feature_from_facts(
             "inventory_usd": inventory_usd,
             "accounts_receivable_usd": receivables_usd,
             "accounts_payable_usd": payables_usd,
-            "revenue_ttm": usd(revenue_ttm_local),
-            "gross_profit_ttm": usd(gross_profit_ttm_local),
-            "operating_income_ttm": usd(operating_income_ttm_local),
-            "net_income_ttm": usd(net_income_ttm_local),
-            "free_cash_flow_ttm": usd(free_cash_flow_ttm_local),
+            "revenue_ttm": usd_income(revenue_ttm_local),
+            "revenue_stub_annualized": revenue_stub_annualized,
+            "revenue_stub_annualized_usd": revenue_stub_annualized_usd,
+            "revenue_stub_period_days": revenue_stub_period_days,
+            "revenue_stub_quality": revenue_stub_quality,
+            "gross_profit_ttm": usd_income(gross_profit_ttm_local),
+            "operating_income_ttm": usd_income(operating_income_ttm_local),
+            "net_income_ttm": usd_income(net_income_ttm_local),
+            "free_cash_flow_ttm": usd_income(free_cash_flow_ttm_local),
             "gross_margin": safe_div(gross_profit, revenue),
             "operating_margin": safe_div(operating_income, revenue),
             "fcf_margin": safe_div(free_cash_flow, revenue),
@@ -1234,16 +1321,17 @@ def main() -> None:
             report_rows: list[dict[str, Any]] = []
             with conn:
                 ph = placeholders(tickers)
-                conn.execute(
-                    f"""
-                    DELETE FROM feature_financial_statement
-                    WHERE asof_date = ?
-                      AND source_id = ?
-                      AND model_family = ?
-                      AND ticker NOT IN ({ph})
-                    """,
-                    (effective_asof.isoformat(), source_id, model_family, *tickers),
-                )
+                if not ticker_filter:
+                    conn.execute(
+                        f"""
+                        DELETE FROM feature_financial_statement
+                        WHERE asof_date = ?
+                          AND source_id = ?
+                          AND model_family = ?
+                          AND ticker NOT IN ({ph})
+                        """,
+                        (effective_asof.isoformat(), source_id, model_family, *tickers),
+                    )
                 conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({ph})", (RUN_TYPE, *tickers))
                 for company in universe:
                     ticker = normalize_ticker(company.get("ticker"))

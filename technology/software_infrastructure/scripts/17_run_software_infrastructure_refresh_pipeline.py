@@ -84,9 +84,11 @@ def build_steps(*, asof: str, skip_ibkr_borrow: bool, force_refresh: bool) -> li
     return [
         Step("00_init_db", "stage_1", "Initialize technology DB/schema/source registry", py_script("technology/scripts/00_init_technology_db.py")),
         Step("01_load_universe", "stage_2", "Load current software-infrastructure universe", py_script("technology/software_infrastructure/scripts/01_load_software_infrastructure_universe.py")),
-        Step("01b_load_historical_membership", "stage_2", "Load PIT historical software-infrastructure membership", py_script("technology/software_infrastructure/scripts/01b_load_software_infrastructure_historical_membership.py")),
-        Step("02_validate_universe", "stage_2", "Validate software-infrastructure universe", py_script("technology/software_infrastructure/scripts/02_validate_software_infrastructure_universe.py")),
+        Step("02_validate_universe_initial", "stage_2", "Validate current software-infrastructure universe", py_script("technology/software_infrastructure/scripts/02_validate_software_infrastructure_universe.py")),
         Step("03_sync_prices", "stage_3", "Sync Yahoo adjusted prices and benchmarks", py_script("technology/software_infrastructure/scripts/03_sync_software_infrastructure_prices.py"), [*asof_args, *refresh_args], network=True),
+        Step("01b_load_historical_membership", "stage_2", "Load PIT historical/current software-infrastructure membership after price availability", py_script("technology/software_infrastructure/scripts/01b_load_software_infrastructure_historical_membership.py")),
+        Step("02_validate_universe", "stage_2", "Validate PIT software-infrastructure universe", py_script("technology/software_infrastructure/scripts/02_validate_software_infrastructure_universe.py")),
+        Step("15_norgate_backfill", "stage_15", "Import Norgate delisted prices", py_script("technology/software_infrastructure/scripts/15_import_software_infrastructure_norgate_delisted_prices.py"), norgate_backfill=True),
         Step("05_build_market_features", "stage_3", "Build market technical features", py_script("technology/software_infrastructure/scripts/05_build_software_infrastructure_market_features.py"), asof_args),
         Step("06_validate_market", "stage_3", "Validate market stage", py_script("technology/software_infrastructure/scripts/06_validate_software_infrastructure_market_stage.py"), asof_args),
         Step("07_sync_sec_fundamentals", "stage_4", "Sync SEC submissions/companyfacts", py_script("technology/software_infrastructure/scripts/07_sync_software_infrastructure_sec_fundamentals.py"), refresh_args, network=True),
@@ -110,7 +112,6 @@ def build_steps(*, asof: str, skip_ibkr_borrow: bool, force_refresh: bool) -> li
         Step("08c_validate_walk_forward", "stage_8", "Validate walk-forward calibration output", py_script("technology/software_infrastructure/scripts/08c_validate_software_infrastructure_walk_forward_calibration.py"), optuna=True),
         Step("09_portfolio_backtest", "stage_9", "Run portfolio backtest reports", py_script("technology/software_infrastructure/scripts/09_run_software_infrastructure_portfolio_backtest.py"), research=True),
         Step("09_validate_portfolio_backtest", "stage_9", "Validate portfolio backtest reports", py_script("technology/software_infrastructure/scripts/09_validate_software_infrastructure_portfolio_backtest.py"), pass_db=False, research=True),
-        Step("15_norgate_backfill", "stage_15", "Import Norgate delisted prices", py_script("technology/software_infrastructure/scripts/15_import_software_infrastructure_norgate_delisted_prices.py"), norgate_backfill=True),
         Step("10b_publish_dashboard", "stage_10", "Publish dashboard/static reports", py_script("technology/software_infrastructure/scripts/10b_publish_software_infrastructure_dashboard_reports.py")),
         Step("10b_validate_dashboard", "stage_10", "Validate dashboard/static reports", py_script("technology/software_infrastructure/scripts/10b_validate_software_infrastructure_dashboard_reports.py"), pass_db=False),
         Step("16_publish_governance", "stage_10b", "Publish lockbox ledger and signal registry", py_script("technology/software_infrastructure/scripts/16_publish_software_infrastructure_lockbox_ledger.py")),
@@ -162,12 +163,34 @@ def selected_steps(steps: list[Step], args: argparse.Namespace, config: dict[str
         and (not args.skip_network or not step.network)
     ]
     if include_optuna and not include_research:
-        research_steps = [step for step in steps if step.research]
         existing = {step.step_id for step in out}
-        insertion_idx = max((idx for idx, step in enumerate(out) if step.stage == "stage_7"), default=-1) + 1
-        for step in reversed(research_steps):
-            if step.step_id not in existing and (not args.skip_network or not step.network):
-                out.insert(insertion_idx, step)
+
+        def insertable(step: Step) -> bool:
+            return (
+                step.step_id not in existing
+                and step.step_id not in skipped
+                and (not args.skip_network or not step.network)
+            )
+
+        research_steps = [step for step in steps if step.research]
+        # Only the Stage 8A signal-diagnostics chain is a true prerequisite of
+        # the Optuna steps; the Stage 9 backtest consumes Stage 8 outputs and
+        # must stay positioned after them.
+        diagnostics_steps = [step for step in research_steps if step.step_id.startswith("07_")]
+        post_optuna_steps = [step for step in research_steps if not step.step_id.startswith("07_")]
+        optuna_indices = [idx for idx, step in enumerate(out) if step.optuna]
+        first_optuna_idx = (
+            optuna_indices[0]
+            if optuna_indices
+            else max((idx for idx, step in enumerate(out) if step.stage == "stage_7"), default=-1) + 1
+        )
+        for step in reversed(diagnostics_steps):
+            if insertable(step):
+                out.insert(first_optuna_idx, step)
+        after_optuna_idx = max((idx for idx, step in enumerate(out) if step.optuna), default=first_optuna_idx - 1) + 1
+        for step in reversed(post_optuna_steps):
+            if insertable(step):
+                out.insert(after_optuna_idx, step)
     return out
 
 

@@ -30,15 +30,23 @@ VALID_PROFILES = {
     "SEC_XBRL_US_GAAP_PARTIAL",
     "SEC_XBRL_IFRS_PARTIAL",
     "SEC_20F_METADATA_ONLY",
+    "SEC_ARCHIVE_TEXT_TABLE",
+    "SEC_ARCHIVE_TEXT_TABLE_PARTIAL",
+    "FPI_HYBRID_STUB_LOADED",
+    "FPI_HYBRID_LOADED",
     "FOREIGN_VENDOR_FUNDAMENTALS",
     "FOREIGN_NEUTRAL_LOW_CONFIDENCE",
     "NO_FINANCIALS_REVIEW",
     "SEC_RAW_ARCHIVE_REQUIRED",
     "RECENT_IPO_DEVELOPMENT_STAGE",
+    "RECENT_PUBLIC_STUB",
     "PRIVATE_EXCLUDE",
     "PARENT_SEGMENT_NO_STANDALONE_SEC",
+    "SPINOFF_SEGMENT_BRIDGE_REVIEW",
+    "SPINOFF_SEGMENT_BRIDGE",
     "NON_FILING_OR_PENDING_REPORTING",
 }
+FPI_HYBRID_PROFILES = {"FPI_HYBRID_STUB_LOADED", "FPI_HYBRID_LOADED"}
 ACCEPTED_DATE_SQL = """
 CASE
     WHEN COALESCE(accepted_at, '') GLOB '????-??-??*' THEN SUBSTR(accepted_at, 1, 10)
@@ -161,6 +169,17 @@ def validate() -> int:
             """,
             (source_id, model_family, *universe),
         )
+        latest_feature_asof = value(
+            conn,
+            f"""
+            SELECT MAX(asof_date)
+            FROM feature_financial_statement
+            WHERE source_id = ?
+              AND model_family = ?
+              AND ticker IN ({ph})
+            """,
+            (source_id, model_family, *universe),
+        )
         audit_asof = requested_asof or parse_date(feature_asof)
         if audit_asof is None:
             errors.append("No financial feature as-of date found.")
@@ -221,11 +240,16 @@ def validate() -> int:
         future_periods = []
         non_usd_missing_fx = []
         complete_missing_core = []
+        recent_stub_missing_observation = []
+        fpi_hybrid_gate_errors = []
+        spinoff_bridge_gate_errors = []
         for row in feature_rows:
             ticker = str(row["ticker"])
             status = str(row["data_quality_status"] or "")
+            review_reason = str(row["review_reason"] or "")
+            reporting_profile = str(row["reporting_profile"] or "").upper()
             if status != "complete":
-                review_rows.append(f"{ticker}:{status}:{row['review_reason'] or ''}")
+                review_rows.append(f"{ticker}:{status}:{review_reason}")
             if status == "neutral_low_confidence":
                 fallback_rows.append(ticker)
             confidence = row["financial_confidence"]
@@ -240,12 +264,52 @@ def validate() -> int:
                 non_usd_missing_fx.append(ticker)
             if status == "complete" and (row["revenue_usd"] is None or row["assets_usd"] is None):
                 complete_missing_core.append(ticker)
+            if reporting_profile == "RECENT_PUBLIC_STUB" and "revenue_not_annual" in review_reason:
+                missing_stub_fields = [
+                    field
+                    for field in ["revenue_stub_annualized", "revenue_stub_period_days", "revenue_stub_quality"]
+                    if row[field] is None or str(row[field]).strip() == ""
+                ]
+                if fx_status != "missing_fx_rate" and row["revenue_stub_annualized_usd"] is None:
+                    missing_stub_fields.append("revenue_stub_annualized_usd")
+                if missing_stub_fields:
+                    recent_stub_missing_observation.append(f"{ticker}:{','.join(missing_stub_fields)}")
+            if reporting_profile in FPI_HYBRID_PROFILES:
+                if currency != "USD" and (
+                    fx_status != "converted_to_usd"
+                    or row["fx_rate_income_statement"] is None
+                    or row["fx_rate_balance_sheet"] is None
+                ):
+                    fpi_hybrid_gate_errors.append(f"{ticker}:missing_pit_fx_{currency}_USD")
+                if reporting_profile == "FPI_HYBRID_STUB_LOADED" and "revenue_not_annual" in review_reason:
+                    missing_stub_fields = [
+                        field
+                        for field in ["revenue_stub_annualized", "revenue_stub_annualized_usd", "revenue_stub_period_days", "revenue_stub_quality"]
+                        if row[field] is None or str(row[field]).strip() == ""
+                    ]
+                    if missing_stub_fields:
+                        fpi_hybrid_gate_errors.append(f"{ticker}:missing_stub_fields={','.join(missing_stub_fields)}")
+                    if status == "complete" and row["revenue_ttm"] is None:
+                        fpi_hybrid_gate_errors.append(f"{ticker}:stub_only_row_marked_complete")
+                if reporting_profile == "FPI_HYBRID_LOADED":
+                    if status != "complete":
+                        fpi_hybrid_gate_errors.append(f"{ticker}:loaded_profile_not_complete status={status} reason={review_reason}")
+                    if row["revenue_ttm"] is None and "revenue_not_annual" in review_reason:
+                        fpi_hybrid_gate_errors.append(f"{ticker}:loaded_profile_still_stub_only")
+            if reporting_profile == "SPINOFF_SEGMENT_BRIDGE_REVIEW" and status == "complete":
+                spinoff_bridge_gate_errors.append(f"{ticker}:bridge_review_profile_marked_complete")
         if bad_feature_confidence:
             errors.append(f"Feature financial confidence outside [0,1]: {bad_feature_confidence}")
         if future_periods:
             errors.append(f"Financial features have fiscal period ends after asof={audit_asof.isoformat()}: {future_periods}")
         if complete_missing_core:
             errors.append(f"Complete financial rows missing core USD fields: {complete_missing_core}")
+        if recent_stub_missing_observation:
+            errors.append(f"Recent public stub rows with interim revenue lack explicit stub observation fields: {recent_stub_missing_observation}")
+        if fpi_hybrid_gate_errors:
+            errors.append(f"FPI hybrid profile gate failures: {fpi_hybrid_gate_errors}")
+        if spinoff_bridge_gate_errors:
+            errors.append(f"Spinoff segment bridge profile gate failures: {spinoff_bridge_gate_errors}")
         if non_usd_missing_fx:
             warnings.append(f"Non-USD rows missing FX and held in review: {non_usd_missing_fx}")
         if fallback_rows and args.strict_fallbacks:
@@ -353,6 +417,50 @@ def validate() -> int:
             ).fetchall()
             if priority_mismatches:
                 errors.append(f"Canonical fact priority mismatches: {[dict(row) for row in priority_mismatches]}")
+            archive_qc_rows = conn.execute(
+                f"""
+                SELECT DISTINCT c.ticker, c.canonical_metric, c.period_end,
+                       c.accession_number, SUBSTR(r.payload_json, 1, 220) AS payload
+                FROM fact_financial_statement_canonical c
+                JOIN fact_sec_xbrl_fact f
+                  ON f.ticker = c.ticker
+                 AND f.source_id = c.source_id
+                 AND f.canonical_metric = c.canonical_metric
+                 AND f.period_end = c.period_end
+                 AND COALESCE(f.accession_number, '') = COALESCE(c.accession_number, '')
+                 AND COALESCE(f.unit, '') = COALESCE(c.unit, '')
+                JOIN fact_sec_xbrl_fact_raw r
+                  ON r.raw_fact_id = f.raw_fact_id
+                WHERE c.source_id = ?
+                  AND c.model_family = ?
+                  AND c.ticker IN ({usable_ph})
+                  AND c.period_end <= ?
+                  AND (
+                        CASE
+                            WHEN COALESCE(c.accepted_at, '') GLOB '????-??-??*' THEN SUBSTR(c.accepted_at, 1, 10)
+                            WHEN COALESCE(c.accepted_at, '') GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*'
+                                THEN SUBSTR(c.accepted_at, 1, 4) || '-' || SUBSTR(c.accepted_at, 5, 2) || '-' || SUBSTR(c.accepted_at, 7, 2)
+                            ELSE c.filing_date
+                        END
+                  ) <= ?
+                  AND f.source_detail = 'sec_archive_text_table_mapped'
+                  AND (
+                        r.payload_json LIKE '%"period_confidence":"fallback_filing_or_report_date"%'
+                     OR r.payload_json LIKE '%"scale_confidence":"low"%'
+                  )
+                ORDER BY c.ticker, c.canonical_metric, c.period_end
+                LIMIT 20
+                """,
+                (
+                    source_id,
+                    model_family,
+                    *usable_profiles,
+                    audit_asof.isoformat(),
+                    audit_asof.isoformat(),
+                ),
+            ).fetchall()
+            if archive_qc_rows:
+                warnings.append(f"Archive text-table QC warnings: {[dict(row) for row in archive_qc_rows]}")
             warnings.append(f"Usable XBRL profiles={len(usable_profiles)} raw_facts={raw_count} mapped_facts={mapped_count} canonical_facts={canonical_count}")
         else:
             warnings.append("No usable SEC XBRL profiles found; all financial rows should be explicit fallbacks until sync/vendor data is loaded.")
@@ -375,19 +483,32 @@ def validate() -> int:
         if future_canonical:
             warnings.append(f"Canonical table has {future_canonical} rows after validation asof; feature builder filters them out for PIT panels.")
 
-        review_issue_count = scalar(
-            conn,
+        review_issue_rows = conn.execute(
             f"""
-            SELECT COUNT(*)
+            SELECT DISTINCT ticker
             FROM data_quality_issues
             WHERE stage = ?
               AND issue_type = 'financial_feature_review'
+              AND resolution_status = 'open'
               AND ticker IN ({ph})
             """,
             (FEATURE_STAGE, *universe),
-        )
-        if review_rows and review_issue_count < len(review_rows):
-            errors.append(f"Financial review issue mismatch: review_features={len(review_rows)} issues={review_issue_count}")
+        ).fetchall()
+        review_issue_tickers = {str(row["ticker"]) for row in review_issue_rows}
+        review_feature_tickers = {str(row["ticker"]) for row in review_rows}
+        if review_rows and audit_asof.isoformat() == str(latest_feature_asof or "").strip() and review_feature_tickers != review_issue_tickers:
+            missing_issues = sorted(review_feature_tickers.difference(review_issue_tickers))
+            stale_issues = sorted(review_issue_tickers.difference(review_feature_tickers))
+            errors.append(
+                "Financial review issue mismatch: "
+                f"review_features={len(review_feature_tickers)} issues={len(review_issue_tickers)} "
+                f"missing_issues={missing_issues} stale_issues={stale_issues}"
+            )
+        elif review_rows and audit_asof.isoformat() != str(latest_feature_asof or "").strip():
+            warnings.append(
+                "Skipped financial review issue parity for historical asof="
+                f"{audit_asof.isoformat()}; data_quality_issues stores the latest build state, not an immutable as-of ledger."
+            )
 
         profile_counts = conn.execute(
             f"""

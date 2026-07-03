@@ -501,16 +501,20 @@ def latest_row(conn: Any, table: str, ticker: str, date_col: str, asof_iso: str)
 
 
 def latest_short_row(conn: Any, ticker: str, asof_iso: str) -> sqlite3.Row | None:
-    # Point-in-time: FINRA short interest is only known once published.
+    # Point-in-time: FINRA short interest is only known once published; when
+    # publication_date is missing, assume the typical settlement+14d lag.
     return conn.execute(
         """
         SELECT * FROM fact_short_interest
         WHERE ticker = ? AND settlement_date <= ?
-          AND (COALESCE(publication_date, '') = '' OR publication_date <= ?)
+          AND (
+              (COALESCE(publication_date, '') <> '' AND publication_date <= ?)
+              OR (COALESCE(publication_date, '') = '' AND DATE(settlement_date, '+14 day') <= ?)
+          )
         ORDER BY settlement_date DESC
         LIMIT 1
         """,
-        (ticker, asof_iso, asof_iso),
+        (ticker, asof_iso, asof_iso, asof_iso),
     ).fetchone()
 
 
@@ -558,24 +562,44 @@ def build_positioning_features(
             direct_source=direct_source,
             upstream_source=upstream_source,
         )
+        # Rows are stored per reporting owner, so a joint filing repeats the same
+        # economic transaction; dedupe on (accession_number, nonderiv_trans_sk) for
+        # counts/values while keeping owners (cluster buyers) from the raw rows.
         purchase = conn.execute(
             """
             SELECT COUNT(*) AS n, COALESCE(SUM(transaction_value), 0) AS v,
-                   COUNT(DISTINCT rptowner_cik) AS owners
-            FROM fact_sec_form4_transaction
-            WHERE ticker = ? AND source_id = ?
-              AND COALESCE(NULLIF(filing_date, ''), transaction_date) BETWEEN ? AND ?
-              AND is_open_market_purchase = 1
+                   (
+                       SELECT COUNT(DISTINCT rptowner_cik)
+                       FROM fact_sec_form4_transaction
+                       WHERE ticker = ? AND source_id = ?
+                         AND COALESCE(NULLIF(filing_date, ''), transaction_date) BETWEEN ? AND ?
+                         AND is_open_market_purchase = 1
+                   ) AS owners
+            FROM (
+                SELECT accession_number, nonderiv_trans_sk, MAX(transaction_value) AS transaction_value
+                FROM fact_sec_form4_transaction
+                WHERE ticker = ? AND source_id = ?
+                  AND COALESCE(NULLIF(filing_date, ''), transaction_date) BETWEEN ? AND ?
+                  AND is_open_market_purchase = 1
+                GROUP BY accession_number, nonderiv_trans_sk
+            )
             """,
-            (ticker, insider_source, insider_start, asof.isoformat()),
+            (
+                ticker, insider_source, insider_start, asof.isoformat(),
+                ticker, insider_source, insider_start, asof.isoformat(),
+            ),
         ).fetchone()
         sale = conn.execute(
             """
             SELECT COUNT(*) AS n, COALESCE(SUM(transaction_value), 0) AS v
-            FROM fact_sec_form4_transaction
-            WHERE ticker = ? AND source_id = ?
-              AND COALESCE(NULLIF(filing_date, ''), transaction_date) BETWEEN ? AND ?
-              AND is_open_market_sale = 1
+            FROM (
+                SELECT accession_number, nonderiv_trans_sk, MAX(transaction_value) AS transaction_value
+                FROM fact_sec_form4_transaction
+                WHERE ticker = ? AND source_id = ?
+                  AND COALESCE(NULLIF(filing_date, ''), transaction_date) BETWEEN ? AND ?
+                  AND is_open_market_sale = 1
+                GROUP BY accession_number, nonderiv_trans_sk
+            )
             """,
             (ticker, insider_source, insider_start, asof.isoformat()),
         ).fetchone()
@@ -589,10 +613,14 @@ def build_positioning_features(
                 SELECT short_interest_pct_float, short_interest_shares, float_shares
                 FROM fact_short_interest
                 WHERE ticker = ? AND settlement_date <= ?
+                  AND (
+                      (COALESCE(publication_date, '') <> '' AND publication_date <= ?)
+                      OR (COALESCE(publication_date, '') = '' AND DATE(settlement_date, '+14 day') <= ?)
+                  )
                 ORDER BY settlement_date DESC
                 LIMIT 1
                 """,
-                (ticker, short_prior_cutoff),
+                (ticker, short_prior_cutoff, asof.isoformat(), asof.isoformat()),
             ).fetchone()
             # Change in percent-of-float, so the signal is comparable across companies.
             latest_pct = safe_float(short["short_interest_pct_float"])

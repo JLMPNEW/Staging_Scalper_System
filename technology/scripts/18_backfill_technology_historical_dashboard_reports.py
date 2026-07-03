@@ -16,12 +16,10 @@ import argparse
 import contextlib
 import csv
 import json
-import runpy
 import sqlite3
 import subprocess
 import sys
 import time
-import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,6 +62,7 @@ class FamilySpec:
     dashboard_dir_default: str
     rank_filename: str
     manifest_filename: str
+    stage11_prefix: str
     steps: tuple[StepSpec, ...]
     restore_steps: tuple[StepSpec, ...]
 
@@ -181,6 +180,7 @@ register(
         dashboard_dir_default="../output/technology_reports/semi_dashboard",
         rank_filename="semiconductor_final_rank_table.csv",
         manifest_filename="semiconductor_dashboard_manifest.json",
+        stage11_prefix="semiconductor",
         steps=SEMICONDUCTOR_STEPS,
         restore_steps=SEMICONDUCTOR_RESTORE_STEPS,
     )
@@ -193,6 +193,7 @@ register(
         dashboard_dir_default="../output/technology_reports/technology_hardware/dashboard",
         rank_filename="technology_hardware_final_rank_table.csv",
         manifest_filename="technology_hardware_dashboard_manifest.json",
+        stage11_prefix="technology_hardware",
         steps=HARDWARE_STEPS,
         restore_steps=HARDWARE_RESTORE_STEPS,
     )
@@ -205,10 +206,13 @@ register(
         dashboard_dir_default="../output/technology_reports/software_infrastructure/dashboard",
         rank_filename="software_infrastructure_final_rank_table.csv",
         manifest_filename="software_infrastructure_dashboard_manifest.json",
+        stage11_prefix="software_infrastructure",
         steps=SOFTWARE_STEPS,
         restore_steps=SOFTWARE_RESTORE_STEPS,
     )
 )
+
+STAGE11_EXPORT_SCRIPT = script("technology/scripts/19_export_stage11_survivorship_calibration_panel.py")
 
 
 def parse_args() -> argparse.Namespace:
@@ -238,6 +242,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--include-stage11-survivorship-panel",
+        action="store_true",
+        help="Also write the survivorship-correct Stage 11 calibration sidecar into each dated dashboard folder.",
+    )
     parser.add_argument("--no-restore-latest-root", action="store_true")
     parser.add_argument(
         "--output-dir",
@@ -377,28 +386,41 @@ def command_for_step(
     return cmd
 
 
+def command_for_stage11_sidecar(
+    *,
+    python_exe: str,
+    config_path: Path,
+    db_path: Path | None,
+    spec: FamilySpec,
+    dates: list[str],
+) -> list[str]:
+    if not dates:
+        raise ValueError("Stage 11 sidecar export requires at least one date.")
+    cmd = [
+        python_exe,
+        "-c",
+        RUNPY_TRAMPOLINE,
+        str(STAGE11_EXPORT_SCRIPT),
+        "--config",
+        str(config_path),
+        "--family",
+        spec.family,
+        "--dates",
+        ",".join(dates),
+        "--output-layout",
+        "dashboard_snapshot",
+    ]
+    if db_path is not None:
+        cmd.extend(["--db", str(db_path)])
+    return cmd
+
+
 def run_command(cmd: list[str], *, timeout_sec: int, dry_run: bool) -> tuple[int, str, str]:
     if dry_run:
         print("DRY-RUN", " ".join(cmd))
         return 0, "", ""
-    if len(cmd) >= 4 and cmd[1] == "-c" and cmd[2] == RUNPY_TRAMPOLINE:
-        script_path = cmd[3]
-        old_argv = sys.argv[:]
-        try:
-            sys.argv = [script_path, *cmd[4:]]
-            runpy.run_path(script_path, run_name="__main__")
-            return 0, "", ""
-        except SystemExit as exc:
-            code = exc.code
-            if code in (None, 0):
-                return 0, "", ""
-            if isinstance(code, int):
-                return code, "", ""
-            return 1, "", str(code)
-        except BaseException:  # noqa: BLE001 - runner records the full child failure
-            return 1, "", traceback.format_exc()
-        finally:
-            sys.argv = old_argv
+    # Always execute steps in a subprocess so --step-timeout-sec is enforced;
+    # the former in-process runpy branch could never be timed out.
     proc = subprocess.run(
         cmd,
         cwd=PROJECT_ROOT,
@@ -466,6 +488,46 @@ def validate_snapshot_files(
         raise RuntimeError(f"{spec.family} OOS snapshot validation failed: {'; '.join(oos_errors)}")
 
 
+def validate_stage11_sidecar(snapshot_dir: Path, spec: FamilySpec, asof: str) -> None:
+    path = snapshot_dir / f"{spec.stage11_prefix}_stage11_survivorship_calibration_panel.csv"
+    if not path.exists() or path.stat().st_size == 0:
+        raise RuntimeError(f"Missing or empty Stage 11 survivorship sidecar: {path}")
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    if not rows:
+        raise RuntimeError(f"Stage 11 survivorship sidecar has no rows: {path}")
+    required = {
+        "ticker",
+        "asof_date",
+        "final_score",
+        "survivorship_corrected_panel_flag",
+        "stage11_calibration_panel_source",
+        "stage11_calibration_input_eligible_flag",
+        "stage11_calibration_input_reason",
+        "stage11_exclusion_reason",
+        "price_available_on_asof_flag",
+        "forward_21d_join_ready_flag",
+        "forward_63d_join_ready_flag",
+    }
+    missing = sorted(required.difference(rows[0]))
+    if missing:
+        raise RuntimeError(f"Stage 11 sidecar missing required fields: {missing}")
+    bad_dates = sorted({str(row.get("asof_date") or "") for row in rows if str(row.get("asof_date") or "") != asof})
+    if bad_dates:
+        raise RuntimeError(f"Stage 11 sidecar contains rows outside {asof}: {bad_dates[:5]}")
+    bad_survivorship = [
+        str(row.get("ticker") or "")
+        for row in rows
+        if str(row.get("survivorship_corrected_panel_flag") or "") != "1"
+        or str(row.get("stage11_calibration_panel_source") or "") == "dashboard_rank_snapshot_current_universe_replay"
+    ]
+    if bad_survivorship:
+        raise RuntimeError(f"Stage 11 sidecar is not survivorship-correct for rows: {bad_survivorship[:10]}")
+    eligible = sum(1 for row in rows if str(row.get("stage11_calibration_input_eligible_flag") or "") == "1")
+    if eligible <= 0:
+        raise RuntimeError(f"Stage 11 sidecar has no eligible calibration rows: {path}")
+
+
 def write_run_report(output_dir: Path, rows: list[dict[str, Any]], summary: dict[str, Any]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -482,6 +544,10 @@ def write_run_report(output_dir: Path, rows: list[dict[str, Any]], summary: dict
         writer.writeheader()
         writer.writerows(rows)
     print(json.dumps({"summary": summary, "json_report": str(json_path), "csv_report": str(csv_path)}, indent=2, sort_keys=True))
+
+
+class _BackfillAbort(Exception):
+    """Internal control-flow signal: stop the backfill, run root restore, write the report."""
 
 
 def run_with_args(args: argparse.Namespace) -> int:
@@ -505,97 +571,92 @@ def run_with_args(args: argparse.Namespace) -> int:
 
     rows: list[dict[str, Any]] = []
     failures = 0
+    historical_published = False
     print(
         f"Historical dashboard backfill: dates={len(dates)} {dates[0]}..{dates[-1]} "
         f"frequency={args.frequency} families={','.join(spec.family for spec in families)}"
     )
-    for asof in dates:
-        for spec in families:
-            root_dir = dashboard_dir(config, base_dir, spec)
-            snapshot_dir = root_dir / asof
-            for step in spec.steps:
-                cmd = command_for_step(
-                    python_exe=sys.executable,
-                    step=step,
-                    config_path=config_path,
-                    db_path=command_db_path,
-                    asof=asof,
-                    snapshot_dir=snapshot_dir if step.output_dir_from_snapshot else None,
-                )
-                print(f"[{asof}][{spec.family}][{step.step_id}]")
-                try:
-                    code, stdout, stderr = run_command(cmd, timeout_sec=args.step_timeout_sec, dry_run=bool(args.dry_run))
-                except subprocess.TimeoutExpired as exc:
-                    code, stdout, stderr = 124, str(exc.stdout or ""), str(exc.stderr or f"Timed out after {args.step_timeout_sec}s")
-                row = {
-                    "asof_date": asof,
-                    "family": spec.family,
-                    "step_id": step.step_id,
-                    "returncode": code,
-                    "command": " ".join(cmd),
-                    "stdout_tail": tail(stdout),
-                    "stderr_tail": tail(stderr),
-                }
-                rows.append(row)
-                if code != 0:
-                    failures += 1
-                    print(row["stderr_tail"] or row["stdout_tail"])
-                    if not args.continue_on_error:
-                        summary = {"status": "FAIL", "target_dates": len(dates), "families": [s.family for s in families], "failures": failures}
-                        write_run_report(output_dir, rows, summary)
-                        return 1
-            if not args.dry_run:
-                try:
-                    validate_snapshot_files(
-                        snapshot_dir,
-                        spec,
-                        asof,
-                        historical_mode=True,
-                        require_oos_score=bool(args.require_oos_score_valid),
+    try:
+        for asof in dates:
+            for spec in families:
+                root_dir = dashboard_dir(config, base_dir, spec)
+                snapshot_dir = root_dir / asof
+                for step in spec.steps:
+                    cmd = command_for_step(
+                        python_exe=sys.executable,
+                        step=step,
+                        config_path=config_path,
+                        db_path=command_db_path,
+                        asof=asof,
+                        snapshot_dir=snapshot_dir if step.output_dir_from_snapshot else None,
                     )
-                    rows.append({"asof_date": asof, "family": spec.family, "step_id": "snapshot_file_validation", "returncode": 0})
-                except Exception as exc:  # noqa: BLE001 - report and optionally continue
-                    failures += 1
-                    rows.append(
-                        {
-                            "asof_date": asof,
-                            "family": spec.family,
-                            "step_id": "snapshot_file_validation",
-                            "returncode": 1,
-                            "stderr_tail": f"{type(exc).__name__}: {exc}",
-                        }
-                    )
-                    print(f"{type(exc).__name__}: {exc}")
-                    if not args.continue_on_error:
-                        summary = {"status": "FAIL", "target_dates": len(dates), "families": [s.family for s in families], "failures": failures}
-                        write_run_report(output_dir, rows, summary)
-                        return 1
+                    print(f"[{asof}][{spec.family}][{step.step_id}]")
+                    if not args.dry_run and step.step_id == "10b_publish_dashboard":
+                        historical_published = True
+                    try:
+                        code, stdout, stderr = run_command(cmd, timeout_sec=args.step_timeout_sec, dry_run=bool(args.dry_run))
+                    except subprocess.TimeoutExpired as exc:
+                        code, stdout, stderr = 124, str(exc.stdout or ""), str(exc.stderr or f"Timed out after {args.step_timeout_sec}s")
+                    row = {
+                        "asof_date": asof,
+                        "family": spec.family,
+                        "step_id": step.step_id,
+                        "returncode": code,
+                        "command": " ".join(cmd),
+                        "stdout_tail": tail(stdout),
+                        "stderr_tail": tail(stderr),
+                    }
+                    rows.append(row)
+                    if code != 0:
+                        failures += 1
+                        print(row["stderr_tail"] or row["stdout_tail"])
+                        if not args.continue_on_error:
+                            raise _BackfillAbort
+                if not args.dry_run:
+                    try:
+                        validate_snapshot_files(
+                            snapshot_dir,
+                            spec,
+                            asof,
+                            historical_mode=True,
+                            require_oos_score=bool(args.require_oos_score_valid),
+                        )
+                        rows.append({"asof_date": asof, "family": spec.family, "step_id": "snapshot_file_validation", "returncode": 0})
+                    except Exception as exc:  # noqa: BLE001 - report and optionally continue
+                        failures += 1
+                        rows.append(
+                            {
+                                "asof_date": asof,
+                                "family": spec.family,
+                                "step_id": "snapshot_file_validation",
+                                "returncode": 1,
+                                "stderr_tail": f"{type(exc).__name__}: {exc}",
+                            }
+                        )
+                        print(f"{type(exc).__name__}: {exc}")
+                        if not args.continue_on_error:
+                            raise _BackfillAbort from exc
 
-    if not args.no_restore_latest_root:
-        for spec in families:
-            current_asof = latest_current_asof(db_path, spec)
-            if not current_asof:
-                continue
-            root_dir = dashboard_dir(config, base_dir, spec)
-            for step in spec.restore_steps:
-                cmd = command_for_step(
+        if args.include_stage11_survivorship_panel:
+            for spec in families:
+                cmd = command_for_stage11_sidecar(
                     python_exe=sys.executable,
-                    step=step,
                     config_path=config_path,
                     db_path=command_db_path,
-                    asof=current_asof,
-                    snapshot_dir=None,
+                    spec=spec,
+                    dates=dates,
                 )
-                print(f"[restore-current-root][{spec.family}][{step.step_id}][{current_asof}]")
+                date_range_label = f"{dates[0]}..{dates[-1]}"
+                print(f"[{date_range_label}][{spec.family}][stage11_survivorship_sidecar_batch]")
                 try:
                     code, stdout, stderr = run_command(cmd, timeout_sec=args.step_timeout_sec, dry_run=bool(args.dry_run))
                 except subprocess.TimeoutExpired as exc:
                     code, stdout, stderr = 124, str(exc.stdout or ""), str(exc.stderr or f"Timed out after {args.step_timeout_sec}s")
                 rows.append(
                     {
-                        "asof_date": current_asof,
+                        "asof_date": date_range_label,
                         "family": spec.family,
-                        "step_id": step.step_id,
+                        "step_id": "stage11_survivorship_sidecar_batch",
                         "returncode": code,
                         "command": " ".join(cmd),
                         "stdout_tail": tail(stdout),
@@ -606,11 +667,89 @@ def run_with_args(args: argparse.Namespace) -> int:
                     failures += 1
                     print(tail(stderr) or tail(stdout))
                     if not args.continue_on_error:
-                        summary = {"status": "FAIL", "target_dates": len(dates), "families": [s.family for s in families], "failures": failures}
-                        write_run_report(output_dir, rows, summary)
-                        return 1
-            if not args.dry_run:
-                validate_snapshot_files(root_dir / current_asof, spec, current_asof, historical_mode=False)
+                        raise _BackfillAbort
+                if not args.dry_run:
+                    root_dir = dashboard_dir(config, base_dir, spec)
+                    for asof in dates:
+                        try:
+                            validate_stage11_sidecar(root_dir / asof, spec, asof)
+                            rows.append({"asof_date": asof, "family": spec.family, "step_id": "stage11_sidecar_validation", "returncode": 0})
+                        except Exception as exc:  # noqa: BLE001 - report and optionally continue
+                            failures += 1
+                            rows.append(
+                                {
+                                    "asof_date": asof,
+                                    "family": spec.family,
+                                    "step_id": "stage11_sidecar_validation",
+                                    "returncode": 1,
+                                    "stderr_tail": f"{type(exc).__name__}: {exc}",
+                                }
+                            )
+                            print(f"{type(exc).__name__}: {exc}")
+                            if not args.continue_on_error:
+                                raise _BackfillAbort from exc
+    except _BackfillAbort:
+        pass
+    finally:
+        # Restore the production dashboard root whenever historical publishing began,
+        # including the abort paths above; a failed run must not leave a historical
+        # snapshot in the current-dashboard root.
+        if historical_published and not args.dry_run and not args.no_restore_latest_root:
+            restore_aborted = False
+            for spec in families:
+                if restore_aborted:
+                    break
+                current_asof = latest_current_asof(db_path, spec)
+                if not current_asof:
+                    continue
+                root_dir = dashboard_dir(config, base_dir, spec)
+                for step in spec.restore_steps:
+                    cmd = command_for_step(
+                        python_exe=sys.executable,
+                        step=step,
+                        config_path=config_path,
+                        db_path=command_db_path,
+                        asof=current_asof,
+                        snapshot_dir=None,
+                    )
+                    print(f"[restore-current-root][{spec.family}][{step.step_id}][{current_asof}]")
+                    try:
+                        code, stdout, stderr = run_command(cmd, timeout_sec=args.step_timeout_sec, dry_run=False)
+                    except subprocess.TimeoutExpired as exc:
+                        code, stdout, stderr = 124, str(exc.stdout or ""), str(exc.stderr or f"Timed out after {args.step_timeout_sec}s")
+                    rows.append(
+                        {
+                            "asof_date": current_asof,
+                            "family": spec.family,
+                            "step_id": step.step_id,
+                            "returncode": code,
+                            "command": " ".join(cmd),
+                            "stdout_tail": tail(stdout),
+                            "stderr_tail": tail(stderr),
+                        }
+                    )
+                    if code != 0:
+                        failures += 1
+                        print(tail(stderr) or tail(stdout))
+                        if not args.continue_on_error:
+                            restore_aborted = True
+                            break
+                else:
+                    try:
+                        validate_snapshot_files(root_dir / current_asof, spec, current_asof, historical_mode=False)
+                        rows.append({"asof_date": current_asof, "family": spec.family, "step_id": "restore_snapshot_validation", "returncode": 0})
+                    except Exception as exc:  # noqa: BLE001 - restore validation must not mask the run report
+                        failures += 1
+                        rows.append(
+                            {
+                                "asof_date": current_asof,
+                                "family": spec.family,
+                                "step_id": "restore_snapshot_validation",
+                                "returncode": 1,
+                                "stderr_tail": f"{type(exc).__name__}: {exc}",
+                            }
+                        )
+                        print(f"{type(exc).__name__}: {exc}")
 
     summary = {
         "status": "PASS" if failures == 0 else "FAIL",

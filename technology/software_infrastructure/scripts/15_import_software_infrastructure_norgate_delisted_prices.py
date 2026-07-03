@@ -324,8 +324,9 @@ def upsert_price_rows(
 def main() -> int:
     configure_utc_logging()
     args = parse_args()
-    config = load_yaml(args.config)
-    db_path = args.db or resolve_path(cfg_get(config, "paths.database_path"), base_dir=PACKAGE_ROOT)
+    config_path = args.config.expanduser().resolve()
+    config = load_yaml(config_path)
+    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=config_path.parent)
     membership_csv = args.membership_csv.expanduser().resolve()
     start_date = args.start_date or str(cfg_get(config, "technology_universe.optimization_start_date", "2010-01-01"))
 
@@ -373,7 +374,9 @@ def main() -> int:
                         first_bar = min(idx.isoformat() for idx in prices.index)
                         last_bar = max(idx.isoformat() for idx in prices.index)
                         status = "loaded"
-                        rows = len(prices)
+                        # Match the real upsert, which skips rows with null
+                        # close/adj_close, so dry-run counts are comparable.
+                        rows = int((prices["Close"].notna() & prices["AdjClose"].notna()).sum())
                         if not args.dry_run:
                             rows = upsert_price_rows(
                                 conn,

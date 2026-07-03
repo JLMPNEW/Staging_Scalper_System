@@ -140,13 +140,31 @@ def resolve_model_family(config: dict[str, Any], settings: CalibratedScoringSett
     )
 
 
+def allowed_component_names(config: dict[str, Any], settings: CalibratedScoringSettings) -> set[str]:
+    """Core components plus every overlay configured for this family.
+
+    KNOWN_COMPONENT_NAMES is seeded from the semiconductor defaults; a family
+    configuring a different overlay name must still validate.
+    """
+    return KNOWN_COMPONENT_NAMES | {str(name) for name in configured_overlay_names(config, settings)}
+
+
 def component_weight_specs(config: dict[str, Any], settings: CalibratedScoringSettings) -> dict[str, float]:
     defaults = settings.default_component_weights
     raw = cfg_get(config, f"{settings.config_key}.component_weights", defaults)
     if isinstance(raw, dict):
-        unknown = sorted(set(map(str, raw)) - KNOWN_COMPONENT_NAMES)
+        unknown = sorted(set(map(str, raw)) - allowed_component_names(config, settings))
         if unknown:
             raise ValueError(f"Unknown component names in {settings.config_key}.component_weights: {unknown}")
+        # Enforce the sum-to-1 invariant on the *declared* weights. Silent
+        # renormalization made the downstream stage-7 gate unreachable and let
+        # config typos rescale invisibly.
+        raw_total = sum(w for w in (safe_float(v) for v in raw.values()) if w is not None and w >= 0)
+        if raw and abs(raw_total - 1.0) > 0.001:
+            raise ValueError(
+                f"{settings.config_key}.component_weights must sum to 1.0 (found {raw_total:.6f}); "
+                "fix the config instead of relying on silent renormalization."
+            )
     configured = normalize_weights(raw)
     if configured:
         for component in defaults:
@@ -160,7 +178,7 @@ def subfeature_weight_specs(config: dict[str, Any], settings: CalibratedScoringS
     out: dict[str, list[tuple[str, float]]] = {}
     if not isinstance(raw, dict):
         return out
-    unknown_components = sorted(set(map(str, raw)) - KNOWN_COMPONENT_NAMES)
+    unknown_components = sorted(set(map(str, raw)) - allowed_component_names(config, settings))
     if unknown_components:
         raise ValueError(f"Unknown component names in {settings.config_key}.subfeature_weights: {unknown_components}")
     for component, raw_weights in raw.items():
@@ -270,8 +288,13 @@ def recalibrate_components(
                 }
             elif component_name in overlay_set:
                 score = safe_float(row.get(f"{component_name}_score"))
-                quality = safe_float(row.get("sector_overlay_quality")) if component_name in {"sector_cycle", "big_tech_capex"} else 0.0
-                status = str(row.get("sector_overlay_status") or "not_loaded") if component_name in {"sector_cycle", "big_tech_capex"} else "not_loaded"
+                # Any configured overlay that Stage 6B actually loaded carries
+                # the row-level overlay quality; hardcoding specific overlay
+                # names here would zero out future 6B additions.
+                overlay_status = str(row.get("sector_overlay_status") or "not_loaded")
+                overlay_loaded = overlay_status != "not_loaded" and score is not None
+                quality = safe_float(row.get("sector_overlay_quality")) if overlay_loaded else 0.0
+                status = overlay_status if overlay_loaded else "not_loaded"
                 row["_component_meta"][component_name] = {
                     "component_score": clamp(score if score is not None else neutral_score),
                     "component_quality": max(0.0, min(1.0, quality or 0.0)),
@@ -352,7 +375,9 @@ def compute_model_outputs(
             available_component_count += 1
         core_score = weighted_score / available_weight if available_weight > 0 else neutral_score
         data_quality = weighted_quality / positive_component_weight if positive_component_weight > 0 else 0.0
-        sector_overlay_score = safe_float(row.get("sector_overlay_score")) or neutral_score
+        raw_overlay_score = safe_float(row.get("sector_overlay_score"))
+        # `or` would coerce a legitimate 0.0 (deep-trough overlay) to neutral.
+        sector_overlay_score = raw_overlay_score if raw_overlay_score is not None else neutral_score
         sector_overlay_quality = safe_float(row.get("sector_overlay_quality")) or 0.0
         applied_overlay_weight = overlay_weight if sector_overlay_quality > 0 else 0.0
         final_score = core_score * (1.0 - applied_overlay_weight) + sector_overlay_score * applied_overlay_weight
@@ -505,6 +530,13 @@ def build_calibrated_scores(settings: CalibratedScoringSettings) -> None:
             if not rows:
                 raise ValueError(f"No baseline scoring rows found for asof={asof_text}")
             universe = load_universe_tickers(conn, model_family)
+            # Stale baseline rows for tickers no longer in the universe must not
+            # be scored/published (they would also contaminate percentiles).
+            universe_set = set(universe)
+            stale = sorted({str(row["ticker"]) for row in rows} - universe_set)
+            if stale:
+                LOGGER.warning("Dropping %d baseline rows for non-universe tickers: %s", len(stale), stale[:10])
+                rows = [row for row in rows if str(row["ticker"]) in universe_set]
             if len(rows) < len(universe):
                 raise ValueError(
                     f"Baseline asof={asof_text} has only {len(rows)}/{len(universe)} universe rows; "
@@ -650,8 +682,8 @@ def validate_calibrated_scores(settings: CalibratedScoringSettings) -> int:
             errors.append(f"Calibrated output rows mismatch: {output_rows}/{len(universe)}")
         rank_ready = scalar(
             conn,
-            "SELECT COUNT(*) FROM feature_scoring_model_output WHERE source_id = ? AND model_family = ? AND asof_date = ? AND rank_ready_flag = 1",
-            (source_id, model_family, asof_text),
+            f"SELECT COUNT(*) FROM feature_scoring_model_output WHERE source_id = ? AND model_family = ? AND asof_date = ? AND rank_ready_flag = 1 AND ticker IN ({ph})",
+            (source_id, model_family, asof_text, *universe),
         )
         # Stage 7 output rows share the baseline asof, so the expectation is
         # computed at the SAME asof being validated. Tickers Stage 7 demotes via
@@ -694,15 +726,15 @@ def validate_calibrated_scores(settings: CalibratedScoringSettings) -> int:
         if rank_ready < min_rank_ready:
             errors.append(f"Rank-ready output too low: {rank_ready}/{expected_rank_ready}")
         score_stats = conn.execute(
-            """
+            f"""
             SELECT MIN(final_score) AS min_score,
                    MAX(final_score) AS max_score,
                    AVG(final_score) AS avg_score,
                    COUNT(DISTINCT final_rank) AS distinct_ranks
             FROM feature_scoring_model_output
-            WHERE source_id = ? AND model_family = ? AND asof_date = ? AND rank_ready_flag = 1
+            WHERE source_id = ? AND model_family = ? AND asof_date = ? AND rank_ready_flag = 1 AND ticker IN ({ph})
             """,
-            (source_id, model_family, asof_text),
+            (source_id, model_family, asof_text, *universe),
         ).fetchone()
         if score_stats is None:
             errors.append("Calibrated final scores have no cross-sectional variance.")
@@ -712,7 +744,7 @@ def validate_calibrated_scores(settings: CalibratedScoringSettings) -> int:
             if int(score_stats["distinct_ranks"] or 0) != rank_ready:
                 errors.append(f"Final rank count mismatch: distinct_ranks={score_stats['distinct_ranks']} rank_ready={rank_ready}")
         component_rows = conn.execute(
-            """
+            f"""
             SELECT component_name,
                    COUNT(*) AS rows,
                    COUNT(DISTINCT ticker) AS tickers,
@@ -720,11 +752,11 @@ def validate_calibrated_scores(settings: CalibratedScoringSettings) -> int:
                    AVG(component_quality) AS avg_quality,
                    SUM(CASE WHEN component_quality <= 0 THEN 1 ELSE 0 END) AS zero_quality_rows
             FROM feature_scoring_component
-            WHERE source_id = ? AND model_family = ? AND asof_date = ?
+            WHERE source_id = ? AND model_family = ? AND asof_date = ? AND ticker IN ({ph})
             GROUP BY component_name
             ORDER BY component_name
             """,
-            (source_id, model_family, asof_text),
+            (source_id, model_family, asof_text, *universe),
         ).fetchall()
         component_by_name = {str(row["component_name"]): dict(row) for row in component_rows}
         max_dead_pct = float(cfg_get(config, f"{settings.config_key}.max_dead_core_component_pct", 0.20))
@@ -738,6 +770,8 @@ def validate_calibrated_scores(settings: CalibratedScoringSettings) -> int:
                     LOGGER.warning(message)
                 else:
                     errors.append(message)
+        # Declared-weight sum is enforced at load time in component_weight_specs
+        # (this post-normalization check could never fire).
         if abs(sum(component_weights.values()) - 1.0) > 0.0001:
             errors.append(f"Component weights do not sum to 1.0: {sum(component_weights.values())}")
         growth_weight = float(component_weights.get("growth", 0.0))

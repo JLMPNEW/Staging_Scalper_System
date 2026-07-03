@@ -431,7 +431,9 @@ def main() -> int:
     production_reference = matching_backtest(backtest_rows, production_model_name, "top_quintile", "score_weight", "long_only")
     stage8_reference = matching_backtest(backtest_rows, stage8_model_name, "top_quintile", "score_weight", "long_only")
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    snapshot_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # Microsecond suffix keeps snapshot filenames collision-proof when two
+    # publishes land within the same second.
+    snapshot_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
     artifacts = [
         artifact_row("technology_config", "input_config", config_path),
@@ -542,6 +544,20 @@ def main() -> int:
     snapshot_dir = output_dir / "snapshots"
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     snapshot_json = snapshot_dir / f"technology_hardware_lockbox_ledger_{snapshot_stamp}.json"
+    if snapshot_json.exists():
+        raise RuntimeError(f"Refusing to overwrite existing lockbox snapshot: {snapshot_json}")
+
+    # Tamper-evident chain: each snapshot records the sha256 of the previous
+    # snapshot file plus a self-hash of its own content, computed with the
+    # self-hash field blanked so validators can recompute it.
+    previous_snapshots = sorted(snapshot_dir.glob("technology_hardware_lockbox_ledger_*.json"))
+    previous_snapshot = previous_snapshots[-1] if previous_snapshots else None
+    lockbox["previous_snapshot_path"] = rel_or_abs(previous_snapshot) if previous_snapshot else ""
+    lockbox["previous_snapshot_sha256"] = sha256_file(previous_snapshot) if previous_snapshot else ""
+    lockbox["ledger_content_sha256"] = ""
+    lockbox["ledger_content_sha256"] = hashlib.sha256(
+        json.dumps(lockbox, indent=2, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
 
     lockbox_json.write_text(json.dumps(lockbox, indent=2, sort_keys=True, default=str), encoding="utf-8")
     snapshot_json.write_text(json.dumps(lockbox, indent=2, sort_keys=True, default=str), encoding="utf-8")
@@ -557,6 +573,9 @@ def main() -> int:
         "automatic_promotion_applied": 0,
         "manual_promotion_approved": lockbox["manual_promotion_approved"],
         "promotion_effective_date": lockbox["promotion_effective_date"],
+        "previous_snapshot_path": lockbox["previous_snapshot_path"],
+        "previous_snapshot_sha256": lockbox["previous_snapshot_sha256"],
+        "ledger_content_sha256": lockbox["ledger_content_sha256"],
         "outputs": {
             "signal_registry_csv": str(signal_registry_csv),
             "signal_registry_json": str(signal_registry_json),

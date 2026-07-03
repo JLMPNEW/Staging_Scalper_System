@@ -291,6 +291,7 @@ def validate() -> int:
             errors.append(f"No market technical features found for model_family={model_family}")
             feature_count = 0
             review_features: list[str] = []
+            review_feature_tickers: set[str] = set()
             low_liquidity_features: list[str] = []
         else:
             feature_count = scalar(
@@ -324,6 +325,11 @@ def validate() -> int:
                 for row in feature_rows
                 if str(row["market_data_quality"] or "") != "complete"
             ]
+            review_feature_tickers = {
+                str(row["ticker"])
+                for row in feature_rows
+                if str(row["market_data_quality"] or "") != "complete"
+            }
             stale_features = [str(row["ticker"]) for row in feature_rows if int(row["stale_flag"] or 0) == 1]
             low_liquidity_features = [str(row["ticker"]) for row in feature_rows if int(row["low_liquidity_flag"] or 0) == 1]
             missing_quality = [str(row["ticker"]) for row in feature_rows if str(row["market_data_quality"] or "") in {"", "missing"}]
@@ -336,19 +342,26 @@ def validate() -> int:
             if missing_quality:
                 errors.append(f"Missing-quality market feature rows: {missing_quality}")
 
-        review_issue_count = scalar(
-            conn,
+        review_issue_rows = conn.execute(
             f"""
-            SELECT COUNT(*)
+            SELECT DISTINCT ticker
             FROM data_quality_issues
             WHERE stage = ?
               AND issue_type = 'market_feature_review'
+              AND resolution_status = 'open'
               AND ticker IN ({ph_universe})
             """,
             (FEATURE_STAGE, *universe_query),
-        )
-        if feature_asof and len(review_features) != review_issue_count:
-            errors.append(f"Feature review issue mismatch: features={len(review_features)} issues={review_issue_count}")
+        ).fetchall()
+        review_issue_tickers = {str(row["ticker"]) for row in review_issue_rows}
+        if feature_asof and review_feature_tickers != review_issue_tickers:
+            missing_issues = sorted(review_feature_tickers.difference(review_issue_tickers))
+            stale_issues = sorted(review_issue_tickers.difference(review_feature_tickers))
+            errors.append(
+                "Feature review issue mismatch: "
+                f"features={len(review_feature_tickers)} issues={len(review_issue_tickers)} "
+                f"missing_issues={missing_issues} stale_issues={stale_issues}"
+            )
 
         total_bars = scalar(conn, f"SELECT COUNT(*) FROM fact_price_ohlcv WHERE source_id IN ({ph_sources}) AND ticker IN ({ph_all})", params_all)
         raw_response_count = scalar(

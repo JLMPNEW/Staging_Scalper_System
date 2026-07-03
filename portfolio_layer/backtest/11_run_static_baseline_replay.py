@@ -63,6 +63,25 @@ def _frame_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return cast(pd.DataFrame, df.loc[:, cols])
 
 
+def trailing_complete_window(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    raw = _frame_cols(df, cols).apply(pd.to_numeric, errors="coerce")
+    complete = np.asarray(raw.notna().all(axis=1), dtype=bool)
+    positions = np.flatnonzero(complete)
+    if len(positions) == 0:
+        raise ValueError(f"no complete replay start row across {len(cols)} held names")
+    window = raw.iloc[int(positions[0]):].copy()
+    missing = window.isna()
+    if bool(missing.to_numpy().any()):
+        counts = missing.sum().sort_values(ascending=False)
+        offenders = [(str(t), int(n)) for t, n in counts.items() if int(n) > 0][:10]
+        first_missing = str(window.index[missing.any(axis=1)][0])
+        raise ValueError(
+            "interior missing returns after replay start; refusing to drop halt/crash days "
+            f"(first_missing={first_missing}, offenders={offenders})"
+        )
+    return window
+
+
 def perf_stats(returns: pd.Series, periods_per_year: int = 252) -> dict[str, float]:
     r = returns.dropna()
     if r.empty:
@@ -101,6 +120,19 @@ def main() -> int:
     if not (weights_path.exists() and optimizer_manifest_path.exists() and returns_path.exists()):
         LOGGER.error("Need validated target_weights.csv/optimizer_manifest.json (run 09+10) and returns_panel.csv (run 05)")
         return 1
+    optimizer_manifest = json.loads(optimizer_manifest_path.read_text(encoding="utf-8"))
+    if optimizer_manifest.get("acceptance") != "PASS":
+        LOGGER.error("Optimizer manifest acceptance is not PASS: %s", optimizer_manifest.get("acceptance"))
+        return 1
+    provenance = optimizer_manifest.get("provenance_sha256") or {}
+    expected_weights_sha = provenance.get("target_weights.csv")
+    actual_weights_sha = sha256_file(weights_path)
+    if expected_weights_sha != actual_weights_sha:
+        LOGGER.error(
+            "Optimizer manifest is stale for target_weights.csv: manifest=%s current=%s",
+            expected_weights_sha, actual_weights_sha,
+        )
+        return 1
     out_dir = run_dir / "optimizer"
     metrics_path = out_dir / "static_replay_metrics.json"
     curve_path = out_dir / "static_replay_equity_curve.csv"
@@ -124,10 +156,10 @@ def main() -> int:
     w = pd.Series({t: weights[t] for t in held})
     w = w / w.sum()  # renormalize to held names present in the panel
 
-    # Complete-case window across held names (a held shrunk name trims the early window).
-    R = _frame_cols(returns, held).dropna(how="any")
-    if R.empty:
-        LOGGER.error("No complete-case replay window across %d held names", len(held))
+    try:
+        R = trailing_complete_window(returns, held)
+    except ValueError as exc:
+        LOGGER.error("%s", exc)
         return 1
     port = R.to_numpy() @ w.reindex(R.columns).to_numpy()
     port_ret = pd.Series(port, index=R.index)

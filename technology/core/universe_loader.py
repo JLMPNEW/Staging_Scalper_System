@@ -5,6 +5,7 @@ import argparse
 import csv
 import logging
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -458,21 +459,41 @@ def prune_removed_current_universe_rows(
     keep_tickers: set[str],
     cohort_source_id: str,
 ) -> int:
-    """Remove stale current-source rows for tickers no longer present in the CSV.
+    """Retire current-source rows for tickers no longer present in the CSV.
 
-    Historical PIT rows use separate membership sources and calibration_use values,
-    so this only removes the current-production universe surface.
+    Point-in-time membership rows (point_in_time_flag=1) are never deleted:
+    deleting them destroys the survivorship-correct history the 01b loaders
+    exist to preserve. Instead they are end-dated as of today. Only non-PIT
+    current-surface rows are physically removed. Taxonomy rows are kept for
+    any ticker that still has PIT membership history in this family, because
+    PIT panels join taxonomy for cohort assignments.
     """
     if not keep_tickers:
         return 0
     tickers = sorted(keep_tickers)
     placeholders = ",".join("?" for _ in tickers)
+    today_iso = date.today().isoformat()
     before = conn.total_changes
+    conn.execute(
+        f"""
+        UPDATE dim_universe_membership
+        SET is_current_member = 0,
+            end_date = COALESCE(NULLIF(end_date, ''), ?),
+            membership_status = 'historical',
+            reason = COALESCE(reason, '') || '; end-dated by current-universe prune (removed from source CSV)'
+        WHERE model_family = ?
+          AND is_current_member = 1
+          AND point_in_time_flag = 1
+          AND ticker NOT IN ({placeholders})
+        """,
+        (today_iso, model_family, *tickers),
+    )
     conn.execute(
         f"""
         DELETE FROM dim_universe_membership
         WHERE model_family = ?
           AND is_current_member = 1
+          AND COALESCE(point_in_time_flag, 0) = 0
           AND ticker NOT IN ({placeholders})
         """,
         (model_family, *tickers),
@@ -486,6 +507,13 @@ def prune_removed_current_universe_rows(
               taxonomy_source = ?
               OR calibration_use IN ('core', 'review')
               OR liquidity_instrument_flag IN ('primary_listing', 'non_primary_or_secondary_listing')
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM dim_universe_membership m
+              WHERE m.model_family = dim_technology_taxonomy.model_family
+                AND m.ticker = dim_technology_taxonomy.ticker
+                AND m.point_in_time_flag = 1
           )
         """,
         (model_family, *tickers, cohort_source_id),

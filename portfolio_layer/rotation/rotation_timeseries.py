@@ -29,9 +29,9 @@ def total_return_momentum(prices: pd.Series, window: int) -> float | None:
 
 def annualized_vol(returns: pd.Series, window: int) -> float | None:
     r = returns.dropna()
-    if len(r) < max(2, window // 2):
+    if window < 2 or len(r) < window:
         return None
-    r = r.iloc[-window:] if len(r) >= window else r
+    r = r.iloc[-window:]
     sd = float(r.std(ddof=1))
     if not math.isfinite(sd) or sd <= 0:
         return None

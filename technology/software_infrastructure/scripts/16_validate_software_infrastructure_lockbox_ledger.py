@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -49,6 +51,80 @@ def require_file(errors: list[str], path: Path, label: str) -> None:
         errors.append(f"Missing or empty {label}: {path}")
 
 
+LEDGER_CHAIN_FIELDS = ("previous_snapshot_sha256", "ledger_content_sha256")
+
+
+def sha256_file(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def ledger_content_sha256(payload: dict[str, Any]) -> str:
+    """Match the publisher's canonical content hash (payload minus chain fields)."""
+    content = {key: value for key, value in payload.items() if key not in LEDGER_CHAIN_FIELDS}
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def artifact_path(raw: str) -> Path:
+    path = Path(str(raw or ""))
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def verify_artifact_hashes(errors: list[str], artifact_rows: list[dict[str, str]]) -> int:
+    checked = 0
+    for row in artifact_rows:
+        if row.get("exists_flag") != "1":
+            continue
+        recorded = str(row.get("sha256") or "")
+        if not recorded:
+            continue
+        path = artifact_path(str(row.get("path") or ""))
+        actual = sha256_file(path)
+        checked += 1
+        if not actual:
+            errors.append(f"Ledger artifact no longer readable: {row.get('artifact_name')} -> {path}")
+        elif actual != recorded:
+            errors.append(
+                f"Ledger artifact sha256 mismatch: {row.get('artifact_name')} -> {path} "
+                f"recorded={recorded[:12]}... actual={actual[:12]}..."
+            )
+    return checked
+
+
+def verify_snapshot_chain(errors: list[str], snapshot_dir: Path) -> int:
+    snapshots = sorted(snapshot_dir.glob("software_infrastructure_lockbox_ledger_*.json")) if snapshot_dir.exists() else []
+    previous_path: Path | None = None
+    for path in snapshots:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            errors.append(f"Invalid lockbox snapshot JSON: {path.name}: {exc}")
+            previous_path = path
+            continue
+        if "ledger_content_sha256" not in payload:
+            LOGGER.warning("Legacy unchained lockbox snapshot (no chain fields): %s", path.name)
+            previous_path = path
+            continue
+        expected_content = ledger_content_sha256(payload)
+        if str(payload.get("ledger_content_sha256") or "") != expected_content:
+            errors.append(f"Snapshot content hash mismatch: {path.name}")
+        recorded_previous = str(payload.get("previous_snapshot_sha256") or "")
+        actual_previous = sha256_file(previous_path) if previous_path is not None else ""
+        if recorded_previous != actual_previous:
+            errors.append(
+                f"Snapshot chain break at {path.name}: previous_snapshot_sha256={recorded_previous[:12] or '(empty)'}... "
+                f"expected {actual_previous[:12] or '(empty)'}... from {previous_path.name if previous_path else '(none)'}"
+            )
+        previous_path = path
+    return len(snapshots)
+
+
 def main() -> int:
     configure_utc_logging()
     args = parse_args()
@@ -87,6 +163,8 @@ def main() -> int:
             errors.append(f"Required artifact missing in ledger: {row.get('artifact_name')} -> {row.get('path')}")
         if row.get("exists_flag") == "1" and not row.get("sha256"):
             errors.append(f"Existing artifact missing sha256: {row.get('artifact_name')}")
+    hashes_checked = verify_artifact_hashes(errors, artifact_rows)
+    snapshots_checked = verify_snapshot_chain(errors, output_dir / "snapshots")
 
     if paths["lockbox_json"].exists():
         try:
@@ -141,9 +219,11 @@ def main() -> int:
             LOGGER.error(error)
         return 1
     LOGGER.info(
-        "Software-infrastructure LCR validation passed: signal_rows=%d artifact_rows=%d output=%s",
+        "Software-infrastructure LCR validation passed: signal_rows=%d artifact_rows=%d artifact_hashes_checked=%d snapshots_checked=%d output=%s",
         len(registry_rows),
         len(artifact_rows),
+        hashes_checked,
+        snapshots_checked,
         output_dir,
     )
     return 0

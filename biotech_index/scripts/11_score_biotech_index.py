@@ -127,6 +127,15 @@ PORTFOLIO_LAYER_CONTRACT_FIELDS = [
     "score_scale_max",
     "score_neutral_value",
     "score_zero_is_missing_flag",
+    "research_calibration_input_eligible_flag",
+    "research_calibration_status",
+    "research_calibration_reason",
+    "calibration_sample_role",
+    "oos_score_valid_flag",
+    "stage11_calibration_input_eligible_flag",
+    "stage11_calibration_input_reason",
+    "stage11_calibration_panel_source",
+    "survivorship_corrected_panel_flag",
     "capacity_bucket",
     "min_position_size_feasible",
     "max_position_size_feasible",
@@ -1139,6 +1148,7 @@ def production_rank_blocked(row: dict[str, Any], *, apply_core_veto_to_rank: boo
 def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]]) -> None:
     """Add cross-sector portfolio/calibration aliases without changing scoring math."""
     for row in rows:
+        ticker = str(row.get("ticker") or "").strip().upper()
         investible = to_float(row.get("biotech_cohort_investible_flag"), 1.0) > 0.0
         calibration_eligible = to_float(row.get("biotech_cohort_calibration_eligible_flag"), 0.0) > 0.0
         core_veto = to_float(row.get("core_structural_veto_flag"), 0.0) > 0.0
@@ -1147,6 +1157,8 @@ def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]]) -> None:
         native_score_field = str(row.get("production_rank_score_field") or "opportunity_score").strip() or "opportunity_score"
         native_score_value = to_float(row.get(native_score_field), to_float(row.get("production_rank_score"), math.nan))
         missing_score = not math.isfinite(native_score_value) or native_score_value <= 0.0
+        price_data_available = bool(str(row.get("price_data_asof_date") or row.get("latest_price_date") or "").strip())
+        pit_valid = True
 
         if missing_score:
             status = "excluded"
@@ -1186,6 +1198,64 @@ def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]]) -> None:
             if calibration_eligible
             else first_nonblank(row.get("biotech_cohort_exclusion_reason"), "not_calibration_eligible")
         )
+        research_eligible = bool(
+            ticker
+            and calibration_eligible
+            and not missing_score
+            and price_data_available
+            and pit_valid
+        )
+        if research_eligible:
+            research_status = "valid_research_calibration_input"
+            research_reason = "ok"
+        elif not ticker:
+            research_status = "missing_ticker"
+            research_reason = "missing_ticker"
+        elif not calibration_eligible:
+            research_status = "not_calibration_eligible"
+            research_reason = calibration_reason
+        elif missing_score:
+            research_status = "missing_score"
+            research_reason = "missing_score"
+        elif not price_data_available:
+            research_status = "missing_price_data"
+            research_reason = "missing_price_data"
+        elif not pit_valid:
+            research_status = "not_pit_valid"
+            research_reason = "not_pit_valid"
+        else:
+            research_status = "not_calibration_eligible"
+            research_reason = "not_calibration_eligible"
+        survivorship_corrected = to_float(row.get("survivorship_corrected_panel_flag"), 0.0) > 0.0
+        stage11_panel_source = (
+            "biotech_survivorship_corrected_pit_score_recompute"
+            if survivorship_corrected
+            else "biotech_current_universe_replay_not_survivorship_corrected"
+        )
+        oos_score_valid = bool(
+            research_eligible
+            and str(row.get("source_snapshot_asof_date") or row.get("asof_date") or "").strip()
+            == str(row.get("asof_date") or "").strip()
+            and to_float(row.get("calibration_only"), 0.0) <= 0.0
+        )
+        stage11_eligible = bool(research_eligible and survivorship_corrected)
+        if stage11_eligible:
+            stage11_reason = "ok"
+        elif not research_eligible:
+            stage11_reason = research_reason
+        elif not survivorship_corrected:
+            stage11_reason = "not_survivorship_corrected"
+        elif not pit_valid:
+            stage11_reason = "not_pit_valid"
+        else:
+            stage11_reason = "excluded_by_calibration_policy"
+        calibration_sample_role = (
+            "excluded"
+            if not research_eligible
+            else "strict_oos"
+            if oos_score_valid
+            else "pre_lock_research"
+        )
 
         row.update(
             {
@@ -1207,6 +1277,15 @@ def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]]) -> None:
                 "score_scale_max": 100.0,
                 "score_neutral_value": 50.0,
                 "score_zero_is_missing_flag": 1.0 if missing_score else 0.0,
+                "research_calibration_input_eligible_flag": 1.0 if research_eligible else 0.0,
+                "research_calibration_status": research_status,
+                "research_calibration_reason": research_reason,
+                "calibration_sample_role": calibration_sample_role,
+                "oos_score_valid_flag": 1.0 if oos_score_valid else 0.0,
+                "stage11_calibration_input_eligible_flag": 1.0 if stage11_eligible else 0.0,
+                "stage11_calibration_input_reason": stage11_reason,
+                "stage11_calibration_panel_source": stage11_panel_source,
+                "survivorship_corrected_panel_flag": 1.0 if survivorship_corrected else 0.0,
                 "capacity_bucket": capacity_bucket_from_addv(capacity_addv),
                 "min_position_size_feasible": "",
                 "max_position_size_feasible": "",
@@ -3523,6 +3602,11 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "calibration_status",
         "calibration_status_reason",
         "native_score_field",
+        "research_calibration_status",
+        "research_calibration_reason",
+        "calibration_sample_role",
+        "stage11_calibration_input_reason",
+        "stage11_calibration_panel_source",
         "capacity_bucket",
         "forward_catalyst_event_date",
         "forward_catalyst_asof_date",

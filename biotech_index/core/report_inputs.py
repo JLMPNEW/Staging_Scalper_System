@@ -38,13 +38,11 @@ def resolve_dated_report_input_csv(
     dated universe exists.  Fallbacks are limited to dated folders not after the
     requested as-of date to avoid accidental look-ahead.
     """
+    cutoff = compact_asof(asof_date)
     dated_candidate = dated_output_dir(base_output_dir, asof_date) / configured_path.name
     if dated_candidate.exists():
         return dated_candidate
-    if configured_path.exists():
-        return configured_path
 
-    cutoff = compact_asof(asof_date)
     candidates = [
         path
         for path in base_output_dir.glob(f"*/{configured_path.name}")
@@ -54,10 +52,12 @@ def resolve_dated_report_input_csv(
     if candidates:
         if logger is not None:
             logger.warning(
-                "Configured report input not found at %s or %s; using latest non-lookahead dated copy %s",
-                configured_path,
-                dated_candidate,
+                "Using latest non-lookahead dated report input %s for asof=%s instead of root/current input %s",
                 candidates[0],
+                asof_date,
+                configured_path,
             )
         return candidates[0]
+    if configured_path.exists():
+        return configured_path
     return configured_path

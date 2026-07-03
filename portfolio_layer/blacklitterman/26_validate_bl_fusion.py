@@ -62,6 +62,11 @@ def _f(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def _f_default(value: Any, default: float) -> float:
+    parsed = _f(value)
+    return default if parsed is None else parsed
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -125,7 +130,10 @@ def _adjusted_weights(path: Path) -> tuple[dict[str, float], float]:
         ticker = str(row.get("ticker") or row.get("Ticker") or "").strip().upper()
         if not ticker:
             continue
-        weight = _f(row.get("weight") or row.get("Weight"))
+        raw_weight = row.get("weight")
+        if raw_weight in (None, ""):
+            raw_weight = row.get("Weight")
+        weight = _f(raw_weight)
         if weight is None:
             raise ValueError(f"{path}:{ticker}.weight must be finite")
         if ticker == "CASH":
@@ -146,7 +154,10 @@ def _raw_bl_weights(path: Path) -> tuple[list[dict[str, Any]], dict[str, str], d
         ticker = str(row.get("Ticker") or row.get("ticker") or "").strip().upper()
         if not ticker:
             continue
-        weight = _f(row.get("Weight") or row.get("weight"))
+        raw_weight = row.get("Weight")
+        if raw_weight in (None, ""):
+            raw_weight = row.get("weight")
+        weight = _f(raw_weight)
         if weight is None:
             raise ValueError(f"{path}:{ticker}.Weight must be finite")
         if ticker == "CASH":
@@ -226,10 +237,11 @@ def _bl_sanity_errors(generated_config: dict[str, Any]) -> list[str]:
         p_empty = np.zeros((0, 3), dtype=float)
         q_empty = np.zeros(0, dtype=float)
         omega_empty = np.zeros((0, 0), dtype=float)
-        posterior = black_litterman_posterior(pi, sigma, p_empty, q_empty, omega_empty, tau or 0.05)
+        tau_value = _f_default(tau, 0.05)
+        posterior = black_litterman_posterior(pi, sigma, p_empty, q_empty, omega_empty, tau_value)
         if not np.allclose(posterior, pi, atol=1e-12):
             errors.append("no_views_identity_failed")
-        omega_diag = np.maximum((tau or 0.05) * np.diag(sigma) * ((1.0 / 0.5) - 1.0), 1e-12)
+        omega_diag = np.maximum(tau_value * np.diag(sigma) * ((1.0 / 0.5) - 1.0), 1e-12)
         if not np.all(omega_diag > 0):
             errors.append("omega_diag_not_positive")
     except Exception as exc:  # noqa: BLE001 - validation should report, not crash, on smoke-test failure.
@@ -383,21 +395,22 @@ def main() -> int:  # noqa: C901
         "Omega confidence inputs positive; no-view posterior recovers prior; absolute annual alpha mode active"
         if not sanity_bad else f"{sanity_bad[:8]}")
 
-    sector_band = _f(((generated_config.get("sector") or {}).get("sector_cap_band"))) or 0.03
+    sector_band = _f_default(((generated_config.get("sector") or {}).get("sector_cap_band")), 0.03)
     sector_targets = {
-        str(r.get("sector_name", "")).strip(): _f(r.get("target_weight")) or 0.0
+        str(r.get("sector_name", "")).strip(): _f_default(r.get("target_weight"), 0.0)
         for r in read_csv(paths_required["bl_sector_targets_optimizer.csv"])
     }
+    target_sectors = set(sector_targets)
     sector_bad = []
     for label, weights in (("raw", raw_weights), ("cost_adjusted", adjusted_weights)):
-        us_total = sum(w for t, w in weights.items() if sector_by_ticker.get(t) and sector_by_ticker.get(t) != "CASH")
+        us_total = sum(w for t, w in weights.items() if sector_by_ticker.get(t) in target_sectors)
         if us_total <= 0:
             sector_bad.append(f"{label}:us_total<=0")
             continue
         exposure: dict[str, float] = {}
         for ticker, weight in weights.items():
             sector = sector_by_ticker.get(ticker, "")
-            if not sector:
+            if sector not in target_sectors:
                 continue
             exposure[sector] = exposure.get(sector, 0.0) + weight / us_total
         for sector, target in sector_targets.items():
@@ -408,10 +421,10 @@ def main() -> int:  # noqa: C901
         f"{len(sector_targets)} sectors within +/-{sector_band}" if not sector_bad else f"{sector_bad[:8]}")
 
     foreign_cfg = (meta24.get("foreign") or {})
-    fmin = _f(foreign_cfg.get("min_budget")) or 0.0
-    fmax = _f(foreign_cfg.get("max_budget")) or 0.0
+    fmin = _f_default(foreign_cfg.get("min_budget"), 0.0)
+    fmax = _f_default(foreign_cfg.get("max_budget"), 0.0)
     foreign_weight = sum(
-        _f(r.get("Weight")) or 0.0
+        _f_default(r.get("Weight"), 0.0)
         for r in raw_rows
         if str(r.get("Sleeve", "")).strip().upper() == "FOREIGN"
         or str(r.get("RegionGroup", "")).strip().upper() == "FOREIGN"

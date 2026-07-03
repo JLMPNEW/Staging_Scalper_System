@@ -9,7 +9,7 @@
 
 ## Stage 2 Defense Universe
 
-- `defense_tickers.csv` loads as exactly 95 active defense tickers.
+- `defense_tickers.csv` loads as exactly 94 active defense tickers.
 - Active ticker rows create matching company, security, taxonomy, identifier, and current membership rows.
 - `aerospace_defense_delisted.csv` loads as the delisted calibration seed.
 - Reused delisted tickers are internalized so they cannot overwrite active issuers.
@@ -19,7 +19,7 @@
 
 ## Stage 3 Defense Market Data
 
-- Yahoo adjusted OHLCV sync covers the 95 active defense tickers plus `XAR`, `ITA`, and `SPY`.
+- Yahoo adjusted OHLCV sync covers the 94 active defense tickers plus `XAR`, `ITA`, and `SPY`.
 - Effective ticker aliases route market-data fetch symbols while preserving the defense contract ticker for joins.
 - Adjusted close and explicit price-adjustment status are present for every scoring bar.
 - Market snapshots cover every active defense ticker and benchmark.
@@ -28,7 +28,7 @@
 - `15_import_defense_norgate_delisted_prices.py --dry-run` must be read-only against SQLite; it may write only its coverage report.
 - Delisted Norgate `adj_close` must use the configured `norgate_delisted_import.price_adjustment_mode` and store that mode in `price_adjustment`; `CAPITAL` is split/capital-action adjusted and excludes ordinary-dividend total return, so total-return and price-return bases must not be mixed silently in calibration features.
 - Reviewed Norgate lineage exceptions must live in `industrials/defense/system_csvs/defense_norgate_symbol_overrides.csv`; missing override symbols are treated as explicit unresolved rows, not inferred silently.
-- Market feature rows exist for all 95 active defense tickers for the requested as-of date.
+- Market feature rows exist for all 94 active defense tickers for the requested as-of date.
 - Stale, future-dated, missing, unadjusted, low-history, and low-liquidity cases are surfaced through validation or data-quality issues.
 - If `--asof` is omitted, audit and validation use the loaded panel date instead of the wall-clock date so historical replay panels can be validated without false staleness failures.
 - Low-history rows are review-only unless validation is run with `--strict-history`.
@@ -63,7 +63,7 @@
 - `04b_validate_defense_stage0_4_production_readiness.py` must be run against the configured production `industrials.sqlite`, not a scratch DB.
 - The readiness validator opens the database read-only and must not create or mutate production data.
 - The gate fails when the production DB is missing, required Stage 0-4 tables are missing, or active/delisted ticker identity rows are incomplete.
-- The gate requires 95 active defense tickers, the full delisted calibration seed, active current membership rows, delisted non-current membership rows, and loaded ticker aliases.
+- The gate requires 94 active defense tickers, the full delisted calibration seed, active current membership rows, delisted non-current membership rows, and loaded ticker aliases.
 - The gate requires active Stage 3 Yahoo price, market snapshot, and market feature coverage for active tickers plus configured benchmarks.
 - The gate requires Stage 4 issuer reporting profiles and financial feature rows for all active defense tickers.
 - Live SEC fact coverage is reported; it can be warning-only when fallback financial rows are intentionally allowed, or blocking when the validator is run with `--require-live-sec-facts`.

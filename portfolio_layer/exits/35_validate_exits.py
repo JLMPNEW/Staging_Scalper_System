@@ -39,6 +39,11 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 SOURCE_FILES = ["exit_common.py", "33_build_exit_signals.py", "34_apply_exits.py", "35_validate_exits.py"]
 
 
+def finite_default(value: Any, default: float) -> float:
+    parsed = finite_float(value)
+    return default if parsed is None else parsed
+
+
 def iso_date_arg(raw: str) -> str:
     try:
         date.fromisoformat(raw)
@@ -178,7 +183,7 @@ def main() -> int:  # noqa: C901
     rec("signal_current", "PASS" if score_ok else "FAIL",
         "Stage 1 signal hard gates PASS and stocks_scores hash current" if score_ok else "score signal stale or failed")
 
-    max_lag = int(cfg_get(config, "exit_engine.max_signal_lag_days", 10) or 10)
+    max_lag = int(finite_default(cfg_get(config, "exit_engine.max_signal_lag_days", 10), 10.0))
     lag_days = date_lag_days(signal_as_of, ledger_as_of)
     rec("pit_signal_asof_lte_ledger_asof", "PASS" if lag_days >= 0 and lag_days <= max_lag else "FAIL",
         f"signal_as_of={signal_as_of}, ledger_as_of={ledger_as_of}, lag_days={lag_days}, max={max_lag}")
@@ -250,7 +255,8 @@ def main() -> int:  # noqa: C901
         "all actions are exits/reviews over actual holdings" if not no_buy_bad else "; ".join(no_buy_bad[:8]))
 
     target_only = [row for row in gaps if row.get("in_target") == "1" and row.get("in_actual") != "1"]
-    target_only_actions = sorted({row.get("ticker") for row in target_only} & set(action_tickers))
+    target_only_tickers = {str(row.get("ticker", "")).strip() for row in target_only if str(row.get("ticker", "")).strip()}
+    target_only_actions = sorted(target_only_tickers & set(action_tickers))
     rec("target_gap_diagnostic_only", "PASS" if not target_only_actions else "FAIL",
         f"target_only_rows={len(target_only)}; no target-only action rows" if not target_only_actions else f"target_only_actions={target_only_actions[:8]}")
 

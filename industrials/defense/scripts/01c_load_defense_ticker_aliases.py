@@ -101,6 +101,11 @@ def load_aliases(conn: Any, *, path: Path, source_id: str) -> int:
     active_source_id = source_id_or_none(conn, source_id)
     if active_source_id is None:
         raise ValueError(f"Source registry is missing required source_id={source_id}")
+    conn.execute(
+        "DELETE FROM fact_corporate_action WHERE source_id = ? AND action_type = 'ticker_alias'",
+        (active_source_id,),
+    )
+    conn.execute("DELETE FROM dim_ticker_alias WHERE source_id = ?", (active_source_id,))
     seen: set[tuple[str, str]] = set()
     for raw in rows:
         contract_ticker = normalize_ticker(row_get(raw, "contract_ticker"))
@@ -224,4 +229,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

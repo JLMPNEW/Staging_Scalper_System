@@ -145,6 +145,7 @@ TIER1_TEMPLATE_ROLES = {
     TIER1_TEMPLATE_ROLE_SPECIAL_SITUATION,
     TIER1_TEMPLATE_ROLE_RESEARCH,
 }
+STAGE11_CALIBRATION_PANEL_SOURCE = "med_devices_survivorship_corrected_score_review_pack"
 OPTIONAL_DAILY_SCORE_COLUMNS = {
     "score_model_version": "TEXT DEFAULT ''",
     "model_family": "TEXT DEFAULT ''",
@@ -156,6 +157,7 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "currency": "TEXT DEFAULT ''",
     "score_confidence": "REAL DEFAULT 0.0",
     "eligibility_reason": "TEXT DEFAULT ''",
+    "oos_score_valid_flag": "INTEGER DEFAULT 0",
     "native_score_field": "TEXT DEFAULT ''",
     "native_score_value": "REAL DEFAULT 0.0",
     "score_zero_is_missing_flag": "INTEGER DEFAULT 0",
@@ -195,6 +197,10 @@ OPTIONAL_DAILY_SCORE_COLUMNS = {
     "research_calibration_status": "TEXT DEFAULT ''",
     "research_calibration_reason": "TEXT DEFAULT ''",
     "calibration_sample_role": "TEXT DEFAULT ''",
+    "stage11_calibration_input_eligible_flag": "INTEGER DEFAULT 0",
+    "stage11_calibration_input_reason": "TEXT DEFAULT ''",
+    "stage11_calibration_panel_source": "TEXT DEFAULT ''",
+    "survivorship_corrected_panel_flag": "INTEGER DEFAULT 0",
     "cohort_score_template_id": "TEXT DEFAULT ''",
     "cohort_score_template_spec": "TEXT DEFAULT ''",
     "cohort_score_template_tier1_role": "TEXT DEFAULT ''",
@@ -358,6 +364,7 @@ FIELDNAMES = [
     "currency",
     "score_confidence",
     "eligibility_reason",
+    "oos_score_valid_flag",
     "native_score_field",
     "native_score_value",
     "score_zero_is_missing_flag",
@@ -401,6 +408,10 @@ FIELDNAMES = [
     "research_calibration_status",
     "research_calibration_reason",
     "calibration_sample_role",
+    "stage11_calibration_input_eligible_flag",
+    "stage11_calibration_input_reason",
+    "stage11_calibration_panel_source",
+    "survivorship_corrected_panel_flag",
     "cohort_score_template_id",
     "cohort_score_template_spec",
     "cohort_score_template_tier1_role",
@@ -616,6 +627,7 @@ class ScoreRow:
     currency: str = ""
     score_confidence: float = 0.0
     eligibility_reason: str = ""
+    oos_score_valid_flag: int = 0
     native_score_field: str = "composite_score"
     native_score_value: float = 0.0
     score_zero_is_missing_flag: int = 0
@@ -658,6 +670,10 @@ class ScoreRow:
     research_calibration_status: str = ""
     research_calibration_reason: str = ""
     calibration_sample_role: str = ""
+    stage11_calibration_input_eligible_flag: int = 0
+    stage11_calibration_input_reason: str = ""
+    stage11_calibration_panel_source: str = ""
+    survivorship_corrected_panel_flag: int = 0
     cohort_score_template_id: str = ""
     cohort_score_template_spec: str = ""
     cohort_score_template_tier1_role: str = ""
@@ -2424,9 +2440,12 @@ def normalize_universe_status(raw: object, *, company_is_active: bool) -> str:
 
 def apply_research_calibration_metadata(row: ScoreRow) -> None:
     """Publish explicit Stage 11 research-calibration eligibility metadata."""
+    row.oos_score_valid_flag = 0
     row.score_scale_min = 0.0
     row.score_scale_max = 100.0
     row.score_neutral_value = DEFAULT_NEUTRAL_SCORE
+    row.stage11_calibration_panel_source = STAGE11_CALIBRATION_PANEL_SOURCE
+    row.survivorship_corrected_panel_flag = 1
 
     reasons: list[str] = []
     native_score_value = to_float(row.native_score_value)
@@ -2451,12 +2470,16 @@ def apply_research_calibration_metadata(row: ScoreRow) -> None:
         row.research_calibration_status = "excluded"
         row.research_calibration_reason = ";".join(dict.fromkeys(reasons))
         row.calibration_sample_role = "excluded_from_research_calibration"
+        row.stage11_calibration_input_eligible_flag = 0
+        row.stage11_calibration_input_reason = row.research_calibration_reason
         return
 
     row.research_calibration_input_eligible_flag = 1
     row.research_calibration_status = "eligible"
     row.research_calibration_reason = "valid_research_calibration_input"
     row.calibration_sample_role = "research_calibration_input"
+    row.stage11_calibration_input_eligible_flag = 1
+    row.stage11_calibration_input_reason = "ok"
 
 
 def cohort_calibration_status_profiles(config: dict[str, Any]) -> dict[str, tuple[str, str]]:
@@ -5272,6 +5295,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "currency",
         "score_confidence",
         "eligibility_reason",
+        "oos_score_valid_flag",
         "native_score_field",
         "native_score_value",
         "score_zero_is_missing_flag",
@@ -5315,6 +5339,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "research_calibration_status",
         "research_calibration_reason",
         "calibration_sample_role",
+        "stage11_calibration_input_eligible_flag",
+        "stage11_calibration_input_reason",
+        "stage11_calibration_panel_source",
+        "survivorship_corrected_panel_flag",
         "cohort_score_template_id",
         "cohort_score_template_spec",
         "cohort_score_template_tier1_role",
@@ -5540,6 +5568,7 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.currency,
                 row.score_confidence,
                 row.eligibility_reason,
+                row.oos_score_valid_flag,
                 row.native_score_field,
                 row.native_score_value,
                 row.score_zero_is_missing_flag,
@@ -5583,6 +5612,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.research_calibration_status,
                 row.research_calibration_reason,
                 row.calibration_sample_role,
+                row.stage11_calibration_input_eligible_flag,
+                row.stage11_calibration_input_reason,
+                row.stage11_calibration_panel_source,
+                row.survivorship_corrected_panel_flag,
                 row.cohort_score_template_id,
                 row.cohort_score_template_spec,
                 row.cohort_score_template_tier1_role,
@@ -5849,6 +5882,10 @@ def main() -> None:
             finish_run(conn, run_id=run_id, status="success", row_count=upserted, message=message)
             LOGGER.info("Daily composite scores complete: %s", message)
         except BaseException as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                LOGGER.exception("Rollback failed while recording failed scoring run")
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
 

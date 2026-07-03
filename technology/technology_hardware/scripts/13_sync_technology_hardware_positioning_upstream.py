@@ -20,7 +20,10 @@ POSITIONING_UNIVERSE_AUDIT_CSV = (
 
 def read_rows(path: Path) -> list[dict[str, str]]:
     if not path.exists():
-        return []
+        raise FileNotFoundError(
+            f"Required positioning-universe input CSV is missing: {path}. "
+            "A silently empty universe would publish an empty positioning feed."
+        )
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         return [{str(key): str(value or "").strip() for key, value in row.items()} for row in csv.DictReader(handle)]
 

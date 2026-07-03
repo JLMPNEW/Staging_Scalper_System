@@ -77,6 +77,7 @@ score_contract:
       file_mode: dated
       file_path: "biotech_index_reports/{yyyymmdd}/biotech_daily_scores.csv"
       zero_score_is_missing: true
+      require_oos_score_valid: true
       calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.20}
     - model_family: med_devices
       adapter: med_devices
@@ -88,6 +89,7 @@ score_contract:
       industry_aggregate: "Health Care Equipment & Services"
       file_mode: dated
       file_path: "med_devices_reports/score_review_pack/{yyyy-mm-dd}/med_device_daily_composite_scores.csv"
+      require_oos_score_valid: true
       calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
 
 # Stage 2 - live/current-book cross-sector risk panel (self-sourced, NOT survivorship history).
@@ -430,3 +432,60 @@ exit_engine:
     review_unrealized_loss_pct: -0.35
     review_actual_weight_pct: 0.15
   catalyst_events_csv: "events/catalyst_events.csv"  # absent => WARN+disable catalyst time-stops in Phase 1
+
+# Stage 11 - lockbox window declaration (machine-readable mirror of docs/LOCKBOX_PROTOCOL.md).
+# The protocol document is CANONICAL; Stage 11 scripts (65/66/16) must verify this block matches the
+# protocol and refuse to run on divergence. Governance is NOT symmetric across fields:
+#   - dev_window_start may move EARLIER freely as older sector history is generated (expanding dev
+#     data backward never contaminates the sealed window).
+#   - dev_window_end / sealed_start move ONLY via a dated append-only entry in the protocol's
+#     Amendment Log (e.g., declaring a new lockbox cycle after an Open Event) — never edited ad hoc.
+#   - lockbox_opened flips true only when an Open Event entry exists in the Amendment Log.
+stage11_lockbox:
+  protocol_doc: "docs/LOCKBOX_PROTOCOL.md"
+  declared: "2026-06-27"
+  dev_window_start: "2024-01-02"
+  dev_window_end: "2025-12-31"
+  sealed_start: "2026-01-01"          # sealed through the Open Event; no fixed right edge
+  lockbox_opened: false
+  training_label_end_max: "2025-12-31"  # purge rule: promoted models train only on labels ending <= this
+
+# Stage 11 - PIT snapshot store (research/65). Immutable append-only archive of sealed Stage 1 runs.
+snapshot_store:
+  dir: "snapshot_store"                 # under paths.output_dir
+  live_max_generation_lag_days: 5       # run generated within N days of as-of => provenance=live, else reconstructed
+  native_median_drift_warn: 20.0        # WARN when a sector's native median jumps more than this between snapshots
+  row_count_drop_warn_fraction: 0.5     # WARN when a sector's row count drops below this fraction of the prior snapshot
+
+# Stage 11 - survivorship-complete research price panel (backtest/15b). NOT the Stage 2 live panel.
+survivorship_panel:
+  dir: "survivorship_panel"                # under paths.output_dir; one sealed subdir per build date
+  history_buffer_calendar_days: 40         # warmup before min(dev_window_start, earliest snapshot)
+  stale_tail_trading_days: 5               # last bar within N master-calendar rows of panel end => active
+  delist_match_trading_days: 10            # last bar within ~N trading days of delist date => delisted_covered
+  overlap_disagreement_warn_rel: 0.02      # Yahoo-vs-export adjclose relative diff to flag (adjustment mismatch)
+  min_complete_fraction_warn: 0.95         # WARN when a sector's survivorship-complete share is below this
+  delisted_price_export_globs:             # published sector price exports (docs/delisted_price_export_contract.md)
+    - "../output/*_reports/market_data/*delisted_price_export.csv"
+  delisting_events_globs:
+    - "../output/*_reports/market_data/*delisting_events.csv"
+  delisting_hint_report_globs:             # existing Norgate import REPORTS (delist-date hints only, no prices)
+    - "../output/*_reports/market_data/norgate_delisted*price_import.csv"
+
+# Stage 11 - forward-return calibration targets (research/66). Lockbox-enforced.
+calibration_targets:
+  dir: "calibration_targets"               # under paths.output_dir; one subdir per panel build date
+  horizons_trading_days: [21, 63, 126, 252]
+  drawdown_horizon_trading_days: 63
+  beta_lookback_trading_days: 252          # trailing daily-return window ENDING at the entry bar (PIT)
+  beta_min_observations: 60
+  max_entry_lag_trading_days: 5            # entry bar must be within N rows of the snapshot as-of
+  realized_vol_min_observations: 10        # min forward daily returns for the realized-vol label
+
+# Stage 11 - calibration panel (research/67): PIT state joins + standardization onto the 66 targets.
+# Regime/sector-fit/stock-fit/foreign-budget come from the read-only macro serving DB (<= as-of);
+# rotation state is recomputed from the survivorship panel sliced to <= as-of via the Stage 5 pure
+# functions. Optional joins (run-dir risk/liquidity/sleeves, tech sidecars) are availability-flagged.
+calibration_panel:
+  dir: "calibration_panel"                 # under paths.output_dir; one subdir per targets build
+  rotation_lookback_trading_days: 504      # panel slice fed to the rotation builders (>= ma_days + slope)
