@@ -28,6 +28,7 @@ from industrials.core.text_norm import as_bool, normalize_cik, normalize_org_nam
 LOGGER = logging.getLogger("validate_defense_identity_reconciliation")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 LOAD_STAGE = "defense_identity_reconciliation"
+MODEL_FAMILY = "defense"
 # EL-11: the only override kinds the CIK/ticker overrides CSV is allowed to carry.
 # Extend this set deliberately when a new override kind is introduced.
 VALID_OVERRIDE_TYPES = frozenset({"verified_sec_cik_correction", "verified_sec_cik_confirmed"})
@@ -200,12 +201,12 @@ def add_issue(
     conn.execute(
         """
         INSERT INTO data_quality_issues(
-            detected_at, severity, stage, ticker, company_id, issue_type,
+            detected_at, severity, stage, model_family, ticker, company_id, issue_type,
             issue_detail, resolution_status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
         """,
-        (now, severity, LOAD_STAGE, ticker, company_id, issue_type, issue_detail, now, now),
+        (now, severity, LOAD_STAGE, MODEL_FAMILY, ticker, company_id, issue_type, issue_detail, now, now),
     )
 
 
@@ -494,7 +495,10 @@ def main() -> int:
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
         with conn:
-            conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (LOAD_STAGE,))
+            conn.execute(
+                "DELETE FROM data_quality_issues WHERE stage = ? AND model_family = ?",
+                (LOAD_STAGE, MODEL_FAMILY),
+            )
         active_errors, active_warnings = validate_active_rows(conn, active_rows=active_rows, overrides=overrides, sec_mapping=sec_mapping)
         delisted_errors, delisted_warnings = validate_delisted_rows(conn, delisted_rows=delisted_rows, overrides=overrides)
         alias_errors, alias_warnings = validate_aliases(conn, aliases_csv=aliases_csv, active_rows=active_rows, asof=asof)
