@@ -1752,6 +1752,11 @@ scoring:
 historical_backfill:
   start_asof: "2019-01-04"
   end_asof: "2026-06-27"
+  # v23 model lock date (med_device_score_v23_2026_07_oos_lock_pit_policy). Script 76 refuses
+  # strict-OOS promotion for any as-of before this date and demotes prior pre-lock promotions:
+  # a model locked 2026-07 cannot produce strict out-of-sample scores for earlier dates
+  # (portfolio_layer/docs/score_eligibility_flags.md: pre-lock snapshots must be oos=0).
+  strict_oos_start_date: "2026-07-01"
   backtest_end_asof: "auto_complete_max_horizon"
   frequency: "daily"
   weekday: "friday"
@@ -1768,7 +1773,7 @@ historical_backfill:
   allow_missing_static_pit_metadata: false
   # Re-run FDA entity linking per as-of date during backfill (script 21); default off.
   relink_fda_per_asof: false
-  new_daily_columns_required_from: "2024-01-02"
+  new_daily_columns_required_from: "2019-01-04"
   oos_validation_csv: "../output/med_devices_reports/oos_validation/med_device_historical_snapshot_oos_validation.csv"
   manifest_csv: "../output/med_devices_reports/historical_backfill/weekly_score_backfill_manifest.csv"
 

@@ -375,6 +375,57 @@ def promote_asof(conn: Any, *, asof: str, dry_run: bool) -> int:
     return int(cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0)
 
 
+def demote_pre_lock_asof(conn: Any, *, asof: str, dry_run: bool) -> int:
+    """Reverse strict-OOS promotions on a pre-lock as-of: no evidence can make them valid.
+
+    Restores script 13's fail-closed defaults (oos_score_valid_flag=0; strict_oos rows return to
+    'research_calibration_input'). Only used for as-ofs before the configured lock date.
+    """
+    pending_sql = "asof_date = ? AND (oos_score_valid_flag = 1 OR calibration_sample_role = 'strict_oos')"
+    if dry_run:
+        return count_rows(
+            conn,
+            f"SELECT COUNT(*) FROM med_device_daily_scores WHERE {pending_sql}",
+            (asof,),
+        )
+    cursor = conn.execute(
+        f"""
+        UPDATE med_device_daily_scores
+        SET oos_score_valid_flag = 0,
+            calibration_sample_role = CASE
+                WHEN calibration_sample_role = 'strict_oos' THEN 'research_calibration_input'
+                ELSE calibration_sample_role
+            END,
+            updated_at = ?
+        WHERE {pending_sql}
+        """,
+        (utc_now(), asof),
+    )
+    return int(cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0)
+
+
+def demote_snapshot_csv(path: Path, *, dry_run: bool) -> tuple[int, str]:
+    """Mirror pre-lock demotions into the dated review-pack snapshot CSV (every flagged row)."""
+    if not path.exists():
+        return 0, "snapshot_csv_missing"
+    fieldnames, rows = read_csv_rows(path)
+    if "oos_score_valid_flag" not in fieldnames or "calibration_sample_role" not in fieldnames:
+        return 0, "snapshot_csv_missing_provenance_columns"
+    updated = 0
+    for row in rows:
+        flagged = str(row.get("oos_score_valid_flag") or "").strip() in {"1", "1.0"}
+        role_oos = str(row.get("calibration_sample_role") or "").strip() == "strict_oos"
+        if not flagged and not role_oos:
+            continue
+        row["oos_score_valid_flag"] = "0"
+        if role_oos:
+            row["calibration_sample_role"] = "research_calibration_input"
+        updated += 1
+    if updated and not dry_run:
+        write_csv_atomic(path, fieldnames, rows)
+    return updated, "ok"
+
+
 def promoted_tickers(conn: Any, *, asof: str) -> set[str]:
     rows = conn.execute(
         """
@@ -492,10 +543,13 @@ def main() -> int:
     )
     strict_oos_start_raw = str(cfg_get(config, "historical_backfill.strict_oos_start_date", "") or "").strip()
     strict_oos_start = parse_date(strict_oos_start_raw)
-    if strict_oos_start_raw and strict_oos_start is None:
+    if strict_oos_start is None:
+        # FAIL CLOSED: without a lock boundary this script would stamp pre-lock snapshots as
+        # OOS-valid (exactly what happened when the key was absent). The lock date is required.
         raise RuntimeError(
-            "Invalid historical_backfill.strict_oos_start_date: "
-            f"{strict_oos_start_raw!r}. Use YYYY-MM-DD or leave blank."
+            "historical_backfill.strict_oos_start_date is required (the model lock date; YYYY-MM-DD). "
+            f"Got {strict_oos_start_raw!r}. A model locked on date L cannot produce strict-OOS scores "
+            "for as-of dates before L; promotion without this boundary is a lockbox-integrity violation."
         )
     dry_run = bool(args.dry_run)
     validator_per_asof, panel_critical_failures, validator_available = load_validator_results(oos_validation_csv)
@@ -544,6 +598,23 @@ def main() -> int:
                             tickers=tickers,
                             dry_run=dry_run,
                         )
+                elif "before_strict_oos_start_date" in result["skip_reason"]:
+                    # Pre-lock as-of: any existing promotion is provably invalid — demote it.
+                    # Other skip reasons (missing evidence) still leave prior promotions for
+                    # manual review, as before.
+                    demoted_db = demote_pre_lock_asof(conn, asof=asof, dry_run=dry_run)
+                    if not args.skip_snapshot_csv and (demoted_db or dry_run):
+                        snapshot_updated, note = demote_snapshot_csv(
+                            reports_root / asof / DAILY_SNAPSHOT_FILENAME, dry_run=dry_run,
+                        )
+                        snapshot_note = f"demoted_pre_lock:{note}"
+                    if demoted_db or snapshot_updated:
+                        LOGGER.info(
+                            "asof=%s pre-lock demotion: db_rows=%d csv_rows=%d",
+                            asof, demoted_db, snapshot_updated,
+                        )
+                    else:
+                        LOGGER.info("asof=%s not promoted: %s", asof, result["skip_reason"])
                 else:
                     LOGGER.info("asof=%s not promoted: %s", asof, result["skip_reason"])
                 summary_rows.append(
