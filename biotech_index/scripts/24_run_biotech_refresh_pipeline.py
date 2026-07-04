@@ -587,9 +587,12 @@ def pipeline_steps(
     skip_market_positioning: bool,
     reuse_unchanged_historical: bool = False,
 ) -> list[Step]:
-    # Weekly reconciliation should remain an operational delta run.  Full SEC
-    # event corpus reparsing is intentionally reserved for explicit backfills.
-    sec_event_args: tuple[str, ...] = ("--full-rescan",) if mode == "full_backfill" else ()
+    # Operational refreshes should parse new/changed SEC text only.  Full SEC
+    # event corpus reparsing, including parser-signature refreshes, is reserved
+    # for explicit backfills.
+    sec_event_args: tuple[str, ...] = (
+        ("--full-rescan",) if mode == "full_backfill" else ("--skip-parser-signature-reparse",)
+    )
     sec_filings_args: tuple[str, ...] = ("--allow-partial",) if mode == "daily_delta" else ()
     companyfacts_args: tuple[str, ...] = ("--full-refresh",) if mode == "full_backfill" else ()
     forward_args: tuple[str, ...] = ("--run-mode", mode)

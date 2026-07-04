@@ -127,8 +127,8 @@ def test_weekly_reconcile_does_not_force_sec_event_full_rescan() -> None:
         )
         return next(step.args for step in steps if step.name == "sec_events")
 
-    assert "--full-rescan" not in sec_event_args_for("daily_delta")
-    assert "--full-rescan" not in sec_event_args_for("weekly_reconcile")
+    assert sec_event_args_for("daily_delta") == ("--skip-parser-signature-reparse",)
+    assert sec_event_args_for("weekly_reconcile") == ("--skip-parser-signature-reparse",)
     assert sec_event_args_for("full_backfill") == ("--full-rescan",)
 
 

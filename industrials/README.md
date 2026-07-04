@@ -65,6 +65,17 @@ C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\21_validate_def
 
 `21_validate_defense_oos_calibration_readiness.py` is report-only by default. It validates manifest hashes, contract schema, 0-100 native score units, shadow-only gates, point-in-time source dates, benchmark pins, and portfolio-adapter shadow ingestion. Use `--promotion-check` only when enough PIT history exists and the run should fail if the configured minimum snapshot count is not met.
 
+Build the report-only Stage 8/9 research artifacts with:
+
+```powershell
+C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\22_build_defense_oos_calibration_panel.py --asof 2026-07-02
+C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\23_validate_defense_oos_calibration_artifacts.py
+C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\24_run_defense_optuna_calibration.py
+C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\25_backtest_defense_scores.py
+```
+
+These stages seal the calibration panel, split metadata, optional Optuna calibration report, and score backtest diagnostics under `output/industrials/defense/stage8` and `output/industrials/defense/stage9`. They remain research-only until the panel is survivorship-corrected, contains enough immutable PIT snapshots, has forward returns available, and passes `23_validate_defense_oos_calibration_artifacts.py --promotion-check`.
+
 Do not register defense in `portfolio_layer/config.yaml` until the immutable snapshot history, OOS calibration validator, duplicate-ticker ownership overrides, and portfolio Stage 1 dry run all pass.
 
 `04b_validate_defense_stage0_4_production_readiness.py` is the hard pre-Stage 5 gate. It validates the configured production DB in read-only mode and fails if scratch DB evidence is being substituted for production data.

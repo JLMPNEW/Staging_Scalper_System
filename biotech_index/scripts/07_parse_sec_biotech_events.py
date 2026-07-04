@@ -386,6 +386,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", type=str, default="", help="Parser as-of date in YYYY-MM-DD. Defaults to UTC today.")
     parser.add_argument("--export-only", action="store_true", help="Only export current sec_events table to CSV.")
     parser.add_argument("--full-rescan", action="store_true", help="Parse all eligible filing texts, not just new/changed documents.")
+    parser.add_argument(
+        "--skip-parser-signature-reparse",
+        action="store_true",
+        help="In incremental mode, do not reparse unchanged filing text solely because parser logic changed.",
+    )
     parser.add_argument("--all-db-companies", action="store_true", help="Parse all SEC filings in the DB window instead of the final scoring universe.")
     return parser.parse_args()
 
@@ -667,6 +672,7 @@ def count_filing_texts(
     asof: str,
     ticker_filter: set[str],
     incremental_only: bool,
+    reparse_signature_mismatch: bool,
     parser_signature: str,
 ) -> int:
     where, params = filing_text_where(cutoff=cutoff, asof=asof, ticker_filter=ticker_filter)
@@ -677,13 +683,16 @@ def count_filing_texts(
         if incremental_only
         else ""
     )
-    incremental_clause = (
-        " AND (s.accession_nodash IS NULL OR COALESCE(s.text_hash, '') <> COALESCE(d.text_hash, '') OR COALESCE(s.parser_signature, '') <> ?)"
-        if incremental_only
-        else ""
-    )
-    if incremental_only:
+    if incremental_only and reparse_signature_mismatch:
+        incremental_clause = (
+            " AND (s.accession_nodash IS NULL OR COALESCE(s.text_hash, '') <> COALESCE(d.text_hash, '') "
+            "OR COALESCE(s.parser_signature, '') <> ?)"
+        )
         params.append(parser_signature)
+    elif incremental_only:
+        incremental_clause = " AND (s.accession_nodash IS NULL OR COALESCE(s.text_hash, '') <> COALESCE(d.text_hash, ''))"
+    else:
+        incremental_clause = ""
     return int(
         conn.execute(
             f"""{latest_docs_cte(target_sql)}
@@ -777,11 +786,15 @@ def load_filing_texts_to_parse(
     ticker_filter: set[str],
     max_filings: int,
     offset: int,
+    reparse_signature_mismatch: bool,
     parser_signature: str,
 ) -> list[FilingText]:
     where, params = filing_text_where(cutoff=cutoff, asof=asof, ticker_filter=ticker_filter)
     where_sql = " AND ".join(where)
     target_sql = target_filings_sql(where_sql)
+    signature_incremental_predicate = (
+        "OR COALESCE(s.parser_signature, '') <> ?" if reparse_signature_mismatch else ""
+    )
     sql = f"""{latest_docs_cte(target_sql)},
         eligible_filings AS (
             SELECT
@@ -802,13 +815,14 @@ def load_filing_texts_to_parse(
             WHERE (
                    s.accession_nodash IS NULL
                 OR COALESCE(s.text_hash, '') <> COALESCE(d.text_hash, '')
-                OR COALESCE(s.parser_signature, '') <> ?
+                {signature_incremental_predicate}
             )
               AND doc.text_content IS NOT NULL
               AND doc.text_content <> ''
             ORDER BY f.filing_date DESC, f.accession_nodash DESC
     """
-    params.append(parser_signature)
+    if reparse_signature_mismatch:
+        params.append(parser_signature)
     if max_filings > 0:
         sql += " LIMIT ? OFFSET ?"
         params.extend([max_filings, max(0, offset)])
@@ -1252,6 +1266,7 @@ def main() -> None:
                     f"asof={asof_str}; refusing to continue"
                 )
             incremental_only = not args.full_rescan
+            reparse_signature_mismatch = incremental_only and not args.skip_parser_signature_reparse
             cleared_stale = clear_stale_events_for_missing_document_text(
                 conn,
                 cutoff=cutoff,
@@ -1267,6 +1282,7 @@ def main() -> None:
                 asof=asof_str,
                 ticker_filter=ticker_filter,
                 incremental_only=incremental_only,
+                reparse_signature_mismatch=reparse_signature_mismatch,
                 parser_signature=parser_signature,
             )
             batch_size = max(1, int(cfg_get(config, "sec_event_parser.batch_size", 250)))
@@ -1289,6 +1305,7 @@ def main() -> None:
                         ticker_filter=ticker_filter,
                         max_filings=int(args.max_filings),
                         offset=int(args.offset),
+                        reparse_signature_mismatch=reparse_signature_mismatch,
                         parser_signature=parser_signature,
                     )
                     if incremental_only
@@ -1330,6 +1347,7 @@ def main() -> None:
                             ticker_filter=ticker_filter,
                             max_filings=batch_size,
                             offset=0,
+                            reparse_signature_mismatch=reparse_signature_mismatch,
                             parser_signature=parser_signature,
                         )
                         if incremental_only

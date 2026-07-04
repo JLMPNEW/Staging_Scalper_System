@@ -1037,6 +1037,76 @@ def load_official_cohort_map(config: dict[str, Any]) -> dict[str, str]:
     return out
 
 
+def load_calibration_ticker_alias_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """Map historical/delisted price aliases to canonical calibration tickers."""
+    if not table_exists(conn, "delisted_calibration_universe"):
+        return {}
+    columns = table_columns(conn, "delisted_calibration_universe")
+    if "ticker" not in columns:
+        return {}
+    alias_fields = [
+        field
+        for field in (
+            "ticker",
+            "calibration_company_ticker",
+            "norgate_symbol",
+            "historical_price_ticker",
+            "original_ticker",
+        )
+        if field in columns
+    ]
+    selected_fields = ", ".join(alias_fields)
+    rows = conn.execute(f"SELECT {selected_fields} FROM delisted_calibration_universe").fetchall()
+    aliases: dict[str, str] = {}
+    for row in rows:
+        canonical = normalize_ticker(row["ticker"])
+        if not canonical:
+            continue
+        for field in alias_fields:
+            alias = normalize_ticker(row[field])
+            if alias:
+                aliases.setdefault(alias, canonical)
+    return aliases
+
+
+def load_delisted_calibration_cohort_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """Return approved calibration cohorts for canonical and aliased delisted tickers."""
+    if not table_exists(conn, "delisted_calibration_universe"):
+        return {}
+    columns = table_columns(conn, "delisted_calibration_universe")
+    if "ticker" not in columns or "cohort" not in columns:
+        return {}
+    alias_fields = [
+        field
+        for field in (
+            "ticker",
+            "calibration_company_ticker",
+            "norgate_symbol",
+            "historical_price_ticker",
+            "original_ticker",
+        )
+        if field in columns
+    ]
+    selected_fields = ", ".join([*alias_fields, "cohort"])
+    rows = conn.execute(
+        f"""
+        SELECT {selected_fields}
+        FROM delisted_calibration_universe
+        WHERE COALESCE(cohort, '') <> ''
+        """
+    ).fetchall()
+    cohorts: dict[str, str] = {}
+    for row in rows:
+        cohort = str(row["cohort"] or "").strip()
+        if not cohort:
+            continue
+        for field in alias_fields:
+            alias = normalize_ticker(row[field])
+            if alias:
+                cohorts.setdefault(alias, cohort)
+    return cohorts
+
+
 def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
     stack = cfg_get(config, "calibration.tier1.recommended_stack", {}) or {}
     costs = cfg_get(config, "calibration.tier1.costs", {}) or {}
@@ -3093,6 +3163,8 @@ def load_observations(
 ) -> list[dict[str, Any]]:
     observations: list[dict[str, Any]] = []
     official_cohort_by_ticker = load_official_cohort_map(config)
+    calibration_ticker_aliases = load_calibration_ticker_alias_map(conn)
+    delisted_cohort_by_ticker = load_delisted_calibration_cohort_map(conn)
     official_cohort_settings = cfg_get(config, "biotech_scoring.calibration_cohorts", {}) or {}
     if not isinstance(official_cohort_settings, dict):
         official_cohort_settings = {}
@@ -3188,10 +3260,15 @@ def load_observations(
             if cohort_calibration_eligible is not None and cohort_calibration_eligible <= 0.0:
                 continue
             ticker = normalize_ticker(row["ticker"])
-            official_cohort = official_cohort_by_ticker.get(ticker)
+            cohort_lookup_ticker = calibration_ticker_aliases.get(ticker, ticker)
+            official_cohort = (
+                official_cohort_by_ticker.get(cohort_lookup_ticker)
+                or delisted_cohort_by_ticker.get(cohort_lookup_ticker)
+                or delisted_cohort_by_ticker.get(ticker)
+            )
             if require_official_cohort and official_cohort_by_ticker and not official_cohort:
                 raise ValueError(
-                    f"Ticker {ticker} is missing from the official biotech cohort map; "
+                    f"Ticker {ticker} (cohort lookup {cohort_lookup_ticker}) is missing from the official biotech cohort map; "
                     "old taxonomy-cohort fallback is disabled."
                 )
             payload = parse_json(row.get("feature_json"))

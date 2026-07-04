@@ -764,8 +764,10 @@ Goal: run report-only IC diagnostics, constrained Optuna calibration, and walk-f
 Implementation:
 
 - Use `21_validate_defense_oos_calibration_readiness.py` as the current Stage 8 readiness scaffold before any OOS panel is promoted. It validates immutable shadow rank-table manifests, schema, native score units, shadow gate pins, PIT source dates, portfolio-adapter shadow ingestion, and benchmark pins.
-- Create `08_build_defense_oos_calibration_panel.py` to produce point-in-time calibration panels and split metadata for research-only scoring diagnostics.
-- Create `08_validate_defense_oos_calibration_artifacts.py` to enforce the True OOS Calibration File Standards.
+- `22_build_defense_oos_calibration_panel.py` produces sealed research-only calibration panels and split metadata from immutable rank snapshots.
+- `23_validate_defense_oos_calibration_artifacts.py` enforces the True OOS Calibration File Standards for the panel, splits, source hashes, source dates, score units, benchmark pin, and promotion checks.
+- `24_run_defense_optuna_calibration.py` runs constrained report-only Optuna calibration when eligible train/holdout rows exist, with deterministic constrained random search as the fallback if Optuna is unavailable.
+- `25_backtest_defense_scores.py` produces report-only score backtest diagnostics from the same Stage 8 panel and optional calibrated weights.
 - Build a point-in-time historical panel using `dim_universe_membership`.
 - Require Norgate delisted historical prices for historical/delisted defense members before calibration outputs can be considered promotable.
 - Compute forward excess and beta-hedged residual returns against a pinned sleeve benchmark.
@@ -776,7 +778,7 @@ Implementation:
 - Apply Bayesian/empirical-Bayes shrinkage for cohort-level calibration. Cohort-level slopes and weights should shrink toward the all-defense prior and, where available, an all-industrials prior. A 20-name cohort cannot independently set aggressive weights without enough evidence.
 - Convert any cohort-level calibration result into a sleeve-absolute scoring scale before promotion back to Stage 7. Cohort-specific slopes may improve calibration, but they cannot make `final_score` a within-cohort percentile.
 - Write OOS calibration panels, train/holdout files, walk-forward files, and research summaries only through the True OOS Calibration File Standards. Any artifact that may support promotion must carry PIT source cutoffs, feature birthdates, source hashes, split definitions, embargo settings, model/config hashes, and benchmark definition.
-- Validate promotable research artifacts with `08_validate_defense_oos_calibration_artifacts.py` before they are reviewed for Stage 7 promotion.
+- Validate promotable research artifacts with `23_validate_defense_oos_calibration_artifacts.py --promotion-check` before they are reviewed for Stage 7 promotion.
 
 Acceptance gates:
 

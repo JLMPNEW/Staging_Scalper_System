@@ -653,6 +653,38 @@ def load_score_rows(
     return out
 
 
+def filter_delisted_rows_to_pit_membership(
+    rows: list[dict[str, Any]],
+    *,
+    asof: str,
+    delisted_metadata: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop delisted calibration rows that are not alive on the output date.
+
+    Carry-forward exports can resolve a pre-terminal score snapshot for a
+    post-terminal output date.  The score snapshot is valid provenance for live
+    names, but a delisted calibration name must not survive past its terminal
+    date in the exported Stage 11 panel.
+    """
+    if not delisted_metadata:
+        return rows
+    asof_day = parse_date(asof)
+    if asof_day is None:
+        return rows
+    out: list[dict[str, Any]] = []
+    dropped = 0
+    for row in rows:
+        ticker = str(row.get("ticker") or "").strip().upper()
+        metadata = delisted_metadata.get(ticker)
+        if metadata and not delisted_membership_valid(metadata, asof_day):
+            dropped += 1
+            continue
+        out.append(row)
+    if dropped:
+        LOGGER.info("Dropped %d post-terminal delisted score row(s) for asof=%s", dropped, asof)
+    return out
+
+
 def load_market_context(conn: sqlite3.Connection, asof: str, *, tickers: set[str]) -> dict[str, dict[str, Any]]:
     clean_tickers = sorted(ticker for ticker in tickers if ticker)
     if not clean_tickers:
@@ -1324,6 +1356,11 @@ def main() -> None:
                         asof,
                         calibration_tickers=calibration_tickers,
                         score_snapshot_asof=resolved_snapshot,
+                    )
+                    score_rows = filter_delisted_rows_to_pit_membership(
+                        score_rows,
+                        asof=asof,
+                        delisted_metadata=delisted_metadata,
                     )
                 if not score_rows:
                     action = "missing_db_rows"

@@ -114,6 +114,82 @@ def test_sec_event_incremental_clears_events_when_latest_document_text_is_missin
     assert dict(state) == {"text_hash": "", "parser_signature": "new-signature", "event_count": 0}
 
 
+def test_sec_event_incremental_can_skip_parser_signature_only_reparse() -> None:
+    module = load_script_module("07_parse_sec_biotech_events.py", "sec_events_skip_signature_reparse")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE companies(company_id INTEGER PRIMARY KEY, ticker TEXT NOT NULL, company_name TEXT);
+        CREATE TABLE sec_filings(
+            company_id INTEGER NOT NULL,
+            accession_nodash TEXT PRIMARY KEY,
+            filing_date TEXT NOT NULL,
+            form TEXT NOT NULL,
+            text_hash TEXT
+        );
+        CREATE TABLE sec_filing_documents(
+            document_id INTEGER PRIMARY KEY,
+            accession_nodash TEXT NOT NULL,
+            document_url TEXT NOT NULL,
+            document_type TEXT NOT NULL,
+            text_content TEXT,
+            text_hash TEXT
+        );
+        CREATE TABLE sec_filing_latest_document(
+            accession_nodash TEXT PRIMARY KEY,
+            document_id INTEGER NOT NULL,
+            document_url TEXT NOT NULL,
+            document_type TEXT NOT NULL,
+            text_hash TEXT NOT NULL,
+            text_length INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE sec_event_parse_state(
+            accession_nodash TEXT PRIMARY KEY,
+            text_hash TEXT,
+            parser_signature TEXT,
+            parsed_at TEXT NOT NULL,
+            event_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO companies(company_id, ticker, company_name) VALUES (1, 'TST', 'Test Therapeutics');
+        INSERT INTO sec_filings(company_id, accession_nodash, filing_date, form, text_hash)
+            VALUES (1, '0001', '2026-05-08', '10-Q', 'same-hash');
+        INSERT INTO sec_filing_documents(document_id, accession_nodash, document_url, document_type, text_content, text_hash)
+            VALUES (10, '0001', 'https://example.test/0001.txt', 'complete_submission_text', 'valid filing text', 'same-hash');
+        INSERT INTO sec_filing_latest_document(accession_nodash, document_id, document_url, document_type, text_hash, text_length)
+            VALUES ('0001', 10, 'https://example.test/0001.txt', 'complete_submission_text', 'same-hash', 17);
+        INSERT INTO sec_event_parse_state(accession_nodash, text_hash, parser_signature, parsed_at, event_count, created_at, updated_at)
+            VALUES ('0001', 'same-hash', 'old-signature', '2026-05-08T00:00:00Z', 1, '2026-05-08T00:00:00Z', '2026-05-08T00:00:00Z');
+        """
+    )
+
+    skipped = module.load_filing_texts_to_parse(
+        conn,
+        cutoff="2025-05-08",
+        asof="2026-05-08",
+        ticker_filter={"TST"},
+        max_filings=0,
+        offset=0,
+        reparse_signature_mismatch=False,
+        parser_signature="new-signature",
+    )
+    strict = module.load_filing_texts_to_parse(
+        conn,
+        cutoff="2025-05-08",
+        asof="2026-05-08",
+        ticker_filter={"TST"},
+        max_filings=0,
+        offset=0,
+        reparse_signature_mismatch=True,
+        parser_signature="new-signature",
+    )
+
+    assert skipped == []
+    assert [filing.accession_nodash for filing in strict] == ["0001"]
+
+
 def test_forward_guidance_worker_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_script_module("19_parse_forward_guidance.py", "forward_guidance_regression")
 

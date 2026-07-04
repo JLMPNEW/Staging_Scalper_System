@@ -293,41 +293,72 @@ def run_dir_joins(runs_root: Path, as_of: str) -> dict[str, Any]:
     return out
 
 
-def load_sidecars(config: dict[str, Any], config_path: Path, as_of: str,
-                  used: dict[str, str]) -> dict[str, dict[str, dict[str, str]]]:
-    """pipeline -> ticker -> sidecar flag fields, for tech-family dated sources at exactly as_of."""
+def _sidecar_fields(row: dict[str, str]) -> dict[str, str]:
+    return {
+        "sidecar_survivorship_corrected": str(row.get("survivorship_corrected_panel_flag", "")),
+        "sidecar_stage11_eligible": str(row.get("stage11_calibration_input_eligible_flag", "")),
+        "sidecar_sample_role": str(row.get("calibration_sample_role", "")),
+        "sidecar_membership_status": str(row.get("membership_status", "")),
+        "sidecar_terminal_date": str(row.get("terminal_date", "")),
+        "sidecar_score_recomputed_pit": str(row.get("score_recomputed_pit_flag", "")),
+    }
+
+
+def build_sidecar_index(config: dict[str, Any], config_path: Path,
+                        used: dict[str, str]) -> dict[str, dict[str, dict[str, dict[str, str]]]]:
+    """pipeline -> as_of (ISO) -> ticker -> sidecar flag fields, built ONCE over every source.
+
+    The tech generators have published Stage 11 survivorship panels in two layouts:
+      legacy:       a per-date sidecar CSV next to each dated rank table
+      consolidated: <prefix>_stage11_survivorship_calibration_panel.csv at the dashboard root
+                    (recent/live dates) plus stage11_combined/<prefix>_..._panel_<start>_<end>.csv
+                    historical range chunks
+    All sources are indexed; later sources override earlier per (as_of, ticker):
+    range chunks (ascending range) -> root panel -> per-date sidecars (authoritative for their date).
+    Every file consumed is sha256-recorded into `used`.
+    """
     sector_root = resolve_path(
         cfg_get(config, "score_contract.sector_output_root", "../output"), base_dir=config_path.parent
     )
-    compact = as_of.replace("-", "")
-    out: dict[str, dict[str, dict[str, str]]] = {}
+    index: dict[str, dict[str, dict[str, dict[str, str]]]] = {}
     for cfg in cfg_get(config, "score_contract.sectors", []) or []:
         if not bool(cfg.get("enabled", True)) or str(cfg.get("file_mode", "flat")) != "dated":
             continue
-        if RANK_TABLE_SUFFIX not in str(cfg.get("file_path", "")):
+        rank_name = Path(str(cfg.get("file_path", ""))).name
+        if RANK_TABLE_SUFFIX not in rank_name:
             continue
         pipe = str(cfg.get("model_family"))
-        match = next((path for d, path in dated_candidates(cfg, sector_root) if d == compact), None)
-        if match is None:
+        candidates = dated_candidates(cfg, sector_root)
+        if not candidates:
             continue
-        sidecar = sidecar_path_for(match)
-        if not sidecar.exists():
-            continue
-        by_ticker: dict[str, dict[str, str]] = {}
-        for r in read_csv(sidecar):
-            ticker = str(r.get("ticker", "")).strip().upper()
-            if ticker:
-                by_ticker[ticker] = {
-                    "sidecar_survivorship_corrected": str(r.get("survivorship_corrected_panel_flag", "")),
-                    "sidecar_stage11_eligible": str(r.get("stage11_calibration_input_eligible_flag", "")),
-                    "sidecar_sample_role": str(r.get("calibration_sample_role", "")),
-                    "sidecar_membership_status": str(r.get("membership_status", "")),
-                    "sidecar_terminal_date": str(r.get("terminal_date", "")),
-                    "sidecar_score_recomputed_pit": str(r.get("score_recomputed_pit_flag", "")),
-                }
-        out[pipe] = by_ticker
-        used[f"{as_of}:{pipe}"] = sha256_file(sidecar)
-    return out
+        prefix = rank_name.replace(RANK_TABLE_SUFFIX, "")
+        dashboard_root = candidates[0][1].parent.parent
+        per_pipe = index.setdefault(pipe, {})
+
+        def ingest(path: Path, *, only_asof: str | None = None) -> None:
+            for r in read_csv(path):
+                ticker = str(r.get("ticker", "")).strip().upper()
+                asof = str(r.get("asof_date", "")).strip()[:10] or (only_asof or "")
+                if not ticker or not asof:
+                    continue
+                if only_asof is not None and asof != only_asof:
+                    continue
+                per_pipe.setdefault(asof, {})[ticker] = _sidecar_fields(r)
+            used[f"{pipe}:{path.name}"] = sha256_file(path)
+
+        chunk_dir = dashboard_root / "stage11_combined"
+        if chunk_dir.exists():
+            for path in sorted(chunk_dir.glob(f"{prefix}_stage11_survivorship_calibration_panel_*.csv")):
+                ingest(path)
+        root_panel = dashboard_root / f"{prefix}{SIDECAR_SUFFIX}"
+        if root_panel.exists():
+            ingest(root_panel)
+        for compact, rank_path in candidates:
+            sidecar = sidecar_path_for(rank_path)
+            if sidecar.exists():
+                iso = f"{compact[:4]}-{compact[4:6]}-{compact[6:]}"
+                ingest(sidecar, only_asof=iso)
+    return index
 
 
 def _latest_targets(targets_root: Path, wanted: str | None) -> Path | None:
@@ -501,7 +532,7 @@ def main() -> int:  # noqa: C901
     macro_cache: dict[str, dict[str, Any]] = {}
     rotation_cache: dict[str, dict[str, dict[str, Any]]] = {}
     rundir_cache: dict[str, dict[str, Any]] = {}
-    sidecar_cache: dict[str, dict[str, dict[str, dict[str, str]]]] = {}
+    sidecar_index = build_sidecar_index(config, config_path, sidecar_hashes)
     conn = open_macro_serving_db(paths.macro_serving_db_path)
     try:
         for r in rows:
@@ -515,7 +546,6 @@ def main() -> int:  # noqa: C901
                                                         lookback=rotation_lookback)
                                          if panel_prices is not None else {})
                 rundir_cache[as_of] = run_dir_joins(runs_root, as_of)
-                sidecar_cache[as_of] = load_sidecars(config, config_path, as_of, sidecar_hashes)
             state = macro_cache[as_of]
             r.update(state["regime"])
             r.update(state["fits"].get(pipe, {
@@ -556,7 +586,7 @@ def main() -> int:  # noqa: C901
                 "liquidity_half_spread_bps": joins["liquidity"].get(ticker, "")
                 if joins["liquidity"] is not None else "",
             })
-            side = sidecar_cache[as_of].get(pipe, {}).get(ticker)
+            side = sidecar_index.get(pipe, {}).get(as_of, {}).get(ticker)
             r.update({"sidecar_available": 1 if side else 0,
                       "sidecar_survivorship_corrected": "", "sidecar_stage11_eligible": "",
                       "sidecar_sample_role": "", "sidecar_membership_status": "",
@@ -630,8 +660,8 @@ def main() -> int:  # noqa: C901
                 z_bad.append(f"{pipe}:{as_of}")
     rec("standardization_sane", "PASS" if not z_bad else "FAIL",
         f"{len(by_group)} (pipeline, date) groups standardized" if not z_bad else f"{z_bad[:8]}")
-    tech_rows = [r for r in rows if str(r.get("source_pipeline", "")) in sidecar_cache.get(
-        str(r.get("as_of_date", "")), {})]
+    tech_rows = [r for r in rows
+                 if str(r.get("as_of_date", "")) in sidecar_index.get(str(r.get("source_pipeline", "")), {})]
     if tech_rows:
         side_frac = sum(int(r.get("sidecar_available", 0)) for r in tech_rows) / len(tech_rows)
         rec("tech_sidecar_join", "PASS" if side_frac >= 0.95 else "WARN",
