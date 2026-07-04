@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import json
 import math
@@ -25,6 +24,7 @@ from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from industrials.core.db import init_db  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.policy_loader import load_eligibility_policy, resolve_policy  # noqa: E402
+from industrials.core.rank_table_contracts import defense_final_rank_header  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.text_norm import normalize_ticker  # noqa: E402
 
@@ -191,12 +191,7 @@ def resolve_eligibility_policy_path(config: dict[str, Any], *, base_dir: Path) -
 
 
 def header(project_root: Path) -> list[str]:
-    semi = project_root / "output" / "technology_reports" / "semi_dashboard" / "semiconductor_final_rank_table.csv"
-    if not semi.exists():
-        raise FileNotFoundError(f"Semiconductor rank-table contract header not found: {semi}")
-    with semi.open("r", encoding="utf-8-sig", newline="") as handle:
-        cols = next(csv.reader(handle))
-    return [col.replace("big_tech_capex_", "defense_budget_backlog_") for col in cols]
+    return defense_final_rank_header(project_root)
 
 
 def fetch_map(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> dict[str, dict[str, Any]]:
@@ -229,6 +224,11 @@ def load_rows(conn: sqlite3.Connection, *, asof: str, config: dict[str, Any]) ->
         conn,
         "SELECT * FROM feature_market_technical WHERE model_family = ? AND source_id = ? AND asof_date = ?",
         (MODEL_FAMILY, market_source, asof),
+    )
+    snapshots = fetch_map(
+        conn,
+        "SELECT * FROM fact_market_snapshot WHERE source_id = ? AND asof_date = ?",
+        (market_source, asof),
     )
     financial = fetch_map(
         conn,
@@ -276,6 +276,7 @@ def load_rows(conn: sqlite3.Connection, *, asof: str, config: dict[str, Any]) ->
     for ticker, base in active.items():
         merged: dict[str, Any] = dict(base)
         merged.update({f"market_{k}": v for k, v in market.get(ticker, {}).items()})
+        merged.update({f"snapshot_{k}": v for k, v in snapshots.get(ticker, {}).items()})
         merged.update({f"financial_{k}": v for k, v in financial.get(ticker, {}).items()})
         merged.update({f"positioning_{k}": v for k, v in positioning.get(ticker, {}).items()})
         merged.update({f"profile_{k}": v for k, v in profiles.get(ticker, {}).items()})
@@ -290,9 +291,55 @@ def load_rows(conn: sqlite3.Connection, *, asof: str, config: dict[str, Any]) ->
     return rows
 
 
+def first_finite(*values: Any) -> float | None:
+    for value in values:
+        number = finite(value)
+        if number is not None:
+            return number
+    return None
+
+
+def market_cap_export_value(row: dict[str, Any]) -> tuple[float | None, str, str]:
+    snapshot_market_cap = finite(row.get("snapshot_market_cap"))
+    if snapshot_market_cap is not None:
+        return snapshot_market_cap, "fact_market_snapshot.market_cap", ""
+    financial_market_cap = finite(row.get("financial_market_cap"))
+    if financial_market_cap is not None:
+        return financial_market_cap, "feature_financial_statement.market_cap", ""
+
+    price = first_finite(
+        row.get("snapshot_regular_market_price"),
+        row.get("financial_latest_price"),
+        row.get("market_latest_close"),
+        row.get("market_latest_adj_close"),
+    )
+    diluted_shares = finite(row.get("financial_diluted_shares"))
+    if price is not None and diluted_shares is not None and diluted_shares > 0:
+        return price * diluted_shares, "computed_pit_price_x_diluted_shares", ""
+
+    reasons: list[str] = []
+    if price is None:
+        reasons.append("market_cap_unavailable_missing_pit_price")
+    if diluted_shares is None or diluted_shares <= 0:
+        reasons.append("market_cap_unavailable_missing_share_count")
+    return None, "", ";".join(reasons)
+
+
+def liquidity_capacity_reason(row: dict[str, Any], *, market_cap_reason: str) -> str:
+    reasons: list[str] = []
+    if market_cap_reason:
+        reasons.append(market_cap_reason)
+    if finite(row.get("avg_dollar_volume_60d")) is None:
+        days = finite(row.get("market_trading_days_available"))
+        if days is not None and days < 60:
+            reasons.append(f"avg_dollar_volume_60d_unavailable_insufficient_history_{int(days)}_of_60")
+        else:
+            reasons.append("avg_dollar_volume_60d_unavailable_missing_price_or_volume_window")
+    return ";".join(reason for reason in reasons if reason)
+
+
 def add_feature_aliases(rows: list[dict[str, Any]]) -> None:
     aliases = {
-        "market_cap": "financial_market_cap",
         "latest_price": "financial_latest_price",
         "revenue_yoy_growth": "financial_revenue_yoy_growth",
         "gross_profit_yoy_growth": "financial_gross_profit_yoy_growth",
@@ -329,8 +376,19 @@ def add_feature_aliases(rows: list[dict[str, Any]]) -> None:
         row["ticker"] = normalize_ticker(row.get("ticker"))
         row["low_liquidity_flag"] = int(finite(row.get("market_low_liquidity_flag")) or 0)
         row["share_count_yoy_growth"] = ""
+        row["latest_price"] = first_finite(
+            row.get("snapshot_regular_market_price"),
+            row.get("financial_latest_price"),
+            row.get("market_latest_close"),
+            row.get("market_latest_adj_close"),
+        )
+        market_cap, market_cap_source, market_cap_reason = market_cap_export_value(row)
+        row["market_cap"] = market_cap
+        row["market_cap_source"] = market_cap_source
         for out_name, source_name in aliases.items():
-            row[out_name] = row.get(source_name)
+            if out_name != "latest_price":
+                row[out_name] = row.get(source_name)
+        row["liquidity_capacity_reason"] = liquidity_capacity_reason(row, market_cap_reason=market_cap_reason)
 
 
 def build_scores(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -533,6 +591,7 @@ def compose_rows(
             "calibration_usage": "shadow_only",
             "calibration_input_valid_flag": "0",
             "oos_score_valid_flag": "0",
+            "oos_score_asof_date": "",
             "oos_invalid_reason": calibration_reason,
             "feature_point_in_time_flag": "1",
             "future_return_excluded_flag": "1",
@@ -550,13 +609,14 @@ def compose_rows(
             "portfolio_candidate_status": "shadow_only",
             "portfolio_candidate_reason": calibration_reason,
             "research_calibration_input_eligible_flag": "0",
+            "research_calibration_eligible_flag": "0",
             "research_calibration_status": "shadow_only",
             "research_calibration_reason": calibration_reason,
             "calibration_sample_role": "excluded",
             "calibration_status": "shadow_only",
             "calibration_status_reason": calibration_reason,
             "survivorship_corrected_panel_flag": "0",
-            "stage11_calibration_panel_source": "",
+            "stage11_calibration_panel_source": "dashboard_rank_snapshot_current_universe_replay",
             "stage11_calibration_input_eligible_flag": "0",
             "stage11_calibration_input_reason": calibration_reason,
             "score_scale_min": "0",
@@ -585,6 +645,8 @@ def compose_rows(
             "forward_catalyst_source": "",
             "forward_catalyst_confidence": "",
             "forward_catalyst_asof_date": "",
+            "market_cap_source": str(row.get("market_cap_source") or ""),
+            "liquidity_capacity_reason": str(row.get("liquidity_capacity_reason") or ""),
         }
         for field in [
             "market_cap", "latest_price", "revenue_yoy_growth", "gross_profit_yoy_growth",
@@ -616,6 +678,7 @@ def compose_rows(
             f"asof={asof}: {sorted(set((profile, stage) for _, profile, stage in unmatched))} "
             f"(tickers: {sorted(ticker for ticker, _, _ in unmatched)[:20]})"
         )
+    out.sort(key=lambda record: (int(record["final_rank"]), record["ticker"]))
     return out
 
 

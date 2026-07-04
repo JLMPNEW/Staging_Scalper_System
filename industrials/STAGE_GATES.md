@@ -71,6 +71,9 @@
 - `sector_cycle_*` and `defense_budget_backlog_*` remain neutralized/not-loaded until validated defense demand, budget, backlog, or contract-award sources are ingested.
 - `16_run_defense_daily_refresh.py --asof YYYY-MM-DD` is the default daily fast path and must run incremental/daily refresh modes, Stage 3-6 validators, shadow publishing, rank-table validation, and portfolio-adapter shadow validation.
 - `17_publish_defense_shadow_rank_table.py` publishes one dated dashboard artifact and a SHA-256 manifest. A valid dated artifact is immutable by default; overwriting requires explicit `--allow-overwrite`.
+- The dashboard CSV preserves the semiconductor-compatible base contract, appends defense-only compatibility fields (`oos_score_asof_date`, `research_calibration_eligible_flag`, `market_cap_source`, `liquidity_capacity_reason`), and writes rows in `final_rank` ascending order.
+- In shadow mode, portfolio/OOS/research allocation gates remain disabled. `research_calibration_eligible_flag` must mirror `research_calibration_input_eligible_flag`, and `stage11_calibration_panel_source` must be `dashboard_rank_snapshot_current_universe_replay`.
+- `market_cap` is exported from PIT market-cap sources where available, or from PIT price times diluted shares. Any remaining blank `market_cap` or `avg_dollar_volume_60d` requires a clear `liquidity_capacity_reason`.
 - `18_validate_defense_shadow_rank_table.py` must pass for every dated shadow artifact before the file can be used as a PIT score-history source.
 - `19_build_defense_shadow_snapshot_history.py` may publish only dates with sufficient loaded Stage 3 market, Stage 4 financial, and Stage 5 positioning coverage. Its report belongs in `output/industrials/defense/stage6`.
 - `20_validate_defense_portfolio_adapter_shadow.py` must pass before any portfolio-layer registration work. It proves `tech_family` can ingest the file while keeping investable, research, and OOS-valid gates disabled.

@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
+from industrials.core.rank_table_contracts import defense_final_rank_header  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
 
 
@@ -48,6 +49,7 @@ SHADOW_ZERO_FIELDS = [
     "oos_score_valid_flag",
     "calibration_eligible_flag",
     "research_calibration_input_eligible_flag",
+    "research_calibration_eligible_flag",
     "stage11_calibration_input_eligible_flag",
 ]
 SHADOW_ONE_FIELDS = [
@@ -60,6 +62,7 @@ PIT_DATE_FIELDS = [
     "source_snapshot_asof_date",
     "price_data_asof_date",
     "latest_price_date",
+    "oos_score_asof_date",
     "market_feature_asof_date",
     "financial_feature_asof_date",
     "financial_data_asof_date",
@@ -129,9 +132,7 @@ def parse_snapshot_date(path: Path) -> date | None:
 
 
 def expected_header() -> list[str]:
-    semi = PROJECT_ROOT / "output" / "technology_reports" / "semi_dashboard" / "semiconductor_final_rank_table.csv"
-    with semi.open("r", encoding="utf-8-sig", newline="") as handle:
-        return [col.replace("big_tech_capex_", "defense_budget_backlog_") for col in next(csv.reader(handle))]
+    return defense_final_rank_header(PROJECT_ROOT)
 
 
 def as_float(raw: object) -> float | None:
@@ -261,6 +262,35 @@ def validate_snapshot(path: Path, *, exp_header: list[str], expected_score_versi
         issues.append(f"shadow one-gate fields not pinned: {bad_shadow_one[:10]}")
     if bad_sample_role:
         issues.append(f"calibration_sample_role not excluded: {bad_sample_role[:10]}")
+    bad_research_alias = [
+        row.get("ticker", "")
+        for row in rows
+        if str(row.get("research_calibration_eligible_flag") or "")
+        != str(row.get("research_calibration_input_eligible_flag") or "")
+    ]
+    if bad_research_alias:
+        issues.append(f"research_calibration_eligible_flag mismatch: {bad_research_alias[:10]}")
+    bad_stage11_source = [
+        row.get("ticker", "")
+        for row in rows
+        if str(row.get("stage11_calibration_panel_source") or "")
+        != "dashboard_rank_snapshot_current_universe_replay"
+    ]
+    if bad_stage11_source:
+        issues.append(f"stage11_calibration_panel_source not explicit: {bad_stage11_source[:10]}")
+    missing_capacity_reason = [
+        row.get("ticker", "")
+        for row in rows
+        if (
+            (not str(row.get("market_cap") or "").strip() and "market_cap_unavailable" not in str(row.get("liquidity_capacity_reason") or ""))
+            or (
+                not str(row.get("avg_dollar_volume_60d") or "").strip()
+                and "avg_dollar_volume_60d_unavailable" not in str(row.get("liquidity_capacity_reason") or "")
+            )
+        )
+    ]
+    if missing_capacity_reason:
+        issues.append(f"blank capacity fields missing liquidity_capacity_reason: {missing_capacity_reason[:10]}")
 
     asof = parse_date(asof_date)
     max_source_date = ""

@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import init_db  # noqa: E402
+from industrials.core.rank_table_contracts import defense_final_rank_header  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -36,9 +37,7 @@ def parse_asof(raw: str) -> str:
 
 
 def expected_header() -> list[str]:
-    semi = PROJECT_ROOT / "output" / "technology_reports" / "semi_dashboard" / "semiconductor_final_rank_table.csv"
-    with semi.open("r", encoding="utf-8-sig", newline="") as handle:
-        return [col.replace("big_tech_capex_", "defense_budget_backlog_") for col in next(csv.reader(handle))]
+    return defense_final_rank_header(PROJECT_ROOT)
 
 
 def as_float(raw: object) -> float | None:
@@ -105,6 +104,9 @@ def main() -> int:
     ranks = sorted(int(float(row.get("final_rank") or 0)) for row in rows)
     if ranks != list(range(1, len(rows) + 1)):
         errors.append("final_rank values are not a contiguous 1..N sequence")
+    file_ranks = [int(float(row.get("final_rank") or 0)) for row in rows]
+    if file_ranks != sorted(file_ranks):
+        errors.append("rank table rows are not physically sorted by final_rank ascending")
     bad_scores = [
         row.get("ticker", "")
         for row in rows
@@ -121,6 +123,42 @@ def main() -> int:
     ]
     if bad_shadow:
         errors.append(f"shadow-only gates not disabled: {bad_shadow[:10]}")
+    bad_research_alias = [
+        row.get("ticker", "")
+        for row in rows
+        if str(row.get("research_calibration_eligible_flag") or "")
+        != str(row.get("research_calibration_input_eligible_flag") or "")
+    ]
+    if bad_research_alias:
+        errors.append(f"research_calibration_eligible_flag does not mirror input flag: {bad_research_alias[:10]}")
+    bad_oos_date = [
+        row.get("ticker", "")
+        for row in rows
+        if str(row.get("oos_score_valid_flag") or "") == "1" and not str(row.get("oos_score_asof_date") or "").strip()
+    ]
+    if bad_oos_date:
+        errors.append(f"OOS-valid rows missing oos_score_asof_date: {bad_oos_date[:10]}")
+    bad_stage11_source = [
+        row.get("ticker", "")
+        for row in rows
+        if str(row.get("stage11_calibration_panel_source") or "")
+        != "dashboard_rank_snapshot_current_universe_replay"
+    ]
+    if bad_stage11_source:
+        errors.append(f"stage11_calibration_panel_source not explicit current-universe replay: {bad_stage11_source[:10]}")
+    missing_capacity_reason = [
+        row.get("ticker", "")
+        for row in rows
+        if (
+            (not str(row.get("market_cap") or "").strip() and "market_cap_unavailable" not in str(row.get("liquidity_capacity_reason") or ""))
+            or (
+                not str(row.get("avg_dollar_volume_60d") or "").strip()
+                and "avg_dollar_volume_60d_unavailable" not in str(row.get("liquidity_capacity_reason") or "")
+            )
+        )
+    ]
+    if missing_capacity_reason:
+        errors.append(f"blank capacity fields missing clear liquidity_capacity_reason: {missing_capacity_reason[:10]}")
     bad_neutral = [
         row.get("ticker", "")
         for row in rows
