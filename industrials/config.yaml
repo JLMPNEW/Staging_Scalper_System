@@ -217,3 +217,9 @@ oos_calibration_standards:
     defense:
       calibration_provenance_version: "industrials_defense_oos_provenance_v1"
       calibration_validation_method: "stage8_report_only_with_true_oos_file_standard_validator"
+      primary_benchmark_ticker: "XAR"
+      robustness_benchmark_ticker: "ITA"
+      snapshot_history_root: "../output/industrials/defense/dashboard"
+      min_shadow_snapshots_for_promotion: 60
+      require_manifest_hash: true
+      require_portfolio_adapter_shadow_validation: true

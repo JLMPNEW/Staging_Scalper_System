@@ -687,6 +687,34 @@ Tests:
 - Component-quality threshold test.
 - Regression test that core scores remain unchanged.
 
+## Stage 6C - Shadow Rank Table And PIT Snapshot History
+
+Goal: publish contract-compatible defense rank tables for PIT data-contract validation while keeping portfolio and OOS gates disabled.
+
+Implemented scripts:
+
+- `16_run_defense_daily_refresh.py`: one-command daily fast path for a specific market `--asof` date. It runs incremental SEC sync, daily positioning refresh, Stage 3-6 validators, shadow publish, rank-table validation, and portfolio `tech_family` adapter shadow validation.
+- `17_publish_defense_shadow_rank_table.py`: publishes `output/industrials/defense/dashboard/YYYY-MM-DD/defense_final_rank_table.csv` and `defense_final_rank_table_manifest.json`.
+- `18_validate_defense_shadow_rank_table.py`: validates the final-rank-table schema, row count, manifest hash, 0-100 native score bounds, shadow gate pins, and neutralized defense overlay pillars.
+- `19_build_defense_shadow_snapshot_history.py`: builds immutable shadow snapshots only for dates with sufficient loaded Stage 3 market, Stage 4 financial, and Stage 5 positioning coverage.
+- `20_validate_defense_portfolio_adapter_shadow.py`: dry-runs the portfolio `tech_family` adapter without registering defense in `portfolio_layer/config.yaml`.
+
+Policy:
+
+- The published `final_score` is a native 0-100 defense composite score, not annualized alpha.
+- Shadow snapshots set portfolio/OOS gates off: `portfolio_candidate_gate=0`, `oos_score_valid_flag=0`, `calibration_eligible_flag=0`, and `calibration_sample_role=excluded`.
+- Dated dashboard artifacts are immutable by default. A valid existing artifact is kept; overwrite requires explicit `--allow-overwrite`.
+- `sector_cycle_*` and `defense_budget_backlog_*` remain neutralized with status `neutralized_not_loaded` until validated overlay sources are promoted.
+- Portfolio-layer registration is blocked until snapshot history and true OOS calibration validation pass.
+
+Acceptance gates:
+
+- The daily runner completes for the requested market date without triggering full-history refresh modes.
+- Every active defense ticker has loaded market, financial, and positioning features for the published date.
+- The rank-table validator passes for every dated shadow snapshot.
+- The portfolio adapter shadow validator ingests the file with the existing `tech_family` adapter and produces zero investable, research-eligible, or OOS-valid rows.
+- Generated snapshot-history reports live under `output/industrials/defense/stage6`.
+
 ## Stage 7 - Calibrated Defense Ranking
 
 Goal: produce the first production defense ranking layer.

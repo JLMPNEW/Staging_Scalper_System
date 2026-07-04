@@ -6,11 +6,13 @@ import csv
 import hashlib
 import json
 import math
+import os
 import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 
@@ -38,6 +40,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--asof", required=True, help="Market/PIT as-of date, YYYY-MM-DD.")
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--allow-overwrite",
+        action="store_true",
+        help="Explicitly replace an existing dated shadow artifact. Daily/PIT runs should not use this.",
+    )
     return parser.parse_args()
 
 
@@ -552,13 +559,50 @@ def compose_rows(rows: list[dict[str, Any]], scores: dict[str, dict[str, Any]], 
     return out
 
 
+def write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = ""
+    try:
+        with NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, delete=False) as handle:
+            tmp_name = handle.name
+            handle.write(text)
+        os.replace(tmp_name, path)
+    finally:
+        if tmp_name and Path(tmp_name).exists():
+            Path(tmp_name).unlink()
+
+
 def write_csv(path: Path, fields: list[str], rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({field: row.get(field, "") for field in fields})
+    tmp_name = ""
+    try:
+        with NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, delete=False) as handle:
+            tmp_name = handle.name
+            writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: row.get(field, "") for field in fields})
+        os.replace(tmp_name, path)
+    finally:
+        if tmp_name and Path(tmp_name).exists():
+            Path(tmp_name).unlink()
+
+
+def sealed_artifact_valid(path: Path, *, asof: str) -> bool:
+    manifest_path = path.with_name("defense_final_rank_table_manifest.json")
+    if not path.exists() or not manifest_path.exists():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return (
+        manifest.get("sha256") == digest
+        and manifest.get("asof_date") == asof
+        and manifest.get("model_family") == MODEL_FAMILY
+        and manifest.get("shadow_only") is True
+    )
 
 
 def seal_manifest(path: Path, *, rows: int, asof: str) -> Path:
@@ -574,7 +618,7 @@ def seal_manifest(path: Path, *, rows: int, asof: str) -> Path:
         "sealed_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
     }
     manifest_path = path.with_name("defense_final_rank_table_manifest.json")
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_text_atomic(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest_path
 
 
@@ -593,6 +637,17 @@ def main() -> int:
         else PROJECT_ROOT / "output" / "industrials" / "defense" / "dashboard" / asof
     )
     output_path = output_dir / "defense_final_rank_table.csv"
+    manifest_path = output_path.with_name("defense_final_rank_table_manifest.json")
+    if output_path.exists() or manifest_path.exists():
+        if not args.allow_overwrite and sealed_artifact_valid(output_path, asof=asof):
+            print(f"Existing sealed artifact is valid; keeping {output_path}")
+            print(f"Existing sealed manifest is valid; keeping {manifest_path}")
+            return 0
+        if not args.allow_overwrite:
+            raise FileExistsError(
+                f"Refusing to overwrite existing dated defense shadow artifact for {asof}: {output_path}. "
+                "Use --allow-overwrite only for an explicit manual rebuild."
+            )
     fields = header(PROJECT_ROOT)
     policies = load_csv_policy(policy_path)
     with sqlite3.connect(db_path) as conn:

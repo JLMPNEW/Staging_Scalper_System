@@ -69,6 +69,12 @@
 - Stage 6 scoring output is shadow-only until a point-in-time score snapshot store and true out-of-sample calibration validation exist.
 - Any emitted `final_score` must be sleeve-absolute across the full defense sleeve, not a within-cohort percentile or z-score.
 - `sector_cycle_*` and `defense_budget_backlog_*` remain neutralized/not-loaded until validated defense demand, budget, backlog, or contract-award sources are ingested.
+- `16_run_defense_daily_refresh.py --asof YYYY-MM-DD` is the default daily fast path and must run incremental/daily refresh modes, Stage 3-6 validators, shadow publishing, rank-table validation, and portfolio-adapter shadow validation.
+- `17_publish_defense_shadow_rank_table.py` publishes one dated dashboard artifact and a SHA-256 manifest. A valid dated artifact is immutable by default; overwriting requires explicit `--allow-overwrite`.
+- `18_validate_defense_shadow_rank_table.py` must pass for every dated shadow artifact before the file can be used as a PIT score-history source.
+- `19_build_defense_shadow_snapshot_history.py` may publish only dates with sufficient loaded Stage 3 market, Stage 4 financial, and Stage 5 positioning coverage. Its report belongs in `output/industrials/defense/stage6`.
+- `20_validate_defense_portfolio_adapter_shadow.py` must pass before any portfolio-layer registration work. It proves `tech_family` can ingest the file while keeping investable, research, and OOS-valid gates disabled.
+- Shadow artifacts can support data-contract and PIT-history validation, but they cannot be portfolio candidates until true OOS calibration is validated and the portfolio layer is registered intentionally.
 
 ## Pre-Stage 5 Production Readiness
 

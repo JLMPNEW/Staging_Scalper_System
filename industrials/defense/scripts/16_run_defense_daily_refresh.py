@@ -129,6 +129,7 @@ def main() -> None:
     )
     run_step("publish shadow rank table", ["industrials/defense/scripts/17_publish_defense_shadow_rank_table.py", "--asof", asof])
     run_step("validate shadow rank table", ["industrials/defense/scripts/18_validate_defense_shadow_rank_table.py", "--asof", asof])
+    run_step("validate portfolio adapter shadow", ["industrials/defense/scripts/20_validate_defense_portfolio_adapter_shadow.py", "--asof", asof])
     coverage_audit(config_path, asof)
 
 
