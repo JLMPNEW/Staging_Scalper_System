@@ -5,6 +5,7 @@ import argparse
 import csv
 import logging
 import math
+import sqlite3
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -24,6 +25,17 @@ from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 LOGGER = logging.getLogger("backtest_med_device_cohort_neutral_scores")
+
+
+def init_db_read_tolerant(conn: Any) -> None:
+    try:
+        init_db(conn)
+    except sqlite3.OperationalError as exc:
+        if "readonly database" not in str(exc).lower():
+            raise
+        LOGGER.warning("Skipping schema migration during read-only cohort-neutral backtest connection: %s", exc)
+
+
 SCORE_FIELDS = [
     "scoring_model_version",
     "rank",
@@ -554,7 +566,7 @@ def main() -> None:
         raise RuntimeError(f"No forward_return_<horizon>d columns found in {input_csv}")
     asofs = {str(row.get("asof_date") or "") for row in rows if str(row.get("asof_date") or "").strip()}
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
-        init_db(conn)
+        init_db_read_tolerant(conn)
         taxonomy = load_taxonomy(conn)
         scores = load_scores(conn, asofs=asofs)
     add_taxonomy_and_scores(rows, taxonomy, scores)

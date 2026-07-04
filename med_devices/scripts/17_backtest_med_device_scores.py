@@ -5,6 +5,7 @@ import argparse
 import csv
 import logging
 import math
+import sqlite3
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -25,6 +26,17 @@ from med_devices.core.market_policy import calibration_market_sources  # noqa: E
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 LOGGER = logging.getLogger("backtest_med_device_scores")
+
+
+def init_db_read_tolerant(conn: Any) -> None:
+    try:
+        init_db(conn)
+    except sqlite3.OperationalError as exc:
+        if "readonly database" not in str(exc).lower():
+            raise
+        LOGGER.warning("Skipping schema migration during read-only backtest connection: %s", exc)
+
+
 BASE_FIELDS = [
     "asof_date",
     "scoring_model_version",
@@ -556,7 +568,7 @@ def main() -> None:
     position_usd = float(cfg_get(config, "calibration.transaction_cost.position_usd", 50_000.0))
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
-        init_db(conn)
+        init_db_read_tolerant(conn)
         asofs = resolve_score_asofs(conn, args)
         if not asofs:
             raise RuntimeError("No med_device_daily_scores as-of dates matched the requested backtest range.")
