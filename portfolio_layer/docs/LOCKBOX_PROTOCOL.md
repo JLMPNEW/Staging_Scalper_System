@@ -137,3 +137,9 @@ their lockbox OOS diagnostics pass.
   layer will be validated against a subsequent lockbox cycle (live-accrued data after the first open)
   before any production use. Rationale: payout is a constraint overlay, not an alpha source, so
   deferring its OOS validation to the next cycle does not compromise the first promotion decision.
+- **2026-07-03 — Development window start moved earlier to 2019-01-04.** Per the declared governance
+  (dev_window_start may move earlier freely as backfilled sector history is generated), the
+  development window is now 2019-01-04 through 2025-12-31 ahead of the full historical generation of
+  daily sector score exports for all five pipelines. `dev_window_end` (2025-12-31), `sealed_start`
+  (2026-01-01), and `training_label_end_max` (2025-12-31) are UNCHANGED. No sealed-window replay,
+  forward-return join, or calibration result has been inspected as of this date.

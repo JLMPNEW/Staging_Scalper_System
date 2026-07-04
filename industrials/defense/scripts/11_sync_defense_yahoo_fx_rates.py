@@ -8,7 +8,7 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = PACKAGE_ROOT.parent
-SHARED_SCRIPT = PACKAGE_ROOT / "scripts" / "09_sync_industrials_yahoo_fx_rates.py"
+SHARED_SCRIPT = PACKAGE_ROOT / "scripts" / "11_sync_industrials_yahoo_fx_rates.py"
 OUTPUT_CSV = PROJECT_ROOT / "output" / "industrials" / "defense" / "stage4" / "fx_rate_coverage.csv"
 
 

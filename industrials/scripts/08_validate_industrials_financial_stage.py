@@ -495,7 +495,8 @@ def validate() -> int:
             (FEATURE_STAGE, *universe),
         ).fetchall()
         review_issue_tickers = {str(row["ticker"]) for row in review_issue_rows}
-        review_feature_tickers = {str(row["ticker"]) for row in review_rows}
+        # review_rows holds "ticker:status:reason" strings; recover the ticker key.
+        review_feature_tickers = {entry.split(":", 1)[0] for entry in review_rows}
         if review_rows and audit_asof.isoformat() == str(latest_feature_asof or "").strip() and review_feature_tickers != review_issue_tickers:
             missing_issues = sorted(review_feature_tickers.difference(review_issue_tickers))
             stale_issues = sorted(review_issue_tickers.difference(review_feature_tickers))

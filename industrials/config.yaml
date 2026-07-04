@@ -167,14 +167,26 @@ positioning_import:
     short_change: 92
   require_upstream_13f_for_gate: true
   require_upstream_short_for_gate: true
+  # Percent-of-float requires a float-shares source. The free FINRA feed carries
+  # none, so this stays false until a float source is wired; raw short-interest
+  # presence is still enforced by require_upstream_short_for_gate above.
+  require_short_pct_float_for_gate: false
   require_upstream_borrow_for_gate: true
-  require_direct_ownership_for_gate: false
   upstream_form4_gate_exempt_tickers: []
   upstream_13f_gate_exempt_tickers: []
-  upstream_short_gate_exempt_tickers:
-    - DPC
+  upstream_short_gate_exempt_tickers: []
   upstream_short_pct_float_gate_exempt_tickers: []
   upstream_borrow_gate_exempt_tickers: []
+  institutional_13f_data_gate:
+    required_period_of_report: "2026-06-30"
+    anchor_tickers:
+      - LMT
+      - RTX
+      - NOC
+      - GD
+      - LHX
+      - HEI
+    min_anchor_tickers_with_period: 4
 
 upstream_databases:
   form4:
@@ -197,6 +209,8 @@ sec_archive:
   max_filings_per_ticker: 0
   max_documents_per_filing: 0
 
+# Consumed by the Stage 8 OOS calibration validator (not yet implemented).
+# Kept here so the provenance contract is pinned before research work begins.
 oos_calibration_standards:
   version: "industrials_defense_oos_provenance_v1"
   families:

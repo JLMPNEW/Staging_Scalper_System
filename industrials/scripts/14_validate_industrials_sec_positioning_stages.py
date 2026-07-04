@@ -28,6 +28,8 @@ CSV_FIELDS = [
     "ticker",
     "is_active",
     "form4_rows",
+    "form4_status",
+    "form4_status_reason",
     "institutional_rows",
     "short_interest_rows",
     "borrow_rows",
@@ -84,6 +86,10 @@ def cfg_ticker_set(raw: Any) -> set[str]:
     return {ticker for ticker in (normalize_ticker(value) for value in values) if ticker}
 
 
+def cfg_ticker_list(raw: Any) -> list[str]:
+    return sorted(cfg_ticker_set(raw))
+
+
 def parse_date(raw: object) -> date | None:
     text = str(raw or "").strip()
     if not text:
@@ -100,6 +106,53 @@ def parse_date(raw: object) -> date | None:
     return None
 
 
+def institutional_13f_gate_config(config: dict[str, Any]) -> tuple[date | None, list[str], int]:
+    gate = cfg_get(config, "positioning_import.institutional_13f_data_gate", {}) or {}
+    required_period = parse_date(gate.get("required_period_of_report"))
+    anchor_tickers = cfg_ticker_list(gate.get("anchor_tickers", []))
+    min_anchor_count = int(gate.get("min_anchor_tickers_with_period", len(anchor_tickers) if anchor_tickers else 0) or 0)
+    return required_period, anchor_tickers, min_anchor_count
+
+
+def institutional_13f_period_available(
+    conn: Any,
+    *,
+    required_period: date | None,
+    anchor_tickers: list[str],
+    min_anchor_count: int,
+    source_id: str,
+) -> bool:
+    if required_period is None:
+        return True
+    row = conn.execute(
+        """
+        SELECT MAX(period_of_report) AS max_period
+        FROM fact_13f_positioning
+        WHERE source_id = ?
+          AND COALESCE(period_of_report, '') <> ''
+        """,
+        (source_id,),
+    ).fetchone()
+    max_period = parse_date(row["max_period"] if row is not None else "")
+    if max_period is None or max_period < required_period:
+        return False
+    if not anchor_tickers or min_anchor_count <= 0:
+        return True
+    anchors = sorted(set(anchor_tickers))
+    row = conn.execute(
+        f"""
+        SELECT COUNT(DISTINCT ticker) AS covered
+        FROM fact_13f_positioning
+        WHERE source_id = ?
+          AND ticker IN ({placeholders(anchors)})
+          AND period_of_report >= ?
+        """,
+        (source_id, *anchors, required_period.isoformat()),
+    ).fetchone()
+    covered = int(row["covered"] or 0) if row is not None else 0
+    return covered >= min_anchor_count
+
+
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         return []
@@ -114,6 +167,7 @@ def load_exempt_tickers(
     config_key: str,
     override_flag: str,
     until_key: str = "",
+    ignore_until: bool = False,
 ) -> set[str]:
     out = cfg_ticker_set(cfg_get(config, config_key, []))
     path_value = cfg_get(config, "positioning_import.positioning_overrides_csv", "")
@@ -123,7 +177,7 @@ def load_exempt_tickers(
             ticker = normalize_ticker(row.get("ticker"))
             exempt = str(row.get(override_flag) or "").strip().lower() in {"1", "true", "yes", "y"}
             until = parse_date(row.get(until_key)) if until_key else None
-            active = until is None or date.today() <= until
+            active = until is None or date.today() <= until or ignore_until
             if ticker and exempt and active:
                 out.add(ticker)
     return out
@@ -189,7 +243,8 @@ def latest_features(conn: Any, tickers: list[str], source_id: str, model_family:
     rows = conn.execute(
         f"""
         SELECT ticker, positioning_quality, latest_institutional_shares,
-               latest_short_interest_pct_float, latest_borrow_fee_rate
+               latest_short_interest_pct_float, latest_borrow_fee_rate,
+               form4_status, form4_status_reason
         FROM feature_positioning
         WHERE source_id = ?
           AND model_family = ?
@@ -211,6 +266,8 @@ def latest_features(conn: Any, tickers: list[str], source_id: str, model_family:
         out[ticker] = {
             "quality": str(row["positioning_quality"] or ""),
             "missing_fields": ";".join(missing),
+            "form4_status": str(row["form4_status"] or ""),
+            "form4_status_reason": str(row["form4_status_reason"] or ""),
         }
     return out
 
@@ -246,15 +303,9 @@ def validate() -> int:
     positioning_source = str(cfg_get(config, "positioning_import.source_id", "industrials_positioning_composite"))
     require_13f = cfg_bool(config, "positioning_import.require_upstream_13f_for_gate", False)
     require_short = cfg_bool(config, "positioning_import.require_upstream_short_for_gate", False)
+    require_short_pct_float = cfg_bool(config, "positioning_import.require_short_pct_float_for_gate", False)
     require_borrow = cfg_bool(config, "positioning_import.require_upstream_borrow_for_gate", False) and not bool(args.allow_missing_borrow)
-    exempt_13f = load_exempt_tickers(
-        config,
-        base_dir=base_dir,
-        config_key="positioning_import.upstream_13f_gate_exempt_tickers",
-        override_flag="institutional_13f_exempt",
-        until_key="institutional_13f_exempt_until",
-    )
-    exempt_13f.update(cfg_ticker_set(args.__dict__.get("13f_exempt_tickers", "")))
+    cli_exempt_13f = cfg_ticker_set(args.__dict__.get("13f_exempt_tickers", ""))
     exempt_form4 = load_exempt_tickers(
         config,
         base_dir=base_dir,
@@ -281,6 +332,23 @@ def validate() -> int:
     report_rows: list[dict[str, Any]] = []
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
+        required_13f_period, anchor_13f_tickers, min_13f_anchor_count = institutional_13f_gate_config(config)
+        institutional_13f_data_available = institutional_13f_period_available(
+            conn,
+            required_period=required_13f_period,
+            anchor_tickers=anchor_13f_tickers,
+            min_anchor_count=min_13f_anchor_count,
+            source_id=mp_source,
+        )
+        exempt_13f = load_exempt_tickers(
+            config,
+            base_dir=base_dir,
+            config_key="positioning_import.upstream_13f_gate_exempt_tickers",
+            override_flag="institutional_13f_exempt",
+            until_key="institutional_13f_exempt_until",
+            ignore_until=not institutional_13f_data_available,
+        )
+        exempt_13f.update(cli_exempt_13f)
         active = load_active_universe(conn, model_family)
         inactive = load_inactive_universe(conn, model_family)
         all_tickers = sorted(set(active) | set(inactive))
@@ -319,6 +387,8 @@ def validate() -> int:
                     "ticker": ticker,
                     "is_active": int(is_active),
                     "form4_rows": form4_counts.get(ticker, 0) + direct_counts.get(ticker, 0),
+                    "form4_status": feature.get("form4_status", "") if is_active else "",
+                    "form4_status_reason": feature.get("form4_status_reason", "") if is_active else "",
                     "institutional_rows": inst_counts.get(ticker, 0),
                     "short_interest_rows": short_counts.get(ticker, 0),
                     "borrow_rows": borrow_counts.get(ticker, 0),
@@ -357,10 +427,16 @@ def validate() -> int:
             errors.append(f"13F coverage required; missing active non-exempt tickers: {active_missing_13f}")
         if require_short and active_missing_short:
             errors.append(f"Short-interest coverage required; missing active tickers: {active_missing_short}")
-        if require_short and active_missing_short_pct:
+        if require_short and require_short_pct_float and active_missing_short_pct:
             errors.append(
                 "Short-interest percent-of-float required; active tickers with rows but missing pct-float: "
                 f"{active_missing_short_pct}"
+            )
+        elif require_short and active_missing_short_pct:
+            warnings.append(
+                "Short-interest pct-of-float unavailable (FINRA free feed has no float shares); "
+                f"tickers={len(active_missing_short_pct)}. Enable positioning_import.require_short_pct_float_for_gate "
+                "only when a float source is wired."
             )
         if require_borrow and active_missing_borrow:
             errors.append(f"Borrow coverage required; missing active non-exempt tickers: {active_missing_borrow}")
@@ -375,6 +451,12 @@ def validate() -> int:
         active_complete_features = sum(1 for ticker in active if feature_map.get(ticker, {}).get("quality") == "complete")
         warnings.append(f"Active universe tickers={len(active)} inactive_calibration_tickers={len(inactive)}")
         warnings.append(f"Latest positioning feature asof={feature_asof or 'NONE'}")
+        warnings.append(
+            "13F data availability gate="
+            f"required_period={required_13f_period.isoformat() if required_13f_period else ''} "
+            f"anchors={anchor_13f_tickers} min_anchor={min_13f_anchor_count} "
+            f"available={institutional_13f_data_available}"
+        )
         warnings.append(
             "Form 4 covered active/inactive="
             f"{sum(1 for t in active if form4_counts.get(t, 0) + direct_counts.get(t, 0) > 0)}/{len(active)} "

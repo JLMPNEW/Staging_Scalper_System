@@ -24,10 +24,12 @@ def _parse_date(raw: object, *, field: str, ticker: str, allow_blank: bool = Fal
     if allow_blank and not text:
         return ""
     try:
-        datetime.strptime(text, "%Y-%m-%d")
+        parsed = datetime.strptime(text, "%Y-%m-%d")
     except ValueError as exc:
         raise ValueError(f"{ticker}: invalid {field}={raw!r}; expected YYYY-MM-DD") from exc
-    return text
+    # Return the canonical zero-padded form: strptime accepts e.g. "2020-9-5",
+    # which would corrupt the lexical max()/min() comparisons downstream.
+    return parsed.strftime("%Y-%m-%d")
 
 
 def _confidence(raw: object) -> float:

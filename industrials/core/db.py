@@ -792,6 +792,8 @@ CREATE TABLE IF NOT EXISTS feature_positioning (
     latest_days_to_cover REAL,
     short_interest_change_3m REAL,
     latest_borrow_fee_rate REAL,
+    form4_status TEXT,
+    form4_status_reason TEXT,
     positioning_quality TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -1008,6 +1010,8 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "feature_financial_statement", "financial_confidence", "REAL NOT NULL DEFAULT 0.0")
     ensure_column(conn, "feature_financial_statement", "financial_fallback_status", "TEXT")
     ensure_column(conn, "feature_financial_statement", "review_reason", "TEXT")
+    ensure_column(conn, "feature_positioning", "form4_status", "TEXT")
+    ensure_column(conn, "feature_positioning", "form4_status_reason", "TEXT")
     conn.execute(
         """
         UPDATE dim_delisted_calibration_seed

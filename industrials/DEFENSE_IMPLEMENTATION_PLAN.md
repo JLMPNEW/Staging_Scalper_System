@@ -31,10 +31,9 @@ industrials/
     07_sync_industrials_sec_fundamentals.py
     08_build_industrials_financial_features.py
     09_import_industrials_positioning.py
-    10_validate_industrials_sec_positioning_stages.py
-    11_sync_industrials_fx_rates.py
-    12_sync_industrials_sec_ownership.py
+    11_sync_industrials_yahoo_fx_rates.py
     13_sync_industrials_positioning_upstream.py
+    14_validate_industrials_sec_positioning_stages.py
   defense/
     system_csvs/
       defense_tickers.csv
@@ -151,12 +150,12 @@ The defense orchestrator should be `industrials/defense/scripts/17_run_defense_r
 10. `industrials/scripts/05_build_industrials_market_features.py`
 11. `industrials/scripts/06_validate_industrials_market_stage.py`
 12. `industrials/scripts/07_sync_industrials_sec_fundamentals.py`
-13. `industrials/scripts/11_sync_industrials_fx_rates.py`
+13. `industrials/scripts/11_sync_industrials_yahoo_fx_rates.py`
 14. `industrials/scripts/08_build_industrials_financial_features.py`
-15. `industrials/scripts/12_sync_industrials_sec_ownership.py`
+15. Direct SEC ownership sync (planned; source `sec_ownership_direct` is registered but the loader is not yet implemented)
 16. `industrials/scripts/13_sync_industrials_positioning_upstream.py`
 17. `industrials/scripts/09_import_industrials_positioning.py`
-18. `industrials/scripts/10_validate_industrials_sec_positioning_stages.py`
+18. `industrials/scripts/14_validate_industrials_sec_positioning_stages.py`
 19. `industrials/defense/scripts/06a_build_defense_scoring_features.py`
 20. `industrials/defense/scripts/06a_validate_defense_scoring_features.py`
 21. Stage 6B defense overlay smoke/build/apply/validate scripts, once implemented.

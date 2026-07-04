@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import sys
 from datetime import date
 from pathlib import Path
@@ -49,7 +48,10 @@ from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file
 from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
-from portfolio_layer.research.stage11_common import load_lockbox  # noqa: E402
+from portfolio_layer.research.stage11_common import (  # noqa: E402
+    admit_calibration_rows, independent_windows, load_lockbox, manifest_file_errors, mean_t, parse_finite,
+    per_date_slope, pooled_slopes, rank_ic_of,
+)
 
 
 LOGGER = logging.getLogger("fit_ridge_alpha_slopes")
@@ -73,77 +75,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--selftest", action="store_true", help="Run synthetic estimator self-tests and exit.")
     p.add_argument("--force", action="store_true")
     return p.parse_args()
-
-
-# ---------------------------------------------------------------------------
-# pure estimators (self-tested)
-# ---------------------------------------------------------------------------
-def pooled_slopes(z: np.ndarray, y: np.ndarray, *, shrinkage: float) -> tuple[float | None, float | None]:
-    """(ols, ridge) pooled cross-sectional slopes of y on z; ridge shrinks toward 0."""
-    n = len(z)
-    if n < 2:
-        return None, None
-    szz = float(z @ z)
-    szy = float(z @ y)
-    if szz <= 0:
-        return None, None
-    return szy / szz, szy / (szz + shrinkage * n)
-
-
-def per_date_slope(z: np.ndarray, y: np.ndarray) -> float | None:
-    """Cross-sectional OLS slope for one date (needs spread in z)."""
-    if len(z) < 2:
-        return None
-    zc = z - z.mean()
-    denom = float(zc @ zc)
-    if denom <= 0:
-        return None
-    return float(zc @ (y - y.mean())) / denom
-
-
-def rank_ic_of(z: np.ndarray, y: np.ndarray) -> float | None:
-    """Spearman rank correlation (average ranks for ties), no scipy dependency."""
-    if len(z) < 3:
-        return None
-    def ranks(v: np.ndarray) -> np.ndarray:
-        order = v.argsort(kind="mergesort")
-        r = np.empty(len(v), dtype=float)
-        r[order] = np.arange(len(v), dtype=float)
-        for uniq in np.unique(v):
-            mask = v == uniq
-            if mask.sum() > 1:
-                r[mask] = r[mask].mean()
-        return r
-    rz, ry = ranks(z), ranks(y)
-    sz, sy = rz.std(), ry.std()
-    if sz <= 0 or sy <= 0:
-        return None
-    return float(((rz - rz.mean()) * (ry - ry.mean())).mean() / (sz * sy))
-
-
-def mean_t(values: list[float]) -> tuple[float | None, float | None, float | None]:
-    """(mean, se, t) of a series; t needs >= 3 observations and positive spread."""
-    if not values:
-        return None, None, None
-    arr = np.array(values, dtype=float)
-    mean = float(arr.mean())
-    if len(arr) < 3:
-        return mean, None, None
-    sd = float(arr.std(ddof=1))
-    if sd <= 0:
-        return mean, 0.0, None
-    se = sd / math.sqrt(len(arr))
-    return mean, se, mean / se
-
-
-def independent_windows(dates: list[str], horizon_days: int) -> int:
-    """Non-overlapping forward-label windows the snapshot span supports (trading-day horizon,
-    converted to calendar days at 7/5). Overlapping windows share outcomes and must not be
-    counted as independent evidence."""
-    if not dates:
-        return 0
-    span = (date.fromisoformat(max(dates)) - date.fromisoformat(min(dates))).days
-    return 1 + int(span / (horizon_days * 7.0 / 5.0))
 
 
 def approval(
@@ -216,10 +147,6 @@ def _selftest() -> None:
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
-def _truthy(value: Any) -> bool:
-    return str(value).strip().lower() in {"1", "1.0", "true", "yes"}
-
-
 def _latest_build(root: Path, wanted: str | None) -> Path | None:
     if wanted:
         cand = root / wanted
@@ -250,6 +177,14 @@ def main() -> int:  # noqa: C901
     shrinkage = float(ac.get("ridge_shrinkage", 0.25))
     min_cross_section = int(ac.get("min_cross_section_names", 8))
     horizons = [int(h) for h in cfg_get(config, "calibration_targets.horizons_trading_days", [21, 63, 126, 252])]
+    if shrinkage < 0 or min_cross_section < 2 or any(h <= 0 for h in horizons):
+        LOGGER.error(
+            "Invalid alpha_calibration config: ridge_shrinkage=%s min_cross_section=%s horizons=%s",
+            shrinkage,
+            min_cross_section,
+            horizons,
+        )
+        return 1
 
     panel_root = paths.output_dir / str(cfg_get(config, "calibration_panel.dir", "calibration_panel"))
     panel_dir = _latest_build(panel_root, args.panel_build)
@@ -260,7 +195,16 @@ def main() -> int:  # noqa: C901
     if panel_manifest.get("acceptance") != "PASS":
         LOGGER.error("Calibration panel %s acceptance=%s; refusing", panel_dir.name, panel_manifest.get("acceptance"))
         return 1
-    rows = read_csv(panel_dir / "calibration_panel.csv")
+    panel_path = panel_dir / "calibration_panel.csv"
+    rows = read_csv(panel_path)
+    panel_bad = manifest_file_errors(
+        panel_manifest,
+        {"calibration_panel.csv": panel_path},
+        row_counts={"calibration_panel.csv": len(rows)},
+    )
+    if panel_bad:
+        LOGGER.error("Calibration panel %s is not current: %s", panel_dir.name, panel_bad[:8])
+        return 1
 
     out_dir = paths.output_dir / str(ac.get("dir", "alpha_calibration")) / panel_dir.name
     slopes_path = out_dir / "alpha_slopes.csv"
@@ -278,28 +222,7 @@ def main() -> int:  # noqa: C901
 
     # ---- row admission with full accounting ----
     leaked_lockbox = sum(1 for r in rows if str(r.get("in_lockbox", "0")).strip() == "1")
-    exclusions: dict[str, int] = {
-        "not_research_eligible": 0, "not_usable_for_promoted_training": 0,
-        "survivorship_incomplete": 0, "missing_score_z": 0,
-    }
-    admitted: list[dict[str, str]] = []
-    for r in rows:
-        eligible = str(r.get("calibration_research_eligible", "")).strip() == "1" or _truthy(
-            r.get("sidecar_stage11_eligible", "")
-        )
-        if not eligible:
-            exclusions["not_research_eligible"] += 1
-            continue
-        if str(r.get("usable_for_promoted_training", "")).strip() != "1":
-            exclusions["not_usable_for_promoted_training"] += 1
-            continue
-        if str(r.get("survivorship_complete", "")).strip() != "1":
-            exclusions["survivorship_incomplete"] += 1
-            continue
-        if str(r.get("score_z_pipeline_date", "")).strip() == "":
-            exclusions["missing_score_z"] += 1
-            continue
-        admitted.append(r)
+    admitted, exclusions = admit_calibration_rows(rows)
 
     target_col = {"excess_sector": "excess_sector_{h}d", "excess_spy": "excess_spy_{h}d",
                   "raw": "fwd_return_{h}d", "resid_sector": "resid_sector_{h}d"}.get(target_kind)
@@ -321,11 +244,15 @@ def main() -> int:  # noqa: C901
                 if str(r.get(status_col, "")) != "ok":
                     label_missing[f"{pipe}:{h}d:status"] = label_missing.get(f"{pipe}:{h}d:status", 0) + 1
                     continue
-                raw_y = str(r.get(col, "")).strip()
-                if raw_y == "":
+                z = parse_finite(r.get("score_z_pipeline_date"))
+                if z is None:
+                    label_missing[f"{pipe}:{h}d:score_z"] = label_missing.get(f"{pipe}:{h}d:score_z", 0) + 1
+                    continue
+                y = parse_finite(r.get(col))
+                if y is None:
                     label_missing[f"{pipe}:{h}d:target"] = label_missing.get(f"{pipe}:{h}d:target", 0) + 1
                     continue
-                usable.append((str(r.get("as_of_date", "")), float(r.get("score_z_pipeline_date")), float(raw_y)))
+                usable.append((str(r.get("as_of_date", "")), z, y))
             if not usable:
                 continue
             by_date: dict[str, list[tuple[float, float]]] = {}

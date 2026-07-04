@@ -41,6 +41,7 @@ REQUIRED_TABLES = [
     "fact_sec_xbrl_fact_raw",
     "fact_sec_xbrl_fact",
     "fact_financial_statement_canonical",
+    "fact_fx_rate",
     "feature_financial_statement",
     "data_quality_issues",
     "runs",
@@ -54,8 +55,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-family", default="", help="Industrials model family to validate, e.g. defense.")
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--allow-scratch-db", action="store_true", help="Allow validation against a non-configured or scratch DB path.")
-    parser.add_argument("--require-live-sec-facts", action="store_true", help="Fail when no raw/mapped SEC XBRL facts have been loaded.")
-    parser.add_argument("--require-delisted-price-history", action="store_true", help="Fail when Norgate delisted price history is incomplete.")
+    parser.add_argument(
+        "--allow-missing-sec-facts",
+        action="store_true",
+        help="Downgrade absent raw/mapped SEC XBRL facts (and an all-fallback financial panel) to warnings. Default fails.",
+    )
+    parser.add_argument(
+        "--allow-missing-delisted-price-history",
+        action="store_true",
+        help="Downgrade incomplete Norgate delisted price coverage to a warning. Default fails.",
+    )
+    # Deprecated aliases: these were the pre-hardening opt-in flags. Failing is now the
+    # default, so they are accepted but redundant.
+    parser.add_argument("--require-live-sec-facts", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--require-delisted-price-history", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -261,6 +274,7 @@ def validate() -> int:
     expected_active = int(cfg_get(config, "industrials_universe.expected_ticker_count", 0) or 0)
     active_source_id = str(cfg_get(config, "industrials_universe.seed_source_id", "defense_ticker_seed"))
     delisted_source_id = str(cfg_get(config, "industrials_universe.delisted_source_id", "defense_delisted_calibration_seed"))
+    historical_source_id = str(cfg_get(config, "industrials_universe.historical_membership_source_id", "defense_historical_membership_seed"))
     alias_source_id = str(cfg_get(config, "industrials_universe.ticker_aliases_source_id", "defense_ticker_alias_seed"))
     market_source_id = str(cfg_get(config, "market_data_policy.scoring_primary_source", "yahoo_finance_adjusted") or "yahoo_finance_adjusted")
     fallback_sources = cfg_get(config, "market_data_policy.scoring_fallback_sources", ["norgate_us_equities_total_return"])
@@ -346,7 +360,37 @@ def validate() -> int:
             add_check(checks, status="pass", gate="delisted_csv_count", detail=f"rows={len(delisted_rows)}")
         else:
             add_check(checks, status="fail", gate="delisted_csv_count", detail="delisted calibration CSV is empty")
-        add_check(checks, status="pass", gate="historical_membership_csv_count", detail=f"rows={len(historical_rows)}")
+        historical_tickers = sorted(
+            {
+                ticker
+                for row in historical_rows
+                if (ticker := normalize_ticker(row_get(row, "ticker")))
+            }
+        )
+        historical_db_count = scalar(
+            conn,
+            """
+            SELECT COUNT(DISTINCT ticker)
+            FROM dim_universe_membership
+            WHERE model_family = ?
+              AND membership_source_id = ?
+            """,
+            (model_family, historical_source_id),
+        )
+        if historical_db_count == len(historical_tickers):
+            add_check(
+                checks,
+                status="pass",
+                gate="historical_membership_rows",
+                detail=f"csv_tickers={len(historical_tickers)} db_tickers={historical_db_count}",
+            )
+        else:
+            add_check(
+                checks,
+                status="fail",
+                gate="historical_membership_rows",
+                detail=f"expected={len(historical_tickers)} actual={historical_db_count} (source_id={historical_source_id})",
+            )
 
         active_tickers = sorted(active_rows)
         active_ph = placeholders(active_tickers)
@@ -581,16 +625,45 @@ def validate() -> int:
             add_check(checks, status="pass", gate="stage4_financial_feature_rows", detail=f"asof={financial_asof} rows={financial_feature_count}")
         else:
             add_check(checks, status="fail", gate="stage4_financial_feature_rows", detail=f"asof={financial_asof or ''} expected={len(active_rows)} actual={financial_feature_count}")
+        allow_missing_sec = bool(args.allow_missing_sec_facts)
         if raw_sec_count > 0 and mapped_sec_count > 0:
             add_check(checks, status="pass", gate="stage4_live_sec_fact_rows", detail=f"raw={raw_sec_count} mapped={mapped_sec_count}")
-        elif args.require_live_sec_facts:
-            add_check(checks, status="fail", gate="stage4_live_sec_fact_rows", detail=f"raw={raw_sec_count} mapped={mapped_sec_count}")
+        elif allow_missing_sec:
+            add_check(checks, status="warn", gate="stage4_live_sec_fact_rows", detail=f"raw={raw_sec_count} mapped={mapped_sec_count}; allowed by --allow-missing-sec-facts")
         else:
-            add_check(checks, status="warn", gate="stage4_live_sec_fact_rows", detail=f"raw={raw_sec_count} mapped={mapped_sec_count}; financial rows may be fallback-only")
+            add_check(checks, status="fail", gate="stage4_live_sec_fact_rows", detail=f"raw={raw_sec_count} mapped={mapped_sec_count}; production requires live SEC facts")
         if financial_feature_count == len(active_rows) and neutral_count == len(active_rows):
-            add_check(checks, status="warn", gate="stage4_financial_fallback_mix", detail=f"all {neutral_count} rows are neutral_low_confidence")
+            fallback_status = "warn" if allow_missing_sec else "fail"
+            add_check(checks, status=fallback_status, gate="stage4_financial_fallback_mix", detail=f"all {neutral_count} rows are neutral_low_confidence")
         else:
             add_check(checks, status="pass", gate="stage4_financial_fallback_mix", detail=f"neutral_low_confidence={neutral_count} total={financial_feature_count}")
+
+        if financial_asof:
+            missing_fx_count = scalar(
+                conn,
+                f"""
+                SELECT COUNT(*)
+                FROM feature_financial_statement
+                WHERE source_id = ?
+                  AND model_family = ?
+                  AND asof_date = ?
+                  AND fx_conversion_status = 'missing_fx_rate'
+                  AND ticker IN ({active_ph})
+                """,
+                (companyfacts_source_id, model_family, financial_asof, *active_tickers),
+            )
+            fx_rate_count = scalar(conn, "SELECT COUNT(*) FROM fact_fx_rate")
+            if missing_fx_count == 0:
+                add_check(checks, status="pass", gate="stage4_fx_conversion", detail=f"missing_fx_rows=0 fx_rate_rows={fx_rate_count}")
+            else:
+                add_check(
+                    checks,
+                    status="fail",
+                    gate="stage4_fx_conversion",
+                    detail=f"missing_fx_rows={missing_fx_count} fx_rate_rows={fx_rate_count}; run the FX loader before promoting non-USD financials",
+                )
+        else:
+            add_check(checks, status="fail", gate="stage4_fx_conversion", detail="no financial feature asof available")
 
         if internal_tickers:
             internal_ph = placeholders(internal_tickers)
@@ -603,14 +676,19 @@ def validate() -> int:
             norgate_delisted_coverage = 0
         if norgate_delisted_coverage == len(delisted_rows):
             add_check(checks, status="pass", gate="stage8_delisted_norgate_price_history", detail=f"covered={norgate_delisted_coverage}")
-        elif args.require_delisted_price_history:
-            add_check(checks, status="fail", gate="stage8_delisted_norgate_price_history", detail=f"expected={len(delisted_rows)} actual={norgate_delisted_coverage}")
-        else:
+        elif args.allow_missing_delisted_price_history:
             add_check(
                 checks,
                 status="warn",
                 gate="stage8_delisted_norgate_price_history",
-                detail=f"expected={len(delisted_rows)} actual={norgate_delisted_coverage}; pending for true OOS calibration",
+                detail=f"expected={len(delisted_rows)} actual={norgate_delisted_coverage}; allowed by --allow-missing-delisted-price-history",
+            )
+        else:
+            add_check(
+                checks,
+                status="fail",
+                gate="stage8_delisted_norgate_price_history",
+                detail=f"expected={len(delisted_rows)} actual={norgate_delisted_coverage}; required before OOS calibration promotion",
             )
 
     write_report(output_csv, checks)

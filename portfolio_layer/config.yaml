@@ -442,7 +442,7 @@ exit_engine:
 stage11_lockbox:
   protocol_doc: "docs/LOCKBOX_PROTOCOL.md"
   declared: "2026-06-27"
-  dev_window_start: "2024-01-02"
+  dev_window_start: "2019-01-04"           # moved earlier 2026-07-03 (see protocol Amendment Log)
   dev_window_end: "2025-12-31"
   sealed_start: "2026-01-01"          # sealed through the Open Event; no fixed right edge
   lockbox_opened: false
@@ -458,7 +458,10 @@ snapshot_store:
 # Stage 11 - survivorship-complete research price panel (backtest/15b). NOT the Stage 2 live panel.
 survivorship_panel:
   dir: "survivorship_panel"                # under paths.output_dir; one sealed subdir per build date
-  history_buffer_calendar_days: 40         # warmup before min(dev_window_start, earliest snapshot)
+  history_buffer_calendar_days: 400        # warmup before min(dev_window_start, earliest snapshot):
+                                           # ~275 trading days, so the FIRST snapshot already has a full
+                                           # 252d trailing-beta window and the rotation 200d-MA + 21d
+                                           # slope history (was 40 during the short-span infra tests)
   stale_tail_trading_days: 5               # last bar within N master-calendar rows of panel end => active
   delist_match_trading_days: 10            # last bar within ~N trading days of delist date => delisted_covered
   overlap_disagreement_warn_rel: 0.02      # Yahoo-vs-export adjclose relative diff to flag (adjustment mismatch)
@@ -502,3 +505,15 @@ alpha_calibration:
   min_independent_windows: 3               # approval floor: non-overlapping label windows in the span
   approve_t_min: 2.0                       # |Fama-MacBeth t| must reach this
   min_sign_consistency: 0.55               # fraction of per-date slopes agreeing with the mean sign
+
+# Stage 11 - purged walk-forward validation of the calibration (research/69). Train folds are
+# purged of every date whose forward-label window can overlap a test date's window (Lopez de Prado
+# purged K-fold); validation verdicts require genuinely independent out-of-fold evidence.
+calibration_validation:
+  dir: "calibration_validation"            # under paths.output_dir; one subdir per panel build
+  n_folds: 5                               # chronologically contiguous test blocks
+  embargo_extra_calendar_days: 0           # extra purge beyond the label window itself
+  min_train_dates: 8                       # a fold trains only with this many surviving dates
+  min_folds_valid: 3                       # verdict floor: folds that actually trained
+  min_independent_test_windows: 3          # verdict floor: non-overlapping test label windows
+  validate_t_min: 2.0                      # out-of-fold rank-IC t-stat must reach this

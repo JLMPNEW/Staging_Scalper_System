@@ -34,6 +34,8 @@ CSV_FIELDS = [
     "form4_transactions",
     "direct_form4_transactions",
     "form4_latest_transaction_date",
+    "form4_status",
+    "form4_status_reason",
     "institutional_rows",
     "short_interest_rows",
     "borrow_rows",
@@ -130,6 +132,89 @@ def cfg_ticker_set(raw: Any) -> set[str]:
     return {ticker for ticker in (normalize_ticker(value) for value in values) if ticker}
 
 
+def cfg_ticker_list(raw: Any) -> list[str]:
+    return sorted(cfg_ticker_set(raw))
+
+
+def institutional_13f_gate_config(config: dict[str, Any]) -> tuple[date | None, list[str], int]:
+    gate = cfg_get(config, "positioning_import.institutional_13f_data_gate", {}) or {}
+    required_period = parse_date(gate.get("required_period_of_report"))
+    anchor_tickers = cfg_ticker_list(gate.get("anchor_tickers", []))
+    min_anchor_count = int(gate.get("min_anchor_tickers_with_period", len(anchor_tickers) if anchor_tickers else 0) or 0)
+    return required_period, anchor_tickers, min_anchor_count
+
+
+def institutional_13f_period_available(
+    conn: sqlite3.Connection,
+    *,
+    required_period: date | None,
+    anchor_tickers: list[str],
+    min_anchor_count: int,
+    table_name: str,
+    source_id: str = "",
+) -> bool:
+    if required_period is None:
+        return True
+    where_source = "AND source = ?" if table_name == "institutional_13f_ownership_snapshots" and source_id else ""
+    params: list[Any] = [*([source_id] if where_source else [])]
+    max_period_row = conn.execute(
+        f"""
+        SELECT MAX(period_of_report) AS max_period
+        FROM {table_name}
+        WHERE COALESCE(period_of_report, '') <> ''
+        {where_source}
+        """,
+        params,
+    ).fetchone()
+    max_period = parse_date(max_period_row["max_period"] if max_period_row is not None else "")
+    if max_period is None or max_period < required_period:
+        return False
+    if not anchor_tickers or min_anchor_count <= 0:
+        return True
+    anchors = sorted(set(anchor_tickers))
+    placeholders = ",".join("?" for _ in anchors)
+    if table_name == "institutional_13f_ownership_snapshots":
+        sql = f"""
+            SELECT COUNT(DISTINCT ticker) AS covered
+            FROM institutional_13f_ownership_snapshots
+            WHERE ticker IN ({placeholders})
+              AND period_of_report >= ?
+              {where_source}
+        """
+        row = conn.execute(sql, (*anchors, required_period.isoformat(), *([source_id] if where_source else []))).fetchone()
+    else:
+        sql = f"""
+            SELECT COUNT(DISTINCT ticker) AS covered
+            FROM {table_name}
+            WHERE ticker IN ({placeholders})
+              AND period_of_report >= ?
+        """
+        row = conn.execute(sql, (*anchors, required_period.isoformat())).fetchone()
+    covered = int(row["covered"] or 0) if row is not None else 0
+    return covered >= min_anchor_count
+
+
+def upstream_institutional_13f_period_available(config: dict[str, Any], mp_db: Path) -> bool:
+    required_period, anchor_tickers, min_anchor_count = institutional_13f_gate_config(config)
+    with closing(ro_connect(mp_db)) as conn:
+        available = institutional_13f_period_available(
+            conn,
+            required_period=required_period,
+            anchor_tickers=anchor_tickers,
+            min_anchor_count=min_anchor_count,
+            table_name="institutional_13f_ownership_snapshots",
+            source_id="sec_13f_data_sets",
+        )
+    LOGGER.info(
+        "13F DERA availability gate: required_period=%s anchors=%s min_anchor=%d available=%s",
+        required_period.isoformat() if required_period else "",
+        anchor_tickers,
+        min_anchor_count,
+        available,
+    )
+    return available
+
+
 def exemption_active(row: dict[str, str], flag_key: str, *, until_key: str = "", policy_date: date | None = None) -> bool:
     if not truthy(row.get(flag_key)):
         return False
@@ -139,14 +224,30 @@ def exemption_active(row: dict[str, str], flag_key: str, *, until_key: str = "",
     return until is None or (policy_date or date.today()) <= until
 
 
+def reporting_owner_key(raw_cik: object, raw_name: object) -> str:
+    """Collision-safe reporting-owner key for the Form 4 PK.
+
+    Joint filings occasionally omit an owner CIK; collapsing them all to '' would
+    merge distinct owners on ON CONFLICT and undercount cluster buyers. Fall back
+    to a normalized-name surrogate so each blank-CIK owner keeps its own row.
+    """
+    cik = normalize_cik(raw_cik)
+    if cik:
+        return cik
+    name = re.sub(r"[^A-Z0-9]+", "_", str(raw_name or "").strip().upper()).strip("_")
+    return f"NAME:{name}" if name else "UNKNOWN_OWNER"
+
+
 def load_universe(conn: Any, ticker_filter: set[str], *, model_family: str, include_historical: bool = False) -> list[str]:
     if include_historical:
+        # Historical mode covers every membership row (current + delisted internal
+        # tickers). The previous (is_current_member OR point_in_time_flag) filter was
+        # a tautology because point_in_time_flag defaults to 1 on every row.
         rows = conn.execute(
             """
             SELECT DISTINCT ticker
             FROM dim_universe_membership
             WHERE model_family = ?
-              AND (is_current_member = 1 OR point_in_time_flag = 1)
             ORDER BY ticker
             """,
             (model_family,),
@@ -222,6 +323,7 @@ def apply_positioning_source_overrides(
     source_to_internal: dict[str, str],
     ambiguous_source_tickers: set[str],
     policy_date: date | None = None,
+    institutional_13f_data_available: bool = True,
 ) -> tuple[list[str], dict[str, str], set[str], set[str], set[str], set[str]]:
     query_set = set(query_tickers)
     short_exempt_tickers: set[str] = set()
@@ -238,7 +340,9 @@ def apply_positioning_source_overrides(
             ambiguous_source_tickers.discard(source_ticker)
         if exemption_active(row, "short_interest_exempt", policy_date=policy_date):
             short_exempt_tickers.add(internal_ticker)
-        if exemption_active(
+        if not institutional_13f_data_available and truthy(row.get("institutional_13f_exempt")):
+            institutional_13f_exempt_tickers.add(internal_ticker)
+        elif exemption_active(
             row,
             "institutional_13f_exempt",
             until_key="institutional_13f_exempt_until",
@@ -274,9 +378,10 @@ def load_form4_override_policy(
     *,
     internal_tickers: list[str],
     overrides: dict[str, dict[str, str]],
-) -> tuple[set[str], set[str], dict[str, str], dict[str, list[Form4Route]]]:
+) -> tuple[set[str], dict[str, str], set[str], dict[str, str], dict[str, list[Form4Route]]]:
     internal_set = set(internal_tickers)
     form4_exempt_tickers: set[str] = set()
+    form4_exempt_reasons: dict[str, str] = {}
     forced_query_ciks: set[str] = set()
     forced_cik_to_internal: dict[str, str] = {}
     routes_by_cik: dict[str, list[Form4Route]] = {}
@@ -285,6 +390,7 @@ def load_form4_override_policy(
             continue
         if exemption_active(row, "form4_exempt"):
             form4_exempt_tickers.add(ticker)
+            form4_exempt_reasons[ticker] = str(row.get("form4_exemption_reason") or "FORM4_POLICY_EXEMPT").strip()
         cik = normalize_cik(row.get("form4_cik"))
         if not cik:
             continue
@@ -299,7 +405,22 @@ def load_form4_override_policy(
             routes_by_cik.setdefault(cik, []).append((ticker, include, exclude))
         else:
             forced_cik_to_internal[cik] = ticker
-    return form4_exempt_tickers, forced_query_ciks, forced_cik_to_internal, routes_by_cik
+    return form4_exempt_tickers, form4_exempt_reasons, forced_query_ciks, forced_cik_to_internal, routes_by_cik
+
+
+def form4_status_for_ticker(
+    ticker: str,
+    *,
+    form4_rows: int,
+    direct_rows: int,
+    form4_exempt_tickers: set[str],
+    form4_exempt_reasons: dict[str, str],
+) -> tuple[str, str]:
+    if ticker in form4_exempt_tickers:
+        return "not_applicable", form4_exempt_reasons.get(ticker) or "FORM4_POLICY_EXEMPT"
+    if form4_rows + direct_rows > 0:
+        return "covered", ""
+    return "missing", "NO_FORM4_TRANSACTIONS"
 
 
 def route_form4_ticker(
@@ -483,7 +604,7 @@ def import_form4(
                 ticker,
                 str(row["accession_number"] or ""),
                 str(row["nonderiv_trans_sk"] or ""),
-                normalize_cik(row["rptowner_cik"]),
+                reporting_owner_key(row["rptowner_cik"], row["rptowner_name"]),
                 source_id,
                 filing_date.isoformat() if filing_date else "",
                 period_date.isoformat() if period_date else "",
@@ -773,10 +894,13 @@ def build_positioning_features(
     upstream_source: str,
     require_13f: bool,
     require_short: bool,
+    require_short_pct_float: bool,
     require_borrow: bool,
     short_exempt_tickers: set[str],
     institutional_13f_exempt_tickers: set[str],
     short_pct_float_exempt_tickers: set[str],
+    form4_status_by_ticker: dict[str, str],
+    form4_status_reason_by_ticker: dict[str, str],
 ) -> dict[str, str]:
     now = utc_now()
     statuses: dict[str, str] = {}
@@ -863,6 +987,11 @@ def build_positioning_features(
                 float_shares = safe_float(short["float_shares"])
                 if latest_shares is not None and prior_shares is not None and float_shares and float_shares > 0:
                     short_change = (latest_shares - prior_shares) / float_shares
+                elif latest_shares is not None and prior_shares is not None and prior_shares > 0:
+                    # The free FINRA feed carries no float, so fall back to the
+                    # relative change in short-interest shares. Same sign and
+                    # cross-sectionally comparable, just not float-scaled.
+                    short_change = (latest_shares - prior_shares) / prior_shares
         reasons: list[str] = []
         waived_reasons: list[str] = []
         institutional_13f_exempt = ticker in institutional_13f_exempt_tickers
@@ -875,7 +1004,9 @@ def build_positioning_features(
         short_pct_float_exempt = ticker in short_pct_float_exempt_tickers
         if require_short and short is None and not short_exempt:
             reasons.append("missing_short_interest")
-        elif require_short and short_pct_float is None and not short_exempt:
+        elif require_short and require_short_pct_float and short_pct_float is None and not short_exempt:
+            # Percent-of-float needs a float-shares source the default FINRA feed
+            # does not provide; only gate on it when the config says the feed can.
             if short_pct_float_exempt:
                 waived_reasons.append("short_pct_float_policy_exempt")
             else:
@@ -883,6 +1014,10 @@ def build_positioning_features(
         if require_borrow and borrow is None:
             reasons.append("missing_borrow")
         quality = "complete" if not reasons and not waived_reasons else ("policy_exempt" if not reasons else "review")
+        form4_status = form4_status_by_ticker.get(ticker) or "missing"
+        form4_status_reason = form4_status_reason_by_ticker.get(ticker) or (
+            "NO_FORM4_TRANSACTIONS" if form4_status == "missing" else ""
+        )
         purchase_value = safe_float(purchase["v"])
         sale_value = safe_float(sale["v"])
         insider_net_value = purchase_value - sale_value if purchase_value is not None and sale_value is not None else None
@@ -894,9 +1029,10 @@ def build_positioning_features(
                 insider_cluster_buyers_90d, insider_net_value_90d, latest_institutional_shares,
                 latest_institutional_value, latest_manager_count, institutional_ownership_delta_pct,
                 latest_short_interest_shares, latest_short_interest_pct_float, latest_days_to_cover,
-                short_interest_change_3m, latest_borrow_fee_rate, positioning_quality, created_at, updated_at
+                short_interest_change_3m, latest_borrow_fee_rate, form4_status, form4_status_reason,
+                positioning_quality, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ticker, asof_date, source_id, model_family) DO UPDATE SET
                 insider_purchase_count_90d = excluded.insider_purchase_count_90d,
                 insider_purchase_value_90d = excluded.insider_purchase_value_90d,
@@ -913,6 +1049,8 @@ def build_positioning_features(
                 latest_days_to_cover = excluded.latest_days_to_cover,
                 short_interest_change_3m = excluded.short_interest_change_3m,
                 latest_borrow_fee_rate = excluded.latest_borrow_fee_rate,
+                form4_status = excluded.form4_status,
+                form4_status_reason = excluded.form4_status_reason,
                 positioning_quality = excluded.positioning_quality,
                 updated_at = excluded.updated_at
             """,
@@ -936,6 +1074,8 @@ def build_positioning_features(
                 safe_float(short["days_to_cover"]) if short is not None else None,
                 short_change,
                 safe_float(borrow["borrow_fee_rate"]) if borrow is not None else None,
+                form4_status,
+                form4_status_reason,
                 quality,
                 now,
                 now,
@@ -979,6 +1119,7 @@ def main() -> None:
         raise ValueError("model_family cannot be empty")
     require_13f = cfg_bool(config, "positioning_import.require_upstream_13f_for_gate", False)
     require_short = cfg_bool(config, "positioning_import.require_upstream_short_for_gate", False)
+    require_short_pct_float = cfg_bool(config, "positioning_import.require_short_pct_float_for_gate", False)
     require_borrow = cfg_bool(config, "positioning_import.require_upstream_borrow_for_gate", False)
     include_historical = cfg_bool(config, "positioning_import.include_historical_members", False)
     ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
@@ -987,6 +1128,7 @@ def main() -> None:
         raise FileNotFoundError(f"Form 4 upstream DB not found: {form4_db}")
     if not mp_db.exists():
         raise FileNotFoundError(f"Market positioning upstream DB not found: {mp_db}")
+    institutional_13f_data_available = upstream_institutional_13f_period_available(config, mp_db)
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
@@ -1014,6 +1156,7 @@ def main() -> None:
                 source_to_internal=source_to_internal,
                 ambiguous_source_tickers=ambiguous_source_tickers,
                 policy_date=date.today(),
+                institutional_13f_data_available=institutional_13f_data_available,
             )
             short_exempt_tickers.update(cfg_ticker_set(cfg_get(config, "positioning_import.upstream_short_gate_exempt_tickers", [])))
             institutional_13f_exempt_tickers.update(cfg_ticker_set(cfg_get(config, "positioning_import.upstream_13f_gate_exempt_tickers", [])))
@@ -1023,11 +1166,14 @@ def main() -> None:
             query_ciks, cik_to_internal = load_unique_cik_map(conn, fact_tickers)
             (
                 form4_exempt_tickers,
+                form4_exempt_reasons,
                 forced_form4_query_ciks,
                 forced_form4_cik_to_internal,
                 form4_routes_by_cik,
             ) = load_form4_override_policy(internal_tickers=fact_tickers, overrides=positioning_overrides)
             form4_exempt_tickers.update(cfg_ticker_set(cfg_get(config, "positioning_import.upstream_form4_gate_exempt_tickers", [])))
+            for ticker in cfg_ticker_set(cfg_get(config, "positioning_import.upstream_form4_gate_exempt_tickers", [])):
+                form4_exempt_reasons.setdefault(ticker, "CONFIG_FORM4_POLICY_EXEMPT")
             query_ciks = sorted(set(query_ciks) | forced_form4_query_ciks)
             for cik, ticker in forced_form4_cik_to_internal.items():
                 if cik not in form4_routes_by_cik:
@@ -1052,6 +1198,18 @@ def main() -> None:
                         start=start,
                     )
                     direct_stats = direct_form4_stats(conn, fact_tickers, source_id=direct_ownership_source)
+                    form4_status_by_ticker: dict[str, str] = {}
+                    form4_status_reason_by_ticker: dict[str, str] = {}
+                    for ticker in fact_tickers:
+                        status, reason = form4_status_for_ticker(
+                            ticker,
+                            form4_rows=int(form4_stats[ticker]["form4_transactions"]),
+                            direct_rows=int(direct_stats[ticker]["direct_form4_transactions"]),
+                            form4_exempt_tickers=form4_exempt_tickers,
+                            form4_exempt_reasons=form4_exempt_reasons,
+                        )
+                        form4_status_by_ticker[ticker] = status
+                        form4_status_reason_by_ticker[ticker] = reason
                     inst_stats = import_13f(
                         conn,
                         mp_conn,
@@ -1095,10 +1253,13 @@ def main() -> None:
                         upstream_source=form4_source,
                         require_13f=require_13f,
                         require_short=require_short,
+                        require_short_pct_float=require_short_pct_float,
                         require_borrow=require_borrow,
                         short_exempt_tickers=short_exempt_tickers,
                         institutional_13f_exempt_tickers=institutional_13f_exempt_tickers,
                         short_pct_float_exempt_tickers=short_pct_float_exempt_tickers,
+                        form4_status_by_ticker=form4_status_by_ticker,
+                        form4_status_reason_by_ticker=form4_status_reason_by_ticker,
                     )
                     rows: list[dict[str, Any]] = []
                     for ticker in fact_tickers:
@@ -1135,6 +1296,8 @@ def main() -> None:
                                 "form4_transactions": form4_stats[ticker]["form4_transactions"],
                                 "direct_form4_transactions": direct_stats[ticker]["direct_form4_transactions"],
                                 "form4_latest_transaction_date": form4_stats[ticker]["form4_latest_transaction_date"],
+                                "form4_status": form4_status_by_ticker.get(ticker, ""),
+                                "form4_status_reason": form4_status_reason_by_ticker.get(ticker, ""),
                                 "institutional_rows": inst_stats[ticker],
                                 "short_interest_rows": short_stats[ticker],
                                 "borrow_rows": borrow_stats[ticker],
@@ -1153,4 +1316,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

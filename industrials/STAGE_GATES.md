@@ -48,15 +48,27 @@
 - Foreign issuers and issuers without usable SEC XBRL are classified explicitly through `dim_issuer_reporting_profile`; they receive neutral-low-confidence financial feature rows unless a future vendor-fundamental fallback supplies usable data.
 - `SEC_RAW_ARCHIVE_REQUIRED` rows attempt SEC archive XML/inline-XBRL extraction when modern CompanyFacts is unavailable or empty; if no modern submissions index is available, they remain explicit archive-required review rows.
 - Non-USD statements must either have an available FX rate in `fact_fx_rate` or remain in review with `fx_conversion_status=missing_fx_rate`.
-- `09_sync_defense_yahoo_fx_rates.py` is the default Stage 4 FX loader and must populate `fact_fx_rate` before non-USD financial rows are promoted from FX review.
+- `11_sync_defense_yahoo_fx_rates.py` is the default Stage 4 FX loader and must populate `fact_fx_rate` before non-USD financial rows are promoted from FX review.
 - Complete financial rows must include core USD fields such as `revenue_usd` and `assets_usd`; incomplete rows are review rows with data-quality issues.
 - Stage 4 validation passes before positioning, sector-cycle, scoring, calibration, dashboard publishing, or portfolio-layer handoff stages run.
+
+## Stage 5 Positioning
+
+- Stage 5 positioning imports read upstream Form 4 and market-positioning databases through read-only adapters and write only to the Industrials database.
+- Form 4, 13F, FINRA short-interest, and IBKR borrow rows are required for active rank-eligible names unless an explicit source-specific policy exception exists.
+- New-listing 13F exceptions must live in the positioning override CSV with a reason and review date; config-level exception lists are for temporary operator overrides only.
+- The 13F new-listing lag gate is data-driven: a zero-row 13F result is not a hard failure until the configured required `period_of_report` is loaded and configured anchor tickers have coverage for that period.
+- Foreign private issuers that are legally Section 16 exempt are treated as Form 4 not-applicable, not as failed SEC Form 4 loads.
+- Missing non-exempt coverage creates data-quality issues, and `14_validate_industrials_sec_positioning_stages.py` must pass before Stage 6 scoring work consumes positioning features.
 
 ## Stage 6 Scoring Policy
 
 - `defense_scoring_eligibility_policy.csv` must include a policy row for every reporting profile and lifecycle-stage combination present in active defense rows.
 - Recent IPO/development-stage rows, parent-segment rows, non-filing rows, raw-archive-required rows, and partial-XBRL rows cannot become rank-ready unless their explicit policy gate allows it.
 - `10_validate_defense_scoring_eligibility_policy.py` must pass before a Stage 6 scorer promotes rank-ready or calibration-eligible rows.
+- Stage 6 scoring output is shadow-only until a point-in-time score snapshot store and true out-of-sample calibration validation exist.
+- Any emitted `final_score` must be sleeve-absolute across the full defense sleeve, not a within-cohort percentile or z-score.
+- `sector_cycle_*` and `defense_budget_backlog_*` remain neutralized/not-loaded until validated defense demand, budget, backlog, or contract-award sources are ingested.
 
 ## Pre-Stage 5 Production Readiness
 
@@ -66,6 +78,8 @@
 - The gate requires 94 active defense tickers, the full delisted calibration seed, active current membership rows, delisted non-current membership rows, and loaded ticker aliases.
 - The gate requires active Stage 3 Yahoo price, market snapshot, and market feature coverage for active tickers plus configured benchmarks.
 - The gate requires Stage 4 issuer reporting profiles and financial feature rows for all active defense tickers.
-- Live SEC fact coverage is reported; it can be warning-only when fallback financial rows are intentionally allowed, or blocking when the validator is run with `--require-live-sec-facts`.
-- Delisted Norgate price coverage must pass before true OOS calibration promotion; the readiness validator can enforce it with `--require-delisted-price-history`.
+- The gate compares historical-membership CSV tickers against loaded `dim_universe_membership` rows for the historical source id.
+- The gate fails when any financial feature row at the latest as-of has `fx_conversion_status=missing_fx_rate`; run the FX loader first.
+- Live SEC fact coverage blocks by default; absent raw/mapped SEC facts (or an all-fallback financial panel) fail unless the validator is run with `--allow-missing-sec-facts`.
+- Delisted Norgate price coverage blocks by default; downgrade to a warning only with `--allow-missing-delisted-price-history` while OOS calibration is still pending.
 - Stage 5 positioning work should not be promoted as production-ready until this gate passes.

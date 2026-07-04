@@ -116,6 +116,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tickers", type=int, default=0, help="Optional cap for smoke tests.")
     parser.add_argument("--include-historical", action="store_true", help="Also sync non-current historical/delisted members.")
     parser.add_argument("--force", action="store_true", help="Ignore cached JSON and refetch.")
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help=(
+            "Daily refresh mode: refetch submissions metadata, then process "
+            "companyfacts/archive only for tickers with new filings or no existing SEC financial state."
+        ),
+    )
+    parser.add_argument("--force-submissions", action="store_true", help="Refetch submissions metadata without forcing companyfacts/archive caches.")
+    parser.add_argument("--force-companyfacts", action="store_true", help="Refetch companyfacts JSON without forcing archive document caches.")
+    parser.add_argument("--force-archive", action="store_true", help="Refetch SEC archive index/document caches.")
     parser.add_argument("--allow-partial", action="store_true", help="Finish with success when individual tickers fail.")
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--skip-source-registry", action="store_true")
@@ -432,6 +443,107 @@ def load_universe(conn: Any, *, model_family: str, ticker_filter: list[str], inc
             tuple(params),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def filing_keys(conn: Any, *, ticker: str, source_id: str) -> set[tuple[str, str, str]]:
+    rows = conn.execute(
+        """
+        SELECT accession_number, filing_date, form_type
+        FROM fact_sec_filing
+        WHERE ticker = ?
+          AND source_id = ?
+        """,
+        (ticker, source_id),
+    ).fetchall()
+    return {
+        (
+            str(row["accession_number"] or ""),
+            str(row["filing_date"] or ""),
+            str(row["form_type"] or ""),
+        )
+        for row in rows
+    }
+
+
+def has_filing_metadata(conn: Any, *, ticker: str, source_id: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM fact_sec_filing
+        WHERE ticker = ?
+          AND source_id = ?
+        LIMIT 1
+        """,
+        (ticker, source_id),
+    ).fetchone()
+    return row is not None
+
+
+def has_existing_sec_financial_state(
+    conn: Any,
+    *,
+    ticker: str,
+    source_id: str,
+    override: ReportingOverride | None,
+) -> bool:
+    if override is not None and override.skip_sec_network:
+        return True
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM fact_sec_xbrl_fact
+        WHERE ticker = ?
+          AND source_id = ?
+        LIMIT 1
+        """,
+        (ticker, source_id),
+    ).fetchone()
+    if row is not None:
+        return True
+    if override is None:
+        return False
+    # These profiles can be intentionally low/partial coverage. Daily refreshes
+    # should not repeatedly grind the archive fallback unless a new filing appears
+    # or the caller explicitly forces companyfacts/archive processing.
+    return override.reporting_profile in {
+        "SEC_RAW_ARCHIVE_REQUIRED",
+        "RECENT_IPO_DEVELOPMENT_STAGE",
+        "RECENT_PUBLIC_STUB",
+        "SEC_20F_METADATA_ONLY",
+        "FOREIGN_PRIVATE_ISSUER_ARCHIVE_REQUIRED",
+        "FPI_HYBRID_STUB_LOADED",
+        "FPI_HYBRID_LOADED",
+    }
+
+
+def sec_fact_counts(conn: Any, *, ticker: str, source_id: str) -> tuple[int, int]:
+    raw_row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM fact_sec_xbrl_fact_raw
+        WHERE ticker = ?
+          AND source_id = ?
+        """,
+        (ticker, source_id),
+    ).fetchone()
+    mapped_row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM fact_sec_xbrl_fact
+        WHERE ticker = ?
+          AND source_id = ?
+        """,
+        (ticker, source_id),
+    ).fetchone()
+    return int(raw_row[0] or 0), int(mapped_row[0] or 0)
+
+
+def clear_stage_issues(conn: Any, *, ticker_filter: list[str] | None = None) -> None:
+    if ticker_filter:
+        placeholders = ",".join("?" for _ in ticker_filter)
+        conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (RUN_TYPE, *ticker_filter))
+    else:
+        conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
 
 
 def record_raw_response(
@@ -2369,6 +2481,12 @@ def main() -> None:
     reporting_overrides_path = resolve_path(reporting_overrides_path_raw, base_dir=base_dir) if reporting_overrides_path_raw else None
     reporting_overrides = load_reporting_overrides(reporting_overrides_path)
     ticker_filter = parse_ticker_list(args.tickers)
+    if args.incremental and args.force:
+        raise ValueError("--incremental cannot be combined with --force; use --force-submissions, --force-companyfacts, or --force-archive.")
+    force_submissions = bool(args.force or args.force_submissions or args.incremental)
+    force_submission_history = bool(args.force or args.force_submissions)
+    force_companyfacts = bool(args.force or args.force_companyfacts)
+    force_archive = bool(args.force or args.force_archive)
 
     with closing(connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0)))) as conn:
         init_db(conn)
@@ -2386,6 +2504,15 @@ def main() -> None:
             tickers = tickers[: args.max_tickers]
         if not tickers:
             raise ValueError(f"No tickers found for model_family={model_family}")
+        LOGGER.info(
+            "SEC fundamentals sync mode: tickers=%d incremental=%s include_historical=%s force_submissions=%s force_companyfacts=%s force_archive=%s",
+            len(tickers),
+            bool(args.incremental),
+            include_historical,
+            force_submissions,
+            force_companyfacts,
+            force_archive,
+        )
 
         concept_map = load_concept_map(conn)
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
@@ -2397,11 +2524,8 @@ def main() -> None:
         companyfacts_requests = 0
         try:
             with conn:
-                if ticker_filter:
-                    placeholders = ",".join("?" for _ in ticker_filter)
-                    conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (RUN_TYPE, *ticker_filter))
-                else:
-                    conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
+                if not args.incremental:
+                    clear_stage_issues(conn, ticker_filter=ticker_filter or None)
 
             for item in tickers:
                 ticker = normalize_ticker(item.get("ticker"))
@@ -2454,12 +2578,14 @@ def main() -> None:
                             add_issue(conn, severity="error", ticker=ticker, source_id=submissions_source_id, issue_type="missing_cik", detail="Ticker has no CIK; SEC financial sync skipped.")
                             profile = classify_reporting_profile(conn, ticker=ticker, cik="", country=country, model_family=model_family, source_id=submissions_source_id, override=reporting_override)
                     else:
+                        existing_filing_keys = filing_keys(conn, ticker=ticker, source_id=submissions_source_id) if args.incremental else set()
+                        existing_archive_metadata = has_filing_metadata(conn, ticker=ticker, source_id=submissions_source_id)
                         submissions_url = submissions_template.format(cik=cik)
                         submissions_cache = cache_path(cache_dir, source_id=submissions_source_id, cik=cik)
                         status_code, submissions_payload, submissions_text, _ = load_or_fetch_json(
                             submissions_url,
                             cache_file=submissions_cache,
-                            force=args.force,
+                            force=force_submissions,
                             user_agent=user_agent,
                             timeout_sec=timeout_sec,
                             max_retries=max_retries,
@@ -2525,7 +2651,9 @@ def main() -> None:
                                 allowed_forms=allowed_forms,
                                 start_date=start_date,
                             )
-                            if archive_enabled and should_attempt_archive(reporting_override):
+                            if archive_enabled and should_attempt_archive(reporting_override) and (
+                                not args.incremental or not existing_archive_metadata or force_submission_history
+                            ):
                                 extra_filing_count, extra_submission_requests = sync_submission_history_files(
                                     conn,
                                     ticker=ticker,
@@ -2533,7 +2661,7 @@ def main() -> None:
                                     source_id=submissions_source_id,
                                     root_payload=submissions_payload,
                                     cache_dir=cache_dir,
-                                    force=args.force,
+                                    force=force_submission_history,
                                     user_agent=user_agent,
                                     timeout_sec=timeout_sec,
                                     max_retries=max_retries,
@@ -2553,7 +2681,7 @@ def main() -> None:
                                         cik=cik,
                                         source_id=submissions_source_id,
                                         cache_dir=cache_dir,
-                                        force=args.force,
+                                        force=force_submission_history,
                                         user_agent=user_agent,
                                         timeout_sec=timeout_sec,
                                         max_retries=max_retries,
@@ -2566,12 +2694,69 @@ def main() -> None:
                                     filing_count += browse_filing_count
                                     submissions_requests += browse_requests
 
+                        new_filing_keys = (
+                            filing_keys(conn, ticker=ticker, source_id=submissions_source_id) - existing_filing_keys
+                            if args.incremental
+                            else set()
+                        )
+                        if (
+                            args.incremental
+                            and not new_filing_keys
+                            and not force_companyfacts
+                            and not force_archive
+                            and has_existing_sec_financial_state(
+                                conn,
+                                ticker=ticker,
+                                source_id=companyfacts_source_id,
+                                override=reporting_override,
+                            )
+                        ):
+                            with conn:
+                                profile = classify_reporting_profile(
+                                    conn,
+                                    ticker=ticker,
+                                    cik=cik,
+                                    country=country,
+                                    model_family=model_family,
+                                    source_id=companyfacts_source_id,
+                                    override=reporting_override,
+                                )
+                                raw_count, mapped_count = sec_fact_counts(
+                                    conn,
+                                    ticker=ticker,
+                                    source_id=companyfacts_source_id,
+                                )
+                            status = "skipped_current"
+                            review_reason = str(profile.get("review_reason", "") or "")
+                            report_rows.append(
+                                {
+                                    "ticker": ticker,
+                                    "cik": cik,
+                                    "company_name": company_name,
+                                    "country": country,
+                                    "status": status,
+                                    "reporting_profile": profile.get("reporting_profile", ""),
+                                    "reporting_standard": profile.get("reporting_standard", ""),
+                                    "latest_filing_date": profile.get("latest_filing_date", ""),
+                                    "latest_form_type": profile.get("latest_form_type", ""),
+                                    "filing_count": filing_count,
+                                    "raw_fact_count": raw_count,
+                                    "mapped_fact_count": mapped_count,
+                                    "review_reason": review_reason,
+                                }
+                            )
+                            continue
+
+                        if args.incremental:
+                            with conn:
+                                clear_stage_issues(conn, ticker_filter=[ticker])
+
                         companyfacts_url = companyfacts_template.format(cik=cik)
                         companyfacts_cache = cache_path(cache_dir, source_id=companyfacts_source_id, cik=cik)
                         status_code, companyfacts_payload, companyfacts_text, _ = load_or_fetch_json(
                             companyfacts_url,
                             cache_file=companyfacts_cache,
-                            force=args.force,
+                            force=force_companyfacts,
                             user_agent=user_agent,
                             timeout_sec=timeout_sec,
                             max_retries=max_retries,
@@ -2606,7 +2791,7 @@ def main() -> None:
                                     submissions_source_id=submissions_source_id,
                                     model_family=model_family,
                                     cache_dir=cache_dir,
-                                    force=args.force,
+                                    force=force_archive,
                                     user_agent=user_agent,
                                     timeout_sec=timeout_sec,
                                     max_retries=max_retries,
@@ -2696,7 +2881,7 @@ def main() -> None:
                                         submissions_source_id=submissions_source_id,
                                         model_family=model_family,
                                         cache_dir=cache_dir,
-                                        force=args.force,
+                                        force=force_archive,
                                         user_agent=user_agent,
                                         timeout_sec=timeout_sec,
                                         max_retries=max_retries,

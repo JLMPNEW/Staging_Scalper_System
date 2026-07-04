@@ -87,6 +87,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-ibkr-borrow", action="store_true")
     parser.add_argument("--skip-float-proxy", action="store_true")
     parser.add_argument(
+        "--daily-refresh",
+        action="store_true",
+        help=(
+            "Daily as-of mode: skip full upstream FINRA/13F/IBKR history sweeps, "
+            "refresh diluted-share proxies, and import positioning features as of --end-date."
+        ),
+    )
+    parser.add_argument(
         "--float-proxy-only",
         action="store_true",
         help="Only load diluted-share float proxies and backfill short-interest pct-float.",
@@ -471,13 +479,15 @@ def ingest_industrials_diluted_share_proxies(
     return len(rows_to_upsert)
 
 
-def run_industrials_import(config_path: Path) -> None:
+def run_industrials_import(config_path: Path, *, asof: date | None = None) -> None:
     cmd = [
         sys.executable,
         str(PACKAGE_ROOT / "scripts" / "09_import_industrials_positioning.py"),
         "--config",
         str(config_path),
     ]
+    if asof is not None:
+        cmd.extend(["--asof", asof.isoformat()])
     LOGGER.info("Running industrials positioning import: %s", " ".join(cmd))
     subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=True)
 
@@ -548,8 +558,15 @@ def aggregate_13f_ownership_for_tickers(conn: Any, tickers: list[str], *, source
         latest_filing[key] = max(latest_filing.get(key, ""), filing_date)
     records: list[tuple[Any, ...]] = []
     prior_by_ticker: dict[str, tuple[float, set[str]]] = {}
+    skipped_no_filing_date = 0
     for (ticker, period) in sorted(buckets, key=lambda item: (item[0], item[1])):
         bucket = buckets[(ticker, period)]
+        if not latest_filing.get((ticker, period)):
+            # No knowledge date: substituting period_of_report (quarter-end) would
+            # make the aggregate visible up to ~45 days before it was filed. Skip
+            # the period entirely rather than leak future data into PIT panels.
+            skipped_no_filing_date += 1
+            continue
         total_shares = sum(entry[2] for entry in bucket.values())
         total_value = sum(entry[3] for entry in bucket.values())
         managers = set(bucket)
@@ -567,7 +584,7 @@ def aggregate_13f_ownership_for_tickers(conn: Any, tickers: list[str], *, source
         records.append(
             (
                 ticker,
-                latest_filing.get((ticker, period)) or period,
+                latest_filing[(ticker, period)],
                 period,
                 total_shares,
                 total_value,
@@ -580,6 +597,11 @@ def aggregate_13f_ownership_for_tickers(conn: Any, tickers: list[str], *, source
                 now,
                 now,
             )
+        )
+    if skipped_no_filing_date:
+        LOGGER.warning(
+            "Skipped %d 13F ticker-periods with no filing date (would leak quarter-end visibility into PIT panels).",
+            skipped_no_filing_date,
         )
     # Replace any legacy filing-day-slice snapshots wholesale for these tickers.
     conn.execute(
@@ -812,6 +834,21 @@ def main() -> None:
 
     with connect_market_positioning(mp_db) as conn:
         init_market_positioning_db(conn)
+        if args.daily_refresh:
+            LOGGER.info("Daily refresh mode: skipping FINRA/13F/IBKR upstream sweeps; feature asof=%s", end_date)
+            if not args.skip_float_proxy:
+                proxy_rows = ingest_industrials_diluted_share_proxies(
+                    conn,
+                    industrials_db_path=industrials_db,
+                    source_to_internal=source_to_internal,
+                    history_start_date=history_start,
+                    end_date=end_date,
+                )
+                backfilled = backfill_short_interest_float_shares(conn)
+                LOGGER.info("Loaded diluted-share float proxies rows=%d backfilled_short_interest_rows=%d", proxy_rows, backfilled)
+            if not args.skip_industrials_import:
+                run_industrials_import(config_path, asof=end_date)
+            return
         if args.float_proxy_only:
             proxy_rows = ingest_industrials_diluted_share_proxies(
                 conn,
@@ -823,7 +860,7 @@ def main() -> None:
             backfilled = backfill_short_interest_float_shares(conn)
             LOGGER.info("Loaded diluted-share float proxies rows=%d backfilled_short_interest_rows=%d", proxy_rows, backfilled)
             if not args.skip_industrials_import:
-                run_industrials_import(config_path)
+                run_industrials_import(config_path, asof=end_date)
             return
         if args.reaggregate_13f_only:
             tickers = load_universe_tickers(tickers_csv)
@@ -841,7 +878,7 @@ def main() -> None:
                 backfilled = backfill_short_interest_float_shares(conn)
                 LOGGER.info("Loaded diluted-share float proxies rows=%d backfilled_short_interest_rows=%d", proxy_rows, backfilled)
             if not args.skip_industrials_import:
-                run_industrials_import(config_path)
+                run_industrials_import(config_path, asof=end_date)
             return
         if not args.skip_finra_short_interest:
             result = sync_finra_equity_short_interest_files(
@@ -892,7 +929,7 @@ def main() -> None:
             LOGGER.info("Loaded diluted-share float proxies rows=%d backfilled_short_interest_rows=%d", proxy_rows, backfilled)
 
     if not args.skip_industrials_import:
-        run_industrials_import(config_path)
+        run_industrials_import(config_path, asof=end_date)
 
 
 if __name__ == "__main__":

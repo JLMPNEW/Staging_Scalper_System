@@ -26,7 +26,7 @@ C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\05_build_defens
 C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\06_validate_defense_market_stage.py
 C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\15_import_defense_norgate_delisted_prices.py
 C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\07_sync_defense_sec_fundamentals.py
-C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\09_sync_defense_yahoo_fx_rates.py
+C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\11_sync_defense_yahoo_fx_rates.py
 C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\08_build_defense_financial_features.py
 C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\08_validate_defense_financial_stage.py
 C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\04b_validate_defense_stage0_4_production_readiness.py
