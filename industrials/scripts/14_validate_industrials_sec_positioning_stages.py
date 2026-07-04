@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import connect, init_db  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
+from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.text_norm import normalize_ticker  # noqa: E402
 
 
@@ -106,9 +107,28 @@ def parse_date(raw: object) -> date | None:
     return None
 
 
+def parse_date_strict(raw: object, *, field: str, context: str = "") -> date | None:
+    """Parse an operator-supplied config/CSV date; raise loudly on garbage.
+
+    Empty means "not set". A malformed value must never fail open into
+    "gate always satisfied" / "exemption never expires".
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    parsed = parse_date(text)
+    if parsed is None:
+        where = f" for {context}" if context else ""
+        raise ValueError(f"Unparseable {field} date {text!r}{where}; expected YYYY-MM-DD")
+    return parsed
+
+
 def institutional_13f_gate_config(config: dict[str, Any]) -> tuple[date | None, list[str], int]:
     gate = cfg_get(config, "positioning_import.institutional_13f_data_gate", {}) or {}
-    required_period = parse_date(gate.get("required_period_of_report"))
+    required_period = parse_date_strict(
+        gate.get("required_period_of_report"),
+        field="positioning_import.institutional_13f_data_gate.required_period_of_report",
+    )
     anchor_tickers = cfg_ticker_list(gate.get("anchor_tickers", []))
     min_anchor_count = int(gate.get("min_anchor_tickers_with_period", len(anchor_tickers) if anchor_tickers else 0) or 0)
     return required_period, anchor_tickers, min_anchor_count
@@ -166,19 +186,32 @@ def load_exempt_tickers(
     base_dir: Path,
     config_key: str,
     override_flag: str,
+    asof: date,
     until_key: str = "",
     ignore_until: bool = False,
 ) -> set[str]:
+    """Load exemption overrides effective at the evaluation asof.
+
+    `valid_from` gates effectiveness same-day-inclusive at the evaluation asof
+    (med_devices convention); `reviewed_at` is provenance documentation only.
+    Expiry windows are also evaluated at the asof, never wall-clock today, so
+    historical rebuilds reproduce the exemption state that held at that date.
+    """
     out = cfg_ticker_set(cfg_get(config, config_key, []))
     path_value = cfg_get(config, "positioning_import.positioning_overrides_csv", "")
     if path_value:
         path = resolve_path(path_value, base_dir=base_dir)
         for row in read_csv_rows(path):
             ticker = normalize_ticker(row.get("ticker"))
+            if not ticker:
+                continue
+            valid_from = parse_date_strict(row.get("valid_from"), field="valid_from", context=ticker)
+            if valid_from is not None and valid_from > asof:
+                continue
             exempt = str(row.get(override_flag) or "").strip().lower() in {"1", "true", "yes", "y"}
-            until = parse_date(row.get(until_key)) if until_key else None
-            active = until is None or date.today() <= until or ignore_until
-            if ticker and exempt and active:
+            until = parse_date_strict(row.get(until_key), field=until_key, context=ticker) if until_key else None
+            active = until is None or asof <= until or ignore_until
+            if exempt and active:
                 out.add(ticker)
     return out
 
@@ -274,10 +307,7 @@ def latest_features(conn: Any, tickers: list[str], source_id: str, model_family:
 
 def write_report(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS, extrasaction="ignore", lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv_atomic(path, CSV_FIELDS, rows)
 
 
 def validate() -> int:
@@ -305,33 +335,43 @@ def validate() -> int:
     require_short = cfg_bool(config, "positioning_import.require_upstream_short_for_gate", False)
     require_short_pct_float = cfg_bool(config, "positioning_import.require_short_pct_float_for_gate", False)
     require_borrow = cfg_bool(config, "positioning_import.require_upstream_borrow_for_gate", False) and not bool(args.allow_missing_borrow)
+    min_form4_covered_fraction = float(
+        cfg_get(config, "positioning_validation.min_form4_covered_fraction", 0.0) or 0.0
+    )
+    if not 0.0 <= min_form4_covered_fraction <= 1.0:
+        raise ValueError(
+            "positioning_validation.min_form4_covered_fraction must be in [0, 1]; "
+            f"got {min_form4_covered_fraction!r}"
+        )
+    if min_form4_covered_fraction <= 0.0:
+        LOGGER.warning(
+            "positioning_validation.min_form4_covered_fraction is 0.0: a wholly missing "
+            "insider feed (or a routing regression) will still pass Stage 5 validation."
+        )
     cli_exempt_13f = cfg_ticker_set(args.__dict__.get("13f_exempt_tickers", ""))
-    exempt_form4 = load_exempt_tickers(
-        config,
-        base_dir=base_dir,
-        config_key="positioning_import.upstream_form4_gate_exempt_tickers",
-        override_flag="form4_exempt",
-    )
-    exempt_short = load_exempt_tickers(
-        config,
-        base_dir=base_dir,
-        config_key="positioning_import.upstream_short_gate_exempt_tickers",
-        override_flag="short_interest_exempt",
-    )
-    exempt_short_pct_float = load_exempt_tickers(
-        config,
-        base_dir=base_dir,
-        config_key="positioning_import.upstream_short_pct_float_gate_exempt_tickers",
-        override_flag="short_pct_float_exempt",
-    )
-    exempt_borrow = cfg_ticker_set(cfg_get(config, "positioning_import.upstream_borrow_gate_exempt_tickers", []))
-    exempt_borrow.update(cfg_ticker_set(args.borrow_exempt_tickers))
 
     errors: list[str] = []
     warnings: list[str] = []
     report_rows: list[dict[str, Any]] = []
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
+        feature_asof = str(
+            value(
+                conn,
+                "SELECT MAX(asof_date) FROM feature_positioning WHERE source_id = ? AND model_family = ?",
+                (positioning_source, model_family),
+            )
+            or ""
+        )
+        # Exemption windows must be evaluated at the feature/evaluation asof,
+        # never wall-clock today, or historical rebuilds flip exemptions
+        # retroactively once an expiry passes.
+        evaluation_asof = parse_date(feature_asof)
+        if evaluation_asof is None:
+            evaluation_asof = date.today()
+            warnings.append(
+                "No parseable positioning feature asof; evaluating exemption windows at wall-clock today."
+            )
         required_13f_period, anchor_13f_tickers, min_13f_anchor_count = institutional_13f_gate_config(config)
         institutional_13f_data_available = institutional_13f_period_available(
             conn,
@@ -345,10 +385,40 @@ def validate() -> int:
             base_dir=base_dir,
             config_key="positioning_import.upstream_13f_gate_exempt_tickers",
             override_flag="institutional_13f_exempt",
+            asof=evaluation_asof,
             until_key="institutional_13f_exempt_until",
             ignore_until=not institutional_13f_data_available,
         )
         exempt_13f.update(cli_exempt_13f)
+        exempt_form4 = load_exempt_tickers(
+            config,
+            base_dir=base_dir,
+            config_key="positioning_import.upstream_form4_gate_exempt_tickers",
+            override_flag="form4_exempt",
+            asof=evaluation_asof,
+        )
+        exempt_short = load_exempt_tickers(
+            config,
+            base_dir=base_dir,
+            config_key="positioning_import.upstream_short_gate_exempt_tickers",
+            override_flag="short_interest_exempt",
+            asof=evaluation_asof,
+        )
+        exempt_short_pct_float = load_exempt_tickers(
+            config,
+            base_dir=base_dir,
+            config_key="positioning_import.upstream_short_pct_float_gate_exempt_tickers",
+            override_flag="short_pct_float_exempt",
+            asof=evaluation_asof,
+        )
+        exempt_borrow = load_exempt_tickers(
+            config,
+            base_dir=base_dir,
+            config_key="positioning_import.upstream_borrow_gate_exempt_tickers",
+            override_flag="borrow_exempt",
+            asof=evaluation_asof,
+        )
+        exempt_borrow.update(cfg_ticker_set(args.borrow_exempt_tickers))
         active = load_active_universe(conn, model_family)
         inactive = load_inactive_universe(conn, model_family)
         all_tickers = sorted(set(active) | set(inactive))
@@ -363,14 +433,6 @@ def validate() -> int:
             if status != "active":
                 errors.append(f"Source {source_id} is not active in source_registry: {status!r}")
 
-        feature_asof = str(
-            value(
-                conn,
-                "SELECT MAX(asof_date) FROM feature_positioning WHERE source_id = ? AND model_family = ?",
-                (positioning_source, model_family),
-            )
-            or ""
-        )
         form4_counts = count_by_ticker(conn, "fact_sec_form4_transaction", all_tickers, form4_source)
         direct_counts = count_by_ticker(conn, "fact_sec_form4_transaction", all_tickers, direct_ownership_source)
         inst_counts = count_by_ticker(conn, "fact_13f_positioning", all_tickers, mp_source)
@@ -419,10 +481,29 @@ def validate() -> int:
             or borrow_counts.get(ticker, 0) == 0
         )
 
+        form4_gate_universe = sorted(
+            ticker for ticker in active if ticker not in exempt_form4 and ticker != "__NO_ACTIVE_TICKERS__"
+        )
+        form4_covered_count = sum(
+            1
+            for ticker in form4_gate_universe
+            if form4_counts.get(ticker, 0) + direct_counts.get(ticker, 0) > 0
+        )
+        form4_covered_fraction = (
+            form4_covered_count / len(form4_gate_universe) if form4_gate_universe else 0.0
+        )
+
         if not feature_asof:
             errors.append("No positioning feature rows loaded.")
         if active_missing_feature:
             errors.append(f"Positioning feature coverage missing active tickers: {active_missing_feature}")
+        if min_form4_covered_fraction > 0.0 and form4_covered_fraction < min_form4_covered_fraction:
+            errors.append(
+                "Form 4 coverage below required floor: covered "
+                f"{form4_covered_count}/{len(form4_gate_universe)} non-exempt active tickers "
+                f"({form4_covered_fraction:.3f} < min {min_form4_covered_fraction:.3f}). "
+                "A wholly missing insider feed or a Form 4 routing regression looks exactly like this."
+            )
         if require_13f and active_missing_13f:
             errors.append(f"13F coverage required; missing active non-exempt tickers: {active_missing_13f}")
         if require_short and active_missing_short:
@@ -461,6 +542,8 @@ def validate() -> int:
             "Form 4 covered active/inactive="
             f"{sum(1 for t in active if form4_counts.get(t, 0) + direct_counts.get(t, 0) > 0)}/{len(active)} "
             f"{sum(1 for t in inactive if form4_counts.get(t, 0) + direct_counts.get(t, 0) > 0)}/{len(inactive)} "
+            f"non_exempt_covered_fraction={form4_covered_fraction:.3f} "
+            f"min_required={min_form4_covered_fraction:.3f} "
             f"exemptions={sorted(exempt_form4)}"
         )
         warnings.append(

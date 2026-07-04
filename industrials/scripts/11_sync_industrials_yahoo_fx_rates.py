@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import json
 import logging
+import os
 import sys
 import time
 from contextlib import closing
@@ -19,9 +19,10 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from industrials.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
+from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
 
 
@@ -50,6 +51,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-date", default="", help="Defaults to today UTC.")
     parser.add_argument("--pairs", default="", help="Optional comma-separated pairs, e.g. CADUSD,GBPUSD.")
     parser.add_argument("--force", action="store_true", help="Ignore cached Yahoo chart JSON.")
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Exit 0 even when some FX pairs fail to sync (default: any failed pair exits 1).",
+    )
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--skip-source-registry", action="store_true")
     return parser.parse_args()
@@ -113,17 +119,22 @@ def request_json(url: str, *, user_agent: str, timeout_sec: float, max_retries: 
 
     headers = {"User-Agent": user_agent, "Accept-Encoding": "gzip, deflate"}
     last_status = 0
-    last_text = ""
-    for attempt in range(max(1, max_retries)):
-        response = requests.get(url, headers=headers, timeout=timeout_sec)
-        last_status = int(response.status_code)
-        last_text = response.text
-        if response.status_code == 200:
-            return last_status, response.json(), last_text
-        if response.status_code not in {429, 500, 502, 503, 504}:
-            break
-        time.sleep(sleep_sec * (attempt + 1))
-    raise RuntimeError(f"Yahoo FX request failed status={last_status} url={url} body={last_text[:200]}")
+    last_error = ""
+    for attempt in range(max(1, max_retries) + 1):
+        try:
+            response = requests.get(url, headers=headers, timeout=timeout_sec)
+            last_status = int(response.status_code)
+            text = response.text
+            if response.status_code == 200:
+                return last_status, response.json(), text
+            last_error = f"HTTP {last_status}: {text[:200]}"
+            if response.status_code not in {429, 500, 502, 503, 504}:
+                break
+        except requests.RequestException as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        if attempt < max_retries:
+            time.sleep(sleep_sec * (attempt + 1))
+    raise RuntimeError(f"Yahoo FX request failed status={last_status} url={url} error={last_error}")
 
 
 def load_or_fetch_json(
@@ -138,10 +149,16 @@ def load_or_fetch_json(
 ) -> tuple[int, dict[str, Any], str]:
     if cache_path.exists() and not force:
         text = cache_path.read_text(encoding="utf-8")
-        return 200, json.loads(text), text
+        try:
+            return 200, json.loads(text), text
+        except json.JSONDecodeError:
+            LOGGER.warning("Corrupt FX cache file %s; deleting and refetching once.", cache_path)
+            cache_path.unlink(missing_ok=True)
     status, payload, text = request_json(url, user_agent=user_agent, timeout_sec=timeout_sec, max_retries=max_retries, sleep_sec=sleep_sec)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(text, encoding="utf-8")
+    tmp_path = cache_path.with_name(cache_path.name + ".tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    os.replace(tmp_path, cache_path)
     return status, payload, text
 
 
@@ -209,15 +226,21 @@ def record_raw_response(conn: Any, *, source_id: str, endpoint: str, status: int
 
 
 def update_source_active(conn: Any, *, source_id: str) -> None:
+    row = conn.execute(
+        "SELECT status, notes FROM source_registry WHERE source_id = ?",
+        (source_id,),
+    ).fetchone()
+    if row is None:
+        return
+    current_status = str(row["status"] or "")
+    current_notes = str(row["notes"] or "")
+    marker = "FX loader enabled."
+    new_notes = current_notes if marker in current_notes else f"{current_notes} {marker}"
+    if current_status == "active" and new_notes == current_notes:
+        return
     conn.execute(
-        """
-        UPDATE source_registry
-        SET status = 'active',
-            notes = COALESCE(notes, '') || CASE WHEN COALESCE(notes, '') LIKE '%FX loader enabled.%' THEN '' ELSE ' FX loader enabled.' END,
-            updated_at = ?
-        WHERE source_id = ?
-        """,
-        (utc_now(), source_id),
+        "UPDATE source_registry SET status = 'active', notes = ?, updated_at = ? WHERE source_id = ?",
+        (new_notes, utc_now(), source_id),
     )
 
 
@@ -246,14 +269,6 @@ def upsert_rates(conn: Any, *, source_id: str, from_currency: str, to_currency: 
     return inserted
 
 
-def write_report(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=REPORT_FIELDS, extrasaction="ignore", lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def main() -> None:
     configure_utc_logging()
     args = parse_args()
@@ -269,7 +284,12 @@ def main() -> None:
     configured_pairs = parse_pair_list(args.pairs) or parse_pair_list(cfg_get(config, "fx_rates.required_pairs", []) or [])
     template = str(cfg_get(config, "fx_rates.chart_url_template") or "https://query1.finance.yahoo.com/v8/finance/chart/{pair}")
     interval = str(cfg_get(config, "fx_rates.interval", "1d") or "1d")
-    user_agent = str(cfg_get(config, "fx_rates.user_agent", "") or "")
+    user_agent = expand_env_vars(cfg_get(config, "fx_rates.user_agent", "") or "").strip()
+    if not user_agent or "@" not in user_agent:
+        raise ValueError(
+            "fx_rates.user_agent must expand to a non-empty identity with a contact email "
+            f"(got {user_agent!r}); set fx_rates.user_agent in config or the referenced env var."
+        )
     timeout_sec = float(cfg_get(config, "fx_rates.timeout_sec", 30.0))
     max_retries = int(cfg_get(config, "fx_rates.max_retries", 3))
     sleep_sec = float(cfg_get(config, "fx_rates.request_sleep_sec", 0.12))
@@ -336,12 +356,22 @@ def main() -> None:
                     }
                 )
                 time.sleep(sleep_sec)
-            write_report(output_csv, report_rows)
+            write_csv_atomic(output_csv, REPORT_FIELDS, report_rows)
             failed = sum(1 for row in report_rows if row["status"] != "loaded")
             finish_run(conn, run_id=run_id, status="success" if failed == 0 else "partial", row_count=loaded_rows, message=f"pairs={len(report_rows)} failed={failed} rows={loaded_rows} output={output_csv}")
         except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=loaded_rows, message=f"{type(exc).__name__}: {exc}")
             raise
+        if failed > 0 and not args.allow_partial:
+            failed_pairs = sorted(str(row["currency_pair"]) for row in report_rows if row["status"] != "loaded")
+            LOGGER.error(
+                "FX sync failed for %d/%d pairs (%s); see %s. Rerun, or pass --allow-partial to accept partial FX coverage.",
+                failed,
+                len(report_rows),
+                ",".join(failed_pairs),
+                output_csv,
+            )
+            raise SystemExit(1)
 
     LOGGER.info("Wrote FX coverage report: %s", output_csv)
     LOGGER.info("Yahoo FX sync complete: pairs=%d rows=%d", len(report_rows), loaded_rows)

@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
+from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
 from industrials.core.text_norm import normalize_cik, normalize_ticker  # noqa: E402
 
@@ -102,18 +103,37 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return [dict(row) for row in csv.DictReader(handle)]
 
 
-def load_positioning_overrides(config: dict[str, Any], *, base_dir: Path) -> dict[str, dict[str, str]]:
+def load_positioning_overrides(config: dict[str, Any], *, base_dir: Path, asof: date) -> dict[str, dict[str, str]]:
+    """Load positioning overrides effective at the run's asof.
+
+    PIT contract: `valid_from` gates effectiveness same-day-inclusive at the
+    evaluation asof (blank means always effective); `reviewed_at` is provenance
+    documentation only. When a ticker has multiple versions, the row with the
+    latest effective `valid_from` wins.
+    """
     path_value = cfg_get(config, "positioning_import.positioning_overrides_csv", "")
     if not path_value:
         return {}
     path = resolve_path(path_value, base_dir=base_dir)
-    overrides: dict[str, dict[str, str]] = {}
+    selected: dict[str, tuple[date, dict[str, str]]] = {}
     for row in read_csv_rows(path):
         ticker = normalize_ticker(row.get("ticker"))
         if not ticker:
             continue
-        overrides[ticker] = {str(key): str(value or "").strip() for key, value in row.items()}
-    return overrides
+        cleaned = {str(key): str(value or "").strip() for key, value in row.items()}
+        raw_valid_from = cleaned.get("valid_from", "")
+        if raw_valid_from:
+            valid_from = parse_date(raw_valid_from)
+            if valid_from is None:
+                raise ValueError(f"Unparseable valid_from for ticker {ticker} in {path}: {raw_valid_from!r}")
+            if valid_from > asof:
+                continue
+        else:
+            valid_from = date.min
+        current = selected.get(ticker)
+        if current is None or valid_from >= current[0]:
+            selected[ticker] = (valid_from, cleaned)
+    return {ticker: row for ticker, (_, row) in selected.items()}
 
 
 def truthy(raw: object) -> bool:
@@ -194,7 +214,7 @@ def institutional_13f_period_available(
     return covered >= min_anchor_count
 
 
-def upstream_institutional_13f_period_available(config: dict[str, Any], mp_db: Path) -> bool:
+def upstream_institutional_13f_period_available(config: dict[str, Any], mp_db: Path, *, source_id: str) -> bool:
     required_period, anchor_tickers, min_anchor_count = institutional_13f_gate_config(config)
     with closing(ro_connect(mp_db)) as conn:
         available = institutional_13f_period_available(
@@ -203,7 +223,7 @@ def upstream_institutional_13f_period_available(config: dict[str, Any], mp_db: P
             anchor_tickers=anchor_tickers,
             min_anchor_count=min_anchor_count,
             table_name="institutional_13f_ownership_snapshots",
-            source_id="sec_13f_data_sets",
+            source_id=source_id,
         )
     LOGGER.info(
         "13F DERA availability gate: required_period=%s anchors=%s min_anchor=%d available=%s",
@@ -275,13 +295,18 @@ def qmarks(values: list[str]) -> str:
     return ",".join("?" for _ in values)
 
 
-def load_source_ticker_map(conn: Any, internal_tickers: list[str]) -> tuple[list[str], dict[str, str], set[str]]:
-    """Return source tickers to query and a source->internal ticker map."""
+def load_source_ticker_map(
+    conn: Any, internal_tickers: list[str]
+) -> tuple[list[str], dict[str, str], set[str], dict[str, list[str]]]:
+    """Return source tickers to query, a source->internal ticker map, ambiguous
+    sources, and ambiguous sources resolved to their identity internal ticker."""
     source_to_internal = {ticker: ticker for ticker in internal_tickers}
     query_tickers = set(internal_tickers)
     ambiguous_sources: set[str] = set()
+    identity_preferred: dict[str, list[str]] = {}
     if not internal_tickers:
-        return [], source_to_internal, ambiguous_sources
+        return [], source_to_internal, ambiguous_sources, identity_preferred
+    internal_set = set(internal_tickers)
     rows = conn.execute(
         f"""
         SELECT c.ticker AS internal_ticker, i.identifier_value AS source_ticker
@@ -302,6 +327,19 @@ def load_source_ticker_map(conn: Any, internal_tickers: list[str]) -> tuple[list
         query_tickers.add(source)
         existing = source_to_internal.get(source)
         if len(internals) > 1 or (existing and existing not in internals):
+            if source in internal_set:
+                # The source symbol is itself a requested internal ticker: keep the
+                # identity mapping instead of silently skipping every upstream row
+                # for a legitimate universe member. The caller surfaces this as a
+                # data-quality issue so the dim_identifier ambiguity gets reviewed.
+                identity_preferred[source] = sorted(internals | {source})
+                source_to_internal[source] = source
+                LOGGER.warning(
+                    "Ambiguous source ticker mapping resolved to identity: source=%s internals=%s",
+                    source,
+                    sorted(internals),
+                )
+                continue
             source_to_internal.pop(source, None)
             ambiguous_sources.add(source)
             LOGGER.warning(
@@ -312,7 +350,7 @@ def load_source_ticker_map(conn: Any, internal_tickers: list[str]) -> tuple[list
             )
             continue
         source_to_internal[source] = next(iter(internals))
-    return sorted(query_tickers), source_to_internal, ambiguous_sources
+    return sorted(query_tickers), source_to_internal, ambiguous_sources, identity_preferred
 
 
 def apply_positioning_source_overrides(
@@ -324,11 +362,12 @@ def apply_positioning_source_overrides(
     ambiguous_source_tickers: set[str],
     policy_date: date | None = None,
     institutional_13f_data_available: bool = True,
-) -> tuple[list[str], dict[str, str], set[str], set[str], set[str], set[str]]:
+) -> tuple[list[str], dict[str, str], set[str], set[str], set[str], set[str], set[str]]:
     query_set = set(query_tickers)
     short_exempt_tickers: set[str] = set()
     institutional_13f_exempt_tickers: set[str] = set()
     short_pct_float_exempt_tickers: set[str] = set()
+    borrow_exempt_tickers: set[str] = set()
     internal_set = set(internal_tickers)
     for internal_ticker, row in overrides.items():
         if internal_ticker not in internal_set:
@@ -351,6 +390,8 @@ def apply_positioning_source_overrides(
             institutional_13f_exempt_tickers.add(internal_ticker)
         if exemption_active(row, "short_pct_float_exempt", policy_date=policy_date):
             short_pct_float_exempt_tickers.add(internal_ticker)
+        if exemption_active(row, "borrow_exempt", until_key="borrow_exempt_until", policy_date=policy_date):
+            borrow_exempt_tickers.add(internal_ticker)
     return (
         sorted(query_set),
         source_to_internal,
@@ -358,6 +399,7 @@ def apply_positioning_source_overrides(
         short_exempt_tickers,
         institutional_13f_exempt_tickers,
         short_pct_float_exempt_tickers,
+        borrow_exempt_tickers,
     )
 
 
@@ -431,6 +473,7 @@ def route_form4_ticker(
     source_to_internal: dict[str, str],
     cik_to_internal: dict[str, str],
     routes_by_cik: dict[str, list[Form4Route]],
+    ambiguous_source_tickers: set[str],
 ) -> str:
     if source_cik in routes_by_cik:
         for ticker, include, exclude in routes_by_cik[source_cik]:
@@ -440,7 +483,14 @@ def route_form4_ticker(
                 continue
             return ticker
         return ""
-    return cik_to_internal.get(source_cik) or source_to_internal.get(source_ticker) or source_ticker
+    mapped = cik_to_internal.get(source_cik)
+    if mapped:
+        return mapped
+    if source_ticker in ambiguous_source_tickers:
+        # No CIK route resolved this row and the source symbol maps to multiple
+        # internal tickers: refuse to attribute it rather than guess.
+        return ""
+    return source_to_internal.get(source_ticker) or source_ticker
 
 
 def load_unique_cik_map(conn: Any, internal_tickers: list[str]) -> tuple[list[str], dict[str, str]]:
@@ -479,19 +529,30 @@ def latest_market_feature_asof(conn: Any, model_family: str) -> date | None:
     return parse_date(row["asof_date"] if row is not None else "")
 
 
-def add_issue(conn: Any, ticker: str, source_id: str, issue_type: str, detail: str, severity: str = "warning") -> None:
+def add_issue(
+    conn: Any,
+    ticker: str,
+    source_id: str,
+    issue_type: str,
+    detail: str,
+    severity: str = "warning",
+    *,
+    model_family: str,
+) -> None:
+    # SC-12: issues are family-scoped; stamp model_family so per-stage clears for
+    # one family never wipe another family's open issues.
     now = utc_now()
     row = conn.execute("SELECT company_id FROM dim_company WHERE ticker = ?", (ticker,)).fetchone()
     company_id = int(row["company_id"]) if row is not None else None
     conn.execute(
         """
         INSERT INTO data_quality_issues(
-            detected_at, severity, stage, ticker, company_id, source_id, issue_type,
+            detected_at, severity, stage, model_family, ticker, company_id, source_id, issue_type,
             issue_detail, resolution_status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
         """,
-        (now, severity, RUN_TYPE, ticker, company_id, source_id, issue_type, detail, now, now),
+        (now, severity, RUN_TYPE, model_family, ticker, company_id, source_id, issue_type, detail, now, now),
     )
 
 
@@ -505,10 +566,18 @@ def import_form4(
     source_to_internal: dict[str, str],
     cik_to_internal: dict[str, str],
     routes_by_cik: dict[str, list[Form4Route]],
+    ambiguous_source_tickers: set[str],
     source_id: str,
     start: date,
 ) -> dict[str, dict[str, Any]]:
     stats = {ticker: {"form4_transactions": 0, "form4_latest_transaction_date": ""} for ticker in tickers}
+    # Full replace for this source: ticker is part of the PK, so rows routed to a
+    # different share class by an earlier run (or superseded Form 4/A rows) would
+    # otherwise survive the upsert forever and double-count across classes.
+    dest.execute(
+        f"DELETE FROM fact_sec_form4_transaction WHERE source_id = ? AND ticker IN ({qmarks(tickers)})",
+        (source_id, *tickers),
+    )
     rows = source.execute(
         f"""
         SELECT
@@ -540,6 +609,7 @@ def import_form4(
           ON ro.accession_number = s.accession_number
         WHERE UPPER(s.issuer_trading_symbol) IN ({qmarks(query_tickers)})
            OR printf('%010d', CAST(s.issuer_cik AS INTEGER)) IN ({qmarks(query_ciks)})
+        ORDER BY s.accession_number, t.nonderiv_trans_sk, ro.rptowner_cik
         """,
         (*query_tickers, *query_ciks),
     )
@@ -554,6 +624,7 @@ def import_form4(
             source_to_internal=source_to_internal,
             cik_to_internal=cik_to_internal,
             routes_by_cik=routes_by_cik,
+            ambiguous_source_tickers=ambiguous_source_tickers,
         )
         if ticker not in stats:
             continue
@@ -645,6 +716,7 @@ def import_13f(
     ambiguous_source_tickers: set[str],
     source_id: str,
     start: date,
+    upstream_source: str,
 ) -> dict[str, int]:
     stats = {ticker: 0 for ticker in tickers}
     now = utc_now()
@@ -654,12 +726,17 @@ def import_13f(
         f"DELETE FROM fact_13f_positioning WHERE source_id = ? AND ticker IN ({qmarks(tickers)})",
         (source_id, *tickers),
     )
+    # Scope to the expected upstream feed: the shared market_positioning DB holds
+    # rows from other packages' aggregators under different source labels, and an
+    # unfiltered read would collapse them nondeterministically into our PK.
     rows = source.execute(
         f"""
         SELECT * FROM institutional_13f_ownership_snapshots
         WHERE UPPER(ticker) IN ({qmarks(query_tickers)})
+          AND source = ?
+        ORDER BY UPPER(ticker), COALESCE(period_of_report, ''), asof_date
         """,
-        query_tickers,
+        (*query_tickers, upstream_source),
     )
     for row in rows:
         source_ticker = normalize_ticker(row["ticker"])
@@ -679,8 +756,7 @@ def import_13f(
                 new_buyer_count, exiting_holder_count, net_buyer_count, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(ticker, asof_date, source_id) DO UPDATE SET
-                period_of_report = excluded.period_of_report,
+            ON CONFLICT(ticker, asof_date, period_of_report, source_id) DO UPDATE SET
                 institutional_shares = excluded.institutional_shares,
                 institutional_value = excluded.institutional_value,
                 manager_count = excluded.manager_count,
@@ -720,12 +796,37 @@ def import_short_interest(
     ambiguous_source_tickers: set[str],
     source_id: str,
     start: date,
+    upstream_sources: list[str],
 ) -> dict[str, int]:
+    if not upstream_sources:
+        raise ValueError("positioning_import.upstream_short_interest_sources cannot be empty")
     stats = {ticker: 0 for ticker in tickers}
     now = utc_now()
+    # Ranked source preference per (ticker, settlement_date), mirroring the shared
+    # market_positioning core: the FINRA files feed outranks the legacy API feed,
+    # whose publication_date == settlement_date rows would otherwise leak short
+    # interest into features ~14 days before FINRA actually published it.
+    rank_case = " ".join(f"WHEN ? THEN {rank}" for rank in range(len(upstream_sources)))
     rows = source.execute(
-        f"SELECT * FROM short_interest_snapshots WHERE UPPER(ticker) IN ({qmarks(query_tickers)})",
-        query_tickers,
+        f"""
+        WITH ranked AS (
+            SELECT s.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY UPPER(s.ticker), s.settlement_date
+                       ORDER BY CASE s.source {rank_case} ELSE 9 END ASC,
+                                s.asof_date DESC,
+                                s.updated_at DESC
+                   ) AS rn
+            FROM short_interest_snapshots s
+            WHERE UPPER(s.ticker) IN ({qmarks(query_tickers)})
+              AND s.source IN ({qmarks(upstream_sources)})
+        )
+        SELECT *
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY UPPER(ticker), settlement_date
+        """,
+        (*upstream_sources, *query_tickers, *upstream_sources),
     )
     for row in rows:
         source_ticker = normalize_ticker(row["ticker"])
@@ -784,12 +885,18 @@ def import_borrow(
     ambiguous_source_tickers: set[str],
     source_id: str,
     start: date,
+    upstream_source: str,
 ) -> dict[str, int]:
     stats = {ticker: 0 for ticker in tickers}
     now = utc_now()
     rows = source.execute(
-        f"SELECT * FROM ibkr_borrow_fee_rate_daily WHERE UPPER(ticker) IN ({qmarks(query_tickers)})",
-        query_tickers,
+        f"""
+        SELECT * FROM ibkr_borrow_fee_rate_daily
+        WHERE UPPER(ticker) IN ({qmarks(query_tickers)})
+          AND source = ?
+        ORDER BY UPPER(ticker), asof_date
+        """,
+        (*query_tickers, upstream_source),
     )
     for row in rows:
         source_ticker = normalize_ticker(row["ticker"])
@@ -840,28 +947,51 @@ def direct_form4_stats(conn: Any, tickers: list[str], *, source_id: str) -> dict
     return stats
 
 
-def latest_row(conn: Any, table: str, ticker: str, date_col: str, asof_iso: str) -> sqlite3.Row | None:
+def source_rank_case(source_ids: list[str]) -> str:
+    """SC-17: deterministic ranked source preference — earlier entries in the
+    configured list outrank later ones; anything else sorts last (and is already
+    excluded by the accompanying source_id IN (...) filter)."""
+    if not source_ids:
+        raise ValueError("source_ids cannot be empty")
+    whens = " ".join(f"WHEN ? THEN {rank}" for rank in range(len(source_ids)))
+    return f"CASE source_id {whens} ELSE 9 END"
+
+
+def latest_row(conn: Any, table: str, ticker: str, date_col: str, asof_iso: str, *, source_ids: list[str]) -> sqlite3.Row | None:
+    # SC-17: positioning fact tables are keyed by source_id, so a second registered
+    # source would otherwise bleed into features nondeterministically. Restrict to
+    # the configured source_id(s); the freshest date wins, with the configured rank
+    # breaking same-date ties (mirrors import_short_interest's PS-3 preference).
     return conn.execute(
-        f"SELECT * FROM {table} WHERE ticker = ? AND {date_col} <= ? ORDER BY {date_col} DESC LIMIT 1",
-        (ticker, asof_iso),
+        f"""
+        SELECT * FROM {table}
+        WHERE ticker = ? AND {date_col} <= ?
+          AND source_id IN ({qmarks(source_ids)})
+        ORDER BY {date_col} DESC, {source_rank_case(source_ids)} ASC
+        LIMIT 1
+        """,
+        (ticker, asof_iso, *source_ids, *source_ids),
     ).fetchone()
 
 
-def latest_short_row(conn: Any, ticker: str, asof_iso: str) -> sqlite3.Row | None:
+def latest_short_row(conn: Any, ticker: str, asof_iso: str, *, source_ids: list[str]) -> sqlite3.Row | None:
     # Point-in-time: FINRA short interest is only known once published; when
     # publication_date is missing, assume the typical settlement+14d lag.
+    # SC-17: filter by the configured source_id(s); latest published settlement
+    # wins, with the configured rank breaking same-settlement-date ties.
     return conn.execute(
-        """
+        f"""
         SELECT * FROM fact_short_interest
         WHERE ticker = ? AND settlement_date <= ?
+          AND source_id IN ({qmarks(source_ids)})
           AND (
               (COALESCE(publication_date, '') <> '' AND publication_date <= ?)
               OR (COALESCE(publication_date, '') = '' AND DATE(settlement_date, '+14 day') <= ?)
           )
-        ORDER BY settlement_date DESC
+        ORDER BY settlement_date DESC, {source_rank_case(source_ids)} ASC
         LIMIT 1
         """,
-        (ticker, asof_iso, asof_iso, asof_iso),
+        (ticker, asof_iso, *source_ids, asof_iso, asof_iso, *source_ids),
     ).fetchone()
 
 
@@ -899,8 +1029,12 @@ def build_positioning_features(
     short_exempt_tickers: set[str],
     institutional_13f_exempt_tickers: set[str],
     short_pct_float_exempt_tickers: set[str],
+    borrow_exempt_tickers: set[str],
     form4_status_by_ticker: dict[str, str],
     form4_status_reason_by_ticker: dict[str, str],
+    max_13f_staleness_days: int,
+    max_borrow_staleness_days: int,
+    preferred_source_ids: list[str],
 ) -> dict[str, str]:
     now = utc_now()
     statuses: dict[str, str] = {}
@@ -956,25 +1090,40 @@ def build_positioning_features(
             """,
             (ticker, insider_source, insider_start, asof.isoformat()),
         ).fetchone()
-        inst = latest_row(conn, "fact_13f_positioning", ticker, "asof_date", asof.isoformat())
-        short = latest_short_row(conn, ticker, asof.isoformat())
-        borrow = latest_row(conn, "fact_ibkr_borrow_snapshot", ticker, "asof_date", asof.isoformat())
+        inst = latest_row(conn, "fact_13f_positioning", ticker, "asof_date", asof.isoformat(), source_ids=preferred_source_ids)
+        # A snapshot older than the policy window must not satisfy the gate or
+        # populate features as if current; NULL the fields and flag for review.
+        inst_stale = False
+        if inst is not None and max_13f_staleness_days > 0:
+            inst_asof = parse_date(inst["asof_date"])
+            if inst_asof is None or (asof - inst_asof).days > max_13f_staleness_days:
+                inst = None
+                inst_stale = True
+        short = latest_short_row(conn, ticker, asof.isoformat(), source_ids=preferred_source_ids)
+        borrow = latest_row(conn, "fact_ibkr_borrow_snapshot", ticker, "asof_date", asof.isoformat(), source_ids=preferred_source_ids)
+        borrow_stale = False
+        if borrow is not None and max_borrow_staleness_days > 0:
+            borrow_asof = parse_date(borrow["asof_date"])
+            if borrow_asof is None or (asof - borrow_asof).days > max_borrow_staleness_days:
+                borrow = None
+                borrow_stale = True
         short_pct_float = safe_float(short["short_interest_pct_float"]) if short is not None else None
         short_change = None
         if short is not None:
             prior = conn.execute(
-                """
+                f"""
                 SELECT short_interest_pct_float, short_interest_shares, float_shares
                 FROM fact_short_interest
                 WHERE ticker = ? AND settlement_date <= ?
+                  AND source_id IN ({qmarks(preferred_source_ids)})
                   AND (
                       (COALESCE(publication_date, '') <> '' AND publication_date <= ?)
                       OR (COALESCE(publication_date, '') = '' AND DATE(settlement_date, '+14 day') <= ?)
                   )
-                ORDER BY settlement_date DESC
+                ORDER BY settlement_date DESC, {source_rank_case(preferred_source_ids)} ASC
                 LIMIT 1
                 """,
-                (ticker, short_prior_cutoff, asof.isoformat(), asof.isoformat()),
+                (ticker, short_prior_cutoff, *preferred_source_ids, asof.isoformat(), asof.isoformat(), *preferred_source_ids),
             ).fetchone()
             # Change in percent-of-float, so the signal is comparable across companies.
             latest_pct = safe_float(short["short_interest_pct_float"])
@@ -998,6 +1147,8 @@ def build_positioning_features(
         if require_13f and inst is None:
             if institutional_13f_exempt:
                 waived_reasons.append("institutional_13f_policy_exempt")
+            elif inst_stale:
+                reasons.append("stale_13f")
             else:
                 reasons.append("missing_13f")
         short_exempt = ticker in short_exempt_tickers
@@ -1012,7 +1163,12 @@ def build_positioning_features(
             else:
                 reasons.append("missing_short_interest_pct_float")
         if require_borrow and borrow is None:
-            reasons.append("missing_borrow")
+            if ticker in borrow_exempt_tickers:
+                waived_reasons.append("borrow_policy_exempt")
+            elif borrow_stale:
+                reasons.append("stale_borrow")
+            else:
+                reasons.append("missing_borrow")
         quality = "complete" if not reasons and not waived_reasons else ("policy_exempt" if not reasons else "review")
         form4_status = form4_status_by_ticker.get(ticker) or "missing"
         form4_status_reason = form4_status_reason_by_ticker.get(ticker) or (
@@ -1085,14 +1241,6 @@ def build_positioning_features(
     return statuses
 
 
-def write_report(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS, extrasaction="ignore", lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def main() -> None:
     configure_utc_logging()
     args = parse_args()
@@ -1101,7 +1249,6 @@ def main() -> None:
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     registry_path = resolve_path(cfg_get(config, "source_registry.path"), base_dir=base_dir)
-    positioning_overrides = load_positioning_overrides(config, base_dir=base_dir)
     form4_db = Path(expand_env_vars(cfg_get(config, "upstream_databases.form4.db_path"))).expanduser()
     mp_db = Path(expand_env_vars(cfg_get(config, "upstream_databases.market_positioning.db_path"))).expanduser()
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(cfg_get(config, "positioning_import.output_csv"), base_dir=base_dir)
@@ -1110,6 +1257,36 @@ def main() -> None:
     direct_ownership_source = str(cfg_get(config, "positioning_import.direct_ownership_source_id", "sec_ownership_direct"))
     mp_source = str(cfg_get(config, "positioning_import.market_positioning_source_id", "market_positioning_upstream"))
     feature_source = str(cfg_get(config, "positioning_import.source_id", "industrials_positioning_composite"))
+    # Expected upstream feed labels inside the shared market_positioning DB. Other
+    # packages write to the same tables under other source labels; only these are
+    # imported (ranked preference for short interest, see import_short_interest).
+    upstream_13f_source = str(cfg_get(config, "positioning_import.upstream_13f_source", "sec_13f_data_sets"))
+    upstream_borrow_source = str(cfg_get(config, "positioning_import.upstream_borrow_source", "interactive_brokers"))
+    upstream_short_sources_raw = cfg_get(
+        config,
+        "positioning_import.upstream_short_interest_sources",
+        ["finra_equity_short_interest_files", "finra_equity_short_interest"],
+    )
+    if isinstance(upstream_short_sources_raw, str):
+        upstream_short_sources = [part.strip() for part in upstream_short_sources_raw.split(",") if part.strip()]
+    else:
+        upstream_short_sources = [str(part).strip() for part in (upstream_short_sources_raw or []) if str(part).strip()]
+    max_13f_staleness_days = int(cfg_get(config, "positioning_import.max_13f_staleness_days", 120))
+    max_borrow_staleness_days = int(cfg_get(config, "positioning_import.max_borrow_staleness_days", 10))
+    # SC-17: source_id(s) the positioning feature readers accept from the local fact
+    # tables (fact_13f_positioning / fact_short_interest / fact_ibkr_borrow_snapshot),
+    # in ranked preference order. Default pins the market_positioning composite feed
+    # (positioning_import.market_positioning_source_id, "market_positioning_upstream")
+    # — the only source_id this script writes those facts under today. Extend the
+    # list deliberately before registering a second positioning source.
+    preferred_sources_raw = cfg_get(config, "positioning_import.preferred_source_ids", [mp_source])
+    if isinstance(preferred_sources_raw, str):
+        preferred_source_ids = [part.strip() for part in preferred_sources_raw.split(",") if part.strip()]
+    else:
+        preferred_source_ids = [str(part).strip() for part in (preferred_sources_raw or []) if str(part).strip()]
+    preferred_source_ids = list(dict.fromkeys(preferred_source_ids))
+    if not preferred_source_ids:
+        raise ValueError("positioning_import.preferred_source_ids cannot be empty")
     model_family = str(
         args.model_family
         or cfg_get(config, "industrials_universe.initial_subsector", "defense")
@@ -1128,7 +1305,7 @@ def main() -> None:
         raise FileNotFoundError(f"Form 4 upstream DB not found: {form4_db}")
     if not mp_db.exists():
         raise FileNotFoundError(f"Market positioning upstream DB not found: {mp_db}")
-    institutional_13f_data_available = upstream_institutional_13f_period_available(config, mp_db)
+    institutional_13f_data_available = upstream_institutional_13f_period_available(config, mp_db, source_id=upstream_13f_source)
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
@@ -1141,7 +1318,28 @@ def main() -> None:
             if not fact_tickers or not feature_tickers:
                 raise ValueError(f"No positioning universe tickers found for model_family={model_family}.")
             feature_ticker_set = set(feature_tickers)
-            query_tickers, source_to_internal, ambiguous_source_tickers = load_source_ticker_map(conn, fact_tickers)
+            # Resolve the feature asof up front: a malformed --asof must fail loudly
+            # (never silently become a current build), and exemption expiries below
+            # are evaluated at this asof, not at wall-clock today.
+            asof_raw = str(args.asof or "").strip()
+            if asof_raw:
+                feature_asof = parse_date(asof_raw)
+                if feature_asof is None:
+                    raise ValueError(f"Unparseable --asof value: {args.asof!r}; expected YYYY-MM-DD.")
+            else:
+                feature_asof = latest_market_feature_asof(conn, model_family)
+                if feature_asof is None:
+                    raise ValueError(
+                        f"No market feature asof found for model_family={model_family}; "
+                        "run the market feature build first or pass --asof explicitly."
+                    )
+            positioning_overrides = load_positioning_overrides(config, base_dir=base_dir, asof=feature_asof)
+            (
+                query_tickers,
+                source_to_internal,
+                ambiguous_source_tickers,
+                identity_preferred_sources,
+            ) = load_source_ticker_map(conn, fact_tickers)
             (
                 query_tickers,
                 source_to_internal,
@@ -1149,19 +1347,30 @@ def main() -> None:
                 short_exempt_tickers,
                 institutional_13f_exempt_tickers,
                 short_pct_float_exempt_tickers,
+                borrow_exempt_tickers,
             ) = apply_positioning_source_overrides(
                 internal_tickers=fact_tickers,
                 overrides=positioning_overrides,
                 query_tickers=query_tickers,
                 source_to_internal=source_to_internal,
                 ambiguous_source_tickers=ambiguous_source_tickers,
-                policy_date=date.today(),
+                policy_date=feature_asof,
                 institutional_13f_data_available=institutional_13f_data_available,
             )
+            # Keep only identity resolutions still in effect after overrides (an
+            # explicit source_ticker override supersedes the identity fallback).
+            identity_preferred_sources = {
+                source: internals
+                for source, internals in identity_preferred_sources.items()
+                if source_to_internal.get(source) == source
+            }
             short_exempt_tickers.update(cfg_ticker_set(cfg_get(config, "positioning_import.upstream_short_gate_exempt_tickers", [])))
             institutional_13f_exempt_tickers.update(cfg_ticker_set(cfg_get(config, "positioning_import.upstream_13f_gate_exempt_tickers", [])))
             short_pct_float_exempt_tickers.update(
                 cfg_ticker_set(cfg_get(config, "positioning_import.upstream_short_pct_float_gate_exempt_tickers", []))
+            )
+            borrow_exempt_tickers.update(
+                cfg_ticker_set(cfg_get(config, "positioning_import.upstream_borrow_gate_exempt_tickers", []))
             )
             query_ciks, cik_to_internal = load_unique_cik_map(conn, fact_tickers)
             (
@@ -1181,10 +1390,22 @@ def main() -> None:
             query_ciks_for_sql = query_ciks or ["__NO_CIK__"]
             with closing(ro_connect(form4_db)) as form4_conn, closing(ro_connect(mp_db)) as mp_conn:
                 with conn:
+                    # SC-12: per-stage clear scoped by model_family so one family's
+                    # rerun never wipes another family's open issues for this stage.
                     conn.execute(
-                        f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({qmarks(fact_tickers)})",
-                        (RUN_TYPE, *fact_tickers),
+                        f"DELETE FROM data_quality_issues WHERE stage = ? AND model_family = ? AND ticker IN ({qmarks(fact_tickers)})",
+                        (RUN_TYPE, model_family, *fact_tickers),
                     )
+                    for source_ticker, internals in sorted(identity_preferred_sources.items()):
+                        add_issue(
+                            conn,
+                            source_ticker,
+                            "dim_identifier",
+                            "ambiguous_source_ticker_identity_preferred",
+                            f"Source ticker maps to multiple internal tickers ({', '.join(internals)}); "
+                            "identity mapping retained for import. Review dim_identifier.",
+                            model_family=model_family,
+                        )
                     form4_stats = import_form4(
                         conn,
                         form4_conn,
@@ -1194,6 +1415,7 @@ def main() -> None:
                         source_to_internal=source_to_internal,
                         cik_to_internal=cik_to_internal,
                         routes_by_cik=form4_routes_by_cik,
+                        ambiguous_source_tickers=ambiguous_source_tickers,
                         source_id=form4_source,
                         start=start,
                     )
@@ -1219,6 +1441,7 @@ def main() -> None:
                         ambiguous_source_tickers=ambiguous_source_tickers,
                         source_id=mp_source,
                         start=start,
+                        upstream_source=upstream_13f_source,
                     )
                     short_stats = import_short_interest(
                         conn,
@@ -1229,6 +1452,7 @@ def main() -> None:
                         ambiguous_source_tickers=ambiguous_source_tickers,
                         source_id=mp_source,
                         start=start,
+                        upstream_sources=upstream_short_sources,
                     )
                     borrow_stats = import_borrow(
                         conn,
@@ -1239,8 +1463,8 @@ def main() -> None:
                         ambiguous_source_tickers=ambiguous_source_tickers,
                         source_id=mp_source,
                         start=start,
+                        upstream_source=upstream_borrow_source,
                     )
-                    feature_asof = parse_date(args.asof) or latest_market_feature_asof(conn, model_family) or date.today()
                     feature_status = build_positioning_features(
                         conn,
                         feature_tickers,
@@ -1258,8 +1482,12 @@ def main() -> None:
                         short_exempt_tickers=short_exempt_tickers,
                         institutional_13f_exempt_tickers=institutional_13f_exempt_tickers,
                         short_pct_float_exempt_tickers=short_pct_float_exempt_tickers,
+                        borrow_exempt_tickers=borrow_exempt_tickers,
                         form4_status_by_ticker=form4_status_by_ticker,
                         form4_status_reason_by_ticker=form4_status_reason_by_ticker,
+                        max_13f_staleness_days=max_13f_staleness_days,
+                        max_borrow_staleness_days=max_borrow_staleness_days,
+                        preferred_source_ids=preferred_source_ids,
                     )
                     rows: list[dict[str, Any]] = []
                     for ticker in fact_tickers:
@@ -1271,23 +1499,23 @@ def main() -> None:
                         ):
                             reasons.append("no_form4_transactions")
                             if ticker in feature_ticker_set:
-                                add_issue(conn, ticker, form4_source, "missing_form4_upstream_rows", "No Form 4 rows imported from sec_insider.sqlite.")
+                                add_issue(conn, ticker, form4_source, "missing_form4_upstream_rows", "No Form 4 rows imported from sec_insider.sqlite.", model_family=model_family)
                         elif form4_stats[ticker]["form4_transactions"] == 0 and direct_stats[ticker]["direct_form4_transactions"] > 0:
                             reasons.append("form4_direct_sec_rows_found_no_upstream")
                             if ticker in feature_ticker_set:
-                                add_issue(conn, ticker, form4_source, "form4_upstream_missing_direct_sec_rows_found", "No upstream Form 4 rows, but direct SEC ownership rows exist in Industrials.sqlite.")
+                                add_issue(conn, ticker, form4_source, "form4_upstream_missing_direct_sec_rows_found", "No upstream Form 4 rows, but direct SEC ownership rows exist in Industrials.sqlite.", model_family=model_family)
                         if inst_stats[ticker] == 0 and ticker not in institutional_13f_exempt_tickers:
                             reasons.append("no_13f_rows")
                             if ticker in feature_ticker_set:
-                                add_issue(conn, ticker, mp_source, "missing_13f_upstream_rows", "No 13F snapshot rows available in market_positioning.sqlite for this ticker.")
+                                add_issue(conn, ticker, mp_source, "missing_13f_upstream_rows", "No 13F snapshot rows available in market_positioning.sqlite for this ticker.", model_family=model_family)
                         if short_stats[ticker] == 0 and ticker not in short_exempt_tickers:
                             reasons.append("no_short_interest_rows")
                             if ticker in feature_ticker_set:
-                                add_issue(conn, ticker, mp_source, "missing_short_interest_upstream_rows", "No short-interest rows available in market_positioning.sqlite for this ticker.")
-                        if borrow_stats[ticker] == 0:
+                                add_issue(conn, ticker, mp_source, "missing_short_interest_upstream_rows", "No short-interest rows available in market_positioning.sqlite for this ticker.", model_family=model_family)
+                        if borrow_stats[ticker] == 0 and ticker not in borrow_exempt_tickers:
                             reasons.append("no_borrow_rows")
                             if ticker in feature_ticker_set:
-                                add_issue(conn, ticker, mp_source, "missing_borrow_upstream_rows", "No IBKR borrow rows available in market_positioning.sqlite for this ticker.")
+                                add_issue(conn, ticker, mp_source, "missing_borrow_upstream_rows", "No IBKR borrow rows available in market_positioning.sqlite for this ticker.", model_family=model_family)
                         if ticker in feature_ticker_set and feature_status.get(ticker):
                             reasons.append(feature_status[ticker])
                         rows.append(
@@ -1305,7 +1533,7 @@ def main() -> None:
                                 "review_reason": ";".join(reason for reason in reasons if reason),
                             }
                         )
-            write_report(output_csv, rows)
+            write_csv_atomic(output_csv, CSV_FIELDS, rows)
             finish_run(conn, run_id=run_id, status="success", row_count=sum(int(row["form4_transactions"]) for row in rows), message=f"fact_tickers={len(rows)} feature_tickers={len(feature_tickers)} output={output_csv}")
             LOGGER.info("Wrote positioning import report: %s", output_csv)
             LOGGER.info("Positioning import complete: fact_tickers=%d feature_tickers=%d form4_rows=%d 13f_rows=%d short_rows=%d borrow_rows=%d", len(rows), len(feature_tickers), sum(int(row["form4_transactions"]) for row in rows), sum(int(row["institutional_rows"]) for row in rows), sum(int(row["short_interest_rows"]) for row in rows), sum(int(row["borrow_rows"]) for row in rows))

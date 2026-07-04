@@ -56,17 +56,36 @@ def main() -> int:
     base_dir = config_path.parent
     db_path = resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     expected_rows = active_defense_count(db_path)
+    snapshot_root = resolve_path(
+        str(
+            cfg_get(
+                config,
+                "oos_calibration_standards.families.defense.snapshot_history_root",
+                "../output/industrials/defense/dashboard",
+            )
+        ),
+        base_dir=base_dir,
+    )
+    sector_output_root = args.sector_output_root.expanduser().resolve()
+    try:
+        snapshot_rel = snapshot_root.resolve().relative_to(sector_output_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Configured oos_calibration_standards.families.defense.snapshot_history_root "
+            f"({snapshot_root}) is not under the sector output root ({sector_output_root}); "
+            "the portfolio adapter resolves dated snapshots relative to that root."
+        ) from exc
     adapter_cfg = {
         "model_family": MODEL_FAMILY,
         "adapter": "tech_family",
         "file_mode": "dated",
-        "file_path": "industrials/defense/dashboard/{yyyy-mm-dd}/defense_final_rank_table.csv",
+        "file_path": "/".join([*snapshot_rel.parts, "{yyyy-mm-dd}", "defense_final_rank_table.csv"]),
         "sector": "Industrials",
         "industry": "Aerospace & Defense",
         "industry_aggregate": "Aerospace & Defense",
         "require_oos_score_valid": True,
     }
-    result = run_adapter(adapter_cfg, args.sector_output_root.expanduser().resolve(), asof)
+    result = run_adapter(adapter_cfg, sector_output_root, asof)
     rows = result.rows
     errors: list[str] = []
     if result.source_asof_date != asof:

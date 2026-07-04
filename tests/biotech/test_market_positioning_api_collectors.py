@@ -12,7 +12,7 @@ from market_positioning.api_collectors import (
     sync_finra_equity_short_interest_files,
     sync_sec_13f_data_sets,
 )
-from market_positioning.core import connect, init_db
+from market_positioning.core import aggregate_13f_ownership_for_tickers, connect, init_db
 
 
 def write_csv(path, fieldnames: list[str], rows: list[dict[str, object]]) -> None:
@@ -176,3 +176,68 @@ def test_sec_13f_data_set_sync_matches_universe_name(tmp_path, monkeypatch) -> N
     assert result.rows == 1
     assert rows[0]["ticker"] == "AAA"
     assert rows[0]["institutional_shares"] == 1000
+
+
+def test_period_13f_aggregation_is_ticker_scoped(tmp_path) -> None:
+    db_path = tmp_path / "market_positioning.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        now = "2026-07-03T00:00:00Z"
+        conn.executemany(
+            """
+            INSERT INTO institutional_13f_filings(
+                filing_key, accession_number, manager_cik, manager_name, period_of_report,
+                filing_date, accepted_at, source, source_file, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("AAA-F1", "AAA-F1", "M1", "Manager 1", "2024-12-31", "2025-02-10", "2025-02-10", "sec_13f_data_sets", "unit", now, now),
+                ("AAA-F2", "AAA-F2", "M1", "Manager 1", "2024-12-31", "2025-02-14", "2025-02-14", "sec_13f_data_sets", "unit", now, now),
+                ("AAA-F3", "AAA-F3", "M2", "Manager 2", "2024-12-31", "2025-02-13", "2025-02-13", "sec_13f_data_sets", "unit", now, now),
+                ("BBB-F1", "BBB-F1", "M3", "Manager 3", "2024-09-30", "2024-11-12", "2024-11-12", "sec_13f_data_sets", "unit", now, now),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO institutional_13f_holdings(
+                filing_key, manager_cik, manager_name, ticker, cusip, period_of_report,
+                filing_date, accepted_at, shares, market_value, title_of_class, share_type,
+                put_call, source, source_file, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("AAA-F1", "M1", "Manager 1", "AAA", "AAA111111", "2024-12-31", "2025-02-10", "2025-02-10", 100, 1000, "COM", "SH", "", "sec_13f_data_sets", "unit", now, now),
+                ("AAA-F2", "M1", "Manager 1", "AAA", "AAA111111", "2024-12-31", "2025-02-14", "2025-02-14", 200, 2000, "COM", "SH", "", "sec_13f_data_sets", "unit", now, now),
+                ("AAA-F3", "M2", "Manager 2", "AAA", "AAA222222", "2024-12-31", "2025-02-13", "2025-02-13", 50, 500, "COM", "SH", "", "sec_13f_data_sets", "unit", now, now),
+                ("BBB-F1", "M3", "Manager 3", "BBB", "BBB111111", "2024-09-30", "2024-11-12", "2024-11-12", 999, 9990, "COM", "SH", "", "sec_13f_data_sets", "unit", now, now),
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO institutional_13f_ownership_snapshots(
+                ticker, asof_date, period_of_report, institutional_shares, institutional_value,
+                manager_count, new_buyer_count, exiting_holder_count, net_buyer_count,
+                institutional_ownership_delta_pct, source, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("BBB", "2024-11-12", "2024-09-30", 999, 9990, 1, 0, 0, 0, None, "sec_13f_data_sets", now, now),
+        )
+
+        assert aggregate_13f_ownership_for_tickers(conn, ["AAA"], source="sec_13f_data_sets") == 1
+        aaa = conn.execute(
+            "SELECT * FROM institutional_13f_ownership_snapshots WHERE ticker = 'AAA'"
+        ).fetchone()
+        bbb = conn.execute(
+            "SELECT * FROM institutional_13f_ownership_snapshots WHERE ticker = 'BBB'"
+        ).fetchone()
+
+    assert aaa["asof_date"] == "2025-02-14"
+    assert aaa["period_of_report"] == "2024-12-31"
+    assert aaa["institutional_shares"] == 250
+    assert aaa["institutional_value"] == 2500
+    assert aaa["manager_count"] == 2
+    assert bbb["asof_date"] == "2024-11-12"
+    assert bbb["institutional_shares"] == 999

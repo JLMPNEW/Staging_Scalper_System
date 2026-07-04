@@ -43,6 +43,7 @@ from market_positioning.core import parse_date as mp_parse_date  # noqa: E402
 from market_positioning.core import to_float, update_feed_state, utc_now  # noqa: E402
 from industrials.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
+from industrials.core.reports import write_csv_atomic  # noqa: E402
 
 
 LOGGER = logging.getLogger("sync_industrials_positioning_upstream")
@@ -50,10 +51,42 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 
 
 def parse_date_arg(raw: object, *, default: date) -> date:
+    """Parse a CLI/config date, raising loudly on malformed non-empty input.
+
+    A typo'd --history-start/--end-date must never silently degrade to the
+    default (that turns a historical rebuild into a current-day build).
+    """
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
     text = str(raw or "").strip()
     if not text:
         return default
-    return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    for separator in ("T", " "):
+        if separator in text:
+            text = text.split(separator, 1)[0]
+            break
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(f"Unparseable date argument {raw!r}; expected YYYY-MM-DD") from exc
+
+
+def parse_pit_date_strict(raw: object, *, field: str, context: str = "") -> date | None:
+    """Parse a point-in-time metadata date from an override CSV; raise on garbage.
+
+    Empty means "not set"; a malformed value must not fail open into
+    "always effective" / "never expires".
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    parsed = parse_13f_date(text)
+    if parsed is None:
+        where = f" for {context}" if context else ""
+        raise ValueError(f"Unparseable {field} date {text!r}{where}; expected YYYY-MM-DD")
+    return parsed
 
 
 def parse_13f_date(raw: object) -> date | None:
@@ -76,6 +109,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--model-family", default="", help="Industrials model family to sync, e.g. defense.")
     parser.add_argument("--history-start", default="")
     parser.add_argument("--end-date", default=date.today().isoformat())
     parser.add_argument("--tickers-csv", type=Path, default=None)
@@ -134,7 +168,13 @@ def normalize_source_ticker(raw: object) -> str:
     return str(raw or "").strip().upper().replace(".", "-")
 
 
-def load_positioning_overrides(config: dict[str, Any], *, base_dir: Path) -> dict[str, dict[str, str]]:
+def load_positioning_overrides(config: dict[str, Any], *, base_dir: Path, asof: date) -> dict[str, dict[str, str]]:
+    """Load positioning overrides effective at the evaluation asof.
+
+    `valid_from` gates effectiveness same-day-inclusive at the evaluation asof
+    (med_devices convention); `reviewed_at` is provenance documentation only.
+    Rows are never selected against wall-clock today.
+    """
     path_value = cfg_get(config, "positioning_import.positioning_overrides_csv", "")
     if not path_value:
         return {}
@@ -143,6 +183,9 @@ def load_positioning_overrides(config: dict[str, Any], *, base_dir: Path) -> dic
     for row in read_csv_rows(path):
         ticker = normalize_source_ticker(row.get("ticker"))
         if not ticker:
+            continue
+        valid_from = parse_pit_date_strict(row.get("valid_from"), field="valid_from", context=ticker)
+        if valid_from is not None and valid_from > asof:
             continue
         overrides[ticker] = {str(key): str(value or "").strip() for key, value in row.items()}
     return overrides
@@ -169,6 +212,8 @@ def apply_positioning_override(row: dict[str, str], overrides: dict[str, dict[st
         "institutional_13f_issuer_alias",
         "short_pct_float_exempt",
         "short_pct_float_exemption_reason",
+        "borrow_exempt",
+        "borrow_exemption_reason",
         "form4_exempt",
         "form4_exemption_reason",
         "form4_cik",
@@ -184,12 +229,12 @@ def apply_positioning_override(row: dict[str, str], overrides: dict[str, dict[st
     return out
 
 
-def build_positioning_universe_csv(config: dict[str, Any], *, base_dir: Path, output_path: Path) -> Path:
+def build_positioning_universe_csv(config: dict[str, Any], *, base_dir: Path, output_path: Path, asof: date) -> Path:
     """Build a current+historical ticker map for free FINRA/SEC positioning syncs."""
     seed_path = resolve_path(cfg_get(config, "industrials_universe.seed_csv"), base_dir=base_dir)
     historical_path = resolve_path(cfg_get(config, "industrials_universe.historical_membership_csv"), base_dir=base_dir)
     delisted_path = resolve_path(cfg_get(config, "industrials_universe.delisted_seed_csv"), base_dir=base_dir)
-    overrides = load_positioning_overrides(config, base_dir=base_dir)
+    overrides = load_positioning_overrides(config, base_dir=base_dir, asof=asof)
     rows_by_ticker: dict[str, dict[str, str]] = {}
 
     for row in read_csv_rows(seed_path):
@@ -269,6 +314,7 @@ def build_positioning_universe_csv(config: dict[str, Any], *, base_dir: Path, ou
         "institutional_13f_issuer_alias", "institutional_13f_exempt",
         "institutional_13f_exemption_reason", "institutional_13f_exempt_until",
         "short_pct_float_exempt", "short_pct_float_exemption_reason",
+        "borrow_exempt", "borrow_exemption_reason",
         "form4_exempt", "form4_exemption_reason", "form4_cik",
         "form4_security_title_regex", "form4_security_title_exclude_regex",
     ]
@@ -279,11 +325,13 @@ def build_positioning_universe_csv(config: dict[str, Any], *, base_dir: Path, ou
         for field in row:
             if field not in fieldnames:
                 fieldnames.append(field)
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n")
-        writer.writeheader()
-        for ticker in sorted(rows_by_ticker):
-            writer.writerow(rows_by_ticker[ticker])
+    # This CSV is a functional input to the FINRA/13F/IBKR syncs: a truncated
+    # partial write would silently shrink the sync universe, so write atomically.
+    write_csv_atomic(
+        output_path,
+        fieldnames,
+        [rows_by_ticker[ticker] for ticker in sorted(rows_by_ticker)],
+    )
     LOGGER.info("Built positioning universe CSV: %s rows=%d", output_path, len(rows_by_ticker))
     return output_path
 
@@ -298,6 +346,10 @@ def load_source_to_internal_map(tickers_csv: Path) -> dict[str, str]:
     return mapping
 
 
+DILUTED_SHARES_PROXY_SOURCE = "industrials_sec_diluted_shares_proxy"
+SHARE_COUNT_PROXY_SOURCE = "industrials_sec_share_count_proxy"
+
+
 def ingest_industrials_diluted_share_proxies(
     conn: Any,
     *,
@@ -305,6 +357,7 @@ def ingest_industrials_diluted_share_proxies(
     source_to_internal: dict[str, str],
     history_start_date: date,
     end_date: date,
+    model_family: str,
 ) -> int:
     """Load canonical diluted shares as a transparent short-interest denominator proxy."""
     if not industrials_db_path.exists():
@@ -316,7 +369,10 @@ def ingest_industrials_diluted_share_proxies(
         return 0
     now = utc_now()
     rows_to_upsert: list[tuple[Any, ...]] = []
-    proxy_rows_by_key: dict[tuple[str, str, str], tuple[int, tuple[Any, ...]]] = {}
+    # Keyed by (source_ticker, asof) only: the diluted-shares and share-count
+    # feeds are folded into ONE winner per key with an explicit rank resolved in
+    # Python, so the pct-float denominator never depends on SQLite row order.
+    proxy_rows_by_key: dict[tuple[str, str], tuple[tuple[int, str, float, str], tuple[Any, ...]]] = {}
 
     def add_proxy_row(
         *,
@@ -331,7 +387,10 @@ def ingest_industrials_diluted_share_proxies(
         if shares < 100_000.0:
             return
         for source_ticker in internal_to_sources.get(internal_ticker, []):
-            key = (source_ticker, asof.isoformat(), source)
+            key = (source_ticker, asof.isoformat())
+            # Deterministic total order: lower priority wins; ties broken by
+            # source name, then larger share count, then accession number.
+            rank = (priority, source, -shares, accession_number)
             row = (
                 source_ticker,
                 asof.isoformat(),
@@ -350,8 +409,8 @@ def ingest_industrials_diluted_share_proxies(
                 now,
             )
             current = proxy_rows_by_key.get(key)
-            if current is None or priority < current[0]:
-                proxy_rows_by_key[key] = (priority, row)
+            if current is None or rank < current[0]:
+                proxy_rows_by_key[key] = (rank, row)
 
     industrials_conn = None
     try:
@@ -363,14 +422,14 @@ def ingest_industrials_diluted_share_proxies(
             f"""
             SELECT ticker, period_end, filing_date, accepted_at, accession_number, value
             FROM fact_financial_statement_canonical
-            WHERE model_family = 'defense'
+            WHERE model_family = ?
               AND canonical_metric = 'diluted_shares'
               AND ticker IN ({placeholders})
               AND COALESCE(value, 0.0) > 0.0
               AND COALESCE(NULLIF(accepted_at, ''), filing_date, period_end) <= ?
             ORDER BY ticker, period_end, filing_date
             """,
-            (*internal_tickers, end_date.isoformat()),
+            (model_family, *internal_tickers, end_date.isoformat()),
         ).fetchall()
         raw_rows = industrials_conn.execute(
             f"""
@@ -378,7 +437,7 @@ def ingest_industrials_diluted_share_proxies(
                    taxonomy, concept_name, raw_value
             FROM fact_sec_xbrl_fact_raw
             WHERE ticker IN ({placeholders})
-              AND unit = 'shares'
+              AND UPPER(unit) = 'SHARES'
               AND COALESCE(NULLIF(accepted_at, ''), filing_date, period_end) <= ?
               AND concept_name IN (
                   'AdjustedWeightedAverageShares',
@@ -411,7 +470,7 @@ def ingest_industrials_diluted_share_proxies(
             asof=asof,
             source_asof=source_asof,
             shares=shares,
-            source="industrials_sec_diluted_shares_proxy",
+            source=DILUTED_SHARES_PROXY_SOURCE,
             accession_number=str(row["accession_number"] or ""),
             priority=10,
         )
@@ -440,12 +499,42 @@ def ingest_industrials_diluted_share_proxies(
             asof=asof,
             source_asof=source_asof,
             shares=shares,
-            source="industrials_sec_share_count_proxy",
+            source=SHARE_COUNT_PROXY_SOURCE,
             accession_number=str(row["accession_number"] or ""),
             priority=concept_priority.get(concept, 100),
         )
     rows_to_upsert = [item[1] for item in proxy_rows_by_key.values()]
+    if not rows_to_upsert:
+        LOGGER.warning(
+            "No diluted-share/share-count proxy rows produced from %s for model_family=%s; "
+            "existing float_shares_snapshots rows left untouched.",
+            industrials_db_path,
+            model_family,
+        )
+        return 0
+    all_source_tickers = sorted({st for sources in internal_to_sources.values() for st in sources})
     with conn:
+        # Rebuild both proxy feeds for the window atomically: without this, a
+        # loser-source row from a prior run coexists with the winner at the same
+        # (ticker, asof_date) and the pct-float backfill picks between them by
+        # SQLite row order (all its tie-breakers tie within a run).
+        ticker_qmarks = ",".join("?" for _ in all_source_tickers)
+        conn.execute(
+            f"""
+            DELETE FROM float_shares_snapshots
+            WHERE source IN (?, ?)
+              AND asof_date >= ?
+              AND asof_date <= ?
+              AND ticker IN ({ticker_qmarks})
+            """,
+            (
+                DILUTED_SHARES_PROXY_SOURCE,
+                SHARE_COUNT_PROXY_SOURCE,
+                history_start_date.isoformat(),
+                end_date.isoformat(),
+                *all_source_tickers,
+            ),
+        )
         conn.executemany(
             """
             INSERT INTO float_shares_snapshots(
@@ -471,7 +560,7 @@ def ingest_industrials_diluted_share_proxies(
         conn,
         feed_name="industrials_diluted_share_proxy",
         history_start_date=history_start_date,
-        source="industrials_sec_diluted_shares_proxy",
+        source=DILUTED_SHARES_PROXY_SOURCE,
         source_file=industrials_db_path,
         row_count=len(rows_to_upsert),
         message=f"Industrials diluted-share float proxies rows={len(rows_to_upsert)}",
@@ -812,19 +901,38 @@ def main() -> None:
         if args.cache_dir
         else (PROJECT_ROOT / "output" / "market_positioning_cache").resolve()
     )
+    model_family = str(
+        args.model_family
+        or cfg_get(config, "industrials_universe.initial_subsector", "defense")
+        or "defense"
+    ).strip()
     if args.tickers_csv:
         tickers_csv = args.tickers_csv.expanduser().resolve()
-    elif cfg_bool(config, "positioning_import.include_historical_members", False):
+    else:
+        # Build the override-applied universe CSV unconditionally: overrides
+        # (CUSIP/source-ticker/IBKR mappings, exemptions) must reach the
+        # FINRA/13F/IBKR syncs even when historical members are excluded.
+        universe_csv_value = str(
+            cfg_get(
+                config,
+                "positioning_import.positioning_universe_csv",
+                "../output/industrials_cache/positioning/{model_family}_positioning_universe.csv",
+            )
+        )
+        if "{model_family}" in universe_csv_value:
+            universe_csv_value = universe_csv_value.replace("{model_family}", model_family)
+        elif model_family != "defense" and "defense" in universe_csv_value.lower():
+            raise ValueError(
+                "positioning_import.positioning_universe_csv points at a defense-scoped path "
+                f"({universe_csv_value!r}) but model_family={model_family!r}; "
+                "template {model_family} into the config value to avoid clobbering defense artifacts."
+            )
         tickers_csv = build_positioning_universe_csv(
             config,
             base_dir=base_dir,
-            output_path=resolve_path(
-                cfg_get(config, "positioning_import.positioning_universe_csv", "../output/industrials_cache/positioning/defense_positioning_universe.csv"),
-                base_dir=base_dir,
-            ),
+            output_path=resolve_path(universe_csv_value, base_dir=base_dir),
+            asof=end_date,
         )
-    else:
-        tickers_csv = resolve_path(cfg_get(config, "industrials_universe.seed_csv"), base_dir=base_dir)
     user_agent = expand_env_vars(args.user_agent or str(cfg_get(config, "yahoo_price_ingestion.user_agent", DEFAULT_USER_AGENT)))
 
     LOGGER.info("Universe CSV: %s", tickers_csv)
@@ -843,6 +951,7 @@ def main() -> None:
                     source_to_internal=source_to_internal,
                     history_start_date=history_start,
                     end_date=end_date,
+                    model_family=model_family,
                 )
                 backfilled = backfill_short_interest_float_shares(conn)
                 LOGGER.info("Loaded diluted-share float proxies rows=%d backfilled_short_interest_rows=%d", proxy_rows, backfilled)
@@ -856,6 +965,7 @@ def main() -> None:
                 source_to_internal=source_to_internal,
                 history_start_date=history_start,
                 end_date=end_date,
+                model_family=model_family,
             )
             backfilled = backfill_short_interest_float_shares(conn)
             LOGGER.info("Loaded diluted-share float proxies rows=%d backfilled_short_interest_rows=%d", proxy_rows, backfilled)
@@ -874,6 +984,7 @@ def main() -> None:
                     source_to_internal=source_to_internal,
                     history_start_date=history_start,
                     end_date=end_date,
+                    model_family=model_family,
                 )
                 backfilled = backfill_short_interest_float_shares(conn)
                 LOGGER.info("Loaded diluted-share float proxies rows=%d backfilled_short_interest_rows=%d", proxy_rows, backfilled)
@@ -924,6 +1035,7 @@ def main() -> None:
                 source_to_internal=source_to_internal,
                 history_start_date=history_start,
                 end_date=end_date,
+                model_family=model_family,
             )
             backfilled = backfill_short_interest_float_shares(conn)
             LOGGER.info("Loaded diluted-share float proxies rows=%d backfilled_short_interest_rows=%d", proxy_rows, backfilled)

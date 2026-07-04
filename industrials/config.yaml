@@ -1,9 +1,14 @@
 paths:
+  # SC-18: env-var fallback pattern is "${ENV_VAR:-machine_default}". The value after
+  # ":-" is machine-specific; set the env var when running on another host so a fresh
+  # empty DB is not silently created under a wrong path.
   database_path: "${INDUSTRIALS_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/industrials.sqlite"
-  output_dir: "../output/industrials"
-  cache_dir: "../output/industrials_cache"
+  # CF-6: removed dead keys output_dir/cache_dir (no reader). Outputs and caches are
+  # controlled per stage: *.output_csv and *.cache_dir keys below.
 
 runtime:
+  # CF-10: this config value is authoritative. Several scripts still carry an in-code
+  # default of 30.0 for this key; never rely on the in-code default.
   sqlite_timeout_sec: 120.0
 
 source_registry:
@@ -11,7 +16,10 @@ source_registry:
 
 industrials_universe:
   initial_subsector: "defense"
-  expected_ticker_count: 94
+  # CF-4: expected_ticker_count lives ONLY in the universe policy YAML
+  # (defense/data/defense_universe_policy.yaml -> expected_ticker_count). The config
+  # copy was removed as a duplicated source of truth; readers (01/02/06/08_validate/04b)
+  # are being unified on the policy YAML. Do not re-add a copy here.
   seed_csv: "defense/system_csvs/defense_tickers.csv"
   seed_source_id: "defense_ticker_seed"
   policy_path: "defense/data/defense_universe_policy.yaml"
@@ -25,7 +33,9 @@ industrials_universe:
   ticker_aliases_source_id: "defense_ticker_alias_seed"
   listing_dates_csv: "defense/system_csvs/defense_listing_dates.csv"
   cik_ticker_overrides_csv: "defense/system_csvs/defense_cik_ticker_overrides.csv"
-  cik_ticker_overrides_source_id: "defense_cik_ticker_overrides"
+  # CF-6: removed dead key cik_ticker_overrides_source_id (no reader). The override
+  # CSV above is applied directly by the defense loaders/validators; no source-registry
+  # id is recorded for it.
   optimization_start_date: "2010-01-01"
   delisted_default_start_date: "2000-01-01"
   sector: "Industrials"
@@ -34,7 +44,9 @@ industrials_universe:
   country: "United States"
   currency: "USD"
   benchmark_ticker: "XAR"
-  robustness_benchmark_ticker: "ITA"
+  # CF-6: removed dead key robustness_benchmark_ticker (no reader). Actual controls:
+  # benchmark_tickers below (price sync), market_feature_build.secondary_benchmarks
+  # (feature columns), and oos_calibration_standards.families.defense.robustness_benchmark_ticker.
   benchmark_tickers:
     - XAR
     - ITA
@@ -42,10 +54,18 @@ industrials_universe:
 
 market_data_policy:
   scoring_primary_source: "yahoo_finance_adjusted"
+  # CF-10: pinned here as the authoritative fallback chain; most scripts carry an
+  # in-code default of [] for this key (04b differs) — never rely on the in-code default.
   scoring_fallback_sources:
     - "norgate_us_equities_total_return"
+  # CF-6/MK-6: consumed by script 04's market-data policy audit, which escalates
+  # missing adjusted close to a failed severity when true (wired in the 2026-07
+  # audit remediation batch).
   require_adjusted_for_scoring: true
   max_staleness_days: 7
+  # CF-5: single source of truth for full-feature thresholds. The duplicate copies
+  # previously under market_feature_build were removed; builder (05) and the
+  # auditor/validator (04/06) must all read the two keys below.
   min_trading_days_for_full_features: 252
   min_avg_dollar_volume_60d_for_full_features: 5000000
 
@@ -56,12 +76,16 @@ yahoo_price_ingestion:
   interval: "1d"
   events: "div,splits"
   include_adjusted_close: true
-  include_benchmark_tickers: true
+  # CF-6: removed dead key include_benchmark_tickers (no reader). Benchmarks are
+  # always synced from industrials_universe.benchmark_tickers unless --skip-benchmarks
+  # is passed to script 03.
   user_agent: "${INDUSTRIALS_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
   timeout_sec: 30.0
   max_retries: 3
   parallel_workers: 4
   cache_dir: "../output/industrials_cache/yahoo_adjusted"
+  # DR-5: defense-instance path. Script in-code default output paths template
+  # {model_family}; a non-defense family run must not reuse this literal defense path.
   output_csv: "../output/industrials/defense/stage3/yahoo_adjusted_price_coverage.csv"
   ticker_start_date_overrides: {}
   retry_status_codes:
@@ -77,8 +101,14 @@ market_data_audit:
 market_feature_build:
   source_id: "yahoo_finance_adjusted"
   output_csv: "../output/industrials/defense/stage3/market_feature_coverage.csv"
-  min_trading_days_for_full_features: 252
-  min_avg_dollar_volume_60d_for_full_features: 5000000
+  # CF-5: min_trading_days_for_full_features / min_avg_dollar_volume_60d_for_full_features
+  # were removed from this block — market_data_policy above is the single source.
+  # DR-3: config-driven secondary benchmark columns (replaces the XAR/ITA literals
+  # hardcoded in script 05). Order defines the secondary rel_strength column slots;
+  # this list preserves current defense behavior.
+  secondary_benchmarks:
+    - XAR
+    - ITA
   windows:
     one_month_days: 21
     three_month_days: 63
@@ -102,7 +132,11 @@ sec_fundamentals:
   submissions_url_template: "https://data.sec.gov/submissions/CIK{cik}.json"
   companyfacts_url_template: "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
   reporting_overrides_csv: "defense/system_csvs/defense_sec_reporting_overrides.csv"
+  # CF-10: authoritative; the in-code default is 2015-01-01 — never rely on it.
   start_date: "2000-01-01"
+  # CF-10 semantics: this explicit list is authoritative and must stay non-empty.
+  # An empty list is ambiguous in code (one branch treats it as "all forms", another
+  # as {10-K, 10-Q}); do not express "all forms" by emptying this list.
   forms:
     - "10-K"
     - "10-K/A"
@@ -124,18 +158,24 @@ sec_fundamentals:
     - "424B3"
     - "424B4"
   include_historical_members: false
-  neutral_fallback_enabled: true
+  # CF-6: removed dead key neutral_fallback_enabled (no reader). Fallback/neutral
+  # profiles are auto-authored unconditionally by 08_build; the gate on them is
+  # 08_validate's --strict-fallbacks / the FN-6 zero-usable-profiles error.
   user_agent: "${INDUSTRIALS_SEC_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
   timeout_sec: 30.0
   max_retries: 3
   request_sleep_sec: 0.12
   cache_dir: "../output/industrials_cache/sec_fundamentals"
+  # FN-8: retention window (days) for raw network responses recorded by script 07;
+  # older rows are pruned each run, 0 disables pruning. Pinned to the in-code default (90).
+  raw_response_retention_days: 90
   sync_output_csv: "../output/industrials/defense/stage4/sec_fundamentals_coverage.csv"
   feature_output_csv: "../output/industrials/defense/stage4/financial_feature_coverage.csv"
 
 fx_rates:
   source_id: "yahoo_fx_rates"
-  default_usd_rate: 1.0
+  # CF-6: removed dead key default_usd_rate (no reader). USD is handled as an
+  # identity 1.0 rate in the 08_build conversion path; missing non-USD rates fail closed.
   chart_url_template: "https://query1.finance.yahoo.com/v8/finance/chart/{pair}"
   start_date: "2010-01-01"
   interval: "1d"
@@ -145,6 +185,9 @@ fx_rates:
   request_sleep_sec: 0.12
   cache_dir: "../output/industrials_cache/yahoo_fx_rates"
   output_csv: "../output/industrials/defense/stage4/fx_rate_coverage.csv"
+  # MK-3: maximum age (days before the evaluation asof) of an FX rate usable for
+  # conversion; older rates must be rejected by the 08_build lookup / 11's gating.
+  max_staleness_days: 30
   required_pairs:
     - CADUSD
     - GBPUSD
@@ -156,7 +199,15 @@ positioning_import:
   form4_source_id: "sec_insider_upstream"
   direct_ownership_source_id: "sec_ownership_direct"
   market_positioning_source_id: "market_positioning_upstream"
+  # SC-17: ranked source preference (most-preferred first) for the positioning feature
+  # readers over fact_13f_positioning / fact_short_interest / fact_ibkr_borrow_snapshot
+  # in scripts/09. Pins the single live writer id (market_positioning_source_id above);
+  # extend this list BEFORE registering any second positioning source so the feature
+  # readers stay scoped instead of silently mixing sources.
+  preferred_source_ids:
+    - market_positioning_upstream
   positioning_overrides_csv: "defense/system_csvs/defense_positioning_overrides.csv"
+  # CF-10: authoritative; the in-code default is 2016-01-01 — never rely on it.
   start_date: "2000-01-01"
   include_historical_members: true
   positioning_universe_csv: "../output/industrials_cache/positioning/defense_positioning_universe.csv"
@@ -165,6 +216,11 @@ positioning_import:
   lookback_days:
     insider: 90
     short_change: 92
+  # PS-6: staleness bounds for point-in-time positioning lookups (days before the
+  # evaluation asof). Rows older than these must not satisfy the gates or be used
+  # in features marked 'complete'.
+  max_13f_staleness_days: 120
+  max_borrow_staleness_days: 10
   require_upstream_13f_for_gate: true
   require_upstream_short_for_gate: true
   # Percent-of-float requires a float-shares source. The free FINRA feed carries
@@ -188,15 +244,39 @@ positioning_import:
       - HEI
     min_anchor_tickers_with_period: 4
 
+positioning_validation:
+  # PS-5: minimum fraction of the gated universe that must have Form 4 coverage for
+  # validator 14 to pass. 0.0 preserves prior behavior (no floor); raise deliberately
+  # once baseline coverage is known.
+  min_form4_covered_fraction: 0.0
+
+# NEW-5: removed dead key market_positioning.finra_api_publication_lag_days (no reader) — the FINRA dissemination-lag default lives in market_positioning/api_collectors.py.
+
 upstream_databases:
+  # SC-18: env-var fallback pattern is "${ENV_VAR:-machine_default}"; the defaults are
+  # machine-specific — set the env vars on other hosts. Readers must fail loudly if a
+  # db_path key is absent (never Path("None")).
+  # CF-6: removed dead access_mode keys (no reader enforced them). Read-only access is
+  # a per-connection concern in code; note script 13 read-writes market_positioning
+  # by design.
   form4:
     db_path: "${SEC_INSIDER_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite}"
-    access_mode: "read_only"
   market_positioning:
     db_path: "${MARKET_POSITIONING_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite}"
-    access_mode: "read_only"
 
 scoring_policy:
+  # DR-1/DR-5: family-scoped policy resolution. Shared scripts read
+  # scoring_policy.families.<model_family>.* and must raise loudly when the family
+  # block is absent (no silent fallback to the defense policy for other families).
+  # Default output paths template {model_family} in the scripts' in-code defaults.
+  families:
+    defense:
+      eligibility_policy_csv: "defense/system_csvs/defense_scoring_eligibility_policy.csv"
+      # DR-2: family-scoped reporting-overrides resolution for script 07 (legacy
+      # fallback: the flat sec_fundamentals.reporting_overrides_csv; keep both in sync).
+      reporting_overrides_csv: "defense/system_csvs/defense_sec_reporting_overrides.csv"
+  # Legacy flat key kept for backward compatibility while readers migrate to
+  # scoring_policy.families.defense.eligibility_policy_csv above; keep both in sync.
   defense_eligibility_policy_csv: "defense/system_csvs/defense_scoring_eligibility_policy.csv"
 
 sec_archive:
@@ -207,7 +287,13 @@ sec_archive:
   browse_edgar_atom_url_template: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form_type}&owner=exclude&count=100&output=atom"
   max_submission_history_files: 0
   max_filings_per_ticker: 0
+  # CF-10: 0 means unlimited and is authoritative; the in-code default caps at 5 —
+  # never rely on the in-code default.
   max_documents_per_filing: 0
+  # FN-2: purge guard for archive re-syncs in script 07 — a refetch that stages fewer
+  # than this fraction of the previously stored facts refuses to purge the existing
+  # archive. Pinned to the in-code default (0.5).
+  min_refetch_fact_fraction: 0.5
 
 # Consumed by the Stage 8 OOS calibration validator (not yet implemented).
 # Kept here so the provenance contract is pinned before research work begins.
@@ -215,8 +301,15 @@ oos_calibration_standards:
   version: "industrials_defense_oos_provenance_v1"
   families:
     defense:
-      calibration_provenance_version: "industrials_defense_oos_provenance_v1"
+      # CF-8: aligned with what defense/scripts/17 actually stamps on rank tables
+      # (SCORE_MODEL_VERSION = "defense_shadow_v0.1.0"). Bump both together.
+      calibration_provenance_version: "defense_shadow_v0.1.0"
       calibration_validation_method: "stage8_report_only_with_true_oos_file_standard_validator"
+      # CF-8: required by the technology-schema OOS consumers. TBD placeholders on
+      # purpose — any reader that date-parses these MUST fail loudly until Stage 8
+      # calibration sets real dates. Do not substitute provisional dates.
+      calibration_train_end_date: "TBD_NOT_YET_CALIBRATED"
+      calibration_lock_date: "TBD_NOT_YET_CALIBRATED"
       primary_benchmark_ticker: "XAR"
       robustness_benchmark_ticker: "ITA"
       snapshot_history_root: "../output/industrials/defense/dashboard"

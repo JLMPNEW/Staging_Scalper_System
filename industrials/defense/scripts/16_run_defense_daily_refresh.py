@@ -125,7 +125,7 @@ def main() -> None:
     run_step("validate positioning stage", ["industrials/scripts/14_validate_industrials_sec_positioning_stages.py", "--model-family", MODEL_FAMILY])
     run_step(
         "validate scoring eligibility",
-        ["industrials/scripts/10_validate_industrials_scoring_eligibility_policy.py", "--model-family", MODEL_FAMILY, "--asof", asof],
+        ["industrials/defense/scripts/10_validate_defense_scoring_eligibility_policy.py", "--asof", asof],
     )
     run_step("publish shadow rank table", ["industrials/defense/scripts/17_publish_defense_shadow_rank_table.py", "--asof", asof])
     run_step("validate shadow rank table", ["industrials/defense/scripts/18_validate_defense_shadow_rank_table.py", "--asof", asof])

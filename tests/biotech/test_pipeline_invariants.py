@@ -114,6 +114,24 @@ def test_final_validation_table_coverage_rejects_extra_score_ticker() -> None:
         )
 
 
+def test_weekly_reconcile_does_not_force_sec_event_full_rescan() -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_weekly_sec_events_args")
+
+    def sec_event_args_for(mode: str) -> tuple[str, ...]:
+        steps = module.pipeline_steps(
+            mode,
+            skip_ctgov=False,
+            skip_ib=False,
+            skip_yahoo=False,
+            skip_market_positioning=False,
+        )
+        return next(step.args for step in steps if step.name == "sec_events")
+
+    assert "--full-rescan" not in sec_event_args_for("daily_delta")
+    assert "--full-rescan" not in sec_event_args_for("weekly_reconcile")
+    assert sec_event_args_for("full_backfill") == ("--full-rescan",)
+
+
 def test_form4_preflight_accepts_fresh_staging_copy(tmp_path: Path) -> None:
     module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_form4_preflight_fresh")
     form4_db = tmp_path / "sec_insider.sqlite"

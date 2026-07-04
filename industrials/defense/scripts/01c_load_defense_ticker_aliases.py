@@ -71,17 +71,20 @@ def add_issue(
     issue_detail: str,
     severity: str = "warning",
     source_id: str | None = None,
+    model_family: str,
 ) -> None:
+    # SC-12: issues are family-scoped; stamp model_family so per-stage clears for
+    # one family never wipe another family's open issues.
     now = utc_now()
     conn.execute(
         """
         INSERT INTO data_quality_issues(
-            detected_at, severity, stage, ticker, source_id, issue_type,
+            detected_at, severity, stage, model_family, ticker, source_id, issue_type,
             issue_detail, resolution_status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
         """,
-        (now, severity, LOAD_STAGE, ticker, source_id, issue_type, issue_detail, now, now),
+        (now, severity, LOAD_STAGE, model_family, ticker, source_id, issue_type, issue_detail, now, now),
     )
 
 
@@ -93,7 +96,7 @@ def validate_header(path: Path) -> None:
         raise ValueError(f"{path} missing required alias column(s): {missing}")
 
 
-def load_aliases(conn: Any, *, path: Path, source_id: str) -> int:
+def load_aliases(conn: Any, *, path: Path, source_id: str, model_family: str) -> int:
     validate_header(path)
     rows = read_csv_flexible(path)
     now = utc_now()
@@ -194,6 +197,7 @@ def load_aliases(conn: Any, *, path: Path, source_id: str) -> int:
                 issue_type="unverified_ticker_alias",
                 issue_detail=f"Alias {contract_ticker}->{active_ticker} effective {effective_date} is not verified.",
                 severity="warning",
+                model_family=model_family,
             )
         count += 1
     return count
@@ -208,6 +212,9 @@ def main() -> int:
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     aliases_csv = args.aliases_csv.expanduser().resolve() if args.aliases_csv else resolve_path(cfg_get(config, "industrials_universe.ticker_aliases_csv"), base_dir=base_dir)
     source_id = str(cfg_get(config, "industrials_universe.ticker_aliases_source_id", "defense_ticker_alias_seed"))
+    model_family = str(cfg_get(config, "industrials_universe.initial_subsector", "defense") or "defense").strip()
+    if not model_family:
+        raise ValueError("model_family cannot be empty")
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
@@ -217,8 +224,13 @@ def main() -> int:
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=aliases_csv)
         try:
             with conn:
-                conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (LOAD_STAGE,))
-                row_count = load_aliases(conn, path=aliases_csv, source_id=source_id)
+                # SC-12: family-scoped clear so this load never wipes another
+                # family's open issues for the same stage.
+                conn.execute(
+                    "DELETE FROM data_quality_issues WHERE stage = ? AND model_family = ?",
+                    (LOAD_STAGE, model_family),
+                )
+                row_count = load_aliases(conn, path=aliases_csv, source_id=source_id, model_family=model_family)
             finish_run(conn, run_id=run_id, status="success", row_count=row_count, message=f"aliases={row_count}")
             LOGGER.info("Loaded defense ticker aliases: rows=%d", row_count)
         except BaseException as exc:

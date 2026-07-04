@@ -28,6 +28,9 @@ from industrials.core.text_norm import as_bool, normalize_cik, normalize_org_nam
 LOGGER = logging.getLogger("validate_defense_identity_reconciliation")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 LOAD_STAGE = "defense_identity_reconciliation"
+# EL-11: the only override kinds the CIK/ticker overrides CSV is allowed to carry.
+# Extend this set deliberately when a new override kind is introduced.
+VALID_OVERRIDE_TYPES = frozenset({"verified_sec_cik_correction", "verified_sec_cik_confirmed"})
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,45 @@ def load_cik_overrides(path: Path) -> dict[str, tuple[str, str]]:
                 raise ValueError(f"{path}: duplicate CIK override ticker={ticker}")
             overrides[ticker] = (cik, applies_to)
     return overrides
+
+
+def validate_override_approvals(path: Path) -> list[WarningRecord]:
+    """EL-11: value checks for the overrides CSV approval metadata.
+
+    approved_by must be non-empty, approved_date must parse as YYYY-MM-DD and not
+    postdate today (UTC wall clock: approvals are file hygiene, not PIT-gated), and
+    override_type must be one of VALID_OVERRIDE_TYPES. Failures are review-level
+    data-quality issues persisted per ticker, never silent passes.
+    """
+    warnings: list[WarningRecord] = []
+    today = date.today()
+    for row in read_csv_flexible(path):
+        ticker = normalize_ticker(row_get(row, "ticker"))
+        if not ticker:
+            continue
+        problems: list[str] = []
+        if not str(row_get(row, "approved_by") or "").strip():
+            problems.append("approved_by is empty")
+        approved_raw = str(row_get(row, "approved_date") or "").strip()
+        approved_date: date | None = None
+        try:
+            approved_date = datetime.strptime(approved_raw[:10], "%Y-%m-%d").date()
+        except ValueError:
+            problems.append(f"approved_date {approved_raw!r} is not a parseable YYYY-MM-DD date")
+        if approved_date is not None and approved_date > today:
+            problems.append(f"approved_date {approved_date.isoformat()} is in the future (today={today.isoformat()})")
+        override_type = str(row_get(row, "override_type") or "").strip()
+        if override_type not in VALID_OVERRIDE_TYPES:
+            problems.append(f"override_type {override_type!r} not in {sorted(VALID_OVERRIDE_TYPES)}")
+        if problems:
+            warnings.append(
+                WarningRecord(
+                    message=f"{path.name} {ticker}: override approval metadata review: {'; '.join(problems)}",
+                    tickers=(ticker,),
+                    issue_type="override_approval_metadata_review",
+                )
+            )
+    return warnings
 
 
 def override_cik_for_row(ticker: str, row: dict[str, str], overrides: dict[str, tuple[str, str]], *, scope: str) -> str:
@@ -465,6 +507,7 @@ def main() -> int:
         shared_errors, shared_warnings = shared_cik_checks(active_rows=active_rows, delisted_rows=delisted_rows)
         errors.extend(shared_errors)
         warnings.extend(shared_warnings)
+        warnings.extend(validate_override_approvals(overrides_csv))
         if not sec_mapping:
             warnings.append(
                 WarningRecord(

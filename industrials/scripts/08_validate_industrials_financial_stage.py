@@ -18,35 +18,25 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import connect, init_db  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
+from industrials.core.policy_loader import load_eligibility_policy  # noqa: E402
+from industrials.core.profiles import FPI_HYBRID_PROFILES, VALID_REPORTING_PROFILES  # noqa: E402
 from industrials.core.text_norm import normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("validate_industrials_financial_stage")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 FEATURE_STAGE = "build_industrials_financial_features"
-VALID_PROFILES = {
-    "SEC_XBRL_US_GAAP",
-    "SEC_XBRL_IFRS",
-    "SEC_XBRL_US_GAAP_PARTIAL",
-    "SEC_XBRL_IFRS_PARTIAL",
-    "SEC_20F_METADATA_ONLY",
-    "SEC_ARCHIVE_TEXT_TABLE",
-    "SEC_ARCHIVE_TEXT_TABLE_PARTIAL",
-    "FPI_HYBRID_STUB_LOADED",
-    "FPI_HYBRID_LOADED",
-    "FOREIGN_VENDOR_FUNDAMENTALS",
-    "FOREIGN_NEUTRAL_LOW_CONFIDENCE",
-    "NO_FINANCIALS_REVIEW",
-    "SEC_RAW_ARCHIVE_REQUIRED",
-    "RECENT_IPO_DEVELOPMENT_STAGE",
-    "RECENT_PUBLIC_STUB",
-    "PRIVATE_EXCLUDE",
-    "PARENT_SEGMENT_NO_STANDALONE_SEC",
-    "SPINOFF_SEGMENT_BRIDGE_REVIEW",
-    "SPINOFF_SEGMENT_BRIDGE",
-    "NON_FILING_OR_PENDING_REPORTING",
-}
-FPI_HYBRID_PROFILES = {"FPI_HYBRID_STUB_LOADED", "FPI_HYBRID_LOADED"}
+DEFAULT_MAX_NEUTRAL_ROW_FRACTION = 0.5
+# FN-14: unsuffixed TTM/net_cash columns hold local reported-currency values;
+# the *_usd variants carry the USD conversion (TTM-window-average FX).
+TTM_USD_COLUMN_PAIRS = [
+    ("revenue_ttm", "revenue_ttm_usd"),
+    ("gross_profit_ttm", "gross_profit_ttm_usd"),
+    ("operating_income_ttm", "operating_income_ttm_usd"),
+    ("net_income_ttm", "net_income_ttm_usd"),
+    ("free_cash_flow_ttm", "free_cash_flow_ttm_usd"),
+    ("net_cash", "net_cash_usd"),
+]
 ACCEPTED_DATE_SQL = """
 CASE
     WHEN COALESCE(accepted_at, '') GLOB '????-??-??*' THEN SUBSTR(accepted_at, 1, 10)
@@ -124,6 +114,39 @@ def load_universe(conn: Any, model_family: str, *, asof: date | None) -> list[st
     return [normalize_ticker(row["ticker"]) for row in rows if normalize_ticker(row["ticker"])]
 
 
+def resolve_eligibility_policy_path(config: dict[str, Any], *, base_dir: Path, model_family: str) -> Path:
+    family_key = f"scoring_policy.families.{model_family}.eligibility_policy_csv"
+    policy_path_raw = str(cfg_get(config, family_key, "") or "").strip()
+    if not policy_path_raw and model_family == "defense":
+        policy_path_raw = str(cfg_get(config, "scoring_policy.defense_eligibility_policy_csv", "") or "").strip()
+    if not policy_path_raw:
+        raise ValueError(f"Missing eligibility policy CSV config for model_family={model_family}: set {family_key}")
+    policy_path = resolve_path(policy_path_raw, base_dir=base_dir)
+    if not policy_path.exists():
+        raise FileNotFoundError(f"Eligibility policy CSV configured at {family_key} does not exist: {policy_path}")
+    return policy_path
+
+
+def check_policy_profile_coverage(config: dict[str, Any], *, base_dir: Path, model_family: str, asof: date, errors: list[str]) -> None:
+    """Cross-check the scoring eligibility policy CSV against the shared profile vocabulary.
+
+    Every profile stage 07 can emit must have at least one policy row; unknown
+    profile names in the CSV are typos or vocabulary drift. Both fail loudly.
+    Coverage is evaluated at the validation asof (NEW-2): the loader selects
+    the policy rows in force at that date (valid_from same-day inclusive), so
+    versioned policy keys load deterministically instead of raising.
+    """
+    policy_path = resolve_eligibility_policy_path(config, base_dir=base_dir, model_family=model_family)
+    policies = load_eligibility_policy(policy_path, asof=asof)
+    policy_profiles = {str(key[0]) for key in policies}
+    uncovered = sorted(VALID_REPORTING_PROFILES.difference(policy_profiles))
+    if uncovered:
+        errors.append(f"Eligibility policy CSV {policy_path} has no rows for reporting profiles: {uncovered}")
+    unknown = sorted(policy_profiles.difference(VALID_REPORTING_PROFILES))
+    if unknown:
+        errors.append(f"Eligibility policy CSV {policy_path} contains unknown reporting profiles: {unknown}")
+
+
 def validate() -> int:
     configure_utc_logging()
     args = parse_args()
@@ -135,7 +158,12 @@ def validate() -> int:
     source_id = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts") or "sec_companyfacts")
     submissions_source_id = str(cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions") or "sec_submissions")
     expected_count = int(cfg_get(config, "industrials_universe.expected_ticker_count", 0) or 0)
-    requested_asof = parse_date(args.asof)
+    asof_text = str(args.asof or "").strip()
+    requested_asof = parse_date(asof_text)
+    if asof_text and requested_asof is None:
+        # Align with siblings 04/06/07/09/10: a malformed operator date must
+        # raise, never silently validate at the latest feature asof.
+        raise ValueError(f"Unparseable --asof value: {args.asof!r}; expected YYYY-MM-DD.")
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -158,7 +186,7 @@ def validate() -> int:
             errors.append(f"Universe count mismatch: expected={expected_count} actual={len(universe)}")
         ph = placeholders(universe)
 
-        feature_asof = args.asof.strip() or value(
+        feature_asof = (requested_asof.isoformat() if requested_asof is not None else "") or value(
             conn,
             f"""
             SELECT MAX(asof_date)
@@ -187,6 +215,10 @@ def validate() -> int:
         else:
             LOGGER.info("Stage 4 financial validation asof=%s", audit_asof.isoformat())
 
+        # NEW-2: pass the validation asof so versioned policy keys resolve to
+        # the row in force at this asof instead of raising on load.
+        check_policy_profile_coverage(config, base_dir=base_dir, model_family=model_family, asof=audit_asof, errors=errors)
+
         profile_rows = conn.execute(
             f"""
             SELECT ticker, reporting_profile, reporting_standard, usable_xbrl_flag,
@@ -205,7 +237,7 @@ def validate() -> int:
         invalid_profiles = [
             f"{row['ticker']}:{row['reporting_profile']}"
             for row in profile_rows
-            if str(row["reporting_profile"] or "") not in VALID_PROFILES
+            if str(row["reporting_profile"] or "") not in VALID_REPORTING_PROFILES
         ]
         if invalid_profiles:
             errors.append(f"Invalid reporting profiles: {invalid_profiles}")
@@ -243,6 +275,8 @@ def validate() -> int:
         recent_stub_missing_observation = []
         fpi_hybrid_gate_errors = []
         spinoff_bridge_gate_errors = []
+        ttm_usd_gap_errors = []
+        ttm_usd_gap_warnings = []
         for row in feature_rows:
             ticker = str(row["ticker"])
             status = str(row["data_quality_status"] or "")
@@ -264,6 +298,16 @@ def validate() -> int:
                 non_usd_missing_fx.append(ticker)
             if status == "complete" and (row["revenue_usd"] is None or row["assets_usd"] is None):
                 complete_missing_core.append(ticker)
+            # FN-14: local and USD TTM/net_cash columns must move together for
+            # USD-native rows (local == USD, so a gap is a writer bug). For
+            # converted rows a missing TTM-window-average FX rate can
+            # legitimately leave *_usd NULL, so that is visibility-only.
+            for local_col, usd_col in TTM_USD_COLUMN_PAIRS:
+                if row[local_col] is not None and row[usd_col] is None:
+                    if fx_status == "usd_native":
+                        ttm_usd_gap_errors.append(f"{ticker}:{usd_col}")
+                    elif fx_status == "converted_to_usd":
+                        ttm_usd_gap_warnings.append(f"{ticker}:{usd_col}")
             if reporting_profile == "RECENT_PUBLIC_STUB" and "revenue_not_annual" in review_reason:
                 missing_stub_fields = [
                     field
@@ -289,6 +333,10 @@ def validate() -> int:
                     ]
                     if missing_stub_fields:
                         fpi_hybrid_gate_errors.append(f"{ticker}:missing_stub_fields={','.join(missing_stub_fields)}")
+                    # FN-14: revenue_ttm is the LOCAL-currency TTM; it is the
+                    # correct availability probe here (a full-year window
+                    # exists or not, independent of FX; FX gaps are gated
+                    # separately above).
                     if status == "complete" and row["revenue_ttm"] is None:
                         fpi_hybrid_gate_errors.append(f"{ticker}:stub_only_row_marked_complete")
                 if reporting_profile == "FPI_HYBRID_LOADED":
@@ -310,10 +358,25 @@ def validate() -> int:
             errors.append(f"FPI hybrid profile gate failures: {fpi_hybrid_gate_errors}")
         if spinoff_bridge_gate_errors:
             errors.append(f"Spinoff segment bridge profile gate failures: {spinoff_bridge_gate_errors}")
+        if ttm_usd_gap_errors:
+            errors.append(f"USD-native rows missing *_usd TTM/net_cash values (FN-14 writer contract): {ttm_usd_gap_errors}")
+        if ttm_usd_gap_warnings:
+            warnings.append(f"Converted rows with local TTM/net_cash but no USD conversion (TTM-window FX unavailable): {ttm_usd_gap_warnings}")
         if non_usd_missing_fx:
             warnings.append(f"Non-USD rows missing FX and held in review: {non_usd_missing_fx}")
         if fallback_rows and args.strict_fallbacks:
             errors.append(f"Neutral-low-confidence fallback rows present under --strict-fallbacks: {fallback_rows}")
+        max_neutral_fraction = float(
+            cfg_get(config, "financial_validation.max_neutral_row_fraction", DEFAULT_MAX_NEUTRAL_ROW_FRACTION)
+        )
+        if feature_rows:
+            neutral_fraction = len(fallback_rows) / len(feature_rows)
+            if neutral_fraction > max_neutral_fraction:
+                errors.append(
+                    "Neutral-low-confidence fallback rows exceed the allowed panel fraction: "
+                    f"{len(fallback_rows)}/{len(feature_rows)}={neutral_fraction:.3f} > "
+                    f"max_neutral_row_fraction={max_neutral_fraction:.3f}"
+                )
 
         usable_profiles = [
             str(row["ticker"])
@@ -463,7 +526,26 @@ def validate() -> int:
                 warnings.append(f"Archive text-table QC warnings: {[dict(row) for row in archive_qc_rows]}")
             warnings.append(f"Usable XBRL profiles={len(usable_profiles)} raw_facts={raw_count} mapped_facts={mapped_count} canonical_facts={canonical_count}")
         else:
-            warnings.append("No usable SEC XBRL profiles found; all financial rows should be explicit fallbacks until sync/vendor data is loaded.")
+            active_filer_rows = conn.execute(
+                f"""
+                SELECT ticker
+                FROM dim_company
+                WHERE is_active = 1
+                  AND COALESCE(cik, '') <> ''
+                  AND ticker IN ({ph})
+                ORDER BY ticker
+                """,
+                (*universe,),
+            ).fetchall()
+            active_filers = [str(row["ticker"]) for row in active_filer_rows]
+            if active_filers:
+                errors.append(
+                    "No usable SEC XBRL profiles found although the universe contains "
+                    f"{len(active_filers)} active SEC filers with CIKs (stage 07 never ran or its facts were wiped): "
+                    f"{active_filers}"
+                )
+            else:
+                warnings.append("No usable SEC XBRL profiles found; all financial rows should be explicit fallbacks until sync/vendor data is loaded.")
 
         future_canonical = scalar(
             conn,
@@ -495,17 +577,36 @@ def validate() -> int:
             (FEATURE_STAGE, *universe),
         ).fetchall()
         review_issue_tickers = {str(row["ticker"]) for row in review_issue_rows}
+        out_of_universe_issue_rows = conn.execute(
+            f"""
+            SELECT DISTINCT ticker
+            FROM data_quality_issues
+            WHERE stage = ?
+              AND issue_type = 'financial_feature_review'
+              AND resolution_status = 'open'
+              AND ticker NOT IN ({ph})
+            """,
+            (FEATURE_STAGE, *universe),
+        ).fetchall()
+        out_of_universe_issue_tickers = sorted(str(row["ticker"]) for row in out_of_universe_issue_rows)
         # review_rows holds "ticker:status:reason" strings; recover the ticker key.
         review_feature_tickers = {entry.split(":", 1)[0] for entry in review_rows}
-        if review_rows and audit_asof.isoformat() == str(latest_feature_asof or "").strip() and review_feature_tickers != review_issue_tickers:
-            missing_issues = sorted(review_feature_tickers.difference(review_issue_tickers))
-            stale_issues = sorted(review_issue_tickers.difference(review_feature_tickers))
-            errors.append(
-                "Financial review issue mismatch: "
-                f"review_features={len(review_feature_tickers)} issues={len(review_issue_tickers)} "
-                f"missing_issues={missing_issues} stale_issues={stale_issues}"
-            )
-        elif review_rows and audit_asof.isoformat() != str(latest_feature_asof or "").strip():
+        at_latest_asof = audit_asof.isoformat() == str(latest_feature_asof or "").strip()
+        if at_latest_asof:
+            if review_feature_tickers != review_issue_tickers:
+                missing_issues = sorted(review_feature_tickers.difference(review_issue_tickers))
+                stale_issues = sorted(review_issue_tickers.difference(review_feature_tickers))
+                errors.append(
+                    "Financial review issue mismatch: "
+                    f"review_features={len(review_feature_tickers)} issues={len(review_issue_tickers)} "
+                    f"missing_issues={missing_issues} stale_issues={stale_issues}"
+                )
+            if out_of_universe_issue_tickers:
+                errors.append(
+                    "Open financial review issues exist for tickers outside the "
+                    f"{model_family} universe (resolve or reassign them): {out_of_universe_issue_tickers}"
+                )
+        elif review_rows or review_issue_tickers or out_of_universe_issue_tickers:
             warnings.append(
                 "Skipped financial review issue parity for historical asof="
                 f"{audit_asof.isoformat()}; data_quality_issues stores the latest build state, not an immutable as-of ledger."

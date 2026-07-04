@@ -1,3 +1,6 @@
+# CF-4: single source of truth for the expected universe size. The duplicate copy in
+# industrials/config.yaml (industrials_universe.expected_ticker_count) was removed;
+# all readers are being unified on this key. Update it here only.
 expected_ticker_count: 94
 default_sector: Industrials
 default_industry: Aerospace & Defense

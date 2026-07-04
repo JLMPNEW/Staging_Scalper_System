@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import json
 import logging
 import math
+import os
 import sys
 import time
 from contextlib import closing
@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
+from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
 from industrials.core.text_norm import normalize_ticker  # noqa: E402
 
@@ -148,6 +149,58 @@ def to_float(raw: object) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def to_int(raw: object) -> int | None:
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def regular_session_bounds(meta: dict[str, Any]) -> tuple[int | None, int | None, int | None]:
+    """Return (regular_start, regular_end, regular_market_time) epoch seconds from chart meta."""
+    raw_period = meta.get("currentTradingPeriod")
+    period = cast(dict[str, Any], raw_period) if isinstance(raw_period, dict) else {}
+    raw_regular = period.get("regular")
+    regular = cast(dict[str, Any], raw_regular) if isinstance(raw_regular, dict) else {}
+    return to_int(regular.get("start")), to_int(regular.get("end")), to_int(meta.get("regularMarketTime"))
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Write text to a temp file and os.replace() it into place so readers never see a truncated file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def cached_payload_stale_reason(payload_text: str) -> str | None:
+    """Return why a cached chart payload must be discarded, or None when it is safe to reuse.
+
+    Two invalidation rules:
+    - Corrupt (truncated / non-JSON) cache files must be deleted and refetched
+      instead of poisoning the ticker on every run.
+    - A payload captured while the regular session was still in progress
+      (regularMarketTime < currentTradingPeriod.regular.end) must not be served
+      once that session has closed, otherwise the completed session's final bar
+      is never observed for this (ticker, start, end) cache key.
+    """
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        return f"json_decode_error: {exc}"
+    chart = payload.get("chart") if isinstance(payload, dict) else None
+    results = chart.get("result") if isinstance(chart, dict) else None
+    first = results[0] if isinstance(results, list) and results and isinstance(results[0], dict) else {}
+    raw_meta = first.get("meta") if isinstance(first, dict) else None
+    meta = cast(dict[str, Any], raw_meta) if isinstance(raw_meta, dict) else {}
+    _, regular_end, market_time = regular_session_bounds(meta)
+    if regular_end is None or market_time is None:
+        return None
+    if market_time < regular_end and int(datetime.now(timezone.utc).timestamp()) >= regular_end:
+        return "intraday_payload_for_completed_session"
+    return None
+
+
 def int_set(raw: object, default: set[int]) -> set[int]:
     values = raw if isinstance(raw, list) else list(default)
     out: set[int] = set()
@@ -254,7 +307,17 @@ def append_benchmarks(jobs: list[PriceJob], benchmark_tickers: list[str], *, ski
     return out
 
 
-def existing_coverage_row(conn: Any, job: PriceJob, *, source_id: str, required_through_date: date) -> dict[str, Any] | None:
+COVERAGE_START_TOLERANCE_DAYS = 7
+
+
+def existing_coverage_row(
+    conn: Any,
+    job: PriceJob,
+    *,
+    source_id: str,
+    required_start_date: date,
+    required_through_date: date,
+) -> dict[str, Any] | None:
     row = conn.execute(
         """
         SELECT
@@ -275,6 +338,14 @@ def existing_coverage_row(conn: Any, job: PriceJob, *, source_id: str, required_
     first_bar_date = parse_date(row["first_bar_date"])
     last_bar_date = parse_date(row["last_bar_date"])
     if bars == 0 or adjusted_bars == 0 or first_bar_date is None or last_bar_date is None:
+        return None
+    if adjusted_bars != bars:
+        # Partial adjustment coverage (NULL adj_close bars) is not "current"; refetch.
+        return None
+    if first_bar_date > required_start_date + timedelta(days=COVERAGE_START_TOLERANCE_DAYS):
+        # Stored history starts later than the requested window (beyond a small
+        # weekend/holiday tolerance): a prior narrow-window fetch or an explicit
+        # earlier --start-date must force a refetch rather than be skipped.
         return None
     if last_bar_date < required_through_date:
         return None
@@ -305,7 +376,10 @@ def existing_coverage_row(conn: Any, job: PriceJob, *, source_id: str, required_
         "latest_adj_close": latest["adj_close"] if latest is not None else "",
         "price_adjustment": latest["price_adjustment"] if latest is not None else "",
         "is_adjusted": latest["is_adjusted"] if latest is not None else 0,
-        "review_reason": f"Existing adjusted OHLCV is current through expected trading date {required_through_date.isoformat()}.",
+        "review_reason": (
+            f"Existing fully adjusted OHLCV covers {first_bar_date.isoformat()}..{last_bar_date.isoformat()} "
+            f"for requested window {required_start_date.isoformat()}..{required_through_date.isoformat()}."
+        ),
     }
 
 
@@ -333,6 +407,29 @@ def fetch_chart_payload(
         if attempt < max_retries:
             time.sleep(min(2.0 * (attempt + 1), 10.0))
     return 0, json.dumps({"error": last_error})
+
+
+def without_unclosed_trailing_bar(bars: list[YahooBar], last_bar_ts: int | None, meta: dict[str, Any]) -> list[YahooBar]:
+    """Drop the trailing in-progress session bar so intraday close/volume is never stored as final OHLCV.
+
+    Yahoo's v8 chart payload includes the current regular session's partial bar
+    while the market is open. The bar is kept only once the session is closed
+    (meta.regularMarketTime >= meta.currentTradingPeriod.regular.end). When the
+    session metadata is missing we cannot prove the session closed, so a
+    trailing bar dated today (UTC) is dropped as well; it is re-fetched on the
+    next run once the session is verifiably complete.
+    """
+    if not bars:
+        return bars
+    regular_start, regular_end, market_time = regular_session_bounds(meta)
+    if regular_start is not None and regular_end is not None and market_time is not None:
+        session_closed = market_time >= regular_end
+        if not session_closed and last_bar_ts is not None and last_bar_ts >= regular_start:
+            return bars[:-1]
+        return bars
+    if bars[-1].bar_date == datetime.now(timezone.utc).date().isoformat():
+        return bars[:-1]
+    return bars
 
 
 def parse_chart_result(job: PriceJob, payload_text: str, source_id: str) -> tuple[list[YahooBar], list[CorporateAction], dict[str, Any], str]:
@@ -421,9 +518,11 @@ def parse_chart_result(job: PriceJob, payload_text: str, source_id: str) -> tupl
         )
 
     bars: list[YahooBar] = []
+    last_bar_ts: int | None = None
     for idx, raw_ts in enumerate(timestamps):
         try:
-            bar_date = datetime.fromtimestamp(int(raw_ts), tz=timezone.utc).date().isoformat()
+            bar_ts = int(raw_ts)
+            bar_date = datetime.fromtimestamp(bar_ts, tz=timezone.utc).date().isoformat()
         except (TypeError, ValueError, OSError):
             continue
         close = to_float(closes[idx] if idx < len(closes) else None)
@@ -447,6 +546,11 @@ def parse_chart_result(job: PriceJob, payload_text: str, source_id: str) -> tupl
                 is_adjusted=1 if adj is not None else 0,
             )
         )
+        last_bar_ts = bar_ts
+    trimmed = without_unclosed_trailing_bar(bars, last_bar_ts, meta)
+    if bars and not trimmed:
+        return [], actions, meta, "only_in_progress_session_bar"
+    bars = trimmed
     if not bars:
         return [], actions, meta, "no_price_bars"
     return bars, actions, meta, ""
@@ -480,11 +584,22 @@ def fetch_job(
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / cache_name(job.fetch_ticker, start_date, end_date)
     cache_status = "live"
+    payload_text: str | None = None
+    status_code = 0
     if cache_path.exists() and not force_refresh:
-        payload_text = cache_path.read_text(encoding="utf-8", errors="replace")
-        status_code = 200
-        cache_status = "cache"
-    else:
+        cached_text = cache_path.read_text(encoding="utf-8", errors="replace")
+        stale_reason = cached_payload_stale_reason(cached_text)
+        if stale_reason is None:
+            payload_text = cached_text
+            status_code = 200
+            cache_status = "cache"
+        else:
+            LOGGER.warning("Invalidating cached Yahoo payload for %s (%s); refetching.", job.fetch_ticker, stale_reason)
+            try:
+                cache_path.unlink()
+            except OSError as exc:
+                LOGGER.warning("Could not delete stale cache file %s: %s", cache_path, exc)
+    if payload_text is None:
         status_code, payload_text = fetch_chart_payload(
             endpoint=endpoint,
             query_params=query_params,
@@ -494,7 +609,7 @@ def fetch_job(
             retry_status_codes=retry_status_codes,
         )
         if status_code == 200:
-            cache_path.write_text(payload_text, encoding="utf-8")
+            write_text_atomic(cache_path, payload_text)
     bars, actions, meta, error = parse_chart_result(job, payload_text, source_id)
     if status_code != 200 and not error:
         error = f"http_status_{status_code}"
@@ -564,10 +679,11 @@ def upsert_result(conn: Any, result: FetchResult, *, source_id: str, ingestion_r
                 close = excluded.close,
                 adj_close = excluded.adj_close,
                 volume = excluded.volume,
-                dividend = excluded.dividend,
-                split_coefficient = excluded.split_coefficient,
-                dividend_amount = excluded.dividend_amount,
-                split_factor = excluded.split_factor,
+                -- Legacy dividend/split_coefficient columns are intentionally not
+                -- updated: they are the backfill source for dividend_amount /
+                -- split_factor and must not be force-NULLed on refetch.
+                dividend_amount = COALESCE(excluded.dividend_amount, fact_price_ohlcv.dividend_amount),
+                split_factor = COALESCE(excluded.split_factor, fact_price_ohlcv.split_factor),
                 price_adjustment = excluded.price_adjustment,
                 is_adjusted = excluded.is_adjusted,
                 updated_at = excluded.updated_at
@@ -666,27 +782,21 @@ def upsert_result(conn: Any, result: FetchResult, *, source_id: str, ingestion_r
     return len(result.bars), len(result.actions)
 
 
-def write_report(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDNAMES, extrasaction="ignore", lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def add_data_quality_issue(conn: Any, *, ticker: str, source_id: str, issue_type: str, detail: str, severity: str = "warning") -> None:
+def add_data_quality_issue(conn: Any, *, ticker: str, source_id: str, issue_type: str, detail: str, severity: str = "warning", model_family: str) -> None:
+    # SC-12: issues are family-scoped; stamp model_family so per-stage clears for
+    # one family never wipe another family's open issues.
     now = utc_now()
     row = conn.execute("SELECT company_id FROM dim_company WHERE ticker = ?", (ticker,)).fetchone()
     company_id = int(row["company_id"]) if row is not None else None
     conn.execute(
         """
         INSERT INTO data_quality_issues(
-            detected_at, severity, stage, ticker, company_id, source_id, issue_type,
+            detected_at, severity, stage, model_family, ticker, company_id, source_id, issue_type,
             issue_detail, resolution_status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
         """,
-        (now, severity, RUN_TYPE, ticker, company_id, source_id, issue_type, detail, now, now),
+        (now, severity, RUN_TYPE, model_family, ticker, company_id, source_id, issue_type, detail, now, now),
     )
 
 
@@ -723,10 +833,11 @@ def main() -> None:
             if ticker and override is not None:
                 ticker_start_overrides[ticker] = override
     ticker_filter = {normalize_ticker(x) for x in str(args.tickers or "").split(",") if normalize_ticker(x)}
+    sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
 
     required_through_date = last_expected_trading_day(end)
 
-    with closing(connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0)))) as conn:
+    with closing(connect(db_path, timeout_sec=sqlite_timeout_sec)) as conn:
         init_db(conn)
         registry_path = resolve_path(cfg_get(config, "source_registry.path"), base_dir=base_dir)
         upsert_source_registry(conn, load_source_registry(registry_path))
@@ -736,11 +847,21 @@ def main() -> None:
         jobs = append_benchmarks(jobs, benchmark_tickers, skip_benchmarks=bool(args.skip_benchmarks))
         if not jobs:
             raise ValueError("No industrials tickers found to fetch.")
+        job_start_dates = {
+            job.ticker: max(start, ticker_start_overrides.get(job.ticker, start), ticker_start_overrides.get(job.fetch_ticker, start))
+            for job in jobs
+        }
         skipped_report_rows: list[dict[str, Any]] = []
         if not bool(args.force_refresh):
             jobs_to_fetch: list[PriceJob] = []
             for job in jobs:
-                coverage_row = existing_coverage_row(conn, job, source_id=source_id, required_through_date=required_through_date)
+                coverage_row = existing_coverage_row(
+                    conn,
+                    job,
+                    source_id=source_id,
+                    required_start_date=job_start_dates[job.ticker],
+                    required_through_date=required_through_date,
+                )
                 if coverage_row is None:
                     jobs_to_fetch.append(job)
                 else:
@@ -759,83 +880,100 @@ def main() -> None:
         end,
     )
     results: list[FetchResult] = []
-    if jobs:
-        with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
-            futures = [
-                executor.submit(
-                    fetch_job,
-                    job,
-                    chart_url_template=chart_url_template,
-                    start_date=max(start, ticker_start_overrides.get(job.ticker, start), ticker_start_overrides.get(job.fetch_ticker, start)),
-                    end_date=end,
-                    source_id=source_id,
-                    cache_dir=cache_dir,
-                    force_refresh=bool(args.force_refresh),
-                    user_agent=user_agent,
-                    timeout_sec=timeout_sec,
-                    max_retries=max_retries,
-                    retry_status_codes=retry_status_codes,
-                    interval=str(cfg_get(config, "yahoo_price_ingestion.interval", "1d") or "1d"),
-                    events=str(cfg_get(config, "yahoo_price_ingestion.events", "div,splits") or "div,splits"),
-                    include_adjusted_close=str(cfg_get(config, "yahoo_price_ingestion.include_adjusted_close", True)).lower() in {"1", "true", "yes", "y"},
-                )
-                for job in jobs
-            ]
-            for idx, future in enumerate(as_completed(futures), start=1):
-                result = future.result()
-                results.append(result)
-                status = "ok" if result.bars and not result.error else f"error={result.error}"
-                LOGGER.info("[%d/%d] %s fetch=%s bars=%d actions=%d %s", idx, len(jobs), result.job.ticker, result.job.fetch_ticker, len(result.bars), len(result.actions), status)
-
     report_rows: list[dict[str, Any]] = list(skipped_report_rows)
     total_bars = 0
     total_actions = 0
     failures = 0
-    with closing(connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0)))) as conn:
-        init_db(conn)
-        with conn:
-            processed = sorted({result.job.ticker for result in results})
-            if processed:
-                placeholders = ",".join("?" for _ in processed)
-                conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (RUN_TYPE, *processed))
-            for result in sorted(results, key=lambda item: item.job.ticker):
-                bars_upserted, actions_upserted = upsert_result(conn, result, source_id=source_id, ingestion_run_id=ingestion_run_id, request_asof=end)
-                total_bars += bars_upserted
-                total_actions += actions_upserted
-                if result.error:
-                    failures += 1
-                    add_data_quality_issue(conn, ticker=result.job.ticker, source_id=source_id, issue_type="yahoo_price_fetch_failed", detail=result.error, severity="error")
-                elif not result.bars:
-                    failures += 1
-                    add_data_quality_issue(conn, ticker=result.job.ticker, source_id=source_id, issue_type="no_yahoo_price_bars", detail="Yahoo returned no usable daily bars.", severity="error")
-                first_bar = result.bars[0] if result.bars else None
-                latest_bar = result.bars[-1] if result.bars else None
-                report_rows.append(
-                    {
-                        "ticker": result.job.ticker,
-                        "fetch_ticker": result.job.fetch_ticker,
-                        "company_name": result.job.company_name,
-                        "is_benchmark": int(result.job.is_benchmark),
-                        "alias_routed": int(result.job.fetch_ticker != result.job.ticker),
-                        "source_id": source_id,
-                        "status": "success" if result.bars and not result.error else "failed",
-                        "bars_upserted": bars_upserted,
-                        "actions_upserted": actions_upserted,
-                        "first_bar_date": first_bar.bar_date if first_bar else "",
-                        "last_bar_date": latest_bar.bar_date if latest_bar else "",
-                        "latest_close": latest_bar.close if latest_bar else "",
-                        "latest_adj_close": latest_bar.adj_close if latest_bar else "",
-                        "price_adjustment": latest_bar.price_adjustment if latest_bar else "",
-                        "is_adjusted": latest_bar.is_adjusted if latest_bar else 0,
-                        "review_reason": result.error,
-                    }
-                )
-            status = "partial" if failures else "success"
-            if failures and not bool(args.allow_partial):
-                status = "failed"
-            finish_ingestion_run(conn, ingestion_run_id, status=status, request_count=len(results), row_count=total_bars, message=f"bars={total_bars} actions={total_actions} failures={failures}")
-            finish_run(conn, run_id=run_id, status=status, row_count=total_bars, message=f"tickers={len(results)} bars={total_bars} actions={total_actions} failures={failures}")
-    write_report(output_csv, report_rows)
+    try:
+        if jobs:
+            with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+                futures = [
+                    executor.submit(
+                        fetch_job,
+                        job,
+                        chart_url_template=chart_url_template,
+                        start_date=job_start_dates[job.ticker],
+                        end_date=end,
+                        source_id=source_id,
+                        cache_dir=cache_dir,
+                        force_refresh=bool(args.force_refresh),
+                        user_agent=user_agent,
+                        timeout_sec=timeout_sec,
+                        max_retries=max_retries,
+                        retry_status_codes=retry_status_codes,
+                        interval=str(cfg_get(config, "yahoo_price_ingestion.interval", "1d") or "1d"),
+                        events=str(cfg_get(config, "yahoo_price_ingestion.events", "div,splits") or "div,splits"),
+                        include_adjusted_close=str(cfg_get(config, "yahoo_price_ingestion.include_adjusted_close", True)).lower() in {"1", "true", "yes", "y"},
+                    )
+                    for job in jobs
+                ]
+                for idx, future in enumerate(as_completed(futures), start=1):
+                    result = future.result()
+                    results.append(result)
+                    status = "ok" if result.bars and not result.error else f"error={result.error}"
+                    LOGGER.info("[%d/%d] %s fetch=%s bars=%d actions=%d %s", idx, len(jobs), result.job.ticker, result.job.fetch_ticker, len(result.bars), len(result.actions), status)
+
+        with closing(connect(db_path, timeout_sec=sqlite_timeout_sec)) as conn:
+            init_db(conn)
+            with conn:
+                processed = sorted({result.job.ticker for result in results})
+                if processed:
+                    placeholders = ",".join("?" for _ in processed)
+                    # SC-12: family-scoped clear so this run never wipes another
+                    # family's open issues for the same ticker/stage.
+                    conn.execute(
+                        f"DELETE FROM data_quality_issues WHERE stage = ? AND model_family = ? AND ticker IN ({placeholders})",
+                        (RUN_TYPE, model_family, *processed),
+                    )
+                for result in sorted(results, key=lambda item: item.job.ticker):
+                    bars_upserted, actions_upserted = upsert_result(conn, result, source_id=source_id, ingestion_run_id=ingestion_run_id, request_asof=end)
+                    total_bars += bars_upserted
+                    total_actions += actions_upserted
+                    if result.error:
+                        failures += 1
+                        add_data_quality_issue(conn, ticker=result.job.ticker, source_id=source_id, issue_type="yahoo_price_fetch_failed", detail=result.error, severity="error", model_family=model_family)
+                    elif not result.bars:
+                        failures += 1
+                        add_data_quality_issue(conn, ticker=result.job.ticker, source_id=source_id, issue_type="no_yahoo_price_bars", detail="Yahoo returned no usable daily bars.", severity="error", model_family=model_family)
+                    first_bar = result.bars[0] if result.bars else None
+                    latest_bar = result.bars[-1] if result.bars else None
+                    report_rows.append(
+                        {
+                            "ticker": result.job.ticker,
+                            "fetch_ticker": result.job.fetch_ticker,
+                            "company_name": result.job.company_name,
+                            "is_benchmark": int(result.job.is_benchmark),
+                            "alias_routed": int(result.job.fetch_ticker != result.job.ticker),
+                            "source_id": source_id,
+                            "status": "success" if result.bars and not result.error else "failed",
+                            "bars_upserted": bars_upserted,
+                            "actions_upserted": actions_upserted,
+                            "first_bar_date": first_bar.bar_date if first_bar else "",
+                            "last_bar_date": latest_bar.bar_date if latest_bar else "",
+                            "latest_close": latest_bar.close if latest_bar else "",
+                            "latest_adj_close": latest_bar.adj_close if latest_bar else "",
+                            "price_adjustment": latest_bar.price_adjustment if latest_bar else "",
+                            "is_adjusted": latest_bar.is_adjusted if latest_bar else 0,
+                            "review_reason": result.error,
+                        }
+                    )
+                status = "partial" if failures else "success"
+                if failures and not bool(args.allow_partial):
+                    status = "failed"
+                finish_ingestion_run(conn, ingestion_run_id, status=status, request_count=len(results), row_count=total_bars, message=f"bars={total_bars} actions={total_actions} failures={failures}")
+                finish_run(conn, run_id=run_id, status=status, row_count=total_bars, message=f"tickers={len(results)} bars={total_bars} actions={total_actions} failures={failures}")
+        write_csv_atomic(output_csv, FIELDNAMES, report_rows)
+    except BaseException as exc:
+        LOGGER.exception("Yahoo price sync failed; finalizing run bookkeeping as failed.")
+        failure_message = f"{type(exc).__name__}: {exc}"[:500]
+        try:
+            with closing(connect(db_path, timeout_sec=sqlite_timeout_sec)) as fail_conn:
+                with fail_conn:
+                    finish_ingestion_run(fail_conn, ingestion_run_id, status="failed", request_count=len(results), row_count=total_bars, message=failure_message)
+                    finish_run(fail_conn, run_id=run_id, status="failed", row_count=total_bars, message=failure_message)
+        except Exception:
+            LOGGER.exception("Could not record failed status for run_id=%s ingestion_run_id=%s", run_id, ingestion_run_id)
+        raise
     LOGGER.info("Wrote Yahoo price coverage report: %s", output_csv)
     LOGGER.info("Yahoo price sync complete: tickers=%d bars=%d actions=%d failures=%d", len(results), total_bars, total_actions, failures)
     if failures and not bool(args.allow_partial):

@@ -44,8 +44,18 @@ def _confidence(raw: object) -> float:
 
 
 def load_listing_windows(path: Path | None) -> dict[str, ListingWindow]:
-    if path is None or not path.exists():
+    # DR-2: an empty mapping is only valid when no listing-dates contract is
+    # configured at all (path is None). When config names a file that is missing,
+    # failing open would silently disable all listing/delisting eligibility
+    # bounding, so raise instead.
+    if path is None:
         return {}
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Listing-dates CSV not found: {path}. The config supplies this path explicitly; "
+            "refusing to fail open and silently disable listing/delisting eligibility bounding. "
+            "Restore the file or unset the config key."
+        )
     windows: dict[str, ListingWindow] = {}
     for row in read_csv_flexible(path):
         ticker = normalize_ticker(row_get(row, "ticker"))

@@ -4,7 +4,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import date, datetime
+from contextlib import closing
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-family", default="", help="Industrials model family to validate, e.g. defense.")
     parser.add_argument("--benchmark-tickers", default="", help="Optional comma-separated benchmark ticker override.")
     parser.add_argument("--policy", type=Path, default=None, help="Optional universe policy YAML override.")
-    parser.add_argument("--asof", default="", help="Validation date for staleness checks. Defaults to today.")
+    parser.add_argument("--asof", default="", help="Validation date (YYYY-MM-DD) for staleness checks. Defaults to the last expected trading day from today.")
     parser.add_argument("--strict-history", action="store_true", help="Fail low-history tickers instead of review-only.")
     return parser.parse_args()
 
@@ -45,6 +46,41 @@ def parse_date(raw: object) -> date | None:
         return datetime.strptime(text, "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def parse_asof_arg(raw: str) -> date | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(f"Unparseable --asof value: {raw!r} (expected YYYY-MM-DD)") from exc
+
+
+def last_expected_trading_day(day: date) -> date:
+    """Weekend-aware expected latest bar date.
+
+    This intentionally avoids a full exchange-calendar dependency. Exchange
+    holidays may still re-fetch once, which is acceptable; weekends should not.
+    """
+    expected = day
+    while expected.weekday() >= 5:
+        expected -= timedelta(days=1)
+    return expected
+
+
+def require_cfg(config: dict[str, Any], key: str) -> Any:
+    value = cfg_get(config, key, None)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise KeyError(f"Required config key missing or empty: {key}")
+    return value
+
+
+def coerce_bool(raw: Any) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "y"}
 
 
 def scalar(conn: Any, sql: str, params: tuple[Any, ...] = ()) -> int:
@@ -163,15 +199,18 @@ def validate() -> int:
     benchmark_tickers = parse_ticker_list(args.benchmark_tickers) or parse_ticker_list(cfg_get(config, "industrials_universe.benchmark_tickers", []))
     policy_path = args.policy.expanduser().resolve() if args.policy else None
     expected_count = read_expected_ticker_count(config, base_dir, policy_path)
-    min_days = int(cfg_get(config, "market_data_policy.min_trading_days_for_full_features", 252))
-    min_avg_dollar_volume_60d = float(cfg_get(config, "market_data_policy.min_avg_dollar_volume_60d_for_full_features", 0) or 0)
-    max_staleness_days = int(cfg_get(config, "market_data_policy.max_staleness_days", 7))
-    requested_asof = parse_date(args.asof)
+    # Stage thresholds come from the market_data_policy block only (single source of
+    # truth); a missing key is a config error, not an implicit fail-open default.
+    min_days = int(require_cfg(config, "market_data_policy.min_trading_days_for_full_features"))
+    min_avg_dollar_volume_60d = float(require_cfg(config, "market_data_policy.min_avg_dollar_volume_60d_for_full_features"))
+    max_staleness_days = int(require_cfg(config, "market_data_policy.max_staleness_days"))
+    require_adjusted = coerce_bool(require_cfg(config, "market_data_policy.require_adjusted_for_scoring"))
+    requested_asof = parse_asof_arg(args.asof)
 
     errors: list[str] = []
     warnings: list[str] = []
 
-    with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
+    with closing(connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0)))) as conn:
         init_db(conn)
         for check_source_id in source_ids:
             source_status = value(conn, "SELECT status FROM source_registry WHERE source_id = ?", (check_source_id,))
@@ -192,29 +231,42 @@ def validate() -> int:
         ph_universe = placeholders(universe_query)
         ph_sources = placeholders(source_ids)
         params_all = (*source_ids, *all_tickers)
-        feature_asof = args.asof.strip() or value(
-            conn,
-            f"SELECT MAX(asof_date) FROM feature_market_technical WHERE source_id IN ({ph_sources}) AND model_family = ?",
-            (*source_ids, model_family),
-        )
         if requested_asof is not None:
+            feature_asof = requested_asof.isoformat()
             audit_asof = requested_asof
         else:
-            audit_asof = parse_date(feature_asof) or max_price_bar_date(conn, source_id=source_id, tickers=all_tickers) or date.today()
-            LOGGER.info("No --asof supplied; using panel as-of date for market-stage validation: %s", audit_asof.isoformat())
+            feature_asof = value(
+                conn,
+                f"SELECT MAX(asof_date) FROM feature_market_technical WHERE source_id IN ({ph_sources}) AND model_family = ?",
+                (*source_ids, model_family),
+            )
+            audit_asof = last_expected_trading_day(date.today())
+            LOGGER.info("No --asof supplied; anchoring staleness checks to last expected trading day: %s", audit_asof.isoformat())
+            panel_max = max_price_bar_date(conn, source_id=source_id, tickers=all_tickers)
+            if panel_max is None or (audit_asof - panel_max).days > max_staleness_days:
+                errors.append(
+                    f"Price panel max bar date {panel_max.isoformat() if panel_max else 'none'} exceeds "
+                    f"max_staleness_days={max_staleness_days} vs expected trading day {audit_asof.isoformat()}"
+                )
+            feature_asof_date = parse_date(feature_asof)
+            if feature_asof_date is not None and (audit_asof - feature_asof_date).days > max_staleness_days:
+                errors.append(
+                    f"Market feature asof {feature_asof} exceeds max_staleness_days={max_staleness_days} "
+                    f"vs expected trading day {audit_asof.isoformat()}"
+                )
 
         duplicate_bars = conn.execute(
             f"""
-            SELECT ticker, bar_date, COUNT(*) AS n
+            SELECT ticker, bar_date, COUNT(DISTINCT source_id) AS n
             FROM fact_price_ohlcv
             WHERE source_id IN ({ph_sources}) AND ticker IN ({ph_all})
-            GROUP BY ticker, bar_date, source_id
-            HAVING COUNT(*) > 1
+            GROUP BY ticker, bar_date
+            HAVING COUNT(DISTINCT source_id) > 1
             """,
             params_all,
         ).fetchall()
         if duplicate_bars:
-            errors.append(f"Duplicate OHLCV rows detected: {[dict(row) for row in duplicate_bars[:10]]}")
+            errors.append(f"Cross-source duplicate OHLCV bars detected: {[dict(row) for row in duplicate_bars[:10]]}")
 
         price_asof_clause = ""
         price_params_all: tuple[Any, ...] = params_all
@@ -267,7 +319,10 @@ def validate() -> int:
                 future_bars.append(f"{ticker}:{latest_bar.isoformat()}")
 
         if no_adjusted:
-            errors.append(f"Tickers with no adjusted close: {no_adjusted}")
+            if require_adjusted:
+                errors.append(f"Tickers with no adjusted close (require_adjusted_for_scoring=true): {no_adjusted}")
+            else:
+                warnings.append(f"Tickers with no adjusted close (require_adjusted_for_scoring=false): {no_adjusted}")
         if no_adjustment_status:
             errors.append(f"Tickers missing explicit price adjustment status: {no_adjustment_status}")
         if stale:

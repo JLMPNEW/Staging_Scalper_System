@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import logging
 import math
 import statistics
 import sys
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -19,14 +19,23 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from industrials.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
+from industrials.core.db import connect, ensure_column, finish_run, init_db, start_run, utc_now  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
+from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.text_norm import normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("build_industrials_market_features")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 RUN_TYPE = "build_industrials_market_features"
+# Open membership spells are represented with this end_date sentinel so that
+# MAX() aggregation prefers an open spell over any closed one (MK-8).
+OPEN_MEMBERSHIP_END_SENTINEL = "9999-12-31"
+# Generic secondary-benchmark feature columns (DR-3). Slot N holds the
+# rel-strength vs the Nth entry (1-based, offset by the primary) of
+# market_feature_build.secondary_benchmarks, in config order.
+SECONDARY_BENCH_COLUMNS = ["rel_strength_bench2_3m", "rel_strength_bench3_3m", "rel_strength_bench4_3m"]
+MAX_SECONDARY_BENCHMARKS = len(SECONDARY_BENCH_COLUMNS)
 FIELDNAMES = [
     "ticker",
     "asof_date",
@@ -133,7 +142,7 @@ def realized_vol(rows: list[PriceRow], end_idx: int, lookback: int) -> float | N
             returns.append(math.log(cur / prev))
     if len(returns) < 20:
         return None
-    return statistics.stdev(returns) * math.sqrt(252.0) if len(returns) > 1 else 0.0
+    return statistics.stdev(returns) * math.sqrt(252.0)
 
 
 def max_drawdown(rows: list[PriceRow], end_idx: int, lookback: int) -> float | None:
@@ -162,7 +171,10 @@ def window_average(rows: list[PriceRow], end_idx: int, lookback: int, *, dollar:
     if start_idx < 0:
         return None
     if dollar:
-        return mean([row.adj_close * row.volume for row in rows[start_idx : end_idx + 1]])
+        # Traded dollar volume is unadjusted close x volume (MK-21): adj_close
+        # is dividend-adjusted while volume is split-only, so mixing them
+        # understates ADV for dividend payers.
+        return mean([row.close * row.volume for row in rows[start_idx : end_idx + 1]])
     return mean([row.volume for row in rows[start_idx : end_idx + 1]])
 
 
@@ -223,8 +235,31 @@ def load_price_rows(conn: Any, ticker: str, source_id: str, asof: date | None, s
     return out
 
 
-def load_benchmark_rows(conn: Any, source_id: str, tickers: list[str], asof: date | None) -> dict[str, list[PriceRow]]:
-    return {normalize_ticker(ticker): load_price_rows(conn, normalize_ticker(ticker), source_id, asof) for ticker in tickers}
+def load_benchmark_rows(
+    conn: Any,
+    source_ids: list[str],
+    tickers: list[str],
+    asof: date | None,
+    *,
+    min_bars: int,
+) -> dict[str, list[PriceRow]]:
+    out: dict[str, list[PriceRow]] = {}
+    for ticker in tickers:
+        normalized = normalize_ticker(ticker)
+        if not normalized:
+            continue
+        rows, bench_source_id = load_best_available_price_rows(
+            conn,
+            ticker=normalized,
+            source_ids=source_ids,
+            asof=asof,
+            start_date=None,
+            min_bars=min_bars,
+        )
+        if rows:
+            LOGGER.info("Benchmark %s loaded from source %s (%d bars)", normalized, bench_source_id, len(rows))
+        out[normalized] = rows
+    return out
 
 
 def parse_ticker_list(raw: object) -> list[str]:
@@ -281,11 +316,19 @@ def load_universe(
         asof_sql = ""
         params: list[Any] = [model_family]
         if asof is not None:
-            asof_sql = "AND m.start_date <= ? AND COALESCE(m.end_date, '9999-12-31') >= ?"
-            params.extend([asof.isoformat(), asof.isoformat()])
+            if include_historical or membership_status in ("all", "inactive"):
+                # Historical builds keep spells that ended before asof (MK-7);
+                # post-delisting price rows are gated per member via end_date
+                # instead (MK-8).
+                asof_sql = "AND m.start_date <= ?"
+                params.append(asof.isoformat())
+            else:
+                asof_sql = f"AND m.start_date <= ? AND COALESCE(m.end_date, '{OPEN_MEMBERSHIP_END_SENTINEL}') >= ?"
+                params.extend([asof.isoformat(), asof.isoformat()])
         rows = conn.execute(
             f"""
-            SELECT m.ticker, MIN(m.start_date) AS start_date, MAX(COALESCE(m.end_date, '')) AS end_date
+            SELECT m.ticker, MIN(m.start_date) AS start_date,
+                   MAX(COALESCE(m.end_date, '{OPEN_MEMBERSHIP_END_SENTINEL}')) AS end_date
             FROM dim_universe_membership m
             JOIN dim_company c
               ON c.company_id = m.company_id
@@ -297,15 +340,18 @@ def load_universe(
             """,
             tuple(params),
         ).fetchall()
-        return [
-            UniverseMember(
-                ticker=normalize_ticker(row["ticker"]),
-                start_date=parse_date(row["start_date"]),
-                end_date=parse_date(row["end_date"]),
-            )
-            for row in rows
-            if normalize_ticker(row["ticker"])
-        ]
+        members: list[UniverseMember] = []
+        for row in rows:
+            ticker = normalize_ticker(row["ticker"])
+            if not ticker:
+                continue
+            # The sentinel means at least one spell is still open, i.e. no
+            # delisting bound applies (MK-8: '' sorted below every real date,
+            # so a closed spell used to beat an open one).
+            end_raw = str(row["end_date"] or "")
+            end_date = None if end_raw >= OPEN_MEMBERSHIP_END_SENTINEL else parse_date(end_raw)
+            members.append(UniverseMember(ticker=ticker, start_date=parse_date(row["start_date"]), end_date=end_date))
+        return members
     rows = conn.execute(
         """
         SELECT DISTINCT c.ticker
@@ -321,19 +367,34 @@ def load_universe(
     return [UniverseMember(ticker=normalize_ticker(row["ticker"]), start_date=None, end_date=None) for row in rows if normalize_ticker(row["ticker"])]
 
 
-def load_first_available_price_rows(
+def load_best_available_price_rows(
     conn: Any,
     *,
     ticker: str,
     source_ids: list[str],
-    asof: date,
+    asof: date | None,
     start_date: date | None,
+    min_bars: int,
 ) -> tuple[list[PriceRow], str]:
-    for source_id in source_ids:
+    """Pick the source with the best usable coverage instead of the first non-empty one (MK-11).
+
+    Preference order: sources meeting the min_bars coverage floor, then the
+    source whose MAX(bar_date) is closest to asof (rows are already capped at
+    asof), then bar count, then configured source priority.
+    """
+    best_rows: list[PriceRow] = []
+    best_source = source_ids[0]
+    best_key: tuple[int, date, int, int] | None = None
+    for priority, source_id in enumerate(source_ids):
         rows = load_price_rows(conn, ticker, source_id, asof, start_date)
-        if rows:
-            return rows, source_id
-    return [], source_ids[0]
+        if not rows:
+            continue
+        key = (int(len(rows) >= min_bars), rows[-1].bar_date, len(rows), -priority)
+        if best_key is None or key > best_key:
+            best_key = key
+            best_rows = rows
+            best_source = source_id
+    return best_rows, best_source
 
 
 def build_feature(
@@ -343,12 +404,14 @@ def build_feature(
     source_id: str,
     model_family: str,
     asof: date,
+    membership_end: date | None,
     max_staleness_days: int,
     min_days: int,
     min_avg_dollar_volume_60d: float,
     windows: dict[str, int],
     bench_rows: dict[str, list[PriceRow]],
     primary_benchmark: str,
+    secondary_benchmarks: list[str],
 ) -> tuple[dict[str, Any], str]:
     if not rows:
         return {
@@ -376,17 +439,44 @@ def build_feature(
     avg_dollar_volume_60d = window_average(rows, end_idx, 60, dollar=True)
     low_liquidity_flag = int(min_avg_dollar_volume_60d > 0 and (avg_dollar_volume_60d is None or avg_dollar_volume_60d < min_avg_dollar_volume_60d))
 
+    rel_bench_3m = (
+        rel_strength(ret_3m, bench_rows.get(primary_benchmark), latest.bar_date, windows["three_month_days"])
+        if primary_benchmark
+        else None
+    )
+    secondary_rel: dict[str, float | None] = {}
+    missing_benchmarks: list[str] = []
+    if primary_benchmark and ret_3m is not None and rel_bench_3m is None:
+        missing_benchmarks.append(primary_benchmark)
+    for offset, column in enumerate(SECONDARY_BENCH_COLUMNS):
+        bench = secondary_benchmarks[offset] if offset < len(secondary_benchmarks) else ""
+        value = (
+            rel_strength(ret_3m, bench_rows.get(bench), latest.bar_date, windows["three_month_days"])
+            if bench
+            else None
+        )
+        secondary_rel[column] = value
+        if bench and ret_3m is not None and value is None:
+            missing_benchmarks.append(bench)
+
     reasons: list[str] = []
     if stale_days > max_staleness_days:
         reasons.append(f"stale_{stale_days}d")
-    if stale_days < 0:
-        reasons.append(f"future_bar_{latest.bar_date.isoformat()}")
+    # NOTE: rows are pre-filtered to bar_date <= asof in load_price_rows, so a
+    # future-bar sentinel here would be unreachable (MK-13); the real
+    # future-bar screen lives in script 06's market-stage validation.
+    if membership_end is not None and membership_end < asof:
+        reasons.append(f"membership_ended_{membership_end.isoformat()}")
     if len(rows) < min_days:
         reasons.append(f"low_history_{len(rows)}")
     if low_liquidity_flag:
         reasons.append("low_liquidity_60d_missing" if avg_dollar_volume_60d is None else f"low_liquidity_60d_{int(avg_dollar_volume_60d)}")
     if latest.adj_close <= 0:
         reasons.append("bad_latest_adj_close")
+    for bench in missing_benchmarks:
+        # Missing benchmark data must never leave a silent NULL rel-strength
+        # on a row marked 'complete' (MK-9).
+        reasons.append(f"missing_benchmark_{bench}")
 
     quality = "complete" if not reasons else "review"
     feature = {
@@ -400,17 +490,15 @@ def build_feature(
         "trading_days_available": len(rows),
         "latest_bar_date": latest.bar_date.isoformat(),
         "stale_days": stale_days,
-        "stale_flag": int(stale_days > max_staleness_days or stale_days < 0),
+        "stale_flag": int(stale_days > max_staleness_days),
         "low_history_flag": int(len(rows) < min_days),
         "low_liquidity_flag": low_liquidity_flag,
         "ret_1m": ret_1m,
         "ret_3m": ret_3m,
         "ret_6m": ret_6m,
         "ret_12m_ex_1m": ret_12m_ex_1m,
-        "rel_strength_bench_3m": rel_strength(ret_3m, bench_rows.get(primary_benchmark), latest.bar_date, windows["three_month_days"]),
-        "rel_strength_xar_3m": rel_strength(ret_3m, bench_rows.get("XAR"), latest.bar_date, windows["three_month_days"]),
-        "rel_strength_ita_3m": rel_strength(ret_3m, bench_rows.get("ITA"), latest.bar_date, windows["three_month_days"]),
-        "rel_strength_spy_3m": rel_strength(ret_3m, bench_rows.get("SPY"), latest.bar_date, windows["three_month_days"]),
+        "rel_strength_bench_3m": rel_bench_3m,
+        **secondary_rel,
         "avg_volume_20d": avg_volume_20d,
         "avg_volume_60d": avg_volume_60d,
         "avg_dollar_volume_20d": avg_dollar_volume_20d,
@@ -436,8 +524,8 @@ def upsert_feature(conn: Any, feature: dict[str, Any]) -> None:
             ticker, asof_date, source_id, model_family, latest_close, latest_adj_close,
             latest_volume, trading_days_available, latest_bar_date, stale_days, stale_flag,
             low_history_flag, low_liquidity_flag, ret_1m, ret_3m, ret_6m, ret_12m_ex_1m,
-            rel_strength_bench_3m, rel_strength_xar_3m, rel_strength_ita_3m,
-            rel_strength_spy_3m, avg_volume_20d, avg_volume_60d,
+            rel_strength_bench_3m, rel_strength_bench2_3m, rel_strength_bench3_3m,
+            rel_strength_bench4_3m, avg_volume_20d, avg_volume_60d,
             avg_dollar_volume_20d, avg_dollar_volume_60d, realized_vol_60d,
             max_drawdown_6m, max_drawdown_12m, distance_from_52w_high,
             ma_50d, ma_200d, above_ma_50d, above_ma_200d, market_data_quality,
@@ -459,9 +547,9 @@ def upsert_feature(conn: Any, feature: dict[str, Any]) -> None:
             ret_6m = excluded.ret_6m,
             ret_12m_ex_1m = excluded.ret_12m_ex_1m,
             rel_strength_bench_3m = excluded.rel_strength_bench_3m,
-            rel_strength_xar_3m = excluded.rel_strength_xar_3m,
-            rel_strength_ita_3m = excluded.rel_strength_ita_3m,
-            rel_strength_spy_3m = excluded.rel_strength_spy_3m,
+            rel_strength_bench2_3m = excluded.rel_strength_bench2_3m,
+            rel_strength_bench3_3m = excluded.rel_strength_bench3_3m,
+            rel_strength_bench4_3m = excluded.rel_strength_bench4_3m,
             avg_volume_20d = excluded.avg_volume_20d,
             avg_volume_60d = excluded.avg_volume_60d,
             avg_dollar_volume_20d = excluded.avg_dollar_volume_20d,
@@ -496,9 +584,9 @@ def upsert_feature(conn: Any, feature: dict[str, Any]) -> None:
             feature.get("ret_6m"),
             feature.get("ret_12m_ex_1m"),
             feature.get("rel_strength_bench_3m"),
-            feature.get("rel_strength_xar_3m"),
-            feature.get("rel_strength_ita_3m"),
-            feature.get("rel_strength_spy_3m"),
+            feature.get("rel_strength_bench2_3m"),
+            feature.get("rel_strength_bench3_3m"),
+            feature.get("rel_strength_bench4_3m"),
             feature.get("avg_volume_20d"),
             feature.get("avg_volume_60d"),
             feature.get("avg_dollar_volume_20d"),
@@ -518,28 +606,27 @@ def upsert_feature(conn: Any, feature: dict[str, Any]) -> None:
     )
 
 
-def add_issue(conn: Any, *, ticker: str, source_id: str, detail: str) -> None:
+def add_issue(conn: Any, *, ticker: str, source_id: str, detail: str, model_family: str) -> None:
+    # SC-12: issues are family-scoped; stamp model_family so per-stage clears for
+    # one family never wipe another family's open issues.
     now = utc_now()
     row = conn.execute("SELECT company_id FROM dim_company WHERE ticker = ?", (ticker,)).fetchone()
     company_id = int(row["company_id"]) if row is not None else None
     conn.execute(
         """
         INSERT INTO data_quality_issues(
-            detected_at, severity, stage, ticker, company_id, source_id, issue_type,
+            detected_at, severity, stage, model_family, ticker, company_id, source_id, issue_type,
             issue_detail, resolution_status, created_at, updated_at
         )
-        VALUES (?, 'warning', ?, ?, ?, ?, 'market_feature_review', ?, 'open', ?, ?)
+        VALUES (?, 'warning', ?, ?, ?, ?, ?, 'market_feature_review', ?, 'open', ?, ?)
         """,
-        (now, RUN_TYPE, ticker, company_id, source_id, detail, now, now),
+        (now, RUN_TYPE, model_family, ticker, company_id, source_id, detail, now, now),
     )
 
 
 def write_report(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDNAMES, extrasaction="ignore", lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv_atomic(path, FIELDNAMES, rows)
 
 
 def main() -> None:
@@ -558,19 +645,53 @@ def main() -> None:
     if not model_family:
         raise ValueError("model_family cannot be empty")
     max_staleness_days = int(cfg_get(config, "market_data_policy.max_staleness_days", 7))
-    min_days = int(cfg_get(config, "market_feature_build.min_trading_days_for_full_features", 252))
+    # market_data_policy is the source of truth for full-feature thresholds
+    # (CF-5); the market_feature_build copies are legacy fallbacks only.
+    min_days = int(
+        cfg_get(
+            config,
+            "market_data_policy.min_trading_days_for_full_features",
+            cfg_get(config, "market_feature_build.min_trading_days_for_full_features", 252),
+        )
+    )
     min_avg_dollar_volume_60d = float(
         cfg_get(
             config,
-            "market_feature_build.min_avg_dollar_volume_60d_for_full_features",
-            cfg_get(config, "market_data_policy.min_avg_dollar_volume_60d_for_full_features", 0),
+            "market_data_policy.min_avg_dollar_volume_60d_for_full_features",
+            cfg_get(config, "market_feature_build.min_avg_dollar_volume_60d_for_full_features", 0),
         )
         or 0
     )
+    min_source_bars = int(cfg_get(config, "market_data_policy.min_source_bars_for_selection", 20))
     benchmark_tickers = parse_ticker_list(args.benchmark_tickers) or parse_ticker_list(cfg_get(config, "industrials_universe.benchmark_tickers", []))
     primary_benchmark = normalize_ticker(args.primary_benchmark or cfg_get(config, "industrials_universe.benchmark_ticker", "XAR") or "XAR")
     if primary_benchmark and primary_benchmark not in benchmark_tickers:
         benchmark_tickers.insert(0, primary_benchmark)
+    secondary_benchmarks = parse_ticker_list(cfg_get(config, "market_feature_build.secondary_benchmarks", []))
+    if not secondary_benchmarks:
+        secondary_benchmarks = [ticker for ticker in benchmark_tickers if ticker != primary_benchmark]
+    if len(secondary_benchmarks) > MAX_SECONDARY_BENCHMARKS:
+        raise ValueError(
+            f"market_feature_build.secondary_benchmarks supports at most {MAX_SECONDARY_BENCHMARKS} entries; got {secondary_benchmarks}."
+        )
+    for ticker in secondary_benchmarks:
+        if ticker not in benchmark_tickers:
+            benchmark_tickers.append(ticker)
+    LOGGER.info(
+        "Benchmark column mapping: rel_strength_bench_3m=%s, %s",
+        primary_benchmark or "(none)",
+        ", ".join(
+            f"{column}={secondary_benchmarks[idx] if idx < len(secondary_benchmarks) else '(unused)'}"
+            for idx, column in enumerate(SECONDARY_BENCH_COLUMNS)
+        ),
+    )
+    membership_status = str(args.membership_status)
+    if args.include_historical:
+        if membership_status == "inactive":
+            raise ValueError("--include-historical conflicts with --membership-status inactive; use --membership-status all instead.")
+        if membership_status != "all":
+            LOGGER.info("--include-historical implies --membership-status all.")
+        membership_status = "all"
     windows = {
         "one_month_days": int(cfg_get(config, "market_feature_build.windows.one_month_days", 21)),
         "three_month_days": int(cfg_get(config, "market_feature_build.windows.three_month_days", 63)),
@@ -583,15 +704,18 @@ def main() -> None:
     }
     asof = parse_date(args.asof)
 
-    with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
+    with closing(connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0)))) as conn:
         init_db(conn)
+        with conn:
+            for column in SECONDARY_BENCH_COLUMNS:
+                ensure_column(conn, "feature_market_technical", column, "REAL")
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
             members = load_universe(
                 conn,
                 model_family,
                 include_historical=bool(args.include_historical),
-                membership_status=str(args.membership_status),
+                membership_status=membership_status,
                 asof=asof,
             )
             tickers = [member.ticker for member in members]
@@ -618,17 +742,35 @@ def main() -> None:
                     conn,
                     model_family,
                     include_historical=bool(args.include_historical),
-                    membership_status=str(args.membership_status),
+                    membership_status=membership_status,
                     asof=effective_asof,
                 )
                 tickers = [member.ticker for member in members]
                 if not tickers:
                     raise ValueError(f"No as-of eligible industrials universe tickers found for model_family={model_family} asof={effective_asof}.")
-            bench_rows = load_benchmark_rows(conn, benchmark_source_id, benchmark_tickers, effective_asof)
+            benchmark_source_ids = source_priority_list(benchmark_source_id, fallback_source_ids)
+            bench_rows = load_benchmark_rows(
+                conn,
+                benchmark_source_ids,
+                benchmark_tickers,
+                effective_asof,
+                min_bars=min_source_bars,
+            )
+            if primary_benchmark and not bench_rows.get(primary_benchmark):
+                raise ValueError(
+                    f"No price bars found for primary benchmark {primary_benchmark} through asof={effective_asof.isoformat()} "
+                    f"in sources {benchmark_source_ids}; rel_strength_bench_3m would be silently NULL panel-wide."
+                )
+            missing_benchmarks = sorted(ticker for ticker, rows in bench_rows.items() if not rows)
+            if missing_benchmarks:
+                LOGGER.error(
+                    "Missing benchmark price data through asof=%s for: %s; affected rel-strength columns will be NULL and flagged for review.",
+                    effective_asof,
+                    ",".join(missing_benchmarks),
+                )
             report_rows: list[dict[str, Any]] = []
             review_count = 0
             with conn:
-                ph_tickers = placeholders(tickers)
                 ph_sources = placeholders(source_ids)
                 issue_tickers = sorted(
                     {
@@ -641,35 +783,38 @@ def main() -> None:
                     }.union(tickers)
                 )
                 ph_issue_tickers = placeholders(issue_tickers)
+                # A single unconditional DELETE: the previous ticker IN /
+                # ticker NOT IN pair covered every ticker between them (SC-8).
                 conn.execute(
                     f"""
                     DELETE FROM feature_market_technical
                     WHERE asof_date = ?
                       AND model_family = ?
                       AND source_id IN ({ph_sources})
-                      AND ticker IN ({ph_tickers})
                     """,
-                    (effective_asof.isoformat(), model_family, *source_ids, *tickers),
+                    (effective_asof.isoformat(), model_family, *source_ids),
                 )
+                # SC-12: family-scoped clear so this run never wipes another
+                # family's open issues for the same ticker/stage.
                 conn.execute(
-                    f"""
-                    DELETE FROM feature_market_technical
-                    WHERE asof_date = ?
-                      AND model_family = ?
-                      AND source_id IN ({ph_sources})
-                      AND ticker NOT IN ({ph_tickers})
-                    """,
-                    (effective_asof.isoformat(), model_family, *source_ids, *tickers),
+                    f"DELETE FROM data_quality_issues WHERE stage = ? AND model_family = ? AND ticker IN ({ph_issue_tickers})",
+                    (RUN_TYPE, model_family, *issue_tickers),
                 )
-                conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({ph_issue_tickers})", (RUN_TYPE, *issue_tickers))
                 for member in members:
                     ticker = member.ticker
-                    rows, feature_source_id = load_first_available_price_rows(
+                    # Delisting gate (MK-8): a closed membership spell caps
+                    # price loads at the delisting date so post-delist bars
+                    # (e.g. a recycled ticker symbol) never leak into features.
+                    member_price_asof = effective_asof
+                    if member.end_date is not None and member.end_date < effective_asof:
+                        member_price_asof = member.end_date
+                    rows, feature_source_id = load_best_available_price_rows(
                         conn,
                         ticker=ticker,
                         source_ids=source_ids,
-                        asof=effective_asof,
+                        asof=member_price_asof,
                         start_date=member.start_date,
+                        min_bars=min_source_bars,
                     )
                     feature, review_reason = build_feature(
                         ticker,
@@ -677,17 +822,19 @@ def main() -> None:
                         source_id=feature_source_id,
                         model_family=model_family,
                         asof=effective_asof,
+                        membership_end=member.end_date,
                         max_staleness_days=max_staleness_days,
                         min_days=min_days,
                         min_avg_dollar_volume_60d=min_avg_dollar_volume_60d,
                         windows=windows,
                         bench_rows=bench_rows,
                         primary_benchmark=primary_benchmark,
+                        secondary_benchmarks=secondary_benchmarks,
                     )
                     upsert_feature(conn, feature)
                     if review_reason:
                         review_count += 1
-                        add_issue(conn, ticker=ticker, source_id=feature_source_id, detail=review_reason)
+                        add_issue(conn, ticker=ticker, source_id=feature_source_id, detail=review_reason, model_family=model_family)
                     report_rows.append(
                         {
                             "ticker": ticker,

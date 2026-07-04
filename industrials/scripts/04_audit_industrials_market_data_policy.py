@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import logging
 import sys
-from datetime import date, datetime
+from contextlib import closing
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import connect, finish_run, init_db, start_run  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
+from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.text_norm import normalize_ticker  # noqa: E402
 
 
@@ -39,6 +40,16 @@ FIELDNAMES = [
     "status",
     "review_reason",
 ]
+# Default severity per review-reason key; policy violations fail the audit unless a
+# config override under market_data_audit.severity_overrides explicitly downgrades them.
+DEFAULT_REASON_SEVERITY = {
+    "no_price_bars": "failed",
+    "stale_latest_bar": "failed",
+    "future_bar": "failed",
+    "no_adjusted_close": "failed",
+    "low_history": "review",
+}
+ALLOWED_SEVERITIES = {"failed", "review"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--model-family", default="", help="Industrials model family to audit, e.g. defense.")
     parser.add_argument("--benchmark-tickers", default="", help="Optional comma-separated benchmark ticker override.")
-    parser.add_argument("--asof", default="", help="Audit as of this YYYY-MM-DD date. Defaults to today.")
+    parser.add_argument("--asof", default="", help="Audit as of this YYYY-MM-DD date. Defaults to the last expected trading day from today.")
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--allow-partial", action="store_true")
     return parser.parse_args()
@@ -61,6 +72,59 @@ def parse_date(raw: object) -> date | None:
         return datetime.strptime(text, "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def parse_asof_arg(raw: str) -> date | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(f"Unparseable --asof value: {raw!r} (expected YYYY-MM-DD)") from exc
+
+
+def last_expected_trading_day(day: date) -> date:
+    """Weekend-aware expected latest bar date.
+
+    This intentionally avoids a full exchange-calendar dependency. Exchange
+    holidays may still re-fetch once, which is acceptable; weekends should not.
+    """
+    expected = day
+    while expected.weekday() >= 5:
+        expected -= timedelta(days=1)
+    return expected
+
+
+def require_cfg(config: dict[str, Any], key: str) -> Any:
+    value = cfg_get(config, key, None)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise KeyError(f"Required config key missing or empty: {key}")
+    return value
+
+
+def coerce_bool(raw: Any) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def resolve_severity_map(config: dict[str, Any], *, require_adjusted: bool) -> dict[str, str]:
+    severity_map = dict(DEFAULT_REASON_SEVERITY)
+    if not require_adjusted:
+        severity_map["no_adjusted_close"] = "review"
+    overrides = cfg_get(config, "market_data_audit.severity_overrides", {}) or {}
+    if not isinstance(overrides, dict):
+        raise ValueError("market_data_audit.severity_overrides must be a mapping of reason -> severity")
+    for raw_key, raw_value in overrides.items():
+        key = str(raw_key).strip()
+        severity = str(raw_value or "").strip().lower()
+        if key not in severity_map:
+            raise ValueError(f"Unknown market_data_audit.severity_overrides reason {key!r}; known reasons: {sorted(severity_map)}")
+        if severity not in ALLOWED_SEVERITIES:
+            raise ValueError(f"Invalid severity {raw_value!r} for market_data_audit.severity_overrides.{key}; allowed: {sorted(ALLOWED_SEVERITIES)}")
+        severity_map[key] = severity
+    return severity_map
 
 
 def parse_ticker_list(raw: object) -> list[str]:
@@ -123,7 +187,17 @@ def panel_max_bar_date(conn: Any, jobs: list[dict[str, Any]], *, source_id: str)
     return parse_date(row["max_bar_date"] if row is not None else "")
 
 
-def audit_ticker(conn: Any, job: dict[str, Any], *, source_id: str, asof: date, max_staleness_days: int, min_days: int) -> dict[str, Any]:
+def audit_ticker(
+    conn: Any,
+    job: dict[str, Any],
+    *,
+    source_id: str,
+    asof: date,
+    max_staleness_days: int,
+    min_days: int,
+    severity_map: dict[str, str],
+    check_future_bars: bool,
+) -> dict[str, Any]:
     ticker = normalize_ticker(job["ticker"])
     row = conn.execute(
         """
@@ -133,9 +207,9 @@ def audit_ticker(conn: Any, job: dict[str, Any], *, source_id: str, asof: date, 
             MIN(bar_date) AS first_bar_date,
             MAX(bar_date) AS latest_bar_date
         FROM fact_price_ohlcv
-        WHERE ticker = ? AND source_id = ?
+        WHERE ticker = ? AND source_id = ? AND bar_date <= ?
         """,
-        (ticker, source_id),
+        (ticker, source_id, asof.isoformat()),
     ).fetchone()
     bar_count = int(row["bar_count"] or 0)
     adjusted_count = int(row["adjusted_bar_count"] or 0)
@@ -144,7 +218,7 @@ def audit_ticker(conn: Any, job: dict[str, Any], *, source_id: str, asof: date, 
     latest_adj_close = ""
     stale_days: int | str = ""
     status = "success"
-    reasons: list[str] = []
+    reasons: list[tuple[str, str]] = []
     if latest_bar:
         latest_adj_row = conn.execute(
             """
@@ -159,17 +233,28 @@ def audit_ticker(conn: Any, job: dict[str, Any], *, source_id: str, asof: date, 
         if latest_date is not None:
             stale_days = (asof - latest_date).days
             if int(stale_days) > max_staleness_days:
-                reasons.append(f"stale_latest_bar_{stale_days}d")
-        if latest_date is not None and latest_date > asof:
-            reasons.append(f"future_bar_{latest_bar}")
+                reasons.append(("stale_latest_bar", f"stale_latest_bar_{stale_days}d"))
     else:
-        reasons.append("no_price_bars")
+        reasons.append(("no_price_bars", "no_price_bars"))
+    if check_future_bars:
+        future_row = conn.execute(
+            """
+            SELECT MAX(bar_date) AS max_bar_date
+            FROM fact_price_ohlcv
+            WHERE ticker = ? AND source_id = ?
+            """,
+            (ticker, source_id),
+        ).fetchone()
+        future_date = parse_date(future_row["max_bar_date"] if future_row is not None else "")
+        if future_date is not None and future_date > asof:
+            reasons.append(("future_bar", f"future_bar_{future_date.isoformat()}"))
     if adjusted_count == 0:
-        reasons.append("no_adjusted_close")
+        reasons.append(("no_adjusted_close", "no_adjusted_close"))
     if bar_count < min_days:
-        reasons.append(f"low_history_{bar_count}_bars")
+        reasons.append(("low_history", f"low_history_{bar_count}_bars"))
     if reasons:
-        status = "review" if bar_count > 0 else "failed"
+        severities = {severity_map[key] for key, _ in reasons}
+        status = "failed" if "failed" in severities else "review"
     return {
         "ticker": ticker,
         "company_name": job["company_name"],
@@ -183,16 +268,8 @@ def audit_ticker(conn: Any, job: dict[str, Any], *, source_id: str, asof: date, 
         "latest_adj_close": latest_adj_close,
         "stale_days": stale_days,
         "status": status,
-        "review_reason": ";".join(reasons),
+        "review_reason": ";".join(text for _, text in reasons),
     }
-
-
-def write_report(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDNAMES, extrasaction="ignore", lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def main() -> None:
@@ -203,29 +280,65 @@ def main() -> None:
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(cfg_get(config, "market_data_audit.output_csv"), base_dir=base_dir)
-    requested_asof = parse_date(args.asof)
+    requested_asof = parse_asof_arg(args.asof)
     model_family = str(args.model_family or cfg_get(config, "industrials_universe.initial_subsector", "defense") or "defense").strip()
     source_id = str(cfg_get(config, "market_data_policy.scoring_primary_source", "yahoo_finance_adjusted") or "yahoo_finance_adjusted")
-    max_staleness_days = int(cfg_get(config, "market_data_policy.max_staleness_days", 7))
-    min_days = int(cfg_get(config, "market_data_policy.min_trading_days_for_full_features", 252))
+    max_staleness_days = int(require_cfg(config, "market_data_policy.max_staleness_days"))
+    min_days = int(require_cfg(config, "market_data_policy.min_trading_days_for_full_features"))
+    require_adjusted = coerce_bool(require_cfg(config, "market_data_policy.require_adjusted_for_scoring"))
+    severity_map = resolve_severity_map(config, require_adjusted=require_adjusted)
     benchmark_tickers = parse_ticker_list(args.benchmark_tickers) or parse_ticker_list(cfg_get(config, "industrials_universe.benchmark_tickers", []))
 
-    with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
+    with closing(connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0)))) as conn:
         init_db(conn)
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
             jobs = load_jobs(conn, model_family=model_family, benchmark_tickers=benchmark_tickers)
-            asof = requested_asof or panel_max_bar_date(conn, jobs, source_id=source_id) or date.today()
-            if requested_asof is None:
-                LOGGER.info("No --asof supplied; using panel max bar date for market-data audit: %s", asof.isoformat())
-            rows = [audit_ticker(conn, job, source_id=source_id, asof=asof, max_staleness_days=max_staleness_days, min_days=min_days) for job in jobs]
+            panel_error = ""
+            if requested_asof is not None:
+                asof = requested_asof
+            else:
+                asof = last_expected_trading_day(date.today())
+                LOGGER.info("No --asof supplied; anchoring staleness to last expected trading day: %s", asof.isoformat())
+                panel_max = panel_max_bar_date(conn, jobs, source_id=source_id)
+                if panel_max is None:
+                    panel_error = f"No price bars found for source_id={source_id} across the audited panel"
+                elif (asof - panel_max).days > max_staleness_days:
+                    panel_error = (
+                        f"Panel max bar date {panel_max.isoformat()} is {(asof - panel_max).days}d behind expected trading day "
+                        f"{asof.isoformat()} (max_staleness_days={max_staleness_days})"
+                    )
+            rows = [
+                audit_ticker(
+                    conn,
+                    job,
+                    source_id=source_id,
+                    asof=asof,
+                    max_staleness_days=max_staleness_days,
+                    min_days=min_days,
+                    severity_map=severity_map,
+                    check_future_bars=requested_asof is None,
+                )
+                for job in jobs
+            ]
             failed = sum(1 for row in rows if row["status"] == "failed")
             review = sum(1 for row in rows if row["status"] == "review")
             status = "success" if failed == 0 else ("partial" if args.allow_partial else "failed")
-            write_report(output_csv, rows)
-            finish_run(conn, run_id=run_id, status=status, row_count=len(rows), message=f"rows={len(rows)} failed={failed} review={review} output={output_csv}")
+            if panel_error:
+                status = "failed"
+            write_csv_atomic(output_csv, FIELDNAMES, rows)
+            finish_run(
+                conn,
+                run_id=run_id,
+                status=status,
+                row_count=len(rows),
+                message=f"rows={len(rows)} failed={failed} review={review} panel_error={panel_error or 'none'} output={output_csv}",
+            )
             LOGGER.info("Wrote market-data audit report: %s", output_csv)
             LOGGER.info("Market-data audit complete: rows=%d failed=%d review=%d", len(rows), failed, review)
+            if panel_error:
+                LOGGER.error("Market-data panel staleness gate failed: %s", panel_error)
+                raise SystemExit(1)
             if failed and not args.allow_partial:
                 raise SystemExit(1)
         except BaseException as exc:

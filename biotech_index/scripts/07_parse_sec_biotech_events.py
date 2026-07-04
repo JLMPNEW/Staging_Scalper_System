@@ -702,6 +702,73 @@ def count_filing_texts(
     )
 
 
+def clear_stale_events_for_missing_document_text(
+    conn: sqlite3.Connection,
+    *,
+    cutoff: str,
+    asof: str,
+    ticker_filter: set[str],
+    parser_signature: str,
+) -> int:
+    """Clear parsed SEC events when a previously parsed latest document is now unreadable.
+
+    Incremental parsing normally keys off the latest document text hash.  If the
+    latest document row disappears, loses its hash, or has blank text, it will not
+    enter the parse queue; without this cleanup, old events can linger forever.
+    Resetting parse-state to an empty hash lets the filing re-enter the queue if
+    valid text is restored on a later sync.
+    """
+    where, params = filing_text_where(cutoff=cutoff, asof=asof, ticker_filter=ticker_filter)
+    where_sql = " AND ".join(where)
+    target_sql = target_filings_sql(where_sql)
+    rows = conn.execute(
+        f"""
+        WITH target_filings AS (
+        {target_sql}
+        ),
+        stale_accessions AS (
+            SELECT f.accession_nodash
+            FROM target_filings f
+            JOIN sec_event_parse_state s ON s.accession_nodash = f.accession_nodash
+            LEFT JOIN sec_filing_latest_document d ON d.accession_nodash = f.accession_nodash
+            LEFT JOIN sec_filing_documents doc ON doc.document_id = d.document_id
+            WHERE d.accession_nodash IS NULL
+               OR COALESCE(d.text_hash, '') = ''
+               OR doc.document_id IS NULL
+               OR doc.text_content IS NULL
+               OR doc.text_content = ''
+        )
+        SELECT accession_nodash
+        FROM stale_accessions
+        ORDER BY accession_nodash
+        """,
+        params,
+    ).fetchall()
+    accessions = [str(row["accession_nodash"] or "") for row in rows if str(row["accession_nodash"] or "")]
+    if not accessions:
+        return 0
+    now = utc_now()
+    with conn:
+        for accession_chunk in chunked(accessions):
+            placeholders = ",".join("?" for _ in accession_chunk)
+            conn.execute(f"DELETE FROM sec_events WHERE accession_nodash IN ({placeholders})", accession_chunk)
+        conn.executemany(
+            """
+            INSERT INTO sec_event_parse_state(accession_nodash, text_hash, parser_signature, parsed_at, event_count, created_at, updated_at)
+            VALUES (?, '', ?, ?, 0, ?, ?)
+            ON CONFLICT(accession_nodash) DO UPDATE SET
+                text_hash = '',
+                parser_signature = excluded.parser_signature,
+                parsed_at = excluded.parsed_at,
+                event_count = 0,
+                updated_at = excluded.updated_at
+            """,
+            [(accession, parser_signature, now, now, now) for accession in accessions],
+        )
+    LOGGER.warning("Cleared stale SEC events for %d filing(s) with missing/blank latest document text", len(accessions))
+    return len(accessions)
+
+
 def load_filing_texts_to_parse(
     conn: sqlite3.Connection,
     *,
@@ -1185,6 +1252,15 @@ def main() -> None:
                     f"asof={asof_str}; refusing to continue"
                 )
             incremental_only = not args.full_rescan
+            cleared_stale = clear_stale_events_for_missing_document_text(
+                conn,
+                cutoff=cutoff,
+                asof=asof_str,
+                ticker_filter=ticker_filter,
+                parser_signature=parser_signature,
+            )
+            if cleared_stale:
+                LOGGER.info("SEC event parser cleared stale missing-text parse state rows=%d", cleared_stale)
             total_available = count_filing_texts(
                 conn,
                 cutoff=cutoff,

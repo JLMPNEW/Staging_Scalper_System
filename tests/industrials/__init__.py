@@ -1,0 +1,1 @@
+"""Industrials regression tests."""

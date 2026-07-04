@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 import math
+import os
 import re
 import sqlite3
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+
+LOGGER = logging.getLogger("market_positioning.core")
 
 DEFAULT_DB_PATH = Path(r"C:\Users\josel\Documents\STAGING\DB\market_positioning.sqlite")
 DEFAULT_HISTORY_START_DATE = date(2019, 1, 1)
@@ -100,11 +105,14 @@ def read_csv_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def write_csv_rows(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> None:
+    """Write a CSV atomically (tmp + os.replace) so readers never see a truncated file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    tmp_path = path.with_name(path.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n", extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(tmp_path, path)
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -1104,7 +1112,10 @@ def ingest_13f_csv(
             """,
             direct_snapshot_rows,
         )
-    aggregate_13f_ownership(conn, source=source)
+    # Scope aggregation to the tickers this CSV actually carried: the DB is shared
+    # across sector packages, so aggregating everything would rebuild other
+    # packages' snapshot rows under this source.
+    aggregate_13f_ownership(conn, source=source, tickers={row[3] for row in holding_rows})
     update_feed_state(
         conn,
         feed_name="institutional_13f",
@@ -1116,9 +1127,31 @@ def ingest_13f_csv(
     return len(filing_rows), len(holding_rows) + len(direct_snapshot_rows)
 
 
-def aggregate_13f_ownership(conn: sqlite3.Connection, *, source: str = "csv") -> int:
-    rows = conn.execute(
-        """
+def normalized_ticker_scope(tickers: Iterable[str] | None) -> list[str] | None:
+    """Normalize an optional ticker scope; None means 'no scoping' (legacy behavior)."""
+    if tickers is None:
+        return None
+    return sorted({normalize_ticker(ticker) for ticker in tickers if normalize_ticker(ticker)})
+
+
+def aggregate_13f_ownership(
+    conn: sqlite3.Connection,
+    *,
+    source: str = "csv",
+    tickers: Iterable[str] | None = None,
+) -> int:
+    """Aggregate 13F holdings into per-(ticker, filing_date) ownership snapshots.
+
+    When ``tickers`` is provided, only those tickers are aggregated and
+    upserted.  ``tickers=None`` preserves the legacy aggregate-everything
+    behavior, but callers sharing ``market_positioning.sqlite`` across sector
+    packages MUST scope to their own universe so they do not rebuild (and
+    reshape) other packages' snapshot rows under the same source.
+    """
+    ticker_scope = normalized_ticker_scope(tickers)
+    if ticker_scope is not None and not ticker_scope:
+        return 0
+    query = """
         SELECT ticker, filing_date AS asof_date, period_of_report,
                COALESCE(NULLIF(manager_cik, ''), NULLIF(manager_name, ''), filing_key) AS manager_key,
                COALESCE(shares, 0.0) AS shares,
@@ -1126,9 +1159,14 @@ def aggregate_13f_ownership(conn: sqlite3.Connection, *, source: str = "csv") ->
         FROM institutional_13f_holdings
         WHERE UPPER(COALESCE(share_type, '')) IN ('', 'SH')
           AND COALESCE(put_call, '') = ''
-        ORDER BY ticker, filing_date
-        """
-    ).fetchall()
+    """
+    params: list[Any] = []
+    if ticker_scope is not None:
+        qmarks = ",".join("?" for _ in ticker_scope)
+        query += f" AND UPPER(ticker) IN ({qmarks})"
+        params.extend(ticker_scope)
+    query += " ORDER BY ticker, filing_date"
+    rows = conn.execute(query, params).fetchall()
     grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in rows:
         key = (str(row["ticker"]), str(row["asof_date"]), str(row["period_of_report"] or ""))
@@ -1184,6 +1222,143 @@ def aggregate_13f_ownership(conn: sqlite3.Connection, *, source: str = "csv") ->
                 )
             )
     with conn:
+        conn.executemany(
+            """
+            INSERT INTO institutional_13f_ownership_snapshots(
+                ticker, asof_date, period_of_report, institutional_shares, institutional_value,
+                manager_count, new_buyer_count, exiting_holder_count, net_buyer_count,
+                institutional_ownership_delta_pct, source, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, asof_date, source) DO UPDATE SET
+                period_of_report = excluded.period_of_report,
+                institutional_shares = excluded.institutional_shares,
+                institutional_value = excluded.institutional_value,
+                manager_count = excluded.manager_count,
+                new_buyer_count = excluded.new_buyer_count,
+                exiting_holder_count = excluded.exiting_holder_count,
+                net_buyer_count = excluded.net_buyer_count,
+                institutional_ownership_delta_pct = excluded.institutional_ownership_delta_pct,
+                updated_at = excluded.updated_at
+            """,
+            records,
+        )
+    return len(records)
+
+
+def aggregate_13f_ownership_for_tickers(
+    conn: sqlite3.Connection,
+    tickers: Iterable[str],
+    *,
+    source: str = "sec_13f_data_sets",
+) -> int:
+    """Aggregate 13F holdings into one snapshot per (ticker, period_of_report).
+
+    Managers file across a 45-day window, so bucketing must be per reporting
+    period, not per filing date. Each manager contributes its latest filing for
+    the period (amendments supersede originals); the snapshot asof_date is the
+    last filing date seen so downstream point-in-time joins remain conservative.
+
+    This is the shared canonical implementation of the period-bucketed
+    aggregator used by the industrials/technology upstream syncs. It is
+    strictly ticker-scoped: only the caller's tickers are deleted and rebuilt,
+    so sector packages sharing the DB cannot clobber each other's snapshots.
+    """
+    ticker_scope = normalized_ticker_scope(tickers) or []
+    if not ticker_scope:
+        return 0
+    qmarks = ",".join("?" for _ in ticker_scope)
+    rows = conn.execute(
+        f"""
+        SELECT ticker, filing_date, period_of_report,
+               COALESCE(NULLIF(manager_cik, ''), NULLIF(manager_name, ''), filing_key) AS manager_key,
+               COALESCE(NULLIF(filing_key, ''), filing_date) AS accession_key,
+               COALESCE(shares, 0.0) AS shares,
+               COALESCE(market_value, 0.0) AS market_value
+        FROM institutional_13f_holdings
+        WHERE UPPER(ticker) IN ({qmarks})
+          AND UPPER(COALESCE(share_type, '')) IN ('', 'SH')
+          AND COALESCE(put_call, '') = ''
+          AND COALESCE(period_of_report, '') <> ''
+        ORDER BY ticker, period_of_report, manager_key, filing_date
+        """,
+        ticker_scope,
+    )
+    now = utc_now()
+    # per (ticker, period): manager -> (latest filing_date, latest accession, shares, value)
+    buckets: dict[tuple[str, str], dict[str, tuple[str, str, float, float]]] = {}
+    latest_filing: dict[tuple[str, str], str] = {}
+    for row in rows:
+        key = (str(row["ticker"]), str(row["period_of_report"]))
+        manager = str(row["manager_key"] or "").strip()
+        if not manager:
+            continue
+        filing_date = str(row["filing_date"] or "")
+        accession = str(row["accession_key"] or "")
+        shares = to_float(row["shares"], 0.0) or 0.0
+        value = to_float(row["market_value"], 0.0) or 0.0
+        bucket = buckets.setdefault(key, {})
+        current = bucket.get(manager)
+        # Compare (filing_date, accession) so a distinct accession filed the same
+        # day (e.g. an amendment) replaces the earlier one instead of being dropped.
+        if current is None or (filing_date, accession) > (current[0], current[1]):
+            bucket[manager] = (filing_date, accession, shares, value)
+        elif (filing_date, accession) == (current[0], current[1]):
+            bucket[manager] = (filing_date, accession, current[2] + shares, current[3] + value)
+        latest_filing[key] = max(latest_filing.get(key, ""), filing_date)
+    records: list[tuple[Any, ...]] = []
+    prior_by_ticker: dict[str, tuple[float, set[str]]] = {}
+    skipped_no_filing_date = 0
+    for (ticker, period) in sorted(buckets, key=lambda item: (item[0], item[1])):
+        bucket = buckets[(ticker, period)]
+        if not latest_filing.get((ticker, period)):
+            # No knowledge date: substituting period_of_report (quarter-end) would
+            # make the aggregate visible up to ~45 days before it was filed. Skip
+            # the period entirely rather than leak future data into PIT panels.
+            skipped_no_filing_date += 1
+            continue
+        total_shares = sum(entry[2] for entry in bucket.values())
+        total_value = sum(entry[3] for entry in bucket.values())
+        managers = set(bucket)
+        prior = prior_by_ticker.get(ticker)
+        if prior is None:
+            delta = None
+            new_buyer_count = 0
+            exiting_holder_count = 0
+        else:
+            prior_shares, prior_managers = prior
+            delta = (total_shares - prior_shares) / prior_shares if prior_shares > 0 else None
+            new_buyer_count = len(managers - prior_managers)
+            exiting_holder_count = len(prior_managers - managers)
+        prior_by_ticker[ticker] = (total_shares, managers)
+        records.append(
+            (
+                ticker,
+                latest_filing[(ticker, period)],
+                period,
+                total_shares,
+                total_value,
+                len(managers),
+                new_buyer_count,
+                exiting_holder_count,
+                new_buyer_count - exiting_holder_count,
+                delta,
+                source,
+                now,
+                now,
+            )
+        )
+    if skipped_no_filing_date:
+        LOGGER.warning(
+            "Skipped %d 13F ticker-periods with no filing date (would leak quarter-end visibility into PIT panels).",
+            skipped_no_filing_date,
+        )
+    with conn:
+        # Replace any legacy filing-day-slice snapshots wholesale for these tickers.
+        conn.execute(
+            f"DELETE FROM institutional_13f_ownership_snapshots WHERE source = ? AND UPPER(ticker) IN ({qmarks})",
+            (source, *ticker_scope),
+        )
         conn.executemany(
             """
             INSERT INTO institutional_13f_ownership_snapshots(
@@ -1446,11 +1621,7 @@ def latest_borrow_availability_rows(
         shortable_staleness_days = "" if shortable_asof is None else max(0, (asof_date - shortable_asof).days)
         current_rate = to_float(latest_fee.get("borrow_fee_rate")) if fee_is_current else None
         history = history_by_ticker.get(ticker, [])
-        rates_90 = [
-            to_float(row.get("borrow_fee_rate"))
-            for row in history
-            if to_float(row.get("borrow_fee_rate")) is not None
-        ]
+        rates_90 = [rate for row in history if (rate := to_float(row.get("borrow_fee_rate"))) is not None]
         rates_30 = [
             rate
             for row, rate in (

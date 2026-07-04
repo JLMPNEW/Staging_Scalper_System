@@ -173,17 +173,20 @@ def add_issue(
     issue_detail: str,
     severity: str = "warning",
     source_id: str | None = None,
+    model_family: str,
 ) -> None:
+    # SC-12: issues are family-scoped; stamp model_family so per-stage clears for
+    # one family never wipe another family's open issues.
     now = utc_now()
     conn.execute(
         """
         INSERT INTO data_quality_issues(
-            detected_at, severity, stage, ticker, company_id, source_id, issue_type,
+            detected_at, severity, stage, model_family, ticker, company_id, source_id, issue_type,
             issue_detail, resolution_status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
         """,
-        (now, severity, LOAD_STAGE, ticker, company_id, source_id, issue_type, issue_detail, now, now),
+        (now, severity, LOAD_STAGE, model_family, ticker, company_id, source_id, issue_type, issue_detail, now, now),
     )
 
 
@@ -346,6 +349,7 @@ def upsert_historical_company(
             issue_type="missing_historical_cik",
             issue_detail=f"Historical/delisted member lacks CIK. {reason}",
             severity="warning",
+            model_family=model_family,
         )
     return company_id
 
@@ -688,6 +692,7 @@ def load_delisted_seed(
                 issue_type="reused_delisted_ticker_internalized",
                 issue_detail=collision_reason,
                 severity="warning",
+                model_family=model_family,
             )
             reason = f"{reason}; {collision_reason}"
         company_id = upsert_historical_company(
@@ -910,7 +915,12 @@ def main() -> int:
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=f"{membership_csv};{delisted_csv}")
         try:
             with conn:
-                conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (LOAD_STAGE,))
+                # SC-12: family-scoped clear so this load never wipes another
+                # family's open issues for the same stage.
+                conn.execute(
+                    "DELETE FROM data_quality_issues WHERE stage = ? AND model_family = ?",
+                    (LOAD_STAGE, model_family),
+                )
                 explicit_count = load_explicit_historical_membership(
                     conn,
                     path=membership_csv,

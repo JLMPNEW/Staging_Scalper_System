@@ -24,6 +24,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import init_db  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
+from industrials.core.policy_loader import load_eligibility_policy, resolve_policy  # noqa: E402
+from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.text_norm import normalize_ticker  # noqa: E402
 
 
@@ -143,20 +145,49 @@ def quality_value(status: str, *, kind: str) -> float:
     return 0.5
 
 
-def load_csv_policy(path: Path) -> dict[tuple[str, str], dict[str, str]]:
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    out: dict[tuple[str, str], dict[str, str]] = {}
-    for row in rows:
-        profile = str(row.get("reporting_profile") or "").strip()
-        stage = str(row.get("development_stage") or "").strip()
-        if profile and stage:
-            out[(profile, stage)] = row
-    return out
+def select_effective_policies(
+    policies: dict[tuple[str, str], dict[str, str]],
+    *,
+    asof: str,
+) -> dict[tuple[str, str], dict[str, str]]:
+    """Keep only policy rows effective at the evaluation asof (valid_from <= asof, same-day-inclusive).
+
+    Rows without a valid_from are treated as always effective (legacy rows predating the PIT
+    columns). A malformed non-empty valid_from is a contract violation and fails loudly.
+    """
+    effective: dict[tuple[str, str], dict[str, str]] = {}
+    for key, row in policies.items():
+        valid_from = str(row.get("valid_from") or "").strip()
+        if valid_from:
+            try:
+                valid_from = datetime.strptime(valid_from[:10], "%Y-%m-%d").date().isoformat()
+            except ValueError as exc:
+                raise ValueError(f"Policy row {key} has malformed valid_from={valid_from!r}") from exc
+            if valid_from > asof:
+                continue
+        effective[key] = row
+    return effective
 
 
-def resolve_policy(policies: dict[tuple[str, str], dict[str, str]], profile: str, stage: str) -> dict[str, str]:
-    return policies.get((profile, stage)) or policies.get((profile, "any")) or {}
+def resolve_eligibility_policy_path(config: dict[str, Any], *, base_dir: Path) -> Path:
+    """Resolve the eligibility policy CSV: per-family key first, legacy flat key as fallback (NEW-3).
+
+    Mirrors scripts/10's resolve_eligibility_policy_path so the validator and the
+    publisher can never read different policy CSVs from the same config.
+    """
+    family_key = f"scoring_policy.families.{MODEL_FAMILY}.eligibility_policy_csv"
+    policy_path_raw = str(cfg_get(config, family_key, "") or "").strip()
+    if not policy_path_raw:
+        policy_path_raw = str(cfg_get(config, "scoring_policy.defense_eligibility_policy_csv", "") or "").strip()
+    if not policy_path_raw:
+        raise ValueError(
+            f"Missing eligibility policy CSV config for model_family={MODEL_FAMILY}: set {family_key} "
+            "(legacy scoring_policy.defense_eligibility_policy_csv is also absent)"
+        )
+    policy_path = resolve_path(policy_path_raw, base_dir=base_dir)
+    if not policy_path.exists():
+        raise FileNotFoundError(f"Eligibility policy CSV not found for model_family={MODEL_FAMILY}: {policy_path}")
+    return policy_path
 
 
 def header(project_root: Path) -> list[str]:
@@ -401,20 +432,43 @@ def rank_percentiles(scores: dict[str, dict[str, Any]]) -> dict[str, tuple[int, 
     return out
 
 
-def compose_rows(rows: list[dict[str, Any]], scores: dict[str, dict[str, Any]], policies: dict[tuple[str, str], dict[str, str]], asof: str) -> list[dict[str, str]]:
+def compose_rows(
+    rows: list[dict[str, Any]],
+    scores: dict[str, dict[str, Any]],
+    policies: dict[tuple[str, str], dict[str, str]],
+    asof: str,
+    *,
+    provenance_version: str,
+) -> list[dict[str, str]]:
     ranks = rank_percentiles(scores)
     out: list[dict[str, str]] = []
+    unmatched: list[tuple[str, str, str]] = []
     for row in rows:
         ticker = str(row["ticker"])
         score = scores[ticker]
         rank, pct = ranks[ticker]
         market_quality = quality_value(str(row.get("market_market_data_quality") or ""), kind="market")
-        financial_confidence = quality_value(str(row.get("financial_financial_confidence") or ""), kind="financial")
         positioning_quality = quality_value(str(row.get("positioning_positioning_quality") or ""), kind="positioning")
+        # NEW-4 / EL-9 parity with scripts/10: the issuer-profile (overrides) row wins for
+        # BOTH profile and confidence — never a profile from one source graded against the
+        # other source's confidence — and the stage comes from the taxonomy, not the feature row.
+        profile_row_profile = str(row.get("profile_reporting_profile") or "").strip()
+        feature_row_profile = str(row.get("financial_reporting_profile") or "").strip()
+        if profile_row_profile:
+            profile = profile_row_profile
+            financial_confidence = quality_value(str(row.get("profile_financial_confidence") or ""), kind="financial")
+        elif feature_row_profile:
+            profile = feature_row_profile
+            financial_confidence = quality_value(str(row.get("financial_financial_confidence") or ""), kind="financial")
+        else:
+            profile = "NO_FINANCIALS_REVIEW"
+            financial_confidence = quality_value("", kind="financial")
         confidence = (market_quality + financial_confidence + positioning_quality) / 3.0
-        profile = str(row.get("financial_reporting_profile") or row.get("profile_reporting_profile") or "NO_FINANCIALS_REVIEW")
-        development_stage = str(row.get("financial_development_stage") or row.get("development_stage") or "operating")
+        development_stage = str(row.get("development_stage") or "operating")
         policy = resolve_policy(policies, profile, development_stage)
+        if policy is None:
+            unmatched.append((ticker, profile, development_stage))
+            continue
         rank_policy = str(policy.get("rank_ready_policy") or "")
         min_conf = finite(policy.get("minimum_financial_confidence")) or 0.0
         rank_ready = (
@@ -489,7 +543,7 @@ def compose_rows(rows: list[dict[str, Any]], scores: dict[str, dict[str, Any]], 
             "calibration_lock_date": "",
             "calibration_production_start_date": "",
             "calibration_validation_method": "not_available_shadow_only",
-            "calibration_provenance_version": SCORE_MODEL_VERSION,
+            "calibration_provenance_version": provenance_version,
             "oos_assertion_basis": "not_available_shadow_only",
             "portfolio_candidate_gate": "0",
             "portfolio_candidate_score": fmt(score["final_score"]),
@@ -556,6 +610,12 @@ def compose_rows(rows: list[dict[str, Any]], scores: dict[str, dict[str, Any]], 
                 record[f"{name}_quality"] = fmt(comp.quality, 4)
             record[f"{name}_status"] = comp.status
         out.append(record)
+    if unmatched:
+        raise ValueError(
+            "Missing scoring eligibility policy rows for (profile, stage) combos effective at "
+            f"asof={asof}: {sorted(set((profile, stage) for _, profile, stage in unmatched))} "
+            f"(tickers: {sorted(ticker for ticker, _, _ in unmatched)[:20]})"
+        )
     return out
 
 
@@ -566,22 +626,6 @@ def write_text_atomic(path: Path, text: str) -> None:
         with NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, delete=False) as handle:
             tmp_name = handle.name
             handle.write(text)
-        os.replace(tmp_name, path)
-    finally:
-        if tmp_name and Path(tmp_name).exists():
-            Path(tmp_name).unlink()
-
-
-def write_csv(path: Path, fields: list[str], rows: list[dict[str, str]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_name = ""
-    try:
-        with NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, delete=False) as handle:
-            tmp_name = handle.name
-            writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
-            writer.writeheader()
-            for row in rows:
-                writer.writerow({field: row.get(field, "") for field in fields})
         os.replace(tmp_name, path)
     finally:
         if tmp_name and Path(tmp_name).exists():
@@ -630,12 +674,26 @@ def main() -> int:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    policy_path = resolve_path(cfg_get(config, "scoring_policy.defense_eligibility_policy_csv"), base_dir=base_dir)
-    output_dir = (
-        args.output_dir.expanduser().resolve()
-        if args.output_dir
-        else PROJECT_ROOT / "output" / "industrials" / "defense" / "dashboard" / asof
+    policy_path = resolve_eligibility_policy_path(config, base_dir=base_dir)
+    provenance_version = str(
+        cfg_get(
+            config,
+            "oos_calibration_standards.families.defense.calibration_provenance_version",
+            SCORE_MODEL_VERSION,
+        )
+        or SCORE_MODEL_VERSION
     )
+    snapshot_root = resolve_path(
+        str(
+            cfg_get(
+                config,
+                "oos_calibration_standards.families.defense.snapshot_history_root",
+                "../output/industrials/defense/dashboard",
+            )
+        ),
+        base_dir=base_dir,
+    )
+    output_dir = args.output_dir.expanduser().resolve() if args.output_dir else snapshot_root / asof
     output_path = output_dir / "defense_final_rank_table.csv"
     manifest_path = output_path.with_name("defense_final_rank_table_manifest.json")
     if output_path.exists() or manifest_path.exists():
@@ -649,7 +707,9 @@ def main() -> int:
                 "Use --allow-overwrite only for an explicit manual rebuild."
             )
     fields = header(PROJECT_ROOT)
-    policies = load_csv_policy(policy_path)
+    # NEW-2: pass the evaluation asof so versioned (profile, stage) keys select the
+    # row effective at that asof instead of raising on the first second version.
+    policies = select_effective_policies(load_eligibility_policy(policy_path, asof=asof), asof=asof)
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         init_db(conn)
@@ -664,8 +724,8 @@ def main() -> int:
     if missing_feature:
         raise ValueError(f"Missing Stage 3/4/5 feature rows for active tickers: {missing_feature[:20]}")
     scores = build_scores(rows)
-    out_rows = compose_rows(rows, scores, policies, asof)
-    write_csv(output_path, fields, out_rows)
+    out_rows = compose_rows(rows, scores, policies, asof, provenance_version=provenance_version)
+    write_csv_atomic(output_path, fields, [{field: row.get(field, "") for field in fields} for row in out_rows])
     manifest_path = seal_manifest(output_path, rows=len(out_rows), asof=asof)
     print(f"Wrote {output_path}")
     print(f"Wrote {manifest_path}")

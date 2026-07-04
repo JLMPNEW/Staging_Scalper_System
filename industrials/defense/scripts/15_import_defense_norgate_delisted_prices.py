@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
+from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.text_norm import normalize_ticker  # noqa: E402
 
 
@@ -94,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Import Norgate delisted defense OHLCV rows.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
-    parser.add_argument("--source-id", default=SOURCE_ID)
+    parser.add_argument("--source-id", default="", help="Overrides config norgate_delisted_import.source_id.")
     parser.add_argument("--start-date", default="", help="Fallback start date. Defaults to config delisted_default_start_date.")
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--price-adjustment-mode", default="", help="Norgate StockPriceAdjustmentType for adj_close. Defaults to config norgate_delisted_import.price_adjustment_mode.")
@@ -404,19 +405,22 @@ def add_issue(
     issue_type: str,
     detail: str,
     severity: str = "warning",
+    model_family: str,
 ) -> None:
+    # SC-12: issues are family-scoped; stamp model_family so per-stage clears for
+    # one family never wipe another family's open issues.
     now = utc_now()
     row = conn.execute("SELECT company_id FROM dim_company WHERE ticker = ? LIMIT 1", (member.internal_ticker,)).fetchone()
     company_id = int(row["company_id"]) if row is not None else None
     conn.execute(
         """
         INSERT INTO data_quality_issues(
-            detected_at, severity, stage, ticker, company_id, source_id, issue_type,
+            detected_at, severity, stage, model_family, ticker, company_id, source_id, issue_type,
             issue_detail, resolution_status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
         """,
-        (now, severity, RUN_TYPE, member.internal_ticker, company_id, source_id, issue_type, detail, now, now),
+        (now, severity, RUN_TYPE, model_family, member.internal_ticker, company_id, source_id, issue_type, detail, now, now),
     )
 
 
@@ -544,14 +548,6 @@ def purge_existing_range(
     )
 
 
-def write_report(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=REPORT_FIELDS, extrasaction="ignore", lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def main() -> int:
     configure_utc_logging()
     args = parse_args()
@@ -559,6 +555,7 @@ def main() -> int:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    source_id = str(args.source_id or cfg_get(config, "norgate_delisted_import.source_id", SOURCE_ID) or SOURCE_ID)
     model_family = str(cfg_get(config, "industrials_universe.initial_subsector", "defense") or "defense")
     default_start_date = parse_date(args.start_date) or str(cfg_get(config, "industrials_universe.delisted_default_start_date", "2000-01-01"))
     output_csv = (
@@ -603,8 +600,13 @@ def main() -> int:
         try:
             if not args.dry_run:
                 with conn:
-                    update_source_status(conn, source_id=args.source_id)
-                    conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (RUN_TYPE,))
+                    update_source_status(conn, source_id=source_id)
+                    # SC-12: family-scoped clear so this import never wipes
+                    # another family's open issues for the same stage.
+                    conn.execute(
+                        "DELETE FROM data_quality_issues WHERE stage = ? AND model_family = ?",
+                        (RUN_TYPE, model_family),
+                    )
             for member in members:
                 match = choose_symbol(
                     norgatedata,
@@ -627,9 +629,10 @@ def main() -> int:
                             add_issue(
                                 conn,
                                 member=member,
-                                source_id=args.source_id,
+                                source_id=source_id,
                                 issue_type="norgate_delisted_symbol_unresolved",
                                 detail=f"{match.reason}; symbol={match.source_symbol or ''}; database={match.source_database}",
+                                model_family=model_family,
                             )
                 else:
                     try:
@@ -644,9 +647,10 @@ def main() -> int:
                                     add_issue(
                                         conn,
                                         member=member,
-                                        source_id=args.source_id,
+                                        source_id=source_id,
                                         issue_type="norgate_delisted_no_price_bars",
                                         detail=f"symbol={match.source_symbol} start={start_date} end={end_date}",
+                                        model_family=model_family,
                                     )
                         else:
                             prices = prices.sort_index()
@@ -663,14 +667,14 @@ def main() -> int:
                                         purge_existing_range(
                                             conn,
                                             member=member,
-                                            source_id=args.source_id,
+                                            source_id=source_id,
                                             first_bar=first_bar,
                                             last_bar=last_bar,
                                         )
                                     row_count = upsert_price_rows(
                                         conn,
                                         member=member,
-                                        source_id=args.source_id,
+                                        source_id=source_id,
                                         source_symbol=match.source_symbol,
                                         match_reason=match.reason,
                                         adjustment_mode=adjustment_mode,
@@ -679,7 +683,7 @@ def main() -> int:
                                     upsert_snapshot(
                                         conn,
                                         member=member,
-                                        source_id=args.source_id,
+                                        source_id=source_id,
                                         source_symbol=match.source_symbol,
                                         adjustment_mode=adjustment_mode,
                                         prices=prices,
@@ -693,10 +697,11 @@ def main() -> int:
                                 add_issue(
                                     conn,
                                     member=member,
-                                    source_id=args.source_id,
+                                    source_id=source_id,
                                     issue_type="norgate_delisted_import_error",
                                     detail=error,
                                     severity="error",
+                                    model_family=model_family,
                                 )
                 report_rows.append(
                     {
@@ -734,7 +739,7 @@ def main() -> int:
                 finish_run(conn, run_id=run_id, status="failed", row_count=loaded_rows, message=f"{type(exc).__name__}: {exc}")
             raise
 
-    write_report(output_csv, report_rows)
+    write_csv_atomic(output_csv, REPORT_FIELDS, report_rows)
     status_counts: dict[str, int] = {}
     for row in report_rows:
         status_counts[str(row["status"])] = status_counts.get(str(row["status"]), 0) + 1

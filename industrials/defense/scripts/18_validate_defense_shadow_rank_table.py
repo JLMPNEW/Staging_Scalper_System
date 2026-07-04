@@ -55,10 +55,20 @@ def main() -> int:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    snapshot_root = resolve_path(
+        str(
+            cfg_get(
+                config,
+                "oos_calibration_standards.families.defense.snapshot_history_root",
+                "../output/industrials/defense/dashboard",
+            )
+        ),
+        base_dir=base_dir,
+    )
     rank_table = (
         args.rank_table.expanduser().resolve()
         if args.rank_table
-        else PROJECT_ROOT / "output" / "industrials" / "defense" / "dashboard" / asof / "defense_final_rank_table.csv"
+        else snapshot_root / asof / "defense_final_rank_table.csv"
     )
     manifest_path = rank_table.with_name("defense_final_rank_table_manifest.json")
     errors: list[str] = []

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import sqlite3
 import subprocess
 import sys
@@ -19,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
+from industrials.core.reports import write_csv_atomic  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -184,14 +184,6 @@ def run_step(script: str, asof: str) -> None:
     )
 
 
-def write_report(path: Path, rows: list[dict[str, object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDNAMES, extrasaction="ignore", lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def main() -> int:
     configure_utc_logging()
     args = parse_args()
@@ -201,6 +193,16 @@ def main() -> int:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    snapshot_root = resolve_path(
+        str(
+            cfg_get(
+                config,
+                "oos_calibration_standards.families.defense.snapshot_history_root",
+                "../output/industrials/defense/dashboard",
+            )
+        ),
+        base_dir=base_dir,
+    )
     output_csv = (
         args.output_csv.expanduser().resolve()
         if args.output_csv
@@ -219,8 +221,9 @@ def main() -> int:
     if args.max_dates > 0:
         publishable = publishable[-args.max_dates :]
     if not publishable:
-        write_report(
+        write_csv_atomic(
             output_csv,
+            FIELDNAMES,
             [
                 {
                     "asof_date": "",
@@ -240,7 +243,7 @@ def main() -> int:
     validator = str(PROJECT_ROOT / "industrials" / "defense" / "scripts" / "18_validate_defense_shadow_rank_table.py")
     report_rows: list[dict[str, object]] = []
     for candidate in publishable:
-        snapshot_dir = PROJECT_ROOT / "output" / "industrials" / "defense" / "dashboard" / candidate.asof_date
+        snapshot_dir = snapshot_root / candidate.asof_date
         if manifest_valid(snapshot_dir, candidate.asof_date):
             status = "valid_existing"
             message = "Existing immutable snapshot passed validation."
@@ -264,7 +267,7 @@ def main() -> int:
                 "message": message,
             }
         )
-    write_report(output_csv, report_rows)
+    write_csv_atomic(output_csv, FIELDNAMES, report_rows)
     for row in report_rows:
         print(
             f"{row['asof_date']}: {row['snapshot_status']} "

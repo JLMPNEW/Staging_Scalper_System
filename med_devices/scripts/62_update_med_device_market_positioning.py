@@ -7,7 +7,6 @@ import sqlite3
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]

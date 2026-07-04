@@ -104,7 +104,11 @@ def normalized_set(raw: Any) -> set[str]:
 
 def load_cik_overrides(path: Path) -> dict[str, CikOverride]:
     if not path.exists():
-        return {}
+        raise FileNotFoundError(
+            f"CIK/ticker overrides CSV named by config key industrials_universe.cik_ticker_overrides_csv "
+            f"does not exist: {path}. A missing overrides file would silently revert documented CIK "
+            "corrections; fix the path or the file instead of proceeding without overrides."
+        )
     overrides: dict[str, CikOverride] = {}
     for row in read_csv_flexible(path):
         ticker = normalize_ticker(row_get(row, "ticker"))
@@ -329,17 +333,20 @@ def add_issue(
     issue_detail: str,
     severity: str = "warning",
     source_id: str | None = None,
+    model_family: str,
 ) -> None:
+    # SC-12: issues are family-scoped; stamp model_family so per-stage clears for
+    # one family never wipe another family's open issues.
     now = utc_now()
     conn.execute(
         """
         INSERT INTO data_quality_issues(
-            detected_at, severity, stage, ticker, company_id, source_id, issue_type,
+            detected_at, severity, stage, model_family, ticker, company_id, source_id, issue_type,
             issue_detail, resolution_status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
         """,
-        (now, severity, LOAD_STAGE, ticker, company_id, source_id, issue_type, issue_detail, now, now),
+        (now, severity, LOAD_STAGE, model_family, ticker, company_id, source_id, issue_type, issue_detail, now, now),
     )
 
 
@@ -459,7 +466,12 @@ def upsert_universe(
     sec_source_id = source_id_or_none(conn, "sec_company_tickers")
     tickers = [company.ticker for company in companies]
     placeholders = ",".join("?" for _ in tickers)
-    conn.execute(f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({placeholders})", (LOAD_STAGE, *tickers))
+    # SC-12: family-scoped clear so this load never wipes another family's open
+    # issues for the same ticker/stage.
+    conn.execute(
+        f"DELETE FROM data_quality_issues WHERE stage = ? AND model_family = ? AND ticker IN ({placeholders})",
+        (LOAD_STAGE, companies[0].model_family, *tickers),
+    )
     stale_count = reset_stale_active_seed_entities(
         conn,
         model_family=companies[0].model_family,
@@ -649,6 +661,7 @@ def upsert_universe(
                 issue_type="incomplete_identity",
                 issue_detail="Active defense CSV row is missing CIK or another required identity field.",
                 severity="error",
+                model_family=company.model_family,
             )
         if company.universe_status != "keep":
             add_issue(
@@ -659,6 +672,7 @@ def upsert_universe(
                 issue_type="not_rank_ready_universe_status",
                 issue_detail=f"Universe status is {company.universe_status}.",
                 severity="warning",
+                model_family=company.model_family,
             )
         if company.is_primary_listing != 1:
             add_issue(
@@ -672,6 +686,7 @@ def upsert_universe(
                     "must deduplicate or explicitly allow it before rank-ready use."
                 ),
                 severity="warning",
+                model_family=company.model_family,
             )
         if cohort_source_id_or_none is None:
             add_issue(
@@ -682,6 +697,7 @@ def upsert_universe(
                 issue_type="missing_cohort_source_registry",
                 issue_detail=f"Source registry is missing cohort source id {cohort_source_id}.",
                 severity="warning",
+                model_family=company.model_family,
             )
     return len(companies)
 
@@ -708,9 +724,11 @@ def reset_stale_active_seed_entities(
         return 0
 
     placeholders = ",".join("?" for _ in stale_tickers)
+    # SC-12: scope the stale-ticker issue purge to this model family; another
+    # family may still track the ticker and owns its open issues.
     conn.execute(
-        f"DELETE FROM data_quality_issues WHERE ticker IN ({placeholders})",
-        tuple(stale_tickers),
+        f"DELETE FROM data_quality_issues WHERE model_family = ? AND ticker IN ({placeholders})",
+        (model_family, *stale_tickers),
     )
     purge_ticker_scoped_rows(conn, tickers=stale_tickers)
     deleted = conn.execute(

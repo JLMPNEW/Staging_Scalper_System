@@ -48,13 +48,13 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("us-gaap", "CostOfGoodsAndServicesSold", "cost_of_sales", "income_statement", "duration", priority=20, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "GrossProfit", "gross_profit", "income_statement", "duration", priority=10),
     _xbrl_concept("us-gaap", "OperatingIncomeLoss", "operating_income", "income_statement", "duration", priority=10),
-    _xbrl_concept("us-gaap", "LossFromOperations", "operating_income", "income_statement", "duration", priority=20),
     _xbrl_concept("us-gaap", "NetIncomeLoss", "net_income", "income_statement", "duration", priority=10),
     _xbrl_concept("us-gaap", "ProfitLoss", "net_income", "income_statement", "duration", priority=20),
     _xbrl_concept("us-gaap", "EarningsPerShareDiluted", "eps_diluted", "income_statement", "duration", priority=10),
     _xbrl_concept("us-gaap", "Assets", "assets", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "Liabilities", "liabilities", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "StockholdersEquity", "equity", "balance_sheet", "instant", priority=10),
+    _xbrl_concept("us-gaap", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest", "equity", "balance_sheet", "instant", priority=20),
     _xbrl_concept("us-gaap", "CashAndCashEquivalentsAtCarryingValue", "cash_and_equivalents", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", "cash_and_equivalents", "balance_sheet", "instant", priority=20),
     _xbrl_concept("us-gaap", "CashCashEquivalentsAndShortTermInvestments", "cash_and_equivalents", "balance_sheet", "instant", priority=30),
@@ -62,6 +62,7 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("us-gaap", "AccountsReceivableNetCurrent", "accounts_receivable", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "AccountsPayableCurrent", "accounts_payable", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "NetCashProvidedByUsedInOperatingActivities", "operating_cash_flow", "cash_flow", "duration", priority=10),
+    _xbrl_concept("us-gaap", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations", "operating_cash_flow", "cash_flow", "duration", priority=20),
     _xbrl_concept("us-gaap", "PaymentsToAcquirePropertyPlantAndEquipment", "capex", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "ResearchAndDevelopmentExpense", "research_and_development", "income_statement", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "ShareBasedCompensation", "stock_based_compensation", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
@@ -450,6 +451,10 @@ CREATE TABLE IF NOT EXISTS fact_sec_filing (
     fiscal_period TEXT,
     primary_document TEXT,
     filing_url TEXT,
+    -- SC-9: reporting_standard / taxonomy are reserved provenance columns that no
+    -- writer populates today (always NULL). Do not read them as authoritative until
+    -- a writer is added. Issuer-level standard/taxonomy live on
+    -- dim_issuer_reporting_profile instead.
     reporting_standard TEXT,
     taxonomy TEXT,
     source_detail TEXT,
@@ -471,7 +476,9 @@ CREATE TABLE IF NOT EXISTS dim_issuer_reporting_profile (
     latest_form_type TEXT,
     latest_accession_number TEXT,
     fallback_status TEXT,
-    financial_confidence REAL NOT NULL DEFAULT 0.0,
+    -- SC-10: nullable on purpose. NULL means "confidence unknown" while 0.0 is a
+    -- deliberate worst-case assignment written explicitly by the profile writer.
+    financial_confidence REAL,
     usable_xbrl_flag INTEGER NOT NULL DEFAULT 0,
     source_id TEXT,
     review_reason TEXT,
@@ -564,14 +571,17 @@ CREATE TABLE IF NOT EXISTS fact_financial_statement_canonical (
     period_start TEXT,
     filing_date TEXT,
     accepted_at TEXT,
-    accession_number TEXT,
+    -- SC-13: PK columns must be NOT NULL. NULLs never conflict in ON CONFLICT, so a
+    -- nullable PK column silently accumulates duplicate rows. Writers use '' for
+    -- "unknown", never NULL.
+    accession_number TEXT NOT NULL DEFAULT '',
     form_type TEXT,
     fiscal_year INTEGER,
     fiscal_period TEXT,
     reporting_standard TEXT,
     taxonomy TEXT,
     concept_name TEXT,
-    unit TEXT,
+    unit TEXT NOT NULL DEFAULT '',
     value REAL,
     value_usd REAL,
     source_priority INTEGER NOT NULL DEFAULT 100,
@@ -648,21 +658,32 @@ CREATE TABLE IF NOT EXISTS feature_financial_statement (
     inventory_usd REAL,
     accounts_receivable_usd REAL,
     accounts_payable_usd REAL,
+    -- FN-14: unsuffixed TTM/net_cash columns hold LOCAL reported-currency
+    -- values (matching the unsuffixed statement columns above). USD-converted
+    -- values live only in the *_usd variants, converted at the TTM-window
+    -- average FX rate for duration metrics. (No semicolons in this comment:
+    -- apply_schema splits SCHEMA_SQL on them.)
     revenue_ttm REAL,
+    revenue_ttm_usd REAL,
     revenue_stub_annualized REAL,
     revenue_stub_annualized_usd REAL,
     revenue_stub_period_days REAL,
     revenue_stub_quality TEXT,
     gross_profit_ttm REAL,
+    gross_profit_ttm_usd REAL,
     operating_income_ttm REAL,
+    operating_income_ttm_usd REAL,
     net_income_ttm REAL,
+    net_income_ttm_usd REAL,
     free_cash_flow_ttm REAL,
+    free_cash_flow_ttm_usd REAL,
     gross_margin REAL,
     operating_margin REAL,
     fcf_margin REAL,
     r_and_d_pct_revenue REAL,
     sbc_pct_revenue REAL,
     net_cash REAL,
+    net_cash_usd REAL,
     net_cash_to_assets REAL,
     inventory_days REAL,
     days_sales_outstanding REAL,
@@ -685,7 +706,9 @@ CREATE TABLE IF NOT EXISTS feature_financial_statement (
     book_to_bill REAL,
     funded_backlog REAL,
     development_stage TEXT,
-    financial_confidence REAL NOT NULL DEFAULT 0.0,
+    -- SC-10: nullable on purpose. NULL means "confidence unknown" while 0.0 is a
+    -- deliberate worst-case assignment written explicitly by the feature builder.
+    financial_confidence REAL,
     financial_fallback_status TEXT,
     canonical_quality TEXT,
     data_quality_status TEXT,
@@ -729,7 +752,10 @@ CREATE TABLE IF NOT EXISTS fact_sec_form4_transaction (
 CREATE TABLE IF NOT EXISTS fact_13f_positioning (
     ticker TEXT NOT NULL,
     asof_date TEXT NOT NULL,
-    period_of_report TEXT,
+    -- PS-11: period_of_report is part of the PK so two reporting periods that share
+    -- the same last-filing-date asof do not collapse into one row. NOT NULL DEFAULT
+    -- '' keeps the PK conflict-detectable (SC-13) and writers coalesce NULL to ''.
+    period_of_report TEXT NOT NULL DEFAULT '',
     source_id TEXT NOT NULL,
     institutional_shares REAL,
     institutional_value REAL,
@@ -740,7 +766,7 @@ CREATE TABLE IF NOT EXISTS fact_13f_positioning (
     net_buyer_count INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    PRIMARY KEY(ticker, asof_date, source_id),
+    PRIMARY KEY(ticker, asof_date, period_of_report, source_id),
     FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
 );
 
@@ -806,6 +832,10 @@ CREATE TABLE IF NOT EXISTS data_quality_issues (
     detected_at TEXT NOT NULL,
     severity TEXT NOT NULL,
     stage TEXT NOT NULL,
+    -- SC-12: issues are family-scoped like every feature table. Writers must stamp
+    -- their model_family and scope per-stage clears/re-opens by it so one family's
+    -- build never wipes another family's open issues.
+    model_family TEXT NOT NULL DEFAULT 'defense',
     ticker TEXT,
     company_id INTEGER,
     source_id TEXT,
@@ -905,6 +935,9 @@ CREATE INDEX IF NOT EXISTS idx_feature_positioning_asof
 
 CREATE INDEX IF NOT EXISTS idx_data_quality_issues_stage_ticker
     ON data_quality_issues(stage, ticker);
+
+CREATE INDEX IF NOT EXISTS idx_data_quality_issues_family_stage_ticker
+    ON data_quality_issues(model_family, stage, ticker);
 """
 
 
@@ -982,6 +1015,209 @@ def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, d
         conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {declaration}")
 
 
+# PRAGMA user_version schema/data version for this database (SC-1 / SC-5).
+# One-time data backfills and table rebuilds are gated on this version so init_db
+# (which every pipeline script runs on every connection) does not repeat them.
+# Bump the constant when adding a new gated migration step below.
+DB_USER_VERSION = 4
+
+
+def db_user_version(conn: sqlite3.Connection) -> int:
+    row = conn.execute("PRAGMA user_version").fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def _column_info(conn: sqlite3.Connection, table_name: str) -> dict[str, sqlite3.Row]:
+    if not SAFE_IDENTIFIER_RE.match(table_name):
+        raise ValueError(f"Unsafe table name: {table_name}")
+    return {str(row["name"]): row for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _backfill_price_adjustment_columns(conn: sqlite3.Connection) -> None:
+    # SC-1: one-time backfill of the legacy dividend/split columns into their
+    # canonical names. Guarded per column so only rows that actually need the
+    # backfill are rewritten (contrast the previous unbounded full-table UPDATE),
+    # and gated on user_version so it runs once per database.
+    conn.execute(
+        """
+        UPDATE fact_price_ohlcv
+        SET dividend_amount = COALESCE(dividend_amount, dividend),
+            split_factor = COALESCE(split_factor, split_coefficient),
+            price_adjustment = COALESCE(NULLIF(price_adjustment, ''), CASE WHEN adj_close IS NOT NULL THEN 'adjusted_close' ELSE 'missing_adjusted_close' END),
+            is_adjusted = CASE WHEN adj_close IS NOT NULL THEN 1 ELSE COALESCE(is_adjusted, 0) END
+        WHERE (dividend_amount IS NULL AND dividend IS NOT NULL)
+           OR (split_factor IS NULL AND split_coefficient IS NOT NULL)
+           OR COALESCE(price_adjustment, '') = ''
+           OR (adj_close IS NOT NULL AND COALESCE(is_adjusted, 0) = 0)
+        """
+    )
+
+
+def _rebuild_fact_financial_statement_canonical(conn: sqlite3.Connection) -> None:
+    # SC-13: the PK contains accession_number/unit, which were nullable on legacy
+    # databases. NULL PK components never conflict in ON CONFLICT, so duplicates
+    # accumulate silently. Rebuild with NOT NULL DEFAULT '' and coalesce legacy
+    # NULLs; on exact-key duplicates the most recently updated row wins.
+    info = _column_info(conn, "fact_financial_statement_canonical")
+    if bool(info["accession_number"]["notnull"]) and bool(info["unit"]["notnull"]):
+        return
+    conn.execute("DROP TABLE IF EXISTS fact_financial_statement_canonical_rebuild")
+    conn.execute(
+        """
+        CREATE TABLE fact_financial_statement_canonical_rebuild (
+            ticker TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            model_family TEXT NOT NULL DEFAULT 'defense',
+            canonical_metric TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            period_start TEXT,
+            filing_date TEXT,
+            accepted_at TEXT,
+            accession_number TEXT NOT NULL DEFAULT '',
+            form_type TEXT,
+            fiscal_year INTEGER,
+            fiscal_period TEXT,
+            reporting_standard TEXT,
+            taxonomy TEXT,
+            concept_name TEXT,
+            unit TEXT NOT NULL DEFAULT '',
+            value REAL,
+            value_usd REAL,
+            source_priority INTEGER NOT NULL DEFAULT 100,
+            canonical_quality TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(ticker, source_id, model_family, canonical_metric, period_end, accession_number, unit),
+            FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO fact_financial_statement_canonical_rebuild(
+            ticker, source_id, model_family, canonical_metric, period_end, period_start,
+            filing_date, accepted_at, accession_number, form_type, fiscal_year, fiscal_period,
+            reporting_standard, taxonomy, concept_name, unit, value, value_usd,
+            source_priority, canonical_quality, created_at, updated_at
+        )
+        SELECT ticker, source_id, model_family, canonical_metric, period_end, period_start,
+               filing_date, accepted_at, COALESCE(accession_number, ''), form_type, fiscal_year, fiscal_period,
+               reporting_standard, taxonomy, concept_name, COALESCE(unit, ''), value, value_usd,
+               source_priority, canonical_quality, created_at, updated_at
+        FROM fact_financial_statement_canonical
+        ORDER BY COALESCE(updated_at, ''), rowid
+        """
+    )
+    conn.execute("DROP TABLE fact_financial_statement_canonical")
+    conn.execute("ALTER TABLE fact_financial_statement_canonical_rebuild RENAME TO fact_financial_statement_canonical")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fact_financial_statement_canonical_ticker_metric
+        ON fact_financial_statement_canonical(model_family, ticker, canonical_metric, period_end, filing_date)
+        """
+    )
+
+
+def _rebuild_fact_13f_positioning(conn: sqlite3.Connection) -> None:
+    # PS-11 (DDL half): legacy PK (ticker, asof_date, source_id) collapses two
+    # reporting periods that share the same last-filing-date asof. Rebuild with
+    # period_of_report in the PK (NOT NULL DEFAULT '' per SC-13); on exact-key
+    # duplicates the most recently updated row wins.
+    info = _column_info(conn, "fact_13f_positioning")
+    period_row = info.get("period_of_report")
+    if period_row is not None and int(period_row["pk"]) > 0 and bool(period_row["notnull"]):
+        return
+    conn.execute("DROP TABLE IF EXISTS fact_13f_positioning_rebuild")
+    conn.execute(
+        """
+        CREATE TABLE fact_13f_positioning_rebuild (
+            ticker TEXT NOT NULL,
+            asof_date TEXT NOT NULL,
+            period_of_report TEXT NOT NULL DEFAULT '',
+            source_id TEXT NOT NULL,
+            institutional_shares REAL,
+            institutional_value REAL,
+            manager_count INTEGER,
+            institutional_ownership_delta_pct REAL,
+            new_buyer_count INTEGER,
+            exiting_holder_count INTEGER,
+            net_buyer_count INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(ticker, asof_date, period_of_report, source_id),
+            FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO fact_13f_positioning_rebuild(
+            ticker, asof_date, period_of_report, source_id, institutional_shares,
+            institutional_value, manager_count, institutional_ownership_delta_pct,
+            new_buyer_count, exiting_holder_count, net_buyer_count, created_at, updated_at
+        )
+        SELECT ticker, asof_date, COALESCE(period_of_report, ''), source_id, institutional_shares,
+               institutional_value, manager_count, institutional_ownership_delta_pct,
+               new_buyer_count, exiting_holder_count, net_buyer_count, created_at, updated_at
+        FROM fact_13f_positioning
+        ORDER BY COALESCE(updated_at, ''), rowid
+        """
+    )
+    conn.execute("DROP TABLE fact_13f_positioning")
+    conn.execute("ALTER TABLE fact_13f_positioning_rebuild RENAME TO fact_13f_positioning")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fact_13f_positioning_ticker_asof
+        ON fact_13f_positioning(ticker, asof_date)
+        """
+    )
+
+
+def _backfill_feature_usd_ttm_columns(conn: sqlite3.Connection) -> None:
+    # FN-14: legacy feature rows stored USD-converted values in the unsuffixed
+    # TTM/net_cash columns. Copy them into the new *_usd columns, then clear
+    # the unsuffixed columns wherever local != USD (the local-currency values
+    # cannot be reconstructed here; the next feature build repopulates them).
+    # usd_native rows keep both columns because local == USD for them.
+    conn.execute(
+        """
+        UPDATE feature_financial_statement
+        SET revenue_ttm_usd = COALESCE(revenue_ttm_usd, revenue_ttm),
+            gross_profit_ttm_usd = COALESCE(gross_profit_ttm_usd, gross_profit_ttm),
+            operating_income_ttm_usd = COALESCE(operating_income_ttm_usd, operating_income_ttm),
+            net_income_ttm_usd = COALESCE(net_income_ttm_usd, net_income_ttm),
+            free_cash_flow_ttm_usd = COALESCE(free_cash_flow_ttm_usd, free_cash_flow_ttm),
+            net_cash_usd = COALESCE(net_cash_usd, net_cash)
+        WHERE revenue_ttm IS NOT NULL
+           OR gross_profit_ttm IS NOT NULL
+           OR operating_income_ttm IS NOT NULL
+           OR net_income_ttm IS NOT NULL
+           OR free_cash_flow_ttm IS NOT NULL
+           OR net_cash IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        UPDATE feature_financial_statement
+        SET revenue_ttm = NULL,
+            gross_profit_ttm = NULL,
+            operating_income_ttm = NULL,
+            net_income_ttm = NULL,
+            free_cash_flow_ttm = NULL,
+            net_cash = NULL
+        WHERE COALESCE(fx_conversion_status, '') <> 'usd_native'
+          AND (
+                revenue_ttm IS NOT NULL
+             OR gross_profit_ttm IS NOT NULL
+             OR operating_income_ttm IS NOT NULL
+             OR net_income_ttm IS NOT NULL
+             OR free_cash_flow_ttm IS NOT NULL
+             OR net_cash IS NOT NULL
+          )
+        """
+    )
+
+
 def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "dim_delisted_calibration_seed", "internal_ticker", "TEXT")
     ensure_column(conn, "fact_price_ohlcv", "dividend_amount", "REAL")
@@ -993,10 +1229,14 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "fact_corporate_action", "split_denominator", "REAL")
     ensure_column(conn, "fact_corporate_action", "split_factor", "REAL")
     ensure_column(conn, "fact_corporate_action", "raw_value", "TEXT")
-    ensure_column(conn, "dim_issuer_reporting_profile", "reporting_profile", "TEXT")
+    # SC-6: match the fresh DDL's NOT NULL contract when migrating legacy tables.
+    ensure_column(conn, "dim_issuer_reporting_profile", "reporting_profile", "TEXT NOT NULL DEFAULT ''")
     ensure_column(conn, "dim_issuer_reporting_profile", "fallback_status", "TEXT")
-    ensure_column(conn, "dim_issuer_reporting_profile", "financial_confidence", "REAL NOT NULL DEFAULT 0.0")
+    # SC-10: nullable REAL — migrated legacy rows must read NULL ("unknown"),
+    # not 0.0 ("worst"). Writers always supply explicit values.
+    ensure_column(conn, "dim_issuer_reporting_profile", "financial_confidence", "REAL")
     ensure_column(conn, "fact_financial_statement_canonical", "concept_name", "TEXT")
+    ensure_column(conn, "fact_13f_positioning", "period_of_report", "TEXT")
     ensure_column(conn, "feature_financial_statement", "cost_of_sales", "REAL")
     ensure_column(conn, "feature_financial_statement", "reporting_profile", "TEXT")
     ensure_column(conn, "feature_financial_statement", "contract_liabilities", "REAL")
@@ -1007,18 +1247,22 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "feature_financial_statement", "revenue_stub_period_days", "REAL")
     ensure_column(conn, "feature_financial_statement", "revenue_stub_quality", "TEXT")
     ensure_column(conn, "feature_financial_statement", "development_stage", "TEXT")
-    ensure_column(conn, "feature_financial_statement", "financial_confidence", "REAL NOT NULL DEFAULT 0.0")
+    # FN-14: USD variants of the TTM/net_cash feature columns; the unsuffixed
+    # columns hold local reported-currency values from this migration on.
+    ensure_column(conn, "feature_financial_statement", "revenue_ttm_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "gross_profit_ttm_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "operating_income_ttm_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "net_income_ttm_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "free_cash_flow_ttm_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "net_cash_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "financial_confidence", "REAL")
     ensure_column(conn, "feature_financial_statement", "financial_fallback_status", "TEXT")
     ensure_column(conn, "feature_financial_statement", "review_reason", "TEXT")
     ensure_column(conn, "feature_positioning", "form4_status", "TEXT")
     ensure_column(conn, "feature_positioning", "form4_status_reason", "TEXT")
-    conn.execute(
-        """
-        UPDATE dim_delisted_calibration_seed
-        SET internal_ticker = ticker
-        WHERE COALESCE(internal_ticker, '') = ''
-        """
-    )
+    # SC-12: family-scope the issues table on legacy databases. Existing rows were
+    # all written by defense-family runs, so the backfill default is 'defense'.
+    ensure_column(conn, "data_quality_issues", "model_family", "TEXT NOT NULL DEFAULT 'defense'")
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_dim_delisted_calibration_internal
@@ -1027,13 +1271,31 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
-        UPDATE fact_price_ohlcv
-        SET dividend_amount = COALESCE(dividend_amount, dividend),
-            split_factor = COALESCE(split_factor, split_coefficient),
-            price_adjustment = COALESCE(NULLIF(price_adjustment, ''), CASE WHEN adj_close IS NOT NULL THEN 'adjusted_close' ELSE 'missing_adjusted_close' END),
-            is_adjusted = CASE WHEN adj_close IS NOT NULL THEN 1 ELSE COALESCE(is_adjusted, 0) END
+        CREATE INDEX IF NOT EXISTS idx_data_quality_issues_family_stage_ticker
+        ON data_quality_issues(model_family, stage, ticker)
         """
     )
+    version = db_user_version(conn)
+    if version < 1:
+        conn.execute(
+            """
+            UPDATE dim_delisted_calibration_seed
+            SET internal_ticker = ticker
+            WHERE COALESCE(internal_ticker, '') = ''
+            """
+        )
+        # SC-6: legacy databases may have gained reporting_profile as a plain
+        # nullable TEXT column; align stored NULLs with the NOT NULL '' contract.
+        conn.execute("UPDATE dim_issuer_reporting_profile SET reporting_profile = '' WHERE reporting_profile IS NULL")
+        _backfill_price_adjustment_columns(conn)
+    if version < 2:
+        _rebuild_fact_financial_statement_canonical(conn)
+    if version < 3:
+        _rebuild_fact_13f_positioning(conn)
+    if version < 4:
+        _backfill_feature_usd_ttm_columns(conn)
+    if version < DB_USER_VERSION:
+        conn.execute(f"PRAGMA user_version = {int(DB_USER_VERSION)}")
 
 
 def seed_xbrl_concept_map(conn: sqlite3.Connection) -> None:
@@ -1051,6 +1313,7 @@ def seed_xbrl_concept_map(conn: sqlite3.Connection) -> None:
             sign_policy = excluded.sign_policy,
             priority = excluded.priority,
             active_flag = 1,
+            notes = excluded.notes,
             updated_at = excluded.updated_at
         """,
         [
@@ -1068,6 +1331,36 @@ def seed_xbrl_concept_map(conn: sqlite3.Connection) -> None:
             for row in XBRL_CONCEPT_MAP_SEED
         ],
     )
+    # SC-5: deactivate seed-managed concepts that were removed from the seed list
+    # (e.g. the nonexistent us-gaap:LossFromOperations, FN-19) so stale mappings do
+    # not keep matching facts. Only rows this seeder authored are touched; manually
+    # curated rows (different notes) are left alone.
+    seeded_keys = {
+        (str(row["taxonomy"]), str(row["concept_name"]), str(row["canonical_metric"]))
+        for row in XBRL_CONCEPT_MAP_SEED
+    }
+    stale_rows = conn.execute(
+        """
+        SELECT taxonomy, concept_name, canonical_metric
+        FROM dim_xbrl_concept_map
+        WHERE active_flag = 1
+          AND notes = 'seeded by industrials.core.db'
+        """
+    ).fetchall()
+    for row in stale_rows:
+        key = (str(row["taxonomy"]), str(row["concept_name"]), str(row["canonical_metric"]))
+        if key in seeded_keys:
+            continue
+        conn.execute(
+            """
+            UPDATE dim_xbrl_concept_map
+            SET active_flag = 0,
+                notes = 'deactivated by industrials.core.db seed sync (removed from seed list)',
+                updated_at = ?
+            WHERE taxonomy = ? AND concept_name = ? AND canonical_metric = ?
+            """,
+            (now, key[0], key[1], key[2]),
+        )
 
 
 def start_run(conn: sqlite3.Connection, *, run_type: str, input_path: Path | str | None = None) -> int:

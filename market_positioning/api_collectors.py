@@ -5,6 +5,7 @@ import io
 import json
 import json.decoder
 import math
+import os
 import re
 import sqlite3
 import sys
@@ -19,7 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from market_positioning.core import (
-    aggregate_13f_ownership,
+    aggregate_13f_ownership,  # noqa: F401  (kept exported for backward compatibility)
+    aggregate_13f_ownership_for_tickers,
     normalize_pct,
     normalize_ticker,
     parse_date,
@@ -227,6 +229,17 @@ def previous_weekday(day: date) -> date:
     return out
 
 
+def add_business_days(day: date, business_days: int) -> date:
+    """Advance a date by N business days (weekends skipped; holidays not modeled)."""
+    out = day
+    remaining = max(0, int(business_days))
+    while remaining > 0:
+        out += timedelta(days=1)
+        if out.weekday() < 5:
+            remaining -= 1
+    return out
+
+
 def last_weekday_of_month(year: int, month: int) -> date:
     if month == 12:
         day = date(year + 1, 1, 1) - timedelta(days=1)
@@ -275,7 +288,17 @@ def finra_short_interest_records(
     user_agent: str = DEFAULT_USER_AGENT,
     timeout_sec: float = 60.0,
     max_tickers: int = 0,
+    publication_lag_business_days: int = 8,
 ) -> list[tuple[Any, ...]]:
+    """Collect FINRA API short-interest rows.
+
+    FINRA disseminates biweekly short interest several business days after the
+    settlement date, so publication_date (and the PIT asof_date) must be
+    settlement + `publication_lag_business_days` — never the settlement date
+    itself, or point-in-time consumers would see the data before FINRA
+    published it. Callers should pass the configured
+    `market_positioning.finra_api_publication_lag_days` value (default 8).
+    """
     records: list[tuple[Any, ...]] = []
     now = utc_now()
     scoped_tickers = set(tickers[:max_tickers] if max_tickers and max_tickers > 0 else tickers)
@@ -312,12 +335,13 @@ def finra_short_interest_records(
                     avg_daily_shares = to_float(row.get("averageShortShareNumber"))
                     if short_shares is not None and avg_daily_shares is not None and avg_daily_shares > 0:
                         days_to_cover = round(short_shares / avg_daily_shares, 4)
+                publication = add_business_days(settlement, publication_lag_business_days)
                 records.append(
                     (
                         api_ticker,
+                        publication.isoformat(),
                         settlement.isoformat(),
-                        settlement.isoformat(),
-                        settlement.isoformat(),
+                        publication.isoformat(),
                         short_shares,
                         None,
                         None,
@@ -350,6 +374,7 @@ def sync_finra_short_interest(
     user_agent: str = DEFAULT_USER_AGENT,
     timeout_sec: float = 60.0,
     max_tickers: int = 0,
+    publication_lag_business_days: int = 8,
 ) -> SyncResult:
     tickers = load_universe_tickers(tickers_csv)
     if not tickers:
@@ -364,8 +389,22 @@ def sync_finra_short_interest(
         user_agent=user_agent,
         timeout_sec=timeout_sec,
         max_tickers=max_tickers,
+        publication_lag_business_days=publication_lag_business_days,
     )
     with conn:
+        # Remove superseded rows for the same (ticker, settlement) whose asof/publication
+        # stamp differs (legacy rows stamped publication_date = settlement_date leaked
+        # pre-publication data into PIT consumers; the corrected row replaces them).
+        conn.executemany(
+            """
+            DELETE FROM short_interest_snapshots
+            WHERE source = 'finra_equity_short_interest'
+              AND ticker = ?
+              AND settlement_date = ?
+              AND asof_date <> ?
+            """,
+            [(record[0], record[2], record[1]) for record in records],
+        )
         conn.executemany(
             """
             INSERT INTO short_interest_snapshots(
@@ -406,6 +445,36 @@ def finra_equity_short_interest_file_url(base_url: str, settlement_date: date) -
     return f"{base_url.rstrip('/')}/shrt{settlement_date.strftime('%Y%m%d')}.csv"
 
 
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    """Write bytes via tmp + os.replace so a crash never leaves a truncated cache file."""
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_bytes(data)
+    os.replace(tmp_path, path)
+
+
+def delimited_file_is_intact(path: Path, *, delimiter: str = "|") -> bool:
+    """Cheap integrity check for cached delimited CSVs.
+
+    A truncated download usually ends mid-line, so require the header to
+    contain the delimiter and the last non-empty line to carry the same field
+    count as the header. Cannot detect truncation exactly at a line boundary,
+    but catches the common corrupt-cache failure mode that otherwise fails
+    open (DictReader silently yields only the surviving lines).
+    """
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return False
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    header = lines[0]
+    if delimiter not in header:
+        return False
+    expected_fields = header.count(delimiter)
+    return lines[-1].count(delimiter) == expected_fields
+
+
 def download_finra_equity_short_interest_file(
     *,
     url: str,
@@ -416,7 +485,10 @@ def download_finra_equity_short_interest_file(
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / Path(urllib.parse.urlparse(url).path).name
     if path.exists() and path.stat().st_size > 0:
-        return path
+        if delimited_file_is_intact(path):
+            return path
+        # Corrupt cache (e.g. truncated earlier download): delete and refetch once.
+        path.unlink()
     try:
         raw = http_request(url, user_agent=user_agent, timeout_sec=timeout_sec)
     except urllib.error.HTTPError as exc:
@@ -425,7 +497,12 @@ def download_finra_equity_short_interest_file(
         raise
     if not raw:
         return None
-    path.write_bytes(raw)
+    write_bytes_atomic(path, raw)
+    if not delimited_file_is_intact(path):
+        path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"FINRA short-interest file failed pipe-delimited integrity verification after download: {url}"
+        )
     return path
 
 
@@ -567,14 +644,35 @@ def discover_sec_13f_archives(
     return urls
 
 
+def cached_download_is_intact(path: Path) -> bool:
+    """Verify a cached download; zip archives must have a readable central directory.
+
+    `zipfile.is_zipfile` fails on truncated archives because the end-of-central-
+    directory record lives at the end of the file, which is exactly what a
+    partial download loses.
+    """
+    if path.suffix.lower() == ".zip":
+        try:
+            return zipfile.is_zipfile(path)
+        except OSError:
+            return False
+    return path.stat().st_size > 0
+
+
 def download_cached(url: str, *, cache_dir: Path, user_agent: str, timeout_sec: float) -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     filename = Path(urllib.parse.urlparse(url).path).name
     path = cache_dir / filename
     if path.exists() and path.stat().st_size > 0:
-        return path
+        if cached_download_is_intact(path):
+            return path
+        # Corrupt cache (e.g. truncated earlier download): delete and refetch once.
+        path.unlink()
     raw = http_request(url, user_agent=user_agent, timeout_sec=timeout_sec)
-    path.write_bytes(raw)
+    write_bytes_atomic(path, raw)
+    if not cached_download_is_intact(path):
+        path.unlink(missing_ok=True)
+        raise RuntimeError(f"Downloaded archive failed integrity verification: {url}")
     return path
 
 
@@ -699,6 +797,10 @@ def sync_sec_13f_data_sets(
     total_holdings = 0
     processed_archives = 0
     skipped_archives = 0
+    dropped_rows_missing_accession = 0
+    dropped_rows_missing_submission = 0
+    dropped_rows_unparsable_filing_date = 0
+    matched_rows_unparsable_period = 0
     for url in archives:
         archive_path = download_cached(url, cache_dir=cache_dir, user_agent=user_agent, timeout_sec=timeout_sec)
         if not force_reprocess_archives and archive_already_processed(conn, archive_path):
@@ -710,6 +812,13 @@ def sync_sec_13f_data_sets(
         with zipfile.ZipFile(archive_path) as zf:
             submissions = read_zip_table(zf, "SUBMISSION")
             infotable = read_zip_table(zf, "INFOTABLE")
+        if infotable and not submissions:
+            # Without SUBMISSION rows every holding lacks a filing date and would be
+            # dropped silently — the archive is corrupt or the SEC layout changed.
+            raise RuntimeError(
+                f"13F archive {archive_path} has {len(infotable)} INFOTABLE rows but no readable "
+                "SUBMISSION table; refusing to silently drop them. Delete the cached archive to force a refetch."
+            )
         submission_by_accession: dict[str, dict[str, str]] = {
             str(row.get("ACCESSION_NUMBER") or row.get("accession_number") or "").strip(): row
             for row in submissions
@@ -717,24 +826,36 @@ def sync_sec_13f_data_sets(
         for row in infotable:
             accession = str(row.get("ACCESSION_NUMBER") or row.get("accession_number") or "").strip()
             if not accession:
+                dropped_rows_missing_accession += 1
                 continue
-            submission = submission_by_accession.get(accession, {})
-            filing_date = parse_date(
+            submission = submission_by_accession.get(accession)
+            if submission is None:
+                dropped_rows_missing_submission += 1
+                continue
+            raw_filing_date = (
                 submission.get("FILING_DATE")
                 or submission.get("filing_date")
                 or submission.get("FILEDASOFDATE")
                 or submission.get("filedAsOfDate")
             )
+            filing_date = parse_date(raw_filing_date)
             period = parse_date(
                 submission.get("REPORTCALENDARORQUARTER")
                 or submission.get("PERIODOFREPORT")
                 or submission.get("periodOfReport")
             )
-            if filing_date is None or filing_date < history_start_date or filing_date > end_date:
+            if filing_date is None:
+                dropped_rows_unparsable_filing_date += 1
+                continue
+            if filing_date < history_start_date or filing_date > end_date:
                 continue
             ticker = match_13f_ticker(row, cusip_map=cusip_map, name_map=name_map)
             if not ticker:
                 continue
+            if period is None:
+                # Stored with period_of_report = '' and permanently invisible to the
+                # period-bucketed aggregator; must be visible in the run summary.
+                matched_rows_unparsable_period += 1
             manager_cik = str(
                 submission.get("CIK")
                 or submission.get("cik")
@@ -789,12 +910,23 @@ def sync_sec_13f_data_sets(
         processed_archives += 1
         if sleep_sec > 0:
             time.sleep(sleep_sec)
-    aggregate_13f_ownership(conn, source="sec_13f_data_sets")
+    # Aggregate ONLY this package's universe (name/CUSIP-mapped tickers). The DB is
+    # shared by several sector packages under the same source string, so an unscoped
+    # aggregation would rebuild — and reshape — other packages' snapshot rows. The
+    # period-bucketed aggregator keeps snapshot semantics identical to the
+    # industrials/technology upstream syncs for any overlapping tickers.
+    universe_tickers = sorted(set(name_map.values()) | set(cusip_map.values()))
+    snapshot_rows = aggregate_13f_ownership_for_tickers(conn, universe_tickers, source="sec_13f_data_sets")
     total_table_holdings = int(conn.execute("SELECT COUNT(*) FROM institutional_13f_holdings").fetchone()[0])
     message = (
         f"SEC Form 13F data-set archives processed={processed_archives} "
         f"skipped_already_loaded={skipped_archives} new_matched_holdings={total_holdings} "
-        f"total_holdings={total_table_holdings}"
+        f"total_holdings={total_table_holdings} snapshot_rows={snapshot_rows} "
+        f"universe_tickers={len(universe_tickers)} "
+        f"dropped_rows_missing_accession={dropped_rows_missing_accession} "
+        f"dropped_rows_missing_submission={dropped_rows_missing_submission} "
+        f"dropped_rows_unparsable_filing_date={dropped_rows_unparsable_filing_date} "
+        f"matched_rows_unparsable_period={matched_rows_unparsable_period}"
     )
     update_feed_state(
         conn,
