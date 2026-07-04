@@ -295,7 +295,7 @@ sec_archive:
   # archive. Pinned to the in-code default (0.5).
   min_refetch_fact_fraction: 0.5
 
-# Consumed by the Stage 8 OOS calibration validator (not yet implemented).
+# Consumed by the Stage 8 OOS readiness validator and future calibration artifact validators.
 # Kept here so the provenance contract is pinned before research work begins.
 oos_calibration_standards:
   version: "industrials_defense_oos_provenance_v1"

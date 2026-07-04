@@ -763,6 +763,7 @@ Goal: run report-only IC diagnostics, constrained Optuna calibration, and walk-f
 
 Implementation:
 
+- Use `21_validate_defense_oos_calibration_readiness.py` as the current Stage 8 readiness scaffold before any OOS panel is promoted. It validates immutable shadow rank-table manifests, schema, native score units, shadow gate pins, PIT source dates, portfolio-adapter shadow ingestion, and benchmark pins.
 - Create `08_build_defense_oos_calibration_panel.py` to produce point-in-time calibration panels and split metadata for research-only scoring diagnostics.
 - Create `08_validate_defense_oos_calibration_artifacts.py` to enforce the True OOS Calibration File Standards.
 - Build a point-in-time historical panel using `dim_universe_membership`.
@@ -779,6 +780,8 @@ Implementation:
 
 Acceptance gates:
 
+- `21_validate_defense_oos_calibration_readiness.py` passes in report-only mode for all available shadow snapshots.
+- `21_validate_defense_oos_calibration_readiness.py --promotion-check` remains blocked until the configured minimum valid snapshot count is met.
 - The calibration panel uses point-in-time universe membership.
 - Current and historical/delisted defense members are included when eligible Norgate price data exists.
 - Delisted ticker coverage from `industrials/defense/system_csvs/aerospace_defense_delisted.csv` meets the configured minimum coverage threshold.

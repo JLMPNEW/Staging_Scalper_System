@@ -76,6 +76,15 @@
 - `20_validate_defense_portfolio_adapter_shadow.py` must pass before any portfolio-layer registration work. It proves `tech_family` can ingest the file while keeping investable, research, and OOS-valid gates disabled.
 - Shadow artifacts can support data-contract and PIT-history validation, but they cannot be portfolio candidates until true OOS calibration is validated and the portfolio layer is registered intentionally.
 
+## Stage 8 OOS Calibration Readiness
+
+- `21_validate_defense_oos_calibration_readiness.py` validates shadow rank-table snapshots before any calibration research artifact is treated as promotable.
+- The readiness validator checks manifest SHA-256 hashes, schema compatibility, 0-100 native score units, shadow-only gate pins, source dates no later than the snapshot `asof_date`, portfolio-adapter shadow ingestion, and defense benchmark pins.
+- `XAR` is the primary defense excess-return benchmark. `ITA` is a robustness comparator.
+- Report-only mode may pass with insufficient snapshot history but must write `promotion_ready=False` in the console summary/report state.
+- `--promotion-check` must fail until the configured `min_shadow_snapshots_for_promotion` valid immutable snapshots exist.
+- Stage 8 promotion remains blocked while any snapshot has a missing/invalid manifest, future-dated source row, non-shadow portfolio/OOS gate, schema drift, or native score outside `0..100`.
+
 ## Pre-Stage 5 Production Readiness
 
 - `04b_validate_defense_stage0_4_production_readiness.py` must be run against the configured production `industrials.sqlite`, not a scratch DB.

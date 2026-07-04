@@ -60,7 +60,10 @@ The publisher refuses to overwrite an existing valid dated artifact unless `--al
 ```powershell
 C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\19_build_defense_shadow_snapshot_history.py --start-date 2026-07-02 --end-date 2026-07-02
 C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\20_validate_defense_portfolio_adapter_shadow.py --asof 2026-07-02
+C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\21_validate_defense_oos_calibration_readiness.py --asof 2026-07-02
 ```
+
+`21_validate_defense_oos_calibration_readiness.py` is report-only by default. It validates manifest hashes, contract schema, 0-100 native score units, shadow-only gates, point-in-time source dates, benchmark pins, and portfolio-adapter shadow ingestion. Use `--promotion-check` only when enough PIT history exists and the run should fail if the configured minimum snapshot count is not met.
 
 Do not register defense in `portfolio_layer/config.yaml` until the immutable snapshot history, OOS calibration validator, duplicate-ticker ownership overrides, and portfolio Stage 1 dry run all pass.
 
