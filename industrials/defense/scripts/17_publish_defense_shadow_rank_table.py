@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -199,11 +200,47 @@ def fetch_map(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> di
     return {normalize_ticker(row["ticker"]): dict(row) for row in rows if normalize_ticker(row["ticker"])}
 
 
-def load_rows(conn: sqlite3.Connection, *, asof: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+def select_effective_capacity_overrides(
+    path: Path,
+    *,
+    asof: str,
+) -> dict[str, dict[str, str]]:
+    if not path.exists():
+        return {}
+    selected: dict[str, dict[str, str]] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            ticker = normalize_ticker(row.get("ticker"))
+            if not ticker:
+                continue
+            valid_from = str(row.get("valid_from") or "").strip()
+            if valid_from:
+                valid_from = datetime.strptime(valid_from[:10], "%Y-%m-%d").date().isoformat()
+                if valid_from > asof:
+                    continue
+            current = selected.get(ticker)
+            current_valid_from = str(current.get("valid_from") or "") if current else ""
+            if current is None or valid_from >= current_valid_from:
+                selected[ticker] = {str(k): str(v or "") for k, v in row.items()}
+    return selected
+
+
+def load_rows(
+    conn: sqlite3.Connection,
+    *,
+    asof: str,
+    config: dict[str, Any],
+    base_dir: Path,
+) -> list[dict[str, Any]]:
     market_source = str(cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted"))
     financial_source = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts"))
     positioning_source = str(cfg_get(config, "positioning_import.source_id", "industrials_positioning_composite"))
     submissions_source = str(cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions"))
+    capacity_override_path = resolve_path(
+        str(cfg_get(config, "rank_export.defense_capacity_overrides_csv", "defense/system_csvs/defense_capacity_overrides.csv")),
+        base_dir=base_dir,
+    )
+    capacity_overrides = select_effective_capacity_overrides(capacity_override_path, asof=asof)
     active = fetch_map(
         conn,
         """
@@ -261,6 +298,29 @@ def load_rows(conn: sqlite3.Connection, *, asof: str, config: dict[str, Any]) ->
         """,
         (market_source,),
     )
+    available_dollar_volume = fetch_map(
+        conn,
+        """
+        WITH ranked AS (
+            SELECT ticker, close, volume,
+                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY bar_date DESC) AS rn
+            FROM fact_price_ohlcv
+            WHERE source_id = ?
+              AND bar_date <= ?
+              AND close IS NOT NULL
+              AND volume IS NOT NULL
+              AND close > 0
+              AND volume >= 0
+        )
+        SELECT ticker,
+               COUNT(*) AS available_dollar_volume_days,
+               AVG(close * volume) AS avg_dollar_volume_available_window
+        FROM ranked
+        WHERE rn <= 60
+        GROUP BY ticker
+        """,
+        (market_source, asof),
+    )
     filing_urls = {
         (str(row["ticker"]), str(row["accession_number"])): dict(row)
         for row in conn.execute(
@@ -280,6 +340,8 @@ def load_rows(conn: sqlite3.Connection, *, asof: str, config: dict[str, Any]) ->
         merged.update({f"financial_{k}": v for k, v in financial.get(ticker, {}).items()})
         merged.update({f"positioning_{k}": v for k, v in positioning.get(ticker, {}).items()})
         merged.update({f"profile_{k}": v for k, v in profiles.get(ticker, {}).items()})
+        merged.update({f"capacity_{k}": v for k, v in capacity_overrides.get(ticker, {}).items()})
+        merged.update({f"market_window_{k}": v for k, v in available_dollar_volume.get(ticker, {}).items()})
         merged["price_start_date"] = price_dates.get(ticker, {}).get("price_start_date") or merged.get("price_start_date") or ""
         merged["price_end_date"] = price_dates.get(ticker, {}).get("price_end_date") or ""
         accession = str(merged.get("financial_accession_number") or "")
@@ -317,19 +379,46 @@ def market_cap_export_value(row: dict[str, Any]) -> tuple[float | None, str, str
     if price is not None and diluted_shares is not None and diluted_shares > 0:
         return price * diluted_shares, "computed_pit_price_x_diluted_shares", ""
 
+    short_shares = finite(row.get("positioning_latest_short_interest_shares"))
+    short_pct_float = finite(row.get("positioning_latest_short_interest_pct_float"))
+    if price is not None and short_shares is not None and short_pct_float is not None and short_pct_float > 0:
+        implied_float_shares = short_shares / short_pct_float
+        if implied_float_shares > 0:
+            return (
+                price * implied_float_shares,
+                "computed_pit_price_x_short_interest_float_proxy",
+                "market_cap_share_count_proxy_from_short_interest_pct_float",
+            )
+
+    override_market_cap = finite(row.get("capacity_market_cap_value"))
+    override_source = str(row.get("capacity_market_cap_source") or "").strip()
+    override_reason = str(row.get("capacity_market_cap_reason") or "market_cap_from_capacity_override").strip()
+    if override_market_cap is not None and override_market_cap > 0:
+        return override_market_cap, override_source or "capacity_override_market_cap_value", override_reason
+    override_shares = finite(row.get("capacity_market_cap_share_count"))
+    if price is not None and override_shares is not None and override_shares > 0:
+        return (
+            price * override_shares,
+            override_source or "computed_pit_price_x_capacity_override_shares",
+            override_reason or "market_cap_share_count_from_capacity_override",
+        )
+
     reasons: list[str] = []
     if price is None:
         reasons.append("market_cap_unavailable_missing_pit_price")
     if diluted_shares is None or diluted_shares <= 0:
         reasons.append("market_cap_unavailable_missing_share_count")
+    reasons.append("market_cap_unavailable_missing_capacity_override")
     return None, "", ";".join(reasons)
 
 
-def liquidity_capacity_reason(row: dict[str, Any], *, market_cap_reason: str) -> str:
+def liquidity_capacity_reason(row: dict[str, Any], *, market_cap_reason: str, avg_dollar_volume_reason: str = "") -> str:
     reasons: list[str] = []
     if market_cap_reason:
         reasons.append(market_cap_reason)
-    if finite(row.get("avg_dollar_volume_60d")) is None:
+    if avg_dollar_volume_reason:
+        reasons.append(avg_dollar_volume_reason)
+    elif finite(row.get("avg_dollar_volume_60d")) is None:
         days = finite(row.get("market_trading_days_available"))
         if days is not None and days < 60:
             reasons.append(f"avg_dollar_volume_60d_unavailable_insufficient_history_{int(days)}_of_60")
@@ -385,10 +474,27 @@ def add_feature_aliases(rows: list[dict[str, Any]]) -> None:
         market_cap, market_cap_source, market_cap_reason = market_cap_export_value(row)
         row["market_cap"] = market_cap
         row["market_cap_source"] = market_cap_source
+        row["_market_cap_reason"] = market_cap_reason
         for out_name, source_name in aliases.items():
             if out_name != "latest_price":
                 row[out_name] = row.get(source_name)
         row["liquidity_capacity_reason"] = liquidity_capacity_reason(row, market_cap_reason=market_cap_reason)
+
+
+def apply_export_capacity_fallbacks(rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        avg_reason = ""
+        if finite(row.get("avg_dollar_volume_60d")) is None:
+            available_avg = finite(row.get("market_window_avg_dollar_volume_available_window"))
+            available_days = finite(row.get("market_window_available_dollar_volume_days"))
+            if available_avg is not None and available_days is not None and available_days > 0:
+                row["avg_dollar_volume_60d"] = available_avg
+                avg_reason = f"avg_dollar_volume_60d_available_history_proxy_{int(available_days)}_of_60"
+        row["liquidity_capacity_reason"] = liquidity_capacity_reason(
+            row,
+            market_cap_reason=str(row.get("_market_cap_reason") or ""),
+            avg_dollar_volume_reason=avg_reason,
+        )
 
 
 def build_scores(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -776,7 +882,7 @@ def main() -> int:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         init_db(conn)
-        rows = load_rows(conn, asof=asof, config=config)
+        rows = load_rows(conn, asof=asof, config=config, base_dir=base_dir)
     if not rows:
         raise ValueError(f"No active defense rows found for asof={asof}")
     missing_feature = [
@@ -787,6 +893,7 @@ def main() -> int:
     if missing_feature:
         raise ValueError(f"Missing Stage 3/4/5 feature rows for active tickers: {missing_feature[:20]}")
     scores = build_scores(rows)
+    apply_export_capacity_fallbacks(rows)
     out_rows = compose_rows(rows, scores, policies, asof, provenance_version=provenance_version)
     write_csv_atomic(output_path, fields, [{field: row.get(field, "") for field in fields} for row in out_rows])
     manifest_path = seal_manifest(output_path, rows=len(out_rows), asof=asof)

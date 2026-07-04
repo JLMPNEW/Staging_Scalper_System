@@ -278,6 +278,12 @@ def validate_snapshot(path: Path, *, exp_header: list[str], expected_score_versi
     ]
     if bad_stage11_source:
         issues.append(f"stage11_calibration_panel_source not explicit: {bad_stage11_source[:10]}")
+    blank_market_cap = [row.get("ticker", "") for row in rows if not str(row.get("market_cap") or "").strip()]
+    if blank_market_cap:
+        issues.append(f"market_cap blank in published rank table: {blank_market_cap[:10]}")
+    blank_adv60 = [row.get("ticker", "") for row in rows if not str(row.get("avg_dollar_volume_60d") or "").strip()]
+    if blank_adv60:
+        issues.append(f"avg_dollar_volume_60d blank in published rank table: {blank_adv60[:10]}")
     missing_capacity_reason = [
         row.get("ticker", "")
         for row in rows

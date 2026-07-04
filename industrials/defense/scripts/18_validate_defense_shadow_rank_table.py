@@ -146,6 +146,12 @@ def main() -> int:
     ]
     if bad_stage11_source:
         errors.append(f"stage11_calibration_panel_source not explicit current-universe replay: {bad_stage11_source[:10]}")
+    blank_market_cap = [row.get("ticker", "") for row in rows if not str(row.get("market_cap") or "").strip()]
+    if blank_market_cap:
+        errors.append(f"market_cap blank in published rank table: {blank_market_cap[:10]}")
+    blank_adv60 = [row.get("ticker", "") for row in rows if not str(row.get("avg_dollar_volume_60d") or "").strip()]
+    if blank_adv60:
+        errors.append(f"avg_dollar_volume_60d blank in published rank table: {blank_adv60[:10]}")
     missing_capacity_reason = [
         row.get("ticker", "")
         for row in rows

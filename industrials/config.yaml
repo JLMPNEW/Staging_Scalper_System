@@ -119,6 +119,9 @@ market_feature_build:
     ma_short_days: 50
     ma_long_days: 200
 
+rank_export:
+  defense_capacity_overrides_csv: "defense/system_csvs/defense_capacity_overrides.csv"
+
 norgate_delisted_import:
   source_id: "norgate_us_equities_total_return"
   symbol_overrides_csv: "defense/system_csvs/defense_norgate_symbol_overrides.csv"
