@@ -1768,7 +1768,7 @@ historical_backfill:
   allow_missing_static_pit_metadata: false
   # Re-run FDA entity linking per as-of date during backfill (script 21); default off.
   relink_fda_per_asof: false
-  new_daily_columns_required_from: "2026-06-26"
+  new_daily_columns_required_from: "2024-01-02"
   oos_validation_csv: "../output/med_devices_reports/oos_validation/med_device_historical_snapshot_oos_validation.csv"
   manifest_csv: "../output/med_devices_reports/historical_backfill/weekly_score_backfill_manifest.csv"
 
