@@ -28,6 +28,13 @@ from industrials.core.policy_loader import load_eligibility_policy, resolve_poli
 from industrials.core.rank_table_contracts import defense_final_rank_header  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.text_norm import normalize_ticker  # noqa: E402
+from industrials.defense.research_artifacts import (  # noqa: E402
+    PRODUCTION_PROMOTION_STATUS,
+    PRODUCTION_SCORING_CONTRACT_VERSION,
+    load_production_lock,
+    lock_mode_for_asof,
+    weighted_score,
+)
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -36,13 +43,26 @@ SCORE_MODEL_VERSION = "defense_shadow_v0.1.0"
 MODEL_VERSION = "defense_shadow_2026_07"
 SCORING_CONTRACT_VERSION = "tech_family_final_rank_table_v1_shadow"
 NEUTRAL_SCORE = 50.0
+PANEL_SOURCE_CURRENT_UNIVERSE_REPLAY = "dashboard_rank_snapshot_current_universe_replay"
+PANEL_SOURCE_SURVIVORSHIP_CORRECTED = "survivorship_corrected_pit_membership_score_recompute"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Publish the shadow defense final rank table.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--asof", required=True, help="Market/PIT as-of date, YYYY-MM-DD.")
+    parser.add_argument(
+        "--policy-asof",
+        default="",
+        help="Eligibility-policy lock date. Defaults to --asof; historical research replays may pin this to a model lock date.",
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--membership-mode",
+        choices=["current", "pit"],
+        default="current",
+        help="current publishes the live dashboard universe; pit publishes members effective at --asof for research snapshots.",
+    )
     parser.add_argument(
         "--allow-overwrite",
         action="store_true",
@@ -53,6 +73,18 @@ def parse_args() -> argparse.Namespace:
 
 def parse_asof(raw: str) -> str:
     return datetime.strptime(raw.strip(), "%Y-%m-%d").date().isoformat()
+
+
+def date_on_or_before(raw: object, asof: str) -> bool:
+    text = str(raw or "").strip()[:10]
+    if not text:
+        return False
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d").date()
+        limit = datetime.strptime(asof, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    return parsed <= limit
 
 
 def finite(raw: Any) -> float | None:
@@ -200,6 +232,35 @@ def fetch_map(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> di
     return {normalize_ticker(row["ticker"]): dict(row) for row in rows if normalize_ticker(row["ticker"])}
 
 
+def parse_source_list(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        values = [part.strip() for part in raw.split(",")]
+    else:
+        values = [str(part).strip() for part in (raw or [])]
+    return [value for value in values if value]
+
+
+def source_priority_list(primary_source: str, fallback_sources: list[str]) -> list[str]:
+    out: list[str] = []
+    for source_id in [primary_source, *fallback_sources]:
+        if source_id and source_id not in out:
+            out.append(source_id)
+    if not out:
+        raise ValueError("At least one market source_id is required")
+    return out
+
+
+def source_rank_case(source_ids: list[str], column: str = "source_id") -> str:
+    whens = " ".join(f"WHEN ? THEN {rank}" for rank in range(len(source_ids)))
+    return f"CASE {column} {whens} ELSE 99 END"
+
+
+def placeholders(values: list[str]) -> str:
+    if not values:
+        raise ValueError("values cannot be empty")
+    return ",".join("?" for _ in values)
+
+
 def select_effective_capacity_overrides(
     path: Path,
     *,
@@ -231,8 +292,13 @@ def load_rows(
     asof: str,
     config: dict[str, Any],
     base_dir: Path,
+    membership_mode: str,
 ) -> list[dict[str, Any]]:
     market_source = str(cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted"))
+    market_sources = source_priority_list(
+        market_source,
+        parse_source_list(cfg_get(config, "market_data_policy.scoring_fallback_sources", [])),
+    )
     financial_source = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts"))
     positioning_source = str(cfg_get(config, "positioning_import.source_id", "industrials_positioning_composite"))
     submissions_source = str(cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions"))
@@ -241,31 +307,77 @@ def load_rows(
         base_dir=base_dir,
     )
     capacity_overrides = select_effective_capacity_overrides(capacity_override_path, asof=asof)
-    active = fetch_map(
-        conn,
-        """
-        SELECT c.ticker, c.company_name, c.sector, c.industry, c.subsector, c.country, c.currency,
-               c.universe_status, t.calibration_cohort_id, t.calibration_cohort, t.development_stage,
-               m.membership_source_id AS historical_universe_source, m.start_date AS price_start_date,
-               m.end_date AS terminal_date
-        FROM dim_company c
-        JOIN dim_industrials_taxonomy t ON t.company_id = c.company_id AND t.model_family = ?
-        LEFT JOIN dim_universe_membership m
-          ON m.company_id = c.company_id AND m.model_family = t.model_family AND m.is_current_member = 1
-        WHERE c.is_active = 1
-        ORDER BY c.ticker
-        """,
-        (MODEL_FAMILY,),
-    )
+    if membership_mode == "current":
+        active = fetch_map(
+            conn,
+            """
+            SELECT c.ticker, c.company_name, c.sector, c.industry, c.subsector, c.country, c.currency,
+                   c.universe_status, t.calibration_cohort_id, t.calibration_cohort, t.development_stage,
+                   m.membership_source_id AS historical_universe_source, m.start_date AS price_start_date,
+                   m.end_date AS terminal_date
+            FROM dim_company c
+            JOIN dim_industrials_taxonomy t ON t.company_id = c.company_id AND t.model_family = ?
+            LEFT JOIN dim_universe_membership m
+              ON m.company_id = c.company_id AND m.model_family = t.model_family AND m.is_current_member = 1
+            WHERE c.is_active = 1
+            ORDER BY c.ticker
+            """,
+            (MODEL_FAMILY,),
+        )
+    else:
+        active = fetch_map(
+            conn,
+            """
+            SELECT c.ticker, c.company_name, c.sector, c.industry, c.subsector, c.country, c.currency,
+                   COALESCE(NULLIF(m.membership_status, ''), c.universe_status) AS universe_status,
+                   t.calibration_cohort_id, t.calibration_cohort, t.development_stage,
+                   m.membership_source_id AS historical_universe_source, m.start_date AS price_start_date,
+                   m.end_date AS terminal_date
+            FROM dim_universe_membership m
+            JOIN dim_company c ON c.company_id = m.company_id
+            JOIN dim_industrials_taxonomy t ON t.company_id = c.company_id AND t.model_family = m.model_family
+            WHERE m.model_family = ?
+              AND m.point_in_time_flag = 1
+              AND m.start_date <= ?
+              AND COALESCE(m.end_date, '9999-12-31') >= ?
+            ORDER BY c.ticker
+            """,
+            (MODEL_FAMILY, asof, asof),
+        )
     market = fetch_map(
         conn,
-        "SELECT * FROM feature_market_technical WHERE model_family = ? AND source_id = ? AND asof_date = ?",
-        (MODEL_FAMILY, market_source, asof),
+        f"""
+        WITH ranked AS (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY ticker
+                       ORDER BY {source_rank_case(market_sources)} ASC
+                   ) AS rn
+            FROM feature_market_technical
+            WHERE model_family = ?
+              AND source_id IN ({placeholders(market_sources)})
+              AND asof_date = ?
+        )
+        SELECT * FROM ranked WHERE rn = 1
+        """,
+        (*market_sources, MODEL_FAMILY, *market_sources, asof),
     )
     snapshots = fetch_map(
         conn,
-        "SELECT * FROM fact_market_snapshot WHERE source_id = ? AND asof_date = ?",
-        (market_source, asof),
+        f"""
+        WITH ranked AS (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY ticker
+                       ORDER BY {source_rank_case(market_sources)} ASC
+                   ) AS rn
+            FROM fact_market_snapshot
+            WHERE source_id IN ({placeholders(market_sources)})
+              AND asof_date = ?
+        )
+        SELECT * FROM ranked WHERE rn = 1
+        """,
+        (*market_sources, *market_sources, asof),
     )
     financial = fetch_map(
         conn,
@@ -293,24 +405,33 @@ def load_rows(
         """
         SELECT ticker, MIN(bar_date) AS price_start_date, MAX(bar_date) AS price_end_date
         FROM fact_price_ohlcv
-        WHERE source_id = ?
+        WHERE source_id IN ({})
         GROUP BY ticker
-        """,
-        (market_source,),
+        """.format(placeholders(market_sources)),
+        tuple(market_sources),
     )
     available_dollar_volume = fetch_map(
         conn,
-        """
-        WITH ranked AS (
-            SELECT ticker, close, volume,
-                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY bar_date DESC) AS rn
+        f"""
+        WITH dedup AS (
+            SELECT ticker, bar_date, close, volume,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY ticker, bar_date
+                       ORDER BY {source_rank_case(market_sources)} ASC
+                   ) AS source_rn
             FROM fact_price_ohlcv
-            WHERE source_id = ?
+            WHERE source_id IN ({placeholders(market_sources)})
               AND bar_date <= ?
               AND close IS NOT NULL
               AND volume IS NOT NULL
               AND close > 0
               AND volume >= 0
+        ),
+        ranked AS (
+            SELECT ticker, close, volume,
+                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY bar_date DESC) AS rn
+            FROM dedup
+            WHERE source_rn = 1
         )
         SELECT ticker,
                COUNT(*) AS available_dollar_volume_days,
@@ -319,7 +440,7 @@ def load_rows(
         WHERE rn <= 60
         GROUP BY ticker
         """,
-        (market_source, asof),
+        (*market_sources, *market_sources, asof),
     )
     filing_urls = {
         (str(row["ticker"]), str(row["accession_number"])): dict(row)
@@ -346,9 +467,23 @@ def load_rows(
         merged["price_end_date"] = price_dates.get(ticker, {}).get("price_end_date") or ""
         accession = str(merged.get("financial_accession_number") or "")
         filing = filing_urls.get((ticker, accession), {})
-        merged["latest_sec_form"] = merged.get("financial_form_type") or filing.get("form_type") or merged.get("profile_latest_form_type") or ""
-        merged["latest_sec_filing_date"] = filing.get("filing_date") or merged.get("profile_latest_filing_date") or ""
-        merged["latest_sec_url"] = filing.get("filing_url") or ""
+        filing_date = str(filing.get("filing_date") or "").strip()
+        profile_date = str(merged.get("profile_latest_filing_date") or "").strip()
+        if filing_date:
+            merged["latest_sec_form"] = merged.get("financial_form_type") or filing.get("form_type") or ""
+            merged["latest_sec_filing_date"] = filing_date
+            merged["latest_sec_url"] = filing.get("filing_url") or ""
+        elif date_on_or_before(profile_date, asof):
+            merged["latest_sec_form"] = merged.get("financial_form_type") or merged.get("profile_latest_form_type") or ""
+            merged["latest_sec_filing_date"] = profile_date
+            merged["latest_sec_url"] = ""
+        else:
+            # The reporting profile stores the latest known SEC filing as of
+            # ingestion time. For historical PIT snapshots it can be years in
+            # the future, so do not export it as row-level PIT evidence.
+            merged["latest_sec_form"] = merged.get("financial_form_type") or ""
+            merged["latest_sec_filing_date"] = ""
+            merged["latest_sec_url"] = ""
         rows.append(merged)
     return rows
 
@@ -603,10 +738,15 @@ def compose_rows(
     asof: str,
     *,
     provenance_version: str,
+    membership_mode: str,
 ) -> list[dict[str, str]]:
     ranks = rank_percentiles(scores)
     out: list[dict[str, str]] = []
     unmatched: list[tuple[str, str, str]] = []
+    is_pit_membership = membership_mode == "pit"
+    stage11_source = (
+        PANEL_SOURCE_SURVIVORSHIP_CORRECTED if is_pit_membership else PANEL_SOURCE_CURRENT_UNIVERSE_REPLAY
+    )
     for row in rows:
         ticker = str(row["ticker"])
         score = scores[ticker]
@@ -721,8 +861,8 @@ def compose_rows(
             "calibration_sample_role": "excluded",
             "calibration_status": "shadow_only",
             "calibration_status_reason": calibration_reason,
-            "survivorship_corrected_panel_flag": "0",
-            "stage11_calibration_panel_source": "dashboard_rank_snapshot_current_universe_replay",
+            "survivorship_corrected_panel_flag": flag(is_pit_membership),
+            "stage11_calibration_panel_source": stage11_source,
             "stage11_calibration_input_eligible_flag": "0",
             "stage11_calibration_input_reason": calibration_reason,
             "score_scale_min": "0",
@@ -788,6 +928,132 @@ def compose_rows(
     return out
 
 
+def production_candidate(row: dict[str, str]) -> bool:
+    return (
+        str(row.get("rank_ready_flag") or "") == "1"
+        and str(row.get("model_status") or "").strip().lower() == "complete"
+        and finite(row.get("final_score")) is not None
+    )
+
+
+def production_noncandidate_reason(row: dict[str, str]) -> str:
+    reason = str(row.get("review_reason") or row.get("eligibility_reason") or "").strip()
+    if reason and reason.lower() not in {"ok", "shadow_only_oos_pending"}:
+        return reason[:240]
+    if str(row.get("rank_ready_flag") or "") != "1":
+        return "not_rank_ready"
+    if str(row.get("model_status") or "").strip().lower() != "complete":
+        return "model_incomplete"
+    if finite(row.get("final_score")) is None:
+        return "missing_score"
+    return "not_portfolio_candidate"
+
+
+def apply_lock_stamps(
+    rows: list[dict[str, str]],
+    *,
+    lock: dict[str, Any],
+    asof: str,
+    mode: str,
+    is_pit_membership: bool,
+) -> list[dict[str, str]]:
+    """Restamp composed rows under the sealed production calibration.
+
+    Score definition is IDENTICAL to scripts/27 (weighted_score over the pillar
+    columns with the sealed promotion weights), so backfilled history and the
+    promoted production file share one score definition. Stamps by mode:
+      production (asof >= production start): scripts/27-parity production_oos stamps.
+      pre_lock  (asof <  production start): every production gate stays closed
+        (oos=0, gate=0, calibration_eligible=0); rows are exposed to research only
+        as pre_lock_research, and only when the snapshot is survivorship-corrected
+        PIT membership — a current-universe replay of a historical date must never
+        feed calibration (fail closed at the source AND in the portfolio adapter).
+    """
+    scored: list[tuple[dict[str, str], float]] = []
+    for row in rows:
+        score = weighted_score(row, lock["weights"])
+        if score is None:
+            fallback = finite(row.get("final_score"))
+            if fallback is None:
+                raise ValueError(f"{row.get('ticker')}: no production score and no shadow fallback score")
+            score = max(0.0, min(100.0, fallback))
+        row["final_score"] = fmt(score)
+        row["native_score_field"] = "final_score"
+        row["native_score_value"] = fmt(score)
+        row["portfolio_candidate_score"] = fmt(score)
+        scored.append((row, score))
+    scored.sort(key=lambda item: (-item[1], str(item[0].get("ticker") or "")))
+    total = len(scored)
+    for rank, (row, _) in enumerate(scored, start=1):
+        percentile = 100.0 if total == 1 else 100.0 * (total - rank) / (total - 1)
+        row["final_rank"] = str(rank)
+        row["final_percentile"] = fmt(percentile, 4)
+        row["scoring_contract_version"] = PRODUCTION_SCORING_CONTRACT_VERSION
+        row["scoring_weights_frozen_flag"] = "1"
+        row["calibration_train_start_date"] = lock["train_start_date"]
+        row["calibration_train_end_date"] = lock["train_end_date"]
+        row["calibration_lock_date"] = lock["lock_date"]
+        row["calibration_production_start_date"] = lock["production_start_date"]
+        row["calibration_validation_method"] = lock["validation_method"]
+        row["calibration_provenance_version"] = PRODUCTION_PROMOTION_STATUS
+        if mode == "production":
+            candidate = production_candidate(row)
+            reason = "ok" if candidate else production_noncandidate_reason(row)
+            oos_valid = finite(row.get("final_score")) is not None
+            row["calibration_usage"] = "production_oos"
+            row["calibration_input_valid_flag"] = "1" if candidate else "0"
+            row["calibration_eligible_flag"] = "1" if candidate else "0"
+            row["oos_score_valid_flag"] = "1" if oos_valid else "0"
+            row["oos_score_asof_date"] = asof if oos_valid else ""
+            row["oos_invalid_reason"] = "" if oos_valid else "missing_production_score"
+            row["oos_assertion_basis"] = lock["validation_method"]
+            row["portfolio_candidate_gate"] = "1" if candidate else "0"
+            row["portfolio_candidate_status"] = "eligible" if candidate else "not_eligible"
+            row["portfolio_candidate_reason"] = reason
+            row["research_calibration_input_eligible_flag"] = "1" if candidate else "0"
+            row["research_calibration_eligible_flag"] = row["research_calibration_input_eligible_flag"]
+            row["research_calibration_status"] = PRODUCTION_PROMOTION_STATUS if candidate else "not_eligible"
+            row["research_calibration_reason"] = reason
+            row["calibration_sample_role"] = "strict_oos" if oos_valid else "excluded"
+            row["calibration_status"] = PRODUCTION_PROMOTION_STATUS if candidate else "not_eligible"
+            row["calibration_status_reason"] = reason
+            row["stage11_calibration_input_eligible_flag"] = "1" if candidate else "0"
+            row["stage11_calibration_input_reason"] = reason
+            row["eligibility_reason"] = reason
+        else:
+            components_available = int(finite(row.get("core_available_component_count")) or 0)
+            if not is_pit_membership:
+                research_ok = False
+                reason = "pre_lock_not_survivorship_corrected_use_pit_membership_replay"
+            elif components_available <= 0:
+                research_ok = False
+                reason = "all_score_components_missing"
+            else:
+                research_ok = True
+                reason = "ok"
+            row["calibration_usage"] = "pre_lock_research"
+            row["calibration_input_valid_flag"] = "1" if research_ok else "0"
+            row["calibration_eligible_flag"] = "0"
+            row["oos_score_valid_flag"] = "0"
+            row["oos_score_asof_date"] = ""
+            row["oos_invalid_reason"] = "pre_lock_research_window"
+            row["oos_assertion_basis"] = "pre_lock_no_oos_assertion"
+            row["portfolio_candidate_gate"] = "0"
+            row["portfolio_candidate_status"] = "pre_lock_research"
+            row["portfolio_candidate_reason"] = "pre_lock_research_window"
+            row["research_calibration_input_eligible_flag"] = "1" if research_ok else "0"
+            row["research_calibration_eligible_flag"] = row["research_calibration_input_eligible_flag"]
+            row["research_calibration_status"] = "pre_lock_research" if research_ok else "not_eligible"
+            row["research_calibration_reason"] = reason
+            row["calibration_sample_role"] = "pre_lock_research" if research_ok else "excluded"
+            row["calibration_status"] = "pre_lock_research" if research_ok else "not_eligible"
+            row["calibration_status_reason"] = reason
+            row["stage11_calibration_input_eligible_flag"] = "1" if research_ok else "0"
+            row["stage11_calibration_input_reason"] = reason
+            # eligibility_reason keeps the live-gate documentation compose_rows wrote
+    return [row for row, _ in scored]
+
+
 def write_text_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_name = ""
@@ -801,7 +1067,7 @@ def write_text_atomic(path: Path, text: str) -> None:
             Path(tmp_name).unlink()
 
 
-def sealed_artifact_valid(path: Path, *, asof: str) -> bool:
+def sealed_artifact_valid(path: Path, *, asof: str, membership_mode: str, calibration_mode: str) -> bool:
     manifest_path = path.with_name("defense_final_rank_table_manifest.json")
     if not path.exists() or not manifest_path.exists():
         return False
@@ -810,15 +1076,27 @@ def sealed_artifact_valid(path: Path, *, asof: str) -> bool:
     except json.JSONDecodeError:
         return False
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    expected_shadow_only = calibration_mode != "production"
     return (
         manifest.get("sha256") == digest
         and manifest.get("asof_date") == asof
         and manifest.get("model_family") == MODEL_FAMILY
-        and manifest.get("shadow_only") is True
+        and manifest.get("membership_mode", "current") == membership_mode
+        and manifest.get("shadow_only") is expected_shadow_only
+        and manifest.get("calibration_mode", "shadow" if expected_shadow_only else "production") == calibration_mode
     )
 
 
-def seal_manifest(path: Path, *, rows: int, asof: str) -> Path:
+def seal_manifest(
+    path: Path,
+    *,
+    rows: int,
+    asof: str,
+    policy_asof: str,
+    membership_mode: str,
+    calibration_mode: str,
+    lock: dict[str, Any] | None,
+) -> Path:
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     manifest = {
         "artifact": str(path),
@@ -827,9 +1105,23 @@ def seal_manifest(path: Path, *, rows: int, asof: str) -> Path:
         "sha256": digest,
         "score_model_version": SCORE_MODEL_VERSION,
         "model_family": MODEL_FAMILY,
-        "shadow_only": True,
+        "policy_asof_date": policy_asof,
+        "membership_mode": membership_mode,
+        "calibration_mode": calibration_mode,
+        "shadow_only": calibration_mode != "production",
         "sealed_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
     }
+    if lock is not None:
+        manifest.update(
+            {
+                "calibration_lock_date": lock["lock_date"],
+                "calibration_production_start_date": lock["production_start_date"],
+                "production_promotion_decision_manifest": lock["decision_manifest_path"],
+                "production_promotion_decision_sha256": lock["decision_manifest_sha256"],
+            }
+        )
+        if calibration_mode == "production":
+            manifest["production_promoted"] = True
     manifest_path = path.with_name("defense_final_rank_table_manifest.json")
     write_text_atomic(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest_path
@@ -839,6 +1131,7 @@ def main() -> int:
     configure_utc_logging()
     args = parse_args()
     asof = parse_asof(args.asof)
+    policy_asof = parse_asof(args.policy_asof) if str(args.policy_asof or "").strip() else asof
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
@@ -862,42 +1155,94 @@ def main() -> int:
         ),
         base_dir=base_dir,
     )
+    lock = load_production_lock(config, base_dir=base_dir)
+    calibration_mode = lock_mode_for_asof(lock, asof)
     output_dir = args.output_dir.expanduser().resolve() if args.output_dir else snapshot_root / asof
     output_path = output_dir / "defense_final_rank_table.csv"
     manifest_path = output_path.with_name("defense_final_rank_table_manifest.json")
     if output_path.exists() or manifest_path.exists():
-        if not args.allow_overwrite and sealed_artifact_valid(output_path, asof=asof):
+        existing_manifest: dict[str, Any] = {}
+        if manifest_path.exists():
+            try:
+                existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                existing_manifest = {}
+        if not args.allow_overwrite and sealed_artifact_valid(
+            output_path,
+            asof=asof,
+            membership_mode=args.membership_mode,
+            calibration_mode=calibration_mode,
+        ):
             print(f"Existing sealed artifact is valid; keeping {output_path}")
             print(f"Existing sealed manifest is valid; keeping {manifest_path}")
             return 0
+        if existing_manifest.get("promotion_payload"):
+            raise FileExistsError(
+                f"Existing artifact for {asof} was sealed by the scripts/27 production promotion "
+                f"(manifest carries promotion_payload): {manifest_path}. The publisher never "
+                "overwrites a promotion seal, even with --allow-overwrite; remove it manually "
+                "only with a protocol note."
+            )
         if not args.allow_overwrite:
             raise FileExistsError(
-                f"Refusing to overwrite existing dated defense shadow artifact for {asof}: {output_path}. "
+                f"Refusing to overwrite existing dated defense artifact for {asof}: {output_path}. "
                 "Use --allow-overwrite only for an explicit manual rebuild."
             )
     fields = header(PROJECT_ROOT)
     # NEW-2: pass the evaluation asof so versioned (profile, stage) keys select the
     # row effective at that asof instead of raising on the first second version.
-    policies = select_effective_policies(load_eligibility_policy(policy_path, asof=asof), asof=asof)
+    policies = select_effective_policies(load_eligibility_policy(policy_path, asof=policy_asof), asof=policy_asof)
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         init_db(conn)
-        rows = load_rows(conn, asof=asof, config=config, base_dir=base_dir)
+        rows = load_rows(
+            conn,
+            asof=asof,
+            config=config,
+            base_dir=base_dir,
+            membership_mode=args.membership_mode,
+        )
     if not rows:
-        raise ValueError(f"No active defense rows found for asof={asof}")
+        raise ValueError(f"No defense rows found for asof={asof} membership_mode={args.membership_mode}")
     missing_feature = [
         row["ticker"]
         for row in rows
         if not row.get("market_ticker") or not row.get("financial_ticker") or not row.get("positioning_ticker")
     ]
     if missing_feature:
-        raise ValueError(f"Missing Stage 3/4/5 feature rows for active tickers: {missing_feature[:20]}")
+        raise ValueError(
+            f"Missing Stage 3/4/5 feature rows for membership_mode={args.membership_mode}: {missing_feature[:20]}"
+        )
     scores = build_scores(rows)
     apply_export_capacity_fallbacks(rows)
-    out_rows = compose_rows(rows, scores, policies, asof, provenance_version=provenance_version)
+    out_rows = compose_rows(
+        rows,
+        scores,
+        policies,
+        asof,
+        provenance_version=provenance_version,
+        membership_mode=args.membership_mode,
+    )
+    if calibration_mode != "shadow":
+        assert lock is not None
+        out_rows = apply_lock_stamps(
+            out_rows,
+            lock=lock,
+            asof=asof,
+            mode=calibration_mode,
+            is_pit_membership=args.membership_mode == "pit",
+        )
     write_csv_atomic(output_path, fields, [{field: row.get(field, "") for field in fields} for row in out_rows])
-    manifest_path = seal_manifest(output_path, rows=len(out_rows), asof=asof)
-    print(f"Wrote {output_path}")
+    manifest_path = seal_manifest(
+        output_path,
+        rows=len(out_rows),
+        asof=asof,
+        policy_asof=policy_asof,
+        membership_mode=args.membership_mode,
+        calibration_mode=calibration_mode,
+        lock=lock,
+    )
+    print(f"Wrote {output_path} (calibration_mode={calibration_mode})")
     print(f"Wrote {manifest_path}")
     return 0
 

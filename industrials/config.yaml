@@ -307,12 +307,17 @@ oos_calibration_standards:
       # CF-8: aligned with what defense/scripts/17 actually stamps on rank tables
       # (SCORE_MODEL_VERSION = "defense_shadow_v0.1.0"). Bump both together.
       calibration_provenance_version: "defense_shadow_v0.1.0"
-      calibration_validation_method: "stage8_report_only_with_true_oos_file_standard_validator"
-      # CF-8: required by the technology-schema OOS consumers. TBD placeholders on
-      # purpose — any reader that date-parses these MUST fail loudly until Stage 8
-      # calibration sets real dates. Do not substitute provisional dates.
-      calibration_train_end_date: "TBD_NOT_YET_CALIBRATED"
-      calibration_lock_date: "TBD_NOT_YET_CALIBRATED"
+      calibration_validation_method: "weekly_pit_panel_validation_ic_holdout_backtest"
+      # Sealed by the 2026-07-02 scripts/27 production promotion. Publishers stamp
+      # dates >= calibration_production_start_date as production_oos and earlier dates
+      # as pre_lock_research, always scoring with the promoted weights read from the
+      # sealed decision manifest below. Blanking or TBD-ing calibration_lock_date
+      # reverts every publisher to shadow stamping (fail closed).
+      calibration_train_start_date: "2019-01-04"
+      calibration_train_end_date: "2023-03-10"
+      calibration_lock_date: "2026-07-02"
+      calibration_production_start_date: "2026-07-02"
+      production_promotion_decision_manifest: "../output/industrials/defense/stage10/production_promotion/2026-07-02/defense_production_promotion_manifest.json"
       primary_benchmark_ticker: "XAR"
       robustness_benchmark_ticker: "ITA"
       snapshot_history_root: "../output/industrials/defense/dashboard"

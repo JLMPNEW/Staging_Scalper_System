@@ -659,12 +659,91 @@ _ADAPTERS: dict[str, Callable[[dict[str, Any], list[dict[str, str]]], list[Canon
 }
 
 
+RANK_TABLE_SUFFIX = "_final_rank_table.csv"
+STAGE11_SIDECAR_SUFFIX = "_stage11_survivorship_calibration_panel.csv"
+_CHUNK_RANGE_RE = re.compile(r"_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.csv$")
+
+
+def _snapshot_iso_date(source_file: Path) -> str:
+    """ISO date of the dated folder a resolved sector file lives in ('' for flat files)."""
+    name = source_file.parent.name
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", name):
+        return name
+    if re.fullmatch(r"\d{8}", name):
+        return f"{name[:4]}-{name[4:6]}-{name[6:]}"
+    return ""
+
+
+def stage11_sidecar_only_rows(source_file: Path, as_of_iso: str) -> tuple[list[dict[str, str]], Path | None]:
+    """Survivorship-corrected Stage 11 panel rows for exactly `as_of_iso` from the best source.
+
+    Source precedence: legacy per-date sidecar next to the rank table, else the stage11_combined
+    range chunk containing the date (latest range end wins), else the dashboard-root consolidated
+    panel. Returns ([], None) when no source covers the date — tech rows then simply have no
+    survivorship-corrected calibration path for that day (flagged downstream, never fabricated).
+    """
+    if RANK_TABLE_SUFFIX not in source_file.name or not as_of_iso:
+        return [], None
+    prefix = source_file.name.replace(RANK_TABLE_SUFFIX, "")
+    candidates: list[Path] = []
+    legacy = source_file.with_name(f"{prefix}{STAGE11_SIDECAR_SUFFIX}")
+    if legacy.exists():
+        candidates.append(legacy)
+    dashboard_root = source_file.parent.parent
+    chunk_dir = dashboard_root / "stage11_combined"
+    if chunk_dir.exists():
+        in_range = []
+        for path in chunk_dir.glob(f"{prefix}_stage11_survivorship_calibration_panel_*.csv"):
+            m = _CHUNK_RANGE_RE.search(path.name)
+            if m and m.group(1) <= as_of_iso <= m.group(2):
+                in_range.append((m.group(2), path))
+        # widest/latest covering chunk first: a regenerated monthly chunk supersedes an older,
+        # narrower test chunk covering the same date
+        candidates.extend(path for _end, path in sorted(in_range, reverse=True))
+    root_panel = dashboard_root / f"{prefix}{STAGE11_SIDECAR_SUFFIX}"
+    if root_panel.exists():
+        candidates.append(root_panel)
+    for path in candidates:
+        rows = [r for r in read_csv(path) if str(r.get("asof_date", "")).strip()[:10] == as_of_iso]
+        if rows:
+            return rows, path
+    return [], None
+
+
 def run_adapter(cfg: dict[str, Any], sector_output_root: Path, run_as_of: str | None) -> AdapterResult:
     adapter_name = str(cfg["adapter"])
     if adapter_name not in _ADAPTERS:
         raise ValueError(f"Unknown adapter '{adapter_name}' for {cfg.get('model_family')}")
     source_file = _resolve_file(cfg, sector_output_root, run_as_of)
     rows = read_csv(source_file)
+    if adapter_name == "tech_family":
+        # Tech rank tables replay the CURRENT universe, so delisted members exist only in the
+        # Stage 11 survivorship panels. Merge sidecar-only rows the sector itself certifies as
+        # calibration inputs (stage11_calibration_input_eligible_flag=1) so they flow through the
+        # contract as calibration-only rows: their gate/oos flags keep them non-investable, and
+        # the survivorship-corrected stamp carries their research eligibility.
+        as_of_iso = _snapshot_iso_date(source_file)
+        sidecar_rows, sidecar_source = stage11_sidecar_only_rows(source_file, as_of_iso)
+        if sidecar_rows:
+            present = {str(r.get("ticker", "")).strip().upper() for r in rows}
+            merged: dict[str, dict[str, str]] = {}
+            skipped_ineligible = 0
+            for r in sidecar_rows:
+                ticker = str(r.get("ticker", "")).strip().upper()
+                if not ticker or ticker in present:
+                    continue
+                if not _truthy(r.get("stage11_calibration_input_eligible_flag")):
+                    skipped_ineligible += 1
+                    continue
+                merged[ticker] = r
+            if merged:
+                LOGGER.info(
+                    "Adapter %s merged %d sidecar-only calibration rows for %s "
+                    "(skipped_ineligible=%d, source=%s)",
+                    cfg.get("model_family"), len(merged), as_of_iso, skipped_ineligible,
+                    sidecar_source.name if sidecar_source else "",
+                )
+                rows = rows + list(merged.values())
     canonical = _ADAPTERS[adapter_name](cfg, rows)
     source_asof = _dominant([{"d": c.source_asof_date} for c in canonical], "d") if canonical else ""
     return AdapterResult(

@@ -27,12 +27,6 @@ from portfolio_layer.costs.cost_common import (  # noqa: E402
     commission, finite_float, half_spread_for_ticker, invalidate_after_cost_model,
     load_spread_inputs, require_same_aum, resolve_aum,
 )
-from portfolio_layer.risk.liquidity import (  # noqa: E402
-    configured_fallback_half_spread_bps,
-    liquidity_half_spread_fail_bps,
-    liquidity_panel_active,
-    load_spread_snapshot,
-)
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
 

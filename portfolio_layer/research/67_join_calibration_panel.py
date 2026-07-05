@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -346,13 +347,22 @@ def build_sidecar_index(config: dict[str, Any], config_path: Path,
                 per_pipe.setdefault(asof, {})[ticker] = _sidecar_fields(r)
             used[f"{pipe}:{path.name}"] = sha256_file(path)
 
-        chunk_dir = dashboard_root / "stage11_combined"
-        if chunk_dir.exists():
-            for path in sorted(chunk_dir.glob(f"{prefix}_stage11_survivorship_calibration_panel_*.csv")):
-                ingest(path)
+        # Precedence (later ingests override earlier per (as_of, ticker)): root panel first, then
+        # range chunks ascending — a regenerated chunk supersedes both the stale root panel and any
+        # older, narrower chunk covering the same dates. Legacy per-date sidecars stay authoritative.
         root_panel = dashboard_root / f"{prefix}{SIDECAR_SUFFIX}"
         if root_panel.exists():
             ingest(root_panel)
+        chunk_dir = dashboard_root / "stage11_combined"
+        if chunk_dir.exists():
+            range_re = re.compile(r"_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.csv$")
+            chunks = []
+            for path in chunk_dir.glob(f"{prefix}_stage11_survivorship_calibration_panel_*.csv"):
+                m = range_re.search(path.name)
+                if m:
+                    chunks.append(((m.group(2), m.group(1)), path))  # sort by (end, start), not name
+            for _key, path in sorted(chunks):
+                ingest(path)
         for compact, rank_path in candidates:
             sidecar = sidecar_path_for(rank_path)
             if sidecar.exists():

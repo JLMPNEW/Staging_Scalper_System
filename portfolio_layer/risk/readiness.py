@@ -35,6 +35,7 @@ def check_stage1_readiness(
     staleness_tolerance: int,
     per_pipeline_staleness_tolerance: dict[str, int] | None = None,
     expected_pipelines: list[str] | None = None,
+    optional_pipelines: set[str] | None = None,
     stale_status: str = "FAIL",
 ) -> list[dict[str, str]]:
     """Return a list of {check,status,detail}. status in {PASS, WARN, FAIL}."""
@@ -76,6 +77,7 @@ def check_stage1_readiness(
         rec("required_sector_outputs_present", "PASS" if not missing else "FAIL",
             "all enabled sectors present in sealed manifest" if not missing else f"missing sectors: {missing}")
     stale = {}
+    stale_optional = {}
     for pipe, info in per_sector.items():
         tolerance = (
             per_pipeline_staleness_tolerance.get(str(pipe), staleness_tolerance)
@@ -84,8 +86,19 @@ def check_stage1_readiness(
         )
         d = _staleness(run_as_of, str(info.get("source_asof", "")))
         if d is None or d > tolerance or d < 0:
-            stale[pipe] = {"staleness_days": d, "tolerance_days": tolerance}
-    status = "PASS" if not stale else stale_status.upper()
+            # an optional (required:false, shadow-only) sector must never block the production
+            # sleeves — its staleness is surfaced as WARN, not FAIL
+            if optional_pipelines and str(pipe) in optional_pipelines:
+                stale_optional[pipe] = {"staleness_days": d, "tolerance_days": tolerance}
+            else:
+                stale[pipe] = {"staleness_days": d, "tolerance_days": tolerance}
+    if stale:
+        status = stale_status.upper()
+    elif stale_optional:
+        status = "WARN"
+    else:
+        status = "PASS"
+    stale = {**stale, **{f"{k} (optional)": v for k, v in stale_optional.items()}}
     tolerance_detail = (
         f"per-pipeline={dict(sorted(per_pipeline_staleness_tolerance.items()))}"
         if per_pipeline_staleness_tolerance

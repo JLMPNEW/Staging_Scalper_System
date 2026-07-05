@@ -22,10 +22,17 @@ from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.rank_table_contracts import defense_final_rank_header  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
+from industrials.defense.research_artifacts import load_production_lock, lock_mode_for_asof  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 MODEL_FAMILY = "defense"
+PANEL_SOURCE_CURRENT_UNIVERSE_REPLAY = "dashboard_rank_snapshot_current_universe_replay"
+PANEL_SOURCE_SURVIVORSHIP_CORRECTED = "survivorship_corrected_pit_membership_score_recompute"
+ALLOWED_STAGE11_PANEL_SOURCES = {
+    PANEL_SOURCE_CURRENT_UNIVERSE_REPLAY,
+    PANEL_SOURCE_SURVIVORSHIP_CORRECTED,
+}
 REPORT_FIELDS = [
     "asof_date",
     "snapshot_dir",
@@ -167,7 +174,15 @@ def snapshot_dirs(root: Path, *, asof: date | None, start: date | None, end: dat
     return sorted(dirs, key=lambda item: item.name)
 
 
-def validate_manifest(csv_path: Path, manifest_path: Path, *, asof: str, rows: int, expected_score_version: str) -> tuple[bool, str, list[str]]:
+def validate_manifest(
+    csv_path: Path,
+    manifest_path: Path,
+    *,
+    asof: str,
+    rows: int,
+    expected_score_version: str,
+    expected_shadow_only: bool,
+) -> tuple[bool, str, list[str]]:
     issues: list[str] = []
     if not csv_path.exists():
         return False, "", [f"missing rank table: {csv_path}"]
@@ -184,8 +199,8 @@ def validate_manifest(csv_path: Path, manifest_path: Path, *, asof: str, rows: i
         issues.append("manifest asof_date mismatch")
     if manifest.get("model_family") != MODEL_FAMILY:
         issues.append("manifest model_family mismatch")
-    if manifest.get("shadow_only") is not True:
-        issues.append("manifest shadow_only is not true")
+    if manifest.get("shadow_only") is not expected_shadow_only:
+        issues.append(f"manifest shadow_only is not {expected_shadow_only}")
     if int(manifest.get("rows") or -1) != rows:
         issues.append("manifest row count mismatch")
     if expected_score_version and manifest.get("score_model_version") != expected_score_version:
@@ -206,7 +221,14 @@ def run_adapter_shadow_check(asof: str) -> tuple[bool, str]:
     return completed.returncode == 0, message
 
 
-def validate_snapshot(path: Path, *, exp_header: list[str], expected_score_version: str, run_adapter: bool) -> SnapshotCheck:
+def validate_snapshot(
+    path: Path,
+    *,
+    exp_header: list[str],
+    expected_score_version: str,
+    run_adapter: bool,
+    mode: str,
+) -> SnapshotCheck:
     asof_date = path.name
     csv_path = path / "defense_final_rank_table.csv"
     manifest_path = path / "defense_final_rank_table_manifest.json"
@@ -229,6 +251,7 @@ def validate_snapshot(path: Path, *, exp_header: list[str], expected_score_versi
         asof=asof_date,
         rows=len(rows),
         expected_score_version=expected_score_version,
+        expected_shadow_only=mode != "production",
     )
     issues.extend(manifest_issues)
 
@@ -244,24 +267,49 @@ def validate_snapshot(path: Path, *, exp_header: list[str], expected_score_versi
     if bad_scores:
         issues.append(f"final_score outside 0..100: {bad_scores[:10]}")
 
+    if mode == "production":
+        zero_fields: list[str] = []
+        allowed_roles = {"strict_oos", "excluded"}
+    elif mode == "pre_lock":
+        zero_fields = ["portfolio_candidate_gate", "oos_score_valid_flag", "calibration_eligible_flag"]
+        allowed_roles = {"pre_lock_research", "excluded"}
+    else:
+        zero_fields = list(SHADOW_ZERO_FIELDS)
+        allowed_roles = {"excluded"}
     bad_shadow_zero = [
         row.get("ticker", "")
         for row in rows
-        if any(str(row.get(field) or "").strip() != "0" for field in SHADOW_ZERO_FIELDS)
+        if any(str(row.get(field) or "").strip() != "0" for field in zero_fields)
     ]
     bad_shadow_one = [
         row.get("ticker", "")
         for row in rows
         if any(str(row.get(field) or "").strip() != "1" for field in SHADOW_ONE_FIELDS)
     ]
-    bad_sample_role = [row.get("ticker", "") for row in rows if str(row.get("calibration_sample_role") or "") != "excluded"]
-    shadow_gates_ok = not bad_shadow_zero and not bad_shadow_one and not bad_sample_role
+    bad_sample_role = [
+        row.get("ticker", "")
+        for row in rows
+        if str(row.get("calibration_sample_role") or "") not in allowed_roles
+    ]
+    bad_production_gate = (
+        [
+            row.get("ticker", "")
+            for row in rows
+            if str(row.get("portfolio_candidate_gate") or "") == "1"
+            and str(row.get("oos_score_valid_flag") or "") != "1"
+        ]
+        if mode == "production"
+        else []
+    )
+    shadow_gates_ok = not bad_shadow_zero and not bad_shadow_one and not bad_sample_role and not bad_production_gate
     if bad_shadow_zero:
-        issues.append(f"shadow zero-gate fields not pinned: {bad_shadow_zero[:10]}")
+        issues.append(f"{mode} zero-gate fields not pinned: {bad_shadow_zero[:10]}")
     if bad_shadow_one:
-        issues.append(f"shadow one-gate fields not pinned: {bad_shadow_one[:10]}")
+        issues.append(f"PIT one-gate fields not pinned: {bad_shadow_one[:10]}")
     if bad_sample_role:
-        issues.append(f"calibration_sample_role not excluded: {bad_sample_role[:10]}")
+        issues.append(f"calibration_sample_role outside {sorted(allowed_roles)}: {bad_sample_role[:10]}")
+    if bad_production_gate:
+        issues.append(f"candidate gate open without oos validity: {bad_production_gate[:10]}")
     bad_research_alias = [
         row.get("ticker", "")
         for row in rows
@@ -274,13 +322,18 @@ def validate_snapshot(path: Path, *, exp_header: list[str], expected_score_versi
         row.get("ticker", "")
         for row in rows
         if str(row.get("stage11_calibration_panel_source") or "")
-        != "dashboard_rank_snapshot_current_universe_replay"
+        not in ALLOWED_STAGE11_PANEL_SOURCES
     ]
     if bad_stage11_source:
         issues.append(f"stage11_calibration_panel_source not explicit: {bad_stage11_source[:10]}")
-    blank_market_cap = [row.get("ticker", "") for row in rows if not str(row.get("market_cap") or "").strip()]
+    blank_market_cap = [
+        row.get("ticker", "")
+        for row in rows
+        if not str(row.get("market_cap") or "").strip()
+        and "market_cap_unavailable" not in str(row.get("liquidity_capacity_reason") or "")
+    ]
     if blank_market_cap:
-        issues.append(f"market_cap blank in published rank table: {blank_market_cap[:10]}")
+        issues.append(f"market_cap blank without unavailable reason in published rank table: {blank_market_cap[:10]}")
     blank_adv60 = [row.get("ticker", "") for row in rows if not str(row.get("avg_dollar_volume_60d") or "").strip()]
     if blank_adv60:
         issues.append(f"avg_dollar_volume_60d blank in published rank table: {blank_adv60[:10]}")
@@ -407,12 +460,14 @@ def main() -> int:
     dirs = snapshot_dirs(snapshot_root, asof=asof, start=start, end=end)
     exp_header = expected_header()
     run_adapter = bool(cfg_get(family_cfg, "require_portfolio_adapter_shadow_validation", True)) and not args.skip_portfolio_adapter
+    lock = load_production_lock(config, base_dir=base_dir)
     checks = [
         validate_snapshot(
             path,
             exp_header=exp_header,
             expected_score_version=expected_score_version,
             run_adapter=run_adapter,
+            mode=lock_mode_for_asof(lock, path.name),
         )
         for path in dirs
     ]

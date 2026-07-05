@@ -1171,26 +1171,41 @@ def merge_member_score_rows(
 
     rows = add_portfolio_candidate_fields(rows)
     for row in rows:
+        # Stage 11 panel eligibility is PIT-QUALITY driven: a recomputed point-in-time score, PIT
+        # source dates, and a usable as-of price. Live-dashboard readiness (rank_ready_flag,
+        # model_status, analyst review) governs ALLOCATION, not research history — inheriting it
+        # here would flunk every delisted historical constituent and defeat the survivorship
+        # panel's purpose. portfolio_candidate_* stays live-gated (dead names are never candidates).
         reasons = [item for item in str(row.get("stage11_exclusion_reason") or "").split(";") if item]
-        if int(row.get("stage11_calibration_input_eligible_flag") or 0) != 1:
-            reasons.append(str(row.get("stage11_calibration_input_reason") or "not_stage11_calibration_input_eligible"))
+        if int(row.get("survivorship_corrected_panel_flag") or 0) != 1:
+            reasons.append("not_survivorship_corrected")
+        if int(row.get("score_recomputed_pit_flag") or 0) != 1:
+            reasons.append("score_not_recomputed_pit")
         if reasons:
             reason = ";".join(dict.fromkeys(reasons))
             row["stage11_exclusion_reason"] = reason
-            if int(row.get("stage11_calibration_input_eligible_flag") or 0) == 1:
-                row["stage11_calibration_input_eligible_flag"] = 0
-                row["stage11_calibration_input_reason"] = reason
-                row["research_calibration_input_eligible_flag"] = 0
-                row["research_calibration_status"] = "excluded"
-                row["research_calibration_reason"] = reason
-                row["calibration_sample_role"] = "excluded"
-                row["calibration_status"] = "excluded"
-                row["calibration_status_reason"] = reason
+            row["stage11_calibration_input_eligible_flag"] = 0
+            row["stage11_calibration_input_reason"] = reason
+            row["research_calibration_input_eligible_flag"] = 0
+            row["research_calibration_status"] = "excluded"
+            row["research_calibration_reason"] = reason
+            row["calibration_sample_role"] = "excluded"
+            row["calibration_status"] = "excluded"
+            row["calibration_status_reason"] = reason
             row["portfolio_candidate_gate"] = 0
             row["portfolio_candidate_status"] = "excluded"
             row["portfolio_candidate_reason"] = reason
         else:
             row["stage11_exclusion_reason"] = ""
+            row["stage11_calibration_input_eligible_flag"] = 1
+            row["stage11_calibration_input_reason"] = "ok"
+            row["research_calibration_input_eligible_flag"] = 1
+            row["research_calibration_status"] = "ok"
+            row["research_calibration_reason"] = "ok"
+            if str(row.get("calibration_sample_role") or "").strip() in ("", "excluded"):
+                row["calibration_sample_role"] = (
+                    "strict_oos" if int(row.get("oos_score_valid_flag") or 0) == 1 else "pre_lock_research"
+                )
     return rows
 
 

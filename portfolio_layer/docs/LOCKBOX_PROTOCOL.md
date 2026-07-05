@@ -31,7 +31,7 @@ All dates are snapshot (as-of) dates on the US master trading calendar.
 
 | window | range | use |
 |---|---|---|
-| **Development window** | 2024-01-02 through 2025-12-31 | all iteration: calibration fits, purged CV, ablation walk-forwards, tuning |
+| **Development window** | 2019-01-04 through 2025-12-31 | all iteration: calibration fits, purged CV, ablation walk-forwards, tuning |
 | **Lockbox (sealed)** | 2026-01-01 through the Open Event | untouched until the one-time Open Event |
 
 The lockbox has no fixed right edge: live-accumulated snapshots join the sealed window as they are
@@ -143,3 +143,12 @@ their lockbox OOS diagnostics pass.
   daily sector score exports for all five pipelines. `dev_window_end` (2025-12-31), `sealed_start`
   (2026-01-01), and `training_label_end_max` (2025-12-31) are UNCHANGED. No sealed-window replay,
   forward-return join, or calibration result has been inspected as of this date.
+- **2026-07-05 — Editorial: Section 2 table aligned to the 2026-07-03 amendment.** The window table
+  still showed the original 2024-01-02 dev start; corrected to 2019-01-04. No governance change —
+  the 2026-07-03 entry above is the authoritative record and config.yaml already mirrored it.
+- **2026-07-05 — Stage 10 payout layer BUILT, shadow-only, still unregistered.** All other stages
+  exist in code, so per the 2026-06-27 sequencing decision the payout/liability planner
+  (`payout/14_build_payout_liability.py`) is now implemented as a sealed SHADOW artifact: it emits a
+  payout plan + payout-adjusted book proposal per run and never modifies the deployable book. The
+  `+payout` walk-forward arm remains UNREGISTERED for the first Open Event; production use still
+  requires validation against a subsequent lockbox cycle, unchanged from the 2026-06-27 entry.

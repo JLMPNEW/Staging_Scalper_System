@@ -68,14 +68,11 @@ C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\21_validate_def
 Build the report-only Stage 8/9 research artifacts with:
 
 ```powershell
-C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\22_build_defense_oos_calibration_panel.py --asof 2026-07-02
-C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\23_validate_defense_oos_calibration_artifacts.py
-C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\24_run_defense_optuna_calibration.py
-C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\25_backtest_defense_scores.py
+C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\26_run_defense_weekly_calibration_research.py --start-date 2026-01-04
 ```
 
-These stages seal the calibration panel, split metadata, optional Optuna calibration report, and score backtest diagnostics under `output/industrials/defense/stage8` and `output/industrials/defense/stage9`. They remain research-only until the panel is survivorship-corrected, contains enough immutable PIT snapshots, has forward returns available, and passes `23_validate_defense_oos_calibration_artifacts.py --promotion-check`.
+The weekly runner anchors buckets on `2026-01-04` and selects the last available market-date snapshot in each weekly bucket. It seals the calibration panel, split metadata, optional Optuna calibration report, and score backtest diagnostics under `output/industrials/defense/stage8/*_weekly` and `output/industrials/defense/stage9/*_weekly`. These artifacts remain research-only until the panel is survivorship-corrected, contains enough immutable PIT snapshots, has forward returns available, and passes `23_validate_defense_oos_calibration_artifacts.py --promotion-check`.
 
-Do not register defense in `portfolio_layer/config.yaml` until the immutable snapshot history, OOS calibration validator, duplicate-ticker ownership overrides, and portfolio Stage 1 dry run all pass.
+Defense is registered in `portfolio_layer/config.yaml` as a SHADOW sleeve (2026-07-04): `enabled: true, required: false, require_oos_score_valid: true`, so every defense row enters the Stage 1 contract with `investable_eligible=0` (`shadow_only_oos_calibration_not_available`) and the optimizer never sizes it. Supporting wiring is in place (XAR/ITA benchmarks, `sector_etf_map`/`sector_factor_etfs`/`sleeve_taxonomy` defense entries, `strategic_sector_weights.defense: 0.00`, PLTR/OSIS canonical ownership overrides). The registration preconditions were verified on the 2026-07-02 run: immutable snapshot history, OOS calibration validators, duplicate-ticker overrides, and a passing 6-sector portfolio Stage 1 collect/calibrate/validate. Promotion to a sized sleeve still requires Stage 8 OOS calibration to flip `calibration_eligible_flag`/`oos_score_valid_flag` in the rank table.
 
 `04b_validate_defense_stage0_4_production_readiness.py` is the hard pre-Stage 5 gate. It validates the configured production DB in read-only mode and fails if scratch DB evidence is being substituted for production data.

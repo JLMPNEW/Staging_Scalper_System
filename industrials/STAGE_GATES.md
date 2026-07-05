@@ -88,9 +88,11 @@
 - `--promotion-check` must fail until the configured `min_shadow_snapshots_for_promotion` valid immutable snapshots exist.
 - Stage 8 promotion remains blocked while any snapshot has a missing/invalid manifest, future-dated source row, non-shadow portfolio/OOS gate, schema drift, or native score outside `0..100`.
 - `22_build_defense_oos_calibration_panel.py` builds a sealed research-only panel from immutable rank snapshots, pinned to `XAR` and the configured price-source priority. Current dashboard replay panels are explicitly tagged `dashboard_rank_snapshot_current_universe_replay` and are not promotable.
+- Stage 8 calibration research should use weekly snapshots anchored on `2026-01-04`, selecting the last available market-date snapshot in each weekly bucket. `19_build_defense_shadow_snapshot_history.py --cadence weekly` and `22_build_defense_oos_calibration_panel.py --cadence weekly` enforce that cadence without fabricating missing dates.
 - `23_validate_defense_oos_calibration_artifacts.py` validates panel/split/manifest hashes, source dates, score units, split definitions, benchmark consistency, and forward-return window integrity. `--promotion-check` requires a survivorship-corrected PIT recompute panel, enough snapshots, and eligible forward-return rows.
 - `24_run_defense_optuna_calibration.py` runs constrained report-only calibration when eligible train/holdout rows exist. It uses Optuna when installed and otherwise falls back to deterministic constrained random search. Insufficient data must produce a sealed `insufficient_data` artifact instead of a fake calibration.
 - `25_backtest_defense_scores.py` reads the same validated panel and optional Stage 8 weights to produce report-only score backtest diagnostics. It must not set any portfolio/OOS production gate.
+- `26_run_defense_weekly_calibration_research.py --start-date 2026-01-04` is the preferred one-command research chain for weekly Stage 8/9 artifacts.
 
 ## Pre-Stage 5 Production Readiness
 

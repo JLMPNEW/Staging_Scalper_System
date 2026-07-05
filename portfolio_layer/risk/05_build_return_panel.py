@@ -326,12 +326,16 @@ def main() -> int:
     tolerance = int(cfg_get(config, "score_contract.staleness_tolerance_days", 10))
     expected = []
     per_pipeline_tolerance = {}
+    optional_pipelines: set[str] = set()
     for sector in cfg_get(config, "score_contract.sectors", []):
         if not bool(sector.get("enabled", True)):
             continue
         pipe = str(sector["model_family"])
-        expected.append(pipe)
         per_pipeline_tolerance[pipe] = int(sector.get("staleness_tolerance_days", tolerance))
+        if bool(sector.get("required", True)):
+            expected.append(pipe)
+        else:
+            optional_pipelines.add(pipe)  # shadow sectors never block the production sleeves
     stale_status = str(cfg_get(config, "risk_panel.readiness_stale_status", "FAIL"))
     readiness = check_stage1_readiness(
         runs_root,
@@ -339,6 +343,7 @@ def main() -> int:
         staleness_tolerance=tolerance,
         per_pipeline_staleness_tolerance=per_pipeline_tolerance,
         expected_pipelines=expected,
+        optional_pipelines=optional_pipelines,
         stale_status=stale_status,
     )
     for c in readiness:

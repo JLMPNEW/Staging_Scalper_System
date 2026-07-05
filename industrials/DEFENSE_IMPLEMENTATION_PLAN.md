@@ -768,6 +768,8 @@ Implementation:
 - `23_validate_defense_oos_calibration_artifacts.py` enforces the True OOS Calibration File Standards for the panel, splits, source hashes, source dates, score units, benchmark pin, and promotion checks.
 - `24_run_defense_optuna_calibration.py` runs constrained report-only Optuna calibration when eligible train/holdout rows exist, with deterministic constrained random search as the fallback if Optuna is unavailable.
 - `25_backtest_defense_scores.py` produces report-only score backtest diagnostics from the same Stage 8 panel and optional calibrated weights.
+- `26_run_defense_weekly_calibration_research.py --start-date 2026-01-04` runs the preferred weekly research chain: weekly shadow snapshot publish, weekly panel build, artifact validation, report-only calibration, and report-only backtest.
+- Weekly research snapshots are anchored on `2026-01-04` and select the last available market-date snapshot in each weekly bucket to reduce forward-window overlap.
 - Build a point-in-time historical panel using `dim_universe_membership`.
 - Require Norgate delisted historical prices for historical/delisted defense members before calibration outputs can be considered promotable.
 - Compute forward excess and beta-hedged residual returns against a pinned sleeve benchmark.

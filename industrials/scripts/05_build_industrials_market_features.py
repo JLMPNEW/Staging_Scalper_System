@@ -87,7 +87,7 @@ def parse_args() -> argparse.Namespace:
         "--membership-status",
         choices=["active", "inactive", "all"],
         default="active",
-        help="Universe subset to build. Defaults to active.",
+        help="Universe subset to build. Defaults to active; with --asof, active means point-in-time active on that date.",
     )
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
@@ -309,7 +309,7 @@ def load_universe(
 ) -> list[UniverseMember]:
     if include_historical or membership_status != "active" or asof is not None:
         status_sql = ""
-        if membership_status == "active":
+        if membership_status == "active" and asof is None:
             status_sql = "AND m.is_current_member = 1"
         elif membership_status == "inactive":
             status_sql = "AND m.is_current_member = 0"
@@ -323,6 +323,10 @@ def load_universe(
                 asof_sql = "AND m.start_date <= ?"
                 params.append(asof.isoformat())
             else:
+                # With an explicit as-of date, the default "active" universe is
+                # point-in-time active, not current active. Delisted calibration
+                # members that were live on the snapshot date must be included
+                # so source fallback can build historical features.
                 asof_sql = f"AND m.start_date <= ? AND COALESCE(m.end_date, '{OPEN_MEMBERSHIP_END_SENTINEL}') >= ?"
                 params.extend([asof.isoformat(), asof.isoformat()])
         rows = conn.execute(

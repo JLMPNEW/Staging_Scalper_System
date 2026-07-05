@@ -182,21 +182,27 @@ def parse_sample_times(config: dict[str, Any]) -> list[str]:
 
 
 def active_symbol_for_ticker(config: dict[str, Any], ticker: str, as_of: str) -> tuple[str, dict[str, Any] | None]:
-    """Return the market-data symbol for a contract ticker using risk_panel.ticker_aliases."""
+    """Return the IB/liquidity query symbol for a contract ticker.
+
+    Broker APIs can use class-share symbols that would be wrong for Yahoo/risk
+    price fetches. Prefer liquidity_panel.ticker_aliases, then fall back to the
+    risk-panel alias map for true same-issuer ticker migrations.
+    """
     key = str(ticker).strip().upper()
-    aliases = cfg_get(config, "risk_panel.ticker_aliases", []) or []
     alias_rows: list[dict[str, Any]] = []
-    if isinstance(aliases, dict):
-        for raw_key, raw_value in aliases.items():
-            if not isinstance(raw_value, dict):
-                continue
-            row = dict(raw_value)
-            row.setdefault("ticker", raw_key)
-            alias_rows.append(row)
-    elif isinstance(aliases, list):
-        alias_rows = [raw for raw in aliases if isinstance(raw, dict)]
-    else:
-        return key, None
+    for aliases in [
+        cfg_get(config, "liquidity_panel.ticker_aliases", {}) or {},
+        cfg_get(config, "risk_panel.ticker_aliases", {}) or {},
+    ]:
+        if isinstance(aliases, dict):
+            for raw_key, raw_value in aliases.items():
+                if not isinstance(raw_value, dict):
+                    continue
+                row = dict(raw_value)
+                row.setdefault("ticker", raw_key)
+                alias_rows.append(row)
+        elif isinstance(aliases, list):
+            alias_rows.extend(raw for raw in aliases if isinstance(raw, dict))
     run_date = date.fromisoformat(as_of)
     best: dict[str, Any] | None = None
     best_effective = date.min
@@ -218,7 +224,7 @@ def active_symbol_for_ticker(config: dict[str, Any], ticker: str, as_of: str) ->
             best_effective = effective
     if not best:
         return key, None
-    active = str(best.get("active_ticker") or best.get("query_symbol") or key).strip().upper()
+    active = str(best.get("ib_symbol") or best.get("query_symbol") or best.get("active_ticker") or key).strip().upper()
     return active, best
 
 

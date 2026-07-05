@@ -128,6 +128,30 @@ def finalize_long_only_weights(
     return out
 
 
+def check_group_cap_feasibility(
+    n: int,
+    *,
+    group_caps: list[tuple[list[int], float]],
+    gross: float,
+    max_weight: float,
+) -> None:
+    """Full investment must stay reachable once capped groups hit their budgets."""
+    grouped: set[int] = set()
+    capacity = 0.0
+    for indices, cap in group_caps:
+        idx = [int(i) for i in indices]
+        overlap = grouped.intersection(idx)
+        if overlap:
+            raise ValueError(f"group caps overlap on indices {sorted(overlap)[:5]}")
+        grouped.update(idx)
+        capacity += min(float(cap) * gross, len(idx) * max_weight)
+    capacity += (n - len(grouped)) * max_weight
+    if capacity < gross - 1e-9:
+        raise ValueError(
+            f"group caps leave capacity {capacity:.4f} < gross {gross:.4f}: full investment infeasible"
+        )
+
+
 def solve_long_only_mv(
     mu: np.ndarray,
     cov: np.ndarray,
@@ -136,17 +160,26 @@ def solve_long_only_mv(
     max_weight: float,
     gross: float = 1.0,
     solver: str = "ECOS",
+    group_caps: list[tuple[list[int], float]] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Return (weights, solve_info). Long-only, sum(w)=gross, 0<=w<=max_weight."""
+    """Return (weights, solve_info). Long-only, sum(w)=gross, 0<=w<=max_weight.
+
+    group_caps: optional [(indices, cap_fraction)] budget caps — sum(w[indices]) <= cap*gross.
+    """
     n = len(mu)
     if n == 0:
         return np.zeros(0), {"status": "empty_universe", "solver_used": None}
     if max_weight * n < gross - 1e-9:
         raise ValueError(f"max_weight*{n}={max_weight * n:.3f} < gross={gross}: caps make full investment infeasible")
+    if group_caps:
+        check_group_cap_feasibility(n, group_caps=group_caps, gross=gross, max_weight=max_weight)
     w = cp.Variable(n, nonneg=True)
     risk = cp.quad_form(w, cp.psd_wrap(cov))
     objective = cp.Maximize(mu @ w - 0.5 * float(risk_aversion) * risk)
     constraints = [cp.sum(w) == gross, w <= max_weight]
+    for indices, cap in group_caps or []:
+        if indices:
+            constraints.append(cp.sum(w[np.asarray(indices, dtype=int)]) <= float(cap) * gross)
     problem = cp.Problem(objective, constraints)
 
     order = [solver] + [s for s in SOLVER_FALLBACK if s != solver]
@@ -180,6 +213,87 @@ def solve_long_only_mv(
     }
 
 
+def finalize_with_group_caps(
+    weights: np.ndarray,
+    *,
+    group_caps: list[tuple[list[int], float]],
+    min_weight: float,
+    max_weight: float,
+    gross: float,
+) -> np.ndarray:
+    """Dust-free finalize that PRESERVES per-group budgets.
+
+    The plain finalize's re-projection is group-agnostic, so dropped dust could leak weight back
+    into a capped group. Instead each capped group is finalized on its own sub-simplex at the
+    solver-chosen group budget (clipped to cap*gross), and the uncapped names absorb the rest.
+    A group whose budget falls below min_weight cannot hold a single dust-free name: it is zeroed
+    and its budget returns to the uncapped pool.
+    """
+    w = np.nan_to_num(np.asarray(weights, dtype=float).flatten(), nan=0.0, posinf=0.0, neginf=0.0)
+    w = np.clip(w, 0.0, None)
+    n = len(w)
+    out = np.zeros(n)
+    grouped = np.zeros(n, dtype=bool)
+    budgets: list[tuple[np.ndarray, float]] = []
+    remaining = float(gross)
+    for indices, cap in group_caps:
+        idx = np.asarray(indices, dtype=int)
+        if idx.size == 0:
+            continue
+        grouped[idx] = True
+        target = min(float(w[idx].sum()), float(cap) * gross)
+        if target < max(min_weight, 1e-12):
+            target = 0.0
+        budgets.append((idx, target))
+        remaining -= target
+    if remaining < -1e-9:
+        raise ValueError(f"group budgets exceed gross ({gross - remaining:.6f} > {gross:.6f})")
+    for idx, target in budgets:
+        if target > 0:
+            out[idx] = finalize_long_only_weights(w[idx], min_weight=min_weight, max_weight=max_weight, gross=target)
+    uncapped = np.where(~grouped)[0]
+    if remaining > 1e-12:
+        if uncapped.size == 0:
+            raise ValueError("group caps absorb the whole book; no uncapped names to hold the remaining gross")
+        out[uncapped] = finalize_long_only_weights(
+            w[uncapped], min_weight=min_weight, max_weight=max_weight, gross=remaining
+        )
+    return out
+
+
+def snap_rounded_weights(
+    weights: np.ndarray,
+    *,
+    gross: float,
+    max_weight: float,
+    decimals: int = 10,
+) -> np.ndarray:
+    """Round for publication and make the ROUNDED weights sum to exactly gross.
+
+    Downstream cost stages compute CASH = gross - sum(published weights); rounding drift of a few
+    1e-10 otherwise leaves CASH negative and fails their book gate. The residual is spread over the
+    largest names one 10^-decimals step each, so no name moves more than one step (cap-, dust- and
+    sensitivity-band-safe).
+    """
+    rounded = np.round(np.asarray(weights, dtype=float).flatten(), decimals)
+    step = 10.0 ** -decimals
+    residual_units = int(round((float(gross) - float(rounded.sum())) / step))
+    if residual_units == 0:
+        return rounded
+    sign = 1.0 if residual_units > 0 else -1.0
+    remaining = abs(residual_units)
+    for idx in np.argsort(-rounded):
+        if remaining == 0:
+            break
+        candidate = float(rounded[idx]) + sign * step
+        if 0.0 < candidate <= max_weight:
+            rounded[idx] = round(candidate, decimals)
+            remaining -= 1
+    if remaining:
+        raise ValueError(f"cannot snap rounded weights to exact gross; {remaining} steps unplaced")
+    return rounded
+
+
 def weight_sensitivity_band(
     mu: np.ndarray,
     cov: np.ndarray,
@@ -189,15 +303,23 @@ def weight_sensitivity_band(
     min_weight: float = 0.0,
     gross: float,
     solver: str,
+    group_caps: list[tuple[list[int], float]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-name [min, max] weight across a set of risk-aversion values (a robustness band)."""
     solutions = []
     for g in gammas:
-        w, info = solve_long_only_mv(mu, cov, risk_aversion=g, max_weight=max_weight, gross=gross, solver=solver)
+        w, info = solve_long_only_mv(
+            mu, cov, risk_aversion=g, max_weight=max_weight, gross=gross, solver=solver, group_caps=group_caps,
+        )
         if info["status"] not in ("optimal", "optimal_inaccurate"):
             raise ValueError(f"sensitivity solve failed for gamma={g}: {info}")
         if min_weight > 0:
-            w = finalize_long_only_weights(w, min_weight=min_weight, max_weight=max_weight, gross=gross)
+            if group_caps:
+                w = finalize_with_group_caps(
+                    w, group_caps=group_caps, min_weight=min_weight, max_weight=max_weight, gross=gross,
+                )
+            else:
+                w = finalize_long_only_weights(w, min_weight=min_weight, max_weight=max_weight, gross=gross)
         solutions.append(w)
     stacked = np.vstack(solutions) if solutions else np.zeros((1, len(mu)))
     return stacked.min(axis=0), stacked.max(axis=0)

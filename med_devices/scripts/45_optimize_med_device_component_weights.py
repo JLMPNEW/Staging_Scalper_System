@@ -167,6 +167,14 @@ def fmt(value: object) -> str:
     return "" if number is None else f"{number:.6f}"
 
 
+def row_value(row: dict[str, str], *keys: str) -> str:
+    for key in keys:
+        value = row.get(key)
+        if value is not None and str(value).strip() != "":
+            return str(value)
+    return ""
+
+
 def parse_int_list(raw: object) -> list[int]:
     out: list[int] = []
     for item in str(raw or "").split(","):
@@ -386,13 +394,22 @@ def load_policies(path: Path, config: dict[str, Any], horizons: set[int]) -> dic
             continue
         if component == "value_trap_score" and action != "test_inverse_alpha":
             continue
-        horizon_value = to_float(row.get("horizon_days"))
+        horizon_value = to_float(row_value(row, "horizon_days", "best_horizon_days"))
         if horizon_value is None:
             continue
         horizon = int(horizon_value)
         if horizon not in horizons:
             continue
-        support = int(to_float(row.get("positive_alpha_fold_count" if action == "use_as_positive_alpha" else "inverse_alpha_fold_count")) or 0)
+        support = int(
+            to_float(
+                row_value(
+                    row,
+                    "positive_alpha_fold_count" if action == "use_as_positive_alpha" else "inverse_alpha_fold_count",
+                    "support_fold_count",
+                )
+            )
+            or 0
+        )
         coverage = to_float(row.get("mean_coverage_pct")) or 0.0
         if support < min_support or coverage < min_coverage:
             continue

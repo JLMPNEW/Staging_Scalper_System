@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import subprocess
 import sys
@@ -19,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
+from industrials.defense.research_artifacts import select_weekly_snapshot_dates  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -30,6 +32,12 @@ FIELDNAMES = [
     "financial_covered",
     "positioning_covered",
     "coverage_threshold",
+    "cadence",
+    "weekly_start_date",
+    "weekly_selection",
+    "policy_asof_date",
+    "membership_mode",
+    "snapshot_root",
     "snapshot_status",
     "message",
 ]
@@ -60,6 +68,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-date", default="")
     parser.add_argument("--coverage-threshold", type=float, default=1.0)
     parser.add_argument("--max-dates", type=int, default=0)
+    parser.add_argument("--cadence", choices=["available", "daily", "weekly"], default="available")
+    parser.add_argument("--weekly-start-date", default="", help="Weekly bucket anchor date when --cadence weekly.")
+    parser.add_argument("--weekly-selection", choices=["first", "last"], default="last")
+    parser.add_argument(
+        "--date-order",
+        choices=["oldest", "newest"],
+        default="newest",
+        help="When --max-dates is set, choose the oldest or newest publishable dates. Defaults to newest for compatibility.",
+    )
+    parser.add_argument(
+        "--policy-asof",
+        default="",
+        help="Eligibility-policy lock date passed to the rank publisher for historical research replays.",
+    )
+    parser.add_argument(
+        "--membership-mode",
+        choices=["current", "pit"],
+        default="current",
+        help="current uses today's active universe; pit uses membership effective at each candidate asof.",
+    )
+    parser.add_argument(
+        "--snapshot-root",
+        type=Path,
+        default=None,
+        help="Root directory for dated rank snapshots. Defaults to configured dashboard root.",
+    )
+    parser.add_argument(
+        "--allow-overwrite",
+        action="store_true",
+        help="Rebuild existing dated snapshots. Intended for research roots after upstream data fixes.",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Before applying --max-dates, ignore already sealed and valid snapshots.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
@@ -84,16 +128,40 @@ def active_sql() -> str:
     """
 
 
+def parse_source_list(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        values = [part.strip() for part in raw.split(",")]
+    else:
+        values = [str(part).strip() for part in (raw or [])]
+    return [value for value in values if value]
+
+
+def source_priority_list(primary_source: str, fallback_sources: list[str]) -> list[str]:
+    out: list[str] = []
+    for source_id in [primary_source, *fallback_sources]:
+        if source_id and source_id not in out:
+            out.append(source_id)
+    if not out:
+        raise ValueError("At least one source_id is required")
+    return out
+
+
+def placeholders(values: list[str]) -> str:
+    if not values:
+        raise ValueError("values cannot be empty")
+    return ",".join("?" for _ in values)
+
+
 def coverage_by_date(
     conn: sqlite3.Connection,
     *,
     table: str,
-    source_id: str,
+    source_ids: list[str],
     start_date: date | None,
     end_date: date | None,
 ) -> dict[str, int]:
-    filters = ["f.model_family = ?", "f.source_id = ?"]
-    params: list[Any] = [MODEL_FAMILY, source_id]
+    filters = ["f.model_family = ?", f"f.source_id IN ({placeholders(source_ids)})"]
+    params: list[Any] = [MODEL_FAMILY, *source_ids]
     if start_date is not None:
         filters.append("f.asof_date >= ?")
         params.append(start_date.isoformat())
@@ -115,7 +183,81 @@ def coverage_by_date(
     return {str(row["asof_date"]): int(row["covered"] or 0) for row in rows}
 
 
-def load_candidates(
+def feature_dates(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    source_ids: list[str],
+    start_date: date | None,
+    end_date: date | None,
+) -> set[str]:
+    filters = ["model_family = ?", f"source_id IN ({placeholders(source_ids)})"]
+    params: list[Any] = [MODEL_FAMILY, *source_ids]
+    if start_date is not None:
+        filters.append("asof_date >= ?")
+        params.append(start_date.isoformat())
+    if end_date is not None:
+        filters.append("asof_date <= ?")
+        params.append(end_date.isoformat())
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT asof_date
+        FROM {table}
+        WHERE {" AND ".join(filters)}
+        """,
+        params,
+    ).fetchall()
+    return {str(row["asof_date"]) for row in rows}
+
+
+def pit_member_count(conn: sqlite3.Connection, *, asof: str) -> int:
+    return int(
+        conn.execute(
+            """
+            SELECT COUNT(DISTINCT m.ticker)
+            FROM dim_universe_membership m
+            JOIN dim_industrials_taxonomy t ON t.company_id = m.company_id AND t.model_family = m.model_family
+            WHERE m.model_family = ?
+              AND m.point_in_time_flag = 1
+              AND m.start_date <= ?
+              AND COALESCE(m.end_date, '9999-12-31') >= ?
+            """,
+            (MODEL_FAMILY, asof, asof),
+        ).fetchone()[0]
+        or 0
+    )
+
+
+def pit_coverage_on_date(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    source_ids: list[str],
+    asof: str,
+) -> int:
+    return int(
+        conn.execute(
+            f"""
+            SELECT COUNT(DISTINCT f.ticker)
+            FROM {table} f
+            JOIN dim_universe_membership m
+              ON m.ticker = f.ticker AND m.model_family = f.model_family
+            JOIN dim_industrials_taxonomy t
+              ON t.company_id = m.company_id AND t.model_family = m.model_family
+            WHERE f.model_family = ?
+              AND f.source_id IN ({placeholders(source_ids)})
+              AND f.asof_date = ?
+              AND m.point_in_time_flag = 1
+              AND m.start_date <= ?
+              AND COALESCE(m.end_date, '9999-12-31') >= ?
+            """,
+            (MODEL_FAMILY, *source_ids, asof, asof, asof),
+        ).fetchone()[0]
+        or 0
+    )
+
+
+def load_pit_candidates(
     conn: sqlite3.Connection,
     *,
     config: dict[str, Any],
@@ -123,27 +265,98 @@ def load_candidates(
     end_date: date | None,
 ) -> list[SnapshotCandidate]:
     market_source = str(cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted"))
+    market_sources = source_priority_list(
+        market_source,
+        parse_source_list(cfg_get(config, "market_data_policy.scoring_fallback_sources", [])),
+    )
+    financial_source = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts"))
+    positioning_source = str(cfg_get(config, "positioning_import.source_id", "industrials_positioning_composite"))
+    dates = sorted(
+        feature_dates(
+            conn,
+            table="feature_market_technical",
+            source_ids=market_sources,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        | feature_dates(
+            conn,
+            table="feature_financial_statement",
+            source_ids=[financial_source],
+            start_date=start_date,
+            end_date=end_date,
+        )
+        | feature_dates(
+            conn,
+            table="feature_positioning",
+            source_ids=[positioning_source],
+            start_date=start_date,
+            end_date=end_date,
+        )
+    )
+    return [
+        SnapshotCandidate(
+            asof_date=asof,
+            active_tickers=pit_member_count(conn, asof=asof),
+            market_covered=pit_coverage_on_date(
+                conn,
+                table="feature_market_technical",
+                source_ids=market_sources,
+                asof=asof,
+            ),
+            financial_covered=pit_coverage_on_date(
+                conn,
+                table="feature_financial_statement",
+                source_ids=[financial_source],
+                asof=asof,
+            ),
+            positioning_covered=pit_coverage_on_date(
+                conn,
+                table="feature_positioning",
+                source_ids=[positioning_source],
+                asof=asof,
+            ),
+        )
+        for asof in dates
+    ]
+
+
+def load_candidates(
+    conn: sqlite3.Connection,
+    *,
+    config: dict[str, Any],
+    start_date: date | None,
+    end_date: date | None,
+    membership_mode: str,
+) -> list[SnapshotCandidate]:
+    if membership_mode == "pit":
+        return load_pit_candidates(conn, config=config, start_date=start_date, end_date=end_date)
+    market_source = str(cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted"))
+    market_sources = source_priority_list(
+        market_source,
+        parse_source_list(cfg_get(config, "market_data_policy.scoring_fallback_sources", [])),
+    )
     financial_source = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts"))
     positioning_source = str(cfg_get(config, "positioning_import.source_id", "industrials_positioning_composite"))
     active_count = int(conn.execute(f"SELECT COUNT(*) FROM ({active_sql()})").fetchone()[0] or 0)
     market = coverage_by_date(
         conn,
         table="feature_market_technical",
-        source_id=market_source,
+        source_ids=market_sources,
         start_date=start_date,
         end_date=end_date,
     )
     financial = coverage_by_date(
         conn,
         table="feature_financial_statement",
-        source_id=financial_source,
+        source_ids=[financial_source],
         start_date=start_date,
         end_date=end_date,
     )
     positioning = coverage_by_date(
         conn,
         table="feature_positioning",
-        source_id=positioning_source,
+        source_ids=[positioning_source],
         start_date=start_date,
         end_date=end_date,
     )
@@ -160,14 +373,20 @@ def load_candidates(
     ]
 
 
-def manifest_valid(snapshot_dir: Path, asof: str) -> bool:
+def manifest_valid(snapshot_dir: Path, asof: str, *, membership_mode: str) -> bool:
     csv_path = snapshot_dir / "defense_final_rank_table.csv"
     manifest_path = snapshot_dir / "defense_final_rank_table_manifest.json"
     if not csv_path.exists() or not manifest_path.exists():
         return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except ValueError:
+        return False
+    if str(manifest.get("membership_mode") or "current") != membership_mode:
+        return False
     validator = PROJECT_ROOT / "industrials" / "defense" / "scripts" / "18_validate_defense_shadow_rank_table.py"
     completed = subprocess.run(
-        [sys.executable, str(validator), "--asof", asof],
+        [sys.executable, str(validator), "--asof", asof, "--rank-table", str(csv_path)],
         cwd=str(PROJECT_ROOT),
         check=False,
         capture_output=True,
@@ -176,12 +395,50 @@ def manifest_valid(snapshot_dir: Path, asof: str) -> bool:
     return completed.returncode == 0
 
 
-def run_step(script: str, asof: str) -> None:
+def run_step(
+    script: str,
+    asof: str,
+    *,
+    policy_asof: str = "",
+    output_dir: Path | None = None,
+    membership_mode: str = "",
+    rank_table: Path | None = None,
+    allow_overwrite: bool = False,
+) -> None:
+    command = [sys.executable, script, "--asof", asof]
+    if policy_asof:
+        command.extend(["--policy-asof", policy_asof])
+    if output_dir is not None:
+        command.extend(["--output-dir", str(output_dir)])
+    if membership_mode:
+        command.extend(["--membership-mode", membership_mode])
+    if rank_table is not None:
+        command.extend(["--rank-table", str(rank_table)])
+    if allow_overwrite:
+        command.append("--allow-overwrite")
     subprocess.run(
-        [sys.executable, script, "--asof", asof],
+        command,
         cwd=str(PROJECT_ROOT),
         check=True,
     )
+
+
+def filter_weekly_candidates(
+    candidates: list[SnapshotCandidate],
+    *,
+    weekly_start_date: str,
+    weekly_selection: str,
+) -> list[SnapshotCandidate]:
+    if not weekly_start_date:
+        raise ValueError("--weekly-start-date is required when --cadence weekly")
+    selected = set(
+        select_weekly_snapshot_dates(
+            [candidate.asof_date for candidate in candidates],
+            weekly_start_date=weekly_start_date,
+            selection=weekly_selection,
+        )
+    )
+    return [candidate for candidate in candidates if candidate.asof_date in selected]
 
 
 def main() -> int:
@@ -193,15 +450,19 @@ def main() -> int:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    snapshot_root = resolve_path(
-        str(
-            cfg_get(
-                config,
-                "oos_calibration_standards.families.defense.snapshot_history_root",
-                "../output/industrials/defense/dashboard",
-            )
-        ),
-        base_dir=base_dir,
+    snapshot_root = (
+        args.snapshot_root.expanduser().resolve()
+        if args.snapshot_root
+        else resolve_path(
+            str(
+                cfg_get(
+                    config,
+                    "oos_calibration_standards.families.defense.snapshot_history_root",
+                    "../output/industrials/defense/dashboard",
+                )
+            ),
+            base_dir=base_dir,
+        )
     )
     output_csv = (
         args.output_csv.expanduser().resolve()
@@ -215,11 +476,36 @@ def main() -> int:
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        candidates = load_candidates(conn, config=config, start_date=start_date, end_date=end_date)
+        candidates = load_candidates(
+            conn,
+            config=config,
+            start_date=start_date,
+            end_date=end_date,
+            membership_mode=args.membership_mode,
+        )
 
     publishable = [candidate for candidate in candidates if candidate.is_publishable(args.coverage_threshold)]
+    if args.cadence == "weekly":
+        publishable = filter_weekly_candidates(
+            publishable,
+            weekly_start_date=args.weekly_start_date,
+            weekly_selection=args.weekly_selection,
+        )
+    if args.skip_existing and not args.allow_overwrite:
+        publishable = [
+            candidate
+            for candidate in publishable
+            if not manifest_valid(
+                snapshot_root / candidate.asof_date,
+                candidate.asof_date,
+                membership_mode=args.membership_mode,
+            )
+        ]
     if args.max_dates > 0:
-        publishable = publishable[-args.max_dates :]
+        if args.date_order == "oldest":
+            publishable = publishable[: args.max_dates]
+        else:
+            publishable = publishable[-args.max_dates :]
     if not publishable:
         write_csv_atomic(
             output_csv,
@@ -232,6 +518,12 @@ def main() -> int:
                     "financial_covered": 0,
                     "positioning_covered": 0,
                     "coverage_threshold": args.coverage_threshold,
+                    "cadence": args.cadence,
+                    "weekly_start_date": args.weekly_start_date,
+                    "weekly_selection": args.weekly_selection,
+                    "policy_asof_date": args.policy_asof,
+                    "membership_mode": args.membership_mode,
+                    "snapshot_root": str(snapshot_root),
                     "snapshot_status": "no_publishable_dates",
                     "message": "No dates have enough loaded Stage 3/4/5 feature coverage.",
                 }
@@ -244,15 +536,23 @@ def main() -> int:
     report_rows: list[dict[str, object]] = []
     for candidate in publishable:
         snapshot_dir = snapshot_root / candidate.asof_date
-        if manifest_valid(snapshot_dir, candidate.asof_date):
+        rank_table = snapshot_dir / "defense_final_rank_table.csv"
+        if not args.allow_overwrite and manifest_valid(snapshot_dir, candidate.asof_date, membership_mode=args.membership_mode):
             status = "valid_existing"
             message = "Existing immutable snapshot passed validation."
         elif args.dry_run:
             status = "would_publish"
             message = "Publishable date found; dry-run did not write output."
         else:
-            run_step(publisher, candidate.asof_date)
-            run_step(validator, candidate.asof_date)
+            run_step(
+                publisher,
+                candidate.asof_date,
+                policy_asof=str(args.policy_asof or ""),
+                output_dir=snapshot_dir,
+                membership_mode=args.membership_mode,
+                allow_overwrite=bool(args.allow_overwrite),
+            )
+            run_step(validator, candidate.asof_date, rank_table=rank_table)
             status = "published"
             message = "Snapshot published and validated."
         report_rows.append(
@@ -263,6 +563,12 @@ def main() -> int:
                 "financial_covered": candidate.financial_covered,
                 "positioning_covered": candidate.positioning_covered,
                 "coverage_threshold": args.coverage_threshold,
+                "cadence": args.cadence,
+                "weekly_start_date": args.weekly_start_date,
+                "weekly_selection": args.weekly_selection,
+                "policy_asof_date": args.policy_asof,
+                "membership_mode": args.membership_mode,
+                "snapshot_root": str(snapshot_root),
                 "snapshot_status": status,
                 "message": message,
             }

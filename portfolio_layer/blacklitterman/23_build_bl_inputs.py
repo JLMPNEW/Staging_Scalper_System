@@ -483,6 +483,25 @@ def main() -> int:  # noqa: C901
         p = pipe_of.get(t, "")
         if p:
             universe_by_pipe.setdefault(p, []).append(t)
+    empty_budget_pipes = [
+        p for p in pipelines
+        if not universe_by_pipe.get(p) and sector_target.get(p, 0.0) > 0.0
+    ]
+    if empty_budget_pipes:
+        sector_target = _renormalize({
+            p: (0.0 if p in empty_budget_pipes else sector_target.get(p, 0.0))
+            for p in pipelines
+        })
+        for row in sector_target_rows:
+            p = str(row["sector_name"])
+            row["target_weight"] = round(sector_target.get(p, 0.0), 10)
+            row["realized_shift"] = round(sector_target.get(p, 0.0) - base_by_pipe.get(p, 0.0), 10)
+    rec(
+        "empty_sleeve_budget_adjustment",
+        "PASS",
+        "no empty sleeves with positive budgets" if not empty_budget_pipes
+        else f"zeroed_and_renormalized={empty_budget_pipes}",
+    )
     benchmark_rows = []
     within_source = str(bl.get("benchmark_within_sector_source", "equal")).strip().lower()
     benchmark_bad = []

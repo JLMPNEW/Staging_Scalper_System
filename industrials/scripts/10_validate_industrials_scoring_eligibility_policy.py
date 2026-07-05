@@ -44,7 +44,7 @@ FIELDNAMES = [
     "policy_status",
     "review_reason",
 ]
-VALID_POLICY_STAGES = frozenset({"operating", "development_stage", "any"})
+VALID_POLICY_STAGES = frozenset({"operating", "development_stage", "historical_delisted", "any"})
 # The rank-table publisher gates on case-sensitive startswith("eligible"); every
 # policy verb must open with one of these prefixes or downstream gating misreads it.
 RANK_READY_POLICY_PREFIXES = ("eligible", "review", "not_rank_ready", "excluded")

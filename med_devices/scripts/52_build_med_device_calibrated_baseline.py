@@ -17,7 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from med_devices.core.fda_states import MANUAL_FDA_REVIEW_STATES, normalize_fda_state  # noqa: E402
+from med_devices.core.fda_states import FDA_REVIEW_KNOWN_STATES, MANUAL_FDA_REVIEW_STATES, normalize_fda_state  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 
 
@@ -33,15 +33,6 @@ HARD_EXCLUDED_CLASSIFICATIONS = {
     "avoid_confirmed_regulatory_risk",
     "data_review_required",
 }
-KNOWN_FDA_REVIEW_STATES = frozenset(
-    {
-        "",
-        "cleared",
-        "no_mapped_fda_records",
-        "regulatory_watch",
-        *MANUAL_FDA_REVIEW_STATES,
-    }
-)
 GATE_PAIRS = (
     ("raw_composite_score", "raw_score_min"),
     ("cohort_percentile", "cohort_percentile_min"),
@@ -317,10 +308,10 @@ def load_frozen_baseline(path: Path | None) -> dict[tuple[str, int], dict[str, s
 
 
 def validate_fda_review_states(rows: list[dict[str, str]]) -> None:
-    unknown = sorted({normalize_fda_state(row.get("fda_review_state")) for row in rows} - KNOWN_FDA_REVIEW_STATES)
+    unknown = sorted({normalize_fda_state(row.get("fda_review_state")) for row in rows} - FDA_REVIEW_KNOWN_STATES)
     if unknown:
         LOGGER.error(
-            "Unrecognized fda_review_state values will not match manual-review exclusions: %s",
+            "Unrecognized fda_review_state values found in baseline panel: %s",
             ", ".join(unknown),
         )
 

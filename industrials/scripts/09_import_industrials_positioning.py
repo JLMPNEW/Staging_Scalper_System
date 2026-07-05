@@ -52,6 +52,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-family", default="", help="Industrials model family to import, e.g. defense.")
     parser.add_argument("--asof", default="", help="Feature as-of date. Defaults to the latest market feature date.")
     parser.add_argument("--tickers", default="")
+    parser.add_argument(
+        "--include-historical-members",
+        action="store_true",
+        help="Import upstream facts for every historical membership ticker, not just current active tickers.",
+    )
+    parser.add_argument(
+        "--feature-membership-mode",
+        choices=["current", "pit", "all"],
+        default="current",
+        help="Feature universe: current active tickers, members effective at --asof, or all historical members.",
+    )
+    parser.add_argument(
+        "--features-only",
+        action="store_true",
+        help="Rebuild feature_positioning from existing local facts without re-importing upstream Form 4/13F/short/borrow facts.",
+    )
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
 
@@ -285,6 +301,26 @@ def load_universe(conn: Any, ticker_filter: set[str], *, model_family: str, incl
             """,
             (model_family,),
         ).fetchall()
+    tickers = [normalize_ticker(row["ticker"]) for row in rows if normalize_ticker(row["ticker"])]
+    return [ticker for ticker in tickers if not ticker_filter or ticker in ticker_filter]
+
+
+def load_pit_universe(conn: Any, ticker_filter: set[str], *, model_family: str, asof: date) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT m.ticker
+        FROM dim_universe_membership m
+        JOIN dim_industrials_taxonomy t
+          ON t.company_id = m.company_id
+         AND t.model_family = m.model_family
+        WHERE m.model_family = ?
+          AND m.point_in_time_flag = 1
+          AND m.start_date <= ?
+          AND COALESCE(m.end_date, '9999-12-31') >= ?
+        ORDER BY m.ticker
+        """,
+        (model_family, asof.isoformat(), asof.isoformat()),
+    ).fetchall()
     tickers = [normalize_ticker(row["ticker"]) for row in rows if normalize_ticker(row["ticker"])]
     return [ticker for ticker in tickers if not ticker_filter or ticker in ticker_filter]
 
@@ -783,6 +819,124 @@ def import_13f(
             ),
         )
         stats[ticker] += 1
+    missing_snapshot_tickers = [ticker for ticker, count in stats.items() if count == 0]
+    if not missing_snapshot_tickers:
+        return stats
+
+    query_missing = [
+        source_ticker
+        for source_ticker in query_tickers
+        if source_to_internal.get(source_ticker, source_ticker) in set(missing_snapshot_tickers)
+    ]
+    if not query_missing:
+        return stats
+
+    # Fallback for incomplete upstream cache: the shared market_positioning DB may
+    # contain raw 13F holdings for a ticker even when institutional_13f_ownership_snapshots
+    # has not been materialized for it. Aggregate raw holdings by report period and
+    # use the latest manager filing date in that period as the PIT availability date.
+    try:
+        holding_rows = source.execute(
+            f"""
+            SELECT UPPER(ticker) AS source_ticker,
+                   period_of_report,
+                   manager_cik,
+                   MAX(COALESCE(NULLIF(filing_date, ''), NULLIF(accepted_at, ''))) AS latest_filing_date,
+                   SUM(shares) AS shares,
+                   SUM(market_value) AS market_value
+            FROM institutional_13f_holdings
+            WHERE UPPER(ticker) IN ({qmarks(query_missing)})
+              AND source = ?
+              AND COALESCE(put_call, '') = ''
+            GROUP BY UPPER(ticker), period_of_report, manager_cik
+            ORDER BY UPPER(ticker), period_of_report, manager_cik
+            """,
+            (*query_missing, upstream_source),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return stats
+
+    grouped: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in holding_rows:
+        source_ticker = normalize_ticker(row["source_ticker"])
+        if source_ticker in ambiguous_source_tickers:
+            continue
+        ticker = source_to_internal.get(source_ticker, source_ticker)
+        if ticker not in stats:
+            continue
+        period = str(row["period_of_report"] or "").strip()
+        manager = str(row["manager_cik"] or "").strip()
+        if not period or not manager:
+            continue
+        by_period = grouped.setdefault(ticker, {})
+        bucket = by_period.setdefault(
+            period,
+            {
+                "latest_filing_date": "",
+                "institutional_shares": 0.0,
+                "institutional_value": 0.0,
+                "managers": set(),
+            },
+        )
+        filing_date = str(row["latest_filing_date"] or "").strip()
+        if filing_date > str(bucket["latest_filing_date"] or ""):
+            bucket["latest_filing_date"] = filing_date
+        bucket["institutional_shares"] = float(bucket["institutional_shares"]) + (safe_float(row["shares"]) or 0.0)
+        bucket["institutional_value"] = float(bucket["institutional_value"]) + (safe_float(row["market_value"]) or 0.0)
+        managers = bucket["managers"]
+        if isinstance(managers, set):
+            managers.add(manager)
+
+    for ticker, periods in grouped.items():
+        previous_shares: float | None = None
+        previous_managers: set[str] = set()
+        for period in sorted(periods):
+            bucket = periods[period]
+            asof = parse_date(bucket["latest_filing_date"])
+            if asof is None or asof < start:
+                continue
+            managers = bucket["managers"] if isinstance(bucket["managers"], set) else set()
+            shares = float(bucket["institutional_shares"])
+            delta = (shares - previous_shares) / previous_shares if previous_shares and previous_shares > 0 else None
+            new_buyers = len(managers - previous_managers) if previous_managers else 0
+            exiting_holders = len(previous_managers - managers) if previous_managers else 0
+            dest.execute(
+                """
+                INSERT INTO fact_13f_positioning(
+                    ticker, asof_date, period_of_report, source_id, institutional_shares,
+                    institutional_value, manager_count, institutional_ownership_delta_pct,
+                    new_buyer_count, exiting_holder_count, net_buyer_count, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ticker, asof_date, period_of_report, source_id) DO UPDATE SET
+                    institutional_shares = excluded.institutional_shares,
+                    institutional_value = excluded.institutional_value,
+                    manager_count = excluded.manager_count,
+                    institutional_ownership_delta_pct = excluded.institutional_ownership_delta_pct,
+                    new_buyer_count = excluded.new_buyer_count,
+                    exiting_holder_count = excluded.exiting_holder_count,
+                    net_buyer_count = excluded.net_buyer_count,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    ticker,
+                    asof.isoformat(),
+                    period,
+                    source_id,
+                    shares,
+                    float(bucket["institutional_value"]),
+                    len(managers),
+                    delta,
+                    new_buyers,
+                    exiting_holders,
+                    new_buyers - exiting_holders,
+                    now,
+                    now,
+                ),
+            )
+            stats[ticker] += 1
+            previous_shares = shares
+            previous_managers = set(managers)
     return stats
 
 
@@ -944,6 +1098,48 @@ def direct_form4_stats(conn: Any, tickers: list[str], *, source_id: str) -> dict
             "direct_form4_transactions": int(row["n"] or 0),
             "direct_form4_latest_transaction_date": str(row["latest_date"] or ""),
         }
+    return stats
+
+
+def local_form4_stats(conn: Any, tickers: list[str], *, source_id: str) -> dict[str, dict[str, Any]]:
+    stats = {ticker: {"form4_transactions": 0, "form4_latest_transaction_date": ""} for ticker in tickers}
+    if not tickers:
+        return stats
+    rows = conn.execute(
+        f"""
+        SELECT ticker, COUNT(*) AS n, MAX(transaction_date) AS latest_date
+        FROM fact_sec_form4_transaction
+        WHERE source_id = ? AND ticker IN ({qmarks(tickers)})
+        GROUP BY ticker
+        """,
+        (source_id, *tickers),
+    ).fetchall()
+    for row in rows:
+        ticker = normalize_ticker(row["ticker"])
+        stats[ticker] = {
+            "form4_transactions": int(row["n"] or 0),
+            "form4_latest_transaction_date": str(row["latest_date"] or ""),
+        }
+    return stats
+
+
+def local_fact_counts(conn: Any, table: str, tickers: list[str], *, source_id: str) -> dict[str, int]:
+    stats = {ticker: 0 for ticker in tickers}
+    if not tickers:
+        return stats
+    rows = conn.execute(
+        f"""
+        SELECT ticker, COUNT(*) AS n
+        FROM {table}
+        WHERE source_id = ? AND ticker IN ({qmarks(tickers)})
+        GROUP BY ticker
+        """,
+        (source_id, *tickers),
+    ).fetchall()
+    for row in rows:
+        ticker = normalize_ticker(row["ticker"])
+        if ticker in stats:
+            stats[ticker] = int(row["n"] or 0)
     return stats
 
 
@@ -1298,7 +1494,9 @@ def main() -> None:
     require_short = cfg_bool(config, "positioning_import.require_upstream_short_for_gate", False)
     require_short_pct_float = cfg_bool(config, "positioning_import.require_short_pct_float_for_gate", False)
     require_borrow = cfg_bool(config, "positioning_import.require_upstream_borrow_for_gate", False)
-    include_historical = cfg_bool(config, "positioning_import.include_historical_members", False)
+    include_historical = cfg_bool(config, "positioning_import.include_historical_members", False) or bool(
+        args.include_historical_members
+    )
     ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
 
     if not form4_db.exists():
@@ -1314,10 +1512,8 @@ def main() -> None:
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
             fact_tickers = load_universe(conn, ticker_filter, model_family=model_family, include_historical=include_historical)
-            feature_tickers = load_universe(conn, ticker_filter, model_family=model_family, include_historical=False)
-            if not fact_tickers or not feature_tickers:
-                raise ValueError(f"No positioning universe tickers found for model_family={model_family}.")
-            feature_ticker_set = set(feature_tickers)
+            if not fact_tickers:
+                raise ValueError(f"No positioning fact universe tickers found for model_family={model_family}.")
             # Resolve the feature asof up front: a malformed --asof must fail loudly
             # (never silently become a current build), and exemption expiries below
             # are evaluated at this asof, not at wall-clock today.
@@ -1333,6 +1529,23 @@ def main() -> None:
                         f"No market feature asof found for model_family={model_family}; "
                         "run the market feature build first or pass --asof explicitly."
                     )
+            if args.feature_membership_mode == "pit":
+                feature_tickers = load_pit_universe(
+                    conn,
+                    ticker_filter,
+                    model_family=model_family,
+                    asof=feature_asof,
+                )
+            elif args.feature_membership_mode == "all":
+                feature_tickers = load_universe(conn, ticker_filter, model_family=model_family, include_historical=True)
+            else:
+                feature_tickers = load_universe(conn, ticker_filter, model_family=model_family, include_historical=False)
+            if not feature_tickers:
+                raise ValueError(
+                    f"No positioning feature universe tickers found for model_family={model_family} "
+                    f"asof={feature_asof} mode={args.feature_membership_mode}."
+                )
+            feature_ticker_set = set(feature_tickers)
             positioning_overrides = load_positioning_overrides(config, base_dir=base_dir, asof=feature_asof)
             (
                 query_tickers,
@@ -1406,20 +1619,60 @@ def main() -> None:
                             "identity mapping retained for import. Review dim_identifier.",
                             model_family=model_family,
                         )
-                    form4_stats = import_form4(
-                        conn,
-                        form4_conn,
-                        fact_tickers,
-                        query_tickers=query_tickers,
-                        query_ciks=query_ciks_for_sql,
-                        source_to_internal=source_to_internal,
-                        cik_to_internal=cik_to_internal,
-                        routes_by_cik=form4_routes_by_cik,
-                        ambiguous_source_tickers=ambiguous_source_tickers,
-                        source_id=form4_source,
-                        start=start,
-                    )
-                    direct_stats = direct_form4_stats(conn, fact_tickers, source_id=direct_ownership_source)
+                    if args.features_only:
+                        form4_stats = local_form4_stats(conn, fact_tickers, source_id=form4_source)
+                        direct_stats = direct_form4_stats(conn, fact_tickers, source_id=direct_ownership_source)
+                        inst_stats = local_fact_counts(conn, "fact_13f_positioning", fact_tickers, source_id=mp_source)
+                        short_stats = local_fact_counts(conn, "fact_short_interest", fact_tickers, source_id=mp_source)
+                        borrow_stats = local_fact_counts(conn, "fact_ibkr_borrow_snapshot", fact_tickers, source_id=mp_source)
+                    else:
+                        form4_stats = import_form4(
+                            conn,
+                            form4_conn,
+                            fact_tickers,
+                            query_tickers=query_tickers,
+                            query_ciks=query_ciks_for_sql,
+                            source_to_internal=source_to_internal,
+                            cik_to_internal=cik_to_internal,
+                            routes_by_cik=form4_routes_by_cik,
+                            ambiguous_source_tickers=ambiguous_source_tickers,
+                            source_id=form4_source,
+                            start=start,
+                        )
+                        direct_stats = direct_form4_stats(conn, fact_tickers, source_id=direct_ownership_source)
+                        inst_stats = import_13f(
+                            conn,
+                            mp_conn,
+                            fact_tickers,
+                            query_tickers=query_tickers,
+                            source_to_internal=source_to_internal,
+                            ambiguous_source_tickers=ambiguous_source_tickers,
+                            source_id=mp_source,
+                            start=start,
+                            upstream_source=upstream_13f_source,
+                        )
+                        short_stats = import_short_interest(
+                            conn,
+                            mp_conn,
+                            fact_tickers,
+                            query_tickers=query_tickers,
+                            source_to_internal=source_to_internal,
+                            ambiguous_source_tickers=ambiguous_source_tickers,
+                            source_id=mp_source,
+                            start=start,
+                            upstream_sources=upstream_short_sources,
+                        )
+                        borrow_stats = import_borrow(
+                            conn,
+                            mp_conn,
+                            fact_tickers,
+                            query_tickers=query_tickers,
+                            source_to_internal=source_to_internal,
+                            ambiguous_source_tickers=ambiguous_source_tickers,
+                            source_id=mp_source,
+                            start=start,
+                            upstream_source=upstream_borrow_source,
+                        )
                     form4_status_by_ticker: dict[str, str] = {}
                     form4_status_reason_by_ticker: dict[str, str] = {}
                     for ticker in fact_tickers:
@@ -1432,39 +1685,6 @@ def main() -> None:
                         )
                         form4_status_by_ticker[ticker] = status
                         form4_status_reason_by_ticker[ticker] = reason
-                    inst_stats = import_13f(
-                        conn,
-                        mp_conn,
-                        fact_tickers,
-                        query_tickers=query_tickers,
-                        source_to_internal=source_to_internal,
-                        ambiguous_source_tickers=ambiguous_source_tickers,
-                        source_id=mp_source,
-                        start=start,
-                        upstream_source=upstream_13f_source,
-                    )
-                    short_stats = import_short_interest(
-                        conn,
-                        mp_conn,
-                        fact_tickers,
-                        query_tickers=query_tickers,
-                        source_to_internal=source_to_internal,
-                        ambiguous_source_tickers=ambiguous_source_tickers,
-                        source_id=mp_source,
-                        start=start,
-                        upstream_sources=upstream_short_sources,
-                    )
-                    borrow_stats = import_borrow(
-                        conn,
-                        mp_conn,
-                        fact_tickers,
-                        query_tickers=query_tickers,
-                        source_to_internal=source_to_internal,
-                        ambiguous_source_tickers=ambiguous_source_tickers,
-                        source_id=mp_source,
-                        start=start,
-                        upstream_source=upstream_borrow_source,
-                    )
                     feature_status = build_positioning_features(
                         conn,
                         feature_tickers,

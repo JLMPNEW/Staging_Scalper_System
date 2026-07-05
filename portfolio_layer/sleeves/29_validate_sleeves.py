@@ -222,6 +222,7 @@ def main() -> int:  # noqa: C901
     max_weight = _f_default(cfg_get(config, "sleeves.max_weight_per_name", 0.05), 0.05)
     rc_cap = _f_default(cfg_get(config, "sleeves.per_name_risk_contribution_cap", 0.08), 0.08)
     band = _f_default(cfg_get(config, "sleeves.sleeve_risk_budget_band", 0.05), 0.05)
+    prod = bool(cfg_get(config, "sleeves.enabled_in_production", False))
 
     rc_after = risk_contributions(proposal, cov)
     factor_before = factor_decomposition(prior, cov, market_etf=market_etf, sector_etfs=sector_etfs)
@@ -290,9 +291,10 @@ def main() -> int:  # noqa: C901
                 f"{sleeve}:realized={realized:.4f},target={target:.4f},"
                 f"feasible={feasible:.4f},bounds=[{bounds['min']:.4f},{bounds['max']:.4f}]"
             )
-    rec("sleeve_risk_within_band", "PASS" if not sleeve_bad else "FAIL",
+    sleeve_status = "PASS" if not sleeve_bad else ("FAIL" if prod else "WARN")
+    rec("sleeve_risk_within_band", sleeve_status,
         f"sleeves within +/-{band} of feasible clipped budgets"
-        if not sleeve_bad else f"{sleeve_bad[:8]}")
+        if not sleeve_bad else f"{sleeve_bad[:8]} ({'production hard gate' if prod else 'shadow-only warning'})")
     rec("sleeve_risk_aspirational_target", "PASS" if not aspirational_miss else "WARN",
         f"realized sleeve risk within +/-{band} of raw targets"
         if not aspirational_miss else f"{aspirational_miss[:8]}")
@@ -327,7 +329,6 @@ def main() -> int:  # noqa: C901
         if not div_bad else f"{div_bad}")
 
     # 9. shadow-only.
-    prod = bool(cfg_get(config, "sleeves.enabled_in_production", False))
     rec("shadow_only_not_production", "PASS" if not prod else "FAIL", f"enabled_in_production={prod}")
 
     # 10. deterministic throttle simulation recomputes from the continuous throttle formula.

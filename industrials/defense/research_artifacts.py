@@ -227,6 +227,89 @@ def weighted_score(row: dict[str, str], weights: dict[str, float]) -> float | No
     return max(0.0, min(100.0, weighted_total / weight_total))
 
 
+PRODUCTION_PROMOTION_STATUS = "production_oos_validated"
+PRODUCTION_PROMOTION_METHOD = "weekly_pit_panel_validation_ic_holdout_backtest"
+PRODUCTION_SCORING_CONTRACT_VERSION = "tech_family_final_rank_table_v1_production"
+LOCK_CONFIG_PREFIX = "oos_calibration_standards.families.defense"
+
+
+def load_production_lock(config: dict[str, Any], *, base_dir: Path) -> dict[str, Any] | None:
+    """Sealed production-calibration lock state for defense, or None while unlocked.
+
+    Fail-closed contract: a blank or TBD_* calibration_lock_date means NOT locked
+    (publishers keep the original shadow stamping). Once the lock date is a real date,
+    every companion key AND the sealed scripts/27 promotion decision manifest must
+    exist and agree — a locked config without its evidence artifact is an error,
+    never a silent fallback to shadow stamps or default weights.
+    """
+    from industrials.core.config import cfg_get, resolve_path
+
+    def read(name: str) -> str:
+        return str(cfg_get(config, f"{LOCK_CONFIG_PREFIX}.{name}", "") or "").strip()
+
+    lock_raw = read("calibration_lock_date")
+    if not lock_raw or lock_raw.upper().startswith("TBD"):
+        return None
+    lock_date = parse_date(lock_raw, field="calibration_lock_date")
+    required = {
+        "calibration_production_start_date": read("calibration_production_start_date"),
+        "calibration_train_start_date": read("calibration_train_start_date"),
+        "calibration_train_end_date": read("calibration_train_end_date"),
+        "production_promotion_decision_manifest": read("production_promotion_decision_manifest"),
+    }
+    missing = sorted(name for name, value in required.items() if not value or value.upper().startswith("TBD"))
+    if missing:
+        raise ValueError(
+            f"{LOCK_CONFIG_PREFIX}.calibration_lock_date is set ({lock_date}) but companion keys "
+            f"are missing/TBD: {missing}"
+        )
+    production_start = parse_date(required["calibration_production_start_date"], field="calibration_production_start_date")
+    train_start = parse_date(required["calibration_train_start_date"], field="calibration_train_start_date")
+    train_end = parse_date(required["calibration_train_end_date"], field="calibration_train_end_date")
+    if train_end < train_start or lock_date < train_end or production_start < lock_date:
+        raise ValueError(
+            f"Defense lock dates out of order: train {train_start}..{train_end}, "
+            f"lock {lock_date}, production start {production_start}"
+        )
+    decision_path = resolve_path(required["production_promotion_decision_manifest"], base_dir=base_dir)
+    if not decision_path.exists():
+        raise FileNotFoundError(
+            f"Configured production promotion decision manifest not found: {decision_path} "
+            "(the lock date is set; the sealed scripts/27 evidence must exist)"
+        )
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    if decision.get("promoted") is not True or str(decision.get("status") or "") != "pass":
+        raise ValueError(f"Promotion decision at {decision_path} is not a passing promotion")
+    if str(decision.get("asof_date") or "") != production_start.isoformat():
+        raise ValueError(
+            f"Promotion decision asof {decision.get('asof_date')!r} does not match configured "
+            f"calibration_production_start_date {production_start}"
+        )
+    payload = decision.get("promotion_payload") or {}
+    raw_weights = payload.get("weights") or {}
+    if not isinstance(raw_weights, dict) or not raw_weights:
+        raise ValueError(f"Promotion decision at {decision_path} carries no promoted weights")
+    weights = normalize_weights({str(key): float(value) for key, value in raw_weights.items()})
+    validation_method = read("calibration_validation_method") or PRODUCTION_PROMOTION_METHOD
+    return {
+        "lock_date": lock_date.isoformat(),
+        "production_start_date": production_start.isoformat(),
+        "train_start_date": train_start.isoformat(),
+        "train_end_date": train_end.isoformat(),
+        "weights": weights,
+        "validation_method": validation_method,
+        "decision_manifest_path": str(decision_path),
+        "decision_manifest_sha256": sha256_file(decision_path),
+    }
+
+
+def lock_mode_for_asof(lock: dict[str, Any] | None, asof: str) -> str:
+    """shadow (not locked) | pre_lock (locked, asof before production start) | production."""
+    if lock is None:
+        return "shadow"
+    return "production" if asof >= str(lock["production_start_date"]) else "pre_lock"
+
+
 def random_weights(seed: int, trials: int) -> list[dict[str, float]]:
     rng = random.Random(seed)
     weights = [dict(DEFAULT_PILLAR_WEIGHTS)]
@@ -319,6 +402,36 @@ def purged_split_snapshot_dates(
     return out
 
 
+def select_weekly_snapshot_dates(
+    snapshot_dates: list[str],
+    *,
+    weekly_start_date: str,
+    selection: str = "last",
+) -> list[str]:
+    """Select one available snapshot per weekly bucket.
+
+    ``weekly_start_date`` defines the bucket anchor. A Sunday anchor such as
+    2026-01-04 creates buckets [2026-01-04, 2026-01-10],
+    [2026-01-11, 2026-01-17], and so on. The selected date must already exist
+    in ``snapshot_dates``; this helper never fabricates market dates.
+    """
+    anchor = parse_required_date(weekly_start_date, field="weekly_start_date")
+    if selection not in {"first", "last"}:
+        raise ValueError(f"weekly selection must be 'first' or 'last', got {selection!r}")
+    buckets: dict[int, list[str]] = {}
+    for raw_date in sorted(set(snapshot_dates)):
+        parsed = parse_date(raw_date, field="snapshot_date")
+        if parsed is None or parsed < anchor:
+            continue
+        bucket = (parsed - anchor).days // 7
+        buckets.setdefault(bucket, []).append(parsed.isoformat())
+    out: list[str] = []
+    for bucket in sorted(buckets):
+        members = sorted(buckets[bucket])
+        out.append(members[0] if selection == "first" else members[-1])
+    return out
+
+
 def split_rows(snapshot_dates: list[str], split_map: dict[str, str], *, embargo_days: int) -> list[dict[str, str]]:
     dates = sorted(set(snapshot_dates))
     out: list[dict[str, str]] = []
@@ -355,4 +468,3 @@ def latest_valid_manifest(path: Path) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     return payload
-

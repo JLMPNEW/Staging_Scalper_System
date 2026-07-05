@@ -234,7 +234,7 @@ def main() -> int:  # noqa: C901
     rec("trade_key_source_row_collision_guard", "PASS" if not key_guard_bad else "FAIL",
         "trade_key recomputes and changes when source_row changes" if not key_guard_bad else "; ".join(key_guard_bad))
 
-    instrument_assets = {r.get("asset_category") for r in instruments}
+    instrument_assets = {str(r.get("asset_category") or "") for r in instruments}
     rec("instrument_metadata_loaded", "PASS" if {"Stocks", "Equity and Index Options"}.issubset(instrument_assets) else "FAIL",
         f"instrument_rows={len(instruments)} asset_categories={sorted(instrument_assets)}")
 

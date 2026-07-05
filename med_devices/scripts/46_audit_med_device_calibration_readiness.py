@@ -86,6 +86,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit med-device calibration readiness by cohort.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--input-csv", type=Path, default=None)
+    parser.add_argument("--template-summary-csv", type=Path, default=None)
+    parser.add_argument("--optimizer-summary-csv", type=Path, default=None)
+    parser.add_argument("--feature-recommendation-csv", type=Path, default=None)
+    parser.add_argument("--component-ic-csv", type=Path, default=None)
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--action-plan-csv", type=Path, default=None)
     return parser.parse_args()
@@ -431,38 +435,50 @@ def main() -> None:
             base_dir=base_dir,
         )
     )
-    template_summary = read_csv(
-        path_from_config(
+    template_summary_path = (
+        args.template_summary_csv.expanduser().resolve()
+        if args.template_summary_csv
+        else path_from_config(
             config,
             "calibration.template_walk_forward.summary_csv",
             "../output/med_devices_reports/calibration/med_device_template_walk_forward_summary.csv",
             base_dir=base_dir,
         )
     )
-    optimizer_summary = read_csv(
-        path_from_config(
+    optimizer_summary_path = (
+        args.optimizer_summary_csv.expanduser().resolve()
+        if args.optimizer_summary_csv
+        else path_from_config(
             config,
             "calibration.component_weight_optimizer.summary_csv",
             "../output/med_devices_reports/calibration/med_device_component_weight_optimizer_summary.csv",
             base_dir=base_dir,
         )
     )
-    feature_recs = read_csv(
-        path_from_config(
+    feature_recommendation_path = (
+        args.feature_recommendation_csv.expanduser().resolve()
+        if args.feature_recommendation_csv
+        else path_from_config(
             config,
             "calibration.feature_stability.recommendation_csv",
             "../output/med_devices_reports/calibration/med_device_feature_stability_recommendations.csv",
             base_dir=base_dir,
         )
     )
-    component_ic = read_csv(
-        path_from_config(
+    component_ic_path = (
+        args.component_ic_csv.expanduser().resolve()
+        if args.component_ic_csv
+        else path_from_config(
             config,
             "calibration.component_ic_csv",
             "../output/med_devices_reports/calibration/med_device_component_ic_by_cohort.csv",
             base_dir=base_dir,
         )
     )
+    template_summary = read_csv(template_summary_path)
+    optimizer_summary = read_csv(optimizer_summary_path)
+    feature_recs = read_csv(feature_recommendation_path)
+    component_ic = read_csv(component_ic_path)
     min_component_ic_t_stat = float(cfg_get(config, "calibration.component_ic.min_ic_t_stat", 2.0))
     rows = read_csv(input_csv)
     horizons = parse_int_list(cfg_get(config, "calibration.calibration_readiness.horizons", "30,60,120"))

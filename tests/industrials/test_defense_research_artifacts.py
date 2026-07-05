@@ -8,6 +8,7 @@ from industrials.defense.research_artifacts import (
     forward_window_calendar_days,
     normalize_weights,
     purged_split_snapshot_dates,
+    select_weekly_snapshot_dates,
     spearman,
     split_snapshot_dates,
     weighted_score,
@@ -75,3 +76,34 @@ def test_purged_split_relabels_boundary_overlap_as_embargo() -> None:
     assert purged["2026-03-06"] == "holdout"
     # No forward window -> purge is a no-op.
     assert purged_split_snapshot_dates(dates, forward_days=0, embargo_days=0) == base
+
+
+def test_select_weekly_snapshot_dates_uses_anchor_buckets_without_fabricating_dates() -> None:
+    dates = [
+        "2026-01-03",  # before anchor, ignored
+        "2026-01-05",
+        "2026-01-08",
+        "2026-01-12",
+        "2026-01-16",
+        "2026-01-25",
+    ]
+
+    assert select_weekly_snapshot_dates(dates, weekly_start_date="2026-01-04", selection="last") == [
+        "2026-01-08",
+        "2026-01-16",
+        "2026-01-25",
+    ]
+    assert select_weekly_snapshot_dates(dates, weekly_start_date="2026-01-04", selection="first") == [
+        "2026-01-05",
+        "2026-01-12",
+        "2026-01-25",
+    ]
+
+
+def test_select_weekly_snapshot_dates_can_start_on_friday_anchor() -> None:
+    dates = ["2019-01-03", "2019-01-04", "2019-01-07", "2019-01-11", "2019-01-14"]
+
+    assert select_weekly_snapshot_dates(dates, weekly_start_date="2019-01-04", selection="first") == [
+        "2019-01-04",
+        "2019-01-11",
+    ]

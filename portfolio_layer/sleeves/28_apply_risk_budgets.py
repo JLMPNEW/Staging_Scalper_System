@@ -37,6 +37,7 @@ from portfolio_layer.sleeves.risk_model import (  # noqa: E402
     solve_risk_budget,
     sleeve_risk_bounds,
     throttle_scale,
+    trailing_book_drawdown,
 )
 
 
@@ -252,6 +253,41 @@ def main() -> int:  # noqa: C901
     weights = solve_risk_budget(cov, target_b, gross=invested_gross, max_weight=max_weight, max_iter=max_iter)
     rc_enforcement = enforce_rc_cap_to_cash(weights, cov, rc_cap=rc_cap, max_iter=max_iter)
     weights = rc_enforcement.weights
+
+    # ---- Phase 2 drawdown throttle: measured on the proposal, state-chained, applied on opt-in ----
+    # Uniform de-risking after the RC trim preserves RC shares (scale-invariant) and only frees
+    # weight to cash. Recovery is ratcheted: the applied scale may rise at most recovery_step_per_run
+    # per run so re-risking is deliberate, never a single-day flicker.
+    throttle_apply = bool(cfg_get(config, "sleeves.drawdown_throttle.apply", False))
+    dd_limit = _f_default(cfg_get(config, "sleeves.drawdown_throttle.dd_limit", 0.15), 0.15)
+    throttle_window = int(_f_default(cfg_get(config, "sleeves.drawdown_throttle.window_trading_days", 63), 63.0))
+    recovery_step = _f_default(cfg_get(config, "sleeves.drawdown_throttle.recovery_step_per_run", 0.25), 0.25)
+    measured_dd = 0.0
+    returns_panel_path = run_dir / "risk" / "returns_panel.csv"
+    if returns_panel_path.exists():
+        returns_panel = pd.read_csv(returns_panel_path, index_col=0)
+        returns_panel.columns = [str(c).strip().upper() for c in returns_panel.columns]
+        measured_dd = trailing_book_drawdown(weights, returns_panel, window=throttle_window)
+    computed_scale = throttle_scale(abs(measured_dd), dd_limit)
+    prev_scale = 1.0
+    prior_runs = sorted(
+        p for p in runs_root.iterdir()
+        if p.is_dir() and p.name < run_as_of and (p / "sleeves" / "drawdown_throttle_state.json").exists()
+    )
+    if prior_runs:
+        try:
+            prev_state = json.loads(
+                (prior_runs[-1] / "sleeves" / "drawdown_throttle_state.json").read_text(encoding="utf-8"))
+            prev_scale = float(prev_state.get("applied_scale", 1.0))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            prev_scale = 1.0
+    ratchet_ceiling = min(1.0, prev_scale + recovery_step)
+    applied_scale = min(computed_scale, ratchet_ceiling) if throttle_apply else 1.0
+    if throttle_apply and applied_scale < 1.0 - 1e-12:
+        weights = {t: w * applied_scale for t, w in weights.items()}
+        LOGGER.info("Drawdown throttle APPLIED: dd=%.4f scale=%.4f (computed=%.4f, ratchet<=%.4f)",
+                    measured_dd, applied_scale, computed_scale, ratchet_ceiling)
+
     # any name pruned/trimmed keeps zero or lower weight; cash absorbs the residual
     realized_invested = sum(weights.values())
     final_cash = round(1.0 - realized_invested, 10)
@@ -324,12 +360,17 @@ def main() -> int:  # noqa: C901
     write_manifest(out["effective_bets.json"],
                    {"before": enb_before, "after": enb_after,
                     "improvement": round(enb_after["enb"] - enb_before["enb"], 4)})
-    throttle_apply = bool(cfg_get(config, "sleeves.drawdown_throttle.apply", False))
-    dd_limit = _f_default(cfg_get(config, "sleeves.drawdown_throttle.dd_limit", 0.15), 0.15)
     simulated_throttle = {
-        "applied_to_weights": throttle_apply,
+        "applied_to_weights": bool(throttle_apply and applied_scale < 1.0 - 1e-12),
+        "apply_enabled": throttle_apply,
         "dd_limit": dd_limit,
-        "formula": "clip(1 - drawdown / dd_limit, 0, 1)",
+        "formula": "clip(1 - drawdown / dd_limit, 0, 1), recovery ratcheted per run",
+        "measured_trailing_drawdown": round(measured_dd, 6),
+        "window_trading_days": throttle_window,
+        "computed_scale": round(computed_scale, 8),
+        "previous_applied_scale": round(prev_scale, 8),
+        "recovery_step_per_run": recovery_step,
+        "applied_scale": round(applied_scale, 8),
         "cases": [
             {
                 "case": "no_breach",
@@ -344,6 +385,13 @@ def main() -> int:  # noqa: C901
         ],
     }
     write_manifest(out["drawdown_throttle_simulation.json"], simulated_throttle)
+    write_manifest(sleeves_dir / "drawdown_throttle_state.json", {
+        "run_as_of": run_as_of,
+        "applied_scale": round(applied_scale, 8),
+        "computed_scale": round(computed_scale, 8),
+        "measured_trailing_drawdown": round(measured_dd, 6),
+        "apply_enabled": throttle_apply,
+    })
 
     # ---- proposal-level sanity (improvement-relative; hard gates live in 29) ----
     sum_ok = abs(realized_invested + final_cash - 1.0) <= 1e-6

@@ -5951,6 +5951,7 @@ def run_candidate_grid_process_jobs(
         return [candidate_grid_process_worker(candidate_grid_process_job_payload(job)) for job in jobs]
     worker_count = max(1, min(int(max_workers), len(jobs)))
     results: dict[int, dict[str, Any]] = {}
+    process_failure: Exception | None = None
     executor = ProcessPoolExecutor(
         max_workers=worker_count,
         initializer=init_candidate_grid_process_context,
@@ -5967,12 +5968,17 @@ def run_candidate_grid_process_jobs(
             job_index = future_map[future]
             try:
                 results[job_index] = future.result()
-            except Exception:
+            except Exception as exc:
+                process_failure = exc
                 shutdown_wait = False
                 for pending in future_map:
                     pending.cancel()
-                LOGGER.exception("%s process job failed: index=%s", job_label, job_index)
-                raise
+                LOGGER.exception(
+                    "%s process job failed: index=%s; falling back to in-process scoring for this chunk",
+                    job_label,
+                    job_index,
+                )
+                break
     except KeyboardInterrupt:
         shutdown_wait = False
         for pending in future_map:
@@ -5983,6 +5989,19 @@ def run_candidate_grid_process_jobs(
             executor.shutdown(wait=shutdown_wait, cancel_futures=not shutdown_wait)
         else:
             executor.shutdown(wait=shutdown_wait)
+    if process_failure is not None:
+        init_candidate_grid_process_context(rows_by_date, top_ns, sample, evaluation_split, params)
+        fallback_results = [
+            candidate_grid_process_worker(candidate_grid_process_job_payload(job))
+            for job in sorted(jobs, key=lambda item: int(item.index))
+        ]
+        LOGGER.warning(
+            "%s process executor fallback completed in-process: jobs=%d original_error=%s",
+            job_label,
+            len(jobs),
+            type(process_failure).__name__,
+        )
+        return fallback_results
     return [results[int(job.index)] for job in sorted(jobs, key=lambda item: int(item.index))]
 
 

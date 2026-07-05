@@ -29,7 +29,8 @@ from portfolio_layer.core.db import connect, finish_run, start_run  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
 from portfolio_layer.optimizer.optimizer_core import (  # noqa: E402
-    finalize_long_only_weights, solve_long_only_mv, weight_sensitivity_band,
+    finalize_long_only_weights, finalize_with_group_caps, snap_rounded_weights, solve_long_only_mv,
+    weight_sensitivity_band,
 )
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
@@ -239,18 +240,49 @@ def main() -> int:  # noqa: C901
     mu_used = mu_raw * conf if use_conf else mu_raw
     sigma = covariance.loc[universe, universe].to_numpy(dtype=float)
 
+    # Explicit per-sleeve budget caps (LIVE book only): sum(w of pipeline) <= cap * gross.
+    # A cap of 0.0 excludes the sleeve from sizing entirely. Research/shadow books stay uncapped
+    # by design — a sleeve earns a larger live budget through Stage 7/BL + Stage 11 evidence,
+    # never by inflating its alpha anchor.
+    sector_caps_cfg = {str(k): float(v) for k, v in (oc.get("sector_weight_caps") or {}).items()}
+    group_caps: list[tuple[list[int], float]] = []
+    sector_cap_summary: dict[str, dict[str, float]] = {}
+    for pipeline, cap in sorted(sector_caps_cfg.items()):
+        if cap < 0:
+            LOGGER.error("optimizer.sector_weight_caps.%s=%s is negative", pipeline, cap)
+            return 1
+        indices = [i for i, t in enumerate(universe)
+                   if str(scores[t].get("source_pipeline", "")).strip() == pipeline]
+        if indices:
+            group_caps.append((indices, cap))
+        sector_cap_summary[pipeline] = {"cap": cap, "n_universe": len(indices)}
+
     weights, info = solve_long_only_mv(
         mu_used, sigma, risk_aversion=risk_aversion, max_weight=max_weight, gross=gross, solver=solver,
+        group_caps=group_caps or None,
     )
     if info["status"] not in ("optimal", "optimal_inaccurate"):
         LOGGER.error("Solver did not converge: %s", info)
         return 1
-    # Drop dust then re-project to exact gross without breaching per-name caps.
-    weights = finalize_long_only_weights(weights, min_weight=min_hold, max_weight=max_weight, gross=gross)
+    # Drop dust then re-project to exact gross without breaching per-name or sleeve-budget caps.
+    if group_caps:
+        weights = finalize_with_group_caps(
+            weights, group_caps=group_caps, min_weight=min_hold, max_weight=max_weight, gross=gross,
+        )
+    else:
+        weights = finalize_long_only_weights(weights, min_weight=min_hold, max_weight=max_weight, gross=gross)
+    # Publish rounded weights that sum to EXACTLY gross (Stage 4 computes CASH from the published book).
+    weights = snap_rounded_weights(weights, gross=gross, max_weight=max_weight)
     band_low, band_high = weight_sensitivity_band(
         mu_used, sigma, gammas=band_gammas, min_weight=min_hold, max_weight=max_weight, gross=gross,
-        solver=solver,
+        solver=solver, group_caps=group_caps or None,
     )
+    for pipeline, summary in sector_cap_summary.items():
+        realized = float(sum(
+            weights[i] for i, t in enumerate(universe)
+            if str(scores[t].get("source_pipeline", "")).strip() == pipeline
+        ))
+        summary["realized_weight"] = round(realized, 8)
 
     rows = []
     for i, t in enumerate(universe):
@@ -278,6 +310,7 @@ def main() -> int:  # noqa: C901
         "gross_exposure": gross,
         "max_weight_per_name": max_weight,
         "min_weight_to_hold": min_hold,
+        "sector_weight_caps": sector_cap_summary,
         "sensitivity_band_gammas": band_gammas,
         "covariance_source": "stage2_risk_covariance_csv",
         "covariance_sha256": sha256_file(cov_path),

@@ -89,12 +89,28 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _resolve_source(config: dict[str, Any], config_path: Path, raw: Path | None) -> Path:
+def _resolve_source(config: dict[str, Any], config_path: Path, raw: Path | None, as_of: str | None) -> Path:
     if raw is not None:
         return ensure_not_prod_path(raw.expanduser().resolve(), label="IB CSV")
     source_dir = resolve_path(cfg_get(config, "holdings_ledger.source_reports_dir", "../IB_reports"), base_dir=config_path.parent)
     source_dir = ensure_not_prod_path(source_dir.expanduser().resolve(), label="IB source dir")
     statement_glob = str(cfg_get(config, "holdings_ledger.statement_glob", STATEMENT_GLOB_DEFAULT) or STATEMENT_GLOB_DEFAULT)
+    if as_of:
+        # orchestrated runs must pair the run date with ITS statement — never "newest wins",
+        # which would silently write a later statement's positions into an earlier run
+        matches = [f for f in sorted(source_dir.glob(statement_glob))
+                   if peek_statement_period_end(ensure_not_prod_path(f.resolve(), label="IB CSV")) == as_of]
+        if not matches:
+            raise FileNotFoundError(
+                f"No IB statement with period end {as_of} under {source_dir} (glob {statement_glob!r}); "
+                "export the daily activity statement first or pass --ib-csv explicitly."
+            )
+        if len(matches) > 1:
+            keep = min(matches, key=_statement_span_key)
+            LOGGER.warning("Multiple statements end %s (%s); using widest/largest %s",
+                           as_of, [m.name for m in matches], keep.name)
+            return ensure_not_prod_path(keep.resolve(), label="IB CSV")
+        return ensure_not_prod_path(matches[0].resolve(), label="IB CSV")
     return ensure_not_prod_path(latest_ib_report(source_dir, statement_glob), label="IB CSV")
 
 
@@ -346,7 +362,17 @@ def main() -> int:
             source_dir = ensure_not_prod_path(source_dir.expanduser().resolve(), label="IB source dir")
         statement_glob = str(cfg_get(config, "holdings_ledger.statement_glob", STATEMENT_GLOB_DEFAULT) or STATEMENT_GLOB_DEFAULT)
         return _backfill(paths, source_dir=source_dir, statement_glob=statement_glob, force=args.force)
-    ib_csv = _resolve_source(config, config_path, args.ib_csv)
+    if args.as_of and not args.force:
+        sealed_sources = paths.output_dir / "runs" / args.as_of / "ledger" / "broker_statement_sources.csv"
+        if sealed_sources.exists():
+            LOGGER.info("Ledger import for %s already sealed; keeping %s (use --force to re-import)",
+                        args.as_of, sealed_sources)
+            return 0
+    try:
+        ib_csv = _resolve_source(config, config_path, args.ib_csv, args.as_of)
+    except FileNotFoundError as exc:
+        LOGGER.error("%s", exc)
+        return 1
     return _import_statement(paths, ib_csv, args.as_of, force=args.force)
 
 

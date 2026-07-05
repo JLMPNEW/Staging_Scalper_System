@@ -19,9 +19,13 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import init_db  # noqa: E402
 from industrials.core.rank_table_contracts import defense_final_rank_header  # noqa: E402
+from industrials.defense.research_artifacts import load_production_lock, lock_mode_for_asof  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+MODEL_FAMILY = "defense"
+PANEL_SOURCE_CURRENT_UNIVERSE_REPLAY = "dashboard_rank_snapshot_current_universe_replay"
+PANEL_SOURCE_SURVIVORSHIP_CORRECTED = "survivorship_corrected_pit_membership_score_recompute"
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,6 +49,37 @@ def as_float(raw: object) -> float | None:
         return float(str(raw).strip())
     except (TypeError, ValueError):
         return None
+
+
+def expected_row_count(conn: sqlite3.Connection, *, asof: str, membership_mode: str) -> int:
+    if membership_mode == "pit":
+        return int(
+            conn.execute(
+                """
+                SELECT COUNT(DISTINCT m.ticker)
+                FROM dim_universe_membership m
+                JOIN dim_industrials_taxonomy t ON t.company_id = m.company_id AND t.model_family = m.model_family
+                WHERE m.model_family = ?
+                  AND m.point_in_time_flag = 1
+                  AND m.start_date <= ?
+                  AND COALESCE(m.end_date, '9999-12-31') >= ?
+                """,
+                (MODEL_FAMILY, asof, asof),
+            ).fetchone()[0]
+            or 0
+        )
+    return int(
+        conn.execute(
+            """
+            SELECT COUNT(DISTINCT c.ticker)
+            FROM dim_company c
+            JOIN dim_industrials_taxonomy t ON t.company_id = c.company_id
+            WHERE c.is_active = 1 AND t.model_family = ?
+            """,
+            (MODEL_FAMILY,),
+        ).fetchone()[0]
+        or 0
+    )
 
 
 def main() -> int:
@@ -82,22 +117,20 @@ def main() -> int:
     if got_header != exp_header:
         errors.append("rank table header does not match semiconductor contract with defense demand-pillar rename")
 
+    manifest: dict[str, object] = {}
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    membership_mode = str(manifest.get("membership_mode") or "current")
+    if membership_mode not in {"current", "pit"}:
+        errors.append(f"manifest membership_mode invalid: {membership_mode!r}")
+        membership_mode = "current"
+
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         init_db(conn)
-        active_count = int(
-            conn.execute(
-                """
-                SELECT COUNT(DISTINCT c.ticker)
-                FROM dim_company c
-                JOIN dim_industrials_taxonomy t ON t.company_id = c.company_id
-                WHERE c.is_active = 1 AND t.model_family = 'defense'
-                """
-            ).fetchone()[0]
-            or 0
-        )
-    if len(rows) != active_count:
-        errors.append(f"row count mismatch: expected active={active_count} actual={len(rows)}")
+        expected_count = expected_row_count(conn, asof=asof, membership_mode=membership_mode)
+    if len(rows) != expected_count:
+        errors.append(f"row count mismatch: expected {membership_mode}={expected_count} actual={len(rows)}")
     tickers = [str(row.get("ticker") or "").strip().upper() for row in rows]
     if len(set(tickers)) != len(tickers):
         errors.append("duplicate tickers found")
@@ -114,15 +147,78 @@ def main() -> int:
     ]
     if bad_scores:
         errors.append(f"final_score outside 0..100 or nonnumeric: {bad_scores[:10]}")
-    bad_shadow = [
-        row.get("ticker", "")
-        for row in rows
-        if str(row.get("oos_score_valid_flag") or "") != "0"
-        or str(row.get("portfolio_candidate_gate") or "") != "0"
-        or str(row.get("calibration_eligible_flag") or "") != "0"
-    ]
-    if bad_shadow:
-        errors.append(f"shadow-only gates not disabled: {bad_shadow[:10]}")
+    lock = load_production_lock(config, base_dir=base_dir)
+    mode = lock_mode_for_asof(lock, asof)
+    if mode == "production":
+        bad_role = [
+            row.get("ticker", "")
+            for row in rows
+            if str(row.get("calibration_sample_role") or "") not in {"strict_oos", "excluded"}
+        ]
+        if bad_role:
+            errors.append(f"production calibration_sample_role not strict_oos/excluded: {bad_role[:10]}")
+        bad_gate = [
+            row.get("ticker", "")
+            for row in rows
+            if str(row.get("portfolio_candidate_gate") or "") == "1"
+            and (
+                str(row.get("oos_score_valid_flag") or "") != "1"
+                or str(row.get("calibration_eligible_flag") or "") != "1"
+            )
+        ]
+        if bad_gate:
+            errors.append(f"candidate gate open without oos/calibration eligibility: {bad_gate[:10]}")
+        bad_lock_date = [
+            row.get("ticker", "")
+            for row in rows
+            if lock is not None and str(row.get("calibration_lock_date") or "") != lock["lock_date"]
+        ]
+        if bad_lock_date:
+            errors.append(f"production rows missing sealed calibration_lock_date: {bad_lock_date[:10]}")
+    else:
+        bad_shadow = [
+            row.get("ticker", "")
+            for row in rows
+            if str(row.get("oos_score_valid_flag") or "") != "0"
+            or str(row.get("portfolio_candidate_gate") or "") != "0"
+            or str(row.get("calibration_eligible_flag") or "") != "0"
+        ]
+        if bad_shadow:
+            errors.append(f"pre-production gates not disabled: {bad_shadow[:10]}")
+        allowed_roles = {"pre_lock_research", "excluded"} if mode == "pre_lock" else {"excluded"}
+        bad_role = [
+            row.get("ticker", "")
+            for row in rows
+            if str(row.get("calibration_sample_role") or "") not in allowed_roles
+        ]
+        if bad_role:
+            errors.append(f"{mode} calibration_sample_role outside {sorted(allowed_roles)}: {bad_role[:10]}")
+        if mode == "pre_lock":
+            bad_lock_date = [
+                row.get("ticker", "")
+                for row in rows
+                if lock is not None and str(row.get("calibration_lock_date") or "") != lock["lock_date"]
+            ]
+            if bad_lock_date:
+                errors.append(f"pre_lock rows missing sealed calibration_lock_date: {bad_lock_date[:10]}")
+            bad_research_guard = [
+                row.get("ticker", "")
+                for row in rows
+                if str(row.get("research_calibration_input_eligible_flag") or "") == "1"
+                and str(row.get("survivorship_corrected_panel_flag") or "") != "1"
+            ]
+            if bad_research_guard:
+                errors.append(
+                    f"research-eligible pre_lock rows not survivorship corrected: {bad_research_guard[:10]}"
+                )
+        else:
+            bad_lock_date = [
+                row.get("ticker", "")
+                for row in rows
+                if str(row.get("calibration_lock_date") or "").strip()
+            ]
+            if bad_lock_date:
+                errors.append(f"shadow rows carry a calibration_lock_date: {bad_lock_date[:10]}")
     bad_research_alias = [
         row.get("ticker", "")
         for row in rows
@@ -138,20 +234,48 @@ def main() -> int:
     ]
     if bad_oos_date:
         errors.append(f"OOS-valid rows missing oos_score_asof_date: {bad_oos_date[:10]}")
+    expected_stage11_source = (
+        PANEL_SOURCE_SURVIVORSHIP_CORRECTED if membership_mode == "pit" else PANEL_SOURCE_CURRENT_UNIVERSE_REPLAY
+    )
+    expected_survivorship_flag = "1" if membership_mode == "pit" else "0"
     bad_stage11_source = [
         row.get("ticker", "")
         for row in rows
-        if str(row.get("stage11_calibration_panel_source") or "")
-        != "dashboard_rank_snapshot_current_universe_replay"
+        if str(row.get("stage11_calibration_panel_source") or "") != expected_stage11_source
     ]
     if bad_stage11_source:
-        errors.append(f"stage11_calibration_panel_source not explicit current-universe replay: {bad_stage11_source[:10]}")
+        errors.append(f"stage11_calibration_panel_source not {expected_stage11_source}: {bad_stage11_source[:10]}")
+    bad_survivorship_flag = [
+        row.get("ticker", "")
+        for row in rows
+        if str(row.get("survivorship_corrected_panel_flag") or "") != expected_survivorship_flag
+    ]
+    if bad_survivorship_flag:
+        errors.append(
+            f"survivorship_corrected_panel_flag not {expected_survivorship_flag}: {bad_survivorship_flag[:10]}"
+        )
     blank_market_cap = [row.get("ticker", "") for row in rows if not str(row.get("market_cap") or "").strip()]
-    if blank_market_cap:
+    blank_market_cap_without_reason = [
+        row.get("ticker", "")
+        for row in rows
+        if not str(row.get("market_cap") or "").strip()
+        and "market_cap_unavailable" not in str(row.get("liquidity_capacity_reason") or "")
+    ]
+    if blank_market_cap and membership_mode == "current":
         errors.append(f"market_cap blank in published rank table: {blank_market_cap[:10]}")
+    elif blank_market_cap_without_reason:
+        errors.append(f"market_cap blank without clear liquidity_capacity_reason: {blank_market_cap_without_reason[:10]}")
     blank_adv60 = [row.get("ticker", "") for row in rows if not str(row.get("avg_dollar_volume_60d") or "").strip()]
-    if blank_adv60:
+    blank_adv60_without_reason = [
+        row.get("ticker", "")
+        for row in rows
+        if not str(row.get("avg_dollar_volume_60d") or "").strip()
+        and "avg_dollar_volume_60d_unavailable" not in str(row.get("liquidity_capacity_reason") or "")
+    ]
+    if blank_adv60 and membership_mode == "current":
         errors.append(f"avg_dollar_volume_60d blank in published rank table: {blank_adv60[:10]}")
+    elif blank_adv60_without_reason:
+        errors.append(f"avg_dollar_volume_60d blank without clear liquidity_capacity_reason: {blank_adv60_without_reason[:10]}")
     missing_capacity_reason = [
         row.get("ticker", "")
         for row in rows
@@ -178,13 +302,16 @@ def main() -> int:
     if not manifest_path.exists():
         errors.append("manifest file missing")
     else:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         digest = hashlib.sha256(rank_table.read_bytes()).hexdigest()
         if manifest.get("sha256") != digest:
             errors.append("manifest sha256 does not match rank table")
         if manifest.get("asof_date") != asof:
             errors.append("manifest asof_date mismatch")
-        if int(manifest.get("rows") or -1) != len(rows):
+        try:
+            manifest_rows = int(str(manifest.get("rows") or "-1"))
+        except ValueError:
+            manifest_rows = -1
+        if manifest_rows != len(rows):
             errors.append("manifest row count mismatch")
 
     if errors:

@@ -213,6 +213,26 @@ def main() -> int:  # noqa: C901
         ),
     )
 
+    # 4b. explicit sleeve budget caps respected in the LIVE book (optimizer.sector_weight_caps).
+    sector_caps = {str(k): float(v) for k, v in (oc.get("sector_weight_caps") or {}).items()}
+    if sector_caps:
+        cap_bad = []
+        cap_detail = []
+        for pipeline, cap in sorted(sector_caps.items()):
+            realized = 0.0
+            for r in rows:
+                if str(r.get("source_pipeline", "")).strip() == pipeline:
+                    wt = finite_float(r.get("weight"))
+                    realized += wt if wt is not None else 0.0
+            cap_detail.append(f"{pipeline}={realized:.6f}<=cap {cap * gross:.6f}")
+            if realized > cap * gross + weight_tol:
+                cap_bad.append(f"{pipeline}:weight={realized:.6f}>cap={cap * gross:.6f}")
+        rec(
+            "sector_weight_caps_respected",
+            "PASS" if not cap_bad else "FAIL",
+            "; ".join(cap_detail) if not cap_bad else f"violations: {cap_bad}",
+        )
+
     # 5. sensitivity bands are post-finalization bands, so the published weight must be contained.
     band_bad = []
     for r in rows:

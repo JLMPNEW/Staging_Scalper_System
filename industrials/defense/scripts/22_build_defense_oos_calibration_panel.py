@@ -36,6 +36,7 @@ from industrials.defense.research_artifacts import (  # noqa: E402
     parse_date,
     parse_required_date,
     purged_split_snapshot_dates,
+    select_weekly_snapshot_dates,
     sha256_file,
     split_rows,
     utc_now,
@@ -133,6 +134,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--forward-days", type=int, default=DEFAULT_FORWARD_DAYS)
     parser.add_argument("--embargo-days", type=int, default=DEFAULT_EMBARGO_DAYS)
     parser.add_argument("--benchmark-ticker", default="")
+    parser.add_argument("--cadence", choices=["available", "weekly"], default="available")
+    parser.add_argument("--weekly-start-date", default="", help="Weekly bucket anchor date when --cadence weekly.")
+    parser.add_argument("--weekly-selection", choices=["first", "last"], default="last")
     parser.add_argument("--allow-overwrite", action="store_true")
     parser.add_argument("--include-review-rows", action="store_true")
     return parser.parse_args()
@@ -174,6 +178,23 @@ def snapshot_dirs(root: Path, *, asof: str, start_date: str, end_date: str) -> l
             continue
         out.append(path)
     return sorted(out, key=lambda item: item.name)
+
+
+def filter_weekly_snapshot_paths(
+    paths: list[Path],
+    *,
+    weekly_start_date: str,
+    weekly_selection: str,
+) -> list[Path]:
+    if not weekly_start_date:
+        raise ValueError("--weekly-start-date is required when --cadence weekly")
+    by_date = {str(snapshot_date(path) or ""): path for path in paths if snapshot_date(path)}
+    selected = select_weekly_snapshot_dates(
+        list(by_date),
+        weekly_start_date=weekly_start_date,
+        selection=weekly_selection,
+    )
+    return [by_date[asof] for asof in selected]
 
 
 def load_snapshot(path: Path) -> SnapshotArtifact:
@@ -497,6 +518,8 @@ def main() -> int:
         raise ValueError("--embargo-days cannot be negative")
     if args.asof and (args.start_date or args.end_date):
         raise ValueError("--asof cannot be combined with --start-date/--end-date")
+    if args.asof and args.cadence == "weekly":
+        raise ValueError("--asof cannot be combined with --cadence weekly")
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
@@ -526,6 +549,12 @@ def main() -> int:
     if benchmark_ticker != "XAR":
         raise ValueError(f"Defense calibration benchmark must be XAR unless the contract is updated, got {benchmark_ticker!r}")
     snapshot_paths = snapshot_dirs(snapshot_root, asof=args.asof, start_date=args.start_date, end_date=args.end_date)
+    if args.cadence == "weekly":
+        snapshot_paths = filter_weekly_snapshot_paths(
+            snapshot_paths,
+            weekly_start_date=args.weekly_start_date,
+            weekly_selection=args.weekly_selection,
+        )
     snapshots = [load_snapshot(path) for path in snapshot_paths]
     if not snapshots:
         raise ValueError(f"No sealed defense rank snapshots found under {snapshot_root}")
@@ -596,6 +625,9 @@ def main() -> int:
         "config_path": str(config_path),
         "source_db_path": str(db_path),
         "snapshot_root": str(snapshot_root),
+        "snapshot_cadence": args.cadence,
+        "weekly_start_date": args.weekly_start_date if args.cadence == "weekly" else "",
+        "weekly_selection": args.weekly_selection if args.cadence == "weekly" else "",
         "snapshot_count": len(snapshot_dates),
         "snapshot_start_date": snapshot_dates[0],
         "snapshot_end_date": snapshot_dates[-1],

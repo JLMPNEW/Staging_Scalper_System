@@ -159,6 +159,24 @@ def information_ratios(alpha: dict[str, float], sigma: dict[str, float], *, eps:
     return out
 
 
+def trailing_book_drawdown(weights: dict[str, float], returns: pd.DataFrame, *, window: int) -> float:
+    """Current drawdown (<= 0) of the book held statically over the last `window` panel days.
+
+    Shared by the Stage 8 drawdown throttle and the Stage 12 risk governor so both read the same
+    number for the same book.
+    """
+    names = [t for t in weights if t in returns.columns]
+    if not names:
+        return 0.0
+    w = np.array([weights[t] for t in names], dtype=float)
+    sub = returns[names].tail(window).apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    sub = np.nan_to_num(sub, nan=0.0)
+    port = sub @ w
+    equity = np.concatenate(([1.0], np.cumprod(1.0 + port)))
+    running = np.maximum.accumulate(equity)
+    return float((equity / running - 1.0)[-1])
+
+
 def throttle_scale(
     drawdown: float,
     dd_limit: float,
