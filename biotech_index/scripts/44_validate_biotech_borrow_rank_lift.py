@@ -444,7 +444,11 @@ def build_gap_summary(gap_rows: list[dict[str, Any]], bonuses: list[float]) -> l
         grouped[(str(row.get("score_field") or ""), int(to_float(row.get("top_n"), 0.0) or 0))].append(row)
     out: list[dict[str, Any]] = []
     for (score_field, top_n), rows in sorted(grouped.items()):
-        gaps = [to_float(row.get("score_gap_to_cutoff")) for row in rows if to_float(row.get("score_gap_to_cutoff")) is not None]
+        gaps: list[float] = []
+        for row in rows:
+            gap = to_float(row.get("score_gap_to_cutoff"))
+            if gap is not None:
+                gaps.append(gap)
         base: dict[str, Any] = {
             "score_field": score_field,
             "score_purpose": score_field_label(score_field),
@@ -534,7 +538,12 @@ def main() -> None:
         if not rows:
             raise ValueError("No daily_scores rows found for selected snapshot dates.")
         tickers = {normalize_ticker(row.get("ticker")) for row in rows if normalize_ticker(row.get("ticker"))}
+        price_ticker_alias = calibration.load_calibration_ticker_alias_map(conn)
         market_tickers = set(tickers)
+        for observation_ticker in tickers:
+            canonical_price_ticker = price_ticker_alias.get(observation_ticker)
+            if canonical_price_ticker:
+                market_tickers.add(canonical_price_ticker)
         if params.alpha_adjustment_enabled and params.benchmark_ticker:
             market_tickers.add(params.benchmark_ticker)
         asof_dates = [parsed for row in rows if (parsed := calibration.parse_date(row.get("asof_date"))) is not None]
@@ -546,6 +555,13 @@ def main() -> None:
             min_date=min(asof_dates),
             market_sources=market_sources,
         )
+        calibration.apply_delisted_price_series_overlay(
+            conn,
+            bars_by_ticker,
+            price_ticker_alias=price_ticker_alias,
+            min_date=min(asof_dates),
+            config=config,
+        )
 
     calibration.add_forward_returns(
         rows,
@@ -555,6 +571,7 @@ def main() -> None:
         next_bar_entry=next_bar_entry,
         benchmark_ticker=params.benchmark_ticker if params.alpha_adjustment_enabled else "",
         benchmark_bars=bars_by_ticker.get(params.benchmark_ticker, []) if params.alpha_adjustment_enabled else [],
+        price_ticker_alias=price_ticker_alias,
     )
 
     rows_by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)

@@ -93,6 +93,13 @@ HEADER_ALIASES = {
     "is_primary_listing": ("isprimarylisting", "primarylisting", "primary"),
 }
 
+KNOWN_INVESTABILITY_STATUSES = {
+    "investable",
+    "non_investable_listing_status",
+    "non_investable_security_type",
+    "review_listing_status",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -249,6 +256,20 @@ def standardize_input_columns(df: pd.DataFrame) -> pd.DataFrame:
     for column in OUTPUT_COLUMNS:
         if column not in df.columns:
             df[column] = ""
+    shifted_company_mask = df.apply(
+        lambda row: blank(row.get("company_name"))
+        and not blank(row.get("investability_status"))
+        and normalize_status_label(row.get("investability_status")) not in KNOWN_INVESTABILITY_STATUSES,
+        axis=1,
+    )
+    shifted_company_count = int(shifted_company_mask.sum())
+    if shifted_company_count:
+        LOGGER.warning(
+            "Recovered company_name from non-status investability_status values for %d rows",
+            shifted_company_count,
+        )
+        df.loc[shifted_company_mask, "company_name"] = df.loc[shifted_company_mask, "investability_status"].map(clean_text)
+        df.loc[shifted_company_mask, "investability_status"] = ""
     df["ticker"] = df["ticker"].map(normalize_ticker)
     df["cik"] = df["cik"].map(normalize_cik)
     df["is_primary_listing"] = df["is_primary_listing"].map(normalize_bool)

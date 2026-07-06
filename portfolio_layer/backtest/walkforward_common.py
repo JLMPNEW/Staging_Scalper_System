@@ -19,7 +19,7 @@ from portfolio_layer.sleeves.risk_model import enforce_rc_cap_to_cash
 
 LOGGER = logging.getLogger("walkforward_common")
 
-ARMS = ("aqr_only", "rotation", "macro_bl", "sleeves")
+ARMS = ("aqr_only", "rotation", "macro_bl", "sleeves", "regime_gate", "regime_lever")
 
 ARM_FIELDS = [
     "arm", "n_rebalances", "n_days", "independent_windows_21d",
@@ -252,10 +252,66 @@ def run_walkforward(
         regime = regime_provider(rb_date)
         fits = sector_fit_provider(rb_date)
 
+        # regime_gate/regime_lever arms (research/71 evidence):
+        #   regime_gate  = score-tilted book only in supportive regimes; min-var otherwise.
+        #   regime_lever = stronger score tilt in supportive regimes; min-var otherwise.
+        # A missing/unknown regime label is UNSUPPORTIVE (fail closed).
+        supportive = {str(s).upper() for s in
+                      (params.get("regime_gate_supportive_regimes") or ["HEATING_UP"])}
+        regime_label = str(regime.get("label", "")).upper()
+        min_var_book: dict[str, float] | None = None
+
+        def _min_var_or_prior(arm_name: str) -> dict[str, float]:
+            nonlocal min_var_book
+            if min_var_book is None:
+                try:
+                    mv_w, mv_info = solve_long_only_mv(
+                        np.zeros(len(common)), sigma,
+                        risk_aversion=float(params["risk_aversion"]),
+                        max_weight=float(params["max_weight"]), gross=float(params["gross"]),
+                        solver=str(params["solver"]),
+                    )
+                except Exception as exc:  # noqa: BLE001 - hold the prior book, never score-tilt
+                    LOGGER.warning("min-variance solve failed at %s: %s", rb_date, exc)
+                    mv_w, mv_info = None, {"status": "error"}
+                if mv_w is not None and mv_info.get("status") in ("optimal", "optimal_inaccurate"):
+                    mv_w = finalize_long_only_weights(
+                        mv_w, min_weight=float(params["min_weight"]),
+                        max_weight=float(params["max_weight"]), gross=float(params["gross"]))
+                    min_var_book = {t: float(x) for t, x in zip(common, mv_w) if x > 0}
+                else:
+                    min_var_book = dict(holdings[arm_name])
+            return dict(min_var_book)
+
         pending_cost: dict[str, float] = {}
         for arm in arms:
             w = dict(aqr)
-            if arm in ("rotation", "macro_bl", "sleeves"):
+            if arm == "regime_gate":
+                if regime_label not in supportive:
+                    w = _min_var_or_prior(arm)
+            elif arm == "regime_lever":
+                if regime_label in supportive:
+                    lever = max(1.0, float(params.get("regime_lever_mu_multiplier", 1.5) or 1.5))
+                    try:
+                        lever_w, lever_info = solve_long_only_mv(
+                            mu_used * lever, sigma,
+                            risk_aversion=float(params["risk_aversion"]),
+                            max_weight=float(params["max_weight"]), gross=float(params["gross"]),
+                            solver=str(params["solver"]),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - fail closed to the normal AQR book
+                        LOGGER.warning("regime-lever solve failed at %s: %s", rb_date, exc)
+                        lever_w, lever_info = None, {"status": "error"}
+                    if lever_w is not None and lever_info.get("status") in ("optimal", "optimal_inaccurate"):
+                        lever_w = finalize_long_only_weights(
+                            lever_w, min_weight=float(params["min_weight"]),
+                            max_weight=float(params["max_weight"]), gross=float(params["gross"]))
+                        w = {t: float(x) for t, x in zip(common, lever_w) if x > 0}
+                    else:
+                        w = dict(aqr)
+                else:
+                    w = _min_var_or_prior(arm)
+            elif arm in ("rotation", "macro_bl", "sleeves"):
                 w = rotation_tilt(w, pipe_of, multiplier_of, gross=float(params["gross"]))
             if arm in ("macro_bl", "sleeves"):
                 w = macro_overlay(w, pipe_of, gross_scalar=float(regime["gross_scalar"]),
@@ -368,6 +424,7 @@ def build_real_providers(config: dict[str, Any], *, conn: Any, prices: pd.DataFr
         label = str(row["active_current_regime"] or "").upper() if row is not None else ""
         bucket = "risk_off" if label in risk_off else "default"
         return {
+            "label": label,
             "gross_scalar": float(gross_map.get(label, gross_map.get("default", 1.0)) or 1.0),
             "budgets": dict(budgets_cfg.get(bucket, budgets_cfg.get("default", {})) or {}),
         }

@@ -720,3 +720,74 @@ def test_calibration_forward_returns_include_alpha_adjusted_objectives() -> None
     assert rows[0]["fwd_1d_net_benchmark_alpha_return"] == pytest.approx(0.05)
     assert rows[0]["fwd_1d_equal_weight_net_return"] == pytest.approx(0.0)
     assert rows[0]["fwd_1d_net_equal_weight_alpha_return"] == pytest.approx(0.10)
+
+
+def test_delisted_price_overlay_protects_reused_canonical_ticker() -> None:
+    module = load_script_module("28_calibrate_biotech_opportunity.py", "calibration_delisted_overlay_regression")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE market_bars_daily(
+            ticker TEXT NOT NULL,
+            bar_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            close REAL NOT NULL
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO market_bars_daily(ticker, bar_date, source, close) VALUES (?, ?, ?, ?)",
+        [
+            ("BOLD", "2020-01-13", "norgate_us_equities_total_return", 40.0),
+            ("BOLD", "2020-01-14", "norgate_us_equities_total_return", 60.0),
+            ("BOLD", "2024-04-01", "yahoo_adjusted", 100.0),
+            ("BOLD", "2024-04-02", "yahoo_adjusted", 20.0),
+        ],
+    )
+    live_reuser_bars = {
+        "BOLD": [module.Bar(date(2024, 4, 1), 100.0), module.Bar(date(2024, 4, 2), 20.0)]
+    }
+
+    applied = module.apply_delisted_price_series_overlay(
+        conn,
+        live_reuser_bars,
+        price_ticker_alias={"BOLD-202001": "BOLD", "BOLD": "BOLD"},
+        min_date=date(2020, 1, 1),
+        config={"delisted_calibration": {"source_rules": {"price_source": "norgate_us_equities_total_return"}}},
+    )
+
+    assert applied == 1
+    assert [bar.day for bar in live_reuser_bars["BOLD-202001"]] == [date(2020, 1, 13), date(2020, 1, 14)]
+    assert [bar.close for bar in live_reuser_bars["BOLD-202001"]] == [40.0, 60.0]
+    assert [bar.close for bar in live_reuser_bars["BOLD"]] == [100.0, 20.0]
+
+    rows = [{"ticker": "BOLD-202001", "asof_date": "2020-01-10"}]
+    module.add_forward_returns(
+        rows,
+        live_reuser_bars,
+        [1],
+        round_trip_cost_bps=0.0,
+        next_bar_entry=True,
+        price_ticker_alias={"BOLD-202001": "BOLD"},
+    )
+
+    assert rows[0]["fwd_1d_entry_date"] == "2020-01-13"
+    assert rows[0]["fwd_1d_target_date"] == "2020-01-14"
+    assert rows[0]["fwd_1d_return"] == pytest.approx(0.5)
+
+
+def test_phase1_score_sort_value_preserves_zero_scores() -> None:
+    module = load_script_module("27_calibration_phase1_backtest.py", "phase1_score_sort_regression")
+    rows = [
+        {"ticker": "MISSING", "score": ""},
+        {"ticker": "ZERO", "score": "0.0"},
+        {"ticker": "POSITIVE", "score": "5.0"},
+    ]
+
+    assert module.score_sort_value(rows[0], "score") == pytest.approx(-1e9)
+    assert module.score_sort_value(rows[1], "score") == pytest.approx(0.0)
+    assert module.score_sort_value(rows[2], "score") == pytest.approx(5.0)
+
+    ranked = sorted(rows, key=lambda row: module.score_sort_value(row, "score"), reverse=True)
+    assert [row["ticker"] for row in ranked] == ["POSITIVE", "ZERO", "MISSING"]

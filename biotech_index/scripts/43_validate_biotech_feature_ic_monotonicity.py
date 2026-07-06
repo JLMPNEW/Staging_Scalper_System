@@ -597,7 +597,12 @@ def main() -> None:
         if not observations:
             raise ValueError("No feature observations remain after exclusions.")
         tickers = {ticker for row in observations if (ticker := normalize_ticker(row.get("ticker")))}
+        price_ticker_alias = calibration.load_calibration_ticker_alias_map(conn)
         market_tickers = set(tickers)
+        for observation_ticker in tickers:
+            canonical_price_ticker = price_ticker_alias.get(observation_ticker)
+            if canonical_price_ticker:
+                market_tickers.add(canonical_price_ticker)
         if params.alpha_adjustment_enabled and params.benchmark_ticker:
             market_tickers.add(params.benchmark_ticker)
         asof_dates = [parsed for row in observations if (parsed := calibration.parse_date(row.get("asof_date"))) is not None]
@@ -609,6 +614,13 @@ def main() -> None:
             min_date=min(asof_dates),
             market_sources=market_sources,
         )
+        calibration.apply_delisted_price_series_overlay(
+            conn,
+            bars_by_ticker,
+            price_ticker_alias=price_ticker_alias,
+            min_date=min(asof_dates),
+            config=config,
+        )
 
     calibration.add_forward_returns(
         observations,
@@ -618,6 +630,7 @@ def main() -> None:
         next_bar_entry=next_bar_entry,
         benchmark_ticker=params.benchmark_ticker if params.alpha_adjustment_enabled else "",
         benchmark_bars=bars_by_ticker.get(params.benchmark_ticker, []) if params.alpha_adjustment_enabled else [],
+        price_ticker_alias=price_ticker_alias,
     )
 
     summary_rows: list[dict[str, Any]] = []

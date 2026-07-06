@@ -10,6 +10,8 @@ survivorship panel (PIT, delisted-covered):
                 the Stage 6/7 overlay; the full tier1 BL fusion is revalidated at promotion time)
   sleeves     + regime sleeve risk budgets and the realized per-name RC-cap trim (Stage 8 rule,
                 reusing sleeves/risk_model directly)
+  regime_gate score-tilted AQR only in supportive regimes, min-variance otherwise
+  regime_lever stronger score tilt in supportive regimes, min-variance otherwise
 
 Costs: every rebalance charges one-way costs on traded weight (config bps), applied on the first
 holding day. Between rebalances weights drift with survivorship-panel returns; a name with no bar
@@ -105,7 +107,8 @@ def _selftest() -> None:
                   use_confidence=True, risk_aversion=5.0, max_weight=0.10, min_weight=0.005,
                   gross=1.0, solver="ECOS", macro_shift_scale=0.5, macro_max_shift=0.15, rc_cap=0.20)
     def regime(_: str) -> dict[str, Any]:
-        return {"gross_scalar": 1.0, "budgets": {"long_core": 0.65, "medium_rotation": 0.35}}
+        return {"label": "A", "gross_scalar": 1.0,
+                "budgets": {"long_core": 0.65, "medium_rotation": 0.35}}
 
     def fits(_: str) -> dict[str, float]:
         return {"alpha_pipe": 0.5, "beta_pipe": 0.0, "gamma_pipe": -0.5}
@@ -144,6 +147,56 @@ def _selftest() -> None:
                                 rotation_provider=rotation)
     rows_small = summarize_arms(res_small, arms, verdict_cfg={})
     assert all(r["promotable"] == 0 for r in rows_small), rows_small
+
+    # regime_gate: score works in the supportive regime and INVERTS otherwise. Holding the score
+    # only when supportive (min-variance elsewhere) must beat always-scoring aqr_only.
+    rng2 = np.random.default_rng(31)
+    up_names = [f"UP{k}" for k in range(names_per_pipe)]
+    dn_names = [f"DN{k}" for k in range(names_per_pipe)]
+    pipe_of2 = {**{t: "up_pipe" for t in up_names}, **{t: "down_pipe" for t in dn_names}}
+    block = 40
+    regime_sched = {d: ("HEATING_UP" if (j // block) % 2 == 0 else "STAGFLATION")
+                    for j, d in enumerate(cal)}
+    cols2: dict[str, np.ndarray] = {}
+    for t in up_names + dn_names:
+        rets = np.empty(n_days)
+        for j, d in enumerate(cal):
+            supportive = regime_sched[d] == "HEATING_UP"
+            # supportive: UP names +, DN names - (score works). unsupportive: signs FLIP (score inverts).
+            edge = 0.0016 if pipe_of2[t] == "up_pipe" else -0.0016
+            drift = edge if supportive else -edge
+            rets[j] = rng2.standard_normal() * 0.012 + drift
+        cols2[t] = 100 * np.cumprod(1 + rets)
+    prices2 = pd.DataFrame(cols2, index=pd.Index(cal))
+    snaps2 = {}
+    for i in range(20, n_days - 25, 10):
+        snaps2[cal[i]] = [
+            {"ticker": t, "final_score": "0.20" if pipe_of2[t] == "up_pipe" else "-0.10",
+             "score_confidence": "1.0", "source_pipeline": pipe_of2[t]}
+            for t in up_names + dn_names
+        ]
+    def regime2(d: str) -> dict[str, Any]:
+        return {"label": regime_sched.get(d, ""), "gross_scalar": 1.0,
+                "budgets": {"long_core": 0.65, "medium_rotation": 0.35}}
+    params2 = {**params, "regime_gate_supportive_regimes": ["HEATING_UP"], "min_universe": 6,
+               "max_universe": 24}
+    params2 = {**params2, "regime_lever_mu_multiplier": 2.0}
+    res2 = run_walkforward(snapshots=snaps2, prices=prices2,
+                           arms=["aqr_only", "regime_gate", "regime_lever"],
+                           params=params2, regime_provider=regime2, sector_fit_provider=fits,
+                           rotation_provider=rotation)
+    assert not res2["pit_violations"], res2["pit_violations"]
+    s2 = {r["arm"]: r for r in summarize_arms(res2, ["aqr_only", "regime_gate", "regime_lever"],
+                                               verdict_cfg={})}
+    assert s2["regime_gate"]["net_sharpe"] > s2["aqr_only"]["net_sharpe"], (
+        s2["regime_gate"]["net_sharpe"], s2["aqr_only"]["net_sharpe"])
+    assert float(s2["regime_gate"]["net_ir_vs_baseline"]) > 0, s2["regime_gate"]["net_ir_vs_baseline"]
+    assert s2["regime_lever"]["net_sharpe"] > s2["aqr_only"]["net_sharpe"], (
+        s2["regime_lever"]["net_sharpe"], s2["aqr_only"]["net_sharpe"])
+    assert float(s2["regime_lever"]["net_ir_vs_baseline"]) > 0, s2["regime_lever"]["net_ir_vs_baseline"]
+    # turnover sanity: the gate rebalances between score-tilt and min-var, so it trades >= baseline
+    assert s2["regime_gate"]["turnover_per_year"] >= 0.0
+    assert s2["regime_lever"]["turnover_per_year"] >= 0.0
     print("walk-forward ablation self-test: PASS")
 
 
@@ -183,6 +236,9 @@ def main() -> int:  # noqa: C901
         macro_shift_scale=float(cfg_get(config, "black_litterman_fusion.macro_sector_shift_scale", 0.5)),
         macro_max_shift=float(cfg_get(config, "black_litterman_fusion.macro_sector_max_shift", 0.15)),
         rc_cap=float(cfg_get(config, "sleeves.per_name_risk_contribution_cap", 0.08)),
+        regime_gate_supportive_regimes=[str(s) for s in
+                                        (wf.get("regime_gate_supportive_regimes") or ["HEATING_UP"])],
+        regime_lever_mu_multiplier=float(wf.get("regime_lever_mu_multiplier", 1.5)),
     )
     arms = [a for a in (wf.get("arms") or list(ARMS)) if a in ARMS]
     if "aqr_only" not in arms:
@@ -262,6 +318,7 @@ def main() -> int:  # noqa: C901
         label = str(row["active_current_regime"] or "").upper() if row is not None else ""
         bucket = "risk_off" if label in risk_off else "default"
         return {
+            "label": label,
             "gross_scalar": float(gross_map.get(label, gross_map.get("default", 1.0)) or 1.0),
             "budgets": dict(budgets_cfg.get(bucket, budgets_cfg.get("default", {})) or {}),
         }

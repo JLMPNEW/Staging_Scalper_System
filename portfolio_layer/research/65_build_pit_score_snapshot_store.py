@@ -507,7 +507,7 @@ def _cmd_validate(*, config: dict[str, Any], runs_root: Path, store_dir: Path, c
         return 0
 
     tamper, run_diverged, bad_accept, bad_sectors, bad_fields, bad_sources, bad_dates = [], [], [], [], [], [], []
-    legacy = []
+    legacy, drifted_sectors = [], []
     for r in rows:
         as_of = str(r["as_of_date"])
         if not RUN_DATE_RE.match(as_of):
@@ -531,7 +531,13 @@ def _cmd_validate(*, config: dict[str, Any], runs_root: Path, store_dir: Path, c
             bad_accept.append(f"{as_of}:{r['acceptance']}/{r['hard_gate_acceptance']}")
         stats = json.loads(str(r["sector_stats_json"]))
         if sorted(stats) != expected:
-            bad_sectors.append(f"{as_of}:{sorted(stats)}")
+            # a reconstruction is built NOW from the current config, so a missing sector is an
+            # integrity failure; a LIVE capture predating a later-added sector is honest history
+            # (retro-demanding the new sector would be anachronistic) -> drift warning instead
+            if str(r["provenance"]) == "live" and set(stats).issubset(expected):
+                drifted_sectors.append(f"{as_of}:missing={sorted(set(expected) - set(stats))}")
+            else:
+                bad_sectors.append(f"{as_of}:{sorted(stats)}")
         for pipe, s in stats.items():
             src = str(s.get("source_asof") or "")
             if src and src > as_of:
@@ -558,6 +564,9 @@ def _cmd_validate(*, config: dict[str, Any], runs_root: Path, store_dir: Path, c
         "all snapshots sealed PASS" if not bad_accept else f"{bad_accept[:8]}")
     rec("sector_coverage_complete", "PASS" if not bad_sectors else "FAIL",
         f"every snapshot covers {expected}" if not bad_sectors else f"{bad_sectors[:8]}")
+    rec("sector_set_drift_live_captures", "PASS" if not drifted_sectors else "WARN",
+        "none" if not drifted_sectors else
+        f"{len(drifted_sectors)} live captures predate a later-added sector: {drifted_sectors[:8]}")
     rec("no_future_source_dates", "PASS" if not bad_sources else "FAIL",
         "sector source dates PIT-consistent" if not bad_sources else f"{bad_sources[:8]}")
     rec("valid_snapshot_dates", "PASS" if not bad_dates else "FAIL",

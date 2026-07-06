@@ -610,7 +610,15 @@ risk_governor:
 # protocol amendment. Arms replay allocation-level overlay rules over dev-window snapshots.
 walkforward:
   dir: "walkforward"                       # under paths.output_dir; one subdir per panel build
-  arms: [aqr_only, rotation, macro_bl, sleeves]
+  arms: [aqr_only, rotation, macro_bl, sleeves, regime_gate, regime_lever]
+  # regime_gate (research/71 evidence): the AQR score-tilted book ONLY when the PIT macro regime is
+  # supportive; otherwise the SAME optimizer with mu=0 (pure minimum-variance over the same universe).
+  # A missing/unknown regime label is treated as unsupportive (fail closed). This is the net-of-cost
+  # test of "trade the scores when the regime says they work, stand down otherwise."
+  regime_gate_supportive_regimes: [HEATING_UP]
+  # regime_lever uses the same supportive-regime gate, but multiplies mu inside supportive regimes
+  # to test whether the conditional ranking signal can produce active return, not just lower vol.
+  regime_lever_mu_multiplier: 1.5
   rebalance_every_n_snapshots: 5           # daily store -> weekly rebalance
   one_way_cost_bps: 5.0                    # flat one-way cost on traded weight at each rebalance
   cov_lookback_trading_days: 252
@@ -630,3 +638,14 @@ calibration_validation:
   min_folds_valid: 3                       # verdict floor: folds that actually trained
   min_independent_test_windows: 3          # verdict floor: non-overlapping test label windows
   validate_t_min: 2.0                      # out-of-fold rank-IC t-stat must reach this
+
+# Stage 11 - regime-conditional calibration validation (research/71; 68/69 extension).
+# EVIDENCE ONLY: validated regime cells change nothing until a regime-conditional sizing design,
+# a Stage 16 walk-forward arm, and a dated protocol amendment exist. Inherits fold/purge settings
+# from calibration_validation; the approval bar sits above 69's because the regime grid multiplies
+# the number of comparisons.
+regime_calibration:
+  dir: "regime_calibration"                # under paths.output_dir; one subdir per panel build
+  regime_column: "macro_regime"            # PIT regime label joined by research/67
+  min_regime_dates: 120                    # cells with fewer in-regime dates fail closed
+  validate_t_min: 2.5                      # stricter than calibration_validation.validate_t_min

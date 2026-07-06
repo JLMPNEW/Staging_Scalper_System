@@ -835,7 +835,12 @@ def main() -> None:
             raise ValueError("Forward catalyst validation observations have no valid as-of dates.")
         tickers = {normalize_ticker(row.get("ticker")) for row in rows if normalize_ticker(row.get("ticker"))}
         benchmark_ticker = params.benchmark_ticker if params.alpha_adjustment_enabled else ""
+        price_ticker_alias = calibration.load_calibration_ticker_alias_map(conn)
         market_tickers = set(tickers)
+        for observation_ticker in tickers:
+            canonical_price_ticker = price_ticker_alias.get(observation_ticker)
+            if canonical_price_ticker:
+                market_tickers.add(canonical_price_ticker)
         if benchmark_ticker:
             market_tickers.add(benchmark_ticker)
         bars_by_ticker = calibration.load_bars(
@@ -843,6 +848,13 @@ def main() -> None:
             tickers=market_tickers,
             min_date=min(asof_dates),
             market_sources=market_sources,
+        )
+        calibration.apply_delisted_price_series_overlay(
+            conn,
+            bars_by_ticker,
+            price_ticker_alias=price_ticker_alias,
+            min_date=min(asof_dates),
+            config=config,
         )
 
     enrich_forward_catalyst_diagnostics(rows, validation_cfg=validation_cfg)
@@ -854,6 +866,7 @@ def main() -> None:
         next_bar_entry=next_bar_entry,
         benchmark_ticker=params.benchmark_ticker if params.alpha_adjustment_enabled else "",
         benchmark_bars=bars_by_ticker.get(params.benchmark_ticker, []) if params.alpha_adjustment_enabled else [],
+        price_ticker_alias=price_ticker_alias,
     )
 
     feature_qa_rows = build_feature_qa_rows(

@@ -22,8 +22,8 @@ invalidation logic. IB liquidity collection (05c) is never launched here — it 
 IB session and belongs to the overnight process; 13's spread_source fallback covers its absence.
 
 Every run writes runs/<as_of>/orchestration_meta.json with per-step durations, exit codes, and the
-acceptance read from each stage manifest. Optional branches (forecast, hedging, payout) do not
-exist yet and stay out of the DAG until Stage 11 promotes them.
+acceptance read from each stage manifest. Forecast and hedging stay out of the DAG until Stage 11
+promotes them; payout/final composition are implemented as shadow-aware Stage 12 groups.
 """
 from __future__ import annotations
 

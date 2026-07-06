@@ -7,7 +7,10 @@ from biotech_index.core.config import cfg_get
 
 
 DEFAULT_SCORING_MARKET_SOURCES = ["yahoo_adjusted", "interactive_brokers"]
-DEFAULT_CALIBRATION_MARKET_SOURCES = ["yahoo_adjusted", "interactive_brokers"]
+# Norgate total-return is listed last (lowest priority): survivors resolve to
+# yahoo/IB, while delisted calibration names — which only have Norgate bars —
+# fall back to it. Omitting it silently NULLs every delisted forward return.
+DEFAULT_CALIBRATION_MARKET_SOURCES = ["yahoo_adjusted", "interactive_brokers", "norgate_us_equities_total_return"]
 
 
 def normalize_source_list(raw: object, default: Iterable[str]) -> list[str]:

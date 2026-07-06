@@ -330,6 +330,45 @@ def load_score_rows(conn: sqlite3.Connection, dates: list[str], excluded_tickers
     return rows_out
 
 
+def score_sort_value(row: dict[str, Any], score_key: str) -> float:
+    """Float sort key for score ranking; None sorts to the bottom, 0.0 stays 0.0."""
+    value = to_float(row.get(score_key))
+    return -1e9 if value is None else value
+
+
+def load_calibration_ticker_alias_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """Map historical/delisted price aliases to canonical calibration tickers."""
+    try:
+        columns = table_columns(conn, "delisted_calibration_universe")
+    except sqlite3.Error:
+        return {}
+    if "ticker" not in columns:
+        return {}
+    alias_fields = [
+        field
+        for field in (
+            "ticker",
+            "calibration_company_ticker",
+            "norgate_symbol",
+            "historical_price_ticker",
+            "original_ticker",
+        )
+        if field in columns
+    ]
+    selected_fields = ", ".join(alias_fields)
+    rows = conn.execute(f"SELECT {selected_fields} FROM delisted_calibration_universe").fetchall()
+    aliases: dict[str, str] = {}
+    for row in rows:
+        canonical = normalize_ticker(row["ticker"])
+        if not canonical:
+            continue
+        for field in alias_fields:
+            alias = normalize_ticker(row[field])
+            if alias:
+                aliases.setdefault(alias, canonical)
+    return aliases
+
+
 def load_bars(
     conn: sqlite3.Connection,
     *,
@@ -382,6 +421,47 @@ def load_bars(
     return out
 
 
+def apply_delisted_price_series_overlay(
+    conn: sqlite3.Connection,
+    bars_by_ticker: dict[str, list[Bar]],
+    *,
+    price_ticker_alias: dict[str, str],
+    min_date: date,
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Overlay delisted alias price series from the dedicated delisted source.
+
+    A reused canonical ticker (e.g. BOLD: Audentes delisted 2020-01, Boundless
+    Bio relisted 2024) can carry the NEW issuer's yahoo/IB bars, and load_bars'
+    priority pick would splice those into the delisted name's era.  Store the
+    delisted-source series under the ALIAS key (norgate symbol) so delisted
+    rows use exactly the old issuer's bars while the live reuser keeps the
+    canonical key.  Returns the number of alias series applied.
+    """
+    delisted_by_alias = {
+        alias: canonical for alias, canonical in price_ticker_alias.items() if alias != canonical
+    }
+    if not delisted_by_alias:
+        return 0
+    delisted_source = str(
+        cfg_get(config or {}, "delisted_calibration.source_rules.price_source", "norgate_us_equities_total_return")
+        or "norgate_us_equities_total_return"
+    ).strip()
+    delisted_bars = load_bars(
+        conn,
+        tickers=set(delisted_by_alias.values()),
+        min_date=min_date,
+        market_sources=[delisted_source],
+    )
+    applied = 0
+    for alias, canonical in delisted_by_alias.items():
+        series = delisted_bars.get(canonical)
+        if series:
+            bars_by_ticker[alias] = series
+            applied += 1
+    return applied
+
+
 def forward_return(
     bars: list[Bar],
     asof: date,
@@ -412,13 +492,17 @@ def add_forward_returns(
     *,
     round_trip_cost_bps: float,
     next_bar_entry: bool,
+    price_ticker_alias: dict[str, str] | None = None,
 ) -> None:
     cost = float(round_trip_cost_bps) / 10_000.0
     missing_return_counts: defaultdict[tuple[int, str], int] = defaultdict(int)
     for row in rows:
         ticker = normalize_ticker(row.get("ticker"))
+        price_ticker = (price_ticker_alias or {}).get(ticker, ticker)
         asof = parse_date(row.get("asof_date"))
-        bars = bars_by_ticker.get(ticker, [])
+        # Alias key first: apply_delisted_price_series_overlay stores the
+        # delisted-source series there, immune to canonical ticker reuse.
+        bars = bars_by_ticker.get(ticker) or bars_by_ticker.get(price_ticker, [])
         for horizon in horizons:
             prefix = f"fwd_{horizon}d"
             if asof is None:
@@ -866,7 +950,10 @@ def build_correlation_rows(rows: list[dict[str, Any]], horizons: list[int]) -> l
             cs_spearman_t = safe_ratio(
                 cs_spearman_mean,
                 (cs_spearman_std / math.sqrt(len(cs_spearman_values)))
-                if cs_spearman_std not in {None, 0.0} and cs_spearman_values
+                if cs_spearman_mean is not None
+                and cs_spearman_std is not None
+                and cs_spearman_std != 0.0
+                and cs_spearman_values
                 else None,
             )
             residual_pairs = (
@@ -1066,7 +1153,10 @@ def build_topn_rows(rows: list[dict[str, Any]], horizons: list[int], top_ns: lis
                     ]
                     if not candidates:
                         continue
-                    candidates.sort(key=lambda row: to_float(row.get(score_key), -1e9), reverse=True)
+                    # Candidates are pre-filtered to score-not-None above; the explicit
+                    # None branch keeps the sort key typed float WITHOUT the falsy-zero
+                    # trap of `or -1e9` (which would bottom-rank a legitimate 0.0 score).
+                    candidates.sort(key=lambda row: score_sort_value(row, score_key), reverse=True)
                     selected = candidates[:top_n]
                     selected_rets = [to_float(row.get(ret_key)) for row in selected]
                     selected_rets = [ret for ret in selected_rets if ret is not None]
@@ -1125,7 +1215,10 @@ def build_topn_risk_adjusted_rows(
                     ]
                     if not candidates:
                         continue
-                    candidates.sort(key=lambda row: to_float(row.get(score_key), -1e9), reverse=True)
+                    # Candidates are pre-filtered to score-not-None above; the explicit
+                    # None branch keeps the sort key typed float WITHOUT the falsy-zero
+                    # trap of `or -1e9` (which would bottom-rank a legitimate 0.0 score).
+                    candidates.sort(key=lambda row: score_sort_value(row, score_key), reverse=True)
                     selected = candidates[:top_n]
                     selected_rets = [to_float(row.get(ret_key)) for row in selected]
                     selected_rets = [ret for ret in selected_rets if ret is not None]
@@ -1922,7 +2015,20 @@ def main() -> None:
         if not asof_dates:
             raise ValueError("Score rows do not contain valid as-of dates.")
         min_asof = min(asof_dates)
-        bars_by_ticker = load_bars(conn, tickers=tickers, min_date=min_asof, market_sources=market_sources)
+        price_ticker_alias = load_calibration_ticker_alias_map(conn)
+        market_tickers = set(tickers)
+        for observation_ticker in tickers:
+            canonical = price_ticker_alias.get(observation_ticker)
+            if canonical:
+                market_tickers.add(canonical)
+        bars_by_ticker = load_bars(conn, tickers=market_tickers, min_date=min_asof, market_sources=market_sources)
+        apply_delisted_price_series_overlay(
+            conn,
+            bars_by_ticker,
+            price_ticker_alias=price_ticker_alias,
+            min_date=min_asof,
+            config=config,
+        )
 
     LOGGER.info(
         "Loaded calibration inputs: dates=%d rows=%d tickers=%d bars_tickers=%d excluded_tickers=%d",
@@ -1939,6 +2045,7 @@ def main() -> None:
         horizons,
         round_trip_cost_bps=round_trip_cost_bps,
         next_bar_entry=next_bar_entry,
+        price_ticker_alias=price_ticker_alias,
     )
     add_bucket_diagnostic_fields(
         score_rows,

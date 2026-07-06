@@ -336,6 +336,39 @@ def load_score_rows(
     return rows_out
 
 
+def load_calibration_ticker_alias_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """Map historical/delisted price aliases to canonical calibration tickers."""
+    try:
+        columns = table_columns(conn, "delisted_calibration_universe")
+    except sqlite3.Error:
+        return {}
+    if "ticker" not in columns:
+        return {}
+    alias_fields = [
+        field
+        for field in (
+            "ticker",
+            "calibration_company_ticker",
+            "norgate_symbol",
+            "historical_price_ticker",
+            "original_ticker",
+        )
+        if field in columns
+    ]
+    selected_fields = ", ".join(alias_fields)
+    rows = conn.execute(f"SELECT {selected_fields} FROM delisted_calibration_universe").fetchall()
+    aliases: dict[str, str] = {}
+    for row in rows:
+        canonical = normalize_ticker(row["ticker"])
+        if not canonical:
+            continue
+        for field in alias_fields:
+            alias = normalize_ticker(row[field])
+            if alias:
+                aliases.setdefault(alias, canonical)
+    return aliases
+
+
 def load_bars(
     conn: sqlite3.Connection,
     *,
@@ -387,6 +420,49 @@ def load_bars(
         if candidates:
             out[ticker] = min(candidates, key=lambda item: item[0])[1]
     return out
+
+
+def apply_delisted_price_series_overlay(
+    conn: sqlite3.Connection,
+    bars_by_ticker: dict[str, list[Bar]],
+    *,
+    price_ticker_alias: dict[str, str],
+    min_date: date,
+    max_date: date,
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Overlay delisted alias price series from the dedicated delisted source.
+
+    A reused canonical ticker (e.g. BOLD: Audentes delisted 2020-01, Boundless
+    Bio relisted 2024) can carry the NEW issuer's yahoo/IB bars, and load_bars'
+    priority pick would splice those into the delisted name's era.  Store the
+    delisted-source series under the ALIAS key (norgate symbol) so delisted
+    rows use exactly the old issuer's bars while the live reuser keeps the
+    canonical key.  Returns the number of alias series applied.
+    """
+    delisted_by_alias = {
+        alias: canonical for alias, canonical in price_ticker_alias.items() if alias != canonical
+    }
+    if not delisted_by_alias:
+        return 0
+    delisted_source = str(
+        cfg_get(config or {}, "delisted_calibration.source_rules.price_source", "norgate_us_equities_total_return")
+        or "norgate_us_equities_total_return"
+    ).strip()
+    delisted_bars = load_bars(
+        conn,
+        tickers=set(delisted_by_alias.values()),
+        min_date=min_date,
+        max_date=max_date,
+        market_sources=[delisted_source],
+    )
+    applied = 0
+    for alias, canonical in delisted_by_alias.items():
+        series = delisted_bars.get(canonical)
+        if series:
+            bars_by_ticker[alias] = series
+            applied += 1
+    return applied
 
 
 def forward_return(
@@ -637,6 +713,7 @@ def build_observations(
     top_n_values: list[int],
     next_bar_entry: bool,
     round_trip_cost_bps: float,
+    price_ticker_alias: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     cost = round_trip_cost_bps / 10_000.0
     max_top_n = max(top_n_values)
@@ -647,6 +724,7 @@ def build_observations(
         if rank > max_top_n:
             continue
         ticker = normalize_ticker(row.get("ticker"))
+        price_ticker = (price_ticker_alias or {}).get(ticker, ticker)
         asof = parse_date(row.get("asof_date"))
         for horizon in horizons:
             ret: float | None = None
@@ -654,8 +732,10 @@ def build_observations(
             target_date = ""
             reason = "invalid_asof_date"
             if asof is not None:
+                # Alias key first: apply_delisted_price_series_overlay stores the
+                # delisted-source series there, immune to canonical ticker reuse.
                 ret, entry_date, target_date, reason = forward_return(
-                    bars_by_ticker.get(ticker, []),
+                    bars_by_ticker.get(ticker) or bars_by_ticker.get(price_ticker, []),
                     asof,
                     horizon,
                     next_bar_entry=next_bar_entry,
@@ -1146,8 +1226,13 @@ def component_scores(row: dict[str, Any], config: dict[str, Any]) -> dict[str, f
     if valuation is None:
         valuation = to_float(row.get("valuation_score"), valuation_default)
     valuation = clamp(valuation_default if valuation is None else valuation)
+    clinical_default = to_float(row.get("opportunity_score"), 50.0)
     return {
-        "clinical_opportunity": score_value(row, "clinical_opportunity_score", to_float(row.get("opportunity_score"), 50.0)),
+        "clinical_opportunity": score_value(
+            row,
+            "clinical_opportunity_score",
+            50.0 if clinical_default is None else clinical_default,
+        ),
         "commercial_value": score_value(
             row,
             "commercial_value_score",
@@ -1295,6 +1380,7 @@ def build_candidate_observations(
     top_n_values: list[int],
     next_bar_entry: bool,
     round_trip_cost_bps: float,
+    price_ticker_alias: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     if not candidates:
         return []
@@ -1346,6 +1432,7 @@ def build_candidate_observations(
                     baseline_component,
                     candidate_component,
                 ) in enumerate(selected_ranked_rows, start=1):
+                    price_ticker = (price_ticker_alias or {}).get(ticker, ticker)
                     component_values = component_scores(row, config)
                     for top_n in top_n_values:
                         if candidate_rank > top_n:
@@ -1356,8 +1443,10 @@ def build_candidate_observations(
                             target_date = ""
                             reason = "invalid_asof_date"
                             if asof is not None:
+                                # Alias key first: apply_delisted_price_series_overlay stores the
+                                # delisted-source series there, immune to canonical ticker reuse.
                                 ret, entry_date, target_date, reason = forward_return(
-                                    bars_by_ticker.get(ticker, []),
+                                    bars_by_ticker.get(ticker) or bars_by_ticker.get(price_ticker, []),
                                     asof,
                                     horizon,
                                     next_bar_entry=next_bar_entry,
@@ -2580,6 +2669,7 @@ def build_component_audit_observations(
     horizons: list[int],
     next_bar_entry: bool,
     round_trip_cost_bps: float,
+    price_ticker_alias: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     cost = round_trip_cost_bps / 10_000.0
     rows: list[dict[str, Any]] = []
@@ -2589,6 +2679,7 @@ def build_component_audit_observations(
         asof = parse_date(score_row.get("asof_date"))
         if not ticker or asof is None:
             continue
+        price_ticker = (price_ticker_alias or {}).get(ticker, ticker)
         components = component_scores(score_row, config)
         raw_missing = {
             component_name: int(to_float(score_row.get(component_raw_column(component_name)), None) is None)
@@ -2599,8 +2690,10 @@ def build_component_audit_observations(
             for component_name in COMPONENT_AUDIT_NAMES
         }
         for horizon in horizons:
+            # Alias key first: apply_delisted_price_series_overlay stores the
+            # delisted-source series there, immune to canonical ticker reuse.
             ret, entry_date, target_date, reason = forward_return(
-                bars_by_ticker.get(ticker, []),
+                bars_by_ticker.get(ticker) or bars_by_ticker.get(price_ticker, []),
                 asof,
                 horizon,
                 next_bar_entry=next_bar_entry,
@@ -2971,6 +3064,7 @@ def main() -> None:
             parsed for parsed in (parse_date(row.get("asof_date")) for row in bar_source_rows) if parsed is not None
         ]
         bars_by_ticker: dict[str, list[Bar]] = {}
+        price_ticker_alias = load_calibration_ticker_alias_map(conn)
         if args.mode in {"all", "baseline", "priority", "calibrate-one", "component-audit"} and parsed_dates:
             min_bar_date = min(parsed_dates) - timedelta(days=14)
             max_bar_date = max(parsed_dates) + timedelta(days=max(horizons) * 3 + 30)
@@ -2979,12 +3073,25 @@ def main() -> None:
                 for row in bar_source_rows
                 if normalize_ticker(row.get("ticker"))
             }
+            market_tickers = set(tickers)
+            for observation_ticker in tickers:
+                canonical_price_ticker = price_ticker_alias.get(observation_ticker)
+                if canonical_price_ticker:
+                    market_tickers.add(canonical_price_ticker)
             bars_by_ticker = load_bars(
                 conn,
-                tickers=tickers,
+                tickers=market_tickers,
                 min_date=min_bar_date,
                 max_date=max_bar_date,
                 market_sources=calibration_market_sources(config),
+            )
+            apply_delisted_price_series_overlay(
+                conn,
+                bars_by_ticker,
+                price_ticker_alias=price_ticker_alias,
+                min_date=min_bar_date,
+                max_date=max_bar_date,
+                config=config,
             )
 
     recent_dates = dates[-thresholds.min_asof_dates :] if thresholds.min_asof_dates > 0 else dates
@@ -3022,6 +3129,7 @@ def main() -> None:
             top_n_values=top_n_values,
             next_bar_entry=next_bar_entry,
             round_trip_cost_bps=round_trip_cost_bps,
+            price_ticker_alias=price_ticker_alias,
         )
         baseline_rows = build_baseline_summary(
             observations,
@@ -3069,6 +3177,7 @@ def main() -> None:
             top_n_values=top_n_values,
             next_bar_entry=next_bar_entry,
             round_trip_cost_bps=round_trip_cost_bps,
+            price_ticker_alias=price_ticker_alias,
         )
         candidate_summary_rows = build_candidate_summary(
             candidate_observations,
@@ -3151,6 +3260,7 @@ def main() -> None:
             horizons=horizons,
             next_bar_entry=next_bar_entry,
             round_trip_cost_bps=round_trip_cost_bps,
+            price_ticker_alias=price_ticker_alias,
         )
         component_predictive_power_rows = build_component_predictive_power_rows(
             component_audit_observations,

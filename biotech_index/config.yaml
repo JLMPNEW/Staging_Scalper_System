@@ -600,6 +600,11 @@ market_data_policy:
   calibration_sources:
     - "yahoo_adjusted"
     - "interactive_brokers"
+    # Delisted calibration names only have bars under the Norgate total-return
+    # source; listed last so survivors keep yahoo/IB and delisted names fall back
+    # to Norgate. Without this, delisted forward returns are silently NULL
+    # (survivorship bias in the calibration panel).
+    - "norgate_us_equities_total_return"
   live_validation_primary_source: "interactive_brokers"
   require_adjusted_for_scoring: true
   audit_output_csv: "../output/biotech_index_reports/market_data_source_audit.csv"

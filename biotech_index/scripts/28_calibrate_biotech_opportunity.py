@@ -4358,6 +4358,47 @@ def load_bars(
     return out
 
 
+def apply_delisted_price_series_overlay(
+    conn: sqlite3.Connection,
+    bars_by_ticker: dict[str, list[Bar]],
+    *,
+    price_ticker_alias: dict[str, str],
+    min_date: date,
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Overlay delisted alias price series from the dedicated delisted source.
+
+    A reused canonical ticker (e.g. BOLD: Audentes delisted 2020-01, Boundless
+    Bio relisted 2024) can carry the NEW issuer's yahoo/IB bars, and load_bars'
+    priority pick would splice those into the delisted name's era.  Store the
+    delisted-source series under the ALIAS key (norgate symbol) so delisted
+    rows use exactly the old issuer's bars while the live reuser keeps the
+    canonical key.  Returns the number of alias series applied.
+    """
+    delisted_by_alias = {
+        alias: canonical for alias, canonical in price_ticker_alias.items() if alias != canonical
+    }
+    if not delisted_by_alias:
+        return 0
+    delisted_source = str(
+        cfg_get(config or {}, "delisted_calibration.source_rules.price_source", "norgate_us_equities_total_return")
+        or "norgate_us_equities_total_return"
+    ).strip()
+    delisted_bars = load_bars(
+        conn,
+        tickers=set(delisted_by_alias.values()),
+        min_date=min_date,
+        market_sources=[delisted_source],
+    )
+    applied = 0
+    for alias, canonical in delisted_by_alias.items():
+        series = delisted_bars.get(canonical)
+        if series:
+            bars_by_ticker[alias] = series
+            applied += 1
+    return applied
+
+
 def terminal_recovery_from_row(row: Mapping[str, Any]) -> tuple[float | None, str]:
     explicit = to_float(row.get("equity_recovery"))
     recovery_type = str(row.get("recovery_type") or "").strip().lower()
@@ -4496,17 +4537,27 @@ def add_forward_returns(
     benchmark_ticker: str = "",
     benchmark_bars: list[Bar] | None = None,
     terminal_events_by_ticker: dict[str, TerminalEvent] | None = None,
+    price_ticker_alias: dict[str, str] | None = None,
 ) -> None:
     cost = float(round_trip_cost_bps) / 10_000.0
     missing_return_counts: defaultdict[tuple[int, str], int] = defaultdict(int)
     clean_benchmark_ticker = normalize_ticker(benchmark_ticker)
     benchmark_bars = benchmark_bars or []
     terminal_events_by_ticker = terminal_events_by_ticker or {}
+    price_ticker_alias = price_ticker_alias or {}
     for row in rows:
         ticker = normalize_ticker(row.get("ticker"))
+        # Delisted calibration rows carry the norgate delisting symbol (e.g.
+        # AKAOQ-202106) as their ticker, but market_bars_daily bars and terminal
+        # events are keyed by the canonical original ticker (e.g. AKAO).  Without
+        # this resolution every delisted name silently gets a NULL forward return.
+        # Lookup order: alias key first (set by apply_delisted_price_series_overlay
+        # with the dedicated delisted-source series — immune to ticker reuse),
+        # then the canonical price ticker.
+        price_ticker = price_ticker_alias.get(ticker, ticker)
         asof = parse_date(row.get("asof_date"))
-        bars = bars_by_ticker.get(ticker, [])
-        terminal_event = terminal_events_by_ticker.get(ticker)
+        bars = bars_by_ticker.get(ticker) or bars_by_ticker.get(price_ticker, [])
+        terminal_event = terminal_events_by_ticker.get(price_ticker) or terminal_events_by_ticker.get(ticker)
         for horizon in horizons:
             prefix = f"fwd_{horizon}d"
             if asof is None:
@@ -7764,6 +7815,7 @@ def main() -> None:
             json.dumps(scoring_config_subtrees, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
         observation_cache_signature = {
+            "forward_return_engine_version": "delisted_alias_overlay_v2",
             "scoring_config_hash": scoring_config_hash,
             "start_asof": start_asof.isoformat() if start_asof else "",
             "end_asof": end_asof.isoformat() if end_asof else "",
@@ -7825,10 +7877,24 @@ def main() -> None:
             raise ValueError("Tier-1 feature observations do not contain valid as-of dates.")
         if not observations_loaded_from_cache:
             benchmark_ticker = params.benchmark_ticker if params.alpha_adjustment_enabled else ""
+            # Resolve delisted score-row tickers (norgate symbols) to their canonical
+            # price ticker so their bars are loaded and joined for forward returns.
+            price_ticker_alias = load_calibration_ticker_alias_map(conn)
             market_tickers = set(tickers)
+            for observation_ticker in tickers:
+                canonical_price_ticker = price_ticker_alias.get(observation_ticker)
+                if canonical_price_ticker:
+                    market_tickers.add(canonical_price_ticker)
             if benchmark_ticker:
                 market_tickers.add(benchmark_ticker)
             bars_by_ticker = load_bars(conn, tickers=market_tickers, min_date=min(asof_dates), market_sources=market_sources)
+            apply_delisted_price_series_overlay(
+                conn,
+                bars_by_ticker,
+                price_ticker_alias=price_ticker_alias,
+                min_date=min(asof_dates),
+                config=config,
+            )
             add_forward_returns(
                 observations,
                 bars_by_ticker,
@@ -7838,6 +7904,7 @@ def main() -> None:
                 benchmark_ticker=params.benchmark_ticker if params.alpha_adjustment_enabled else "",
                 benchmark_bars=bars_by_ticker.get(params.benchmark_ticker, []) if params.alpha_adjustment_enabled else [],
                 terminal_events_by_ticker=terminal_events_by_ticker,
+                price_ticker_alias=price_ticker_alias,
             )
             write_csv(observation_cache_path, observations)
             write_json(

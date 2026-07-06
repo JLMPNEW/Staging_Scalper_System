@@ -199,6 +199,39 @@ def load_ranked_score_rows(
     return out
 
 
+def load_calibration_ticker_alias_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """Map historical/delisted price aliases to canonical calibration tickers."""
+    try:
+        columns = table_columns(conn, "delisted_calibration_universe")
+    except sqlite3.Error:
+        return {}
+    if "ticker" not in columns:
+        return {}
+    alias_fields = [
+        field
+        for field in (
+            "ticker",
+            "calibration_company_ticker",
+            "norgate_symbol",
+            "historical_price_ticker",
+            "original_ticker",
+        )
+        if field in columns
+    ]
+    selected_fields = ", ".join(alias_fields)
+    rows = conn.execute(f"SELECT {selected_fields} FROM delisted_calibration_universe").fetchall()
+    aliases: dict[str, str] = {}
+    for row in rows:
+        canonical = normalize_ticker(row["ticker"])
+        if not canonical:
+            continue
+        for field in alias_fields:
+            alias = normalize_ticker(row[field])
+            if alias:
+                aliases.setdefault(alias, canonical)
+    return aliases
+
+
 def load_bars(
     conn: sqlite3.Connection,
     *,
@@ -244,6 +277,47 @@ def load_bars(
         for ticker, candidates in by_ticker.items()
         if candidates
     }
+
+
+def apply_delisted_price_series_overlay(
+    conn: sqlite3.Connection,
+    bars_by_ticker: dict[str, list[Bar]],
+    *,
+    price_ticker_alias: dict[str, str],
+    min_date: date,
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Overlay delisted alias price series from the dedicated delisted source.
+
+    A reused canonical ticker (e.g. BOLD: Audentes delisted 2020-01, Boundless
+    Bio relisted 2024) can carry the NEW issuer's yahoo/IB bars, and load_bars'
+    priority pick would splice those into the delisted name's era.  Store the
+    delisted-source series under the ALIAS key (norgate symbol) so delisted
+    rows use exactly the old issuer's bars while the live reuser keeps the
+    canonical key.  Returns the number of alias series applied.
+    """
+    delisted_by_alias = {
+        alias: canonical for alias, canonical in price_ticker_alias.items() if alias != canonical
+    }
+    if not delisted_by_alias:
+        return 0
+    delisted_source = str(
+        cfg_get(config or {}, "delisted_calibration.source_rules.price_source", "norgate_us_equities_total_return")
+        or "norgate_us_equities_total_return"
+    ).strip()
+    delisted_bars = load_bars(
+        conn,
+        tickers=set(delisted_by_alias.values()),
+        min_date=min_date,
+        market_sources=[delisted_source],
+    )
+    applied = 0
+    for alias, canonical in delisted_by_alias.items():
+        series = delisted_bars.get(canonical)
+        if series:
+            bars_by_ticker[alias] = series
+            applied += 1
+    return applied
 
 
 def forward_return(
@@ -573,6 +647,7 @@ def build_observations(
     top_n_values: list[int],
     next_bar_entry: bool,
     round_trip_cost_bps: float,
+    price_ticker_alias: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     cost = round_trip_cost_bps / 10_000.0
     out: list[dict[str, Any]] = []
@@ -584,14 +659,17 @@ def build_observations(
                 selected = select_for_date(date_rows, spec, top_n)
                 for selected_rank, row in enumerate(selected, start=1):
                     ticker = normalize_ticker(row.get("ticker"))
+                    price_ticker = (price_ticker_alias or {}).get(ticker, ticker)
                     for horizon in horizons:
                         ret = None
                         entry_date = ""
                         target_date = ""
                         reason = "invalid_asof_date"
                         if parsed_asof is not None:
+                            # Alias key first: apply_delisted_price_series_overlay stores the
+                            # delisted-source series there, immune to canonical ticker reuse.
                             ret, entry_date, target_date, reason = forward_return(
-                                bars_by_ticker.get(ticker, []),
+                                bars_by_ticker.get(ticker) or bars_by_ticker.get(price_ticker, []),
                                 parsed_asof,
                                 horizon,
                                 next_bar_entry=next_bar_entry,
@@ -959,7 +1037,20 @@ def main() -> None:
         parsed_dates = [parsed for parsed in (parse_date(row.get("asof_date")) for row in rows) if parsed is not None]
         min_bar_date = min(parsed_dates) - timedelta(days=14) if parsed_dates else date.today()
         tickers = {normalize_ticker(row.get("ticker")) for row in rows if normalize_ticker(row.get("ticker"))}
-        bars_by_ticker = load_bars(conn, tickers=tickers, min_date=min_bar_date, market_sources=market_sources)
+        price_ticker_alias = load_calibration_ticker_alias_map(conn)
+        market_tickers = set(tickers)
+        for observation_ticker in tickers:
+            canonical = price_ticker_alias.get(observation_ticker)
+            if canonical:
+                market_tickers.add(canonical)
+        bars_by_ticker = load_bars(conn, tickers=market_tickers, min_date=min_bar_date, market_sources=market_sources)
+        apply_delisted_price_series_overlay(
+            conn,
+            bars_by_ticker,
+            price_ticker_alias=price_ticker_alias,
+            min_date=min_bar_date,
+            config=config,
+        )
 
     observations = build_observations(
         rows_by_date,
@@ -969,6 +1060,7 @@ def main() -> None:
         top_n_values=top_n_values,
         next_bar_entry=next_bar_entry,
         round_trip_cost_bps=round_trip_cost_bps,
+        price_ticker_alias=price_ticker_alias,
     )
     summary_rows, summary_by_key = summarize_candidate_rows(
         observations,
