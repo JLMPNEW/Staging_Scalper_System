@@ -40,8 +40,7 @@ macro_raw:
 
   industry_macro_layer:
     cadence: "W-FRI"
-    source_mode: "hybrid"
-    backtest_config_path: "BackTest/config_backtest.yaml"
+    source_mode: "staging_snapshot_store"
     strategy_key: "mf_wf"
     production_output_root: "output"
     production_file_glob: "tier1_optimizer_universe_*.csv"
@@ -109,13 +108,13 @@ macro_raw:
       clip_min: -3.0
       clip_max: 3.0
     selection_score_weights:
-      base_stock_z: 0.95
+      base_stock_z: 0.90
       macro_stock_fit_z: 0.05
-      sector_tactical_lift_z: 0.00
+      sector_tactical_lift_z: 0.05
     weight_score_weights:
-      base_stock_z: 0.85
+      base_stock_z: 0.80
       macro_stock_fit_z: 0.15
-      sector_tactical_lift_z: 0.00
+      sector_tactical_lift_z: 0.05
     selection_validation:
       enabled: false
       signal_column: "macro_stock_fit_z"
@@ -134,8 +133,8 @@ macro_raw:
     sector_tactical:
       enabled: true
       output_root: "output"
-      file_glob: "sector_rotation_latest_*.csv"
-      date_source: "parent_directory"
+      file_glob: "runs/*/rotation/sector_rotation_optimizer.csv"
+      date_source: "path"
       sector_name_column: "SectorName"
       score_column: "ScorePct"
       state_column: "State"
@@ -325,8 +324,6 @@ macro_raw:
   shadow_validation_layer:
     output_dir: "MacroLayer/out/shadow_backtest"
     base_config_path: "config.yaml"
-    backtest_config_path: "BackTest/config_backtest.yaml"
-    price_cache_path: null
     benchmark_ticker: "SPY"
     start_date: null
     end_date: null
@@ -356,7 +353,7 @@ macro_raw:
 
   sources:
     fred_alfred:
-      api_key: ""
+      api_key: "6724ad580a95b6c039412e187cb4a6f7"
       api_key_env: "FRED_API_KEY"
       max_workers: 1
       min_interval_seconds: 1.0
@@ -371,7 +368,7 @@ macro_raw:
       max_workers: 1
       min_interval_seconds: 75.0
     eia_seriesid:
-      api_key: ""
+      api_key: "CGEnuIAimOaaReAehMP8DSIRQzCHDu2YcZgDUUSe"
       api_key_env: "EIA_API_KEY"
       base_url: "https://api.eia.gov/v2/seriesid"
       max_workers: 2

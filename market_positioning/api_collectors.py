@@ -14,6 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -277,6 +278,37 @@ def finra_payload_for_settlement_date(settlement_date: date, *, limit: int, offs
     }
 
 
+def first_float(row: Mapping[str, object], *keys: str) -> float | None:
+    for key in keys:
+        value = to_float(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def finra_days_to_cover(row: Mapping[str, object], short_shares: float | None) -> float | None:
+    """Return FINRA days-to-cover, deriving only from average daily volume.
+
+    FINRA payloads may expose either daysToCoverQuantity or daysToCoverNumber
+    depending on the endpoint/file vintage. When absent, the valid formula is
+    current short shares divided by average daily volume. averageShortShareNumber
+    is not a volume denominator and would materially understate the value.
+    """
+    explicit_days = first_float(row, "daysToCoverQuantity", "daysToCoverNumber")
+    if explicit_days is not None:
+        return explicit_days
+    avg_daily_volume = first_float(
+        row,
+        "averageDailyVolumeQuantity",
+        "averageDailyVolumeNumber",
+        "averageDailyShareVolumeQuantity",
+        "averageDailyShareVolumeNumber",
+    )
+    if short_shares is not None and avg_daily_volume is not None and avg_daily_volume > 0:
+        return round(short_shares / avg_daily_volume, 4)
+    return None
+
+
 def finra_short_interest_records(
     *,
     tickers: list[str],
@@ -328,13 +360,7 @@ def finra_short_interest_records(
                 if api_ticker not in scoped_tickers:
                     continue
                 short_shares = to_float(row.get("currentShortShareNumber"))
-                days_to_cover = to_float(row.get("daysToCoverNumber"))
-                if days_to_cover is None:
-                    # FINRA frequently omits daysToCoverNumber; derive it from the
-                    # short position and the average daily share volume when possible.
-                    avg_daily_shares = to_float(row.get("averageShortShareNumber"))
-                    if short_shares is not None and avg_daily_shares is not None and avg_daily_shares > 0:
-                        days_to_cover = round(short_shares / avg_daily_shares, 4)
+                days_to_cover = finra_days_to_cover(row, short_shares)
                 publication = add_business_days(settlement, publication_lag_business_days)
                 records.append(
                     (
@@ -560,16 +586,17 @@ def sync_finra_equity_short_interest_files(
             if row_settlement < history_start_date or row_settlement > end_date:
                 continue
             row_publication = row_settlement + timedelta(days=max(0, publication_lag_days))
+            short_shares = to_float(row.get("currentShortPositionQuantity"))
             records.append(
                 (
                     ticker,
                     row_publication.isoformat(),
                     row_settlement.isoformat(),
                     row_publication.isoformat(),
-                    to_float(row.get("currentShortPositionQuantity")),
+                    short_shares,
                     None,
                     None,
-                    to_float(row.get("daysToCoverQuantity")),
+                    finra_days_to_cover(row, short_shares),
                     "finra_equity_short_interest_files",
                     str(path),
                     now,
@@ -579,6 +606,19 @@ def sync_finra_equity_short_interest_files(
         if sleep_sec > 0:
             time.sleep(sleep_sec)
     with conn:
+        # Keep file-ingest PIT stamps consistent with the API path: if the
+        # publication lag changes, corrected rows replace same-ticker/same-settlement
+        # stale rows instead of coexisting under a different asof_date primary key.
+        conn.executemany(
+            """
+            DELETE FROM short_interest_snapshots
+            WHERE source = 'finra_equity_short_interest_files'
+              AND ticker = ?
+              AND settlement_date = ?
+              AND asof_date <> ?
+            """,
+            [(record[0], record[2], record[1]) for record in records],
+        )
         conn.executemany(
             """
             INSERT INTO short_interest_snapshots(

@@ -246,7 +246,11 @@ transaction_costs:
   no_trade_buffer_drag: 0.0                # extra buffer added to cost in the utility>cost test (weight units)
   enable_provisional_mu_no_trade: false    # Stage 11 turns on realized-alpha-calibrated utility gating
   half_spread_bps_default: 5.0             # provisional (config) until bid/ask data exists
-  spread_source: "liquidity_panel"         # auto | config_default | liquidity_panel
+  spread_source: "auto"                    # auto | config_default | liquidity_panel
+  # auto: use the collected IB spread snapshot when risk/05c has run for the date, else fall back to
+  # the flat half_spread_bps_default (fallback is recorded as spread_mode=config_default, never
+  # silent). Set to "liquidity_panel" for strict live trading that must fail closed on a missing
+  # snapshot; "config_default" to force flat spreads always.
   impact_model: "none"                     # none | sqrt_adv (deferred; needs volume)
   min_position_commission_fraction: 0.005  # drop position to CASH if commission > this fraction of its notional
   decision_commission: "worst_case"        # which commission drives trade/no-trade economics
@@ -308,25 +312,25 @@ macro:
   stock_fallback_policy: "stock_then_industry_then_aggregate_then_sector"
   sleeve_taxonomy:
     biotech:
-      macro_sector_fallback: "Healthcare"
-      industries: ["Biotechnology", "Diagnostics & Research", "Drug Manufacturers - General", "Drug Manufacturers - Specialty & Generic"]
-      industry_aggregates: ["Healthcare: Biopharma & Research Tools"]
+      macro_sector_fallback: "Health Care"
+      industries: ["Biotechnology", "Diagnostics & Research", "Drug Manufacturers - General", "Drug Manufacturers - Specialty & Generic", "commercial_profitable_quality_or_mature", "commercial_turnaround_or_unprofitable_growth", "early_clinical_speculative_or_single_asset_pipeline", "late_clinical_pivotal_or_registrational", "platform_partnered_modality_pipeline"]
+      industry_aggregates: ["Pharmaceuticals, Biotechnology & Life Sciences", "Healthcare: Biopharma & Research Tools"]
     med_devices:
-      macro_sector_fallback: "Healthcare"
+      macro_sector_fallback: "Health Care"
       industries: ["Medical Devices", "Medical Instruments & Supplies"]
-      industry_aggregates: ["Healthcare: Providers, Plans, MedTech & Distribution"]
+      industry_aggregates: ["Health Care Equipment & Services", "Healthcare: Providers, Plans, MedTech & Distribution"]
     semiconductors:
-      macro_sector_fallback: "Technology"
+      macro_sector_fallback: "Information Technology"
       industries: ["Semiconductors", "Semiconductor Equipment & Materials"]
-      industry_aggregates: ["Semiconductors & Electronic Components"]
+      industry_aggregates: ["Semiconductors & Semiconductor Equipment", "Semiconductors & Electronic Components"]
     software_infrastructure:
-      macro_sector_fallback: "Technology"
-      industries: ["Software - Infrastructure", "Software - Application", "Information Technology Services"]
-      industry_aggregates: ["Software & IT Services"]
+      macro_sector_fallback: "Information Technology"
+      industries: ["Software", "Software - Infrastructure", "Software - Application", "Information Technology Services"]
+      industry_aggregates: ["Software & Services", "Software & IT Services"]
     technology_hardware:
-      macro_sector_fallback: "Technology"
-      industries: ["Computer Hardware", "Consumer Electronics", "Communication Equipment", "Electronic Components", "Scientific & Technical Instruments"]
-      industry_aggregates: ["Tech Hardware & Instruments"]
+      macro_sector_fallback: "Information Technology"
+      industries: ["Technology Hardware", "Computer Hardware", "Consumer Electronics", "Communication Equipment", "Electronic Components", "Scientific & Technical Instruments"]
+      industry_aggregates: ["Technology Hardware & Equipment", "Tech Hardware & Instruments"]
     defense:
       macro_sector_fallback: "Industrials"
       industries: ["Aerospace & Defense"]
@@ -619,6 +623,11 @@ walkforward:
   # regime_lever uses the same supportive-regime gate, but multiplies mu inside supportive regimes
   # to test whether the conditional ranking signal can produce active return, not just lower vol.
   regime_lever_mu_multiplier: 1.5
+  regime_lever_unsupported_mode: "min_var"  # min_var | cash | aqr
+  regime_sweep:
+    mu_multipliers: [1.25, 1.5, 2.0]
+    rebalance_every_n_snapshots: [5, 21]
+    unsupported_modes: [min_var, cash]
   rebalance_every_n_snapshots: 5           # daily store -> weekly rebalance
   one_way_cost_bps: 5.0                    # flat one-way cost on traded weight at each rebalance
   cov_lookback_trading_days: 252

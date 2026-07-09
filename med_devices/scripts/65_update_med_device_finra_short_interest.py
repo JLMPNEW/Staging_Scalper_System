@@ -7,7 +7,6 @@ import sqlite3
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -51,11 +50,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def parse_asof(raw: str) -> date:
+def parse_asof(raw: str, *, field_name: str = "date", default_today: bool = False) -> date:
+    text = str(raw or "").strip()
+    if not text:
+        if default_today:
+            return datetime.now().date()
+        raise ValueError(f"Missing required {field_name}")
     parsed = parse_date(raw)
     if parsed is not None:
         return parsed
-    return datetime.now().date()
+    raise ValueError(f"Invalid {field_name}: {raw!r}")
 
 
 def as_bool(raw: object, default: bool) -> bool:
@@ -131,15 +135,16 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
-    asof = parse_asof(args.asof)
+    asof = parse_asof(args.asof, field_name="--asof", default_today=True)
     history_start = parse_asof(
         args.history_start
-        or str(cfg_get(config, "market_positioning_update.finra_short_interest.history_start", "2019-01-01"))
+        or str(cfg_get(config, "market_positioning_update.finra_short_interest.history_start", "2019-01-01")),
+        field_name="--history-start",
     )
     db_path = (
         args.market_positioning_db.expanduser().resolve()
         if args.market_positioning_db
-        else Path(str(cfg_get(config, "external_positioning_import.market_positioning_db_path"))).expanduser().resolve()
+        else resolve_path(cfg_get(config, "external_positioning_import.market_positioning_db_path"), base_dir=base_dir)
     )
     tickers_csv = (
         args.tickers_csv.expanduser().resolve()

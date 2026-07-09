@@ -23,7 +23,7 @@ from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.costs.cost_common import (  # noqa: E402
     commission, finite_float, invalidate_after_validation, require_same_aum, resolve_aum,
 )
-from portfolio_layer.risk.liquidity import liquidity_panel_active, load_spread_snapshot  # noqa: E402
+from portfolio_layer.risk.liquidity import effective_spread_uses_panel, load_spread_snapshot  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
 
@@ -254,7 +254,7 @@ def main() -> int:  # noqa: C901
     #    rows are backed by a sealed spread snapshot with bounded fallback.
     spread_policy = str(cfg_get(config, "transaction_costs.spread_source", "auto")).strip().lower()
     try:
-        panel_expected = liquidity_panel_active(config)
+        panel_expected = effective_spread_uses_panel(config, risk_dir.parent)
     except ValueError as exc:
         spread_bad = [str(exc)]
         panel_expected = False

@@ -392,11 +392,19 @@ def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[Cano
             status = str(r.get("portfolio_candidate_status") or "").strip().lower()
             status_allows = status in {"", "eligible"}
             eligible = _truthy(r.get("portfolio_candidate_gate")) and status_allows and not missing_score
-            reason = str(
-                r.get("eligibility_reason")
-                or r.get("portfolio_candidate_reason")
-                or ("ok" if eligible else "failed_portfolio_candidate_gate")
-            ).strip()
+            if eligible:
+                # the sector gate already adjudicated this name as a passing candidate; a soft source
+                # annotation (e.g. "ok:no_guidance_negative_growth_cap" where the quality cap did NOT
+                # veto) must not leak into the contract's authoritative eligibility_reason, which the
+                # Stage 1 invariant requires to be exactly "ok" for investable names. Mirrors the
+                # tech_family adapter, which also forces "ok" for eligible rows.
+                reason = "ok"
+            else:
+                reason = str(
+                    r.get("eligibility_reason")
+                    or r.get("portfolio_candidate_reason")
+                    or "failed_portfolio_candidate_gate"
+                ).strip()
             if missing_score:
                 eligible = False
                 reason = "missing_score"

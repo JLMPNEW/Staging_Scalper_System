@@ -258,6 +258,35 @@ def load_existing_price_seed(path: Path, *, end: date) -> dict[str, list[tuple[s
     return seed
 
 
+def load_existing_split_seed(path: Path, *, end: date) -> dict[str, list[dict[str, str]]]:
+    if not path.exists():
+        return {}
+    try:
+        rows = read_csv(path)
+    except Exception:  # noqa: BLE001 - stale/bad prior artifact should not block a fresh fetch
+        return {}
+    seed: dict[str, list[dict[str, str]]] = {}
+    end_s = end.isoformat()
+    for row in rows:
+        ticker = str(row.get("ticker") or "").strip().upper()
+        split_date = str(row.get("split_date") or "").strip()
+        if not ticker or not split_date or split_date > end_s:
+            continue
+        query_symbol = str(row.get("query_symbol") or ticker).strip().upper()
+        source_symbol = str(row.get("source_symbol") or query_symbol).strip().upper()
+        provider = str(row.get("provider") or "existing_price_snapshot").strip()
+        seed.setdefault(ticker, []).append({
+            "split_date": split_date,
+            "numerator": str(row.get("numerator") or "").strip(),
+            "denominator": str(row.get("denominator") or "").strip(),
+            "split_ratio": str(row.get("split_ratio") or "").strip(),
+            "_query_symbol": query_symbol,
+            "_source_symbol": source_symbol,
+            "_provider": provider,
+        })
+    return seed
+
+
 def load_price_history_csv(
     path: Path,
     ticker: str,
@@ -408,6 +437,7 @@ def main() -> int:
     enable_stooq = bool(fetch_cfg.get("enable_stooq_fallback", True))
     price_cache_dir = paths.cache_dir / "risk_prices"
     existing_seed = load_existing_price_seed(prices_path, end=run_date) if args.reuse_existing_panel else {}
+    existing_split_seed = load_existing_split_seed(split_events_path, end=run_date) if args.reuse_existing_panel else {}
     try:
         ticker_aliases = parse_ticker_aliases(rc)
     except ValueError as exc:
@@ -442,11 +472,10 @@ def main() -> int:
         expected_query_symbols = {str(segment["query_symbol"]) for segment in segments}
 
         if ticker in existing_seed and not alias_applied:
-            # Seed bars carry no split events; do NOT write them into the price cache — that would
-            # overwrite a previously fetched entry's real split_events and blind the split-artifact
-            # detector for every later --reuse-price-cache run.
+            # Seeded bars preserve the prior split snapshot, but do not update the price cache; a
+            # seeded run should not overwrite a provider-fetched cache entry.
             bars = existing_seed[ticker]
-            return bars, [], "ok", "existing_price_snapshot", ticker, ticker, False, "", "", ""
+            return bars, existing_split_seed.get(ticker, []), "ok", "existing_price_snapshot", ticker, ticker, False, "", "", ""
 
         # Aliased (reused-ticker) names skip the cache so the start-date floor is always re-applied and
         # any pre-effective-date history cached by an earlier run is overwritten.

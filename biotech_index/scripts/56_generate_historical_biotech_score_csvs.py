@@ -1399,6 +1399,7 @@ def main() -> None:
                         survivorship_corrected_panel=survivorship_corrected_panel,
                         strict_oos_start_date=strict_oos_start_date,
                     )
+                    export_module.apply_promoted_portfolio_candidate_policy(score_rows, config)
                     output_dir.mkdir(parents=True, exist_ok=True)
                     generated_temp_path = output_path.with_name(output_path.name + ".tmp")
                     export_module.write_csv(generated_temp_path, score_rows)

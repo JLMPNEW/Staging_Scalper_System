@@ -24,7 +24,10 @@ class MacroFit:
 
 
 def norm_key(value: Any) -> str:
-    return " ".join(str(value or "").strip().lower().replace("&", "and").split())
+    text = str(value or "").strip().lower().replace("&", "and")
+    for char in ("_", "-", "/", "\\", ",", ":", ";", "(", ")", "[", "]"):
+        text = text.replace(char, " ")
+    return " ".join(text.split())
 
 
 def sleeve_taxonomy(config: dict[str, Any]) -> dict[str, dict[str, Any]]:

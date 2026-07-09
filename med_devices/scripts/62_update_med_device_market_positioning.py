@@ -119,7 +119,7 @@ def main() -> None:
     db_path = (
         args.market_positioning_db.expanduser().resolve()
         if args.market_positioning_db
-        else Path(str(cfg_get(config, "external_positioning_import.market_positioning_db_path"))).expanduser().resolve()
+        else resolve_path(cfg_get(config, "external_positioning_import.market_positioning_db_path"), base_dir=base_dir)
     )
     tickers_csv = (
         args.tickers_csv.expanduser().resolve()

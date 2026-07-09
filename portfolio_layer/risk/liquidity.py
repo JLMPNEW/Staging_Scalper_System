@@ -137,13 +137,40 @@ def spread_source_policy(config: dict[str, Any]) -> str:
 
 
 def liquidity_panel_active(config: dict[str, Any]) -> bool:
-    """True when the run should produce/validate/consume the enhanced spread panel."""
+    """True when the run should produce/validate/consume the enhanced spread panel.
+
+    Config-only resolution (no run directory): `auto` reports the panel as active whenever enhanced
+    intraday collection is enabled. For the run-specific decision a daily pipeline acts on -- which
+    tolerates a missing snapshot under `auto` -- use `effective_spread_uses_panel`.
+    """
     policy = spread_source_policy(config)
     if policy == "config_default":
         return False
     if policy == "liquidity_panel":
         return True
     return enhanced_liquidity_enabled(config)
+
+
+def effective_spread_uses_panel(config: dict[str, Any], run_dir: Path) -> bool:
+    """Run-aware decision of whether THIS run consumes the enhanced spread panel.
+
+    config_default  -> never (flat config-default spreads).
+    liquidity_panel -> always (strict; a missing snapshot fails the run closed -- live trading must
+                       not proceed on absent per-name spreads).
+    auto            -> only when an IB spread snapshot was actually collected for this run; otherwise
+                       fall back to flat config-default spreads so a daily run stays reproducible even
+                       when the overnight IB collection (risk/05c) did not run. The fallback is NOT
+                       silent: the cost report/manifest record spread_mode=config_default so a reader
+                       always sees real spreads were unavailable for the date.
+    """
+    policy = spread_source_policy(config)
+    if policy == "config_default":
+        return False
+    if policy == "liquidity_panel":
+        return True
+    if not enhanced_liquidity_enabled(config):
+        return False
+    return (run_dir / "risk" / "spread_snapshot.csv").exists()
 
 
 def configured_fallback_half_spread_bps(config: dict[str, Any]) -> float:

@@ -78,11 +78,11 @@ def ensure_source(conn: Any, source_id: str) -> None:
     upsert_source_registry(conn, sources)
 
 
-def required_config_path(config: dict[str, Any], key: str) -> Path:
+def required_config_path(config: dict[str, Any], key: str, *, base_dir: Path) -> Path:
     raw = str(cfg_get(config, key, "") or "").strip()
     if not raw or raw.lower() == "none":
         raise SystemExit(f"Missing required config value {key!r}; set it to the staging DB path or pass the CLI override.")
-    return Path(raw).expanduser().resolve()
+    return resolve_path(raw, base_dir=base_dir)
 
 
 def company_map(conn: Any) -> dict[str, dict[str, Any]]:
@@ -529,12 +529,12 @@ def main() -> None:
     market_db = (
         args.market_positioning_db.expanduser().resolve()
         if args.market_positioning_db
-        else required_config_path(config, "external_positioning_import.market_positioning_db_path")
+        else required_config_path(config, "external_positioning_import.market_positioning_db_path", base_dir=base_dir)
     )
     form4_db = (
         args.sec_form4_db.expanduser().resolve()
         if args.sec_form4_db
-        else required_config_path(config, "external_positioning_import.sec_form4_db_path")
+        else required_config_path(config, "external_positioning_import.sec_form4_db_path", base_dir=base_dir)
     )
     sources = parse_sources(args.sources)
     start = args.history_start.strip() or str(cfg_get(config, "external_positioning_import.history_start", "2019-01-01"))

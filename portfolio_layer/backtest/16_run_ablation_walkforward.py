@@ -239,6 +239,7 @@ def main() -> int:  # noqa: C901
         regime_gate_supportive_regimes=[str(s) for s in
                                         (wf.get("regime_gate_supportive_regimes") or ["HEATING_UP"])],
         regime_lever_mu_multiplier=float(wf.get("regime_lever_mu_multiplier", 1.5)),
+        regime_lever_unsupported_mode=str(wf.get("regime_lever_unsupported_mode", "min_var")),
     )
     arms = [a for a in (wf.get("arms") or list(ARMS)) if a in ARMS]
     if "aqr_only" not in arms:

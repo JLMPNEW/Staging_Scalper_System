@@ -20,12 +20,13 @@ import hashlib
 import html
 import json
 import logging
+import math
 import os
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -38,35 +39,31 @@ SEC_ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
 DEFAULT_USER_AGENT = os.getenv("SEC_USER_AGENT", "").strip()
 PLACEHOLDER_USER_AGENT = "StagingScalperSystem/1.0 (admin@example.com)"
 
-DEFAULT_INPUT = Path("index_constituents_out/cik_ticker_mapping.csv")
-DEFAULT_OUTPUT = Path("index_constituents_out/cik_ticker_mapping_with_cusip.csv")
-DEFAULT_CACHE_DIR = Path("index_constituents_out/_sec_cusip_cache")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_INPUT = PROJECT_ROOT / "index_constituents_out" / "cik_ticker_mapping.csv"
+DEFAULT_OUTPUT = PROJECT_ROOT / "index_constituents_out" / "cik_ticker_mapping_with_cusip.csv"
+DEFAULT_CACHE_DIR = PROJECT_ROOT / "index_constituents_out" / "_sec_cusip_cache"
 DEFAULT_SUBMISSIONS_CACHE_TTL_HOURS = 24.0
 DEFAULT_MAX_SUBMISSIONS_PAGES = 5
 
+# Default to issuer-equity-oriented forms. Debt prospectuses, acquisition 8-Ks, and broad 6-Ks frequently
+# contain non-common CUSIPs before the issuer common-equity CUSIP; users can opt back in via --forms.
 DEFAULT_FORMS = [
     "10-K",
     "10-Q",
     "20-F",
     "40-F",
-    "6-K",
-    "8-K",
     "DEF 14A",
     "S-1",
     "S-3",
     "S-4",
-    "424B1",
-    "424B2",
-    "424B3",
-    "424B4",
-    "424B5",
-    "424B7",
 ]
 
 
 @dataclass(frozen=True)
 class FilingRef:
     cik10: str
+    accession: str
     accession_nodash: str
     filing_date: str
     form: str
@@ -83,29 +80,36 @@ class CusipHit:
     accession: str
 
 
-def normalize_ticker(v: str) -> str:
-    return str(v or "").strip().upper().replace(".", "-")
+def _safe_text(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, float) and math.isnan(v):
+        return ""
+    s = str(v).strip()
+    if s.lower() in {"", "nan", "none", "null"}:
+        return ""
+    return s
+
+
+def normalize_ticker(v: Any) -> str:
+    return _safe_text(v).upper().replace(".", "-")
 
 
 def normalize_cik(v: Any) -> str:
-    s = str(v or "").strip()
+    s = _safe_text(v)
     if not s:
         return ""
-    digits = "".join(ch for ch in s if ch.isdigit())
-    if not digits:
+    if re.fullmatch(r"\d+(?:\.0+)?", s):
+        digits = s.split(".", 1)[0]
+    else:
+        return ""
+    if not digits or len(digits) > 10:
         return ""
     return digits.zfill(10)
 
 
 def cik_to_int_str(cik10: str) -> str:
     return str(int(cik10))
-
-
-def _safe_text(v: Any) -> str:
-    s = str(v or "").strip()
-    if s.lower() in {"", "nan", "none", "null"}:
-        return ""
-    return s
 
 
 def resolve_user_agent(raw_user_agent: str) -> str:
@@ -130,16 +134,37 @@ def _http_get(
     timeout: float,
     user_agent: str,
     accept: str = "*/*",
+    max_attempts: int = 4,
+    retry_backoff_sec: float = 0.75,
 ) -> bytes:
-    req = Request(
-        url,
-        headers={
-            "User-Agent": user_agent,
-            "Accept": accept,
-        },
-    )
-    with urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+    attempts = max(1, int(max_attempts))
+    retryable_status = {429, 500, 502, 503, 504}
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        req = Request(
+            url,
+            headers={
+                "User-Agent": user_agent,
+                "Accept": accept,
+            },
+        )
+        try:
+            with urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except HTTPError as exc:
+            last_error = exc
+            if exc.code not in retryable_status or attempt >= attempts - 1:
+                raise
+        except (URLError, TimeoutError) as exc:
+            last_error = exc
+            if attempt >= attempts - 1:
+                raise
+        sleep_for = min(max(0.0, retry_backoff_sec) * (2**attempt), 8.0)
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"HTTP request failed without exception: {url}")
 
 
 def _http_get_json(url: str, *, timeout: float, user_agent: str) -> Any:
@@ -149,7 +174,12 @@ def _http_get_json(url: str, *, timeout: float, user_agent: str) -> Any:
 
 def _http_get_text(url: str, *, timeout: float, user_agent: str) -> str:
     raw = _http_get(url, timeout=timeout, user_agent=user_agent, accept="text/plain,text/html,*/*")
-    return raw.decode("utf-8", errors="replace")
+    for encoding in ("utf-8", "cp1252", "latin-1"):
+        try:
+            return raw.decode(encoding, errors="strict")
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="ignore")
 
 
 def _slug(s: str) -> str:
@@ -163,6 +193,7 @@ def _load_json_cached(
     timeout: float,
     user_agent: str,
     max_age_seconds: Optional[float] = None,
+    request_sleep_sec: float = 0.0,
 ) -> Any:
     if cache_path.exists():
         use_cache = True
@@ -172,7 +203,11 @@ def _load_json_cached(
         if use_cache:
             with cache_path.open("r", encoding="utf-8") as f:
                 return json.load(f)
-    payload = _http_get_json(url, timeout=timeout, user_agent=user_agent)
+    try:
+        payload = _http_get_json(url, timeout=timeout, user_agent=user_agent)
+    finally:
+        if request_sleep_sec > 0:
+            time.sleep(request_sleep_sec)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return payload
@@ -235,14 +270,15 @@ def validate_cusip(cusip9: str) -> bool:
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 
-# Labeled CUSIP patterns with near-context extraction.
-_CUSIP_LABELED_PATTERNS = [
-    re.compile(r"(?i)\bCUSIP(?:\s*(?:No\.?|Number|#))?\s*[:\-]?\s*([A-Za-z0-9\-\s*@#]{8,24})"),
-    re.compile(r"(?i)\bC\.?U\.?S\.?I\.?P\.?\s*[:\-]?\s*([A-Za-z0-9\-\s*@#]{8,24})"),
-]
-
-# Fallback generic token (used only if doc contains word "CUSIP").
-_CUSIP_GENERIC_TOKEN = re.compile(r"\b[0-9A-Za-z*@#][0-9A-Za-z*@#\-\s]{7,20}\b")
+# Search only whole CUSIP-shaped tokens. Do not slide across long cleaned strings:
+# adjacent unrelated numbers/FIGIs/ISINs can otherwise merge into checksum-valid false positives.
+_CUSIP_LABEL_RE = re.compile(r"(?i)\bC\.?\s*U\.?\s*S\.?\s*I\.?\s*P\.?(?:\s*(?:No\.?|Number|#))?\b")
+_CUSIP_TOKEN_RE = re.compile(
+    r"(?<![0-9A-Za-z*@#])"
+    r"([0-9A-Za-z*@#]{6}(?:[-\s]?[0-9A-Za-z*@#]{2})(?:[-\s]?[0-9A-Za-z*@#]))"
+    r"(?![0-9A-Za-z*@#])"
+)
+_CUSIP_NEAR_LABEL_CHARS = 240
 
 
 def _clean_doc_text(raw: str) -> str:
@@ -254,13 +290,16 @@ def _clean_doc_text(raw: str) -> str:
 
 def _extract_cusip_from_fragment(fragment: str) -> Optional[str]:
     """
-    Normalize a candidate fragment and return the first valid 9-char CUSIP found.
+    Return the first valid standalone 9-char CUSIP token found in a fragment.
     """
-    cleaned = re.sub(r"[^0-9A-Za-z*@#]", "", fragment.upper())
-    if len(cleaned) < 9:
-        return None
-    for i in range(0, len(cleaned) - 8):
-        cand = cleaned[i : i + 9]
+    text = str(fragment or "").upper()
+    for match in _CUSIP_TOKEN_RE.finditer(text):
+        cand = re.sub(r"[^0-9A-Za-z*@#]", "", match.group(1))
+        if len(cand) == 9 and validate_cusip(cand):
+            return cand
+    cleaned = re.sub(r"[^0-9A-Za-z*@#]", "", text)
+    if len(cleaned) == 9:
+        cand = cleaned
         if validate_cusip(cand):
             return cand
     return None
@@ -275,23 +314,13 @@ def extract_cusip_from_document(text: str) -> Tuple[Optional[str], str]:
     if not doc:
         return None, "none"
 
-    # First pass: labeled patterns (most reliable).
-    for pat in _CUSIP_LABELED_PATTERNS:
-        for m in pat.finditer(doc):
-            frag = m.group(1) if m.groups() else ""
-            cusip = _extract_cusip_from_fragment(frag)
-            if cusip:
-                return cusip, "labeled"
-
-    # Second pass: only if document references CUSIP text somewhere.
-    if "CUSIP" not in doc.upper():
-        return None, "none"
-
-    for m in _CUSIP_GENERIC_TOKEN.finditer(doc):
-        frag = m.group(0)
+    # Only accept candidates close to an actual CUSIP label. Scanning an entire filing for checksum-valid
+    # 9-character windows produces false positives from CIKs, dates, share counts, FIGIs, and ISINs.
+    for m in _CUSIP_LABEL_RE.finditer(doc):
+        frag = doc[m.start() : m.end() + _CUSIP_NEAR_LABEL_CHARS]
         cusip = _extract_cusip_from_fragment(frag)
         if cusip:
-            return cusip, "generic"
+            return cusip, "labeled"
     return None, "none"
 
 
@@ -314,7 +343,8 @@ def _recent_filings_from_submissions(payload: Any, *, fallback_cik10: str = "") 
     out: List[FilingRef] = []
     cik10 = normalize_cik(payload.get("cik")) or normalize_cik(fallback_cik10)
     for i in range(n):
-        acc = _safe_text(accs[i]).replace("-", "")
+        acc_dashed = _safe_text(accs[i])
+        acc = acc_dashed.replace("-", "")
         form = _safe_text(forms[i])
         fdate = _safe_text(dates[i])
         pdoc = _safe_text(docs[i])
@@ -323,6 +353,7 @@ def _recent_filings_from_submissions(payload: Any, *, fallback_cik10: str = "") 
         out.append(
             FilingRef(
                 cik10=cik10,
+                accession=acc_dashed,
                 accession_nodash=acc,
                 filing_date=fdate,
                 form=form,
@@ -335,9 +366,11 @@ def _recent_filings_from_submissions(payload: Any, *, fallback_cik10: str = "") 
 def _build_submission_urls(f: FilingRef) -> List[str]:
     cik_int = cik_to_int_str(f.cik10)
     base = f"{SEC_ARCHIVES_BASE}/{cik_int}/{f.accession_nodash}"
-    urls = [f"{base}/{f.accession_nodash}.txt"]
+    urls = []
     if f.primary_document:
         urls.append(f"{base}/{f.primary_document}")
+    if f.accession:
+        urls.append(f"{base}/{f.accession}.txt")
     return list(dict.fromkeys(urls))
 
 
@@ -389,6 +422,29 @@ def _submissions_page_urls(payload: Any) -> List[str]:
     return list(dict.fromkeys(out))
 
 
+def normalize_asof_date(v: Any) -> str:
+    text = _safe_text(v)
+    if not text:
+        return ""
+    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", text)
+    if match:
+        return match.group(0)
+    match = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", text)
+    if match:
+        month, day, year = match.groups()
+        return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+    return ""
+
+
+def _row_asof_date(row: pd.Series, fallback: str) -> str:
+    for column in ("asof_date", "AsOfDate", "as_of_date", "Date", "date", "snapshot_date"):
+        if column in row.index:
+            asof = normalize_asof_date(row.get(column))
+            if asof:
+                return asof
+    return fallback
+
+
 def find_cusip_for_cik(
     cik10: str,
     *,
@@ -401,6 +457,7 @@ def find_cusip_for_cik(
     use_doc_cache: bool,
     submissions_cache_ttl_seconds: Optional[float],
     max_submissions_pages: int,
+    asof_date: str = "",
 ) -> Tuple[Optional[CusipHit], str]:
     """
     Return (CusipHit or None, error_message).
@@ -416,6 +473,7 @@ def find_cusip_for_cik(
             timeout=timeout,
             user_agent=user_agent,
             max_age_seconds=submissions_cache_ttl_seconds,
+            request_sleep_sec=max(0.0, request_sleep_sec),
         )
     except Exception as e:
         return None, f"submissions_error:{type(e).__name__}"
@@ -433,6 +491,7 @@ def find_cusip_for_cik(
                 timeout=timeout,
                 user_agent=user_agent,
                 max_age_seconds=submissions_cache_ttl_seconds,
+                request_sleep_sec=max(0.0, request_sleep_sec),
             )
         except Exception:
             continue
@@ -453,6 +512,9 @@ def find_cusip_for_cik(
     filings = deduped
     if allowed_forms is not None:
         filings = [f for f in filings if f.form.upper() in allowed_forms]
+    asof = normalize_asof_date(asof_date)
+    if asof:
+        filings = [f for f in filings if not f.filing_date or f.filing_date <= asof]
     if max_filings > 0:
         filings = filings[:max_filings]
     if not filings:
@@ -487,7 +549,7 @@ def find_cusip_for_cik(
                     source_url=u,
                     form=f.form,
                     filing_date=f.filing_date,
-                    accession=f.accession_nodash,
+                    accession=f.accession or f.accession_nodash,
                 )
                 return hit, ""
     return None, "not_found_in_scanned_filings"
@@ -534,6 +596,14 @@ def parse_args() -> argparse.Namespace:
         "--forms",
         default=",".join(DEFAULT_FORMS),
         help="Comma-separated forms to scan (default curated set). Use empty string for all forms.",
+    )
+    p.add_argument(
+        "--asof-date",
+        default="",
+        help=(
+            "Optional PIT cutoff date (YYYY-MM-DD). Rows may override this with asof_date/AsOfDate/date columns; "
+            "filings after the row as-of date are ignored."
+        ),
     )
     p.add_argument(
         "--max-tickers",
@@ -584,7 +654,7 @@ def main() -> None:
     if not input_path.exists():
         raise FileNotFoundError(f"Input CSV not found: {input_path}")
 
-    df = pd.read_csv(input_path, dtype=str)
+    df = pd.read_csv(input_path, dtype=str, encoding="utf-8-sig", keep_default_na=False)
     if df.empty:
         raise ValueError(f"Input CSV is empty: {input_path}")
     _ensure_columns(df, ["Ticker", "CIK"])
@@ -603,7 +673,17 @@ def main() -> None:
     out["CusipForm"] = ""
     out["CusipFilingDate"] = ""
     out["CusipAccession"] = ""
+    out["CusipAsOfDate"] = ""
     out["CusipError"] = ""
+
+    cik_ticker_counts = (
+        out.loc[out["CIK"].astype(str).str.len() > 0, ["CIK", "Ticker"]]
+        .drop_duplicates()
+        .groupby("CIK")["Ticker"]
+        .nunique()
+    )
+    ambiguous_ciks = set(cik_ticker_counts[cik_ticker_counts > 1].index)
+    default_asof_date = normalize_asof_date(args.asof_date)
 
     total = len(out)
     hits = 0
@@ -611,6 +691,11 @@ def main() -> None:
         cik10 = _safe_text(out.at[idx, "CIK"])
         if not cik10:
             out.at[idx, "CusipError"] = "missing_cik"
+            continue
+        row_asof_date = _row_asof_date(out.loc[idx], default_asof_date)
+        out.at[idx, "CusipAsOfDate"] = row_asof_date
+        if cik10 in ambiguous_ciks:
+            out.at[idx, "CusipError"] = "ambiguous_cik_multiple_tickers"
             continue
 
         hit, err = find_cusip_for_cik(
@@ -624,6 +709,7 @@ def main() -> None:
             use_doc_cache=bool(args.use_doc_cache),
             submissions_cache_ttl_seconds=submissions_cache_ttl_seconds,
             max_submissions_pages=max(0, int(args.max_submissions_pages)),
+            asof_date=row_asof_date,
         )
         if hit is None:
             out.at[idx, "CusipError"] = err

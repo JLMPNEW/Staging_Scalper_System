@@ -29,7 +29,7 @@ from portfolio_layer.macro.contract import (  # noqa: E402
     MACRO_REGIME_FIELDS,
     MACRO_SECTOR_FIELDS,
     MACRO_STOCK_FIELDS,
-    sqlite_snapshot_inputs,
+    macro_serving_content_sha256,
 )
 from portfolio_layer.macro.taxonomy import score_pipelines, sleeve_taxonomy  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
@@ -384,17 +384,16 @@ def main() -> int:  # noqa: C901
     for name, path in optimizer_inputs.items():
         if name in inputs or path.exists():
             expected_inputs[name] = path
-    expected_inputs.update(sqlite_snapshot_inputs(serving_db_path))
     for name, path in expected_inputs.items():
         if not path.exists():
             meta_bad.append(f"{name}:missing_input")
             continue
         if inputs.get(name) != sha256_file(path):
             meta_bad.append(f"{name}:input_hash_mismatch")
-    db_prefix = f"{serving_db_path.expanduser().resolve().name}-"
-    for recorded_name in inputs:
-        if recorded_name.startswith(db_prefix) and recorded_name not in expected_inputs:
-            meta_bad.append(f"{recorded_name}:recorded_input_missing")
+    serving_content_key = "macro_serving.sqlite:content"
+    actual_serving_content_hash = macro_serving_content_sha256(serving_db_path, run_as_of)
+    if inputs.get(serving_content_key) != actual_serving_content_hash:
+        meta_bad.append(f"{serving_content_key}:input_hash_mismatch")
     for name in SOURCE_FILES:
         path = PACKAGE_ROOT / "macro" / name
         recorded_source = inputs.get(f"source/{name}")
@@ -428,7 +427,6 @@ def main() -> int:  # noqa: C901
         "manifest.json": stage1_manifest_path,
         "config.yaml": config_path,
     }
-    provenance.update(sqlite_snapshot_inputs(serving_db_path))
     for name in SOURCE_FILES:
         path = PACKAGE_ROOT / "macro" / name
         if path.exists():
@@ -441,6 +439,7 @@ def main() -> int:  # noqa: C901
         "shadow_only": True,
         "enabled_in_production": bool(cfg_get(config, "macro.enabled_in_production", False)),
         "macro_contract_meta_sha256": sha256_file(file_paths["macro_contract_meta.json"]),
+        "macro_serving_content_sha256": inputs.get("macro_serving.sqlite:content", ""),
         "counts": {
             "sector_rows": len(sector),
             "stock_rows": len(stock),

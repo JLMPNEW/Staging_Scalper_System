@@ -38,27 +38,13 @@ from macro_serving_storage import (  # noqa: E402
     insert_many,
     start_serving_run,
 )
+from staging_portfolio_adapter import (  # noqa: E402
+    MAX_STAGE2_PRICE_STALE_DAYS,
+    load_staging_prices,
+    staleness_gated_weekly,
+)
 
 logger = logging.getLogger(__name__)
-
-_BACKTEST_IMPORT_ERROR: Exception | None = None
-_BACKTEST: dict[str, Any] = {}
-try:
-    from BackTest.prices import load_prices as _load_backtest_prices
-
-    _BACKTEST["load_prices"] = _load_backtest_prices
-except ModuleNotFoundError as exc:
-    _BACKTEST_IMPORT_ERROR = exc
-
-
-def _require_backtest(name: str) -> Any:
-    if name in _BACKTEST:
-        return _BACKTEST[name]
-    raise RuntimeError(
-        "The copied MacroLayer no longer loads BackTest at import time. "
-        "Disable stock overlay validation or provide a Staging-owned price adapter before running this mode."
-    ) from _BACKTEST_IMPORT_ERROR
-
 
 @dataclass(frozen=True)
 class StockOverlayConfig:
@@ -259,11 +245,14 @@ def _parse_snapshot_date(path: Path, *, date_source: str) -> pd.Timestamp | None
     candidates: list[str] = []
     if date_source == "parent_directory":
         candidates.append(path.parent.name)
+    elif date_source == "path":
+        candidates.extend(reversed(path.parts))
     candidates.append(path.stem)
     for candidate in candidates:
-        matches = re.findall(r"(20\d{6})", str(candidate))
+        matches = re.findall(r"(20\d{2}[-_]?\d{2}[-_]?\d{2})", str(candidate))
         for match in reversed(matches):
-            parsed = pd.to_datetime(match, format="%Y%m%d", errors="coerce")
+            fmt = "%Y-%m-%d" if "-" in match else "%Y_%m_%d" if "_" in match else "%Y%m%d"
+            parsed = pd.to_datetime(match, format=fmt, errors="coerce")
             if pd.notna(parsed):
                 return pd.Timestamp(parsed).normalize()
     return None
@@ -274,6 +263,7 @@ def _discover_sector_rotation_paths(layer_cfg: StockOverlayConfig) -> list[Path]
     pattern = layer_cfg.sector_tactical_file_glob
     paths = {p.resolve() for p in root.glob(pattern)}
     paths.update({p.resolve() for p in root.glob(f"*/{pattern}")})
+    paths.update({p.resolve() for p in root.glob(f"*/*/{pattern}")})
     return sorted(paths)
 
 
@@ -461,14 +451,6 @@ def _load_stage9_macro_frames(conn: sqlite3.Connection, *, start_date: str, end_
     return industry, aggregate, sector
 
 
-def _resolve_price_cache_path(backtest_cfg: dict[str, Any], repo_root: Path) -> Path:
-    raw = cfg_get(backtest_cfg, "prices", "cache_path", default=None)
-    if raw is None or str(raw).strip() == "":
-        raise ValueError("BackTest config prices.cache_path is required for Stage 11 validation.")
-    p = Path(str(raw)).expanduser()
-    return p if p.is_absolute() else (repo_root / p).resolve()
-
-
 def _load_validation_forward_returns(
     score_panel: pd.DataFrame,
     *,
@@ -483,14 +465,16 @@ def _load_validation_forward_returns(
     dates = pd.DatetimeIndex(pd.to_datetime(weekly_dates, errors="coerce")).dropna().sort_values().unique()
     if not tickers or len(dates) < 2:
         return pd.DataFrame(columns=["as_of_date", "ticker", "validation_forward_return"])
-    cache_path = _resolve_price_cache_path(backtest_cfg, repo_root)
+    del backtest_cfg, repo_root
     min_dt = pd.Timestamp(dates.min()).normalize() - pd.Timedelta(days=10)
     max_dt = pd.Timestamp(dates.max()).normalize() + pd.Timedelta(days=10)
-    load_backtest_prices = _require_backtest("load_prices")
-    prices = load_backtest_prices(cache_path=cache_path, tickers=tickers, start_date=min_dt, end_date=max_dt)
-    prices = prices.sort_index()
-    dense_index = prices.index.union(pd.DatetimeIndex(dates)).sort_values()
-    weekly_prices = prices.reindex(dense_index).ffill(limit=5).reindex(pd.DatetimeIndex(dates))
+    prices = load_staging_prices(
+        tickers=tickers,
+        start_date=min_dt,
+        end_date=max_dt,
+        freshness_as_of=pd.Timestamp(dates.max()).normalize(),
+    )
+    weekly_prices = staleness_gated_weekly(prices, dates, max_stale_days=MAX_STAGE2_PRICE_STALE_DAYS)
     forward = weekly_prices.shift(-1) / weekly_prices - 1.0
     out = (
         forward.rename_axis(index="as_of_date", columns="ticker")
@@ -634,6 +618,10 @@ def _prepare_score_panel(score_panel: pd.DataFrame, *, layer_cfg: StockOverlayCo
         if col not in out.columns:
             out[col] = ""
         out[col] = out[col].fillna("").astype(str).str.strip()
+    if "source_pipeline" in out.columns:
+        out["source_pipeline"] = out["source_pipeline"].fillna("").astype(str).str.strip()
+    else:
+        out["source_pipeline"] = ""
     return out.dropna(subset=["as_of_date", "ticker", "base_score"]).reset_index(drop=True)
 
 
@@ -662,7 +650,10 @@ def _build_overlay_frames(
         out = out.merge(validation_returns, on=["as_of_date", "ticker"], how="left")
     else:
         out["validation_forward_return"] = np.nan
-    out["rotation_sector_name"] = out["sector_name"].map(layer_cfg.stock_sector_to_rotation_sector).fillna(out["sector_name"])
+    out["rotation_sector_name"] = out["source_pipeline"].where(
+        out["source_pipeline"].astype(str).str.strip().ne(""),
+        out["sector_name"].map(layer_cfg.stock_sector_to_rotation_sector).fillna(out["sector_name"]),
+    )
     out = out.merge(tactical, on=["as_of_date", "rotation_sector_name"], how="left")
     out["sector_tactical_lift"] = pd.to_numeric(out["sector_tactical_lift"], errors="coerce")
     out["sector_tactical_lift_z"] = pd.to_numeric(out["sector_tactical_lift_z"], errors="coerce")
@@ -884,7 +875,11 @@ def main() -> None:
     layer_cfg = _resolve_layer_config(cfg, config_path)
     layer_cfg.output_dir.mkdir(parents=True, exist_ok=True)
     industry_layer_cfg = _resolve_industry_layer_config(cfg, config_path)
-    score_panel_raw, weekly_dates, backtest_cfg, repo_root = _load_weekly_score_panel(industry_layer_cfg)
+    score_panel_raw, weekly_dates, backtest_cfg, repo_root = _load_weekly_score_panel(
+        industry_layer_cfg,
+        start_date=None,
+        end_date=args.end_date,
+    )
     score_panel = _prepare_score_panel(score_panel_raw, layer_cfg=layer_cfg)
     serving_db_path = resolve_serving_db_path(cfg, config_path, override=args.serving_db_path)
     conn = connect_sqlite(serving_db_path, row_factory=sqlite3.Row)

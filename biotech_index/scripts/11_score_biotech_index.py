@@ -1338,6 +1338,92 @@ def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]]) -> None:
         )
 
 
+def _candidate_policy_score(row: dict[str, Any]) -> float:
+    score = to_float(row.get("portfolio_candidate_score"), math.nan)
+    if math.isfinite(score):
+        return score
+    score = to_float(row.get("native_score_value"), math.nan)
+    if math.isfinite(score):
+        return score
+    return to_float(row.get("opportunity_score"), 0.0)
+
+
+def _promoted_policy_base_candidate(row: dict[str, Any]) -> bool:
+    """True when a row can enter the promoted live candidate selector."""
+    ticker = str(row.get("ticker") or "").strip()
+    price_data_available = bool(str(row.get("price_data_asof_date") or row.get("latest_price_date") or "").strip())
+    return (
+        bool(ticker)
+        and _candidate_policy_score(row) > 0.0
+        and to_float(row.get("score_zero_is_missing_flag"), 0.0) <= 0.0
+        and to_float(row.get("biotech_cohort_investible_flag"), 1.0) > 0.0
+        and to_float(row.get("core_structural_veto_flag"), 0.0) <= 0.0
+        and to_float(row.get("rank_quality_cap_vetoed"), 0.0) <= 0.0
+        and price_data_available
+    )
+
+
+def apply_promoted_portfolio_candidate_policy(rows: list[dict[str, Any]], config: dict[str, Any]) -> None:
+    """Apply a promoted live allocation gate without changing raw score fields."""
+    settings = cfg_get(config, "biotech_scoring.portfolio_candidate_policy", {}) or {}
+    if not isinstance(settings, dict) or not as_bool(settings.get("enabled", False), False):
+        return
+    allowed_cohorts = set(parse_string_list(settings.get("allowed_primary_cohorts"), []))
+    rank_top_n = max(0, int(float(settings.get("rank_top_n") or 0)))
+    cohort_top_k = max(0, int(float(settings.get("cohort_top_k_per_cohort") or 0)))
+    total_max = max(0, int(float(settings.get("total_max") or 0)))
+    score_floor_pct = max(0.0, min(100.0, to_float(settings.get("min_score_pct_of_top"), 0.0)))
+    policy_name = str(settings.get("name") or settings.get("policy_name") or "promoted_portfolio_candidate_policy")
+    selected_reason = str(settings.get("selected_reason") or policy_name)
+    excluded_reason = str(settings.get("excluded_reason") or f"excluded_by_{policy_name}")
+    if rank_top_n <= 0 and not allowed_cohorts and cohort_top_k <= 0 and total_max <= 0 and score_floor_pct <= 0.0:
+        return
+
+    base_candidates = [row for row in rows if _promoted_policy_base_candidate(row)]
+    base_candidates.sort(key=lambda row: (-_candidate_policy_score(row), str(row.get("ticker") or "")))
+    pool = base_candidates[:rank_top_n] if rank_top_n > 0 else list(base_candidates)
+    if allowed_cohorts:
+        pool = [
+            row
+            for row in pool
+            if str(row.get("biotech_primary_cohort") or "").strip() in allowed_cohorts
+        ]
+    if 0.0 < score_floor_pct <= 100.0 and pool:
+        top_score = _candidate_policy_score(pool[0])
+        min_score = top_score * score_floor_pct / 100.0
+        pool = [row for row in pool if _candidate_policy_score(row) >= min_score]
+    if cohort_top_k > 0:
+        counts: dict[str, int] = {}
+        capped: list[dict[str, Any]] = []
+        for row in pool:
+            cohort = str(row.get("biotech_primary_cohort") or "").strip()
+            current = counts.get(cohort, 0)
+            if current >= cohort_top_k:
+                continue
+            counts[cohort] = current + 1
+            capped.append(row)
+        pool = capped
+    if total_max > 0:
+        pool = pool[:total_max]
+    base_candidate_ids = {id(row) for row in base_candidates}
+    selected_tickers = {str(row.get("ticker") or "").strip().upper() for row in pool}
+
+    for row in rows:
+        ticker = str(row.get("ticker") or "").strip().upper()
+        if id(row) not in base_candidate_ids:
+            continue
+        if ticker in selected_tickers:
+            row["portfolio_candidate_gate"] = 1.0
+            row["portfolio_candidate_status"] = "eligible"
+            row["portfolio_candidate_reason"] = selected_reason
+            row["eligibility_reason"] = selected_reason
+        else:
+            row["portfolio_candidate_gate"] = 0.0
+            row["portfolio_candidate_status"] = "excluded"
+            row["portfolio_candidate_reason"] = excluded_reason
+            row["eligibility_reason"] = excluded_reason
+
+
 def commercial_risk_overlay_settings(config: dict[str, Any]) -> dict[str, Any]:
     settings = dict(cfg_get(config, "biotech_scoring.commercial_risk_overlay", {}) or {})
     production_fragility_threshold = float(
@@ -3329,6 +3415,7 @@ def score_rows(
     enrich_biotech_cohort_rank_stats(scored)
     apply_biotech_cohort_policy(scored, cohort_policy)
     enrich_portfolio_layer_contract_rows(scored)
+    apply_promoted_portfolio_candidate_policy(scored, config)
     if production_score_field == "discovery_opportunity_score":
         # routed_discovery is active: rank must follow the routed production score,
         # not the legacy allocation score.

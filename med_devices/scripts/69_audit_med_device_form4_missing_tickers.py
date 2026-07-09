@@ -486,7 +486,7 @@ def main() -> None:
     form4_db = (
         args.sec_form4_db.expanduser().resolve()
         if args.sec_form4_db
-        else Path(str(cfg_get(config, "external_positioning_import.sec_form4_db_path"))).expanduser().resolve()
+        else resolve_path(cfg_get(config, "external_positioning_import.sec_form4_db_path"), base_dir=base_dir)
     )
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else output_path_from_config(config, base_dir, asof=asof)
     if not form4_db.exists():
@@ -538,7 +538,6 @@ def main() -> None:
             for company in companies:
                 ticker = normalize_ticker(company["ticker"])
                 company_id = int(company["company_id"])
-                ciks = company_ciks.get(company_id, set())
                 cik_keys = company_cik_keys.get(company_id, set())
                 med_summary = med_summary_by_company.get(company_id, Summary())
                 source_by_ticker = source_ticker_map.get(ticker, Summary())

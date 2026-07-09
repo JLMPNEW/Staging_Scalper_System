@@ -90,9 +90,9 @@ def test_sec_event_incremental_clears_events_when_latest_document_text_is_missin
         INSERT INTO sec_filings(company_id, accession_nodash, filing_date, form, text_hash)
             VALUES (1, '0001', '2026-05-08', '10-Q', 'old-hash');
         INSERT INTO sec_filing_documents(document_id, accession_nodash, document_url, document_type, text_content, text_hash)
-            VALUES (10, '0001', 'https://example.test/0001.txt', 'complete_submission_text', '', '');
+            VALUES (10, '0001', 'https://example.test/0001.txt', 'complete_submission_text', '', 'old-hash');
         INSERT INTO sec_filing_latest_document(accession_nodash, document_id, document_url, document_type, text_hash, text_length)
-            VALUES ('0001', 10, 'https://example.test/0001.txt', 'complete_submission_text', '', 0);
+            VALUES ('0001', 10, 'https://example.test/0001.txt', 'complete_submission_text', 'old-hash', 0);
         INSERT INTO sec_events(event_id, company_id, accession_nodash, filing_date, form, event_type)
             VALUES (1, 1, '0001', '2026-05-08', '10-Q', 'pdufa_date');
         INSERT INTO sec_event_parse_state(accession_nodash, text_hash, parser_signature, parsed_at, event_count, created_at, updated_at)
@@ -500,6 +500,91 @@ def test_production_rank_blocked_filters_avoid_rankcap_and_noninvestible() -> No
     )
 
 
+def test_promoted_portfolio_candidate_policy_filters_global_top_by_cohort_caps() -> None:
+    module = load_script_module("11_score_biotech_index.py", "score_biotech_promoted_gate_regression")
+    config = {
+        "biotech_scoring": {
+            "portfolio_candidate_policy": {
+                "enabled": True,
+                "name": "post_adaptive_top4_late_platform_max8_raw",
+                "rank_top_n": 20,
+                "allowed_primary_cohorts": [
+                    "late_clinical_pivotal_or_registrational",
+                    "platform_partnered_modality_pipeline",
+                ],
+                "cohort_top_k_per_cohort": 4,
+                "total_max": 8,
+                "selected_reason": "promoted_policy",
+                "excluded_reason": "excluded_by_policy",
+            }
+        }
+    }
+    rows: list[dict[str, Any]] = []
+    cohorts = {
+        "L": "late_clinical_pivotal_or_registrational",
+        "P": "platform_partnered_modality_pipeline",
+        "C": "commercial_profitable_quality_or_mature",
+    }
+    for idx, (ticker, cohort_key, score) in enumerate(
+        [
+            ("L1", "L", 100),
+            ("L2", "L", 99),
+            ("L3", "L", 98),
+            ("L4", "L", 97),
+            ("L5", "L", 96),
+            ("P1", "P", 95),
+            ("P2", "P", 94),
+            ("P3", "P", 93),
+            ("P4", "P", 92),
+            ("P5", "P", 91),
+            ("C1", "C", 90),
+            ("C2", "C", 89),
+        ],
+        start=1,
+    ):
+        rows.append(
+            {
+                "ticker": ticker,
+                "biotech_primary_cohort": cohorts[cohort_key],
+                "portfolio_candidate_gate": 0.0,
+                "portfolio_candidate_status": "excluded",
+                "portfolio_candidate_reason": "allocation_bucket_avoid",
+                "eligibility_reason": "allocation_bucket_avoid",
+                "portfolio_candidate_score": float(score),
+                "native_score_value": float(score),
+                "opportunity_score": float(score),
+                "score_zero_is_missing_flag": 0.0,
+                "price_data_asof_date": "2026-07-07",
+                "rank": idx,
+            }
+        )
+    rows.append(
+        {
+            "ticker": "MISS",
+            "biotech_primary_cohort": cohorts["L"],
+            "portfolio_candidate_gate": 0.0,
+            "portfolio_candidate_status": "excluded",
+            "portfolio_candidate_reason": "missing_score",
+            "eligibility_reason": "missing_score",
+            "portfolio_candidate_score": 0.0,
+            "native_score_value": "",
+            "opportunity_score": 0.0,
+            "score_zero_is_missing_flag": 1.0,
+            "price_data_asof_date": "2026-07-07",
+        }
+    )
+
+    module.apply_promoted_portfolio_candidate_policy(rows, config)
+
+    selected = [row["ticker"] for row in rows if row["portfolio_candidate_gate"] == 1.0]
+    assert selected == ["L1", "L2", "L3", "L4", "P1", "P2", "P3", "P4"]
+    assert next(row for row in rows if row["ticker"] == "L5")["portfolio_candidate_reason"] == "excluded_by_policy"
+    assert next(row for row in rows if row["ticker"] == "C1")["portfolio_candidate_reason"] == "excluded_by_policy"
+    missing = next(row for row in rows if row["ticker"] == "MISS")
+    assert missing["portfolio_candidate_gate"] == 0.0
+    assert missing["portfolio_candidate_reason"] == "missing_score"
+
+
 def test_ctgov_shared_study_merge_is_deterministic_on_conflict() -> None:
     module = load_script_module("03_sync_ctgov_trials.py", "ctgov_sync_merge_regression")
     first = module.SyncResult(
@@ -519,7 +604,7 @@ def test_ctgov_shared_study_merge_is_deterministic_on_conflict() -> None:
         studies={"NCT00000001": {"protocolSection": {"identificationModule": {"nctId": "NCT00000001"}}, "value": 2}},
     )
 
-    merged = module.merge_unique_studies([first, second])
+    merged = module.merge_unique_studies([second, first])
 
     assert merged["NCT00000001"]["value"] == 1
 
@@ -741,6 +826,7 @@ def test_delisted_price_overlay_protects_reused_canonical_ticker() -> None:
         [
             ("BOLD", "2020-01-13", "norgate_us_equities_total_return", 40.0),
             ("BOLD", "2020-01-14", "norgate_us_equities_total_return", 60.0),
+            ("OLD", "2018-01-12", "norgate_us_equities_total_return", 30.0),
             ("BOLD", "2024-04-01", "yahoo_adjusted", 100.0),
             ("BOLD", "2024-04-02", "yahoo_adjusted", 20.0),
         ],
@@ -761,6 +847,12 @@ def test_delisted_price_overlay_protects_reused_canonical_ticker() -> None:
     assert [bar.day for bar in live_reuser_bars["BOLD-202001"]] == [date(2020, 1, 13), date(2020, 1, 14)]
     assert [bar.close for bar in live_reuser_bars["BOLD-202001"]] == [40.0, 60.0]
     assert [bar.close for bar in live_reuser_bars["BOLD"]] == [100.0, 20.0]
+    assert module.count_applicable_delisted_price_overlays(
+        conn,
+        price_ticker_alias={"BOLD-202001": "BOLD", "OLD-201801": "OLD"},
+        min_date=date(2020, 1, 1),
+        config={"delisted_calibration": {"source_rules": {"price_source": "norgate_us_equities_total_return"}}},
+    ) == 1
 
     rows = [{"ticker": "BOLD-202001", "asof_date": "2020-01-10"}]
     module.add_forward_returns(
@@ -775,6 +867,218 @@ def test_delisted_price_overlay_protects_reused_canonical_ticker() -> None:
     assert rows[0]["fwd_1d_entry_date"] == "2020-01-13"
     assert rows[0]["fwd_1d_target_date"] == "2020-01-14"
     assert rows[0]["fwd_1d_return"] == pytest.approx(0.5)
+
+
+def test_calibration_missing_raw_risk_defaults_to_worst_case() -> None:
+    module = load_script_module("28_calibrate_biotech_opportunity.py", "calibration_missing_risk_regression")
+
+    risk_value, risk_missing = module.raw_score_value({}, {}, "risk_score_raw")
+    catalyst_value, catalyst_missing = module.raw_score_value({}, {}, "catalyst_score_raw")
+
+    assert risk_missing is True
+    assert risk_value == pytest.approx(100.0)
+    assert catalyst_missing is True
+    assert catalyst_value == pytest.approx(0.0)
+
+
+def test_calibration_custom_selection_policies_keep_raw_baseline() -> None:
+    module = load_script_module("28_calibrate_biotech_opportunity.py", "calibration_policy_baseline_regression")
+    config = {
+        "calibration": {
+            "tier1": {
+                "selection_policies": [
+                    {"policy_name": "custom_hard_veto", "hard_veto": True, "hard_veto_reasons": ["*"]}
+                ]
+            }
+        }
+    }
+
+    policies = module.generate_selection_policies(config)
+
+    assert [policy.policy_name for policy in policies][:2] == ["raw_legacy_score", "custom_hard_veto"]
+
+
+def test_calibration_load_bars_rejects_empty_market_sources() -> None:
+    module = load_script_module("28_calibrate_biotech_opportunity.py", "calibration_load_bars_sources_regression")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    with pytest.raises(ValueError, match="market data source"):
+        module.load_bars(conn, tickers={"AAA"}, min_date=date(2026, 1, 1), market_sources=[])
+
+
+def test_calibration_commercial_risk_diag_drops_nested_sub_scores() -> None:
+    module = load_script_module("28_calibrate_biotech_opportunity.py", "calibration_commercial_diag_regression")
+
+    fields = module.diagnostic_commercial_risk_fields(
+        {
+            "commercial_risk_overlay_score": 42.0,
+            "commercial_risk_sub_scores": {"deterioration": 12.0},
+        }
+    )
+
+    assert fields == {"diag_commercial_risk_overlay_score": 42.0}
+
+
+def test_calibration_selection_policy_allowed_primary_cohorts_filters_rows() -> None:
+    module = load_script_module("28_calibrate_biotech_opportunity.py", "calibration_allowed_cohorts_regression")
+    policy = module.SelectionPolicy(
+        policy_name="late_platform_only",
+        description="test policy",
+        allowed_primary_cohorts=("late_clinical_pivotal_or_registrational", "platform_partnered_modality_pipeline"),
+    )
+    spec = module.WeightSpec(
+        candidate_name="current_config",
+        description="test",
+        clinical_catalyst=0.55,
+        clinical_credibility=0.25,
+        clinical_financial_quality=0.15,
+        clinical_momentum=0.05,
+        clinical_risk_penalty=0.15,
+        clinical_stage_profile={
+            "clinical_opportunity": 0.45,
+            "commercial_value": 0.03,
+            "forward_guidance": 0.04,
+            "valuation": 0.05,
+            "upside_capacity": 0.15,
+            "institutional_upside": 0.0,
+            "financial_quality": 0.15,
+            "momentum": 0.05,
+            "borrow_signal": 0.05,
+            "short_interest_signal": 0.03,
+            "institutional_crowding": 0.0,
+            "risk_penalty": 0.40,
+        },
+        commercial_stage_profile={
+            "clinical_opportunity": 0.04,
+            "commercial_value": 0.27,
+            "forward_guidance": 0.2,
+            "valuation": 0.07,
+            "upside_capacity": 0.04,
+            "institutional_upside": 0.06,
+            "financial_quality": 0.14,
+            "momentum": 0.06,
+            "borrow_signal": 0.04,
+            "short_interest_signal": 0.03,
+            "institutional_crowding": 0.05,
+            "risk_penalty": 0.24,
+        },
+    )
+    params = module.CalibrationParams()
+    base_row = {
+        "profile_name": "clinical_stage",
+        "catalyst_score_raw": 50.0,
+        "credibility_score_raw": 50.0,
+        "financial_quality_score_raw": 50.0,
+        "momentum_score_raw": 50.0,
+        "risk_score_raw": 50.0,
+        "commercial_value_score": 50.0,
+        "forward_guidance_score": 50.0,
+        "valuation_score_raw": 50.0,
+        "valuation_score": 50.0,
+        "upside_capacity_score": 50.0,
+        "institutional_upside_capacity_score": 50.0,
+        "borrow_pressure_score": 0.0,
+        "short_interest_days_to_cover_score": 0.0,
+        "institutional_accumulation_score": 50.0,
+    }
+    allowed_row = {
+        **base_row,
+        "biotech_primary_cohort": "platform_partnered_modality_pipeline",
+    }
+    blocked_row = {
+        **base_row,
+        "biotech_primary_cohort": "commercial_profitable_quality_or_mature",
+    }
+
+    allowed_score, _allowed_diag = module.policy_adjusted_score(allowed_row, spec, policy, params)
+    blocked_score, _blocked_diag = module.policy_adjusted_score(blocked_row, spec, policy, params)
+
+    assert allowed_score is not None
+    assert blocked_score is None
+
+
+def test_calibration_selection_policy_cohort_top_k_limits_each_cohort() -> None:
+    module = load_script_module("28_calibrate_biotech_opportunity.py", "calibration_cohort_top_k_regression")
+    policy = module.SelectionPolicy(
+        policy_name="top2_per_cohort",
+        description="test policy",
+        cohort_top_k_per_cohort=2,
+    )
+    ranked_rows = [
+        {"ticker": "A1", "biotech_primary_cohort": "alpha"},
+        {"ticker": "A2", "biotech_primary_cohort": "alpha"},
+        {"ticker": "A3", "biotech_primary_cohort": "alpha"},
+        {"ticker": "B1", "biotech_primary_cohort": "beta"},
+        {"ticker": "B2", "biotech_primary_cohort": "beta"},
+        {"ticker": "B3", "biotech_primary_cohort": "beta"},
+    ]
+
+    limited = module.apply_policy_cohort_top_k_limit(ranked_rows, policy)
+
+    assert [row["ticker"] for row in limited] == ["A1", "A2", "B1", "B2"]
+
+
+def test_calibration_selection_policy_post_selection_gate_filters_global_top_n() -> None:
+    module = load_script_module("28_calibrate_biotech_opportunity.py", "calibration_post_selection_gate_regression")
+    policy = module.SelectionPolicy(
+        policy_name="post_top1_beta",
+        description="test policy",
+        post_selection_allowed_primary_cohorts=("beta",),
+        post_selection_cohort_top_k_per_cohort=1,
+    )
+    ranked_rows = [
+        {"ticker": "A1", "biotech_primary_cohort": "alpha"},
+        {"ticker": "B1", "biotech_primary_cohort": "beta"},
+        {"ticker": "B2", "biotech_primary_cohort": "beta"},
+        {"ticker": "B3", "biotech_primary_cohort": "beta"},
+    ]
+
+    selected = module.apply_policy_post_selection_filter(ranked_rows, policy, top_n=3)
+
+    assert [row["ticker"] for row in selected] == ["B1"]
+
+
+def test_calibration_selection_policy_post_selection_total_max_is_adaptive_cap() -> None:
+    module = load_script_module("28_calibrate_biotech_opportunity.py", "calibration_post_selection_total_cap")
+    policy = module.SelectionPolicy(
+        policy_name="post_max3",
+        description="test policy",
+        post_selection_allowed_primary_cohorts=("alpha", "beta"),
+        post_selection_total_max=3,
+    )
+    ranked_rows = [
+        {"ticker": "A1", "biotech_primary_cohort": "alpha"},
+        {"ticker": "B1", "biotech_primary_cohort": "beta"},
+        {"ticker": "A2", "biotech_primary_cohort": "alpha"},
+        {"ticker": "B2", "biotech_primary_cohort": "beta"},
+        {"ticker": "A3", "biotech_primary_cohort": "alpha"},
+    ]
+
+    selected = module.apply_policy_post_selection_filter(ranked_rows, policy, top_n=5)
+
+    assert [row["ticker"] for row in selected] == ["A1", "B1", "A2"]
+
+
+def test_calibration_selection_policy_post_selection_score_floor_keeps_close_scores() -> None:
+    module = load_script_module("28_calibrate_biotech_opportunity.py", "calibration_post_selection_score_floor")
+    policy = module.SelectionPolicy(
+        policy_name="post_score90",
+        description="test policy",
+        post_selection_allowed_primary_cohorts=("alpha", "beta"),
+        post_selection_min_score_pct_of_top=90.0,
+        post_selection_total_max=10,
+    )
+    ranked_rows = [
+        {"ticker": "A1", "biotech_primary_cohort": "alpha", "candidate_selection_score": 100.0},
+        {"ticker": "B1", "biotech_primary_cohort": "beta", "candidate_selection_score": 92.0},
+        {"ticker": "A2", "biotech_primary_cohort": "alpha", "candidate_selection_score": 89.9},
+        {"ticker": "B2", "biotech_primary_cohort": "beta", "candidate_selection_score": 88.0},
+    ]
+
+    selected = module.apply_policy_post_selection_filter(ranked_rows, policy, top_n=4)
+
+    assert [row["ticker"] for row in selected] == ["A1", "B1"]
 
 
 def test_phase1_score_sort_value_preserves_zero_scores() -> None:

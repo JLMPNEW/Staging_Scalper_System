@@ -337,6 +337,12 @@ class WeightSpec:
 class SelectionPolicy:
     policy_name: str
     description: str
+    allowed_primary_cohorts: tuple[str, ...] = ()
+    cohort_top_k_per_cohort: int = 0
+    post_selection_allowed_primary_cohorts: tuple[str, ...] = ()
+    post_selection_cohort_top_k_per_cohort: int = 0
+    post_selection_total_max: int = 0
+    post_selection_min_score_pct_of_top: float = 0.0
     hard_veto: bool = False
     require_liquidity: bool = False
     max_risk_score: float | None = None
@@ -369,6 +375,8 @@ class SelectionPolicy:
 
     def __post_init__(self) -> None:
         for field_name in (
+            "allowed_primary_cohorts",
+            "post_selection_allowed_primary_cohorts",
             "commercial_cohort_target_cohorts",
             "borrow_overlay_target_cohorts",
             "hard_veto_reasons",
@@ -376,6 +384,18 @@ class SelectionPolicy:
             "targeted_soft_weakness_penalty_reasons",
         ):
             object.__setattr__(self, field_name, tuple(str(item) for item in getattr(self, field_name)))
+        object.__setattr__(self, "cohort_top_k_per_cohort", max(0, int(self.cohort_top_k_per_cohort)))
+        object.__setattr__(
+            self,
+            "post_selection_cohort_top_k_per_cohort",
+            max(0, int(self.post_selection_cohort_top_k_per_cohort)),
+        )
+        object.__setattr__(self, "post_selection_total_max", max(0, int(self.post_selection_total_max)))
+        object.__setattr__(
+            self,
+            "post_selection_min_score_pct_of_top",
+            max(0.0, min(100.0, float(self.post_selection_min_score_pct_of_top))),
+        )
         if self.hard_veto and not self.hard_veto_reasons:
             raise ValueError(
                 f"SelectionPolicy '{self.policy_name}' has hard_veto=True but no hard_veto_reasons. "
@@ -1927,6 +1947,12 @@ def policy_signature(policy: SelectionPolicy) -> tuple[Any, ...]:
         policy.policy_name,
         bool(policy.hard_veto),
         bool(policy.require_liquidity),
+        tuple(sorted(policy.allowed_primary_cohorts)),
+        int(policy.cohort_top_k_per_cohort),
+        tuple(sorted(policy.post_selection_allowed_primary_cohorts)),
+        int(policy.post_selection_cohort_top_k_per_cohort),
+        int(policy.post_selection_total_max),
+        round(float(policy.post_selection_min_score_pct_of_top), 6),
         None if policy.max_risk_score is None else round(float(policy.max_risk_score), 6),
         round(float(policy.hard_weakness_penalty), 6),
         round(float(policy.soft_weakness_penalty), 6),
@@ -1992,6 +2018,16 @@ def policy_from_dict(raw: dict[str, Any], *, fallback_name: str) -> SelectionPol
     policy = SelectionPolicy(
         policy_name=str(raw.get("policy_name") or raw.get("name") or fallback_name),
         description=str(raw.get("description") or "Custom calibration selection policy."),
+        allowed_primary_cohorts=tuple(normalize_string_list(raw.get("allowed_primary_cohorts"), [])),
+        cohort_top_k_per_cohort=int(to_float(raw.get("cohort_top_k_per_cohort"), 0.0) or 0.0),
+        post_selection_allowed_primary_cohorts=tuple(
+            normalize_string_list(raw.get("post_selection_allowed_primary_cohorts"), [])
+        ),
+        post_selection_cohort_top_k_per_cohort=int(
+            to_float(raw.get("post_selection_cohort_top_k_per_cohort"), 0.0) or 0.0
+        ),
+        post_selection_total_max=int(to_float(raw.get("post_selection_total_max"), 0.0) or 0.0),
+        post_selection_min_score_pct_of_top=float(raw.get("post_selection_min_score_pct_of_top", 0.0)),
         hard_veto=as_bool(raw.get("hard_veto", False), False),
         require_liquidity=as_bool(raw.get("require_liquidity", False), False),
         max_risk_score=max_risk,
@@ -2066,9 +2102,16 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
     raw_policies = cfg_get(config, "calibration.tier1.selection_policies", None)
     policies: list[SelectionPolicy] = []
     if isinstance(raw_policies, list) and raw_policies:
+        raw_baseline = SelectionPolicy(
+            policy_name="raw_legacy_score",
+            description="Legacy score ordering; broad binary weakness remains diagnostic only.",
+        )
+        policies.append(raw_baseline)
         for idx, raw in enumerate(raw_policies, start=1):
             if isinstance(raw, dict):
-                policies.append(policy_from_dict(raw, fallback_name=f"custom_policy_{idx}"))
+                policy = policy_from_dict(raw, fallback_name=f"custom_policy_{idx}")
+                if policy.policy_name != raw_baseline.policy_name:
+                    policies.append(policy)
         if policies:
             return policies
 
@@ -2452,6 +2495,14 @@ def policy_fields(policy: SelectionPolicy) -> dict[str, Any]:
     return {
         "selection_policy_name": policy.policy_name,
         "selection_policy_description": policy.description,
+        "selection_policy_allowed_primary_cohorts": "|".join(policy.allowed_primary_cohorts),
+        "selection_policy_cohort_top_k_per_cohort": policy.cohort_top_k_per_cohort,
+        "selection_policy_post_selection_allowed_primary_cohorts": "|".join(
+            policy.post_selection_allowed_primary_cohorts
+        ),
+        "selection_policy_post_selection_cohort_top_k_per_cohort": policy.post_selection_cohort_top_k_per_cohort,
+        "selection_policy_post_selection_total_max": policy.post_selection_total_max,
+        "selection_policy_post_selection_min_score_pct_of_top": policy.post_selection_min_score_pct_of_top,
         "selection_policy_hard_veto": policy.hard_veto,
         "selection_policy_require_liquidity": policy.require_liquidity,
         "selection_policy_max_risk_score": "" if policy.max_risk_score is None else policy.max_risk_score,
@@ -2490,6 +2541,12 @@ def policy_output_keys() -> list[str]:
     return [
         "selection_policy_name",
         "selection_policy_description",
+        "selection_policy_allowed_primary_cohorts",
+        "selection_policy_cohort_top_k_per_cohort",
+        "selection_policy_post_selection_allowed_primary_cohorts",
+        "selection_policy_post_selection_cohort_top_k_per_cohort",
+        "selection_policy_post_selection_total_max",
+        "selection_policy_post_selection_min_score_pct_of_top",
         "selection_policy_hard_veto",
         "selection_policy_require_liquidity",
         "selection_policy_max_risk_score",
@@ -2999,7 +3056,10 @@ def short_term_catalyst_timing_fields(observation: Mapping[str, Any]) -> dict[st
 
 def raw_score_value(raw_scores: dict[str, Any], row: dict[str, Any], key: str) -> tuple[float, bool]:
     value = first_float(raw_scores.get(key), row.get(key))
-    return clamp(value), value is None
+    if value is None:
+        # Missing risk must not become 0.0, which means "best possible risk" downstream.
+        return (100.0 if key == "risk_score_raw" else 0.0), True
+    return clamp(value), False
 
 
 def optional_raw_score_value(
@@ -3147,6 +3207,15 @@ def build_binary_weakness_fields(
         "diag_mild_soft_weakness_reasons": "|".join(mild_soft_reasons),
         "diag_normal_clinical_binary_flag": 1.0 if normal_binary else 0.0,
         "diag_illiquid_weakness_flag": 1.0 if "illiquid" in hard_reasons else 0.0,
+    }
+
+
+def diagnostic_commercial_risk_fields(commercial_risk_diag: Mapping[str, Any]) -> dict[str, Any]:
+    """Flatten commercial-risk diagnostics without writing nested sub-score dicts."""
+    return {
+        f"diag_{key}": value
+        for key, value in commercial_risk_diag.items()
+        if key != "commercial_risk_sub_scores"
     }
 
 
@@ -3369,7 +3438,9 @@ def load_observations(
                 raw_scores.get("indication_success_multiplier"),
                 indication_shadow.get("multiplier"),
                 1.0,
-            ) or 1.0
+            )
+            if indication_success_multiplier is None:
+                indication_success_multiplier = 1.0
             indication_weighted_phase2_3_component = first_float(
                 row.get("indication_weighted_phase2_3_component"),
                 raw_scores.get("indication_weighted_phase2_3_component"),
@@ -4229,12 +4300,7 @@ def load_observations(
                     high_risk_threshold=float(commercial_risk_settings.get("high_risk_threshold", 75.0)),
                 )
             )
-            observation.update(
-                {
-                    f"diag_{key}": value
-                    for key, value in commercial_risk_diag.items()
-                }
-            )
+            observation.update(diagnostic_commercial_risk_fields(commercial_risk_diag))
             observations.append(observation)
     return observations
 
@@ -4320,6 +4386,8 @@ def load_bars(
     source_priority = {source: idx for idx, source in enumerate(market_sources)}
     grouped: dict[tuple[str, str], list[Bar]] = defaultdict(list)
     ordered_sources = [source for source in market_sources if source]
+    if not ordered_sources:
+        raise ValueError("load_bars requires at least one non-empty market data source")
     ordered_tickers = sorted(tickers)
     ticker_chunk_size = max(1, SQLITE_PARAM_CHUNK_SIZE - len(ordered_sources) - 1)
     for ticker_chunk in chunked(ordered_tickers, ticker_chunk_size):
@@ -4397,6 +4465,41 @@ def apply_delisted_price_series_overlay(
             bars_by_ticker[alias] = series
             applied += 1
     return applied
+
+
+def count_applicable_delisted_price_overlays(
+    conn: sqlite3.Connection,
+    *,
+    price_ticker_alias: dict[str, str],
+    min_date: date,
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Count alias overlays that should have bars in the calibration window."""
+    delisted_by_alias = {
+        alias: canonical for alias, canonical in price_ticker_alias.items() if alias != canonical
+    }
+    if not delisted_by_alias:
+        return 0
+    delisted_source = str(
+        cfg_get(config or {}, "delisted_calibration.source_rules.price_source", "norgate_us_equities_total_return")
+        or "norgate_us_equities_total_return"
+    ).strip()
+    available_canonicals: set[str] = set()
+    canonical_values = sorted(set(delisted_by_alias.values()))
+    for ticker_chunk in chunked(canonical_values, SQLITE_PARAM_CHUNK_SIZE - 2):
+        placeholders = ",".join("?" for _ in ticker_chunk)
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT ticker
+            FROM market_bars_daily
+            WHERE source = ?
+              AND date(bar_date) >= date(?)
+              AND ticker IN ({placeholders})
+            """,
+            (delisted_source, min_date.isoformat(), *ticker_chunk),
+        ).fetchall()
+        available_canonicals.update(normalize_ticker(row["ticker"]) for row in rows)
+    return sum(1 for canonical in delisted_by_alias.values() if canonical in available_canonicals)
 
 
 def terminal_recovery_from_row(row: Mapping[str, Any]) -> tuple[float | None, str]:
@@ -5398,11 +5501,14 @@ def policy_adjusted_score(
     )
     illiquid = 1.0 if (to_float(row.get("diag_illiquid_weakness_flag"), 0.0) or 0.0) > 0.0 else 0.0
     liquidity_ok = to_float(row.get("diag_liquidity_ok"))
+    allowed_cohorts = set(policy.allowed_primary_cohorts)
+    row_cohort_values = {str(row.get("biotech_primary_cohort") or "")}
+    if allowed_cohorts and not row_cohort_values.intersection(allowed_cohorts):
+        return None, scores
     if policy.hard_veto and hard_veto_match:
         return None, scores
     if policy.require_liquidity and liquidity_ok != 1.0:
         return None, scores
-    row_cohort_values = {str(row.get("biotech_primary_cohort") or "")}
     commercial_cohort_target = bool(row_cohort_values.intersection(set(policy.commercial_cohort_target_cohorts)))
     borrow_target_cohorts = set(policy.borrow_overlay_target_cohorts)
     borrow_cohort_target = (
@@ -5585,6 +5691,79 @@ def annotate_selected_row(
     return out
 
 
+def apply_policy_cohort_top_k_limit(
+    ranked_rows: list[dict[str, Any]],
+    policy: SelectionPolicy,
+) -> list[dict[str, Any]]:
+    """Limit ranked rows to the first K names per primary cohort when configured."""
+    top_k = int(policy.cohort_top_k_per_cohort)
+    if top_k <= 0:
+        return ranked_rows
+    counts: dict[str, int] = defaultdict(int)
+    out: list[dict[str, Any]] = []
+    for row in ranked_rows:
+        cohort = str(row.get("biotech_primary_cohort") or "").strip()
+        if counts[cohort] >= top_k:
+            continue
+        counts[cohort] += 1
+        out.append(row)
+    return out
+
+
+def apply_policy_post_selection_filter(
+    ranked_rows: list[dict[str, Any]],
+    policy: SelectionPolicy,
+    *,
+    top_n: int,
+) -> list[dict[str, Any]]:
+    """Filter the global Top-N list by cohort, score floor, and adaptive caps after ranking."""
+    pool = ranked_rows[:top_n]
+    allowed_cohorts = set(policy.post_selection_allowed_primary_cohorts)
+    if allowed_cohorts:
+        pool = [
+            row
+            for row in pool
+            if str(row.get("biotech_primary_cohort") or "").strip() in allowed_cohorts
+        ]
+    score_floor_pct = float(policy.post_selection_min_score_pct_of_top)
+    if 0.0 < score_floor_pct <= 100.0 and pool:
+        top_score = next(
+            (score for row in pool if (score := to_float(row.get("candidate_selection_score"))) is not None),
+            None,
+        )
+        if top_score is not None and top_score > 0.0:
+            min_score = top_score * score_floor_pct / 100.0
+            pool = [
+                row
+                for row in pool
+                if (score := to_float(row.get("candidate_selection_score"))) is not None and score >= min_score
+            ]
+    top_k = int(policy.post_selection_cohort_top_k_per_cohort)
+    if top_k > 0:
+        counts: dict[str, int] = defaultdict(int)
+        out: list[dict[str, Any]] = []
+        for row in pool:
+            cohort = str(row.get("biotech_primary_cohort") or "").strip()
+            if counts[cohort] >= top_k:
+                continue
+            counts[cohort] += 1
+            out.append(row)
+        pool = out
+    total_max = int(policy.post_selection_total_max)
+    if total_max > 0:
+        pool = pool[:total_max]
+    return pool
+
+
+def policy_uses_post_selection_filter(policy: SelectionPolicy) -> bool:
+    return (
+        bool(policy.post_selection_allowed_primary_cohorts)
+        or int(policy.post_selection_cohort_top_k_per_cohort) > 0
+        or int(policy.post_selection_total_max) > 0
+        or float(policy.post_selection_min_score_pct_of_top) > 0.0
+    )
+
+
 def select_top_rows(
     date_rows: list[dict[str, Any]],
     spec: WeightSpec,
@@ -5631,7 +5810,10 @@ def select_top_rows_and_policy_eligible(
             )
         )
     candidates.sort(key=lambda item: (-item[0], item[1]))
-    return [row for _, _, row in candidates[:top_n]], policy_eligible
+    ranked_rows = [row for _, _, row in candidates]
+    if policy_uses_post_selection_filter(policy):
+        return apply_policy_post_selection_filter(ranked_rows, policy, top_n=top_n), policy_eligible
+    return apply_policy_cohort_top_k_limit(ranked_rows, policy)[:top_n], policy_eligible
 
 
 def split_rows_by_completed_return_date(
@@ -5849,7 +6031,10 @@ def build_candidate_grid_rows_for_top_ns(
         candidates.sort(key=lambda item: (-item[0], item[1]))
         ranked_rows = [row for _, _, row in candidates]
         for top_n in clean_top_ns:
-            selected = ranked_rows[:top_n]
+            if policy_uses_post_selection_filter(job.policy):
+                selected = apply_policy_post_selection_filter(ranked_rows, job.policy, top_n=top_n)
+            else:
+                selected = apply_policy_cohort_top_k_limit(ranked_rows, job.policy)[:top_n]
             if not selected:
                 continue
             state = states[top_n]
@@ -7530,6 +7715,22 @@ def read_json_payload(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def file_sha256(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    digest = hashlib.sha256()
+    with open(filesystem_path(path), "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def file_mtime_ns(path: Path) -> int:
+    if not path.exists() or not path.is_file():
+        return 0
+    return path.stat().st_mtime_ns
+
+
 def progress_dir(output_dir: Path) -> Path:
     return output_dir / "_progress"
 
@@ -7798,6 +7999,11 @@ def main() -> None:
         observation_cache_path = progress_csv_path(output_dir, "tier1_observations_with_forward_returns.csv")
         observation_cache_manifest_path = progress_csv_path(output_dir, "tier1_observations_with_forward_returns_manifest.json")
         terminal_events_by_ticker = load_terminal_events()
+        calibration_cohort_settings = cfg_get(config, "biotech_scoring.calibration_cohorts", {}) or {}
+        calibration_cohorts_csv = resolve_path(
+            calibration_cohort_settings.get("csv", "data/biotech_calibration_cohorts.csv"),
+            base_dir=base_dir,
+        )
         # Scoring-relevant config subtrees that shape observation content but
         # are not captured by the explicit signature fields below.  Hashing
         # them ensures a config change invalidates --resume observation caches.
@@ -7805,11 +8011,33 @@ def main() -> None:
             "sec_event_weights": cfg_get(config, "biotech_features.sec_event_weights", {}) or {},
             "sec_event_recency_decay": cfg_get(config, "biotech_features.sec_event_recency_decay", {}) or {},
             "sec_event_parser_lookback_days": cfg_get(config, "sec_event_parser.lookback_days", 730),
+            "commercial_stage_revenue_min": cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000.0),
+            "data_quality_adjustment": cfg_get(config, "biotech_scoring.data_quality_adjustment", {}) or {},
+            "quality_adjusted_valuation": cfg_get(config, "commercial_value.quality_adjusted_valuation", {}) or {},
+            "quality_adjusted_guidance": cfg_get(config, "forward_guidance.quality_adjusted_guidance", {}) or {},
+            "use_quality_adjusted_valuation_component": cfg_get(
+                config,
+                "biotech_scoring.use_quality_adjusted_valuation_component",
+                True,
+            ),
+            "use_quality_adjusted_guidance_component": cfg_get(
+                config,
+                "biotech_scoring.use_quality_adjusted_guidance_component",
+                True,
+            ),
             "borrow_availability_validation": cfg_get(config, "biotech_reports.borrow_availability_validation", {}) or {},
             "borrow_overlay_thresholds": cfg_get(config, "calibration.tier1.borrow_overlay_thresholds", {}) or {},
             "commercial_risk_overlay": cfg_get(config, "biotech_scoring.commercial_risk_overlay", {}) or {},
+            "production_policy": cfg_get(config, "biotech_scoring.production_policy", {}) or {},
+            "commercial_value": cfg_get(config, "commercial_value", {}) or {},
+            "financial_survival": cfg_get(config, "financial_survival", {}) or {},
+            "governance_event_features": cfg_get(config, "governance_event_features", {}) or {},
             "rank_quality_caps": cfg_get(config, "biotech_scoring.rank_quality_caps", {}) or {},
             "missing_score_defaults": cfg_get(config, "biotech_scoring.missing_score_defaults", {}) or {},
+            "calibration_cohorts": calibration_cohort_settings,
+            "calibration_cohorts_csv_path": str(calibration_cohorts_csv),
+            "calibration_cohorts_csv_sha256": file_sha256(calibration_cohorts_csv),
+            "calibration_cohorts_csv_mtime_ns": file_mtime_ns(calibration_cohorts_csv),
         }
         scoring_config_hash = hashlib.sha256(
             json.dumps(scoring_config_subtrees, sort_keys=True, default=str).encode("utf-8")
@@ -7888,13 +8116,26 @@ def main() -> None:
             if benchmark_ticker:
                 market_tickers.add(benchmark_ticker)
             bars_by_ticker = load_bars(conn, tickers=market_tickers, min_date=min(asof_dates), market_sources=market_sources)
-            apply_delisted_price_series_overlay(
+            applicable_delisted_overlay_count = count_applicable_delisted_price_overlays(
+                conn,
+                price_ticker_alias=price_ticker_alias,
+                min_date=min(asof_dates),
+                config=config,
+            )
+            delisted_overlay_applied = apply_delisted_price_series_overlay(
                 conn,
                 bars_by_ticker,
                 price_ticker_alias=price_ticker_alias,
                 min_date=min(asof_dates),
                 config=config,
             )
+            if applicable_delisted_overlay_count and delisted_overlay_applied < applicable_delisted_overlay_count:
+                LOGGER.warning(
+                    "Delisted price overlay applied %d/%d applicable alias series; missing overlay bars may allow ticker-reuse "
+                    "contamination or missing delisted forward returns. Check delisted_calibration.source_rules.price_source.",
+                    delisted_overlay_applied,
+                    applicable_delisted_overlay_count,
+                )
             add_forward_returns(
                 observations,
                 bars_by_ticker,

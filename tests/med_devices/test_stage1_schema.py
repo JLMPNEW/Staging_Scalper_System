@@ -3,8 +3,11 @@ from __future__ import annotations
 import sqlite3
 import importlib.util
 import sys
+from datetime import date
 from pathlib import Path
 from types import ModuleType
+
+import pytest
 
 from med_devices.core.db import connect, init_db
 from med_devices.core.market_policy import is_adjusted_price_row
@@ -30,6 +33,14 @@ def load_script_module(filename: str, module_name: str) -> ModuleType:
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_finra_short_interest_parse_asof_rejects_malformed_dates() -> None:
+    module = load_script_module("65_update_med_device_finra_short_interest.py", "med_device_finra_parse_asof_test")
+
+    assert module.parse_asof("2026-06-30", field_name="history") == date(2026, 6, 30)
+    with pytest.raises(ValueError, match="Invalid history"):
+        module.parse_asof("not-a-date", field_name="history")
 
 
 def test_stage1_schema_creates_independent_med_device_tables(tmp_path: Path) -> None:

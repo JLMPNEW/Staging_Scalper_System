@@ -158,7 +158,8 @@ def medtech_pure_play_flag(industry: str, subsector: str) -> int:
     return int(bool(labels & pure_play_labels))
 
 
-def parse_universe_rows(path: Path, *, config: dict[str, Any]) -> list[UniverseCompany]:
+def parse_universe_rows(path: Path, *, config: dict[str, Any] | None = None) -> list[UniverseCompany]:
+    config = config or {}
     rows = read_csv_flexible(path)
     companies: list[UniverseCompany] = []
     seen: set[str] = set()

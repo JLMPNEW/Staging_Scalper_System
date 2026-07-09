@@ -35,10 +35,10 @@ from portfolio_layer.macro.contract import (  # noqa: E402
     MACRO_STOCK_FIELDS,
     finite_or_blank,
     int_or_blank,
+    macro_serving_content_sha256,
     open_macro_serving_db,
     rows_at_latest,
     single_latest_row,
-    sqlite_snapshot_inputs,
     staleness_days,
 )
 from portfolio_layer.macro.taxonomy import (  # noqa: E402
@@ -84,7 +84,7 @@ def _macro_serving_path(default_path: Path, override: Path | None) -> Path:
     return ensure_not_prod_path(default_path, label="macro serving db")
 
 
-def _source_hashes(config_path: Path, serving_db_path: Path, run_dir: Path) -> dict[str, str]:
+def _source_hashes(config_path: Path, serving_db_path: Path, run_dir: Path, run_as_of: str) -> dict[str, str]:
     paths = {
         "config.yaml": config_path,
         "stocks_scores.csv": run_dir / "stocks_scores.csv",
@@ -92,12 +92,13 @@ def _source_hashes(config_path: Path, serving_db_path: Path, run_dir: Path) -> d
         "optimizer/target_weights.csv": run_dir / "optimizer" / "target_weights.csv",
         "optimizer/optimizer_manifest.json": run_dir / "optimizer" / "optimizer_manifest.json",
     }
-    paths.update(sqlite_snapshot_inputs(serving_db_path))
     for name in SOURCE_FILES:
         path = PACKAGE_ROOT / "macro" / name
         if path.exists():
             paths[f"source/{name}"] = path
-    return {name: sha256_file(path) for name, path in paths.items() if path.exists()}
+    hashes = {name: sha256_file(path) for name, path in paths.items() if path.exists()}
+    hashes["macro_serving.sqlite:content"] = macro_serving_content_sha256(serving_db_path, run_as_of)
+    return hashes
 
 
 def _load_sealed_optimizer_targets(run_dir: Path) -> tuple[list[dict[str, str]] | None, list[str]]:
@@ -458,7 +459,7 @@ def main() -> int:
             "stock_fallback_rows": len(fallback_tickers),
             "eligible_stock_fallback_rows": len(fallback_tickers & eligible_tickers),
         },
-        "inputs_sha256": _source_hashes(config_path, serving_db_path, run_dir),
+        "inputs_sha256": _source_hashes(config_path, serving_db_path, run_dir, run_as_of),
         "files": {
             name: {"sha256": sha256_file(path), "rows": sum(1 for _ in path.open("r", encoding="utf-8")) - 1}
             for name, path in paths_out.items()

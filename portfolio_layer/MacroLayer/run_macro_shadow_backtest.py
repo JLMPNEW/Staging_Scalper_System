@@ -27,54 +27,15 @@ from macro_raw_config import (  # noqa: E402
     resolve_path,
 )
 from macro_serving_common import resolve_serving_db_path  # noqa: E402
+from staging_portfolio_adapter import load_staging_prices  # noqa: E402
 
 logger = logging.getLogger(__name__)
-
-_BACKTEST_IMPORT_ERROR: Exception | None = None
-_BACKTEST: dict[str, Any] = {}
-try:
-    from BackTest.config_loader import load_config as _load_backtest_config
-    from BackTest.prices import load_prices as _load_prices
-
-    _BACKTEST.update({"load_config": _load_backtest_config, "load_prices": _load_prices})
-except ModuleNotFoundError as exc:
-    _BACKTEST_IMPORT_ERROR = exc
-
-_TIER1_IMPORT_ERROR: Exception | None = None
-_TIER1: dict[str, Any] = {}
-try:
-    from tier1_common import _get_tier1_cfg as _tier1_get_cfg
-    from tier1_portfolio_optimizer import load_yaml as _tier1_load_yaml
-
-    _TIER1.update({"get_cfg": _tier1_get_cfg, "load_yaml": _tier1_load_yaml})
-except ModuleNotFoundError as exc:
-    _TIER1_IMPORT_ERROR = exc
-
-
-def _require_backtest(name: str) -> Any:
-    if name in _BACKTEST:
-        return _BACKTEST[name]
-    raise RuntimeError(
-        "The copied MacroLayer no longer loads BackTest at import time. "
-        "Shadow backtests require a Staging-owned price adapter before use."
-    ) from _BACKTEST_IMPORT_ERROR
-
-
-def _require_tier1(name: str) -> Any:
-    if name in _TIER1:
-        return _TIER1[name]
-    raise RuntimeError(
-        "The copied MacroLayer no longer loads tier1 optimizer modules at import time. "
-        "Use the portfolio-layer optimizer adapter for Stage 7 integration."
-    ) from _TIER1_IMPORT_ERROR
 
 
 @dataclass(frozen=True)
 class ShadowBacktestConfig:
     output_dir: Path
     base_config_path: Path
-    backtest_config_path: Path
-    price_cache_path: Path
     benchmark_ticker: str
     start_date: date | None
     end_date: date | None
@@ -102,8 +63,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
-    load_yaml = _require_tier1("load_yaml")
-    return load_yaml(str(path))
+    _, data = load_macro_raw_config(path)
+    return data
 
 
 def _resolve_layer_config(cfg: dict[str, Any], config_path: Path, args: argparse.Namespace) -> ShadowBacktestConfig:
@@ -114,24 +75,7 @@ def _resolve_layer_config(cfg: dict[str, Any], config_path: Path, args: argparse
     base_config_path = resolve_path(config_path, str(raw_cfg.get("base_config_path", "config.yaml")))
     if base_config_path is None:
         raise ValueError("shadow_validation_layer.base_config_path could not be resolved.")
-    backtest_config_path = resolve_path(
-        config_path,
-        str(raw_cfg.get("backtest_config_path", cfg_get(cfg, "industry_macro_layer", "backtest_config_path", default="BackTest/config_backtest.yaml"))),
-    )
-    if backtest_config_path is None:
-        raise ValueError("shadow_validation_layer.backtest_config_path could not be resolved.")
-
-    load_backtest_config = _require_backtest("load_config")
-    backtest_cfg = load_backtest_config(backtest_config_path)
-    price_cache_raw = raw_cfg.get("price_cache_path", None) or cfg_get(backtest_cfg, "prices", "cache_path", default=None)
-    if price_cache_raw is None or str(price_cache_raw).strip() == "":
-        raise ValueError("shadow_validation_layer.price_cache_path or BackTest prices.cache_path is required.")
-    price_cache_path = Path(str(price_cache_raw)).expanduser()
-    if not price_cache_path.is_absolute():
-        price_cache_path = (REPO_ROOT / price_cache_path).resolve()
-
-    get_tier1_cfg = _require_tier1("get_cfg")
-    base_cfg = get_tier1_cfg(_load_yaml(base_config_path))
+    base_cfg = _load_yaml(base_config_path)
     universe_cfg = dict(base_cfg.get("universe", {}) or {})
     allocation_cfg = dict(base_cfg.get("allocation", {}) or {})
     cash_budget = dict(dict(allocation_cfg.get("region_budgets", {}) or {}).get("CASH", {}) or {})
@@ -158,9 +102,7 @@ def _resolve_layer_config(cfg: dict[str, Any], config_path: Path, args: argparse
     return ShadowBacktestConfig(
         output_dir=output_dir,
         base_config_path=base_config_path,
-        backtest_config_path=backtest_config_path,
-        price_cache_path=price_cache_path,
-        benchmark_ticker=str(raw_cfg.get("benchmark_ticker", cfg_get(backtest_cfg, "prices", "benchmark_ticker", default="SPY"))).upper().strip(),
+        benchmark_ticker=str(raw_cfg.get("benchmark_ticker", "SPY")).upper().strip(),
         start_date=start_date,
         end_date=end_date,
         holding_period_trading_days=max(1, int(raw_cfg.get("holding_period_trading_days", 5))),
@@ -178,8 +120,7 @@ def _resolve_layer_config(cfg: dict[str, Any], config_path: Path, args: argparse
 
 
 def _rating_quotas(base_config_path: Path) -> dict[str, int]:
-    get_tier1_cfg = _require_tier1("get_cfg")
-    cfg = get_tier1_cfg(_load_yaml(base_config_path))
+    cfg = _load_yaml(base_config_path)
     universe = dict(cfg.get("universe", {}) or {})
     raw = dict(universe.get("per_rating_quota_long_only", {}) or {})
     return {str(k).strip(): max(0, int(v)) for k, v in raw.items() if str(k).strip() and int(v) > 0}
@@ -292,7 +233,8 @@ def _select_with_quotas(day: pd.DataFrame, *, score_col: str, quotas: dict[str, 
     selected = pd.concat(selected_parts, axis=0) if selected_parts else pd.DataFrame(columns=day.columns)
     if len(selected) < top_n:
         fill = day.loc[~day.index.isin(selected_idx)].sort_values(score_col, ascending=False).head(top_n - len(selected))
-        selected = pd.concat([selected, fill], axis=0)
+        frames = [frame for frame in (selected, fill) if not frame.empty]
+        selected = pd.concat(frames, axis=0) if frames else pd.DataFrame(columns=day.columns)
     return selected.sort_values(score_col, ascending=False).head(top_n).copy()
 
 
@@ -377,14 +319,8 @@ def _load_price_panel(holdings: pd.DataFrame, layer_cfg: ShadowBacktestConfig, b
     dates = pd.to_datetime(holdings["as_of_date"], errors="coerce").dropna()
     start = dates.min() - pd.Timedelta(days=10)
     end = dates.max() + pd.Timedelta(days=max(30, layer_cfg.holding_period_trading_days * 3))
-    logger.info("Loading cached prices for %d tickers from %s to %s", len(tickers), start.date(), end.date())
-    load_prices = _require_backtest("load_prices")
-    return load_prices(
-        cache_path=layer_cfg.price_cache_path,
-        tickers=tickers,
-        start_date=start,
-        end_date=end,
-    )
+    logger.info("Loading Staging prices for %d tickers from %s to %s", len(tickers), start.date(), end.date())
+    return load_staging_prices(tickers=tickers, start_date=start, end_date=end, freshness_as_of=dates.max())
 
 
 def _trade_date_map(signal_dates: pd.Series, price_index: pd.DatetimeIndex, holding_period_days: int) -> pd.DataFrame:
@@ -401,8 +337,7 @@ def _trade_date_map(signal_dates: pd.Series, price_index: pd.DatetimeIndex, hold
 
 
 def _cash_period_return(base_config_path: Path, holding_days: int) -> float:
-    get_tier1_cfg = _require_tier1("get_cfg")
-    cfg = get_tier1_cfg(_load_yaml(base_config_path))
+    cfg = _load_yaml(base_config_path)
     cash_ann = float(dict(cfg.get("cash", {}) or {}).get("annual_yield", 0.0))
     return (1.0 + cash_ann) ** (float(holding_days) / 252.0) - 1.0
 

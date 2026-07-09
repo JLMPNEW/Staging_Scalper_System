@@ -48,6 +48,7 @@ def test_finra_short_interest_records_maps_current_short_position(monkeypatch) -
                 "settlementDate": "2025-01-15",
                 "currentShortShareNumber": 1000,
                 "averageShortShareNumber": 250,
+                "averageDailyVolumeQuantity": 500,
                 "daysToCoverNumber": None,
             }
         ]
@@ -65,7 +66,7 @@ def test_finra_short_interest_records_maps_current_short_position(monkeypatch) -
     assert len(rows) == 1
     assert rows[0][0] == "AAA"
     assert rows[0][4] == 1000
-    assert rows[0][7] == 4
+    assert rows[0][7] == 2
     assert calls[0]["compareFilters"][0]["fieldName"] == "settlementDate"  # type: ignore[index]
 
 
@@ -89,6 +90,30 @@ def test_finra_equity_short_interest_file_sync_and_export(tmp_path, monkeypatch)
     monkeypatch.setattr(api_collectors, "http_request", lambda *args, **kwargs: payload)
     with connect(db_path) as conn:
         init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO short_interest_snapshots(
+                ticker, asof_date, settlement_date, publication_date,
+                short_interest_shares, float_shares, short_interest_pct_float, days_to_cover,
+                source, source_file, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "AAA",
+                "2025-01-15",
+                "2025-01-15",
+                "2025-01-15",
+                1000,
+                None,
+                None,
+                3,
+                "finra_equity_short_interest_files",
+                "stale.csv",
+                "2025-01-15T00:00:00Z",
+                "2025-01-15T00:00:00Z",
+            ),
+        )
         result = sync_finra_equity_short_interest_files(
             conn,
             tickers_csv=universe_csv,
@@ -99,9 +124,17 @@ def test_finra_equity_short_interest_file_sync_and_export(tmp_path, monkeypatch)
             user_agent="unit",
             sleep_sec=0.0,
         )
-        row = conn.execute("SELECT * FROM short_interest_snapshots").fetchone()
+        row_count = conn.execute(
+            "SELECT COUNT(*) FROM short_interest_snapshots WHERE source = ?",
+            ("finra_equity_short_interest_files",),
+        ).fetchone()[0]
+        row = conn.execute(
+            "SELECT * FROM short_interest_snapshots WHERE source = ?",
+            ("finra_equity_short_interest_files",),
+        ).fetchone()
 
     assert result.rows == 1
+    assert row_count == 1
     assert row["ticker"] == "AAA"
     assert row["asof_date"] == "2025-01-27"
     assert row["settlement_date"] == "2025-01-15"

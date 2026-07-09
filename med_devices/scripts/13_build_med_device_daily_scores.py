@@ -420,17 +420,17 @@ FIELDNAMES = [
 
 @dataclass
 class ScoreRow:
-    asof_date: str
-    scoring_model_version: str
-    score_model_version: str
-    model_family: str
-    model_version: str
-    scoring_contract_version: str
-    rank: int
-    company_id: int
-    ticker: str
-    company_name: str
-    subsector: str
+    asof_date: str = ""
+    scoring_model_version: str = ""
+    score_model_version: str = ""
+    model_family: str = "med_devices"
+    model_version: str = ""
+    scoring_contract_version: str = "stocks_scores_v1"
+    rank: int = 0
+    company_id: int = 0
+    ticker: str = ""
+    company_name: str = ""
+    subsector: str = ""
     sector: str = ""
     industry: str = ""
     country: str = ""
@@ -679,6 +679,20 @@ class ScoreRow:
     sentiment_proxy_available: bool = False
     sentiment_proxy_source: str = ""
     sentiment_proxy_input: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.score_model_version:
+            self.score_model_version = self.scoring_model_version or self.model_version
+        if not self.model_version:
+            self.model_version = self.score_model_version or self.scoring_model_version
+        if not self.scoring_model_version:
+            self.scoring_model_version = self.score_model_version or self.model_version
+        if not self.model_family:
+            self.model_family = "med_devices"
+        if not self.scoring_contract_version:
+            self.scoring_contract_version = "stocks_scores_v1"
+        if self.composite_score == 0.0 and self.raw_composite_score > 0.0:
+            self.composite_score = self.raw_composite_score
 
 
 @dataclass(frozen=True)

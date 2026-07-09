@@ -961,11 +961,24 @@ biotech_scoring:
     runner_up_candidate_id: "tier1_b011ee62a2ea"
     notes:
       - "Tier-1 production ranking is calibrated for a 120-trading-day primary horizon."
-      - "Top-10 production selector uses the core structural veto policy promoted from the 2026-05-29 restated 120-trading-day holdout."
+      - "Raw production score still uses the core structural veto policy; live portfolio eligibility is further gated by portfolio_candidate_policy."
       - "Shadow Top-20 research pool uses the challenger model for broader idea discovery; it is not the concentrated allocation selector."
       - "Core structural weakness is vetoed for rank; event and configured soft weakness remain diagnostics under the selected production policy."
       - "Rank-quality cap veto keeps business-shock and severe-deterioration caps out of investable ranked lists when the cap is at or below the configured threshold."
       - "Alpha and multibagger scores remain secondary context until Phase 2 calibration proves orthogonal value."
+  portfolio_candidate_policy:
+    enabled: true
+    name: "post_adaptive_top4_late_platform_max8_raw"
+    description: "Promoted live allocation gate: rank global Top 20 by current production score, then keep late-clinical/platform candidates with max 4 per cohort and max 8 total."
+    rank_top_n: 20
+    allowed_primary_cohorts:
+      - "late_clinical_pivotal_or_registrational"
+      - "platform_partnered_modality_pipeline"
+    cohort_top_k_per_cohort: 4
+    total_max: 8
+    min_score_pct_of_top: 0.0
+    selected_reason: "promoted_post_adaptive_late_platform_policy"
+    excluded_reason: "excluded_by_promoted_post_adaptive_late_platform_policy"
   convex_risk_penalty_enabled: true
   risk_penalty_convexity: 0.35
   risk_penalty_inflection: 50.0
@@ -1569,6 +1582,41 @@ calibration:
         commercial_cohort_expected_return_bonus: 2.0
         commercial_cohort_target_cohorts: "commercial_turnaround_or_unprofitable_growth"
         borrow_distress_penalty: 10.0
+      # Diagnostic-only cohort-gated policies from the July 2026 same-cohort
+      # edge report. These do not affect production scoring; they allow the
+      # calibration harness to test whether the score only works inside specific
+      # biotech economic-driver cohorts.
+      - name: "post_top3_late_platform_raw"
+        description: "Diagnostic raw score: global Top-N first, then late-clinical/platform cohorts with max 3 names per cohort/date."
+        post_selection_allowed_primary_cohorts: "late_clinical_pivotal_or_registrational|platform_partnered_modality_pipeline"
+        post_selection_cohort_top_k_per_cohort: 3
+      - name: "post_adaptive_top4_late_platform_max8_raw"
+        description: "Adaptive raw score: global Top-N first, then late-clinical/platform cohorts with max 4 names per cohort and max 8 total names/date."
+        post_selection_allowed_primary_cohorts: "late_clinical_pivotal_or_registrational|platform_partnered_modality_pipeline"
+        post_selection_cohort_top_k_per_cohort: 4
+        post_selection_total_max: 8
+      - name: "post_adaptive_top5_late_platform_max10_raw"
+        description: "Adaptive raw score: global Top-N first, then late-clinical/platform cohorts with max 5 names per cohort and max 10 total names/date."
+        post_selection_allowed_primary_cohorts: "late_clinical_pivotal_or_registrational|platform_partnered_modality_pipeline"
+        post_selection_cohort_top_k_per_cohort: 5
+        post_selection_total_max: 10
+      - name: "post_adaptive_late_platform_max10_raw"
+        description: "Adaptive raw score: global Top-N first, then late-clinical/platform cohorts with no per-cohort cap and max 10 total names/date."
+        post_selection_allowed_primary_cohorts: "late_clinical_pivotal_or_registrational|platform_partnered_modality_pipeline"
+        post_selection_total_max: 10
+      - name: "post_adaptive_late_platform_score90_max10_raw"
+        description: "Adaptive raw score: global Top-N first, then late-clinical/platform cohorts within 90% of the best surviving score and max 10 total names/date."
+        post_selection_allowed_primary_cohorts: "late_clinical_pivotal_or_registrational|platform_partnered_modality_pipeline"
+        post_selection_min_score_pct_of_top: 90.0
+        post_selection_total_max: 10
+      - name: "post_top5_platform_turnaround_raw"
+        description: "Diagnostic raw score: global Top-N first, then platform/turnaround cohorts with max 5 names per cohort/date."
+        post_selection_allowed_primary_cohorts: "platform_partnered_modality_pipeline|commercial_turnaround_or_unprofitable_growth"
+        post_selection_cohort_top_k_per_cohort: 5
+      - name: "post_top3_platform_profitable_raw"
+        description: "Diagnostic raw score: global Top-N first, then platform/profitable cohorts with max 3 names per cohort/date."
+        post_selection_allowed_primary_cohorts: "platform_partnered_modality_pipeline|commercial_profitable_quality_or_mature"
+        post_selection_cohort_top_k_per_cohort: 3
     risk_decomposition:
       use_for_penalty: false
       risk_penalty_mode: "legacy"

@@ -66,13 +66,31 @@ def parse_args() -> argparse.Namespace:
         description="Build biotech cohort/regime edge diagnostics from existing Stage 11 calibration artifacts."
     )
     parser.add_argument("--calibration-dir", type=Path, default=DEFAULT_CALIBRATION_DIR)
-    parser.add_argument("--observations", type=Path, default=DEFAULT_OBSERVATIONS)
-    parser.add_argument("--selected", type=Path, default=DEFAULT_SELECTED)
+    parser.add_argument(
+        "--observations",
+        type=Path,
+        default=None,
+        help="Observation cache CSV. Defaults to <calibration-dir>/_progress/tier1_observations_with_forward_returns.csv.",
+    )
+    parser.add_argument(
+        "--selected",
+        type=Path,
+        default=None,
+        help="Selected ticker diagnostics CSV. Defaults to <calibration-dir>/tier1_selected_ticker_diagnostics.csv.",
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--top-k", default="1,3,5,10")
     parser.add_argument("--lcb-z", type=float, default=1.0)
     parser.add_argument("--min-train-dates", type=int, default=25)
     parser.add_argument("--allow-lcb-threshold", type=float, default=0.0)
+    parser.add_argument(
+        "--forced-allowed-cohorts",
+        default="",
+        help=(
+            "Optional comma/pipe/semicolon-separated cohort list to simulate as an explicit no-trade/cash gate. "
+            "This is diagnostic-only and does not alter production scoring."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -96,6 +114,12 @@ def parse_top_k(raw: str) -> list[int]:
     if not out:
         raise ValueError("--top-k did not contain any positive integers")
     return sorted(set(out))
+
+
+def parse_cohort_list(raw: str) -> list[str]:
+    tokens = str(raw or "").replace("|", ",").replace(";", ",").split(",")
+    out = sorted({token.strip() for token in tokens if token.strip()})
+    return out
 
 
 def write_df(path: Path, frame: pd.DataFrame) -> None:
@@ -478,6 +502,82 @@ def build_cash_gate_outputs(
     return gate_rows.sort_values(gate_group_cols), cash_gate
 
 
+def build_forced_cohort_gate_outputs(
+    selected: pd.DataFrame,
+    date_level: pd.DataFrame,
+    *,
+    top_k_values: list[int],
+    forced_allowed_cohorts: list[str],
+    lcb_z: float,
+) -> pd.DataFrame:
+    """Simulate an explicit cohort-only cash gate without retraining scores.
+
+    This intentionally complements the train-learned gate above. It answers:
+    "what if we only traded this cohort and held cash on all other dates?"
+    """
+    if date_level.empty or not forced_allowed_cohorts:
+        return pd.DataFrame()
+
+    selected_dates = (
+        selected[KEY_COLUMNS + ["evaluation_split", "asof_date"]]
+        .drop_duplicates()
+        .groupby(KEY_COLUMNS + ["evaluation_split"], dropna=False)["asof_date"]
+        .apply(list)
+        .reset_index()
+    )
+    date_lookup = {
+        tuple(row[col] for col in KEY_COLUMNS + ["evaluation_split"]): list(row["asof_date"])
+        for _, row in selected_dates.iterrows()
+    }
+
+    rows: list[dict[str, Any]] = []
+    allowed_label = "|".join(forced_allowed_cohorts)
+    for top_k in top_k_values:
+        for key_values, all_dates in date_lookup.items():
+            key = key_values[:-1]
+            split = key_values[-1]
+            mask = date_level["cohort_top_k"].eq(top_k)
+            for col, value in zip(KEY_COLUMNS, key, strict=True):
+                mask &= date_level[col].eq(value)
+            mask &= date_level["evaluation_split"].eq(split)
+            mask &= date_level["biotech_primary_cohort"].isin(forced_allowed_cohorts)
+
+            included = date_level[mask]
+            by_date = included.groupby("asof_date", dropna=False).agg(
+                date_selected_count=("date_selected_count", "sum"),
+                date_abs=("date_selected_abs_return_pct", "mean"),
+                date_xbi_alpha=("date_selected_xbi_alpha_pct", "mean"),
+                date_same_cohort_alpha=("date_same_cohort_alpha_mean_pct", "mean"),
+            )
+            all_date_index = pd.Index(sorted(set(all_dates)), name="asof_date")
+            by_date = pd.DataFrame(by_date.reindex(all_date_index))
+            by_date["date_selected_count"] = numeric(by_date.get("date_selected_count", pd.Series(dtype="float64"))).fillna(0.0)
+            for column in ["date_abs", "date_xbi_alpha", "date_same_cohort_alpha"]:
+                by_date[column] = numeric(by_date.get(column, pd.Series(dtype="float64"))).fillna(0.0)
+            traded_dates = int((by_date["date_selected_count"] > 0.0).sum())
+            row: dict[str, Any] = {
+                **dict(zip(KEY_COLUMNS, key, strict=True)),
+                "evaluation_split": split,
+                "cohort_top_k": top_k,
+                "gate_type": "forced_allowed_cohorts",
+                "allowed_cohort_count": len(forced_allowed_cohorts),
+                "allowed_cohorts": allowed_label,
+                "candidate_dates": len(all_date_index),
+                "traded_dates": traded_dates,
+                "cash_dates": int(len(all_date_index) - traded_dates),
+                "trade_rate_pct": round(100.0 * traded_dates / len(all_date_index), 6) if len(all_date_index) else 0.0,
+            }
+            row.update(stats_from_values(by_date["date_abs"], "cash_gate_abs", lcb_z))
+            row.update(stats_from_values(by_date["date_xbi_alpha"], "cash_gate_xbi_alpha", lcb_z))
+            row.update(stats_from_values(by_date["date_same_cohort_alpha"], "cash_gate_same_cohort_alpha", lcb_z))
+            rows.append(row)
+
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values(KEY_COLUMNS + ["cohort_top_k", "evaluation_split"])
+    return out
+
+
 def build_recommendations(cash_gate: pd.DataFrame) -> pd.DataFrame:
     if cash_gate.empty:
         return pd.DataFrame()
@@ -515,6 +615,72 @@ def build_recommendations(cash_gate: pd.DataFrame) -> pd.DataFrame:
                 "test_cash_gate_abs_lcb_pct": row.get("cash_gate_abs_lcb_pct"),
                 "test_cash_gate_xbi_alpha_lcb_pct": row.get("cash_gate_xbi_alpha_lcb_pct"),
                 "test_cash_gate_same_cohort_alpha_lcb_pct": row.get("cash_gate_same_cohort_alpha_lcb_pct"),
+                "test_cash_gate_abs_mean_pct": row.get("cash_gate_abs_mean_pct"),
+                "test_cash_gate_xbi_alpha_mean_pct": row.get("cash_gate_xbi_alpha_mean_pct"),
+                "test_cash_gate_same_cohort_alpha_mean_pct": row.get("cash_gate_same_cohort_alpha_mean_pct"),
+            }
+        )
+        rows.append(out)
+    return pd.DataFrame(rows).sort_values(
+        ["recommendation_status", "test_cash_gate_xbi_alpha_lcb_pct", "test_cash_gate_same_cohort_alpha_lcb_pct"],
+        ascending=[True, False, False],
+    )
+
+
+def build_forced_cohort_recommendations(forced_gate: pd.DataFrame) -> pd.DataFrame:
+    if forced_gate.empty:
+        return pd.DataFrame()
+    key_cols = KEY_COLUMNS + ["cohort_top_k", "allowed_cohorts"]
+    train = forced_gate[forced_gate["evaluation_split"] == "train"].copy()
+    test = forced_gate[forced_gate["evaluation_split"] == "test"].copy()
+    if test.empty:
+        return pd.DataFrame()
+    train_lookup = {
+        tuple(row[col] for col in key_cols): row
+        for _, row in train.iterrows()
+    }
+    rows: list[dict[str, Any]] = []
+    for _, row in test.iterrows():
+        train_row = train_lookup.get(tuple(row[col] for col in key_cols))
+        test_abs_lcb = numeric(pd.Series([row.get("cash_gate_abs_lcb_pct")])).iloc[0]
+        test_xbi_lcb = numeric(pd.Series([row.get("cash_gate_xbi_alpha_lcb_pct")])).iloc[0]
+        test_cohort_lcb = numeric(pd.Series([row.get("cash_gate_same_cohort_alpha_lcb_pct")])).iloc[0]
+        test_trade_rate = numeric(pd.Series([row.get("trade_rate_pct")])).iloc[0]
+        train_abs_lcb = numeric(pd.Series([train_row.get("cash_gate_abs_lcb_pct") if train_row is not None else math.nan])).iloc[0]
+        train_xbi_lcb = numeric(pd.Series([train_row.get("cash_gate_xbi_alpha_lcb_pct") if train_row is not None else math.nan])).iloc[0]
+        train_cohort_lcb = numeric(
+            pd.Series([train_row.get("cash_gate_same_cohort_alpha_lcb_pct") if train_row is not None else math.nan])
+        ).iloc[0]
+        train_trade_rate = numeric(pd.Series([train_row.get("trade_rate_pct") if train_row is not None else math.nan])).iloc[0]
+        train_positive = train_abs_lcb > 0.0 and train_xbi_lcb > 0.0 and train_cohort_lcb > 0.0
+        test_positive = test_abs_lcb > 0.0 and test_xbi_lcb > 0.0 and test_cohort_lcb > 0.0
+        if train_positive and test_positive and test_trade_rate >= 10.0:
+            status = "forced_cohort_targeted_policy_candidate"
+            reason = "positive_train_and_test_lcb_vs_absolute_xbi_and_same_cohort"
+        elif test_positive and not train_positive:
+            status = "diagnostic_test_only_regime_candidate"
+            reason = "positive_test_lcb_but_train_split_did_not_validate"
+        elif train_positive and not test_positive:
+            status = "diagnostic_train_only_not_oos_stable"
+            reason = "positive_train_lcb_but_test_split_failed"
+        else:
+            status = "diagnostic_only"
+            reason = "forced_cohort_lcb_not_positive_in_train_and_test"
+        out = {col: row.get(col) for col in KEY_COLUMNS}
+        out.update(
+            {
+                "cohort_top_k": row.get("cohort_top_k"),
+                "recommendation_status": status,
+                "recommendation_reason": reason,
+                "allowed_cohorts": row.get("allowed_cohorts"),
+                "train_trade_rate_pct": round(float(train_trade_rate), 6) if pd.notna(train_trade_rate) else "",
+                "test_trade_rate_pct": round(float(test_trade_rate), 6) if pd.notna(test_trade_rate) else "",
+                "train_cash_gate_abs_lcb_pct": train_abs_lcb,
+                "train_cash_gate_xbi_alpha_lcb_pct": train_xbi_lcb,
+                "train_cash_gate_same_cohort_alpha_lcb_pct": train_cohort_lcb,
+                "test_cash_gate_abs_lcb_pct": test_abs_lcb,
+                "test_cash_gate_xbi_alpha_lcb_pct": test_xbi_lcb,
+                "test_cash_gate_same_cohort_alpha_lcb_pct": test_cohort_lcb,
                 "test_cash_gate_abs_mean_pct": row.get("cash_gate_abs_mean_pct"),
                 "test_cash_gate_xbi_alpha_mean_pct": row.get("cash_gate_xbi_alpha_mean_pct"),
                 "test_cash_gate_same_cohort_alpha_mean_pct": row.get("cash_gate_same_cohort_alpha_mean_pct"),
@@ -573,20 +739,43 @@ def write_markdown_summary(path: Path, manifest: dict[str, Any], recommendations
                     "{allowed_cohorts} | {test_cash_gate_xbi_alpha_lcb_pct} | "
                     "{test_cash_gate_same_cohort_alpha_lcb_pct} |".format(**row)
                 )
+    forced_rows = int(manifest.get("forced_cohort_recommendation_rows") or 0)
+    if forced_rows:
+        lines.extend(
+            [
+                "",
+                "## Forced-Cohort Diagnostic",
+                "",
+                f"- Forced allowed cohorts: `{ '|'.join(manifest.get('forced_allowed_cohorts') or []) }`",
+                f"- Recommendation rows: {forced_rows}",
+                f"- Targeted candidates: {manifest.get('forced_cohort_targeted_policy_candidate_rows', 0)}",
+                "",
+                "See `forced_cohort_cash_gate_simulation.csv` and `forced_cohort_policy_recommendations.csv`.",
+            ]
+        )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> None:
     args = parse_args()
     calibration_dir = args.calibration_dir.resolve()
-    observations_path = args.observations.resolve()
-    selected_path = args.selected.resolve()
+    observations_path = (
+        args.observations.resolve()
+        if args.observations is not None
+        else calibration_dir / "_progress" / "tier1_observations_with_forward_returns.csv"
+    )
+    selected_path = (
+        args.selected.resolve()
+        if args.selected is not None
+        else calibration_dir / "tier1_selected_ticker_diagnostics.csv"
+    )
     output_dir = (
         args.output_dir.resolve()
         if args.output_dir is not None
-        else calibration_dir.parent / "cohort_regime_edge_diagnostics"
+        else calibration_dir / "cohort_regime_edges"
     )
     top_k_values = parse_top_k(args.top_k)
+    forced_allowed_cohorts = parse_cohort_list(args.forced_allowed_cohorts)
     if not observations_path.exists():
         raise FileNotFoundError(observations_path)
     if not selected_path.exists():
@@ -606,6 +795,14 @@ def main() -> None:
         lcb_z=float(args.lcb_z),
     )
     recommendations = build_recommendations(cash_gate)
+    forced_cohort_gate = build_forced_cohort_gate_outputs(
+        selected,
+        date_level,
+        top_k_values=top_k_values,
+        forced_allowed_cohorts=forced_allowed_cohorts,
+        lcb_z=float(args.lcb_z),
+    )
+    forced_cohort_recommendations = build_forced_cohort_recommendations(forced_cohort_gate)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     write_df(output_dir / "cohort_date_return_baselines.csv", baselines)
@@ -616,6 +813,9 @@ def main() -> None:
     write_df(output_dir / "train_learned_cohort_gate.csv", gate_rows)
     write_df(output_dir / "no_trade_cash_gate_simulation.csv", cash_gate)
     write_df(output_dir / "cohort_policy_recommendations.csv", recommendations)
+    if forced_allowed_cohorts:
+        write_df(output_dir / "forced_cohort_cash_gate_simulation.csv", forced_cohort_gate)
+        write_df(output_dir / "forced_cohort_policy_recommendations.csv", forced_cohort_recommendations)
 
     manifest = {
         "status": "success",
@@ -625,6 +825,7 @@ def main() -> None:
         "selected": str(selected_path),
         "output_dir": str(output_dir),
         "top_k_values": top_k_values,
+        "forced_allowed_cohorts": forced_allowed_cohorts,
         "lcb_z": float(args.lcb_z),
         "min_train_dates": int(args.min_train_dates),
         "allow_lcb_threshold": float(args.allow_lcb_threshold),
@@ -634,6 +835,16 @@ def main() -> None:
         "topk_date_level_rows": int(len(date_level)),
         "cash_gate_rows": int(len(cash_gate)),
         "recommendation_rows": int(len(recommendations)),
+        "forced_cohort_cash_gate_rows": int(len(forced_cohort_gate)),
+        "forced_cohort_recommendation_rows": int(len(forced_cohort_recommendations)),
+        "forced_cohort_targeted_policy_candidate_rows": int(
+            (
+                forced_cohort_recommendations.get("recommendation_status", pd.Series(dtype="string"))
+                == "forced_cohort_targeted_policy_candidate"
+            ).sum()
+            if not forced_cohort_recommendations.empty
+            else 0
+        ),
         "targeted_policy_candidate_rows": int(
             (recommendations.get("recommendation_status", pd.Series(dtype="string")) == "targeted_policy_candidate").sum()
             if not recommendations.empty
@@ -643,6 +854,7 @@ def main() -> None:
             "Diagnostic-only run; no historical files were regenerated.",
             "Same-cohort alpha compares selected ticker return against the same asof-date, horizon, and cohort mean.",
             "No-trade/cash gate is trained on train split same-cohort alpha LCB and evaluated on test split with cash return of 0 for blocked dates.",
+            "Forced-cohort cash gate is explicit diagnostic simulation only; it does not change calibration policy or production scoring.",
         ],
     }
     write_json(output_dir / "cohort_regime_edge_manifest.json", manifest)

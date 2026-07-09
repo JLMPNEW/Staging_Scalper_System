@@ -10,8 +10,8 @@ from portfolio_layer.core.artifacts import unlink_if_exists
 from portfolio_layer.core.contracts import sha256_file
 from portfolio_layer.risk.liquidity import (
     configured_fallback_half_spread_bps,
+    effective_spread_uses_panel,
     liquidity_half_spread_fail_bps,
-    liquidity_panel_active,
     load_spread_snapshot,
 )
 
@@ -55,7 +55,7 @@ def decision_commission(config: dict[str, Any]) -> float:
 
 def load_spread_inputs(config: dict[str, Any], run_dir: Path, default_half_spread_bps: float) -> dict[str, Any]:
     """Resolve the active spread source shared by Stage 4 and BL cost overlays."""
-    use_panel = liquidity_panel_active(config)
+    use_panel = effective_spread_uses_panel(config, run_dir)
     allow_fallback = bool(cfg_get(config, "liquidity_panel.allow_fallback_to_default", True))
     fallback_half_spread_bps = (
         configured_fallback_half_spread_bps(config) if use_panel else default_half_spread_bps

@@ -254,7 +254,8 @@ def run_walkforward(
 
         # regime_gate/regime_lever arms (research/71 evidence):
         #   regime_gate  = score-tilted book only in supportive regimes; min-var otherwise.
-        #   regime_lever = stronger score tilt in supportive regimes; min-var otherwise.
+        #   regime_lever = stronger score tilt in supportive regimes; configurable fail-closed
+        #                  fallback otherwise (default: min-var, matching the original arm).
         # A missing/unknown regime label is UNSUPPORTIVE (fail closed).
         supportive = {str(s).upper() for s in
                       (params.get("regime_gate_supportive_regimes") or ["HEATING_UP"])}
@@ -310,7 +311,15 @@ def run_walkforward(
                     else:
                         w = dict(aqr)
                 else:
-                    w = _min_var_or_prior(arm)
+                    unsupported_mode = str(
+                        params.get("regime_lever_unsupported_mode", "min_var") or "min_var"
+                    ).strip().lower()
+                    if unsupported_mode in {"cash", "zero", "flat"}:
+                        w = {}
+                    elif unsupported_mode in {"aqr", "baseline", "score"}:
+                        w = dict(aqr)
+                    else:
+                        w = _min_var_or_prior(arm)
             elif arm in ("rotation", "macro_bl", "sleeves"):
                 w = rotation_tilt(w, pipe_of, multiplier_of, gross=float(params["gross"]))
             if arm in ("macro_bl", "sleeves"):

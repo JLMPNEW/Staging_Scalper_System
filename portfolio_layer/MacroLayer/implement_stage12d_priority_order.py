@@ -17,26 +17,9 @@ REPO_ROOT = SCRIPT_DIR.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from staging_portfolio_adapter import load_staging_prices  # noqa: E402
+
 logger = logging.getLogger(__name__)
-
-_BACKTEST_IMPORT_ERROR: Exception | None = None
-_BACKTEST: dict[str, Any] = {}
-try:
-    from BackTest.prices import load_prices as _load_prices
-
-    _BACKTEST["load_prices"] = _load_prices
-except ModuleNotFoundError as exc:
-    _BACKTEST_IMPORT_ERROR = exc
-
-
-def _require_backtest(name: str) -> Any:
-    if name in _BACKTEST:
-        return _BACKTEST[name]
-    raise RuntimeError(
-        "The copied MacroLayer no longer loads BackTest at import time. "
-        "Stage 12D priority review requires a Staging-owned price adapter before use."
-    ) from _BACKTEST_IMPORT_ERROR
-
 
 @dataclass(frozen=True)
 class IbkrConfig:
@@ -332,25 +315,15 @@ def _latest_close_prices(base_config: Path, tickers: list[str]) -> pd.Series:
     if not tickers:
         return pd.Series(dtype="float64")
     cfg = _read_yaml(base_config)
-    cache_cfg = dict(cfg.get("ohlcv_cache", {}) or {})
-    cache_path = cache_cfg.get("path")
-    if not cache_path:
-        return pd.Series(dtype="float64")
     end_raw = cfg.get("end")
     end = pd.to_datetime(end_raw, errors="coerce")
     if pd.isna(end):
         return pd.Series(dtype="float64")
     start = end - pd.Timedelta(days=20)
     try:
-        load_prices = _require_backtest("load_prices")
-        prices = load_prices(
-            cache_path=cache_path,
-            tickers=tickers,
-            start_date=start,
-            end_date=end,
-        )
+        prices = load_staging_prices(tickers=tickers, start_date=start, end_date=end)
     except Exception:
-        logger.warning("Unable to load close prices from OHLCV cache.", exc_info=True)
+        logger.warning("Unable to load close prices from Staging survivorship panel.", exc_info=True)
         return pd.Series(dtype="float64")
     if prices.empty:
         return pd.Series(dtype="float64")

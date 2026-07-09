@@ -250,7 +250,7 @@ def load_production_lock(config: dict[str, Any], *, base_dir: Path) -> dict[str,
     lock_raw = read("calibration_lock_date")
     if not lock_raw or lock_raw.upper().startswith("TBD"):
         return None
-    lock_date = parse_date(lock_raw, field="calibration_lock_date")
+    lock_date = parse_required_date(lock_raw, field="calibration_lock_date")
     required = {
         "calibration_production_start_date": read("calibration_production_start_date"),
         "calibration_train_start_date": read("calibration_train_start_date"),
@@ -263,9 +263,12 @@ def load_production_lock(config: dict[str, Any], *, base_dir: Path) -> dict[str,
             f"{LOCK_CONFIG_PREFIX}.calibration_lock_date is set ({lock_date}) but companion keys "
             f"are missing/TBD: {missing}"
         )
-    production_start = parse_date(required["calibration_production_start_date"], field="calibration_production_start_date")
-    train_start = parse_date(required["calibration_train_start_date"], field="calibration_train_start_date")
-    train_end = parse_date(required["calibration_train_end_date"], field="calibration_train_end_date")
+    production_start = parse_required_date(
+        required["calibration_production_start_date"],
+        field="calibration_production_start_date",
+    )
+    train_start = parse_required_date(required["calibration_train_start_date"], field="calibration_train_start_date")
+    train_end = parse_required_date(required["calibration_train_end_date"], field="calibration_train_end_date")
     if train_end < train_start or lock_date < train_end or production_start < lock_date:
         raise ValueError(
             f"Defense lock dates out of order: train {train_start}..{train_end}, "

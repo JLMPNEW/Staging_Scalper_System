@@ -36,40 +36,14 @@ from macro_serving_storage import (  # noqa: E402
     insert_many,
     start_serving_run,
 )
+from staging_portfolio_adapter import (  # noqa: E402
+    MAX_STAGE2_PRICE_STALE_DAYS,
+    load_staging_prices,
+    load_staging_score_panel,
+    staleness_gated_weekly,
+)
 
 logger = logging.getLogger(__name__)
-
-_BACKTEST_IMPORT_ERROR: Exception | None = None
-_BACKTEST: dict[str, Any] = {}
-try:
-    from BackTest.config_loader import load_config as _load_backtest_config
-    from BackTest.config_loader import repo_root_from_config_path as _repo_root_from_config_path
-    from BackTest.config_loader import resolve_repo_path as _resolve_repo_path
-    from BackTest.prices import load_prices as _load_backtest_prices
-    from BackTest.snapshot_loader import discover_snapshot_manifest as _discover_snapshot_manifest
-    from BackTest.snapshot_loader import load_score_panel as _load_score_panel
-
-    _BACKTEST.update(
-        {
-            "discover_snapshot_manifest": _discover_snapshot_manifest,
-            "load_config": _load_backtest_config,
-            "load_prices": _load_backtest_prices,
-            "load_score_panel": _load_score_panel,
-            "repo_root_from_config_path": _repo_root_from_config_path,
-            "resolve_repo_path": _resolve_repo_path,
-        }
-    )
-except ModuleNotFoundError as exc:
-    _BACKTEST_IMPORT_ERROR = exc
-
-
-def _require_backtest(name: str) -> Any:
-    if name in _BACKTEST:
-        return _BACKTEST[name]
-    raise RuntimeError(
-        "The copied MacroLayer no longer loads BackTest at import time. "
-        "Configure a Staging-owned score/price adapter before running this legacy BackTest-backed mode."
-    ) from _BACKTEST_IMPORT_ERROR
 
 REGIME_ORDER = (
     "EXPANSION_DISINFLATION",
@@ -182,7 +156,6 @@ SHOCK_KEYWORD_RULES: list[tuple[tuple[str, ...], dict[str, float]]] = [
 @dataclass(frozen=True)
 class IndustryMacroConfig:
     cadence: str
-    backtest_config_path: Path
     strategy_key: str
     source_mode: str
     production_output_root: Path
@@ -222,16 +195,21 @@ def _clip(value: float, *, lo: float = -2.0, hi: float = 2.0) -> float:
 
 def _resolve_layer_config(cfg: dict[str, Any], config_path: Path) -> IndustryMacroConfig:
     raw_cfg = dict(cfg_get(cfg, "industry_macro_layer", default={}) or {})
-    backtest_config_path = resolve_path(config_path, str(raw_cfg.get("backtest_config_path", "BackTest/config_backtest.yaml")))
     production_output_root = resolve_path(config_path, str(raw_cfg.get("production_output_root", "output")))
     output_dir = resolve_path(config_path, str(raw_cfg.get("output_dir", "MacroLayer/out/industry_macro")))
-    if backtest_config_path is None or production_output_root is None or output_dir is None:
+    if production_output_root is None or output_dir is None:
         raise ValueError("Stage 9 config paths could not be resolved.")
     source_mode = str(raw_cfg.get("source_mode", "hybrid")).strip().lower() or "hybrid"
-    if source_mode not in {"backtest_history", "tier1_optimizer_universe", "sec_resolved_snapshot", "hybrid"}:
+    if source_mode not in {
+        "staging_snapshot_store",
+        "backtest_history",
+        "tier1_optimizer_universe",
+        "sec_resolved_snapshot",
+        "hybrid",
+    }:
         raise ValueError(
             "industry_macro_layer.source_mode must be one of: "
-            "backtest_history, tier1_optimizer_universe, sec_resolved_snapshot, hybrid."
+            "staging_snapshot_store, backtest_history, tier1_optimizer_universe, sec_resolved_snapshot, hybrid."
         )
     sec_db_path_raw = str(raw_cfg.get("sec_db_path", "") or "").strip()
     sec_db_path = resolve_path(config_path, sec_db_path_raw) if sec_db_path_raw else None
@@ -246,7 +224,6 @@ def _resolve_layer_config(cfg: dict[str, Any], config_path: Path) -> IndustryMac
         raise ValueError("industry_macro_layer hierarchy weights must sum to 1.0.")
     return IndustryMacroConfig(
         cadence=str(raw_cfg.get("cadence", "W-FRI")).strip() or "W-FRI",
-        backtest_config_path=backtest_config_path,
         strategy_key=str(raw_cfg.get("strategy_key", "mf_wf")).strip() or "mf_wf",
         source_mode=source_mode,
         production_output_root=production_output_root,
@@ -311,7 +288,7 @@ def _validate_sql_identifier(value: str, *, label: str) -> str:
     return text
 
 
-def _normalize_score_panel(frame: pd.DataFrame, *, source_name: str) -> pd.DataFrame:
+def _normalize_score_panel(frame: pd.DataFrame, *, source_name: str = "") -> pd.DataFrame:
     rename_map: dict[str, str] = {}
     if "AsOfDate" in frame.columns and "Date" not in frame.columns:
         rename_map["AsOfDate"] = "Date"
@@ -363,13 +340,25 @@ def _normalize_score_panel(frame: pd.DataFrame, *, source_name: str) -> pd.DataF
         "industry",
     ]
     out.loc[out["industry"] == "", "industry"] = out.loc[out["industry"] == "", "industry_aggregate"]
-    out["SnapshotSource"] = str(source_name)
     source_priority = {
         "sec_resolved_snapshot": -1,
         "backtest_score_history": 0,
         "tier1_optimizer_universe": 1,
-    }.get(str(source_name), 0)
-    out["SourcePriority"] = source_priority
+        "staging_snapshot_store": 2,
+        "staging_run_output": 3,
+    }
+    if source_name:
+        out["SnapshotSource"] = str(source_name)
+        out["SourcePriority"] = source_priority.get(str(source_name), 0)
+    else:
+        if "SnapshotSource" not in out.columns:
+            out["SnapshotSource"] = ""
+        out["SnapshotSource"] = out["SnapshotSource"].fillna("").astype(str).str.strip()
+        if "SourcePriority" not in out.columns:
+            out["SourcePriority"] = out["SnapshotSource"].map(source_priority).fillna(0)
+        out["SourcePriority"] = pd.to_numeric(out["SourcePriority"], errors="coerce").fillna(
+            out["SnapshotSource"].map(source_priority).fillna(0)
+        )
     out = out.loc[
         out["Date"].notna()
         & out["Score"].notna()
@@ -435,23 +424,11 @@ def _load_backtest_score_panel(
     *,
     backtest_cfg: dict[str, Any],
     repo_root: Path,
+    start_date: Any = None,
+    end_date: Any = None,
 ) -> pd.DataFrame:
-    discover_snapshot_manifest = _require_backtest("discover_snapshot_manifest")
-    load_score_panel = _require_backtest("load_score_panel")
-    manifest, strategy_meta = discover_snapshot_manifest(repo_root, backtest_cfg)
-    manifest = manifest.loc[manifest["strategy_key"] == layer_cfg.strategy_key].copy()
-    if manifest.empty:
-        raise ValueError(
-            f"No score-history snapshots matched strategy_key={layer_cfg.strategy_key!r} "
-            f"from {layer_cfg.backtest_config_path}."
-        )
-    if layer_cfg.strategy_key not in strategy_meta:
-        raise ValueError(
-            f"strategy_key={layer_cfg.strategy_key!r} was present in the snapshot manifest "
-            "but missing from the manifest metadata."
-        )
-    panel, _ = load_score_panel(manifest, {layer_cfg.strategy_key: strategy_meta[layer_cfg.strategy_key]})
-    return _normalize_score_panel(panel, source_name="backtest_score_history")
+    del layer_cfg, backtest_cfg, repo_root
+    return _normalize_score_panel(load_staging_score_panel(start_date=start_date, end_date=end_date))
 
 
 def _discover_production_universe_paths(layer_cfg: IndustryMacroConfig) -> list[Path]:
@@ -480,17 +457,16 @@ def _load_production_score_panel(layer_cfg: IndustryMacroConfig) -> tuple[pd.Dat
     return out.reset_index(drop=True), paths
 
 
-def _load_weekly_score_panel(layer_cfg: IndustryMacroConfig) -> tuple[pd.DataFrame, pd.DatetimeIndex, dict[str, Any], Path]:
+def _load_weekly_score_panel(
+    layer_cfg: IndustryMacroConfig,
+    *,
+    start_date: Any = None,
+    end_date: Any = None,
+) -> tuple[pd.DataFrame, pd.DatetimeIndex, dict[str, Any], Path]:
     backtest_cfg: dict[str, Any] = {}
     repo_root = REPO_ROOT
     panels: list[pd.DataFrame] = []
     source_messages: list[str] = []
-
-    if layer_cfg.source_mode in {"backtest_history", "hybrid"}:
-        load_backtest_config = _require_backtest("load_config")
-        repo_root_from_config_path = _require_backtest("repo_root_from_config_path")
-        backtest_cfg = load_backtest_config(layer_cfg.backtest_config_path)
-        repo_root = repo_root_from_config_path(layer_cfg.backtest_config_path)
 
     if layer_cfg.source_mode in {"sec_resolved_snapshot", "hybrid"}:
         sec_panel = _load_sec_resolved_snapshot_panel(layer_cfg)
@@ -500,11 +476,17 @@ def _load_weekly_score_panel(layer_cfg: IndustryMacroConfig) -> tuple[pd.DataFra
         elif layer_cfg.source_mode == "sec_resolved_snapshot":
             raise ValueError("Stage 9 source_mode=sec_resolved_snapshot but no SEC snapshot rows were loaded.")
 
-    if layer_cfg.source_mode in {"backtest_history", "hybrid"}:
-        backtest_panel = _load_backtest_score_panel(layer_cfg, backtest_cfg=backtest_cfg, repo_root=repo_root)
+    if layer_cfg.source_mode in {"staging_snapshot_store", "backtest_history", "hybrid"}:
+        backtest_panel = _load_backtest_score_panel(
+            layer_cfg,
+            backtest_cfg=backtest_cfg,
+            repo_root=repo_root,
+            start_date=start_date,
+            end_date=end_date,
+        )
         if not backtest_panel.empty:
             panels.append(backtest_panel)
-            source_messages.append(f"backtest_rows={len(backtest_panel)}")
+            source_messages.append(f"staging_snapshot_rows={len(backtest_panel)}")
 
     if layer_cfg.source_mode in {"tier1_optimizer_universe", "hybrid"}:
         production_panel, production_paths = _load_production_score_panel(layer_cfg)
@@ -531,12 +513,19 @@ def _load_weekly_score_panel(layer_cfg: IndustryMacroConfig) -> tuple[pd.DataFra
     production_dates = set(
         out.loc[out["SnapshotSource"].eq("tier1_optimizer_universe"), "Date"].dropna().unique().tolist()
     )
-    if production_dates:
-        # A canonical Tier 1 snapshot is authoritative for its as-of date. Do
-        # not leave BackTest-only tickers in the same live date's universe.
+    staging_dates = set(
+        out.loc[out["SnapshotSource"].isin({"staging_snapshot_store", "staging_run_output"}), "Date"]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    authoritative_dates = production_dates | staging_dates
+    if authoritative_dates:
+        # A canonical Staging/production snapshot is authoritative for its as-of date. Do
+        # not leave lower-priority legacy/SEC-only tickers in the same live date's universe.
         out = out.loc[
-            ~out["Date"].isin(production_dates)
-            | out["SnapshotSource"].eq("tier1_optimizer_universe")
+            ~out["Date"].isin(authoritative_dates)
+            | out["SnapshotSource"].isin({"tier1_optimizer_universe", "staging_snapshot_store", "staging_run_output"})
         ].copy()
     out = out.sort_values(["Date", "Ticker", "SourcePriority"]).drop_duplicates(
         subset=["Date", "Ticker"],
@@ -553,17 +542,6 @@ def _load_weekly_score_panel(layer_cfg: IndustryMacroConfig) -> tuple[pd.DataFra
         len(weekly_dates),
     )
     return out, weekly_dates, backtest_cfg, repo_root
-
-
-def _resolve_price_cache_path(backtest_cfg: dict[str, Any], repo_root: Path) -> Path:
-    raw = cfg_get(backtest_cfg, "prices", "cache_path", default=None)
-    resolve_repo_path = _require_backtest("resolve_repo_path")
-    path = resolve_repo_path(repo_root, raw)
-    if path is None:
-        raise ValueError("BackTest config prices.cache_path is required for Stage 9.")
-    return path
-
-
 def _load_snapshot_prices(
     panel: pd.DataFrame,
     *,
@@ -573,14 +551,16 @@ def _load_snapshot_prices(
     layer_cfg: IndustryMacroConfig,
 ) -> pd.DataFrame:
     tickers = sorted(item for item in panel["Ticker"].dropna().astype(str).str.upper().unique().tolist() if item)
-    cache_path = _resolve_price_cache_path(backtest_cfg, repo_root)
     min_dt = pd.Timestamp(weekly_dates.min()).normalize() - pd.Timedelta(days=int(layer_cfg.lookback_weeks * 10))
     max_dt = pd.Timestamp(weekly_dates.max()).normalize() + pd.Timedelta(days=7)
-    load_backtest_prices = _require_backtest("load_prices")
-    prices = load_backtest_prices(cache_path=cache_path, tickers=tickers, start_date=min_dt, end_date=max_dt)
-    prices = prices.sort_index()
-    dense_index = prices.index.union(pd.DatetimeIndex(weekly_dates)).sort_values()
-    return prices.reindex(dense_index).ffill(limit=5).reindex(weekly_dates)
+    freshness_as_of = pd.Timestamp(weekly_dates.max()).normalize()
+    prices = load_staging_prices(
+        tickers=tickers,
+        start_date=min_dt,
+        end_date=max_dt,
+        freshness_as_of=freshness_as_of,
+    )
+    return staleness_gated_weekly(prices, weekly_dates, max_stale_days=MAX_STAGE2_PRICE_STALE_DAYS)
 
 
 def _resolve_history_bounds(
@@ -1009,7 +989,11 @@ def main() -> None:
     layer_cfg = _resolve_layer_config(cfg, config_path)
     layer_cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
-    score_panel, weekly_dates, backtest_cfg, repo_root = _load_weekly_score_panel(layer_cfg)
+    score_panel, weekly_dates, backtest_cfg, repo_root = _load_weekly_score_panel(
+        layer_cfg,
+        start_date=None,
+        end_date=args.end_date,
+    )
     serving_db_path = resolve_serving_db_path(cfg, config_path, override=args.serving_db_path)
     conn = connect_sqlite(serving_db_path, row_factory=sqlite3.Row)
     init_db(conn)
@@ -1029,7 +1013,7 @@ def main() -> None:
         repo_root=repo_root,
         layer_cfg=layer_cfg,
     )
-    returns = snapshot_prices.pct_change()
+    returns = snapshot_prices.pct_change(fill_method=None)
     return_long = returns.rename_axis(index="Date", columns="Ticker").stack().rename("weekly_return").reset_index()
     return_long["Date"] = pd.to_datetime(return_long["Date"], errors="coerce").dt.normalize()
     return_long["Ticker"] = return_long["Ticker"].astype(str).str.upper().str.strip()

@@ -864,6 +864,9 @@ proper sampling cadence without losing information.
   `forward_excess_return_vs_sector`, `drawdown_next_63d`, and `regime_at_snapshot`.
 - `backtest/16_run_ablation_walkforward.py` - walk-forward across the existing rule-based stack:
   AQR-only, +rotation, +macro/BL, +sleeves, +exits, net of cost.
+- `backtest/16b_run_regime_parameter_sweep.py` - research-only regime-gated parameter sweep over the
+  Stage 16 `regime_lever` arm: supportive-regime score multiplier, rebalance cadence, and unsupported-regime
+  fallback mode. It emits evidence only; promotion still requires the Stage 11 lockbox gates.
 - `backtest/17_publish_lockbox_ledger.py` - sealed out-of-sample ledger.
 
 Only after those pass should optional modules be tested: `forecast/67_train_models.py` /
