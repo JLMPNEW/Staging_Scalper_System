@@ -5,12 +5,19 @@ The default path refreshes production inputs, rebuilds derived features, scores
 the requested as-of date, publishes the dated review pack, and validates the
 final output surface. Research calibration and backfills remain separate so a
 routine daily refresh cannot accidentally change model policy.
+
+The default path publishes oos_score_valid_flag=0: scoring never self-certifies
+strict_oos, and med_devices/scripts/76_mark_med_device_oos_provenance.py stays
+the sole strict-OOS promoter. Passing --oos-score-valid (explicit opt-in, still
+bounded by scoring.oos_replay_window_days) bypasses 76's evidence gates and must
+be followed by a script 76 run so the promotion carries an evidence record.
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import json
+import os
 import subprocess
 import sys
 import time
@@ -49,6 +56,22 @@ PROTECTED_CRITICAL_STEPS = {
     "74_build_analyst_review",
     "72_validate_production_outputs",
 }
+MANIFEST_STEP_FIELDS = [
+    "run_id",
+    "step_number",
+    "step_id",
+    "stage",
+    "description",
+    "script",
+    "network_flag",
+    "optional_flag",
+    "pass_db_flag",
+    "command",
+    "log_path",
+    "status",
+    "return_code",
+    "elapsed_sec",
+]
 
 
 @dataclass(frozen=True)
@@ -81,6 +104,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-refresh", action="store_true", help="Refresh source caches where supported.")
     parser.add_argument("--skip-ibkr-borrow", action="store_true")
     parser.add_argument("--skip-form4-runner", action="store_true")
+    parser.add_argument(
+        "--oos-score-valid",
+        action="store_true",
+        help=(
+            "Opt-in: forward --oos-score-valid to 13_build_daily_scores so replay-window rows "
+            "self-certify oos_score_valid_flag=1. Default off: script 13 publishes "
+            "oos_score_valid_flag=0 and med_devices/scripts/76_mark_med_device_oos_provenance.py "
+            "remains the sole strict-OOS promoter. Requires --asof."
+        ),
+    )
     parser.add_argument("--resume", action="store_true", help="Resume from a previous manifest by skipping passed steps.")
     parser.add_argument("--resume-manifest", type=Path, default=None, help="Manifest JSON to resume from; defaults to latest manifest.")
     parser.add_argument("--rerun-passed", action="store_true", help="With --resume, rerun passed steps instead of skipping them.")
@@ -106,7 +139,9 @@ def build_steps(
     skip_ibkr_borrow: bool,
     skip_form4_runner: bool,
     import_positioning_sources: str,
-    oos_score_valid: bool = True,
+    oos_score_valid: bool = False,
+    include_financial_baseline_qa: bool = True,
+    include_share_count_qa: bool = True,
 ) -> list[Step]:
     asof_args = ["--asof", asof] if asof else []
     scoring_args = [*asof_args, "--oos-score-valid"] if oos_score_valid else list(asof_args)
@@ -169,6 +204,38 @@ def build_steps(
             Step("67_audit_external_positioning", "stage_7", "Audit external-positioning source coverage", py_script("med_devices/scripts/67_audit_med_device_external_positioning_coverage.py"), asof_args, optional=True),
             Step("13_build_daily_scores", "stage_8", "Build daily composite scores", py_script("med_devices/scripts/13_build_med_device_daily_scores.py"), scoring_args),
             Step("16_publish_review_pack", "stage_8", "Publish dated score review pack", py_script("med_devices/scripts/16_publish_med_device_score_review_pack.py"), asof_args),
+        ]
+    )
+    # Post-scoring QA publishers (QA-1/QA-2): default-on so routine refreshes keep the
+    # financial-baseline and share-count QA artifacts current for script 72's freshness
+    # checks. They run after 16 (dated review-pack directory exists) and before 72 (the
+    # QA gate then validates fresh artifacts). Marked optional: a QA publisher failure
+    # must not block the production refresh; 72's WARNING freshness check still
+    # surfaces the gap on the next validation.
+    if include_financial_baseline_qa:
+        steps.append(
+            Step(
+                "07_publish_financial_baseline_qa",
+                "stage_8",
+                "Publish financial baseline QA reports",
+                py_script("med_devices/scripts/07_publish_med_device_financial_baseline_qa.py"),
+                asof_args,
+                optional=True,
+            )
+        )
+    if include_share_count_qa:
+        steps.append(
+            Step(
+                "19_publish_share_count_qa",
+                "stage_8",
+                "Publish share-count/market-cap QA report",
+                py_script("med_devices/scripts/19_publish_med_device_share_count_qa.py"),
+                asof_args,
+                optional=True,
+            )
+        )
+    steps.extend(
+        [
             Step("74_build_analyst_review", "stage_8", "Build analyst review queue", py_script("med_devices/scripts/74_build_med_device_analyst_review_queue.py"), asof_args),
             Step("72_validate_production_outputs", "stage_8", "Run final production QA gate", py_script("med_devices/scripts/72_validate_med_device_production_outputs.py"), asof_args),
             Step("73_audit_calibration_governance", "stage_9", "Audit calibration refresh cadence", py_script("med_devices/scripts/73_audit_med_device_calibration_governance.py"), asof_args, optional=True),
@@ -252,18 +319,27 @@ def command_for_step(step: Step, *, config_path: Path, db_path: Path | None) -> 
     return cmd
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    # newline="\n" pins LF (XR-6) so manifest bytes are identical across platforms
+    tmp_path.write_text(text, encoding="utf-8", newline="\n")
+    os.replace(tmp_path, path)
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fields: list[str] = []
+    fields = list(MANIFEST_STEP_FIELDS)
     for row in rows:
         for key in row:
             if key not in fields:
                 fields.append(key)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
-        if fields:
-            writer.writeheader()
-            writer.writerows(rows)
+        writer.writeheader()
+        writer.writerows(rows)
+    os.replace(tmp_path, path)
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -272,6 +348,8 @@ def load_manifest(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"Resume manifest root must be an object: {path}")
+    if bool(payload.get("dry_run")):
+        raise ValueError(f"Refusing to resume from a dry-run manifest (dry_run=true): {path}")
     return payload
 
 
@@ -296,11 +374,13 @@ def resume_completed_step_ids(
     return completed
 
 
-def archive_paths(output_dir: Path, run_id: str) -> tuple[Path, Path, Path, Path]:
-    latest_json = output_dir / "med_devices_refresh_manifest.json"
-    latest_csv = output_dir / "med_devices_refresh_steps.csv"
-    archive_json = output_dir / f"med_devices_refresh_manifest_{run_id}.json"
-    archive_csv = output_dir / f"med_devices_refresh_steps_{run_id}.csv"
+def archive_paths(output_dir: Path, run_id: str, *, dry_run: bool = False) -> tuple[Path, Path, Path, Path]:
+    manifest_stem = "med_devices_refresh_dry_run_manifest" if dry_run else "med_devices_refresh_manifest"
+    steps_stem = "med_devices_refresh_dry_run_steps" if dry_run else "med_devices_refresh_steps"
+    latest_json = output_dir / f"{manifest_stem}.json"
+    latest_csv = output_dir / f"{steps_stem}.csv"
+    archive_json = output_dir / f"{manifest_stem}_{run_id}.json"
+    archive_csv = output_dir / f"{steps_stem}_{run_id}.csv"
     return latest_json, latest_csv, archive_json, archive_csv
 
 
@@ -323,21 +403,32 @@ def main() -> int:
     logs_dir = output_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("med_devices_refresh_%Y%m%dT%H%M%SZ")
-    production_latest_json, production_latest_csv, archive_manifest_json, archive_manifest_csv = archive_paths(output_dir, run_id)
-    latest_manifest_json = (
-        output_dir / "med_devices_refresh_dry_run_manifest.json" if args.dry_run else production_latest_json
+    # Dry-run manifests carry the dry_run marker in BOTH the latest and archive
+    # filenames so audit tooling enumerating archives can never mistake a
+    # rehearsal for a production refresh.
+    latest_manifest_json, latest_manifest_csv, archive_manifest_json, archive_manifest_csv = archive_paths(
+        output_dir, run_id, dry_run=bool(args.dry_run)
     )
-    latest_manifest_csv = (
-        output_dir / "med_devices_refresh_dry_run_steps.csv" if args.dry_run else production_latest_csv
-    )
+    production_latest_json, _, _, _ = archive_paths(output_dir, run_id, dry_run=False)
 
-    # --oos-score-valid is passed for the normal next-morning refresh but dropped
-    # when the resolved as-of falls outside the strict-OOS replay window. The
-    # window comes from the same config key script 13 enforces
+    # Strict-OOS self-certification is opt-in: by default script 13 publishes
+    # oos_score_valid_flag=0 and med_devices/scripts/76_mark_med_device_oos_provenance.py
+    # remains the sole writer of oos_score_valid_flag=1, so every promoted asof
+    # carries 76's evidence record. Even when --oos-score-valid is explicitly
+    # requested it is dropped outside the strict-OOS replay window. The window
+    # comes from the same config key script 13 enforces
     # (scoring.oos_replay_window_days), so the two scripts can never disagree.
-    oos_score_valid = True
+    oos_score_valid = bool(args.oos_score_valid)
     oos_drop_note = ""
-    if asof:
+    oos_opt_in_note = ""
+    if oos_score_valid and not asof:
+        print(
+            "ERROR: --oos-score-valid requires --asof so the strict-OOS replay window "
+            "(scoring.oos_replay_window_days) can be enforced.",
+            file=sys.stderr,
+        )
+        return 2
+    if oos_score_valid:
         replay_window_days = int(cfg_get(config, "scoring.oos_replay_window_days", 5))
         try:
             asof_age_days: int | None = (datetime.now(timezone.utc).date() - date.fromisoformat(asof)).days
@@ -352,6 +443,14 @@ def main() -> int:
                 "path (med_devices/scripts/21_backfill_med_device_historical_scores.py) plus "
                 "med_devices/scripts/76_mark_med_device_oos_provenance.py."
             )
+        else:
+            oos_opt_in_note = (
+                f"WARNING: --oos-score-valid was explicitly requested for --asof {asof}; "
+                "13_build_daily_scores will self-certify oos_score_valid_flag=1 / "
+                "calibration_sample_role='strict_oos' WITHOUT script 76's evidence gates. "
+                "Run med_devices/scripts/76_mark_med_device_oos_provenance.py afterwards so the "
+                "promotion carries an evidence/summary record."
+            )
     steps = build_steps(
         asof=asof,
         force_refresh=bool(args.force_refresh),
@@ -359,6 +458,8 @@ def main() -> int:
         skip_form4_runner=bool(args.skip_form4_runner),
         import_positioning_sources=str(args.import_positioning_sources or ""),
         oos_score_valid=oos_score_valid,
+        include_financial_baseline_qa=bool(cfg_get(config, f"{CONFIG_KEY}.enable_financial_baseline_qa_step", True)),
+        include_share_count_qa=bool(cfg_get(config, f"{CONFIG_KEY}.enable_share_count_qa_step", True)),
     )
     validate_step_order(steps)
     steps = apply_optional_step_config(steps, configured_optional_step_ids(config))
@@ -384,11 +485,15 @@ def main() -> int:
             retry_optional=bool(args.retry_optional),
         ).intersection({step.step_id for step in selected})
     planned = [step for step in selected if step.step_id not in resume_skipped_ids]
-    # Next-morning refreshes for the prior trading date keep --oos-score-valid;
-    # anything outside the shared replay window already had the flag dropped
-    # above, so retrospectively computed rows can never self-certify strict_oos.
-    if oos_drop_note and any(step.step_id == "13_build_daily_scores" for step in planned):
-        print(oos_drop_note)
+    # The default refresh publishes oos_score_valid_flag=0; only an explicit
+    # --oos-score-valid within the shared replay window forwards the flag, and
+    # anything outside the window already had it dropped above, so routine or
+    # retrospective runs can never silently self-certify strict_oos.
+    if any(step.step_id == "13_build_daily_scores" for step in planned):
+        if oos_drop_note:
+            print(oos_drop_note)
+        if oos_opt_in_note:
+            print(oos_opt_in_note)
     rows: list[dict[str, Any]] = [
         {
             "run_id": run_id,
@@ -469,6 +574,8 @@ def main() -> int:
         "ended_at_utc": ended.isoformat(timespec="seconds"),
         "dry_run": bool(args.dry_run),
         "asof": asof,
+        "oos_score_valid_requested": bool(args.oos_score_valid),
+        "oos_score_valid_effective": bool(oos_score_valid),
         "database_path": str(db_path),
         "config_path": str(config_path),
         "step_count": len(rows),
@@ -489,9 +596,13 @@ def main() -> int:
         "validation": validation,
         "steps": rows,
     }
-    archive_manifest_json.write_text(json.dumps(summary, indent=2, sort_keys=True, default=str), encoding="utf-8")
-    latest_manifest_json.write_text(json.dumps(summary, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    # Dated archives land first, then the latest pointers flip; every file goes
+    # through tmp+os.replace so a crash mid-publish can never leave a truncated
+    # manifest for --resume to trip over.
+    manifest_text = json.dumps(summary, indent=2, sort_keys=True, default=str)
+    atomic_write_text(archive_manifest_json, manifest_text)
     write_csv(archive_manifest_csv, rows)
+    atomic_write_text(latest_manifest_json, manifest_text)
     write_csv(latest_manifest_csv, rows)
     print(
         json.dumps(

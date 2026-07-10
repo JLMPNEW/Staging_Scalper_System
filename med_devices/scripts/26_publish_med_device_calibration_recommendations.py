@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,8 +46,13 @@ OUTPUT_FIELDS = [
     "validation_median_excess_120d",
     "validation_hit_rate_120d",
     "validation_lcb_120d",
+    "train_end_asof",
+    "validation_start_asof",
+    "validation_end_asof",
     "best_positive_components_120d",
     "weak_or_negative_components_120d",
+    "ic_generated_asof",
+    "score_model_version",
     "notes",
 ]
 
@@ -87,6 +94,38 @@ def validate_grid_contract(rows: list[dict[str, str]], *, path: Path) -> None:
         )
 
 
+def validate_ic_contract(rows: list[dict[str, str]], *, path: Path) -> None:
+    if not rows:
+        raise RuntimeError(
+            f"Component IC CSV is empty: {path}. Regenerate component ICs before publishing recommendations."
+        )
+    required = {
+        "calibration_cohort",
+        "horizon_days",
+        "component",
+        "production_recommendation",
+        "spearman_ic_excess",
+        "generated_asof",
+        "valid_from",
+    }
+    missing = sorted(required.difference(rows[0]))
+    if missing:
+        raise RuntimeError(
+            f"Component IC CSV {path} is missing required columns: {','.join(missing)}. "
+            "Regenerate the component IC file (with provenance columns) before publishing recommendations."
+        )
+
+
+def parse_iso_date(raw: object) -> date | None:
+    text = str(raw or "").strip()[:10]
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
 def parse_csv_set(raw: object) -> set[str]:
     return {item.strip() for item in str(raw or "").split(",") if item.strip()}
 
@@ -119,27 +158,43 @@ def row_value(row: dict[str, str], *keys: str) -> str:
     return ""
 
 
-def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+def publish_outputs(*, output_csv: Path, rows: list[dict[str, Any]], output_yaml: Path, yaml_text: str) -> None:
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    output_yaml.parent.mkdir(parents=True, exist_ok=True)
+    csv_tmp = output_csv.with_name(output_csv.name + ".tmp")
+    yaml_tmp = output_yaml.with_name(output_yaml.name + ".tmp")
+    with csv_tmp.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+    # newline="\n" pins LF (XR-6) so the YAML fragment's bytes are identical across platforms
+    yaml_tmp.write_text(yaml_text, encoding="utf-8", newline="\n")
+    # Both payloads are fully staged before either canonical artifact is swapped so the
+    # CSV/YAML pair cannot drift on a partial failure.
+    os.replace(csv_tmp, output_csv)
+    os.replace(yaml_tmp, output_yaml)
 
 
 def best_components(ic_rows: list[dict[str, str]], cohort: str) -> tuple[str, str]:
-    positive: list[str] = []
-    weak_or_negative: list[str] = []
+    positive: list[tuple[float, str]] = []
+    weak_or_negative: list[tuple[float, str]] = []
     for row in ic_rows:
         if str(row.get("calibration_cohort") or "") != cohort or str(row.get("horizon_days") or "") != "120":
             continue
         component = str(row.get("component") or "")
         rec = str(row.get("production_recommendation") or "")
+        ic = to_float(row.get("spearman_ic_excess"))
+        strength = abs(ic) if ic is not None else 0.0
         if rec == "positive_candidate_factor":
-            positive.append(component)
+            positive.append((strength, component))
         elif rec in {"negative_or_inverse_factor", "weak_or_unstable_factor"}:
-            weak_or_negative.append(component)
-    return ";".join(positive[:5]), ";".join(weak_or_negative[:5])
+            weak_or_negative.append((strength, component))
+
+    def top_five(items: list[tuple[float, str]]) -> str:
+        ranked = sorted(items, key=lambda item: (-item[0], item[1]))
+        return ";".join(component for _, component in ranked[:5])
+
+    return top_five(positive), top_five(weak_or_negative)
 
 
 def production_guardrail_reasons(
@@ -173,10 +228,33 @@ def production_guardrail_reasons(
     return list(dict.fromkeys(reasons)), concentration_override_used
 
 
+def grid_sort_key(row: dict[str, str]) -> tuple[bool, float]:
+    score = to_float(row.get("objective_score"))
+    return (str(row.get("pass_fail") or "") == "pass", score if score is not None else float("-inf"))
+
+
+def lockbox_violation_reasons(selected: dict[str, str], *, dev_window_end: date) -> list[str]:
+    reasons: list[str] = []
+    validation_end = parse_iso_date(selected.get("validation_end_asof"))
+    train_end = parse_iso_date(selected.get("train_end_asof"))
+    if validation_end is None:
+        reasons.append("validation_end_asof_missing_or_invalid")
+    elif validation_end > dev_window_end:
+        reasons.append("validation_window_exceeds_lockbox_seal")
+    if train_end is not None and train_end > dev_window_end:
+        reasons.append("train_window_exceeds_lockbox_seal")
+    return reasons
+
+
 def choose_recommendations(
     grid_rows: list[dict[str, str]],
     ic_rows: list[dict[str, str]],
     config: dict[str, Any],
+    *,
+    ic_generated_asof: str,
+    score_model_version: str,
+    dev_window_end: date,
+    on_lockbox_violation: str,
 ) -> list[dict[str, Any]]:
     min_selected_validation_for_production = int(
         cfg_get(
@@ -206,9 +284,25 @@ def choose_recommendations(
     cohorts = sorted({str(row.get("calibration_cohort") or "") for row in grid_rows if str(row.get("calibration_cohort") or "")})
     out: list[dict[str, Any]] = []
     for cohort in cohorts:
-        rows = [row for row in grid_rows if str(row.get("calibration_cohort") or "") == cohort]
+        # Sort locally by (pass_fail, objective_score) so the selection does not silently
+        # depend on the upstream sort order of the grid CSV (script 25).
+        rows = sorted(
+            (row for row in grid_rows if str(row.get("calibration_cohort") or "") == cohort),
+            key=grid_sort_key,
+            reverse=True,
+        )
         passing = [row for row in rows if str(row.get("pass_fail") or "") == "pass"]
         selected = passing[0] if passing else (rows[0] if rows else {})
+        lockbox_reasons = lockbox_violation_reasons(selected, dev_window_end=dev_window_end)
+        if lockbox_reasons and on_lockbox_violation == "fail":
+            raise RuntimeError(
+                f"Lockbox violation for cohort {cohort}: {';'.join(lockbox_reasons)} "
+                f"(train_end_asof={selected.get('train_end_asof', '')}, "
+                f"validation_end_asof={selected.get('validation_end_asof', '')}, "
+                f"dev_window_end={dev_window_end.isoformat()}). Regenerate the gate grid inside the sealed "
+                "dev window, or set calibration.on_lockbox_violation to 'downgrade' to publish flagged, "
+                "non-promotable recommendations."
+            )
         positive, weak = best_components(ic_rows, cohort)
         if passing:
             guardrail_reasons, concentration_override_used = production_guardrail_reasons(
@@ -248,6 +342,15 @@ def choose_recommendations(
                 "No gate set passed constraints; shown parameter set is the best failed diagnostic row, "
                 "not a calibrated production candidate."
             )
+        if lockbox_reasons:
+            if action == "promote_to_calibrated_baseline":
+                action = "review_for_manual_promotion"
+                selected_row_type = "passed_validation_watchlist"
+                production_candidate = 0
+            notes += (
+                f" Lockbox violation ({';'.join(lockbox_reasons)}): validation statistics extend past "
+                f"dev_window_end={dev_window_end.isoformat()}; not promotable until regenerated inside the seal."
+            )
         out.append(
             {
                 "calibration_cohort": cohort,
@@ -282,19 +385,30 @@ def choose_recommendations(
                 "validation_median_excess_120d": selected.get("validation_median_120d", ""),
                 "validation_hit_rate_120d": selected.get("validation_hit_rate_120d", ""),
                 "validation_lcb_120d": selected.get("validation_lcb_120d", ""),
+                "train_end_asof": selected.get("train_end_asof", ""),
+                "validation_start_asof": selected.get("validation_start_asof", ""),
+                "validation_end_asof": selected.get("validation_end_asof", ""),
                 "best_positive_components_120d": positive,
                 "weak_or_negative_components_120d": weak,
+                "ic_generated_asof": ic_generated_asof,
+                "score_model_version": score_model_version,
                 "notes": notes,
             }
         )
     return out
 
 
-def write_yaml_fragment(path: Path, recommendations: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def build_yaml_fragment(
+    recommendations: list[dict[str, Any]],
+    *,
+    ic_generated_asof: str,
+    score_model_version: str,
+) -> str:
     lines = [
         "# Generated calibration recommendation fragment.",
         "# Review manually before copying any values into med_devices/config.yaml.",
+        f"# score_model_version: {score_model_version}",
+        f"# ic_generated_asof: {ic_generated_asof}",
         "scoring:",
         "  cohort_profiles:",
     ]
@@ -319,7 +433,7 @@ def write_yaml_fragment(path: Path, recommendations: list[dict[str, Any]]) -> No
                 f"        value_trap_max: {row['value_trap_max']}",
             ]
         )
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "\n".join(lines) + "\n"
 
 
 def main() -> None:
@@ -350,11 +464,43 @@ def main() -> None:
     )
     grid_rows = read_csv(grid_csv)
     validate_grid_contract(grid_rows, path=grid_csv)
-    recommendations = choose_recommendations(grid_rows, read_csv(ic_csv), config)
-    write_csv(output_csv, recommendations)
-    write_yaml_fragment(output_yaml, recommendations)
+    ic_rows = read_csv(ic_csv)
+    validate_ic_contract(ic_rows, path=ic_csv)
+    ic_generated_asof = ";".join(
+        sorted({str(row.get("generated_asof") or "").strip() for row in ic_rows if str(row.get("generated_asof") or "").strip()})
+    )
+    score_model_version = str(cfg_get(config, "scoring.model_version", "")).strip()
+    dev_window_end_raw = str(cfg_get(config, "calibration.dev_window_end", "2025-12-31")).strip()
+    dev_window_end = parse_iso_date(dev_window_end_raw)
+    if dev_window_end is None:
+        raise RuntimeError(f"Invalid calibration.dev_window_end date: {dev_window_end_raw!r}")
+    on_lockbox_violation = str(cfg_get(config, "calibration.on_lockbox_violation", "fail")).strip().lower()
+    if on_lockbox_violation not in {"fail", "downgrade"}:
+        raise RuntimeError(
+            f"calibration.on_lockbox_violation must be 'fail' or 'downgrade', got {on_lockbox_violation!r}"
+        )
+    recommendations = choose_recommendations(
+        grid_rows,
+        ic_rows,
+        config,
+        ic_generated_asof=ic_generated_asof,
+        score_model_version=score_model_version,
+        dev_window_end=dev_window_end,
+        on_lockbox_violation=on_lockbox_violation,
+    )
+    yaml_text = build_yaml_fragment(
+        recommendations,
+        ic_generated_asof=ic_generated_asof,
+        score_model_version=score_model_version,
+    )
+    publish_outputs(output_csv=output_csv, rows=recommendations, output_yaml=output_yaml, yaml_text=yaml_text)
+    lockbox_flagged = sum(1 for row in recommendations if "Lockbox violation" in str(row.get("notes") or ""))
     print(f"recommendations_csv={output_csv} rows={len(recommendations)}")
     print(f"recommended_config_yaml={output_yaml}")
+    print(
+        f"ic_generated_asof={ic_generated_asof} score_model_version={score_model_version} "
+        f"dev_window_end={dev_window_end.isoformat()} lockbox_flagged_cohorts={lockbox_flagged}"
+    )
 
 
 if __name__ == "__main__":

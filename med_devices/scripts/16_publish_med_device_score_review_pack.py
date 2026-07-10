@@ -5,10 +5,12 @@ import argparse
 import csv
 import importlib.util
 import json
+import logging
 import math
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -302,14 +304,19 @@ DAILY_COMPOSITE_EXTRA_FIELDS = [
     "forward_catalyst_confidence",
     "forward_catalyst_asof_date",
 ]
-assert "feature_data_asof_date" in set(SCORE_FIELDS), (
-    "DAILY_COMPOSITE_FIELDS injection is anchored on 'feature_data_asof_date' in SCORE_FIELDS; "
-    "if that field is ever removed from SCORE_FIELDS the daily-only composite fields will be silently dropped. "
-    "Update the injection loop below before removing it."
-)
-# Single source of truth for the daily composite CSV contract shared with script 13's
-# builder copy of med_device_daily_composite_scores.csv. Script 13 additionally emits
-# company_id (right after rank); the review pack intentionally omits it.
+# Explicit raise (not assert) so the guard survives python -O / PYTHONOPTIMIZE.
+if "feature_data_asof_date" not in set(SCORE_FIELDS):
+    raise RuntimeError(
+        "Daily composite contract injection is anchored on 'feature_data_asof_date' in SCORE_FIELDS; "
+        "if that field is ever removed from SCORE_FIELDS the daily-only composite fields will be silently dropped. "
+        "Update the injection loop below before removing it."
+    )
+# Superset contract for the daily composite CSVs. Script 13's rolling copy of
+# med_device_daily_composite_scores.csv emits company_id (which the review pack
+# intentionally omits) and omits the PACK_ONLY_COMPOSITE_FIELDS enrichment columns
+# below (which the review pack appends at the end of its dated copy). Everything
+# else must match script 13's FIELDNAMES exactly; build_daily_composite_fieldnames()
+# enforces both directions at runtime.
 DAILY_COMPOSITE_CONTRACT_FIELDS = []
 for field in SCORE_FIELDS:
     DAILY_COMPOSITE_CONTRACT_FIELDS.append(field)
@@ -318,9 +325,39 @@ for field in SCORE_FIELDS:
     if field == "feature_data_asof_date":
         DAILY_COMPOSITE_CONTRACT_FIELDS.extend(extra for extra in DAILY_COMPOSITE_EXTRA_FIELDS if extra not in SCORE_FIELDS)
 REVIEW_PACK_OMITTED_CONTRACT_FIELDS = {"company_id"}
-DAILY_COMPOSITE_FIELDS = [
-    field for field in DAILY_COMPOSITE_CONTRACT_FIELDS if field not in REVIEW_PACK_OMITTED_CONTRACT_FIELDS
+# Enrichment columns present ONLY in the dated review-pack composite CSV, appended
+# after script 13's ordering so positional readers of the rolling and dated files see
+# identical positions for every shared column:
+# - forward_catalyst_*: DB-backed catalyst columns script 13 does not emit.
+# - dedup_class_i_* / class_i_* / canonical_recall_* / *_mapping_confidence*: FDA
+#   recall-dedup audit columns joined from feature_fda_product_risk by load_score_rows.
+# - reimbursement_billing_category .. reimbursement_rate_row_count: reimbursement
+#   enrichment columns joined from feature_reimbursement by load_score_rows.
+PACK_ONLY_COMPOSITE_FIELDS = [
+    "forward_catalyst_event_date",
+    "forward_catalyst_event_type",
+    "forward_catalyst_nearest_days",
+    "forward_catalyst_source",
+    "forward_catalyst_confidence",
+    "forward_catalyst_asof_date",
+    "dedup_class_i_recall_count_36m",
+    "class_i_multi_source_recall_count_36m",
+    "open_class_i_recall_count_36m",
+    "terminated_class_i_recall_count_36m",
+    "canonical_recall_duplicate_source_count",
+    "avg_fda_mapping_confidence",
+    "risk_mapping_confidence_min",
+    "reimbursement_billing_category",
+    "reimbursement_payment_rate_status",
+    "reimbursement_primary_payment_file",
+    "reimbursement_policy_evidence_count",
+    "reimbursement_code_count",
+    "reimbursement_rate_row_count",
 ]
+# Stamped into the per-pack manifest so sealed packs published by older script
+# revisions are self-describing. Bump whenever the pack's file set, any CSV header,
+# or the markdown layout changes.
+REVIEW_PACK_SCHEMA_VERSION = "med_device_review_pack_v2"
 
 
 def _script13_composite_fieldnames() -> list[str]:
@@ -343,14 +380,49 @@ def _script13_composite_fieldnames() -> list[str]:
     return list(module.FIELDNAMES)
 
 
-_SCRIPT13_CONTRACT_DRIFT = [
-    field for field in _script13_composite_fieldnames() if field not in set(DAILY_COMPOSITE_CONTRACT_FIELDS)
-]
-assert not _SCRIPT13_CONTRACT_DRIFT, (
-    "Script 13 FIELDNAMES drifted outside the daily composite contract: "
-    f"{_SCRIPT13_CONTRACT_DRIFT}. Add the new fields to SCORE_FIELDS / DAILY_COMPOSITE_EXTRA_FIELDS "
-    "(or the contract injection above) so both composite CSV headers stay aligned."
-)
+def build_daily_composite_fieldnames() -> list[str]:
+    """Build the dated composite CSV header from script 13's FIELDNAMES.
+
+    The dated header is script 13's rolling header verbatim (minus company_id) with the
+    review-pack-only enrichment columns appended at the end, so every shared column sits
+    at the same position in both files. Raises RuntimeError (never assert, so the guard
+    survives python -O) on drift in either direction:
+    - script 13 emits a field outside the contract, or
+    - the set of contract fields script 13 omits stops matching PACK_ONLY_COMPOSITE_FIELDS.
+    Called from main() so the (expensive) script-13 module exec does not run at import
+    time or for --help.
+    """
+    script13_fields = _script13_composite_fieldnames()
+    script13_set = set(script13_fields)
+    contract_set = set(DAILY_COMPOSITE_CONTRACT_FIELDS)
+    pack_only_set = set(PACK_ONLY_COMPOSITE_FIELDS)
+    drift_outside = [field for field in script13_fields if field not in contract_set]
+    if drift_outside:
+        raise RuntimeError(
+            "Script 13 FIELDNAMES drifted outside the daily composite contract: "
+            f"{drift_outside}. Add the new fields to SCORE_FIELDS / DAILY_COMPOSITE_EXTRA_FIELDS "
+            "(or the contract injection above) so both composite CSV headers stay reconciled."
+        )
+    missing_from_script13 = {field for field in contract_set if field not in script13_set}
+    undeclared = sorted(missing_from_script13 - pack_only_set)
+    stale_pack_only = sorted(pack_only_set - missing_from_script13)
+    if undeclared or stale_pack_only:
+        raise RuntimeError(
+            "Daily composite contract drifted versus script 13 FIELDNAMES: "
+            f"contract fields missing from script 13 but not declared in PACK_ONLY_COMPOSITE_FIELDS={undeclared}; "
+            f"declared pack-only fields script 13 now emits (or the contract dropped)={stale_pack_only}. "
+            "Update PACK_ONLY_COMPOSITE_FIELDS / SCORE_FIELDS / DAILY_COMPOSITE_EXTRA_FIELDS so the "
+            "rolling and dated composite headers stay reconciled."
+        )
+    if not REVIEW_PACK_OMITTED_CONTRACT_FIELDS <= script13_set:
+        raise RuntimeError(
+            "Review-pack omitted contract fields "
+            f"{sorted(REVIEW_PACK_OMITTED_CONTRACT_FIELDS - script13_set)} are no longer emitted by "
+            "script 13; update REVIEW_PACK_OMITTED_CONTRACT_FIELDS."
+        )
+    header = [field for field in script13_fields if field not in REVIEW_PACK_OMITTED_CONTRACT_FIELDS]
+    header.extend(field for field in PACK_ONLY_COMPOSITE_FIELDS)
+    return header
 DAILY_COMPOSITE_FIELD_DEFAULTS: dict[str, Any] = {
     "score_scale_min": 0.0,
     "score_scale_max": 100.0,
@@ -695,6 +767,15 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
     os.replace(tmp_name, path)
 
 
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # newline="" keeps the JSON LF on every platform, matching the pack's CSV writers.
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, delete=False) as handle:
+        tmp_name = handle.name
+        handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp_name, path)
+
+
 def calibration_eligible_flag_value(row: dict[str, Any]) -> str:
     raw = row.get("calibration_eligible_flag")
     return "" if raw in {None, ""} else str(raw)
@@ -732,46 +813,35 @@ def collapse_count_rows(items: list[dict[str, Any]], key: str) -> list[tuple[str
     return sorted(totals.items(), key=lambda item: (-item[1], item[0]))
 
 
+def section_heading(title: str, items: list[dict[str, Any]], limit: int | None = None) -> str:
+    """Markdown section heading that states the truncation explicitly when it applies."""
+    if limit is not None and len(items) > limit:
+        return f"## {title} (top {limit} of {len(items)})"
+    return f"## {title}"
+
+
 def write_markdown(
     path: Path,
     *,
     rows: list[dict[str, Any]],
     counts: list[dict[str, Any]],
     reimbursement_counts: list[dict[str, Any]],
+    tier1: list[dict[str, Any]],
     portfolio_candidates: list[dict[str, Any]],
     baseline_candidates: list[dict[str, Any]],
+    safe_core: list[dict[str, Any]],
+    safe_core_watchlist: list[dict[str, Any]],
+    special_situations: list[dict[str, Any]],
+    restricted: list[dict[str, Any]],
+    regulatory_risk: list[dict[str, Any]],
+    pullback_candidates: list[dict[str, Any]],
+    top25: list[dict[str, Any]],
+    bottom25: list[dict[str, Any]],
     asof: str,
-) -> None:
+) -> int:
+    # All selection lists are computed once in main() and passed in, so the markdown
+    # sections and the companion CSVs can never diverge from duplicated filter logic.
     model_version = str(rows[0].get("scoring_model_version") or "") if rows else ""
-    tier1 = [row for row in rows if row.get("classification") == "tier_1_long_candidate"]
-    safe_core = sorted(
-        [row for row in rows if int(row.get("passed_safe_core_gate") or 0) == 1],
-        key=lambda item: (int(item.get("safe_core_rank") or 999999), -first_float(item.get("safe_core_score"))),
-    )
-    safe_core_watchlist = sorted(
-        [row for row in rows if str(row.get("safe_core_status") or "").strip().lower() == "watchlist"],
-        key=lambda item: -first_float(item.get("safe_core_score")),
-    )
-    special_situations = [
-        row
-        for row in rows
-        if row.get("classification") == "special_situation_or_binary_risk_watchlist"
-        or str(row.get("tier1_safety_status") or "").strip().lower() == "fail"
-    ]
-    restricted = [
-        row for row in rows
-        if str(row.get("calibration_status") or "").strip().lower()
-        in {"restricted_research_only", "excluded_from_tier1"}
-    ]
-    regulatory_risk = [
-        row
-        for row in rows
-        if row.get("classification") in {"manual_review_regulatory_risk", "avoid_confirmed_regulatory_risk"}
-        or str(row.get("fda_review_state") or "").strip().lower() in REGULATORY_RISK_STATES
-    ]
-    top25 = rows[:25]
-    bottom25 = list(reversed(rows[-25:]))
-    pullback_candidates = [row for row in rows if str(row.get("pullback_candidate_tag") or "").strip() in {"1", "true", "True"}]
 
     def line_items(items: list[dict[str, Any]], *, include_reason: bool = False) -> list[str]:
         out: list[str] = []
@@ -820,7 +890,7 @@ def write_markdown(
         "## Tier-1 Long Candidates",
         *(line_items(tier1) or ["- None"]),
         "",
-        "## Portfolio Candidate Universe",
+        section_heading("Portfolio Candidate Universe", portfolio_candidates, 25),
         *(
             [
                 f"- {row.get('rank')}. {row.get('ticker')} "
@@ -831,7 +901,7 @@ def write_markdown(
             ] or ["- None"]
         ),
         "",
-        "## Calibrated Baseline Candidates",
+        section_heading("Calibrated Baseline Candidates", baseline_candidates, 30),
         *(
             [
                 f"- {row.get('rank')}. {row.get('ticker')} "
@@ -845,16 +915,16 @@ def write_markdown(
             ] or ["- None"]
         ),
         "",
-        "## Shadow Safe-Core Candidates",
+        section_heading("Shadow Safe-Core Candidates", safe_core, 25),
         *(safe_core_line_items(safe_core[:25], include_reason=True) or ["- None"]),
         "",
-        "## Shadow Safe-Core Watchlist",
+        section_heading("Shadow Safe-Core Watchlist", safe_core_watchlist, 25),
         *(safe_core_line_items(safe_core_watchlist[:25], include_reason=True) or ["- None"]),
         "",
-        "## Special Situation / Binary Risk Watchlist",
+        section_heading("Special Situation / Binary Risk Watchlist", special_situations, 25),
         *(line_items(special_situations[:25], include_reason=True) or ["- None"]),
         "",
-        "## Restricted Research Cohorts",
+        section_heading("Restricted Research Cohorts", restricted, 25),
         *(
             [
                 f"- {row.get('rank')}. {row.get('ticker')} "
@@ -865,7 +935,7 @@ def write_markdown(
             ] or ["- None"]
         ),
         "",
-        "## Technical Policy Snapshot",
+        section_heading("Technical Policy Snapshot", tier1, 25),
         *(
             [
                 f"- {row.get('ticker')}: mode={row.get('technical_gate_mode') or 'legacy'} "
@@ -908,7 +978,7 @@ def write_markdown(
             ] or ["- None"]
         ),
         "",
-        "## Pullback Candidate Tags",
+        section_heading("Pullback Candidate Tags", pullback_candidates, 25),
         *(
             [
                 f"- {row.get('rank')}. {row.get('ticker')} "
@@ -930,10 +1000,13 @@ def write_markdown(
         "",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+    # newline="" disables platform newline translation so the markdown is LF on every
+    # host, matching the pack's CSV writers (and script 76's rewrites).
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, delete=False) as handle:
         tmp_name = handle.name
         handle.write("\n".join(content))
     os.replace(tmp_name, path)
+    return len(content)
 
 
 def dated_output_dir(base_output_dir: Path, asof: str) -> Path:
@@ -959,9 +1032,10 @@ def main() -> None:
         rows = load_score_rows(conn, asof=asof)
         if not rows:
             raise RuntimeError(f"No med_device_daily_scores rows found for {asof}")
+        daily_composite_fields = build_daily_composite_fieldnames()
         output_dir = dated_output_dir(output_base_dir, asof)
         counts = classification_counts(rows)
-        clean_rows = [clean_row(row, fieldnames=DAILY_COMPOSITE_FIELDS) for row in rows]
+        clean_rows = [clean_row(row, fieldnames=daily_composite_fields) for row in rows]
         reimbursement_counts = reimbursement_status_counts(clean_rows)
         tier1 = [row for row in clean_rows if row["classification"] == "tier_1_long_candidate"]
         safe_core = sorted(
@@ -972,11 +1046,23 @@ def main() -> None:
             [row for row in clean_rows if str(row.get("safe_core_status") or "").strip().lower() == "watchlist"],
             key=lambda item: -first_float(item.get("safe_core_score")),
         )
+        # A bare tier1_safety_status='fail' OR-term sweeps ~97.6% of the universe into
+        # this watchlist; only tier1 failures that carry an actual binary/special-
+        # situation risk flag belong here.
         special_situations = [
             row
             for row in clean_rows
             if row["classification"] == "special_situation_or_binary_risk_watchlist"
-            or str(row.get("tier1_safety_status") or "").strip().lower() == "fail"
+            or (
+                str(row.get("tier1_safety_status") or "").strip().lower() == "fail"
+                and (
+                    int(row.get("single_product_risk_flag") or 0) == 1
+                    or int(row.get("binary_event_risk_flag") or 0) == 1
+                )
+            )
+        ]
+        pullback_candidates = [
+            row for row in clean_rows if str(row.get("pullback_candidate_tag") or "").strip() in {"1", "true", "True"}
         ]
         manual = [row for row in clean_rows if row["classification"] == "manual_review_regulatory_risk"]
         restricted = [
@@ -998,45 +1084,84 @@ def main() -> None:
         bottom25 = list(reversed(clean_rows[-25:]))
         baseline_candidates = calibrated_baseline_candidates(clean_rows, config)
 
-        write_csv(output_dir / "med_device_daily_composite_scores.csv", clean_rows, DAILY_COMPOSITE_FIELDS)
-        write_csv(output_dir / "med_device_score_review_all.csv", clean_rows, SCORE_FIELDS)
-        write_csv(output_dir / "med_device_score_review_tier1.csv", tier1, SCORE_FIELDS)
-        write_csv(output_dir / "med_device_score_review_portfolio_candidates.csv", portfolio_candidates, SCORE_FIELDS)
-        write_csv(
-            output_dir / "med_device_score_review_calibrated_baseline.csv",
+        manifest_files: dict[str, dict[str, Any]] = {}
+
+        def publish_csv(name: str, csv_rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+            write_csv(output_dir / name, csv_rows, fieldnames)
+            manifest_files[name] = {"row_count": len(csv_rows), "column_count": len(fieldnames)}
+            if not csv_rows:
+                logging.warning(
+                    "review pack selection %s is empty for %s; published header-only "
+                    "(manifest records row_count=0 as intentional)",
+                    name,
+                    asof,
+                )
+
+        publish_csv("med_device_daily_composite_scores.csv", clean_rows, daily_composite_fields)
+        publish_csv("med_device_score_review_all.csv", clean_rows, SCORE_FIELDS)
+        publish_csv("med_device_score_review_tier1.csv", tier1, SCORE_FIELDS)
+        publish_csv("med_device_score_review_portfolio_candidates.csv", portfolio_candidates, SCORE_FIELDS)
+        publish_csv(
+            "med_device_score_review_calibrated_baseline.csv",
             baseline_candidates,
             CALIBRATED_BASELINE_FIELDS,
         )
-        write_csv(output_dir / "med_device_score_review_safe_core.csv", safe_core, SCORE_FIELDS)
-        write_csv(output_dir / "med_device_score_review_safe_core_watchlist.csv", safe_core_watchlist, SCORE_FIELDS)
-        write_csv(
-            output_dir / "med_device_score_review_special_situation_binary_risk.csv",
+        publish_csv("med_device_score_review_safe_core.csv", safe_core, SCORE_FIELDS)
+        publish_csv("med_device_score_review_safe_core_watchlist.csv", safe_core_watchlist, SCORE_FIELDS)
+        publish_csv(
+            "med_device_score_review_special_situation_binary_risk.csv",
             special_situations,
             SCORE_FIELDS,
         )
-        write_csv(output_dir / "med_device_score_review_manual_regulatory.csv", manual, SCORE_FIELDS)
-        write_csv(output_dir / "med_device_score_review_restricted_cohorts.csv", restricted, SCORE_FIELDS)
-        write_csv(output_dir / "med_device_score_review_regulatory_risk.csv", regulatory_risk, SCORE_FIELDS)
-        write_csv(output_dir / "med_device_score_review_top25.csv", top25, SCORE_FIELDS)
-        write_csv(output_dir / "med_device_score_review_bottom25.csv", bottom25, SCORE_FIELDS)
-        write_csv(
-            output_dir / "med_device_score_review_classification_counts.csv",
+        publish_csv("med_device_score_review_manual_regulatory.csv", manual, SCORE_FIELDS)
+        publish_csv("med_device_score_review_restricted_cohorts.csv", restricted, SCORE_FIELDS)
+        publish_csv("med_device_score_review_regulatory_risk.csv", regulatory_risk, SCORE_FIELDS)
+        publish_csv("med_device_score_review_top25.csv", top25, SCORE_FIELDS)
+        publish_csv("med_device_score_review_bottom25.csv", bottom25, SCORE_FIELDS)
+        publish_csv(
+            "med_device_score_review_classification_counts.csv",
             counts,
             ["classification", "calibration_eligible_flag", "count"],
         )
-        write_csv(
-            output_dir / "med_device_score_review_reimbursement_status_counts.csv",
+        publish_csv(
+            "med_device_score_review_reimbursement_status_counts.csv",
             reimbursement_counts,
             ["reimbursement_status", "calibration_eligible_flag", "count"],
         )
-        write_markdown(
+        markdown_line_count = write_markdown(
             output_dir / "med_device_score_review_pack.md",
             rows=clean_rows,
             counts=counts,
             reimbursement_counts=reimbursement_counts,
+            tier1=tier1,
             portfolio_candidates=portfolio_candidates,
             baseline_candidates=baseline_candidates,
+            safe_core=safe_core,
+            safe_core_watchlist=safe_core_watchlist,
+            special_situations=special_situations,
+            restricted=restricted,
+            regulatory_risk=regulatory_risk,
+            pullback_candidates=pullback_candidates,
+            top25=top25,
+            bottom25=bottom25,
             asof=asof,
+        )
+        manifest_files["med_device_score_review_pack.md"] = {"line_count": markdown_line_count}
+        # Manifest is written LAST so its presence positively confirms a complete pack:
+        # a pack with a manifest whose row_count is 0 was published legitimately empty,
+        # while a pack missing its manifest is incomplete/truncated.
+        write_json(
+            output_dir / "med_device_score_review_manifest.json",
+            {
+                "asof_date": asof,
+                "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "publisher_script": Path(__file__).name,
+                "review_pack_schema_version": REVIEW_PACK_SCHEMA_VERSION,
+                "scoring_contract_version": str(rows[0].get("scoring_contract_version") or ""),
+                "scoring_model_version": str(rows[0].get("scoring_model_version") or ""),
+                "universe_row_count": len(rows),
+                "files": manifest_files,
+            },
         )
         print(
             f"review_pack_dir={output_dir} asof={asof} rows={len(rows)} "

@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import sys
 from collections import Counter, defaultdict
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +68,11 @@ DETAIL_FIELDS = [
     "spearman_ic_excess_bh_q_value",
     "net_spearman_ic_excess_bh_q_value",
     "factor_neutral_spearman_ic_excess_bh_q_value",
+    "ic_generated_asof",
+    "input_scoring_model_version",
+    "support_window_start",
+    "support_window_end",
+    "input_lockbox_violation",
 ]
 SUMMARY_FIELDS = [
     "review_action",
@@ -94,10 +101,87 @@ def read_csv(path: Path) -> list[dict[str, str]]:
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    tmp_path = path.with_name(path.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(tmp_path, path)
+
+
+def parse_iso_date(raw: object) -> date | None:
+    text = str(raw or "").strip()[:10]
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def validate_ic_contract(rows: list[dict[str, str]], *, path: Path) -> None:
+    if not rows:
+        raise RuntimeError(
+            f"Component IC CSV is empty: {path}. Regenerate component ICs before building the promotion review."
+        )
+    required = {"calibration_cohort", "component", "horizon_days", "production_recommendation", "generated_asof"}
+    missing = sorted(required.difference(rows[0]))
+    if missing:
+        raise RuntimeError(
+            f"Component IC CSV {path} is missing required columns: {','.join(missing)}. "
+            "Regenerate the component IC file (with provenance columns) before building the promotion review."
+        )
+
+
+def validate_scoring_model_version(
+    cohort_rows: list[dict[str, str]],
+    *,
+    path: Path,
+    expected: str,
+    allowed_extra: set[str],
+) -> str:
+    if "scoring_model_version" not in cohort_rows[0]:
+        raise RuntimeError(
+            f"Cohort-neutral backtest CSV {path} has no scoring_model_version column; "
+            "regenerate it with the current scoring pipeline before building the promotion review."
+        )
+    versions = sorted({str(row.get("scoring_model_version") or "").strip() for row in cohort_rows})
+    allowed = {expected} | allowed_extra
+    allowed.discard("")
+    unexpected = [version for version in versions if version not in allowed]
+    if unexpected:
+        raise RuntimeError(
+            f"Cohort-neutral backtest CSV {path} contains scoring_model_version values "
+            f"{','.join(repr(v) for v in unexpected)} that do not match config scoring.model_version "
+            f"{expected!r}. Regenerate the backtest with the current model, or add the version(s) to "
+            "calibration.component_promotion_review.allowed_scoring_model_versions for an explicit "
+            "calibration run."
+        )
+    return ";".join(version for version in versions if version)
+
+
+def filter_to_dev_window(
+    cohort_rows: list[dict[str, str]],
+    *,
+    window_start: date,
+    window_end: date,
+) -> tuple[list[dict[str, str]], date | None, date | None, int]:
+    kept: list[dict[str, str]] = []
+    input_min: date | None = None
+    input_max: date | None = None
+    dropped = 0
+    for row in cohort_rows:
+        asof = parse_iso_date(row.get("asof_date"))
+        if asof is None:
+            dropped += 1
+            continue
+        input_min = asof if input_min is None or asof < input_min else input_min
+        input_max = asof if input_max is None or asof > input_max else input_max
+        if window_start <= asof <= window_end:
+            kept.append(row)
+        else:
+            dropped += 1
+    return kept, input_min, input_max, dropped
 
 
 def to_int(raw: object, default: int = 0) -> int:
@@ -306,6 +390,7 @@ def build_review_rows(
                 "spearman_ic_excess_bh_q_value": row.get("spearman_ic_excess_bh_q_value") or "",
                 "net_spearman_ic_excess_bh_q_value": row.get("net_spearman_ic_excess_bh_q_value") or "",
                 "factor_neutral_spearman_ic_excess_bh_q_value": row.get("factor_neutral_spearman_ic_excess_bh_q_value") or "",
+                "ic_generated_asof": row.get("generated_asof") or "",
             }
         )
     return out
@@ -389,7 +474,59 @@ def main() -> None:
     )
 
     ic_rows = read_csv(ic_csv)
+    validate_ic_contract(ic_rows, path=ic_csv)
     cohort_rows = read_csv(cohort_csv)
+    if not cohort_rows:
+        raise RuntimeError(f"Cohort-neutral backtest CSV is empty: {cohort_csv}")
+    expected_model_version = str(cfg_get(config, "scoring.model_version", "")).strip()
+    allowed_extra_versions = {
+        item.strip()
+        for item in str(
+            cfg_get(config, "calibration.component_promotion_review.allowed_scoring_model_versions", "")
+        ).split(",")
+        if item.strip()
+    }
+    input_model_version = validate_scoring_model_version(
+        cohort_rows,
+        path=cohort_csv,
+        expected=expected_model_version,
+        allowed_extra=allowed_extra_versions,
+    )
+    window_start_raw = str(cfg_get(config, "calibration.dev_window_start", "2024-01-02")).strip()
+    window_end_raw = str(cfg_get(config, "calibration.dev_window_end", "2025-12-31")).strip()
+    window_start = parse_iso_date(window_start_raw)
+    window_end = parse_iso_date(window_end_raw)
+    if window_start is None or window_end is None or window_start > window_end:
+        raise RuntimeError(
+            f"Invalid calibration dev window: start={window_start_raw!r} end={window_end_raw!r}"
+        )
+    on_lockbox_violation = str(
+        cfg_get(config, "calibration.component_promotion_review.on_lockbox_violation", "fail")
+    ).strip().lower()
+    if on_lockbox_violation not in {"fail", "downgrade"}:
+        raise RuntimeError(
+            "calibration.component_promotion_review.on_lockbox_violation must be 'fail' or 'downgrade', "
+            f"got {on_lockbox_violation!r}"
+        )
+    cohort_rows, input_asof_min, input_asof_max, dropped_rows = filter_to_dev_window(
+        cohort_rows,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    if input_asof_min is None or input_asof_max is None or not cohort_rows:
+        raise RuntimeError(
+            f"Cohort-neutral backtest CSV {cohort_csv} has no parseable asof_date rows inside the dev window "
+            f"{window_start.isoformat()}..{window_end.isoformat()}"
+        )
+    lockbox_violation = input_asof_min < window_start or input_asof_max > window_end
+    if lockbox_violation and on_lockbox_violation == "fail":
+        raise RuntimeError(
+            f"Lockbox violation: cohort-neutral backtest {cohort_csv} spans asof "
+            f"{input_asof_min.isoformat()}..{input_asof_max.isoformat()}, outside the sealed dev window "
+            f"{window_start.isoformat()}..{window_end.isoformat()}. Regenerate the backtest inside the dev "
+            "window, or set calibration.component_promotion_review.on_lockbox_violation to 'downgrade' to "
+            "publish a flagged, non-promotable review."
+        )
     horizons = return_horizons(cohort_rows)
     if not horizons:
         raise RuntimeError(f"No cohort_excess_return_<horizon>d columns found in {cohort_csv}")
@@ -408,11 +545,36 @@ def main() -> None:
         require_60_120_persistence=require_persistence,
         max_bh_q_value=max_bh_q_value,
     )
+    for review_row in review_rows:
+        review_row["input_scoring_model_version"] = input_model_version
+        review_row["support_window_start"] = window_start.isoformat()
+        review_row["support_window_end"] = window_end.isoformat()
+        review_row["input_lockbox_violation"] = "1" if lockbox_violation else "0"
+    if lockbox_violation:
+        # Downgrade mode: IC statistics upstream are not dev-window constrained, so no
+        # promotion may leave this script while the input extends past the seal.
+        for review_row in review_rows:
+            if review_row["review_action"] == "promote_to_cohort_policy_review":
+                review_row["review_action"] = "research_only"
+                reasons = [item for item in str(review_row["review_reason"]).split(";") if item]
+                reasons.append("input_window_exceeds_lockbox_seal")
+                review_row["review_reason"] = ";".join(dict.fromkeys(reasons))
+        print(
+            "warning: lockbox violation - input asof range exceeds the sealed dev window; "
+            "all promote actions downgraded to research_only"
+        )
     write_csv(output_csv, review_rows, DETAIL_FIELDS)
     summary_rows = summarize(review_rows)
     write_csv(summary_csv, summary_rows, SUMMARY_FIELDS)
     print(f"component_promotion_review={output_csv} rows={len(review_rows)}")
     print(f"component_promotion_review_summary={summary_csv} rows={len(summary_rows)}")
+    print(
+        f"support_window={window_start.isoformat()}..{window_end.isoformat()} "
+        f"input_asof_range={input_asof_min.isoformat()}..{input_asof_max.isoformat()} "
+        f"rows_in_window={len(cohort_rows)} rows_dropped={dropped_rows} "
+        f"lockbox_violation={1 if lockbox_violation else 0}"
+    )
+    print(f"input_scoring_model_version={input_model_version}")
 
 
 if __name__ == "__main__":

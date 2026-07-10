@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sqlite3
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,10 @@ from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 CONFIG_KEY = "med_devices_analyst_review"
+# Artifact names this script's directory used to contain but that no current
+# script revision writes; removed on every run so stale *_latest files cannot
+# pose as current state.
+RETIRED_ARTIFACT_NAMES = ("med_device_p1_review_summary_latest.csv",)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build med-devices analyst review queue.")
@@ -34,10 +40,12 @@ def parse_args() -> argparse.Namespace:
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    tmp_path = path.with_name(path.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(tmp_path, path)
 
 
 def float_or_zero(value: Any) -> float:
@@ -78,7 +86,13 @@ def review_categories(row: dict[str, Any], *, high_score_threshold: float, inclu
     )
 
 
-def priority_for(row: dict[str, Any], categories: list[str], *, priority_score_threshold: float) -> str:
+def priority_for(
+    row: dict[str, Any],
+    categories: list[str],
+    *,
+    priority_score_threshold: float,
+    saturated_categories: set[str] | None = None,
+) -> str:
     portfolio_candidate_score = row.get("portfolio_candidate_score")
     score = float_or_zero(
         portfolio_candidate_score
@@ -91,9 +105,40 @@ def priority_for(row: dict[str, Any], categories: list[str], *, priority_score_t
         return "P1"
     if "high_score_blocked" in categories and score >= priority_score_threshold:
         return "P1"
-    if {"high_score_blocked", "tier1_safety_failed", "unknown_reimbursement"}.intersection(categories):
+    # Near-universal categories carry no per-ticker escalation signal, so they
+    # are excluded from the P2 mapping (queue membership is unaffected).
+    escalation_categories = {"high_score_blocked", "tier1_safety_failed", "unknown_reimbursement"}
+    if saturated_categories:
+        escalation_categories -= saturated_categories
+    if escalation_categories.intersection(categories):
         return "P2"
     return "P3"
+
+
+def saturated_category_set(
+    categorized_rows: list[tuple[dict[str, Any], list[str]]],
+    *,
+    scored_count: int,
+    saturation_threshold: float,
+) -> tuple[set[str], list[str]]:
+    """Return categories whose incidence exceeds the saturation threshold plus warnings."""
+    if scored_count <= 0:
+        return set(), []
+    counts: Counter[str] = Counter()
+    for _, categories in categorized_rows:
+        counts.update(set(categories))
+    saturated: set[str] = set()
+    warnings: list[str] = []
+    for category, count in sorted(counts.items()):
+        incidence = count / scored_count
+        if incidence > saturation_threshold:
+            saturated.add(category)
+            warnings.append(
+                f"WARNING: category '{category}' is near-universal "
+                f"({count}/{scored_count} scored tickers, {incidence:.0%} > {saturation_threshold:.0%}); "
+                "excluded from P2 escalation - investigate the upstream gate."
+            )
+    return saturated, warnings
 
 
 def reason_for(row: dict[str, Any]) -> str:
@@ -107,19 +152,42 @@ def reason_for(row: dict[str, Any]) -> str:
     return ";".join(part for part in parts if part)
 
 
-def write_markdown(path: Path, rows: list[dict[str, Any]], *, asof: str) -> None:
+def write_markdown(
+    path: Path,
+    rows: list[dict[str, Any]],
+    *,
+    asof: str,
+    scored_count: int,
+    max_rows: int,
+    warnings: list[str] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    priority_counts = Counter(str(row.get("priority") or "") for row in rows)
+    status_counts = Counter(str(row.get("review_status") or "") for row in rows)
+    status_summary = " ".join(f"{status}={count}" for status, count in sorted(status_counts.items())) or "none"
     lines = [
         f"# Med-Devices Analyst Review Queue - {asof}",
         "",
         f"Generated at UTC: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
         "",
-        "| Priority | Ticker | Cohort | Score | Status | Decision | Categories | Reason |",
-        "|---|---:|---|---:|---|---|---|---|",
+        f"Total queue rows: {len(rows)} of {scored_count} scored tickers | "
+        f"P1={priority_counts.get('P1', 0)} P2={priority_counts.get('P2', 0)} P3={priority_counts.get('P3', 0)} | "
+        f"Status: {status_summary}",
+        "",
     ]
+    for warning in warnings or []:
+        lines.extend([warning, ""])
+    lines.extend(
+        [
+            "| Priority | Ticker | Cohort | Score | Status | Decision | Categories | Reason |",
+            "|---|---:|---|---:|---|---|---|---|",
+        ]
+    )
     if not rows:
-        lines.append("| - | - | - | - | - | - | - | No open review items |")
-    for row in rows[:100]:
+        lines.append(
+            f"| - | - | - | - | - | - | - | No open review items across {scored_count} scored tickers |"
+        )
+    for row in rows[:max_rows]:
         reason = str(row.get("review_reason") or "").replace("|", "/")
         categories = str(row.get("review_categories") or "").replace("|", "/")
         status = str(row.get("review_status") or "").replace("|", "/")
@@ -129,7 +197,18 @@ def write_markdown(path: Path, rows: list[dict[str, Any]], *, asof: str) -> None
             f"{float_or_zero(row.get('portfolio_candidate_score')):.2f} | {status} | {decision} | "
             f"{categories} | {reason} |"
         )
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if len(rows) > max_rows:
+        lines.extend(
+            [
+                "",
+                f"Showing top {max_rows} of {len(rows)} rows (priority-sorted); "
+                f"the remaining {len(rows) - max_rows} rows are in the CSV artifact.",
+            ]
+        )
+    tmp_path = path.with_name(path.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write("\n".join(lines) + "\n")
+    os.replace(tmp_path, path)
 
 
 def main() -> int:
@@ -146,6 +225,8 @@ def main() -> int:
     high_score_threshold = float(cfg_get(config, f"{CONFIG_KEY}.high_score_threshold", 70.0) or 70.0)
     priority_score_threshold = float(cfg_get(config, f"{CONFIG_KEY}.priority_score_threshold", 75.0) or 75.0)
     include_portfolio_candidates = bool(cfg_get(config, f"{CONFIG_KEY}.include_portfolio_candidates", False))
+    markdown_max_rows = int(cfg_get(config, f"{CONFIG_KEY}.markdown_max_rows", 100) or 100)
+    saturation_threshold = float(cfg_get(config, f"{CONFIG_KEY}.category_saturation_threshold", 0.5) or 0.5)
     expiration_warning_days = int(cfg_get(config, f"{CONFIG_KEY}.expiration_warning_days", 14) or 14)
     decision_path = resolve_path(
         cfg_get(config, f"{CONFIG_KEY}.decisions_csv", "data/analyst_review_decisions.csv"),
@@ -174,8 +255,18 @@ def main() -> int:
         raise ValueError(f"Invalid analyst review decision file {decision_path}: {details}")
 
     with sqlite3.connect(db_path, timeout=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0) or 30.0)) as conn:
-        asof = str(args.asof or "").strip() or latest_score_asof(conn)
+        max_score_asof = latest_score_asof(conn)
+        asof = str(args.asof or "").strip() or max_score_asof
         score_rows = load_rows(conn, asof)
+    if not score_rows:
+        # Fail loud: an empty score surface means the asof is wrong or scores
+        # have not been built yet. Writing artifacts here would clobber a real
+        # queue with an empty one that is indistinguishable from a clean day.
+        raise RuntimeError(
+            f"No med_device_daily_scores rows at asof={asof} (latest scored asof={max_score_asof}); "
+            "refusing to publish review-queue artifacts."
+        )
+    is_latest_asof = asof == max_score_asof
     asof_date = analyst_review_core.parse_date(asof) or analyst_review_core.utc_today()
     lifecycle_rows = analyst_review_core.decision_lifecycle_rows(
         analyst_decisions,
@@ -187,7 +278,7 @@ def main() -> int:
         analyst_decisions,
         asof=asof_date,
     )
-    review_rows: list[dict[str, Any]] = []
+    categorized_rows: list[tuple[dict[str, Any], list[str]]] = []
     for row in score_rows:
         categories = review_categories(
             row,
@@ -196,6 +287,16 @@ def main() -> int:
         )
         if not categories:
             continue
+        categorized_rows.append((row, categories))
+    saturated_categories, saturation_warnings = saturated_category_set(
+        categorized_rows,
+        scored_count=len(score_rows),
+        saturation_threshold=saturation_threshold,
+    )
+    for warning in saturation_warnings:
+        print(warning)
+    review_rows: list[dict[str, Any]] = []
+    for row, categories in categorized_rows:
         category_set = set(categories)
         active_decision = analyst_review_core.effective_decision(
             analyst_decisions,
@@ -235,7 +336,12 @@ def main() -> int:
         review_rows.append(
             {
                 "asof_date": asof,
-                "priority": priority_for(row, categories, priority_score_threshold=priority_score_threshold),
+                "priority": priority_for(
+                    row,
+                    categories,
+                    priority_score_threshold=priority_score_threshold,
+                    saturated_categories=saturated_categories,
+                ),
                 "review_status": queue_status,
                 "review_owner": decision_for_display.review_owner if decision_for_display else "",
                 "analyst_decision": decision_for_display.decision if decision_for_display else "",
@@ -324,6 +430,28 @@ def main() -> int:
         "review_categories",
         "review_reason",
     ]
+    # Flag decisions whose ticker no longer maps to the score surface / queue so
+    # stale decisions cannot report 'current' indefinitely after delistings.
+    scored_tickers = {str(row.get("ticker") or "") for row in score_rows}
+    queued_tickers = {str(row.get("ticker") or "") for row in review_rows}
+    lifecycle_fields = list(analyst_review_core.DECISION_STATUS_FIELDNAMES) + [
+        "in_score_surface",
+        "in_current_queue",
+    ]
+    orphaned_decision_count = 0
+    for lifecycle_row in lifecycle_rows:
+        ticker = str(lifecycle_row.get("ticker") or "")
+        in_score_surface = int(ticker in scored_tickers)
+        lifecycle_row["in_score_surface"] = in_score_surface
+        lifecycle_row["in_current_queue"] = int(ticker in queued_tickers)
+        if not in_score_surface and str(lifecycle_row.get("expiration_status") or "") in (
+            "current",
+            "expires_soon",
+            "active_no_expiration",
+        ):
+            lifecycle_row["expiration_status"] = "orphaned_ticker"
+            lifecycle_row["needs_review"] = 1
+            orphaned_decision_count += 1
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / f"med_device_analyst_review_queue_{asof}.csv"
     md_path = output_dir / f"med_device_analyst_review_queue_{asof}.md"
@@ -331,17 +459,45 @@ def main() -> int:
     latest_md = output_dir / "med_device_analyst_review_queue_latest.md"
     lifecycle_csv = output_dir / f"med_device_analyst_review_decision_status_{asof}.csv"
     lifecycle_latest_csv = output_dir / "med_device_analyst_review_decision_status_latest.csv"
+    # Dated artifacts first, then *_latest, so an interrupted run can never
+    # leave latest newer than its dated twin.
     write_csv(csv_path, review_rows, fields)
-    write_csv(latest_csv, review_rows, fields)
-    write_csv(lifecycle_csv, lifecycle_rows, analyst_review_core.DECISION_STATUS_FIELDNAMES)
-    write_csv(lifecycle_latest_csv, lifecycle_rows, analyst_review_core.DECISION_STATUS_FIELDNAMES)
-    write_markdown(md_path, review_rows, asof=asof)
-    write_markdown(latest_md, review_rows, asof=asof)
+    write_csv(lifecycle_csv, lifecycle_rows, lifecycle_fields)
+    write_markdown(
+        md_path,
+        review_rows,
+        asof=asof,
+        scored_count=len(score_rows),
+        max_rows=markdown_max_rows,
+        warnings=saturation_warnings,
+    )
+    if is_latest_asof:
+        write_csv(latest_csv, review_rows, fields)
+        write_csv(lifecycle_latest_csv, lifecycle_rows, lifecycle_fields)
+        write_markdown(
+            latest_md,
+            review_rows,
+            asof=asof,
+            scored_count=len(score_rows),
+            max_rows=markdown_max_rows,
+            warnings=saturation_warnings,
+        )
+    else:
+        print(
+            f"skipped_latest_artifacts=1 asof={asof} latest_scored_asof={max_score_asof} "
+            "(backfill run; *_latest left untouched)"
+        )
+    for retired_name in RETIRED_ARTIFACT_NAMES:
+        retired_path = output_dir / retired_name
+        if retired_path.exists():
+            retired_path.unlink()
+            print(f"removed_retired_artifact={retired_path}")
     p1_count = sum(1 for row in review_rows if row["priority"] == "P1")
     review_due_count = sum(1 for row in review_rows if int(row.get("analyst_review_due") or 0) == 1)
     print(
-        f"analyst_review_queue={csv_path} asof={asof} rows={len(review_rows)} p1={p1_count} "
-        f"review_due={review_due_count} decision_status={lifecycle_csv} "
+        f"analyst_review_queue={csv_path} asof={asof} scored={len(score_rows)} rows={len(review_rows)} "
+        f"p1={p1_count} review_due={review_due_count} latest_written={int(is_latest_asof)} "
+        f"orphaned_decisions={orphaned_decision_count} decision_status={lifecycle_csv} "
         f"decision_log_appended={logged_change_count}"
     )
     return 0

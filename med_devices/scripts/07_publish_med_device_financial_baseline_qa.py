@@ -5,7 +5,9 @@ import argparse
 import csv
 import logging
 import math
+import os
 import sys
+import tempfile
 from pathlib import Path
 from statistics import median, pstdev
 from typing import Any
@@ -41,11 +43,13 @@ DEFAULT_KEY_METRICS = [
 SUMMARY_FIELDS = ["asof_date", "section", "metric", "value", "detail"]
 DELTA_FIELDS = [
     "asof_date",
+    "previous_asof_date",
     "ticker",
     "company_name",
     "previous_stage4_baseline_score",
     "current_stage4_baseline_score",
     "score_delta",
+    "delta_status",
     "alert_flag",
 ]
 RANKED_FIELDS = [
@@ -200,8 +204,16 @@ def summary_rows(
     def add(section: str, metric: str, value: object, detail: str = "") -> None:
         out.append({"asof_date": asof, "section": section, "metric": metric, "value": value, "detail": detail})
 
+    distinct_tickers = {str(row.get("ticker") or "").strip().upper() for row in rows if str(row.get("ticker") or "").strip()}
     add("coverage", "feature_rows", total)
-    add("coverage", "tickers", total)
+    add("coverage", "tickers", len(distinct_tickers))
+    if len(distinct_tickers) != total:
+        add(
+            "coverage",
+            "duplicate_or_blank_ticker_rows",
+            total - len(distinct_tickers),
+            "WARNING: feature_rows != distinct tickers; duplicate or blank tickers present for this asof",
+        )
     add("score_config", "stage4_fundamental_weight", fundamental_weight)
     add("score_config", "stage4_valuation_weight", valuation_weight)
     for field in ("data_quality_status", "calibration_bucket", "subsector"):
@@ -243,38 +255,91 @@ def summary_rows(
     return out
 
 
-def read_previous_ranked_scores(path: Path) -> dict[str, float]:
+def read_previous_ranked_scores(path: Path) -> tuple[dict[str, float], str]:
+    """Return (ticker -> previous stage4 score, previous asof_date) from the last ranked CSV.
+
+    A missing or score-less baseline is logged loudly and surfaced to the caller as an
+    empty mapping so it can emit an explicit `delta/baseline_missing` marker instead of
+    silently publishing an empty delta report (QA-3).
+    """
     if not path.exists():
-        return {}
+        LOGGER.warning("Previous ranked CSV missing; delta baseline unavailable: %s", path)
+        return {}, ""
     out: dict[str, float] = {}
+    asof_dates: set[str] = set()
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
             ticker = str(row.get("ticker") or "").strip().upper()
             score = parse_float(row.get("stage4_baseline_score"))
+            asof_value = str(row.get("asof_date") or "").strip()
+            if asof_value:
+                asof_dates.add(asof_value)
             if ticker and score is not None:
                 out[ticker] = score
-    return out
+    if not out:
+        LOGGER.warning("Previous ranked CSV has no usable score rows; delta baseline unavailable: %s", path)
+    return out, max(asof_dates) if asof_dates else ""
 
 
-def delta_rows(rows: list[dict[str, Any]], previous_scores: dict[str, float], *, asof: str) -> list[dict[str, Any]]:
+def delta_rows(
+    rows: list[dict[str, Any]],
+    previous_scores: dict[str, float],
+    *,
+    asof: str,
+    previous_asof: str,
+    alert_threshold: float,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    current_tickers: set[str] = set()
     for row in rows:
         ticker = str(row.get("ticker") or "").strip().upper()
+        if not ticker:
+            continue
+        current_tickers.add(ticker)
         current = parse_float(row.get("stage4_baseline_score"))
         previous = previous_scores.get(ticker)
-        if not ticker or current is None or previous is None:
+        if current is None or previous is None:
+            out.append(
+                {
+                    "asof_date": asof,
+                    "previous_asof_date": previous_asof,
+                    "ticker": ticker,
+                    "company_name": row.get("company_name", ""),
+                    "previous_stage4_baseline_score": "" if previous is None else previous,
+                    "current_stage4_baseline_score": "" if current is None else current,
+                    "score_delta": "",
+                    "delta_status": "added" if previous is None else "missing_current_score",
+                    "alert_flag": 1,
+                }
+            )
             continue
         delta = round(current - previous, 2)
         out.append(
             {
                 "asof_date": asof,
+                "previous_asof_date": previous_asof,
                 "ticker": ticker,
                 "company_name": row.get("company_name", ""),
                 "previous_stage4_baseline_score": previous,
                 "current_stage4_baseline_score": current,
                 "score_delta": delta,
-                "alert_flag": 1 if abs(delta) >= 15.0 else 0,
+                "delta_status": "scored",
+                "alert_flag": 1 if abs(delta) >= alert_threshold else 0,
+            }
+        )
+    for ticker in sorted(set(previous_scores) - current_tickers):
+        out.append(
+            {
+                "asof_date": asof,
+                "previous_asof_date": previous_asof,
+                "ticker": ticker,
+                "company_name": "",
+                "previous_stage4_baseline_score": previous_scores[ticker],
+                "current_stage4_baseline_score": "",
+                "score_delta": "",
+                "delta_status": "removed",
+                "alert_flag": 1,
             }
         )
     return out
@@ -282,10 +347,12 @@ def delta_rows(rows: list[dict[str, Any]], previous_scores: dict[str, float], *,
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, delete=False) as handle:
+        tmp_name = handle.name
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows([{field: row.get(field, "") for field in fieldnames} for row in rows])
+    os.replace(tmp_name, path)
 
 
 def main() -> None:
@@ -324,16 +391,17 @@ def main() -> None:
     top_bottom_n = max(1, int(cfg_get(config, "financial_baseline_qa.top_bottom_n", 20)))
     fundamental_weight = cfg_float(config, "financial_baseline_qa.baseline_score_weights.fundamental_quality", 0.55)
     valuation_weight = cfg_float(config, "financial_baseline_qa.baseline_score_weights.valuation", 0.45)
+    delta_alert_threshold = cfg_float(config, "financial_baseline_qa.delta_alert_threshold", 15.0)
     neutral_score = cfg_float(config, "financial_features.neutral_component_score", DEFAULT_NEUTRAL_SCORE)
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
-        asof = args.asof.strip() if args.asof else latest_feature_asof(conn)
-        rows = load_feature_rows(conn, asof=asof)
-        if not rows:
-            raise ValueError(f"No feature_financial_valuation rows found for asof={asof}")
         run_id = start_run(conn, run_type="publish_med_device_financial_baseline_qa", input_path=config_path)
         try:
+            asof = args.asof.strip() if args.asof else latest_feature_asof(conn)
+            rows = load_feature_rows(conn, asof=asof)
+            if not rows:
+                raise ValueError(f"No feature_financial_valuation rows found for asof={asof}")
             for row in rows:
                 row["stage4_baseline_score"] = baseline_score(
                     row,
@@ -341,7 +409,7 @@ def main() -> None:
                     valuation_weight=valuation_weight,
                     neutral_score=neutral_score,
                 )
-            previous_scores = read_previous_ranked_scores(ranked_csv)
+            previous_scores, previous_asof = read_previous_ranked_scores(ranked_csv)
             ranked = sorted(rows, key=lambda row: parse_float(row.get("stage4_baseline_score")) or 0.0, reverse=True)
             for idx, row in enumerate(ranked, start=1):
                 row["rank"] = idx
@@ -353,12 +421,49 @@ def main() -> None:
                 fundamental_weight=fundamental_weight,
                 valuation_weight=valuation_weight,
             )
-            deltas = delta_rows(ranked, previous_scores, asof=asof)
+            delta_skip_reason = ""
+            if not previous_scores:
+                delta_skip_reason = "baseline_missing"
+            elif previous_asof and previous_asof == asof:
+                delta_skip_reason = "same_asof_rerun"
+            if delta_skip_reason:
+                LOGGER.warning(
+                    "Delta generation skipped (%s): previous_asof=%s asof=%s ranked_csv=%s",
+                    delta_skip_reason,
+                    previous_asof or "unknown",
+                    asof,
+                    ranked_csv,
+                )
+                summary.append(
+                    {
+                        "asof_date": asof,
+                        "section": "delta",
+                        "metric": delta_skip_reason,
+                        "value": 1,
+                        "detail": f"previous_asof_date={previous_asof or 'unknown'}",
+                    }
+                )
+                deltas = []
+            else:
+                deltas = delta_rows(
+                    ranked,
+                    previous_scores,
+                    asof=asof,
+                    previous_asof=previous_asof,
+                    alert_threshold=delta_alert_threshold,
+                )
             write_csv(summary_csv, summary, SUMMARY_FIELDS)
             write_csv(ranked_csv, ranked, RANKED_FIELDS)
-            write_csv(delta_csv, deltas, DELTA_FIELDS)
+            if delta_skip_reason == "same_asof_rerun" and delta_csv.exists():
+                LOGGER.warning("Preserving existing delta CSV from prior run (same-asof rerun): %s", delta_csv)
+            else:
+                write_csv(delta_csv, deltas, DELTA_FIELDS)
             alerts = sum(1 for row in deltas if int(row.get("alert_flag") or 0) == 1)
-            message = f"asof={asof} rows={len(rows)} delta_alerts={alerts} summary={summary_csv} ranked={ranked_csv} delta={delta_csv}"
+            message = (
+                f"asof={asof} rows={len(rows)} previous_asof={previous_asof or 'none'} "
+                f"delta_status={delta_skip_reason or 'ok'} delta_alerts={alerts} "
+                f"summary={summary_csv} ranked={ranked_csv} delta={delta_csv}"
+            )
             finish_run(conn, run_id=run_id, status="success", row_count=len(rows), message=message)
             LOGGER.info("Financial baseline QA complete: %s", message)
         except BaseException as exc:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -77,6 +78,26 @@ OUTPUT_FIELDS = [
     "recommended_redesign_action",
     "rationale",
 ]
+STRING_OUTPUT_FIELDS = {
+    "component",
+    "component_category",
+    "recommended_redesign_action",
+    "rationale",
+}
+INT_OUTPUT_FIELDS = {
+    "priority_rank",
+    "cohort_count",
+    "positive_alpha_cohorts",
+    "inverse_alpha_cohorts",
+    "neutralize_cohorts",
+    "repair_data_cohorts",
+    "risk_gate_cohorts",
+    "negative_spread_cohorts",
+    "positive_spread_cohorts",
+    "all_horizon_negative_spread_count",
+    "all_horizon_positive_spread_count",
+    "all_horizon_repair_count",
+}
 DETAIL_FIELDS = [
     "component",
     "calibration_cohort",
@@ -104,19 +125,35 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def read_csv(path: Path) -> list[dict[str, str]]:
+def read_csv(path: Path, *, label: str, required: bool = True) -> list[dict[str, str]]:
     if not path.exists():
+        if required:
+            raise RuntimeError(
+                f"{label} CSV not found: {path}. Run the feature-stability analysis (script 44) "
+                "before ranking component redesign priority."
+            )
+        print(f"warning: optional {label} CSV missing: {path}; all_horizon_* columns will be zero")
         return []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        return [dict(row) for row in csv.DictReader(handle)]
+        rows = [dict(row) for row in csv.DictReader(handle)]
+    if not rows:
+        if required:
+            raise RuntimeError(
+                f"{label} CSV has no data rows: {path}. Refusing to publish an empty redesign-priority "
+                "artifact over the previous output."
+            )
+        print(f"warning: optional {label} CSV is empty: {path}; all_horizon_* columns will be zero")
+    return rows
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    tmp_path = path.with_name(path.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(tmp_path, path)
 
 
 def to_float(raw: object) -> float | None:
@@ -125,11 +162,6 @@ def to_float(raw: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) else None
-
-
-def fmt(value: object) -> str:
-    number = to_float(value)
-    return "" if number is None else f"{number:.6f}"
 
 
 def parse_str_list(raw: object) -> list[str]:
@@ -273,10 +305,20 @@ def main() -> None:
             base_dir=base_dir,
         )
     )
-    recommendations = read_csv(recommendation_csv)
-    summaries = read_csv(summary_csv)
+    require_summary = str(
+        cfg_get(config, "calibration.component_redesign_priority.require_summary_csv", True)
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    recommendations = read_csv(recommendation_csv, label="feature-stability recommendations")
+    summaries = read_csv(summary_csv, label="feature-stability summary", required=require_summary)
+    print(f"recommendation_csv={recommendation_csv} rows={len(recommendations)}")
+    print(f"summary_csv={summary_csv} rows={len(summaries)}")
 
     components = sorted({str(row.get("component") or "") for row in recommendations if row.get("component")})
+    if not components:
+        raise RuntimeError(
+            f"No component values found in {recommendation_csv}; refusing to publish an empty "
+            "redesign-priority artifact."
+        )
     detail_rows: list[dict[str, Any]] = []
     output_rows: list[dict[str, Any]] = []
     summary_by_component: dict[str, list[dict[str, str]]] = defaultdict(list)
@@ -365,9 +407,15 @@ def main() -> None:
         row["priority_rank"] = rank
     for row in output_rows:
         for field in OUTPUT_FIELDS:
-            if field in {"component", "component_category", "recommended_redesign_action", "rationale"}:
+            if field in STRING_OUTPUT_FIELDS:
                 continue
-            row[field] = fmt(row.get(field))
+            number = to_float(row.get(field))
+            if number is None:
+                row[field] = ""
+            elif field in INT_OUTPUT_FIELDS:
+                row[field] = str(int(number))
+            else:
+                row[field] = f"{number:.6f}"
     write_csv(output_csv, output_rows, OUTPUT_FIELDS)
     write_csv(detail_csv, detail_rows, DETAIL_FIELDS)
     print(f"component_redesign_priority_csv={output_csv} rows={len(output_rows)}")
@@ -375,4 +423,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

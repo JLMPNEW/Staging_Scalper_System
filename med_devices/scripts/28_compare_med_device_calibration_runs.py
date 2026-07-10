@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -73,13 +74,39 @@ def to_float(raw: object) -> float | None:
     return value if math.isfinite(value) else None
 
 
-def read_rows(path: Path) -> dict[tuple[str, str, str], dict[str, str]]:
+REQUIRED_INPUT_FIELDS = ["summary_type", "segment", "horizon_days", "count", "unique_tickers", *NUMERIC_FIELDS]
+
+
+def read_rows(path: Path, *, label: str) -> dict[tuple[str, str, str], dict[str, str]]:
+    if not path.exists():
+        raise RuntimeError(f"{label} summary CSV not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         rows = [dict(row) for row in csv.DictReader(handle)]
-    return {
-        (str(row.get("summary_type") or ""), str(row.get("segment") or ""), str(row.get("horizon_days") or "")): row
-        for row in rows
-    }
+    if not rows:
+        raise RuntimeError(f"{label} summary CSV has no data rows: {path}")
+    missing = [field for field in REQUIRED_INPUT_FIELDS if field not in rows[0]]
+    if missing:
+        raise RuntimeError(
+            f"{label} summary CSV {path} is missing required cohort-neutral summary columns: {','.join(missing)}. "
+            "Check that the path points at a cohort-neutral backtest summary file."
+        )
+    out: dict[tuple[str, str, str], dict[str, str]] = {}
+    for row in rows:
+        key = (str(row.get("summary_type") or ""), str(row.get("segment") or ""), str(row.get("horizon_days") or ""))
+        if key in out:
+            raise RuntimeError(
+                f"{label} summary CSV {path} contains duplicate key "
+                f"summary_type={key[0]!r} segment={key[1]!r} horizon_days={key[2]!r}; refusing to silently drop rows."
+            )
+        out[key] = row
+    return out
+
+
+def horizon_sort_key(raw: str) -> tuple[int, float, str]:
+    value = to_float(raw)
+    if value is None:
+        return (1, 0.0, raw)
+    return (0, value, raw)
 
 
 def fmt(value: float | None) -> str:
@@ -87,7 +114,7 @@ def fmt(value: float | None) -> str:
 
 
 def compare(before: dict[tuple[str, str, str], dict[str, str]], after: dict[tuple[str, str, str], dict[str, str]]) -> list[dict[str, Any]]:
-    keys = sorted(set(before) | set(after))
+    keys = sorted(set(before) | set(after), key=lambda key: (key[0], key[1], horizon_sort_key(key[2])))
     out: list[dict[str, Any]] = []
     for summary_type, segment, horizon in keys:
         b = before.get((summary_type, segment, horizon), {})
@@ -113,18 +140,23 @@ def compare(before: dict[tuple[str, str, str], dict[str, str]], after: dict[tupl
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    tmp_path = path.with_name(path.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=FIELDS, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(tmp_path, path)
 
 
 def main() -> None:
     args = parse_args()
-    rows = compare(read_rows(args.before_csv), read_rows(args.after_csv))
+    rows = compare(
+        read_rows(args.before_csv, label="before"),
+        read_rows(args.after_csv, label="after"),
+    )
     write_csv(args.output_csv, rows)
     print(f"comparison_csv={args.output_csv} rows={len(rows)}")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

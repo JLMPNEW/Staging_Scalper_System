@@ -16,8 +16,12 @@ that already exists on disk before promoting anything:
 Only rows meeting the full row-level Stage 11 eligibility contract are
 promoted; everything else keeps the fail-closed default written by script 13.
 The script is idempotent (re-runs promote zero additional rows) and supports
---dry-run. Promotions are mirrored into the dated review-pack snapshot CSV so
-the portfolio-layer adapters see the same provenance as the database.
+--dry-run. Promotions and pre-lock demotions are mirrored into the dated
+review-pack snapshot CSV and, when it holds the same as-of date, script 13's
+rolling composite CSV (scoring.output_csv), so every CSV projection carries
+the same provenance as the database. After every non-dry run the script
+reconciles the summary ledger against the database and exits non-zero if any
+as-of carrying oos_score_valid_flag=1 has no summary row.
 """
 from __future__ import annotations
 
@@ -107,6 +111,8 @@ SUMMARY_FIELDS = [
     "stale_flagged_rows",
     "snapshot_csv_rows_updated",
     "snapshot_csv_note",
+    "rolling_csv_rows_updated",
+    "rolling_csv_note",
 ]
 
 
@@ -124,9 +130,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest-csv", type=Path, default=None)
     parser.add_argument("--summary-csv", type=Path, default=None)
     parser.add_argument(
+        "--rolling-csv",
+        type=Path,
+        default=None,
+        help="Script 13's rolling composite CSV (default: scoring.output_csv).",
+    )
+    parser.add_argument(
         "--skip-snapshot-csv",
         action="store_true",
-        help="Do not mirror promotions into the dated review-pack snapshot CSVs.",
+        help="Do not mirror promotions into the dated review-pack snapshot CSVs or the rolling composite CSV.",
     )
     parser.add_argument(
         "--dry-run",
@@ -404,15 +416,27 @@ def demote_pre_lock_asof(conn: Any, *, asof: str, dry_run: bool) -> int:
     return int(cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0)
 
 
-def demote_snapshot_csv(path: Path, *, dry_run: bool) -> tuple[int, str]:
-    """Mirror pre-lock demotions into the dated review-pack snapshot CSV (every flagged row)."""
+def demote_snapshot_csv(path: Path, *, dry_run: bool, only_asof: str = "") -> tuple[int, str]:
+    """Mirror pre-lock demotions into a snapshot CSV (every flagged row).
+
+    With only_asof set (script 13's rolling composite CSV holds whichever as-of
+    was last published), rows for other as-of dates are left untouched and a
+    file that does not contain the as-of at all is skipped.
+    """
     if not path.exists():
         return 0, "snapshot_csv_missing"
     fieldnames, rows = read_csv_rows(path)
     if "oos_score_valid_flag" not in fieldnames or "calibration_sample_role" not in fieldnames:
         return 0, "snapshot_csv_missing_provenance_columns"
+    if only_asof:
+        if "asof_date" not in fieldnames:
+            return 0, "snapshot_csv_missing_asof_date_column"
+        if not any(str(row.get("asof_date") or "").strip()[:10] == only_asof for row in rows):
+            return 0, "asof_not_in_csv"
     updated = 0
     for row in rows:
+        if only_asof and str(row.get("asof_date") or "").strip()[:10] != only_asof:
+            continue
         flagged = str(row.get("oos_score_valid_flag") or "").strip() in {"1", "1.0"}
         role_oos = str(row.get("calibration_sample_role") or "").strip() == "strict_oos"
         if not flagged and not role_oos:
@@ -452,12 +476,15 @@ def candidate_tickers(conn: Any, *, asof: str) -> set[str]:
     return {str(row["ticker"] or "").strip() for row in rows if str(row["ticker"] or "").strip()}
 
 
-def sync_snapshot_csv(path: Path, *, tickers: set[str], dry_run: bool) -> tuple[int, str]:
-    """Mirror database promotions into the dated review-pack snapshot CSV.
+def sync_snapshot_csv(path: Path, *, tickers: set[str], dry_run: bool, only_asof: str = "") -> tuple[int, str]:
+    """Mirror database promotions into a snapshot CSV.
 
-    The portfolio-layer adapters read the dated CSV, not the database, so the
-    two projections must agree. Only the two provenance columns are touched and
-    only for tickers the database certifies as strict_oos.
+    The portfolio-layer adapters read the CSV projections, not the database, so
+    every projection must agree with the database. Only the two provenance
+    columns are touched and only for tickers the database certifies as
+    strict_oos. With only_asof set (script 13's rolling composite CSV holds
+    whichever as-of was last published), rows for other as-of dates are left
+    untouched and a file that does not contain the as-of at all is skipped.
     """
     if not tickers:
         return 0, "no_promoted_tickers"
@@ -466,8 +493,15 @@ def sync_snapshot_csv(path: Path, *, tickers: set[str], dry_run: bool) -> tuple[
     fieldnames, rows = read_csv_rows(path)
     if "oos_score_valid_flag" not in fieldnames or "calibration_sample_role" not in fieldnames:
         return 0, "snapshot_csv_missing_provenance_columns"
+    if only_asof:
+        if "asof_date" not in fieldnames:
+            return 0, "snapshot_csv_missing_asof_date_column"
+        if not any(str(row.get("asof_date") or "").strip()[:10] == only_asof for row in rows):
+            return 0, "asof_not_in_csv"
     updated = 0
     for row in rows:
+        if only_asof and str(row.get("asof_date") or "").strip()[:10] != only_asof:
+            continue
         ticker = str(row.get("ticker") or "").strip().upper()
         if ticker not in tickers:
             continue
@@ -492,6 +526,28 @@ def write_summary(path: Path, new_rows: list[dict[str, Any]]) -> None:
     merged = existing + [dict(row) for row in new_rows]
     merged.sort(key=lambda row: str(row.get("asof_date") or ""))
     write_csv_atomic(path, SUMMARY_FIELDS, merged)
+
+
+def flagged_asofs_missing_from_summary(conn: Any, summary_csv: Path, *, also_covered: set[str]) -> list[str]:
+    """As-of dates carrying oos_score_valid_flag=1 in the database with no summary-ledger row.
+
+    The summary CSV is the sole audit artifact for strict-OOS promotion, so
+    every flagged as-of must have a row. A gap means a promotion escaped the
+    ledger (e.g. a range-restricted run against a different summary path, or a
+    summary write that was lost) and must be repaired by re-running over the
+    missing dates.
+    """
+    flagged = {
+        str(row["asof_date"] or "").strip()
+        for row in conn.execute(
+            "SELECT DISTINCT asof_date FROM med_device_daily_scores WHERE oos_score_valid_flag = 1"
+        ).fetchall()
+    }
+    covered = set(also_covered)
+    if summary_csv.exists():
+        _, rows = read_csv_rows(summary_csv)
+        covered |= {str(row.get("asof_date") or "").strip() for row in rows}
+    return sorted(asof for asof in flagged if asof and asof not in covered)
 
 
 def main() -> int:
@@ -541,6 +597,14 @@ def main() -> int:
         if summary_raw
         else reports_root / SUMMARY_FILENAME
     )
+    rolling_csv = (
+        args.rolling_csv.expanduser().resolve()
+        if args.rolling_csv
+        else resolve_path(
+            cfg_get(config, "scoring.output_csv", "../output/med_devices_reports/med_device_daily_composite_scores.csv"),
+            base_dir=base_dir,
+        )
+    )
     strict_oos_start_raw = str(cfg_get(config, "historical_backfill.strict_oos_start_date", "") or "").strip()
     strict_oos_start = parse_date(strict_oos_start_raw)
     if strict_oos_start is None:
@@ -584,6 +648,8 @@ def main() -> int:
                 )
                 snapshot_updated = 0
                 snapshot_note = "skipped"
+                rolling_updated = 0
+                rolling_note = "skipped"
                 if not result["skip_reason"]:
                     result["newly_promoted_rows"] = promote_asof(conn, asof=asof, dry_run=dry_run)
                     promoted_asofs += 1
@@ -598,20 +664,33 @@ def main() -> int:
                             tickers=tickers,
                             dry_run=dry_run,
                         )
+                        # Script 13's rolling composite CSV carries the same provenance
+                        # columns for whichever as-of it currently holds; keep it in
+                        # lockstep so no consumer reads stale flags for the latest as-of.
+                        rolling_updated, rolling_note = sync_snapshot_csv(
+                            rolling_csv, tickers=tickers, dry_run=dry_run, only_asof=asof,
+                        )
                 elif "before_strict_oos_start_date" in result["skip_reason"]:
                     # Pre-lock as-of: any existing promotion is provably invalid — demote it.
                     # Other skip reasons (missing evidence) still leave prior promotions for
                     # manual review, as before.
                     demoted_db = demote_pre_lock_asof(conn, asof=asof, dry_run=dry_run)
-                    if not args.skip_snapshot_csv and (demoted_db or dry_run):
+                    if not args.skip_snapshot_csv:
+                        # Not gated on demoted_db: the CSV projections can carry stale
+                        # flag=1 rows the database no longer has, and a pre-lock as-of
+                        # must never present strict-OOS provenance anywhere.
                         snapshot_updated, note = demote_snapshot_csv(
                             reports_root / asof / DAILY_SNAPSHOT_FILENAME, dry_run=dry_run,
                         )
                         snapshot_note = f"demoted_pre_lock:{note}"
-                    if demoted_db or snapshot_updated:
+                        rolling_updated, rolling_note_raw = demote_snapshot_csv(
+                            rolling_csv, dry_run=dry_run, only_asof=asof,
+                        )
+                        rolling_note = f"demoted_pre_lock:{rolling_note_raw}"
+                    if demoted_db or snapshot_updated or rolling_updated:
                         LOGGER.info(
-                            "asof=%s pre-lock demotion: db_rows=%d csv_rows=%d",
-                            asof, demoted_db, snapshot_updated,
+                            "asof=%s pre-lock demotion: db_rows=%d csv_rows=%d rolling_csv_rows=%d",
+                            asof, demoted_db, snapshot_updated, rolling_updated,
                         )
                     else:
                         LOGGER.info("asof=%s not promoted: %s", asof, result["skip_reason"])
@@ -634,10 +713,33 @@ def main() -> int:
                         "stale_flagged_rows": result["stale_flagged_rows"],
                         "snapshot_csv_rows_updated": snapshot_updated,
                         "snapshot_csv_note": snapshot_note,
+                        "rolling_csv_rows_updated": rolling_updated,
+                        "rolling_csv_note": rolling_note,
                     }
                 )
             if not dry_run:
+                # Commit promotions/demotions before writing the ledger so a
+                # reconciliation failure below cannot roll back database rows the
+                # summary CSV already records.
+                conn.commit()
                 write_summary(summary_csv, summary_rows)
+            # The summary CSV must be a complete ledger: every as-of carrying
+            # strict-OOS provenance in the database needs a summary row. In
+            # dry-run mode this run's as-ofs count as covered (a real run would
+            # write them) and gaps only warn because nothing was changed.
+            also_covered = {str(row.get("asof_date") or "") for row in summary_rows} if dry_run else set()
+            uncovered = flagged_asofs_missing_from_summary(conn, summary_csv, also_covered=also_covered)
+            if uncovered:
+                gap_message = (
+                    f"{len(uncovered)} as-of date(s) carry oos_score_valid_flag=1 in the database but "
+                    f"have no row in the provenance summary ledger {summary_csv}: {', '.join(uncovered)}. "
+                    "Re-run this script without --asof/--start-asof/--end-asof (or including those dates) "
+                    "to record them."
+                )
+                if dry_run:
+                    LOGGER.warning("Provenance ledger incomplete (dry-run, not failing): %s", gap_message)
+                else:
+                    raise RuntimeError(f"Provenance ledger incomplete: {gap_message}")
             message = (
                 f"asofs={len(asofs)} promoted_asofs={promoted_asofs} "
                 f"newly_promoted_rows={total_promoted} summary={summary_csv} dry_run={int(dry_run)}"

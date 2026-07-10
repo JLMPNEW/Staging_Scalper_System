@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -61,8 +62,10 @@ DECISION_STATUS_FIELDNAMES = [
 DECISION_LOG_FIELDNAMES = [
     "logged_at_utc",
     "asof_date",
+    "report_asof_date",
     "event_type",
     "decision_key",
+    "decision_key_seq",
     "decision_fingerprint",
     "row_number",
     "ticker",
@@ -78,6 +81,11 @@ DECISION_LOG_FIELDNAMES = [
     "max_position_weight_override",
     "source_reference",
 ]
+DECISION_LOG_EVENT_CREATED = "decision_created"
+DECISION_LOG_EVENT_CHANGED = "decision_changed"
+DECISION_LOG_EVENT_DEACTIVATED = "decision_deactivated"
+DECISION_LOG_EVENT_REACTIVATED = "decision_reactivated"
+DECISION_LOG_EVENT_REMOVED = "decision_removed"
 MANUAL_REVIEW_CLASSES = {
     "manual_review_regulatory_risk",
     "avoid_confirmed_regulatory_risk",
@@ -549,6 +557,58 @@ def ensure_decision_log_file(path: Path) -> None:
         writer.writeheader()
 
 
+def _load_decision_log_rows(path: Path) -> list[dict[str, str]]:
+    """Read the decision change log, migrating legacy files to the current schema in place.
+
+    Legacy files (pre ``report_asof_date``/``decision_key_seq``) recorded the report as-of
+    date in ``asof_date``. Migration preserves that value in ``report_asof_date`` and
+    re-stamps ``asof_date`` with the observation date derived from ``logged_at_utc``, then
+    rewrites the file atomically (tmp + os.replace). Fails loudly on unknown columns so a
+    schema drift never silently drops data.
+    """
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = [str(field or "") for field in (reader.fieldnames or [])]
+        rows = [
+            {str(key): str(value or "") for key, value in row.items() if key is not None}
+            for row in reader
+        ]
+    if fieldnames == DECISION_LOG_FIELDNAMES:
+        return rows
+    unknown_columns = [field for field in fieldnames if field and field not in DECISION_LOG_FIELDNAMES]
+    if unknown_columns:
+        raise ValueError(
+            f"Decision change log {path} has unsupported columns: {','.join(unknown_columns)}"
+        )
+    created_seq_by_key: dict[str, int] = {}
+    migrated: list[dict[str, str]] = []
+    for row in rows:
+        upgraded = {field: str(row.get(field, "") or "") for field in DECISION_LOG_FIELDNAMES}
+        if not upgraded["report_asof_date"]:
+            upgraded["report_asof_date"] = upgraded["asof_date"]
+            logged_date = parse_date(upgraded["logged_at_utc"])
+            if logged_date is not None:
+                upgraded["asof_date"] = logged_date.isoformat()
+        if not upgraded["decision_key_seq"]:
+            key = upgraded["decision_key"]
+            if upgraded["event_type"] == DECISION_LOG_EVENT_CREATED:
+                seq = created_seq_by_key.get(key, 0)
+                created_seq_by_key[key] = seq + 1
+            else:
+                # Legacy change events carry no slot identity; attribute them to the
+                # first slot for the key (legacy logs were single-row-per-key in practice).
+                seq = 0
+            upgraded["decision_key_seq"] = str(seq)
+        migrated.append(upgraded)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=DECISION_LOG_FIELDNAMES, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(migrated)
+    os.replace(tmp_path, path)
+    return migrated
+
+
 def append_decision_change_log(
     path: Path,
     decisions: list[AnalystReviewDecision],
@@ -556,24 +616,72 @@ def append_decision_change_log(
     asof: date,
     logged_at_utc: datetime | None = None,
 ) -> int:
+    """Append decision lifecycle events for the current decision-file snapshot.
+
+    Events are tracked per slot (``decision_key`` + ``decision_key_seq``, the ordinal of
+    the row among same-key rows in file order) against the latest logged fingerprint, so
+    edits, reverts to a prior state, activation flips, and row removals are all captured:
+
+    - ``decision_created``: slot never logged before (or previously removed).
+    - ``decision_changed``: slot fingerprint differs from the latest logged state.
+    - ``decision_deactivated`` / ``decision_reactivated``: fingerprint change where the
+      ``active`` flag flipped off / on.
+    - ``decision_removed``: previously logged slot absent from the current decision file;
+      the event carries the last-known field values.
+
+    ``asof`` is the report as-of date and is recorded as ``report_asof_date``; the
+    ``asof_date`` column records the observation date derived from ``logged_at_utc`` so
+    backfill runs for old report dates do not misdate when a change was observed.
+    """
     ensure_decision_log_file(path)
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        existing_rows = list(csv.DictReader(handle))
-    seen_fingerprints = {str(row.get("decision_fingerprint") or "") for row in existing_rows}
-    seen_keys = {str(row.get("decision_key") or "") for row in existing_rows}
-    logged_at = (logged_at_utc or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    existing_rows = _load_decision_log_rows(path)
+    last_event_by_slot: dict[tuple[str, str], dict[str, str]] = {}
+    for row in existing_rows:
+        slot = (str(row.get("decision_key") or ""), str(row.get("decision_key_seq") or "0"))
+        last_event_by_slot[slot] = row
+    logged_at_dt = logged_at_utc or datetime.now(timezone.utc)
+    logged_at = logged_at_dt.isoformat(timespec="seconds")
+    observed_asof = logged_at_dt.date().isoformat()
+    report_asof = asof.isoformat()
+    seq_by_key: dict[str, int] = {}
+    current_slots: set[tuple[str, str]] = set()
     new_rows: list[dict[str, Any]] = []
     for decision in decisions:
-        fingerprint = decision_fingerprint(decision)
-        if fingerprint in seen_fingerprints:
-            continue
         key = decision_key(decision)
+        seq = seq_by_key.get(key, 0)
+        seq_by_key[key] = seq + 1
+        slot = (key, str(seq))
+        current_slots.add(slot)
+        fingerprint = decision_fingerprint(decision)
+        previous = last_event_by_slot.get(slot)
+        previous_removed = (
+            previous is not None
+            and str(previous.get("event_type") or "") == DECISION_LOG_EVENT_REMOVED
+        )
+        if (
+            previous is not None
+            and not previous_removed
+            and str(previous.get("decision_fingerprint") or "") == fingerprint
+        ):
+            continue
+        if previous is None or previous_removed:
+            event_type = DECISION_LOG_EVENT_CREATED
+        else:
+            previous_active = parse_bool(previous.get("active"), False)
+            if previous_active and not decision.active:
+                event_type = DECISION_LOG_EVENT_DEACTIVATED
+            elif not previous_active and decision.active:
+                event_type = DECISION_LOG_EVENT_REACTIVATED
+            else:
+                event_type = DECISION_LOG_EVENT_CHANGED
         new_rows.append(
             {
                 "logged_at_utc": logged_at,
-                "asof_date": asof.isoformat(),
-                "event_type": "decision_changed" if key in seen_keys else "decision_created",
+                "asof_date": observed_asof,
+                "report_asof_date": report_asof,
+                "event_type": event_type,
                 "decision_key": key,
+                "decision_key_seq": str(seq),
                 "decision_fingerprint": fingerprint,
                 "row_number": decision.row_number,
                 "ticker": decision.ticker,
@@ -592,6 +700,21 @@ def append_decision_change_log(
                 "source_reference": decision.source_reference,
             }
         )
+    for slot, previous in last_event_by_slot.items():
+        if slot in current_slots:
+            continue
+        if str(previous.get("event_type") or "") == DECISION_LOG_EVENT_REMOVED:
+            continue
+        removed_row = {field: str(previous.get(field, "") or "") for field in DECISION_LOG_FIELDNAMES}
+        removed_row.update(
+            {
+                "logged_at_utc": logged_at,
+                "asof_date": observed_asof,
+                "report_asof_date": report_asof,
+                "event_type": DECISION_LOG_EVENT_REMOVED,
+            }
+        )
+        new_rows.append(removed_row)
     if not new_rows:
         return 0
     with path.open("a", encoding="utf-8", newline="") as handle:

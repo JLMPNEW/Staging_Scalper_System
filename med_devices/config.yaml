@@ -8,6 +8,8 @@ runtime:
 
 med_devices_refresh_pipeline:
   output_dir: "../output/med_devices_reports/orchestration"
+  enable_financial_baseline_qa_step: true  # post-scoring QA publisher (script 07)
+  enable_share_count_qa_step: true  # post-scoring QA publisher (script 19)
   optional_external_steps:
     - 53_sync_ibkr_borrow
     - 55_sync_finra_short_volume
@@ -49,6 +51,7 @@ med_devices_production_qa:
   min_score_rows_pct_of_active: 0.95
   min_portfolio_candidates: 1
   max_feature_staleness_days: 7
+  max_qa_artifact_age_days: 7  # freshness window for script 07/19 QA publisher artifacts
   fail_on_warnings: false
   review_pack_required_files:
     - med_device_daily_composite_scores.csv
@@ -743,7 +746,8 @@ technical_features:
 
 fda_features:
   output_csv: "../output/med_devices_reports/med_device_fda_product_risk_features.csv"
-  hard_red_review_csv: "../output/med_devices_reports/fda_hard_red_review_{asof}.csv"
+  # Dated per-asof files live in a subdirectory to keep the reports root clean (XR-13).
+  hard_red_review_csv: "../output/med_devices_reports/fda_hard_red_review/fda_hard_red_review_{asof}.csv"
   review_override_csv: "data/fda_regulatory_review_overrides.csv"
   footprint_csv: "data/fda_company_footprints.csv"
   manual_footprint_evidence_csv: "data/fda_manual_footprint_evidence.csv"
@@ -1120,7 +1124,8 @@ external_positioning_import:
 external_positioning_coverage:
   output_csv: "../output/med_devices_reports/med_device_external_positioning_coverage.csv"
 form4_missing_ticker_audit:
-  output_csv_template: "../output/med_devices_reports/med_device_form4_missing_ticker_audit_{asof}.csv"
+  # Dated per-asof files live in a subdirectory to keep the reports root clean (XR-13).
+  output_csv_template: "../output/med_devices_reports/form4_missing_ticker_audit/med_device_form4_missing_ticker_audit_{asof}.csv"
 market_positioning_update:
   user_agent: "JL, Independent Research, jm.357@hotmail.com"
   timeout_sec: 120.0
