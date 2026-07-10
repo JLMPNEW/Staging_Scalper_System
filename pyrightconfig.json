@@ -1,5 +1,5 @@
 {
-  "include": ["portfolio_layer"],
+  "include": ["portfolio_layer", "technology"],
   "exclude": ["portfolio_layer/MacroLayer"],
   "ignore": ["portfolio_layer/optimizer/tier1_portfolio_optimizer.py"],
   "venvPath": "C:/Users/josel/miniconda3/envs",

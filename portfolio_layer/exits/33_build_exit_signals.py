@@ -16,8 +16,17 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    read_csv,
+    read_manifest,
+    sealed_artifact_errors,
+    sha256_file,
+    write_csv,
+    write_manifest,
+)
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.exits.exit_common import (  # noqa: E402
@@ -77,24 +86,78 @@ def _status_priority(action_hint: str, signal: str) -> int:
     return 10
 
 
-def _target_weights(signal_dir: Path) -> tuple[dict[str, float], str, Path | None]:
-    sleeve_path = signal_dir / "sleeves" / "sleeve_adjusted_target_weights.csv"
-    if sleeve_path.exists():
-        rows = read_csv(sleeve_path)
-        return {
-            str(r.get("ticker", "")).strip().upper(): f0(r.get("weight"))
-            for r in rows
-            if str(r.get("ticker", "")).strip().upper() and str(r.get("ticker", "")).strip().upper() != "CASH"
-        }, "stage8_sleeve_proposal", sleeve_path
-    bl_path = signal_dir / "blacklitterman" / "costs" / "bl_cost_adjusted_target_weights.csv"
-    if bl_path.exists():
-        rows = read_csv(bl_path)
-        return {
-            str(r.get("ticker", "")).strip().upper(): f0(r.get("weight") or r.get("Weight"))
-            for r in rows
-            if str(r.get("ticker", "")).strip().upper() and str(r.get("ticker", "")).strip().upper() != "CASH"
-        }, "stage7_bl_cost_adjusted", bl_path
-    return {}, "none", None
+def _strict_target_weights(path: Path) -> dict[str, float]:
+    rows = read_csv(path)
+    if not rows:
+        raise ValueError(f"target book is empty: {path}")
+    all_weights: dict[str, float] = {}
+    cash_rows = 0
+    for row_number, row in enumerate(rows, start=2):
+        ticker = str(row.get("ticker", "")).strip().upper()
+        if not ticker or ticker in all_weights:
+            raise ValueError(f"{path}:{row_number}: blank or duplicate ticker {ticker!r}")
+        weight = finite_float(row.get("weight", row.get("Weight")))
+        if weight is None or weight < -1e-12:
+            raise ValueError(f"{path}:{row_number}: invalid weight for {ticker}")
+        all_weights[ticker] = max(0.0, weight)
+        cash_rows += int(ticker == "CASH")
+    if cash_rows != 1 or abs(sum(all_weights.values()) - 1.0) > 1e-6:
+        raise ValueError(
+            f"{path}: expected one CASH row and weights summing to 1; "
+            f"cash_rows={cash_rows} sum={sum(all_weights.values()):.12f}"
+        )
+    return {ticker: weight for ticker, weight in all_weights.items() if ticker != "CASH"}
+
+
+def _target_weights(
+    runs_root: Path,
+    as_of: str,
+) -> tuple[dict[str, float], str, Path | None, Path | None, str]:
+    """Return the newest accepted Stage 8/7 target at or before `as_of`."""
+    cutoff = date.fromisoformat(as_of)
+    dated_runs: list[tuple[date, Path]] = []
+    for run_dir in runs_root.iterdir() if runs_root.exists() else []:
+        if not run_dir.is_dir():
+            continue
+        try:
+            run_date = date.fromisoformat(run_dir.name)
+        except ValueError:
+            continue
+        if run_date <= cutoff:
+            dated_runs.append((run_date, run_dir))
+    for run_date, run_dir in sorted(dated_runs, reverse=True):
+        candidates = (
+            (
+                "stage8_sleeve_proposal",
+                run_dir / "sleeves" / "sleeve_adjusted_target_weights.csv",
+                run_dir / "sleeves" / "sleeve_manifest.json",
+                ("sleeve_adjusted_target_weights.csv",),
+            ),
+            (
+                "stage7_bl_cost_adjusted",
+                run_dir / "blacklitterman" / "costs" / "bl_cost_adjusted_target_weights.csv",
+                run_dir / "blacklitterman" / "bl_manifest.json",
+                ("costs/bl_cost_adjusted_target_weights.csv",),
+            ),
+        )
+        for source, book_path, manifest_path, artifact_keys in candidates:
+            if not book_path.exists() or not manifest_path.exists():
+                continue
+            try:
+                manifest = read_manifest(manifest_path)
+                errors = sealed_artifact_errors(
+                    manifest,
+                    book_path,
+                    *artifact_keys,
+                    run_as_of=run_date.isoformat(),
+                )
+                if errors:
+                    LOGGER.warning("Ignoring unsealed target-gap source %s: %s", book_path, errors)
+                    continue
+                return _strict_target_weights(book_path), source, book_path, manifest_path, run_date.isoformat()
+            except ValueError as exc:
+                LOGGER.warning("Ignoring malformed target-gap source %s: %s", book_path, exc)
+    return {}, "none", None, None, ""
 
 
 def _lot_stats(lots: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
@@ -271,9 +334,10 @@ def main() -> int:  # noqa: C901
         LOGGER.error("signal_as_of=%s must be <= ledger_as_of=%s", signal_as_of, ledger_as_of)
         return 1
 
-    ledger_dir = runs_root / ledger_as_of / "ledger"
+    run_dir = runs_root / ledger_as_of
+    ledger_dir = run_dir / "ledger"
     signal_dir = runs_root / signal_as_of
-    exits_dir = runs_root / ledger_as_of / "exits"
+    exits_dir = run_dir / "exits"
     art = {
         "ledger_manifest.json": ledger_dir / "ledger_manifest.json",
         "holding_state.csv": ledger_dir / "holding_state.csv",
@@ -295,6 +359,7 @@ def main() -> int:  # noqa: C901
         "exit_signals_meta.json": exits_dir / "exit_signals_meta.json",
     }
     if args.force:
+        invalidate_dependents(run_dir, "exits")
         for path in output_paths.values():
             if path.exists():
                 path.unlink()
@@ -331,9 +396,10 @@ def main() -> int:  # noqa: C901
     holdings = read_csv(art["holding_state.csv"])
     lots = read_csv(art["holding_lots.csv"])
     scores = {str(r.get("ticker", "")).strip().upper(): r for r in read_csv(art["stocks_scores.csv"])}
-    target_as_of = latest_run_on_or_before(runs_root, "sleeves/sleeve_manifest.json", ledger_as_of)
-    target_dir = runs_root / target_as_of if target_as_of else signal_dir
-    target_weights, target_source, target_path = _target_weights(target_dir)
+    target_weights, target_source, target_path, target_manifest_path, target_as_of = _target_weights(
+        runs_root,
+        ledger_as_of,
+    )
     lot_info = _lot_stats(lots)
     stock_holdings = [r for r in holdings if r.get("asset_category") == "Stocks"]
     unsupported = [
@@ -400,9 +466,12 @@ def main() -> int:  # noqa: C901
     input_paths = {name: str(path) for name, path in art.items()}
     if target_path is not None:
         input_paths["target_gap_weights"] = str(target_path)
+    if target_manifest_path is not None:
+        input_paths["target_gap_manifest"] = str(target_manifest_path)
     meta = {
         "stage": "stage9_build_exit_signals",
         "phase": str(cfg_get(config, "exit_engine.phase", "phase1_actual_equity_holdings")),
+        "run_as_of": ledger_as_of,
         "ledger_as_of": ledger_as_of,
         "signal_as_of": signal_as_of,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),

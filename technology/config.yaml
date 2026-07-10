@@ -318,18 +318,24 @@ semiconductor_governance_reports:
 
 semiconductor_refresh_pipeline:
   output_dir: "../output/technology_reports/orchestration"
+  financial_feature_batch_size: 8
+  financial_feature_batch_timeout_sec: 1800.0
   default_include_research: false
   default_include_optuna: false
   default_include_norgate_backfill: false
 
 software_infrastructure_refresh_pipeline:
   output_dir: "../output/technology_reports/software_infrastructure/orchestration"
+  financial_feature_batch_size: 8
+  financial_feature_batch_timeout_sec: 1800.0
   default_include_research: false
   default_include_optuna: false
   default_include_norgate_backfill: false
 
 technology_hardware_refresh_pipeline:
   output_dir: "../output/technology_reports/technology_hardware/orchestration"
+  financial_feature_batch_size: 8
+  financial_feature_batch_timeout_sec: 1800.0
   default_include_research: false
   default_include_optuna: false
   default_include_norgate_backfill: false

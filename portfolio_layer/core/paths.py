@@ -30,12 +30,21 @@ def resolve_runtime_paths(config: dict[str, Any], config_path: Path) -> RuntimeP
     return RuntimePaths(
         config_path=config_path,
         base_dir=base_dir,
-        database_path=resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir),
-        output_dir=resolve_path(cfg_get(config, "paths.output_dir", "output"), base_dir=base_dir),
-        cache_dir=resolve_path(cfg_get(config, "paths.cache_dir", "output/cache"), base_dir=base_dir),
-        macro_serving_db_path=resolve_path(
-            cfg_get(config, "paths.macro_serving_db_path", "MacroLayer/macro_serving.sqlite"),
-            base_dir=base_dir,
+        database_path=ensure_not_prod_path(
+            resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir), label="database path",
+        ),
+        output_dir=ensure_not_prod_path(
+            resolve_path(cfg_get(config, "paths.output_dir", "output"), base_dir=base_dir), label="output path",
+        ),
+        cache_dir=ensure_not_prod_path(
+            resolve_path(cfg_get(config, "paths.cache_dir", "output/cache"), base_dir=base_dir), label="cache path",
+        ),
+        macro_serving_db_path=ensure_not_prod_path(
+            resolve_path(
+                cfg_get(config, "paths.macro_serving_db_path", "MacroLayer/macro_serving.sqlite"),
+                base_dir=base_dir,
+            ),
+            label="macro serving database path",
         ),
     )
 
@@ -43,7 +52,7 @@ def resolve_runtime_paths(config: dict[str, Any], config_path: Path) -> RuntimeP
 def ensure_not_prod_path(path: Path, *, label: str = "path") -> Path:
     """Resolve a path and reject accidental writes into the PROD tree."""
     resolved = path.expanduser().resolve()
-    if "prod_scalper_system" in str(resolved).lower():
+    if any(part.casefold() == "prod_scalper_system" for part in resolved.parts):
         raise ValueError(f"Refusing to use {label} in the PROD tree: {resolved}")
     return resolved
 

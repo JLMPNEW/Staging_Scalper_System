@@ -63,7 +63,7 @@ def parse_date(raw: object) -> date | None:
     return None
 
 
-def safe_float(raw: object) -> float | None:
+def safe_float(raw: Any) -> float | None:
     try:
         value = float(raw)
     except (TypeError, ValueError):
@@ -641,6 +641,13 @@ def build_positioning_features(
         if require_borrow and borrow is None:
             reasons.append("missing_borrow")
         quality = "complete" if not reasons else "review"
+        purchase_value = safe_float(purchase["v"])
+        sale_value = safe_float(sale["v"])
+        insider_net_value = (
+            purchase_value - sale_value
+            if purchase_value is not None and sale_value is not None
+            else None
+        )
         conn.execute(
             """
             INSERT INTO feature_positioning(
@@ -677,11 +684,11 @@ def build_positioning_features(
                 feature_source_id,
                 model_family,
                 int(purchase["n"] or 0),
-                safe_float(purchase["v"]),
+                purchase_value,
                 int(sale["n"] or 0),
-                safe_float(sale["v"]),
+                sale_value,
                 int(purchase["owners"] or 0),
-                safe_float(purchase["v"]) - safe_float(sale["v"]) if safe_float(purchase["v"]) is not None and safe_float(sale["v"]) is not None else None,
+                insider_net_value,
                 safe_float(inst["institutional_shares"]) if inst is not None else None,
                 safe_float(inst["institutional_value"]) if inst is not None else None,
                 int(inst["manager_count"]) if inst is not None and inst["manager_count"] is not None else None,

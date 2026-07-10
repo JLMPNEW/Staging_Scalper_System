@@ -4,11 +4,17 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
+from pandas.tseries.holiday import USFederalHolidayCalendar
+
 from macro_policy import MetricPolicy
 from macro_raw_config import cfg_get, parse_iso_date, resolve_db_path, resolve_path
+
+
+RELEASE_STALENESS_POLICY_VERSION = "release_business_days_v1"
 
 
 @dataclass(frozen=True)
@@ -223,3 +229,35 @@ def freshness_anchor_date(candidate: RawCandidate, policy: MetricPolicy) -> date
     if candidate.observation_date is not None:
         return period_end_date(candidate.observation_date, policy.frequency or candidate.frequency)
     return candidate.effective_available_date
+
+
+@lru_cache(maxsize=32)
+def _us_release_holidays(start_year: int, end_year: int) -> frozenset[date]:
+    calendar = USFederalHolidayCalendar()
+    holidays = calendar.holidays(
+        start=f"{start_year}-01-01",
+        end=f"{end_year}-12-31",
+    )
+    return frozenset(timestamp.date() for timestamp in holidays)
+
+
+def release_staleness_days(*, as_of: date, anchor: date, frequency: str) -> int:
+    """Age a released observation using the cadence implied by its policy.
+
+    Daily U.S.-served macro series age only on federal business days so weekends and
+    observed holidays cannot invalidate an otherwise current release. Lower-frequency
+    policy thresholds remain calendar-day based, matching the existing 10/45/120-day
+    weekly/monthly/quarterly buffers.
+    """
+    calendar_age = (as_of - anchor).days
+    if calendar_age <= 0 or str(frequency or "").strip().lower() != "daily":
+        return calendar_age
+
+    holidays = _us_release_holidays(anchor.year, as_of.year)
+    current = anchor + timedelta(days=1)
+    business_age = 0
+    while current <= as_of:
+        if current.weekday() < 5 and current not in holidays:
+            business_age += 1
+        current += timedelta(days=1)
+    return business_age

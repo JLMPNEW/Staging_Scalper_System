@@ -8,7 +8,7 @@ import math
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -120,11 +120,28 @@ def load_risk_settings(config: dict[str, Any]) -> dict[str, Any]:
     raw = cfg_get(config, "biotech_features.risk_decomposition", {}) or {}
     if not isinstance(raw, dict):
         raw = {}
-    weights_raw = raw.get("weights") if isinstance(raw.get("weights"), dict) else {}
-    compensated_weights_raw = raw.get("compensated_weights") if isinstance(raw.get("compensated_weights"), dict) else {}
-    penalty_weights_raw = raw.get("penalty_weights") if isinstance(raw.get("penalty_weights"), dict) else {}
-    free_bands_raw = raw.get("penalty_free_bands") if isinstance(raw.get("penalty_free_bands"), dict) else {}
-    caps_raw = raw.get("penalty_caps") if isinstance(raw.get("penalty_caps"), dict) else {}
+    weights_value = raw.get("weights")
+    weights_raw: dict[str, Any] = cast(dict[str, Any], weights_value) if isinstance(weights_value, dict) else {}
+    compensated_weights_value = raw.get("compensated_weights")
+    compensated_weights_raw: dict[str, Any] = (
+        cast(dict[str, Any], compensated_weights_value)
+        if isinstance(compensated_weights_value, dict)
+        else {}
+    )
+    penalty_weights_value = raw.get("penalty_weights")
+    penalty_weights_raw: dict[str, Any] = (
+        cast(dict[str, Any], penalty_weights_value)
+        if isinstance(penalty_weights_value, dict)
+        else {}
+    )
+    free_bands_value = raw.get("penalty_free_bands")
+    free_bands_raw: dict[str, Any] = (
+        cast(dict[str, Any], free_bands_value)
+        if isinstance(free_bands_value, dict)
+        else {}
+    )
+    caps_value = raw.get("penalty_caps")
+    caps_raw: dict[str, Any] = cast(dict[str, Any], caps_value) if isinstance(caps_value, dict) else {}
     return {
         "compute_enabled": as_bool(raw.get("compute_enabled", raw.get("enabled", True))),
         "compensated_free_band": bounded_float(raw.get("compensated_free_band"), 60.0, low=0.0, high=100.0),

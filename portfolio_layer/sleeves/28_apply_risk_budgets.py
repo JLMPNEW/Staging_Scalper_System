@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -24,7 +25,16 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    read_csv,
+    read_manifest,
+    sealed_artifact_errors,
+    sha256_file,
+    write_csv,
+    write_manifest,
+)
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
@@ -36,6 +46,7 @@ from portfolio_layer.sleeves.risk_model import (  # noqa: E402
     risk_contributions,
     solve_risk_budget,
     sleeve_risk_bounds,
+    target_risk_budget,
     throttle_scale,
     trailing_book_drawdown,
 )
@@ -112,42 +123,6 @@ def _verify_recorded_hashes(meta: dict[str, Any], *, package_root: Path) -> list
     return bad
 
 
-def _target_risk_budget(
-    *,
-    members: dict[str, list[str]],
-    sleeve_budgets: dict[str, float],
-    ir: dict[str, float],
-    tilt: float,
-    rc_cap: float,
-) -> dict[str, float]:
-    """Per-name risk budget = sleeve_budget * within-sleeve [(1-tilt)*equal + tilt*IR_plus], capped at rc_cap."""
-    present = {s: ts for s, ts in members.items() if ts}
-    total_budget = sum(max(0.0, sleeve_budgets.get(s, 0.0)) for s in present) or 1.0
-    b: dict[str, float] = {}
-    for sleeve, tickers in present.items():
-        sleeve_share = max(0.0, sleeve_budgets.get(sleeve, 0.0)) / total_budget
-        if sleeve_share <= 0.0:
-            continue
-        n = len(tickers)
-        ir_plus = {t: max(0.0, ir.get(t, 0.0)) for t in tickers}
-        ir_sum = sum(ir_plus.values())
-        for t in tickers:
-            equal = 1.0 / n
-            tilt_w = (ir_plus[t] / ir_sum) if ir_sum > 0 else equal
-            b[t] = sleeve_share * ((1.0 - tilt) * equal + tilt * tilt_w)
-    # cap per-name risk budget, redistribute, renormalize (a few passes)
-    for _ in range(16):
-        total = sum(b.values())
-        if total <= 0:
-            break
-        b = {t: v / total for t, v in b.items()}
-        over = {t: v for t, v in b.items() if v > rc_cap + 1e-12}
-        if not over:
-            break
-        b = {t: min(v, rc_cap) for t, v in b.items()}
-    return {t: v for t, v in b.items() if v > 0.0}
-
-
 def main() -> int:  # noqa: C901
     configure_utc_logging()
     args = parse_args()
@@ -165,6 +140,8 @@ def main() -> int:  # noqa: C901
         "assignments": sleeves_dir / "sleeve_assignments.csv",
         "risk_model_meta": sleeves_dir / "risk_model_meta.json",
         "covariance": run_dir / "risk" / "covariance.csv",
+        "returns_panel": run_dir / "risk" / "returns_panel.csv",
+        "risk_manifest": run_dir / "risk" / "risk_manifest.json",
         "config": config_path,
     }
     missing = [k for k, p in art.items() if not p.exists()]
@@ -182,6 +159,7 @@ def main() -> int:  # noqa: C901
     }
     validation_path = sleeves_dir / "validation" / "risk_budget_validation.csv"
     if args.force:
+        invalidate_dependents(run_dir, "sleeves")
         for p in (*out.values(), validation_path):
             if p.exists():
                 p.unlink()
@@ -249,7 +227,13 @@ def main() -> int:  # noqa: C901
     max_weight = _f_default(cfg_get(config, "sleeves.max_weight_per_name", 0.05), 0.05)
     max_iter = int(_f_default(cfg_get(config, "sleeves.projection.max_iterations", 50), 50.0))
 
-    target_b = _target_risk_budget(members=members, sleeve_budgets=sleeve_budgets, ir=ir, tilt=tilt, rc_cap=rc_cap)
+    target_b = target_risk_budget(
+        members=members,
+        sleeve_budgets=sleeve_budgets,
+        information_ratio=ir,
+        tilt=tilt,
+        rc_cap=rc_cap,
+    )
     weights = solve_risk_budget(cov, target_b, gross=invested_gross, max_weight=max_weight, max_iter=max_iter)
     rc_enforcement = enforce_rc_cap_to_cash(weights, cov, rc_cap=rc_cap, max_iter=max_iter)
     weights = rc_enforcement.weights
@@ -262,12 +246,43 @@ def main() -> int:  # noqa: C901
     dd_limit = _f_default(cfg_get(config, "sleeves.drawdown_throttle.dd_limit", 0.15), 0.15)
     throttle_window = int(_f_default(cfg_get(config, "sleeves.drawdown_throttle.window_trading_days", 63), 63.0))
     recovery_step = _f_default(cfg_get(config, "sleeves.drawdown_throttle.recovery_step_per_run", 0.25), 0.25)
-    measured_dd = 0.0
-    returns_panel_path = run_dir / "risk" / "returns_panel.csv"
-    if returns_panel_path.exists():
-        returns_panel = pd.read_csv(returns_panel_path, index_col=0)
-        returns_panel.columns = [str(c).strip().upper() for c in returns_panel.columns]
-        measured_dd = trailing_book_drawdown(weights, returns_panel, window=throttle_window)
+    min_complete = _f_default(
+        cfg_get(config, "sleeves.drawdown_throttle.min_complete_fraction", 0.80), 0.80,
+    )
+    risk_manifest = read_manifest(art["risk_manifest"])
+    risk_seal_bad = sealed_artifact_errors(
+        risk_manifest, art["returns_panel"], "returns_panel.csv", run_as_of=run_as_of,
+    )
+    rec(
+        "drawdown_returns_sealed",
+        "PASS" if not risk_seal_bad else "FAIL",
+        "returns panel matches accepted Stage 2 manifest"
+        if not risk_seal_bad else f"{risk_seal_bad}",
+    )
+    if risk_seal_bad:
+        validation_path.parent.mkdir(parents=True, exist_ok=True)
+        write_csv(validation_path, ["check", "status", "detail"], checks)
+        return 1
+    returns_panel = pd.read_csv(art["returns_panel"], index_col=0)
+    returns_panel.columns = [str(c).strip().upper() for c in returns_panel.columns]
+    try:
+        measured_dd = trailing_book_drawdown(
+            weights,
+            returns_panel,
+            window=throttle_window,
+            min_complete_fraction=min_complete,
+        )
+    except ValueError as exc:
+        rec("drawdown_data_sufficient", "FAIL", str(exc))
+        validation_path.parent.mkdir(parents=True, exist_ok=True)
+        write_csv(validation_path, ["check", "status", "detail"], checks)
+        LOGGER.error("Cannot compute Stage 8 drawdown throttle safely: %s", exc)
+        return 1
+    rec(
+        "drawdown_data_sufficient",
+        "PASS",
+        f"window={throttle_window}; min_complete_fraction={min_complete:.3f}",
+    )
     computed_scale = throttle_scale(abs(measured_dd), dd_limit)
     prev_scale = 1.0
     prior_runs = sorted(
@@ -394,8 +409,37 @@ def main() -> int:  # noqa: C901
     })
 
     # ---- proposal-level sanity (improvement-relative; hard gates live in 29) ----
-    sum_ok = abs(realized_invested + final_cash - 1.0) <= 1e-6
-    rec("weights_close_to_one", "PASS" if sum_ok else "FAIL", f"invested={realized_invested:.10f}+cash={final_cash:.10f}")
+    serialized_rows = read_csv(out["sleeve_adjusted_target_weights.csv"])
+    serialized_bad: list[str] = []
+    serialized_tickers: set[str] = set()
+    serialized_sum = 0.0
+    serialized_cash_rows = 0
+    for row_number, row in enumerate(serialized_rows, start=2):
+        ticker = str(row.get("ticker", "")).strip().upper()
+        raw_weight = row.get("weight")
+        if raw_weight is None:
+            serialized_bad.append(f"row={row_number}:missing_weight")
+            continue
+        try:
+            weight = float(raw_weight)
+        except (TypeError, ValueError):
+            serialized_bad.append(f"row={row_number}:non_numeric_weight")
+            continue
+        if not ticker or ticker in serialized_tickers:
+            serialized_bad.append(f"row={row_number}:blank_or_duplicate_ticker={ticker!r}")
+        if not math.isfinite(weight) or weight < -1e-12:
+            serialized_bad.append(f"row={row_number}:{ticker}:invalid_weight={weight}")
+        serialized_tickers.add(ticker)
+        serialized_cash_rows += int(ticker == "CASH")
+        serialized_sum += weight
+    sum_ok = abs(serialized_sum - 1.0) <= 1e-6
+    serialized_ok = not serialized_bad and serialized_cash_rows == 1 and sum_ok
+    rec(
+        "serialized_weights_valid",
+        "PASS" if serialized_ok else "FAIL",
+        f"rows={len(serialized_rows)} sum={serialized_sum:.10f} cash_rows={serialized_cash_rows}"
+        if serialized_ok else f"sum={serialized_sum:.10f}; cash_rows={serialized_cash_rows}; bad={serialized_bad[:8]}",
+    )
     no_add_risk = realized_invested <= invested_gross + 1e-6
     rec("no_added_gross", "PASS" if no_add_risk else "FAIL", f"after_gross={realized_invested:.6f}<=stage7={invested_gross:.6f}")
     cash_ok = final_cash + 1e-8 >= cash_weight

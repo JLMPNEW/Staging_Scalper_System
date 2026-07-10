@@ -18,6 +18,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
@@ -30,6 +31,11 @@ from portfolio_layer.macro.contract import (  # noqa: E402
     MACRO_SECTOR_FIELDS,
     MACRO_STOCK_FIELDS,
     macro_serving_content_sha256,
+    open_macro_serving_db,
+    regime_table_for_source,
+    regime_application_errors,
+    v2_promotion_status,
+    verify_v2_promotion_manifest,
 )
 from portfolio_layer.macro.taxonomy import score_pipelines, sleeve_taxonomy  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
@@ -167,6 +173,7 @@ def main() -> int:  # noqa: C901
     validation_path = macro_dir / "validation" / "macro_contract_validation.csv"
     manifest_path = macro_dir / "macro_manifest.json"
     if args.force:
+        invalidate_dependents(run_dir, "macro")
         for path in (validation_path, manifest_path):
             if path.exists():
                 path.unlink()
@@ -223,6 +230,71 @@ def main() -> int:  # noqa: C901
     rec("independence_shadow_only", "PASS" if not prod_hits and not enabled else "FAIL",
         "macro wrapper has no PROD path token and production is disabled"
         if not prod_hits and not enabled else f"prod_hits={prod_hits} enabled={enabled}")
+
+    # 1b. The regime source is explicit and cannot switch to v2 without sealed promotion evidence.
+    configured_regime_source = str(cfg_get(config, "macro.regime_source", "v1") or "").strip().lower()
+    source_errors: list[str] = []
+    try:
+        configured_regime_table = regime_table_for_source(configured_regime_source)
+    except ValueError as exc:
+        configured_regime_table = ""
+        source_errors.append(str(exc))
+    if meta.get("regime_source") != configured_regime_source:
+        source_errors.append("meta_regime_source_mismatch")
+    if meta.get("regime_source_table") != configured_regime_table:
+        source_errors.append("meta_regime_table_mismatch")
+    configured_model_version = (
+        str(cfg_get(config, "macro.regime_v2_model_version", "") or "").strip()
+        if configured_regime_source == "v2"
+        else None
+    )
+    if meta.get("regime_model_version") != configured_model_version:
+        source_errors.append("meta_regime_model_version_mismatch")
+    if configured_regime_source == "v2":
+        promotion_path_raw = str(meta.get("regime_promotion_manifest_path") or "").strip()
+        if not promotion_path_raw:
+            source_errors.append("missing_v2_promotion_manifest_path")
+        else:
+            promotion_path = ensure_not_prod_path(Path(promotion_path_raw), label="v2 promotion manifest").resolve()
+            recorded_hash = (meta.get("inputs_sha256") or {}).get("MacroLayer/regime_v2_promotion_manifest.json")
+            if not promotion_path.exists() or recorded_hash != sha256_file(promotion_path):
+                source_errors.append("v2_promotion_manifest_hash_mismatch")
+            source_errors.extend(
+                verify_v2_promotion_manifest(
+                    promotion_path,
+                    model_version=str(configured_model_version or ""),
+                    macro_config_path=PACKAGE_ROOT / "MacroLayer" / "config_macro_raw.yaml",
+                    builder_path=PACKAGE_ROOT / "MacroLayer" / "validate_macro_regime_v2_promotion.py",
+                    allowed_root=PACKAGE_ROOT / "MacroLayer" / "out" / "regime_v2",
+                )
+            )
+            promotion_conn = open_macro_serving_db(serving_db_path)
+            try:
+                promotion_row = v2_promotion_status(
+                    promotion_conn,
+                    model_version=str(configured_model_version or ""),
+                    run_as_of=run_as_of,
+                )
+            finally:
+                promotion_conn.close()
+            if promotion_row is None:
+                source_errors.append("missing_v2_promotion_summary")
+            else:
+                if str(promotion_row["acceptance"] or "") != "PROMOTABLE":
+                    source_errors.append(f"v2_db_acceptance={promotion_row['acceptance']}")
+                db_manifest = Path(str(promotion_row["artifact_manifest_path"] or "")).expanduser().resolve()
+                if db_manifest != promotion_path:
+                    source_errors.append("v2_db_manifest_path_mismatch")
+                regime_date = str(regime[0].get("macro_as_of_date") or "") if len(regime) == 1 else ""
+                if str(promotion_row["evidence_as_of_date"] or "") != regime_date:
+                    source_errors.append("v2_promotion_decision_date_mismatch")
+    rec(
+        "regime_source_selection",
+        "PASS" if not source_errors else "FAIL",
+        f"source={configured_regime_source} table={configured_regime_table}"
+        if not source_errors
+        else f"{source_errors[:8]}",
+    )
 
     # 2. Required schema.
     schema_bad = []
@@ -302,7 +374,20 @@ def main() -> int:  # noqa: C901
     rec("macro_freshness_within_tolerance", "PASS" if not freshness_bad else "FAIL",
         "all macro contract rows within configured tolerances" if not freshness_bad else f"{freshness_bad[:8]}")
 
-    # 6. Sleeve taxonomy: macro_sector_fit must be keyed exactly to Stage 1 source_pipeline values.
+    # 6. A carried regime may be reported, but only a covered decision can govern allocation.
+    regime_coverage_bad = []
+    if len(regime) != 1:
+        regime_coverage_bad.append(f"row_count={len(regime)} expected=1")
+    regime_coverage_bad.extend(regime_application_errors(regime[0] if len(regime) == 1 else None))
+    rec(
+        "current_regime_covered",
+        "PASS" if not regime_coverage_bad else "FAIL",
+        "current and next regimes are covered, finite, and allocation-safe"
+        if not regime_coverage_bad
+        else f"{regime_coverage_bad[:8]}",
+    )
+
+    # 7. Sleeve taxonomy: macro_sector_fit must be keyed exactly to Stage 1 source_pipeline values.
     score_pipe_set = set(score_pipelines(scores))
     sector_pipe_set = {str(r.get("source_pipeline", "")).strip() for r in sector if str(r.get("source_pipeline", "")).strip()}
     taxonomy_keys = set(sleeve_taxonomy(config))
@@ -318,7 +403,7 @@ def main() -> int:  # noqa: C901
     rec("sleeve_taxonomy_matches_scores", "PASS" if not taxonomy_bad else "FAIL",
         f"{len(score_pipe_set)} sleeves keyed by source_pipeline" if not taxonomy_bad else f"{taxonomy_bad}")
 
-    # 7. Stock overlay covers every Stage 1 ticker exactly once, with bounded fallback.
+    # 8. Stock overlay covers every Stage 1 ticker exactly once, with bounded fallback.
     score_tickers = [str(r.get("ticker", "")).strip().upper() for r in scores if str(r.get("ticker", "")).strip()]
     stock_tickers = [str(r.get("ticker", "")).strip().upper() for r in stock if str(r.get("ticker", "")).strip()]
     missing_tickers = sorted(set(score_tickers) - set(stock_tickers))
@@ -345,7 +430,7 @@ def main() -> int:  # noqa: C901
         f"rows={len(stock_tickers)} fallback={fallback_frac:.3f} eligible_fallback={eligible_fallback_frac:.3f}"
         if not stock_bad else f"{stock_bad}")
 
-    # 8. Stage 7 contract surface: sector targets and foreign budget are present and numeric.
+    # 9. Stage 7 contract surface: sector targets and foreign budget are present and numeric.
     contract_bad = []
     weights = []
     for row in sector:
@@ -366,7 +451,7 @@ def main() -> int:  # noqa: C901
     rec("stage7_contract_surface", "PASS" if not contract_bad else "FAIL",
         "sector target weights + macro fits + foreign budget are numeric" if not contract_bad else f"{contract_bad[:8]}")
 
-    # 9. Build meta still matches input/source files and artifact hashes.
+    # 10. Build meta still matches input/source files and artifact hashes.
     meta_bad = []
     inputs = meta.get("inputs_sha256") or {}
     configured_stock_fallback_policy = str(cfg_get(config, "macro.stock_fallback_policy", ""))
@@ -374,6 +459,14 @@ def main() -> int:  # noqa: C901
         meta_bad.append("stock_fallback_policy:meta_config_mismatch")
     expected_inputs = {
         "config.yaml": config_path,
+        "MacroLayer/config_macro_raw.yaml": PACKAGE_ROOT / "MacroLayer" / "config_macro_raw.yaml",
+        "MacroLayer/macro_metric_policy.csv": PACKAGE_ROOT / "MacroLayer" / "macro_metric_policy.csv",
+        "MacroLayer/macro_feature_policy.csv": PACKAGE_ROOT / "MacroLayer" / "macro_feature_policy.csv",
+        "MacroLayer/macro_composite_policy.csv": PACKAGE_ROOT / "MacroLayer" / "macro_composite_policy.csv",
+        "MacroLayer/macro_serving_common.py": PACKAGE_ROOT / "MacroLayer" / "macro_serving_common.py",
+        "MacroLayer/build_macro_observation_daily_pit.py": (
+            PACKAGE_ROOT / "MacroLayer" / "build_macro_observation_daily_pit.py"
+        ),
         "stocks_scores.csv": scores_path,
         "manifest.json": stage1_manifest_path,
     }
@@ -391,7 +484,12 @@ def main() -> int:  # noqa: C901
         if inputs.get(name) != sha256_file(path):
             meta_bad.append(f"{name}:input_hash_mismatch")
     serving_content_key = "macro_serving.sqlite:content"
-    actual_serving_content_hash = macro_serving_content_sha256(serving_db_path, run_as_of)
+    actual_serving_content_hash = macro_serving_content_sha256(
+        serving_db_path,
+        run_as_of,
+        regime_table=str(meta.get("regime_source_table") or "macro_regime_decision_daily"),
+        regime_model_version=(str(meta.get("regime_model_version") or "").strip() or None),
+    )
     if inputs.get(serving_content_key) != actual_serving_content_hash:
         meta_bad.append(f"{serving_content_key}:input_hash_mismatch")
     for name in SOURCE_FILES:
@@ -406,7 +504,7 @@ def main() -> int:  # noqa: C901
     rec("macro_meta_reproducible", "PASS" if not meta_bad else "FAIL",
         "meta pins current inputs, sources, and CSV artifacts" if not meta_bad else f"{meta_bad[:8]}")
 
-    # 10. MacroLayer legacy optimizer outputs are not part of this contract.
+    # 11. MacroLayer legacy optimizer outputs are not part of this contract.
     forbidden = [
         run_dir / "stocks_scores_macro_adjusted.csv",
         run_dir / "macro_optimizer_inputs.csv",

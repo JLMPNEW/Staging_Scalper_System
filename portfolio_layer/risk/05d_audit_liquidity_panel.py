@@ -24,8 +24,17 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    read_csv,
+    read_manifest,
+    sealed_artifact_errors,
+    sha256_file,
+    write_csv,
+    write_manifest,
+)
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.liquidity import finite_float  # noqa: E402
@@ -149,6 +158,35 @@ def _map_by_ticker(path: Path) -> dict[str, dict[str, str]]:
     return out
 
 
+def _sealed_optional_map(
+    run_dir: Path,
+    *,
+    data_relative: str,
+    manifest_relative: str,
+    artifact_keys: tuple[str, ...],
+) -> dict[str, dict[str, str]]:
+    """Load later-stage enrichment only when its accepted manifest seals the exact bytes."""
+    data_path = run_dir / data_relative
+    manifest_path = run_dir / manifest_relative
+    if not data_path.exists() or not manifest_path.exists():
+        return {}
+    try:
+        manifest = read_manifest(manifest_path)
+        errors = sealed_artifact_errors(
+            manifest,
+            data_path,
+            *artifact_keys,
+            run_as_of=run_dir.name,
+        )
+    except ValueError as exc:
+        LOGGER.warning("Ignoring unsealed optional liquidity enrichment %s: %s", data_relative, exc)
+        return {}
+    if errors:
+        LOGGER.warning("Ignoring unsealed optional liquidity enrichment %s: %s", data_relative, errors)
+        return {}
+    return _map_by_ticker(data_path)
+
+
 def _expected_liquidity_universe(run_dir: Path) -> set[str]:
     scores = {
         str(r.get("ticker", "")).strip().upper()
@@ -157,6 +195,7 @@ def _expected_liquidity_universe(run_dir: Path) -> set[str]:
     }
     meta_path = run_dir / "risk" / "spread_snapshot_meta.json"
     universe_source = ""
+    meta: dict[str, Any] = {}
     if meta_path.exists():
         try:
             with meta_path.open("r", encoding="utf-8") as handle:
@@ -164,27 +203,44 @@ def _expected_liquidity_universe(run_dir: Path) -> set[str]:
             universe_source = str(meta.get("universe_source", "")).strip().lower()
         except (OSError, json.JSONDecodeError):
             universe_source = ""
+    requested = meta.get("requested_tickers") if isinstance(meta, dict) else None
+    if requested is not None:
+        if not isinstance(requested, list):
+            raise ValueError("spread_snapshot_meta.requested_tickers must be a list")
+        expected = {str(ticker).strip().upper() for ticker in requested if str(ticker).strip()}
+        if len(expected) != len(requested):
+            raise ValueError("spread_snapshot_meta.requested_tickers contains blank or duplicate tickers")
+        return expected
     if "stocks_scores.csv:investable_eligible" in universe_source or "investable_scores" in universe_source:
         return scores
     # 05c's trade-list / target-weights universe modes (including the "auto:" prefixed variants):
     # the snapshot legitimately covers only traded/held names, so that is the expected universe.
     if "trade_list" in universe_source:
-        trade_path = run_dir / "costs" / "trade_list.csv"
-        if trade_path.exists():
+        trade_rows = _sealed_optional_map(
+            run_dir,
+            data_relative="costs/trade_list.csv",
+            manifest_relative="costs/cost_manifest.json",
+            artifact_keys=("trade_list.csv",),
+        )
+        if trade_rows:
             return {
-                str(r.get("ticker", "")).strip().upper()
-                for r in read_csv(trade_path)
+                ticker
+                for ticker, r in trade_rows.items()
                 if str(r.get("ticker", "")).strip()
                 and _safe_float(r.get("trade_notional"), 0.0) > 0
             }
     if "target_weights" in universe_source:
-        target_path = run_dir / "optimizer" / "target_weights.csv"
-        if target_path.exists():
+        target_rows = _sealed_optional_map(
+            run_dir,
+            data_relative="optimizer/target_weights.csv",
+            manifest_relative="optimizer/optimizer_manifest.json",
+            artifact_keys=("target_weights.csv",),
+        )
+        if target_rows:
             return {
-                str(r.get("ticker", "")).strip().upper()
-                for r in read_csv(target_path)
-                if str(r.get("ticker", "")).strip()
-                and str(r.get("ticker", "")).strip().upper() != "CASH"
+                ticker
+                for ticker, r in target_rows.items()
+                if ticker != "CASH"
                 and _safe_float(r.get("weight"), 0.0) > 0
             }
 
@@ -243,9 +299,10 @@ def _checks(
     extra_snapshot = sorted(snapshot_tickers - expected_universe)
     rec(
         "liquidity_universe_coverage",
-        "PASS" if not missing_universe else "FAIL",
-        f"expected={len(expected_universe)} snapshot={len(snapshot_tickers)} extra={len(extra_snapshot)}"
-        if not missing_universe else f"missing={missing_universe[:20]}",
+        "PASS" if not missing_universe and not extra_snapshot else "FAIL",
+        f"expected={len(expected_universe)} snapshot={len(snapshot_tickers)} exact_set_match"
+        if not missing_universe and not extra_snapshot else
+        f"missing={missing_universe[:20]} unexpected={extra_snapshot[:20]}",
     )
 
     missing_targets = sorted(target_tickers - snapshot_tickers)
@@ -327,6 +384,7 @@ def main() -> int:  # noqa: C901
     sector_path = risk_dir / "liquidity_audit_by_sector.csv"
     summary_path = risk_dir / "liquidity_audit_summary.json"
     if args.force:
+        invalidate_dependents(run_dir, "liquidity")
         for path in (
             audit_path,
             sector_path,
@@ -349,10 +407,24 @@ def main() -> int:  # noqa: C901
 
     scores = _map_by_ticker(run_dir / "stocks_scores.csv")
     coverage = _map_by_ticker(risk_dir / "risk_coverage.csv")
-    target_weights = _map_by_ticker(run_dir / "optimizer" / "target_weights.csv")
-    trade_list = _map_by_ticker(run_dir / "costs" / "trade_list.csv")
+    target_weights = _sealed_optional_map(
+        run_dir,
+        data_relative="optimizer/target_weights.csv",
+        manifest_relative="optimizer/optimizer_manifest.json",
+        artifact_keys=("target_weights.csv",),
+    )
+    trade_list = _sealed_optional_map(
+        run_dir,
+        data_relative="costs/trade_list.csv",
+        manifest_relative="costs/cost_manifest.json",
+        artifact_keys=("trade_list.csv",),
+    )
     spread_rows = _read_spread_snapshot(spread_path)
-    expected_universe = _expected_liquidity_universe(run_dir)
+    try:
+        expected_universe = _expected_liquidity_universe(run_dir)
+    except ValueError as exc:
+        LOGGER.error("Invalid sealed liquidity universe provenance: %s", exc)
+        return 1
     default_spread = finite_float(cfg_get(config, "transaction_costs.half_spread_bps_default", 5.0),
                                   name="transaction_costs.half_spread_bps_default")
     comm_base = finite_float(cfg_get(config, "transaction_costs.commission_per_order.base", 1.125),

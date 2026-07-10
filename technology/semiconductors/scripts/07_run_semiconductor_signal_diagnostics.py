@@ -174,13 +174,15 @@ def is_member_on_date(intervals: list[tuple[date, date | None]] | None, asof: da
 # ---------------------------------------------------------------- price layer
 
 class PriceSeries:
-    __slots__ = ("dates", "adj", "close", "volume", "_by_date")
+    __slots__ = ("dates", "adj", "close", "volume", "source_id", "available_source_ids", "_by_date")
 
     def __init__(self) -> None:
         self.dates: list[date] = []
         self.adj: list[float] = []
         self.close: list[float] = []
         self.volume: list[float] = []
+        self.source_id = ""
+        self.available_source_ids: list[str] = []
         self._by_date: dict[date, float] | None = None
 
     def idx_at(self, asof: date) -> int:
@@ -226,7 +228,7 @@ def load_prices(conn: sqlite3.Connection, source_ids: str | list[str], tickers: 
     out: dict[str, PriceSeries] = {ticker: PriceSeries() for ticker in tickers}
     source_list = coerce_source_ids(source_ids, str(source_ids) if isinstance(source_ids, str) else "")
     placeholders = ",".join("?" for _ in tickers)
-    by_ticker_date: dict[tuple[str, date], tuple[float, float, float]] = {}
+    by_ticker_source: dict[str, dict[str, dict[date, tuple[float, float, float]]]] = {}
 
     for source_id in source_list:
         rows = conn.execute(
@@ -239,23 +241,38 @@ def load_prices(conn: sqlite3.Connection, source_ids: str | list[str], tickers: 
             (source_id, *tickers),
         )
         for row in rows:
-            ticker = str(row["ticker"])
+            ticker = normalize_ticker(row["ticker"])
             bar_date = parse_date(row["bar_date"])
             adj = safe_float(row["adj_close"])
             if ticker not in out or bar_date is None or adj is None or adj <= 0:
                 continue
-            key = (ticker, bar_date)
-            if key in by_ticker_date:
-                continue
-            by_ticker_date[key] = (adj, float(row["close"] or 0.0), float(row["volume"] or 0.0))
+            by_ticker_source.setdefault(ticker, {}).setdefault(source_id, {})[bar_date] = (
+                adj,
+                float(row["close"] or 0.0),
+                float(row["volume"] or 0.0),
+            )
 
-    for (ticker, bar_date), values in sorted(by_ticker_date.items(), key=lambda item: (item[0][0], item[0][1])):
+    for ticker, rows_by_source in by_ticker_source.items():
+        available_sources = [source_id for source_id in source_list if rows_by_source.get(source_id)]
+        if not available_sources:
+            continue
+        selected_source = max(
+            available_sources,
+            key=lambda source_id: (
+                max(rows_by_source[source_id]),
+                len(rows_by_source[source_id]),
+                -source_list.index(source_id),
+            ),
+        )
         series = out[ticker]
-        adj, close, volume = values
-        series.dates.append(bar_date)
-        series.adj.append(adj)
-        series.close.append(close)
-        series.volume.append(volume)
+        series.source_id = selected_source
+        series.available_source_ids = available_sources
+        for bar_date, values in sorted(rows_by_source[selected_source].items()):
+            adj, close, volume = values
+            series.dates.append(bar_date)
+            series.adj.append(adj)
+            series.close.append(close)
+            series.volume.append(volume)
     return out
 
 
@@ -287,10 +304,11 @@ def market_subfeatures(series: PriceSeries, asof: date, soxx: PriceSeries) -> di
     if idx >= 59:
         dollar = [series.adj[i] * series.volume[i] for i in range(idx - 59, idx + 1)]
         out["avg_dollar_volume_60d"] = sum(dollar) / len(dollar)
-    if out.get("ret_3m") is not None and soxx.dates:
+    ret_3m = out.get("ret_3m")
+    if ret_3m is not None and soxx.dates:
         soxx_idx = soxx.idx_at(series.dates[idx])
         bench_ret = soxx.ret(soxx_idx, 63) if soxx_idx >= 0 else None
-        out["rel_strength_bench_3m"] = out["ret_3m"] - bench_ret if bench_ret is not None else None
+        out["rel_strength_bench_3m"] = ret_3m - bench_ret if bench_ret is not None else None
         out["rel_strength_soxx_3m"] = out["rel_strength_bench_3m"]
     return out
 
@@ -342,19 +360,27 @@ def load_financial_rows(conn: sqlite3.Connection, source_id: str, model_family: 
     return out
 
 
-def financial_subfeatures(rows: list[dict[str, Any]], asof_iso: str) -> dict[str, float | None]:
+def financial_subfeatures(rows: list[dict[str, Any]], asof_iso: str) -> dict[str, Any]:
+    # Select the newest reported fiscal period visible at the panel date. A
+    # later-filed amendment to an older annual period must not shadow a newer
+    # quarter.
     latest = None
     for row in rows:
         if str(row["asof_date"]) <= asof_iso:
-            latest = row
-        else:
-            break
+            if latest is None or (
+                str(row.get("fiscal_period_end") or ""),
+                str(row.get("asof_date") or ""),
+            ) > (
+                str(latest.get("fiscal_period_end") or ""),
+                str(latest.get("asof_date") or ""),
+            ):
+                latest = row
     if latest is None:
         return {}
-    out: dict[str, float | None] = {field: safe_float(latest.get(field)) for field in FIN_FIELDS}
+    out: dict[str, Any] = {field: safe_float(latest.get(field)) for field in FIN_FIELDS}
     # Stash filing-date valuation inputs (underscore keys are ignored by the
     # subfeature registry) so reprice_valuation can move ratios to the panel date.
-    out["_val_asof"] = str(latest.get("asof_date") or "")  # type: ignore[assignment]
+    out["_val_asof"] = str(latest.get("asof_date") or "")
     out["_market_cap_f"] = safe_float(latest.get("market_cap"))
     out["_net_cash_f"] = safe_float(latest.get("net_cash"))
     out["_fx_balance_rate_f"] = safe_float(latest.get("fx_rate_balance_sheet"))
@@ -605,12 +631,11 @@ def reprice_valuation(feats: dict[str, Any], series: PriceSeries, asof: date) ->
             feats[field] = ratio * ev_t / ev_f
 
 
-def load_form4(conn: sqlite3.Connection, direct_source: str, upstream_source: str) -> dict[str, list[tuple[str, float, int, str]]]:
-    """ticker -> sorted [(avail_date, signed_value, is_purchase, owner)] from one preferred feed."""
+def load_form4(conn: sqlite3.Connection, direct_source: str, upstream_source: str) -> dict[str, list[tuple[str, float, int, tuple[str, ...]]]]:
     rows = conn.execute(
         """
-        SELECT ticker, source_id,
-               COALESCE(NULLIF(filing_date, ''), transaction_date) AS avail_date,
+        SELECT ticker, source_id, accession_number, nonderiv_trans_sk,
+               filing_date, transaction_date,
                transaction_value, is_open_market_purchase, is_open_market_sale, rptowner_cik
         FROM fact_sec_form4_transaction
         WHERE source_id IN (?, ?)
@@ -618,26 +643,48 @@ def load_form4(conn: sqlite3.Connection, direct_source: str, upstream_source: st
         """,
         (direct_source, upstream_source),
     ).fetchall()
-    by_ticker_source: dict[str, dict[str, list[tuple[str, float, int, str]]]] = {}
+    by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for row in rows:
-        avail = str(row["avail_date"] or "")
+        ticker = normalize_ticker(row["ticker"])
+        filing = str(row["filing_date"] or "")
+        transaction = str(row["transaction_date"] or "")
+        if filing:
+            avail = filing
+        elif transaction:
+            transaction_date = parse_date(transaction)
+            avail = (transaction_date + timedelta(days=3)).isoformat() if transaction_date else ""
+        else:
+            avail = ""
         value = safe_float(row["transaction_value"]) or 0.0
-        if not avail:
+        if not ticker or not avail:
             continue
         is_purchase = int(row["is_open_market_purchase"] or 0)
         signed = value if is_purchase else -value
         owner = str(row["rptowner_cik"] or "").lstrip("0")
-        by_ticker_source.setdefault(str(row["ticker"]), {}).setdefault(str(row["source_id"]), []).append(
-            (avail, signed, is_purchase, owner)
+        key = (ticker, str(row["source_id"]), str(row["accession_number"] or ""), str(row["nonderiv_trans_sk"] or ""))
+        entry = by_key.get(key)
+        if entry is None:
+            by_key[key] = {
+                "avail": avail,
+                "signed": signed,
+                "is_purchase": is_purchase,
+                "owners": {owner} if owner else set(),
+            }
+        elif owner:
+            entry["owners"].add(owner)
+    by_ticker_source: dict[str, dict[str, list[tuple[str, float, int, tuple[str, ...]]]]] = {}
+    for (ticker, source_id, _accession, _sk), entry in by_key.items():
+        by_ticker_source.setdefault(ticker, {}).setdefault(source_id, []).append(
+            (entry["avail"], entry["signed"], entry["is_purchase"], tuple(sorted(entry["owners"])))
         )
-    out: dict[str, list[tuple[str, float, int, str]]] = {}
+    out: dict[str, list[tuple[str, float, int, tuple[str, ...]]]] = {}
     for ticker, sources in by_ticker_source.items():
         chosen = sources.get(direct_source) or sources.get(upstream_source) or []
         out[ticker] = sorted(chosen)
     return out
 
 
-def insider_subfeatures(events: list[tuple[str, float, int, str]], asof_iso: str, window_days: int) -> dict[str, float | None]:
+def insider_subfeatures(events: list[tuple[str, float, int, tuple[str, ...]]], asof_iso: str, window_days: int) -> dict[str, float | None]:
     asof = parse_date(asof_iso)
     if asof is None:
         return {}
@@ -645,13 +692,13 @@ def insider_subfeatures(events: list[tuple[str, float, int, str]], asof_iso: str
     net = 0.0
     buyers: set[str] = set()
     seen = False
-    for avail, signed, is_purchase, owner in events:
+    for avail, signed, is_purchase, owners in events:
         if avail < start_iso or avail > asof_iso:
             continue
         seen = True
         net += signed
-        if is_purchase and owner:
-            buyers.add(owner)
+        if is_purchase:
+            buyers.update(owner for owner in owners if owner)
     if not seen:
         return {"insider_net_value_90d": 0.0, "insider_cluster_buyers_90d": 0.0}
     return {"insider_net_value_90d": net, "insider_cluster_buyers_90d": float(len(buyers))}
@@ -721,7 +768,13 @@ def load_positioning_signal_birthdates(
     form4_birth = min_table_date(
         conn,
         """
-        SELECT MIN(COALESCE(NULLIF(filing_date, ''), transaction_date))
+        SELECT MIN(
+            CASE
+                WHEN COALESCE(filing_date, '') <> '' THEN filing_date
+                WHEN COALESCE(transaction_date, '') <> '' THEN DATE(transaction_date, '+3 day')
+                ELSE NULL
+            END
+        )
         FROM fact_sec_form4_transaction
         WHERE source_id IN (?, ?)
         """,
@@ -735,7 +788,13 @@ def load_positioning_signal_birthdates(
     short_birth = min_table_date(
         conn,
         """
-        SELECT MIN(COALESCE(NULLIF(publication_date, ''), settlement_date, asof_date))
+        SELECT MIN(
+            CASE
+                WHEN COALESCE(publication_date, '') <> '' THEN publication_date
+                WHEN COALESCE(settlement_date, '') <> '' THEN DATE(settlement_date, '+14 day')
+                ELSE asof_date
+            END
+        )
         FROM fact_short_interest
         WHERE source_id = ?
         """,
@@ -786,7 +845,7 @@ def positioning_subfeatures(
     ticker: str,
     asof_iso: str,
     *,
-    form4: dict[str, list[tuple[str, float, int, str]]],
+    form4: dict[str, list[tuple[str, float, int, tuple[str, ...]]]],
     inst: dict[str, list[dict[str, Any]]],
     short: dict[str, list[dict[str, Any]]],
     borrow: dict[str, list[dict[str, Any]]],
@@ -799,10 +858,14 @@ def positioning_subfeatures(
         else:
             break
     out["institutional_ownership_delta_pct"] = safe_float(latest_inst["institutional_ownership_delta_pct"]) if latest_inst else None
-    available = [
-        row for row in short.get(ticker, [])
-        if str(row["settlement_date"]) <= asof_iso and (not str(row["publication_date"] or "") or str(row["publication_date"]) <= asof_iso)
-    ]
+    available = []
+    for row in short.get(ticker, []):
+        publication = str(row["publication_date"] or "")
+        if not publication:
+            settlement = parse_date(str(row["settlement_date"] or ""))
+            publication = (settlement + timedelta(days=14)).isoformat() if settlement else ""
+        if str(row["settlement_date"]) <= asof_iso and publication and publication <= asof_iso:
+            available.append(row)
     if available:
         latest_short = available[-1]
         out["latest_short_interest_pct_float"] = safe_float(latest_short["short_interest_pct_float"])
@@ -911,6 +974,8 @@ def main() -> int:
     beta_lookback = int(cfg_get(config, f"{CONFIG_KEY}.beta_lookback_days", 252))
     min_cross_section = int(cfg_get(config, f"{CONFIG_KEY}.min_cross_section", 30))
     min_t = float(cfg_get(config, f"{CONFIG_KEY}.min_abs_t_stat_for_keep", 1.5))
+    min_forward_return = float(cfg_get(config, f"{CONFIG_KEY}.min_forward_return", -0.95))
+    max_forward_return = float(cfg_get(config, f"{CONFIG_KEY}.max_forward_return", 3.00))
     price_sources = research_price_source_ids(config)
     fin_source = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts"))
     mp_source = str(cfg_get(config, "positioning_import.market_positioning_source_id", "market_positioning_upstream"))
@@ -1042,7 +1107,7 @@ def main() -> int:
             series = prices.get(ticker)
             if series is None or not series.dates:
                 continue
-            feats = market_subfeatures(series, asof, soxx)
+            feats: dict[str, Any] = dict(market_subfeatures(series, asof, soxx))
             if not feats:
                 continue
             feats.update(financial_subfeatures(fin_rows.get(ticker, []), asof_iso))
@@ -1058,9 +1123,14 @@ def main() -> int:
             for h in horizons:
                 target_date = bench.dates[panel_idx + h]
                 target_idx = series.idx_at(target_date)
+                if target_idx >= 0 and series.dates[target_idx] < target_date:
+                    if is_member_on_date(membership_by_ticker.get(ticker), target_date):
+                        continue
                 fwd = series.ret_between(idx, target_idx)
                 bench_fwd = bench.ret_between(panel_idx, panel_idx + h)
                 if fwd is None or bench_fwd is None:
+                    continue
+                if fwd < min_forward_return or fwd > max_forward_return:
                     continue
                 fwd_resid[h][ticker] = fwd - beta * bench_fwd
                 usable = True

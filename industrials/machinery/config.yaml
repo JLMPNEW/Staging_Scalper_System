@@ -1,0 +1,193 @@
+paths:
+  database_path: "${INDUSTRIALS_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/industrials.sqlite"
+
+runtime:
+  sqlite_timeout_sec: 120.0
+
+source_registry:
+  path: "../data/free_source_registry.yaml"
+
+industrials_universe:
+  initial_subsector: machinery
+  seed_csv: "system_csvs/machinery_tickers.csv"
+  seed_source_id: machinery_ticker_seed
+  policy_path: "data/machinery_universe_policy.yaml"
+  cohort_path: "data/machinery_cohorts.yaml"
+  cohort_source_id: machinery_cohort_policy
+  historical_membership_csv: "system_csvs/machinery_historical_membership.csv"
+  historical_membership_source_id: machinery_historical_membership_seed
+  delisted_seed_csv: "system_csvs/machinery_delisted.csv"
+  delisted_source_id: machinery_delisted_calibration_seed
+  ticker_aliases_csv: "system_csvs/machinery_ticker_aliases.csv"
+  ticker_aliases_source_id: machinery_ticker_alias_seed
+  listing_dates_csv: "system_csvs/machinery_listing_dates.csv"
+  norgate_symbol_map_csv: "system_csvs/machinery_norgate_symbol_map.csv"
+  norgate_symbol_overrides_csv: "system_csvs/machinery_norgate_symbol_overrides.csv"
+  optimization_start_date: "2019-01-02"
+  delisted_default_start_date: "2019-01-02"
+  expected_ticker_count: 114
+  sector: Industrials
+  industry: Machinery
+  subsector: Machinery
+  country: United States
+  currency: USD
+  benchmark_ticker: XLI
+  benchmark_tickers: [XLI, VIS, SPY]
+
+market_data_policy:
+  scoring_primary_source: yahoo_finance_adjusted
+  scoring_fallback_sources: [norgate_us_equities_total_return]
+  require_adjusted_for_scoring: true
+  max_staleness_days: 7
+  min_source_bars_for_selection: 20
+  min_trading_days_for_full_features: 252
+  min_avg_dollar_volume_60d_for_full_features: 5000000
+
+yahoo_price_ingestion:
+  source_id: yahoo_finance_adjusted
+  chart_url_template: "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+  start_date: "2019-01-02"
+  interval: 1d
+  events: "div,splits"
+  include_adjusted_close: true
+  user_agent: "${INDUSTRIALS_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  timeout_sec: 30.0
+  max_retries: 3
+  parallel_workers: 4
+  cache_dir: "../../output/industrials_cache/machinery/yahoo_adjusted"
+  output_csv: "../../output/industrials/machinery/stage3/yahoo_adjusted_price_coverage.csv"
+  ticker_start_date_overrides: {}
+  retry_status_codes: [429, 500, 502, 503, 504]
+
+market_data_audit:
+  output_csv: "../../output/industrials/machinery/stage3/market_data_source_audit.csv"
+
+market_feature_build:
+  source_id: yahoo_finance_adjusted
+  output_csv: "../../output/industrials/machinery/stage3/market_feature_coverage.csv"
+  secondary_benchmarks: [VIS, SPY]
+  windows:
+    one_month_days: 21
+    three_month_days: 63
+    six_month_days: 126
+    one_year_days: 252
+    skip_latest_month_days: 21
+    volatility_days: 60
+    ma_short_days: 50
+    ma_long_days: 200
+
+norgate_delisted_import:
+  source_id: norgate_us_equities_total_return
+  symbol_overrides_csv: "system_csvs/machinery_norgate_symbol_overrides.csv"
+  symbol_map_csv: "system_csvs/machinery_norgate_symbol_map.csv"
+  output_csv: "../../output/industrials/machinery/stage3/norgate_delisted_price_import.csv"
+  price_adjustment_mode: CAPITAL
+  purge_existing_range: true
+
+sec_fundamentals:
+  submissions_source_id: sec_submissions
+  companyfacts_source_id: sec_companyfacts
+  submissions_url_template: "https://data.sec.gov/submissions/CIK{cik}.json"
+  companyfacts_url_template: "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+  reporting_overrides_csv: "system_csvs/machinery_sec_reporting_overrides.csv"
+  start_date: "2019-01-02"
+  forms: [10-K, 10-K/A, 10-Q, 10-Q/A, 20-F, 20-F/A, 40-F, 40-F/A, 6-K, S-1, S-1/A, S-4, S-4/A]
+  include_historical_members: true
+  user_agent: "${INDUSTRIALS_SEC_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  timeout_sec: 30.0
+  max_retries: 3
+  request_sleep_sec: 0.12
+  cache_dir: "../../output/industrials_cache/machinery/sec_fundamentals"
+  raw_response_retention_days: 90
+  sync_output_csv: "../../output/industrials/machinery/stage4/sec_fundamentals_coverage.csv"
+  feature_output_csv: "../../output/industrials/machinery/stage4/financial_feature_coverage.csv"
+
+fx_rates:
+  source_id: yahoo_fx_rates
+  chart_url_template: "https://query1.finance.yahoo.com/v8/finance/chart/{pair}"
+  start_date: "2019-01-02"
+  interval: 1d
+  user_agent: "${INDUSTRIALS_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  timeout_sec: 30.0
+  max_retries: 3
+  request_sleep_sec: 0.12
+  cache_dir: "../../output/industrials_cache/machinery/yahoo_fx_rates"
+  output_csv: "../../output/industrials/machinery/stage4/fx_rate_coverage.csv"
+  max_staleness_days: 30
+  required_pairs: []
+
+positioning_import:
+  source_id: industrials_positioning_composite
+  form4_source_id: sec_insider_upstream
+  direct_ownership_source_id: sec_ownership_direct
+  market_positioning_source_id: market_positioning_upstream
+  preferred_source_ids: [market_positioning_upstream]
+  positioning_overrides_csv: "system_csvs/machinery_positioning_overrides.csv"
+  start_date: "2019-01-02"
+  include_historical_members: true
+  positioning_universe_csv: "../../output/industrials_cache/positioning/machinery_positioning_universe.csv"
+  output_csv: "../../output/industrials/machinery/stage5/positioning_import_coverage.csv"
+  feature_output_csv: "../../output/industrials/machinery/stage5/positioning_feature_coverage.csv"
+  lookback_days: {insider: 90, short_change: 92}
+  max_13f_staleness_days: 120
+  max_borrow_staleness_days: 10
+  require_upstream_13f_for_gate: false
+  require_upstream_short_for_gate: false
+  require_short_pct_float_for_gate: false
+  require_upstream_borrow_for_gate: false
+  upstream_form4_gate_exempt_tickers: []
+  upstream_13f_gate_exempt_tickers: []
+  upstream_short_gate_exempt_tickers: []
+  upstream_short_pct_float_gate_exempt_tickers: []
+  upstream_borrow_gate_exempt_tickers: []
+  institutional_13f_data_gate: {required_period_of_report: "", anchor_tickers: [], min_anchor_tickers_with_period: 0}
+
+positioning_validation:
+  min_form4_covered_fraction: 0.0
+
+upstream_databases:
+  form4:
+    db_path: "${SEC_INSIDER_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite}"
+    orchestrator_script: "../../SEC_FORM4_Runner/run_sec_form4_orchestrator.py"
+    orchestrator_config: "../../SEC_FORM4_Runner/config_sec_form4_orchestrator_staging.yaml"
+  market_positioning:
+    db_path: "${MARKET_POSITIONING_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite}"
+
+scoring_policy:
+  families:
+    machinery:
+      eligibility_policy_csv: "system_csvs/machinery_scoring_eligibility_policy.csv"
+      reporting_overrides_csv: "system_csvs/machinery_sec_reporting_overrides.csv"
+      output_csv: "../../output/industrials/machinery/stage6/scoring_eligibility_validation.csv"
+
+machinery_scoring:
+  contract_version: industrial_family_final_rank_table_v1_shadow
+  score_model_version: machinery_shadow_v0.1.0
+  model_version: machinery_shadow_2026_07
+  min_score_confidence: 0.40
+  component_weights:
+    quality_score: 0.20
+    growth_score: 0.15
+    valuation_score: 0.15
+    risk_control_score: 0.15
+    market_behavior_score: 0.20
+    positioning_score: 0.05
+    industrial_cycle_score: 0.05
+    orders_backlog_score: 0.025
+    capex_cycle_score: 0.025
+  feature_output_root: "../../output/industrials/machinery/scoring_features"
+  score_output_root: "../../output/industrials/machinery/scores"
+  dashboard_root: "../../output/industrials/machinery/dashboard"
+  history_start_date: "2019-01-02"
+
+sec_archive:
+  enabled: true
+  all_family_members: true
+  index_url_template: "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/index.json"
+  document_url_template: "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/{document_name}"
+  submission_file_url_template: "https://data.sec.gov/submissions/{file_name}"
+  browse_edgar_atom_url_template: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form_type}&owner=exclude&count=100&output=atom"
+  max_submission_history_files: 0
+  max_filings_per_ticker: 32
+  max_documents_per_filing: 3
+  min_refetch_fact_fraction: 0.5

@@ -5,7 +5,7 @@ Motivation (2026-07-06 diagnostic): unconditional purged OOS validation (researc
 nearly every (pipeline, horizon) cell, yet per-date rank ICs are strongly positive inside the
 HEATING_UP / STAGFLATION macro regimes across ALL sectors and flat-to-negative in SLOW_GROWTH and
 crisis-2020. This script tests that hypothesis at the same evidentiary standard as 69: for every
-(pipeline, horizon, regime) cell, purged K-fold validation run entirely WITHIN the regime's dates
+(pipeline, horizon, regime) cell, purged expanding-window validation run entirely WITHIN the regime's dates
 (folds chronologically contiguous in the regime's own timeline; the calendar purge window around a
 test block is therefore conservative across regime gaps).
 
@@ -55,8 +55,8 @@ from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.research.stage11_common import (  # noqa: E402
-    admit_calibration_rows, independent_windows, load_lockbox, manifest_file_errors, mean_t, parse_finite,
-    pooled_slopes, rank_ic_of,
+    admit_calibration_rows, forward_status_is_valid, independent_windows, load_lockbox,
+    manifest_file_errors, mean_t_hac, parse_finite, pooled_slopes, rank_ic_of,
 )
 
 # reuse 69's self-tested purged-fold machinery verbatim (module name starts with a digit,
@@ -98,15 +98,17 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def welch_t(a: list[float], b: list[float]) -> float | None:
+def welch_t(a: list[float], b: list[float], *, max_lag: int) -> float | None:
     if len(a) < 3 or len(b) < 3:
         return None
-    a_arr, b_arr = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
-    va, vb = a_arr.var(ddof=1) / len(a_arr), b_arr.var(ddof=1) / len(b_arr)
-    denom = float(np.sqrt(va + vb))
+    a_mean, a_se, _ = mean_t_hac(a, max_lag=max_lag)
+    b_mean, b_se, _ = mean_t_hac(b, max_lag=max_lag)
+    if a_mean is None or b_mean is None or a_se is None or b_se is None:
+        return None
+    denom = float(np.sqrt(a_se * a_se + b_se * b_se))
     if denom <= 0:
         return None
-    return float((a_arr.mean() - b_arr.mean()) / denom)
+    return float((a_mean - b_mean) / denom)
 
 
 def regime_of_dates(rows: list[dict[str, str]], regime_col: str) -> tuple[dict[str, str], int]:
@@ -143,7 +145,7 @@ def validate_regime_cell(
     static_out = [ric for d in complement_dates
                   if (ric := rank_ic_of(np.array([p[0] for p in by_date[d]]),
                                         np.array([p[1] for p in by_date[d]]))) is not None]
-    delta_t = welch_t(static_in, static_out)
+    delta_t = welch_t(static_in, static_out, max_lag=max(0, horizon - 1))
 
     folds = purged_folds(regime_dates, n_folds=n_folds, horizon_trading_days=horizon,
                          embargo_extra_calendar_days=embargo_days)
@@ -183,7 +185,7 @@ def validate_regime_cell(
             "trained_slope_ridge": round(trained_ridge, 8) if trained_ridge is not None else "",
             "fold_oof_rank_ic": round(float(np.mean(fold_rics)), 6) if fold_rics else "",
         })
-    oof_mean, _se, oof_t = mean_t(oof_rics)
+    oof_mean, _se, oof_t = mean_t_hac(oof_rics, max_lag=max(0, horizon - 1))
     r2, calib = oos_metrics(np.concatenate(preds), np.concatenate(ys)) if preds else (None, None)
     test_windows = independent_windows(sorted(test_dates_scored), horizon)
     validated, reasons = validation_verdict(
@@ -362,7 +364,7 @@ def main() -> int:  # noqa: C901
             status_col = f"fwd_status_{h}d"
             by_date: dict[str, list[tuple[float, float]]] = {}
             for r in sub:
-                if str(r.get(status_col, "")) != "ok":
+                if not forward_status_is_valid(r.get(status_col)):
                     continue
                 z = parse_finite(r.get("score_z_pipeline_date"))
                 y = parse_finite(r.get(col))
@@ -403,7 +405,13 @@ def main() -> int:  # noqa: C901
     rec("purge_verified", "PASS" if not purge_violations else "FAIL",
         "no train/test label-window overlap in any regime fold"
         if not purge_violations else f"{purge_violations[:8]}")
-    rec("admission_accounted", "PASS", f"admitted={len(admitted)}/{len(rows)}; exclusions={exclusions}")
+    admission_ok = len(admitted) + sum(exclusions.values()) == len(rows)
+    rec(
+        "admission_accounted",
+        "PASS" if admission_ok else "FAIL",
+        f"admitted={len(admitted)}/{len(rows)}; exclusions={exclusions}"
+        if admission_ok else f"admitted+excluded={len(admitted) + sum(exclusions.values())}!={len(rows)}",
+    )
     frac_inconsistent = inconsistent_rows / max(1, len(admitted))
     rec("regime_labels_consistent", "PASS" if frac_inconsistent < 0.01 else "FAIL",
         f"rows disagreeing with their date's modal regime: {inconsistent_rows} "

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import os
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -20,6 +22,39 @@ def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) 
         writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+
+
+def test_quality_gate_honors_writable_pytest_temp_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_script_module("00_run_biotech_quality_gate.py", "biotech_quality_gate_temp_regression")
+    exact_path = tmp_path / "quality_gate" / "pytest_base"
+    monkeypatch.setenv("BIOTECH_PYTEST_TMP", str(exact_path))
+
+    assert module.resolve_pytest_temp_dir() == exact_path.resolve()
+
+
+def test_report_qa_uses_report_form4_provenance_not_arbitrary_state_row(tmp_path: Path) -> None:
+    module = load_script_module("42_audit_biotech_daily_report_quality.py", "report_form4_state_regression")
+    form4_db = tmp_path / "STAGING" / "sec_insider.sqlite"
+    form4_db.parent.mkdir(parents=True)
+    with sqlite3.connect(form4_db) as conn:
+        conn.execute("CREATE TABLE sec_form4_daily_state(process_name TEXT, last_index_date TEXT)")
+        conn.executemany(
+            "INSERT INTO sec_form4_daily_state VALUES (?, ?)",
+            [("old", "2026-06-05"), ("current", "2026-07-09")],
+        )
+
+    state = module.load_form4_staging_state(
+        tmp_path / "missing_biotech.sqlite",
+        {"governance_events": {"form4_db_path": str(form4_db)}},
+        report_rows=[{"insider_data_asof_date": "2026-07-07"}],
+    )
+
+    assert state["form4_snapshot_date"] == "2026-07-07"
+    assert state["form4_snapshot_source"] == "biotech_daily_scores.insider_data_asof_date"
+    assert state["form4_db_latest_snapshot_date"] == "2026-07-09"
 
 
 def test_final_scoring_tickers_exclude_manual_removed_tickers() -> None:
@@ -130,6 +165,60 @@ def test_weekly_reconcile_does_not_force_sec_event_full_rescan() -> None:
     assert sec_event_args_for("daily_delta") == ("--skip-parser-signature-reparse",)
     assert sec_event_args_for("weekly_reconcile") == ("--skip-parser-signature-reparse",)
     assert sec_event_args_for("full_backfill") == ("--full-rescan",)
+
+
+def test_historical_restatement_rebuilds_ctgov_before_scoring_universe() -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_historical_ctgov_order")
+
+    names = [step.name for step in module.historical_restatement_steps()]
+
+    assert names[:2] == ["ctgov_audit", "historical_scoring_universe"]
+
+
+def test_snapshot_copies_only_current_run_outputs_and_never_prunes_shared_history(tmp_path: Path) -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_snapshot_boundary_regression")
+    source_dir = tmp_path / "biotech_reports"
+    source_dir.mkdir()
+    historical_dir = source_dir / "20190104"
+    historical_dir.mkdir()
+    (historical_dir / "biotech_daily_scores.csv").write_text("ticker\nAAA\n", encoding="utf-8")
+    stale = source_dir / "old_calibration_audit.csv"
+    stale.write_text("status\nold\n", encoding="utf-8")
+    run_start = datetime.now(timezone.utc) - timedelta(seconds=2)
+    old_timestamp = (run_start - timedelta(days=1)).timestamp()
+    os.utime(stale, (old_timestamp, old_timestamp))
+    fresh = source_dir / "biotech_daily_scores.csv"
+    fresh.write_text("ticker\nAAA\n", encoding="utf-8")
+
+    result = module.snapshot_direct_output_files(
+        {
+            "biotech_reports": {"output_dir": str(source_dir)},
+            "biotech_refresh": {
+                "max_snapshot_history": 1,
+                "snapshot_outputs": {
+                    "source_dir": str(source_dir),
+                    "root_dir": str(source_dir),
+                    "include_extensions": [".csv", ".json"],
+                    "copy_only_refreshed_since_run_start": True,
+                    "mtime_tolerance_sec": 0,
+                    "prune_old_snapshot_dirs": True,
+                },
+            },
+        },
+        base_dir=tmp_path,
+        asof="2026-07-07",
+        run_started_at=run_start.isoformat(),
+        mode="daily_delta",
+        selected_steps=set(),
+    )
+
+    snapshot_dir = source_dir / "20260707"
+    assert result["status"] == "success"
+    assert (snapshot_dir / "biotech_daily_scores.csv").exists()
+    assert not (snapshot_dir / "old_calibration_audit.csv").exists()
+    assert historical_dir.exists()
+    manifest = module.json.loads((snapshot_dir / "snapshot_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["skipped_stale_source_files"] == ["old_calibration_audit.csv"]
 
 
 def test_form4_preflight_accepts_fresh_staging_copy(tmp_path: Path) -> None:

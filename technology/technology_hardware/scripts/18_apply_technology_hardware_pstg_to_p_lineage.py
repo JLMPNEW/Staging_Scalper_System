@@ -170,6 +170,8 @@ def apply_migration(conn: sqlite3.Connection, *, dry_run: bool) -> dict[str, Any
         )
 
     company_row = new_company if old_company is None else old_company
+    if company_row is None:
+        raise RuntimeError(f"Unable to resolve a company row for CIK {CIK}.")
     company_id = int(company_row["company_id"])
     source_id = source_id_or_none(conn, SOURCE_ID)
     tables = ticker_tables(conn)

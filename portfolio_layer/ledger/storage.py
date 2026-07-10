@@ -19,6 +19,7 @@ from portfolio_layer.ledger.ledger_common import (
     SECURITIES_LENDING_FIELDS,
     STATEMENT_META_FIELDS,
     TRADE_FIELDS,
+    TRADE_IDENTITY_FIELDS,
     parse_number,
 )
 
@@ -315,6 +316,7 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
 
 
 def replace_source_rows(conn: sqlite3.Connection, table: str, rows: Iterable[dict[str, str]], source_sha256: str) -> int:
+    materialized = list(rows)
     fields = TABLE_FIELDS[table]
     placeholders = ", ".join("?" for _ in [*fields, "created_at"])
     columns = ", ".join([*fields, "created_at"])
@@ -322,9 +324,21 @@ def replace_source_rows(conn: sqlite3.Connection, table: str, rows: Iterable[dic
     now = utc_now()
     with conn:
         conn.execute(f"DELETE FROM {table} WHERE source_sha256 = ?", (source_sha256,))
-        for row in rows:
+        if table == "broker_trades":
+            # A later overlapping IB statement replaces earlier copies of the same economic fill.
+            # Repeated identical fills in this statement survive because deletion happens once,
+            # before its occurrence-ordinal keys are inserted.
+            identities = {
+                tuple(_to_db_value(field, row.get(field, "")) for field in TRADE_IDENTITY_FIELDS)
+                for row in materialized
+            }
+            where = " AND ".join(f"{field} IS ?" for field in TRADE_IDENTITY_FIELDS)
+            for identity in identities:
+                conn.execute(f"DELETE FROM broker_trades WHERE {where}", identity)
+        insert_verb = "INSERT OR REPLACE" if table == "broker_trades" else "INSERT"
+        for row in materialized:
             values = [_to_db_value(field, row.get(field, "")) for field in fields]
-            conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", [*values, now])
+            conn.execute(f"{insert_verb} INTO {table} ({columns}) VALUES ({placeholders})", [*values, now])
             count += 1
     return count
 

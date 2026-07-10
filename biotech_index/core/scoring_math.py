@@ -113,7 +113,7 @@ def normalize_risk_penalty_mode(raw: object, *, default: str = RISK_MODE_LEGACY)
 
 def _float_or_default(raw: object, default: float) -> float:
     try:
-        value = float(raw)
+        value = float(str(raw).strip())
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default

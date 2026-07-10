@@ -5,11 +5,11 @@ For every (source_pipeline, horizon) cell, splits the admitted calibration rows 
 chronologically contiguous test folds. For each fold the TRAIN set contains only snapshot dates
 whose forward-label windows cannot overlap any test date's window:
 
-    train date d is admitted iff  d < test_start - W  or  d > test_end + W,
+    train date d is admitted iff  d < test_start - W,
     W = horizon trading days * 7/5 calendar + embargo_extra_calendar_days
 
-(purged K-fold in the Lopez de Prado sense: overlapping label windows share outcomes and would
-leak the test fold's future into training). Per fold: fit the pooled ridge slope on train, then
+(expanding-window purged walk-forward: overlapping label windows share outcomes and future dates
+are never available to an earlier fold). Per fold: fit the pooled ridge slope on train, then
 score the test dates OUT OF FOLD:
 
   oof_rank_ic          per-test-date Spearman of sign(trained slope) * z vs the realized target
@@ -52,8 +52,8 @@ from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.research.stage11_common import (  # noqa: E402
-    admit_calibration_rows, independent_windows, load_lockbox, manifest_file_errors, mean_t, parse_finite,
-    pooled_slopes, rank_ic_of,
+    admit_calibration_rows, forward_status_is_valid, independent_windows, load_lockbox,
+    manifest_file_errors, mean_t_hac, parse_finite, pooled_slopes, rank_ic_of,
 )
 
 
@@ -93,8 +93,9 @@ def purged_folds(
 ) -> list[tuple[list[str], list[str], list[str]]]:
     """(train_dates, test_dates, purged_dates) per chronologically contiguous test block.
 
-    Two forward-label windows [d, d+W] and [t, t+W] overlap iff |d - t| <= W, so a train date is
-    admitted only when it sits strictly more than W calendar days outside the test block.
+    A deployable walk-forward fold can train only on dates strictly before the test block. The
+    additional W-day purge ensures every training label has ended before the first test decision.
+    All remaining non-test dates, including future dates, are reported as excluded/purged.
     """
     ordered = sorted(set(dates))
     if not ordered or n_folds < 1:
@@ -105,13 +106,12 @@ def purged_folds(
     for block in blocks:
         test = [str(d) for d in block]
         lo = date.fromisoformat(test[0]) - timedelta(days=window)
-        hi = date.fromisoformat(test[-1]) + timedelta(days=window)
         train, purged = [], []
         for d in ordered:
             if d in test:
                 continue
             day = date.fromisoformat(d)
-            if day < lo or day > hi:
+            if day < lo:
                 train.append(d)
             else:
                 purged.append(d)
@@ -120,12 +120,15 @@ def purged_folds(
 
 
 def verify_purge(folds: list[tuple[list[str], list[str], list[str]]], *, window: int) -> list[str]:
-    """Independent re-check that no train window can overlap a test window (gate input)."""
+    """Re-check no overlap and no future training dates (gate input)."""
     violations: list[str] = []
     for i, (train, test, _purged) in enumerate(folds):
+        if train and test and max(train) >= min(test):
+            violations.append(f"fold{i}:non_chronological_train={max(train)} test_start={min(test)}")
         for d in train:
             for t in test:
-                if abs((date.fromisoformat(d) - date.fromisoformat(t)).days) <= window:
+                delta = (date.fromisoformat(t) - date.fromisoformat(d)).days
+                if delta <= window:
                     violations.append(f"fold{i}:{d}~{t}")
     return violations
 
@@ -199,7 +202,7 @@ def _run_cell(dates, data, *, horizon: int, n_folds: int, shrinkage: float = 0.2
                 oof_rics.append(ric)
             preds.append(ridge * z_te)
             ys.append(y_te)
-    _m, _se, t = mean_t(oof_rics)
+    _m, _se, t = mean_t_hac(oof_rics, max_lag=max(0, horizon - 1))
     r2, calib = oos_metrics(np.concatenate(preds), np.concatenate(ys)) if preds else (None, None)
     return folds_valid, oof_rics, t, r2, calib
 
@@ -215,7 +218,8 @@ def _selftest() -> None:
     folds = purged_folds(dates, n_folds=5, horizon_trading_days=21)
     window = purge_window_days(21, 0)
     assert not verify_purge(folds, window=window)
-    assert all(train for train, _t, _p in folds), "weekly 14-month span must yield non-empty train sets"
+    assert any(train for train, _t, _p in folds[1:]), "later walk-forward folds need non-empty train sets"
+    assert all(not train or max(train) < min(test) for train, test, _p in folds)
     # true signal validates
     folds_valid, rics, t, r2, calib = _run_cell(dates, data, horizon=21, n_folds=5)
     ok, reasons = validation_verdict(folds_valid=folds_valid, test_windows=independent_windows(dates, 21),
@@ -374,7 +378,7 @@ def main() -> int:  # noqa: C901
             status_col = f"fwd_status_{h}d"
             by_date: dict[str, list[tuple[float, float]]] = {}
             for r in sub:
-                if str(r.get(status_col, "")) != "ok":
+                if not forward_status_is_valid(r.get(status_col)):
                     label_exclusions[f"{pipe}:{h}d:status"] = label_exclusions.get(f"{pipe}:{h}d:status", 0) + 1
                     continue
                 if str(r.get(col, "")).strip() == "":
@@ -435,7 +439,7 @@ def main() -> int:  # noqa: C901
                     "trained_slope_ridge": round(trained_ridge, 8) if trained_ridge is not None else "",
                     "fold_oof_rank_ic": round(float(np.mean(fold_rics)), 6) if fold_rics else "",
                 })
-            oof_mean, _se, oof_t = mean_t(oof_rics)
+            oof_mean, _se, oof_t = mean_t_hac(oof_rics, max_lag=max(0, h - 1))
             static_mean = float(np.mean(static_rics)) if static_rics else None
             r2, calib = oos_metrics(np.concatenate(preds), np.concatenate(ys)) if preds else (None, None)
             test_windows = independent_windows(sorted(test_dates_scored), h)
@@ -468,7 +472,13 @@ def main() -> int:  # noqa: C901
     rec("purge_verified", "PASS" if not purge_violations else "FAIL",
         "no train/test label-window overlap in any constructed fold"
         if not purge_violations else f"{purge_violations[:8]}")
-    rec("admission_accounted", "PASS", f"admitted={len(admitted)}/{len(rows)}; exclusions={exclusions}")
+    admission_ok = len(admitted) + sum(exclusions.values()) == len(rows)
+    rec(
+        "admission_accounted",
+        "PASS" if admission_ok else "FAIL",
+        f"admitted={len(admitted)}/{len(rows)}; exclusions={exclusions}"
+        if admission_ok else f"admitted+excluded={len(admitted) + sum(exclusions.values())}!={len(rows)}",
+    )
     rec("alpha_calibration_current", "PASS" if not alpha_bad else "FAIL",
         "68 alpha calibration manifest/files match this panel and validation config"
         if not alpha_bad else f"{alpha_bad[:8]}")

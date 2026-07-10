@@ -59,6 +59,23 @@ BIOTECH_SCORE_CSV_REQUIRED_COLUMNS = [
     "core_structural_veto_flag",
     "rank_demoted_by_core_veto",
     "effective_total_risk_drag",
+    "portfolio_candidate_gate",
+    "portfolio_candidate_score",
+    "portfolio_candidate_status",
+    "portfolio_candidate_reason",
+    "calibration_eligible_flag",
+    "native_score_field",
+    "native_score_value",
+    "score_zero_is_missing_flag",
+    "research_calibration_input_eligible_flag",
+    "research_calibration_status",
+    "research_calibration_reason",
+    "calibration_sample_role",
+    "oos_score_valid_flag",
+    "stage11_calibration_input_eligible_flag",
+    "stage11_calibration_input_reason",
+    "stage11_calibration_panel_source",
+    "survivorship_corrected_panel_flag",
 ]
 
 BIOTECH_SCORE_CSV_PRESENT_COLUMNS = [
@@ -208,6 +225,14 @@ def as_bool(raw: object, default: bool = False) -> bool:
     if text in {"0", "false", "f", "no", "n", "disabled", "off"}:
         return False
     return default
+
+
+def to_float(raw: object, default: float = 0.0) -> float:
+    try:
+        text = str(raw if raw is not None else "").strip().replace(",", "")
+        return float(text) if text else default
+    except (TypeError, ValueError):
+        return default
 
 
 def parse_string_list(raw: object, default: list[str] | None = None) -> list[str]:
@@ -672,6 +697,7 @@ def historical_restatement_steps(
     if str(market_start_asof or "").strip():
         norgate_args = (*norgate_args, "--start-date", str(market_start_asof).strip())
     return [
+        Step("ctgov_audit", "05_audit_ctgov_trial_links.py"),
         Step("historical_scoring_universe", "57_build_historical_scoring_universe.py"),
         Step("yahoo_market_adjusted", "17_sync_market_data_yahoo_adjusted.py", market_args),
         Step("norgate_market_features", "17_sync_market_data_yahoo_adjusted.py", norgate_args),
@@ -844,6 +870,17 @@ def snapshot_direct_output_files(
     snapshot_dir = snapshot_root / asof.replace("-", "")
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     run_start = datetime.fromisoformat(run_started_at.replace("Z", "+00:00"))
+    if run_start.tzinfo is None:
+        run_start = run_start.replace(tzinfo=timezone.utc)
+    copy_only_refreshed = as_bool(
+        cfg_get(config, "biotech_refresh.snapshot_outputs.copy_only_refreshed_since_run_start", True),
+        True,
+    )
+    mtime_tolerance_sec = max(
+        0.0,
+        float(cfg_get(config, "biotech_refresh.snapshot_outputs.mtime_tolerance_sec", 5.0)),
+    )
+    minimum_source_mtime = run_start.timestamp() - mtime_tolerance_sec
     manifest_path = snapshot_dir / "snapshot_manifest.json"
     previous_snapshot_names: set[str] = set()
     if manifest_path.exists():
@@ -855,10 +892,20 @@ def snapshot_direct_output_files(
             for item in previous_manifest.get("files", []):
                 if isinstance(item, dict) and str(item.get("name") or "").strip():
                     previous_snapshot_names.add(str(item["name"]))
-    source_files = [
+    candidate_source_files = [
         source
         for source in sorted(list(source_dir.iterdir()), key=lambda item: item.name.lower())
         if source.is_file() and source.suffix.lower() in include_extensions
+    ]
+    skipped_stale_sources = [
+        source.name
+        for source in candidate_source_files
+        if copy_only_refreshed and source.stat().st_mtime < minimum_source_mtime
+    ]
+    source_files = [
+        source
+        for source in candidate_source_files
+        if not copy_only_refreshed or source.stat().st_mtime >= minimum_source_mtime
     ]
     source_names = {source.name for source in source_files}
 
@@ -909,11 +956,16 @@ def snapshot_direct_output_files(
         "source_dir": str(source_dir),
         "snapshot_dir": str(snapshot_dir),
         "include_extensions": sorted(include_extensions),
+        "copy_only_refreshed_since_run_start": copy_only_refreshed,
+        "mtime_tolerance_sec": mtime_tolerance_sec,
+        "skipped_stale_source_file_count": len(skipped_stale_sources),
+        "skipped_stale_source_files": skipped_stale_sources,
         "file_count": len(copied_files),
         "files": copied_files,
         "notes": [
             "Snapshot folder name is derived from the data as-of date, not the wall-clock run date.",
             "Only direct files in source_dir are copied; subdirectories and calibration folders are not copied.",
+            "By default, direct files older than this pipeline run are excluded so stale audit artifacts cannot be relabeled as current.",
             "Only files listed in the previous snapshot manifest are eligible for stale cleanup.",
         ],
     }
@@ -927,13 +979,26 @@ def snapshot_direct_output_files(
             "last_write_time_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0).isoformat(),
         }
     )
-    max_history = int(cfg_get(config, "biotech_refresh.max_snapshot_history", 30) or 0)
-    if max_history > 0:
+    max_history = int(cfg_get(config, "biotech_refresh.max_snapshot_history", 0) or 0)
+    prune_enabled = as_bool(
+        cfg_get(config, "biotech_refresh.snapshot_outputs.prune_old_snapshot_dirs", False),
+        False,
+    )
+    shared_report_root = source_dir.resolve() == snapshot_root.resolve()
+    if max_history > 0 and prune_enabled and shared_report_root:
+        LOGGER.warning(
+            "Skipping snapshot pruning because source_dir and snapshot_root are the same shared Stage 11 report root: %s",
+            snapshot_root,
+        )
+    if max_history > 0 and prune_enabled and not shared_report_root:
         dated_dirs = sorted(
             [
                 path
                 for path in snapshot_root.iterdir()
-                if path.is_dir() and path.name.isdigit() and len(path.name) == 8
+                if path.is_dir()
+                and path.name.isdigit()
+                and len(path.name) == 8
+                and (path / "snapshot_manifest.json").exists()
             ],
             key=lambda path: path.name,
             reverse=True,
@@ -1762,6 +1827,42 @@ def validate_score_csv(
         if blank_tickers:
             sample = ",".join(sorted(blank_tickers)[:10])
             failures.append(f"{column} blank for {len(blank_tickers)} row(s): {sample}")
+    portfolio_contract_fields = {
+        "portfolio_candidate_gate",
+        "portfolio_candidate_score",
+        "portfolio_candidate_status",
+        "score_zero_is_missing_flag",
+        "calibration_sample_role",
+        "oos_score_valid_flag",
+    }
+    if portfolio_contract_fields.issubset(fieldnames):
+        bad_gate_status: list[str] = []
+        bad_gate_score: list[str] = []
+        bad_missing_gate: list[str] = []
+        bad_oos_role: list[str] = []
+        for row in rows:
+            ticker = str(row.get("ticker") or "")
+            gate = to_float(row.get("portfolio_candidate_gate"), 0.0) > 0.0
+            score = to_float(row.get("portfolio_candidate_score"), 0.0)
+            missing = to_float(row.get("score_zero_is_missing_flag"), 0.0) > 0.0
+            role = str(row.get("calibration_sample_role") or "").strip()
+            oos = to_float(row.get("oos_score_valid_flag"), 0.0) > 0.0
+            if gate and str(row.get("portfolio_candidate_status") or "").strip() != "eligible":
+                bad_gate_status.append(ticker)
+            if gate and score <= 0.0:
+                bad_gate_score.append(ticker)
+            if gate and missing:
+                bad_missing_gate.append(ticker)
+            if (role == "strict_oos") != oos:
+                bad_oos_role.append(ticker)
+        for label, tickers in (
+            ("gate_true_status_not_eligible", bad_gate_status),
+            ("gate_true_nonpositive_score", bad_gate_score),
+            ("gate_true_missing_score", bad_missing_gate),
+            ("strict_oos_role_flag_mismatch", bad_oos_role),
+        ):
+            if tickers:
+                failures.append(f"{label} for {len(tickers)} row(s): {format_ticker_sample(tickers)}")
     if failures:
         raise RuntimeError(f"{path} validation failed: " + " | ".join(failures))
 
@@ -2185,6 +2286,12 @@ def main() -> None:
                 if args.history_restatement:
                     timing_step = Step(f"{step.name}@{run_asof}", step.script, step.args, step.supports_asof)
                 command = build_step_command(command_step, config_path=config_path, db_path=db_path, asof=run_asof)
+                if args.history_restatement and step.name == "ctgov_audit":
+                    historical_output_root = resolve_path(
+                        cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"),
+                        base_dir=base_dir,
+                    )
+                    command.extend(["--output-dir", str(historical_output_root / run_asof.replace("-", ""))])
                 row = {
                     "run_started_at": run_started_at,
                     "mode": effective_mode,

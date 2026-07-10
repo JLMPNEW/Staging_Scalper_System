@@ -162,8 +162,8 @@ def friday_grid(*, start_asof: str, end_asof: str, target_count: int = 0) -> lis
     end = previous_or_same_friday(end)
     start = parse_date(start_asof)
     if target_count > 0:
-        dates = [end - timedelta(days=7 * idx) for idx in range(target_count)]
-        return [item.isoformat() for item in reversed(dates)]
+        target_dates = [end - timedelta(days=7 * idx) for idx in range(target_count)]
+        return [item.isoformat() for item in reversed(target_dates)]
     if start is None:
         raise ValueError("A weekly date grid requires either --start-asof or --target-weekly-date-count.")
     start = previous_or_same_friday(start)

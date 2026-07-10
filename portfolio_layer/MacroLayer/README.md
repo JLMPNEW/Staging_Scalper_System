@@ -35,6 +35,12 @@ This package scaffolds a production-style raw macro ingestion layer with:
 - `build_macro_features.py`: materializes the event-level and daily macro feature layer
 - `build_macro_composites.py`: materializes the daily composite layer and component-contribution layer
 - `build_macro_probabilities.py`: materializes calibrated daily macro probabilities plus calibration diagnostics
+- `macro_probability_v2.py`: pure multivariate ridge-logistic and four-state regime primitives for the shadow v2 model
+- `build_macro_probabilities_v2.py`: builds versioned shadow probabilities against independent first-release GDP and CPI/PCE outcomes
+- `validate_macro_probabilities_v2.py`: hard-checks v2 target independence, PIT label cutoffs, model payloads, probability integrity, and OOS evidence
+- `build_macro_regime_v2_decision.py`: applies the production smoothing, transition, and hysteresis primitives to the namespaced v2 candidate
+- `validate_macro_regime_v2_promotion.py`: compares v2 with v1 on common independent outcomes and emits the sealed, fail-closed promotion verdict
+- `audit_macro_v2_vintage_gaps.py`: reports cell-level evidence deficits and the exact PIT/vintage inputs blocking an earlier model-ready date; optional ALFRED probing is manual
 - `build_macro_regime_raw.py`: materializes the raw 4-state macro regime layer from Stage 6 probabilities
 - `build_macro_regime_smoothed.py`: materializes the Stage 8 smoothed regime layer plus transition diagnostics
 - `build_macro_regime_decision.py`: materializes the Stage 8.5 decision overlay for active portfolio regimes
@@ -185,6 +191,20 @@ Build the macro probability layer:
 python MacroLayer/build_macro_probabilities.py --config MacroLayer/config_macro_raw.yaml
 ```
 
+Build and validate the shadow v2 candidate (this does not change the active regime source):
+
+```powershell
+python MacroLayer/build_macro_probabilities_v2.py --config MacroLayer/config_macro_raw.yaml
+python MacroLayer/validate_macro_probabilities_v2.py --config MacroLayer/config_macro_raw.yaml
+python MacroLayer/build_macro_regime_v2_decision.py --config MacroLayer/config_macro_raw.yaml
+python MacroLayer/validate_macro_regime_v2_promotion.py --config MacroLayer/config_macro_raw.yaml
+python MacroLayer/audit_macro_v2_vintage_gaps.py --config MacroLayer/config_macro_raw.yaml
+```
+
+To query ALFRED for the earliest provider vintage of locally deficient FRED series, run the audit manually
+with `--probe-fred`. The daily serving DAG deliberately runs the local-only audit so broker/API availability
+cannot block the macro refresh and credentials never appear in the report.
+
 Run the full serving DAG in one command:
 
 ```powershell
@@ -324,6 +344,18 @@ YAML `api_key` takes precedence when both are present.
 - The feature layer also lives in the serving DB and materializes `macro_feature_event` and `macro_feature_daily`.
 - The composite layer also lives in the serving DB and materializes `macro_composite_daily` plus `macro_composite_component_daily`.
 - The probability layer also lives in the serving DB and materializes `macro_probabilities_daily`, `macro_probability_calibration`, and `macro_probability_diagnostics`.
+- The independent-outcome v2 research layer is isolated in `macro_probability_v2_target`,
+  `macro_probability_v2_model`, `macro_probability_v2_daily`, `macro_probability_v2_diagnostics`, and
+  `macro_regime_v2_daily`. Its namespaced decision/evidence layer is stored in
+  `macro_regime_v2_smoothed_daily`, `macro_transition_v2_matrix`, `macro_transition_v2_diagnostics`,
+  `macro_regime_v2_decision_daily`, `macro_regime_v2_promotion_evidence`, and
+  `macro_regime_v2_promotion_summary`. It remains shadow-only while `portfolio_layer/config.yaml` has
+  `macro.regime_source: v1`. Selecting `v2` fails closed unless the configured model has a current,
+  sealed `PROMOTABLE` verdict for the same decision date whose artifacts and upstream validation files
+  still match their hashes. Current-day probability confidence is diagnostic, not model-selection evidence;
+  the decision layer's hysteresis carries the active regime when a promoted model is temporarily uncertain.
+  Each candidate build also seals `macro_v2_vintage_gap_cells.csv`, `macro_v2_vintage_gap_inputs.csv`,
+  `macro_v2_vintage_gap_summary.json`, and `macro_v2_vintage_gap_manifest.json` under the dated v2 output.
 - The raw regime layer also lives in the serving DB and materializes `macro_regime_raw_daily`.
 - The smoothed regime layer also lives in the serving DB and materializes `macro_regime_smoothed_daily`, `macro_transition_matrix`, and `macro_transition_diagnostics`.
 - The Stage 8.5 decision overlay also lives in the serving DB and materializes `macro_regime_decision_daily`.

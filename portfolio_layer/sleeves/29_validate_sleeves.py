@@ -25,15 +25,20 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 from portfolio_layer.sleeves.risk_model import (  # noqa: E402
     effective_number_of_bets,
+    enforce_rc_cap_to_cash,
     factor_decomposition,
+    information_ratios,
     risk_contributions,
+    solve_risk_budget,
     sleeve_risk_bounds,
+    target_risk_budget,
     throttle_scale,
 )
 
@@ -138,6 +143,7 @@ def main() -> int:  # noqa: C901
     validation_path = sleeves_dir / "validation" / "sleeve_validation.csv"
     manifest_path = sleeves_dir / "sleeve_manifest.json"
     if args.force:
+        invalidate_dependents(run_dir, "sleeves")
         for p in (validation_path, manifest_path):
             if p.exists():
                 p.unlink()
@@ -194,6 +200,7 @@ def main() -> int:  # noqa: C901
     prior: dict[str, float] = {}
     sleeve_of: dict[str, str] = {}
     ir_by_ticker: dict[str, float] = {}
+    alpha_by_ticker: dict[str, float] = {}
     for r in read_csv(art["assignments"]):
         t = str(r.get("ticker", "")).strip().upper()
         w = _f(r.get("weight"))
@@ -201,6 +208,7 @@ def main() -> int:  # noqa: C901
             prior[t] = w
             sleeve_of[t] = str(r.get("sleeve", "")).strip()
             ir_by_ticker[t] = _f_default(r.get("information_ratio"), 0.0)
+            alpha_by_ticker[t] = _f_default(r.get("final_score"), 0.0)
     proposal: dict[str, float] = {}
     cash_after = 0.0
     for r in read_csv(art["proposal"]):
@@ -367,7 +375,7 @@ def main() -> int:  # noqa: C901
     rec("drawdown_throttle_simulated", "PASS" if throttle_ok else "FAIL",
         "stored cases match continuous throttle formula and are monotone" if throttle_ok else f"{throttle_bad[:8]}")
 
-    # 11. determinism: recomputed diagnostics match 28's sealed numbers.
+    # 11. determinism: independently replay the full proposal vector, not only summary statistics.
     d = meta28.get("diagnostics") or {}
     det_bad = []
     for key, val in (("enb_after", enb_after), ("idio_after", factor_after["idiosyncratic_share"]), ("rc_max_after", rc_max)):
@@ -375,8 +383,70 @@ def main() -> int:  # noqa: C901
             det_bad.append(f"{key}:missing_from_28_diagnostics")  # absent seal must FAIL, not skip
         elif abs(float(d[key]) - float(val)) > 1e-4:
             det_bad.append(f"{key}:{d.get(key)}!={val:.6f}")
-    rec("recompute_matches_28", "PASS" if not det_bad else "FAIL",
-        "29 recompute matches 28 sealed diagnostics" if not det_bad else f"{det_bad}")
+    try:
+        rc_before = risk_contributions(prior, cov)
+        replay_ir = information_ratios(alpha_by_ticker, rc_before.sigma)
+        members: dict[str, list[str]] = {}
+        for ticker, sleeve in sleeve_of.items():
+            members.setdefault(sleeve, []).append(ticker)
+        tilt = _f_default(meta28.get("within_sleeve_ir_tilt"), 0.5)
+        replay_budget = target_risk_budget(
+            members=members,
+            sleeve_budgets={str(k): float(v) for k, v in budgets.items()},
+            information_ratio=replay_ir,
+            tilt=tilt,
+            rc_cap=rc_cap,
+        )
+        replay = solve_risk_budget(
+            cov,
+            replay_budget,
+            gross=prior_gross,
+            max_weight=max_weight,
+            max_iter=max_iter,
+        )
+        replay_enforcement = enforce_rc_cap_to_cash(
+            replay,
+            cov,
+            rc_cap=rc_cap,
+            max_iter=max_iter,
+        )
+        replay = replay_enforcement.weights
+        throttle_meta = meta28.get("drawdown_throttle_simulation") or {}
+        applied_scale = _f(throttle_meta.get("applied_scale"))
+        apply_enabled = throttle_meta.get("apply_enabled") is True
+        if applied_scale is None or not 0.0 <= applied_scale <= 1.0:
+            det_bad.append(f"invalid_applied_scale:{applied_scale}")
+        elif apply_enabled and applied_scale < 1.0 - 1e-12:
+            replay = {ticker: weight * applied_scale for ticker, weight in replay.items()}
+        replay_cash = 1.0 - sum(replay.values())
+        if set(replay) != set(proposal):
+            det_bad.append(
+                f"weight_ticker_set:{sorted(set(replay) ^ set(proposal))[:8]}"
+            )
+        vector_diff = max(
+            (abs(replay.get(ticker, 0.0) - proposal.get(ticker, 0.0))
+             for ticker in set(replay) | set(proposal)),
+            default=0.0,
+        )
+        if vector_diff > 5e-9:
+            det_bad.append(f"weight_vector_max_abs_diff={vector_diff:.3e}")
+        if abs(replay_cash - cash_after) > 5e-9:
+            det_bad.append(f"cash:{replay_cash:.10f}!={cash_after:.10f}")
+        stored_enforcement = meta28.get("rc_cap_enforcement") or {}
+        if bool(stored_enforcement.get("converged")) != replay_enforcement.converged:
+            det_bad.append("rc_enforcement_convergence_mismatch")
+        if int(stored_enforcement.get("iterations", -1)) != replay_enforcement.iterations:
+            det_bad.append("rc_enforcement_iteration_mismatch")
+        if abs(_f_default(stored_enforcement.get("cash_added"), -1.0) - replay_enforcement.cash_added) > 5e-9:
+            det_bad.append("rc_enforcement_cash_mismatch")
+    except (TypeError, ValueError) as exc:
+        det_bad.append(f"full_replay_error:{exc}")
+    rec(
+        "recompute_matches_28",
+        "PASS" if not det_bad else "FAIL",
+        "29 independently reproduced the complete 28 weight vector and diagnostics"
+        if not det_bad else f"{det_bad[:10]}",
+    )
 
     # ---- WARN-only: absolute Rentech floors (capped by the 2-sector upstream book) ----
     min_idio = _f_default(cfg_get(config, "sleeves.factor_risk_caps.min_idiosyncratic_share", 0.50), 0.50)

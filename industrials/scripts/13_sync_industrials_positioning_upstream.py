@@ -235,6 +235,9 @@ def build_positioning_universe_csv(config: dict[str, Any], *, base_dir: Path, ou
     historical_path = resolve_path(cfg_get(config, "industrials_universe.historical_membership_csv"), base_dir=base_dir)
     delisted_path = resolve_path(cfg_get(config, "industrials_universe.delisted_seed_csv"), base_dir=base_dir)
     overrides = load_positioning_overrides(config, base_dir=base_dir, asof=asof)
+    family_sector = str(cfg_get(config, "industrials_universe.sector", "Industrials") or "Industrials")
+    family_industry = str(cfg_get(config, "industrials_universe.industry", "") or "")
+    family_subsector = str(cfg_get(config, "industrials_universe.subsector", family_industry) or family_industry)
     rows_by_ticker: dict[str, dict[str, str]] = {}
 
     for row in read_csv_rows(seed_path):
@@ -260,8 +263,8 @@ def build_positioning_universe_csv(config: dict[str, Any], *, base_dir: Path, ou
                 "company_name": str(row.get("company_name") or ""),
                 "cik": str(row.get("cik") or ""),
                 "exchange": str(row.get("exchange") or ""),
-                "sector": "Industrials",
-                "industry": "defense",
+                "sector": family_sector,
+                "industry": family_industry,
                 "subsector": str(row.get("calibration_cohort") or ""),
                 "country": str(row.get("country") or ""),
                 "currency": str(row.get("currency") or "USD"),
@@ -287,9 +290,9 @@ def build_positioning_universe_csv(config: dict[str, Any], *, base_dir: Path, ou
                 "company_name": str(row.get("company") or ""),
                 "cik": str(row.get("cik") or ""),
                 "exchange": str(row.get("exchange") or ""),
-                "sector": "Industrials",
-                "industry": "Aerospace & Defense",
-                "subsector": "Defense",
+                "sector": family_sector,
+                "industry": family_industry,
+                "subsector": family_subsector,
                 "country": str(row.get("country") or "United States"),
                 "currency": str(row.get("currency") or "USD"),
                 "security_type": str(row.get("security_type") or "Common Stock"),
@@ -333,6 +336,23 @@ def build_positioning_universe_csv(config: dict[str, Any], *, base_dir: Path, ou
         [rows_by_ticker[ticker] for ticker in sorted(rows_by_ticker)],
     )
     LOGGER.info("Built positioning universe CSV: %s rows=%d", output_path, len(rows_by_ticker))
+    return output_path
+
+
+def build_active_borrow_universe_csv(source_path: Path, *, output_path: Path, asof: date) -> Path:
+    rows = read_csv_rows(source_path)
+    active_rows: list[dict[str, str]] = []
+    for row in rows:
+        listing_status = str(row.get("listing_status") or "").strip().lower()
+        membership_end = str(row.get("membership_end_date") or "").strip()[:10]
+        if listing_status != "active" or (membership_end and membership_end < asof.isoformat()):
+            continue
+        active_rows.append(row)
+    if not active_rows:
+        raise ValueError(f"No active securities available for IBKR borrow sync in {source_path}")
+    fieldnames = list(active_rows[0])
+    write_csv_atomic(output_path, fieldnames, active_rows)
+    LOGGER.info("Built active IBKR borrow universe CSV: %s rows=%d", output_path, len(active_rows))
     return output_path
 
 
@@ -1015,9 +1035,14 @@ def main() -> None:
             )
             LOGGER.info("%s rows=%d message=%s", result.feed_name, result.rows, result.message)
         if not args.skip_ibkr_borrow:
+            ibkr_tickers_csv = build_active_borrow_universe_csv(
+                tickers_csv,
+                output_path=tickers_csv.with_name(f"{tickers_csv.stem}_ibkr_active.csv"),
+                asof=end_date,
+            )
             result = sync_ibkr_borrow_availability(
                 conn,
-                tickers_csv=tickers_csv,
+                tickers_csv=ibkr_tickers_csv,
                 history_start_date=history_start,
                 end_date=end_date,
                 host=args.ibkr_host,

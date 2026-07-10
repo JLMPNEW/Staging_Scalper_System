@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import load_yaml  # noqa: E402
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import ensure_not_prod_path, resolve_runtime_paths  # noqa: E402
@@ -179,6 +180,7 @@ def main() -> int:  # noqa: C901
     ]
     output_paths = [target_path, summary_path, validation_path, meta_path, *native_outputs, *downstream]
     if args.force:
+        invalidate_dependents(run_dir, "blacklitterman")
         for path in output_paths:
             if path.exists():
                 path.unlink()

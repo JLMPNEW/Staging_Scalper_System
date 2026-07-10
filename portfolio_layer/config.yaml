@@ -106,6 +106,20 @@ score_contract:
       file_path: "industrials/defense/dashboard/{yyyy-mm-dd}/defense_final_rank_table.csv"
       require_oos_score_valid: true
       calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
+    # Machinery remains an enabled optional shadow source until its OOS calibration
+    # is sealed. The adapter ingests rows for diagnostics but cannot size them.
+    - model_family: machinery
+      adapter: industrial_family
+      enabled: true
+      required: false
+      staleness_tolerance_days: 3
+      sector: "Industrials"
+      industry: "Machinery"
+      industry_aggregate: "Machinery"
+      file_mode: dated
+      file_path: "industrials/machinery/dashboard/{yyyy-mm-dd}/machinery_final_rank_table.csv"
+      require_oos_score_valid: true
+      calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
 
 # Stage 2 - live/current-book cross-sector risk panel (self-sourced, NOT survivorship history).
 risk_panel:
@@ -117,6 +131,8 @@ risk_panel:
   hard_floor_history_days: 60                      # < -> risk_status=excluded (risk_eligible=0)
   max_missing_day_fraction: 0.10                   # max fraction of master-calendar days a ticker may miss
   max_stale_price_trading_days: 0                  # missing right-edge bars beyond this exclude risk sizing
+  same_day_bar_final_after_et: "17:00"             # never seal a current-session Yahoo daily bar before this
+  market_timezone: "America/New_York"
   readiness_stale_status: "FAIL"                   # stale/missing required sectors block Stage 2 by default
   covariance_frequency: "daily"                    # daily | weekly
   shrinkage_method: "pairwise_linear"              # pairwise_linear (ragged-panel safe) | ledoit_wolf | oas
@@ -145,7 +161,7 @@ risk_panel:
       price_history_csv: "data/price_lineage_p.csv"
       issuer_id: "CIK0001474432"
       reason: "Pure Storage/Everpure active ticker; stitch PSTG history before P effective date"
-  benchmark_tickers: [SPY, QQQ, SMH, SOXX, XBI, XLK, XLV, XLF, XLE, XLI, XLP, XLY, XLU, XLB, XLRE, XLC, XAR, ITA]
+  benchmark_tickers: [SPY, QQQ, SMH, SOXX, XBI, XLK, XLV, XLF, XLE, XLI, XLP, XLY, XLU, XLB, XLRE, XLC, XAR, ITA, VIS]
   hedge_rotation_etfs: [IGV, IHI, XAR, MCHI, FXI, INDA, EWZ, EWG, EWY, EWT, IEMG]
   sector_etf_map:                                  # source_pipeline -> shrinkage-target ETF
     semiconductors: SOXX
@@ -154,11 +170,12 @@ risk_panel:
     biotech: XBI
     med_devices: IHI
     defense: XAR
+    machinery: XLI
   fetch:
     chart_url_templates:
       - "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
       - "https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
-    enable_stooq_fallback: true
+    enable_stooq_fallback: false              # Stooq closes are not dividend-adjusted; diagnostic only
     max_workers: 10
     request_timeout_sec: 20
     max_retries: 3
@@ -234,6 +251,7 @@ optimizer:
     # Research/shadow books (walk-forward arms, BL, sleeve diagnostics) are intentionally UNCAPPED —
     # a larger live budget is earned through Stage 7/BL fusion + Stage 11 calibration evidence.
     defense: 0.05
+    machinery: 0.00
 
 # Stage 4 - transaction-cost & turnover overlay (flat per-order commission, AUM-aware). Stage 3 unchanged.
 transaction_costs:
@@ -297,6 +315,9 @@ rotation:
 macro:
   enabled_in_production: false
   vendor_root: "MacroLayer"
+  regime_source: "v1"                       # v1 | v2; v2 is fail-closed on sealed PROMOTABLE evidence
+  candidate_regime_source: "v2"
+  regime_v2_model_version: "macro_regime_v2_independent_outcomes_v1"
   freshness_tolerance_days:
     regime: 5
     country_fit: 30
@@ -335,6 +356,10 @@ macro:
       macro_sector_fallback: "Industrials"
       industries: ["Aerospace & Defense"]
       industry_aggregates: ["Aerospace & Defense"]
+    machinery:
+      macro_sector_fallback: "Industrials"
+      industries: ["Machinery", "Specialty Industrial Machinery", "Farm & Heavy Construction Machinery", "Building Products & Equipment"]
+      industry_aggregates: ["Machinery"]
 
 # Stage 7 - Black-Litterman fusion (SHADOW-ONLY adapter over the vendored optimizer).
 # Units = annualized (option B): only Stage 1 final_score becomes an expected-return view; rating/state/
@@ -372,6 +397,7 @@ black_litterman_fusion:
     software_infrastructure: 0.19
     technology_hardware: 0.1425
     defense: 0.05
+    machinery: 0.00
   benchmark_within_sector_source: "equal"   # equal | stage3_weights; ticker-level BL prior inside each sleeve
   macro_sector_shift_mode: "relative_with_floor"
   macro_sector_max_shift: 0.10              # absolute safety cap on |shift| before projection
@@ -404,6 +430,7 @@ sleeves:
     biotech: "XBI"
     med_devices: "IHI"
     defense: "XAR"
+    machinery: "XLI"
   factor_risk_caps:
     min_idiosyncratic_share: 0.50            # >= this share of book variance must be idiosyncratic
     max_market_share: 0.25                   # market-beta risk share cap
@@ -435,6 +462,7 @@ sleeves:
                                              # the proposal (activation awaits Stage 11 promotion)
     dd_limit: 0.15
     window_trading_days: 63                  # trailing window for the measured proposal drawdown
+    min_complete_fraction: 0.80              # fail closed if fewer complete held-name return rows exist
     recovery_step_per_run: 0.25              # applied scale may rise at most this much per run
   # --- iterative scale->project loop ---
   projection:
@@ -582,8 +610,8 @@ calibration_feedback:
 orchestration:
   step_timeout_sec: 1800
   cadences:
-    tactical: [scores, risk, optimizer, costs, rotation, final]
-    strategic: [scores, risk, optimizer, costs, rotation, macro, bl, sleeves, ledger, exits, payout, final]
+    tactical: [scores, risk, optimizer, costs, rotation, governor, final]
+    strategic: [scores, risk, optimizer, costs, rotation, macro, bl, sleeves, ledger, exits, payout, governor, final]
 
 # Stage 10 - payout / liability planner (SHADOW-ONLY; the +payout walk-forward arm is UNREGISTERED
 # for the first Open Event per docs/LOCKBOX_PROTOCOL.md). Emits a per-run distribution PROPOSAL:
@@ -628,6 +656,7 @@ walkforward:
     mu_multipliers: [1.25, 1.5, 2.0]
     rebalance_every_n_snapshots: [5, 21]
     unsupported_modes: [min_var, cash]
+    familywise_alpha: 0.05                 # Bonferroni family-wise error rate across the full grid
   rebalance_every_n_snapshots: 5           # daily store -> weekly rebalance
   one_way_cost_bps: 5.0                    # flat one-way cost on traded weight at each rebalance
   cov_lookback_trading_days: 252
@@ -637,7 +666,9 @@ walkforward:
   min_days: 250                            # promotion floor: net holding days replayed
   min_independent_windows: 6               # promotion floor: non-overlapping 21d windows in span
   promote_net_ir_min: 0.0                  # net IR vs aqr_only must exceed this
-  promote_active_t_min: 2.0                # t-stat of daily net active returns must reach this
+  promote_active_t_min: 2.0                # Newey-West t-stat of daily net active returns must reach this
+  active_t_hac_lag_days: 20                # overlap/serial-correlation correction for promotion inference
+  lockbox_min_rebalances: 6                # one-time ledger refuses publication below this evidence floor
 
 calibration_validation:
   dir: "calibration_validation"            # under paths.output_dir; one subdir per panel build
@@ -658,3 +689,9 @@ regime_calibration:
   regime_column: "macro_regime"            # PIT regime label joined by research/67
   min_regime_dates: 120                    # cells with fewer in-regime dates fail closed
   validate_t_min: 2.5                      # stricter than calibration_validation.validate_t_min
+
+# Stage 11 - component-level purged forward IC (research/72). GATE 1 of the sector-neutral track:
+# attribute which raw factor pillars predict forward returns out-of-sample, per sector/horizon/regime,
+# and whether any pillar beats the diluting composite. EVIDENCE ONLY -- never edits scoring.
+component_ic:
+  dir: "component_ic"                      # under paths.output_dir; one subdir per panel build

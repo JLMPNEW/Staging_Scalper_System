@@ -173,7 +173,7 @@ def _provenance(*, mode: str, as_of: str, generated_at: str, live_lag_days: int)
     return "live" if 0 <= lag <= live_lag_days else "reconstructed"
 
 
-def _insert_snapshot(conn, meta: dict[str, Any], snapshot_dir: Path) -> None:
+def _insert_snapshot(conn, meta: dict[str, Any], snapshot_dir: Path, *, replace: bool = False) -> None:
     input_rows = [(meta["as_of_date"], "stocks_scores.csv", meta["stocks_scores_sha256"], meta["n_rows"])]
     if meta.get("config_sha256"):
         input_rows.append((meta["as_of_date"], "config.yaml", meta["config_sha256"], None))
@@ -181,6 +181,9 @@ def _insert_snapshot(conn, meta: dict[str, Any], snapshot_dir: Path) -> None:
         input_rows.append((meta["as_of_date"], f"raw/{name}", str((info or {}).get("sha256", "")),
                            int((info or {}).get("rows") or 0)))
     with conn:
+        if replace:
+            conn.execute("DELETE FROM snapshot_input_hashes WHERE as_of_date = ?", (meta["as_of_date"],))
+            conn.execute("DELETE FROM score_snapshots WHERE as_of_date = ?", (meta["as_of_date"],))
         conn.execute(INSERT_SNAPSHOT_SQL, (
             meta["as_of_date"], meta["mode"], meta["provenance"], meta["in_lockbox"],
             meta["stage11_fields_complete"], meta["acceptance"], meta["hard_gate_acceptance"],
@@ -205,6 +208,9 @@ def _archive_run(
     mode: str,
     live_lag_days: int,
     script_sha: str,
+    destination: Path | None = None,
+    register: bool = True,
+    check_existing: bool = True,
 ) -> tuple[str, str]:
     """Archive one sealed Stage 1 run. Returns (status, detail)."""
     run_dir = runs_root / as_of
@@ -224,7 +230,7 @@ def _archive_run(
 
     existing = conn.execute(
         "SELECT stocks_scores_sha256 FROM score_snapshots WHERE as_of_date = ?", (as_of,)
-    ).fetchone()
+    ).fetchone() if check_existing else None
     if existing is not None:
         if str(existing["stocks_scores_sha256"]) == actual_sha:
             return "already_current", actual_sha[:12]
@@ -245,7 +251,7 @@ def _archive_run(
     if bad_sources:
         return "invalid", f"future source_asof for {bad_sources}"
 
-    final_dir = store_dir / as_of
+    final_dir = destination or (store_dir / as_of)
     if final_dir.exists():
         # Crash-recovery: adopt a fully-written orphan dir if its bytes match this run; else refuse.
         meta_path = final_dir / "snapshot_meta.json"
@@ -256,7 +262,8 @@ def _archive_run(
                 and (final_dir / "stocks_scores.csv").exists()
                 and sha256_file(final_dir / "stocks_scores.csv") == actual_sha
             ):
-                _insert_snapshot(conn, orphan, final_dir)
+                if register:
+                    _insert_snapshot(conn, orphan, final_dir)
                 return "adopted", f"orphan snapshot dir re-indexed sha={actual_sha[:12]}"
         return "mismatch", f"store dir exists without a matching index row: {final_dir}"
 
@@ -296,7 +303,8 @@ def _archive_run(
     }
     write_manifest(staging / "snapshot_meta.json", meta)
     staging.rename(final_dir)
-    _insert_snapshot(conn, meta, final_dir)
+    if register:
+        _insert_snapshot(conn, meta, final_dir)
     note = f"{meta['provenance']} rows={len(rows)} sha={actual_sha[:12]}"
     if missing_fields:
         note += f" LEGACY(no {missing_fields})"
@@ -456,23 +464,45 @@ def _cmd_supersede(*, runs_root: Path, store_dir: Path, conn, lockbox: dict[str,
     old_sha = str(row["stocks_scores_sha256"])
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     retired = store_dir / f"{as_of}.superseded.{stamp}"
-    if old_dir.exists():
+    replacement = store_dir / ".supersede-staging" / f"{as_of}.{stamp}"
+    replacement.parent.mkdir(parents=True, exist_ok=True)
+    if replacement.exists():
+        shutil.rmtree(replacement)
+    status, note = _archive_run(
+        runs_root=runs_root, store_dir=store_dir, conn=conn, as_of=as_of,
+        lockbox=lockbox, mode="archive", live_lag_days=live_lag_days, script_sha=script_sha,
+        destination=replacement, register=False, check_existing=False,
+    )
+    if status != "archived":
+        shutil.rmtree(replacement, ignore_errors=True)
+        LOGGER.error("Supersede preparation failed [%s]: %s; active snapshot remains unchanged", status, note)
+        return 1
+    replacement_meta = json.loads((replacement / "snapshot_meta.json").read_text(encoding="utf-8"))
+    if not old_dir.exists():
+        shutil.rmtree(replacement, ignore_errors=True)
+        LOGGER.error("Active snapshot directory disappeared before atomic supersede: %s", old_dir)
+        return 1
+    swapped = False
+    try:
         old_dir.rename(retired)
-    with conn:
-        conn.execute("DELETE FROM score_snapshots WHERE as_of_date = ?", (as_of,))
-        conn.execute("DELETE FROM snapshot_input_hashes WHERE as_of_date = ?", (as_of,))
+        replacement.rename(old_dir)
+        swapped = True
+        _insert_snapshot(conn, replacement_meta, old_dir, replace=True)
+    except Exception as exc:  # noqa: BLE001 - restore the previous active snapshot on any swap/index failure.
+        failed_new = store_dir / ".supersede-staging" / f"{as_of}.{stamp}.failed"
+        if swapped and old_dir.exists():
+            old_dir.rename(failed_new)
+        if retired.exists() and not old_dir.exists():
+            retired.rename(old_dir)
+        shutil.rmtree(failed_new, ignore_errors=True)
+        shutil.rmtree(replacement, ignore_errors=True)
+        LOGGER.exception("Atomic supersede failed; previous snapshot restored: %s", exc)
+        return 1
     add_issue(
         conn, stage="stage11_snapshot_store", issue_type="snapshot_superseded",
         detail=f"as_of={as_of}; old_sha={old_sha[:16]}; retired_dir={retired.name}", severity="warning",
     )
-    status, note = _archive_run(
-        runs_root=runs_root, store_dir=store_dir, conn=conn, as_of=as_of,
-        lockbox=lockbox, mode="archive", live_lag_days=live_lag_days, script_sha=script_sha,
-    )
     _write_index(conn, store_dir)
-    if status != "archived":
-        LOGGER.error("Supersede re-archive failed [%s]: %s (old bytes kept at %s)", status, note, retired.name)
-        return 1
     LOGGER.info("Superseded %s: old bytes kept at %s; new %s", as_of, retired.name, note)
     return 0
 

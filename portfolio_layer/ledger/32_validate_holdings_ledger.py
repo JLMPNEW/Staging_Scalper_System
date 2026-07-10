@@ -16,12 +16,18 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.db import connect, table_exists  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
-from portfolio_layer.ledger.ledger_common import RECONCILIATION_FIELDS, csv_trade_key, parse_number  # noqa: E402
+from portfolio_layer.ledger.ledger_common import (  # noqa: E402
+    RECONCILIATION_FIELDS,
+    csv_trade_key,
+    parse_number,
+    trade_identity,
+)
 from portfolio_layer.ledger.storage import count_for_run, count_for_source, init_ledger_tables  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
@@ -80,7 +86,8 @@ def main() -> int:  # noqa: C901
     if not run_as_of:
         LOGGER.error("No built holdings-ledger run found under %s", runs_root)
         return 1
-    ledger_dir = runs_root / run_as_of / "ledger"
+    run_dir = runs_root / run_as_of
+    ledger_dir = run_dir / "ledger"
     art = {
         "ib_statement_meta": ledger_dir / "ib_statement_meta.json",
         "broker_statement_sources": ledger_dir / "broker_statement_sources.csv",
@@ -106,6 +113,7 @@ def main() -> int:  # noqa: C901
     validation_path = ledger_dir / "validation" / "ledger_validation.csv"
     manifest_path = ledger_dir / "ledger_manifest.json"
     if args.force:
+        invalidate_dependents(run_dir, "ledger")
         for path in (validation_path, manifest_path):
             if path.exists():
                 path.unlink()
@@ -202,8 +210,9 @@ def main() -> int:  # noqa: C901
         f"{len(stock_state)} stock positions reconcile to lots" if not lot_bad else "; ".join(lot_bad[:8]))
 
     override_symbols = _manual_override_symbols(config)
+    applicable_override_symbols = override_symbols & set(stock_state)
     override_bad: list[str] = []
-    for symbol in override_symbols:
+    for symbol in applicable_override_symbols:
         matched = [
             lot for lot in lots_by_symbol.get(symbol, [])
             if "manual_entry_date" in lot.get("provenance", "") and lot.get("entry_date")
@@ -211,7 +220,8 @@ def main() -> int:  # noqa: C901
         if not matched:
             override_bad.append(symbol)
     rec("manual_lot_overrides_materialized", "PASS" if not override_bad else "FAIL",
-        f"manual overrides materialized: {sorted(override_symbols)}" if not override_bad else f"missing={override_bad}")
+        f"applicable={sorted(applicable_override_symbols)} configured_closed_or_absent="
+        f"{sorted(override_symbols - set(stock_state))}" if not override_bad else f"missing={override_bad}")
 
     stock_trade_keys = [r.get("trade_key", "") for r in trades if r.get("trade_key")]
     duplicate_trade_keys = len(stock_trade_keys) - len(set(stock_trade_keys))
@@ -219,23 +229,37 @@ def main() -> int:  # noqa: C901
         f"trade_rows={len(trades)} unique_keys={len(set(stock_trade_keys))}")
 
     key_guard_bad: list[str] = []
+    occurrences: dict[str, int] = {}
+    ordered_trades = sorted(trades, key=lambda row: int(_f(row.get("source_row"))))
+    for row in ordered_trades:
+        identity = trade_identity(row)
+        occurrence = occurrences.get(identity, 0) + 1
+        occurrences[identity] = occurrence
+        expected_key = csv_trade_key(source_sha, row, occurrence=occurrence)
+        if expected_key != row.get("trade_key", ""):
+            key_guard_bad.append(f"source_row={row.get('source_row')}:stored_key_not_recomputed")
     if trades:
         sample = dict(trades[0])
-        recomputed = csv_trade_key(source_sha, sample)
-        if recomputed != sample.get("trade_key", ""):
-            key_guard_bad.append("stored_key_not_recomputed")
-        shifted = dict(sample)
-        shifted_source_row = str(int(_f(sample.get("source_row"))) + 1_000_000)
-        shifted["source_row"] = shifted_source_row
-        if csv_trade_key(source_sha, shifted) == recomputed:
-            key_guard_bad.append("source_row_not_in_key")
-    else:
-        key_guard_bad.append("no_trades")
-    rec("trade_key_source_row_collision_guard", "PASS" if not key_guard_bad else "FAIL",
-        "trade_key recomputes and changes when source_row changes" if not key_guard_bad else "; ".join(key_guard_bad))
+        first = csv_trade_key(source_sha, sample, occurrence=1)
+        second = csv_trade_key(source_sha, sample, occurrence=2)
+        if first == second:
+            key_guard_bad.append("identical_fill_occurrences_collide")
+        if csv_trade_key("different-statement-sha", sample, occurrence=1) != first:
+            key_guard_bad.append("trade_key_depends_on_statement_sha")
+    rec(
+        "trade_key_incremental_identity_guard",
+        "PASS" if not key_guard_bad else "FAIL",
+        "no trades in statement; identity guard not applicable" if not trades else
+        "all keys replay from economic identity + occurrence; repeated fills remain unique; statement SHA excluded"
+        if not key_guard_bad else "; ".join(key_guard_bad[:8]),
+    )
 
     instrument_assets = {str(r.get("asset_category") or "") for r in instruments}
-    rec("instrument_metadata_loaded", "PASS" if {"Stocks", "Equity and Index Options"}.issubset(instrument_assets) else "FAIL",
+    required_instrument_assets = {
+        str(r.get("asset_category") or "") for r in open_positions
+        if str(r.get("asset_category") or "") in {"Stocks", "Equity and Index Options"}
+    }
+    rec("instrument_metadata_loaded", "PASS" if required_instrument_assets.issubset(instrument_assets) else "FAIL",
         f"instrument_rows={len(instruments)} asset_categories={sorted(instrument_assets)}")
 
     lending_bad: list[str] = []

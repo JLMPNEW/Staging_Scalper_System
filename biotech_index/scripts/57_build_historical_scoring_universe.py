@@ -204,7 +204,7 @@ def live_universe_rows(
         if not ok:
             audit.append({"ticker": ticker, "decision": "exclude", "reason": reason})
             continue
-        out = dict(row)
+        out: dict[str, Any] = dict(row)
         out.update(
             {
                 "ticker": ticker,
@@ -326,12 +326,19 @@ def main() -> int:
         raise ValueError(f"Invalid --asof date: {args.asof}")
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     base_output_dir = resolve_path(cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
+    output_dir = dated_output_dir(base_output_dir, asof.isoformat())
+    configured_root_universe = resolve_path(
+        cfg_get(config, "biotech_features.final_scoring_universe_csv"),
+        base_dir=base_dir,
+    )
+    dated_pit_universe = output_dir / configured_root_universe.name
     root_universe = (
         args.root_universe_csv.expanduser().resolve()
         if args.root_universe_csv
-        else resolve_path(cfg_get(config, "biotech_features.final_scoring_universe_csv"), base_dir=base_dir)
+        else dated_pit_universe
+        if dated_pit_universe.exists()
+        else configured_root_universe
     )
-    output_dir = dated_output_dir(base_output_dir, asof.isoformat())
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else output_dir / root_universe.name
     summary_csv = args.summary_csv.expanduser().resolve() if args.summary_csv else output_dir / "historical_scoring_universe_audit.csv"
     manifest_path = output_dir / "historical_scoring_universe_manifest.json"

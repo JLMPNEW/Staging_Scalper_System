@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
 
 def to_float(raw: object, default: float = math.nan) -> float:
     try:
-        value = float(raw)
+        value = float(str(raw).strip())
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default

@@ -5,7 +5,7 @@ Runs the sealed per-as-of chain in dependency order, verifying each stage's mani
 before continuing:
 
   scores    01 -> 02 -> 03                       (Stage 1 contract)
-  risk      04 -> 05 -> 06 -> 07 -> 08           (Stage 2 panel; 05d liquidity audit if snapshot exists)
+  risk      04 -> 05 -> 06 -> 07 -> [05d] -> 08    (Stage 2 panel; 05d runs when a spread snapshot exists)
   optimizer 09 -> 10                             (Stage 3 AQR baseline)
   costs     12 -> 13 -> 14 -> 15                 (Stage 4)
   rotation  17 -> 18                             (Stage 5, shadow)
@@ -14,11 +14,11 @@ before continuing:
   sleeves   27 -> 28 -> 29                       (Stage 8, shadow)
   ledger    31 -> 32                             (Stage 8.5; skipped unless broker imports exist)
   exits     33 -> 34 -> 35                       (Stage 9, needs ledger)
+  governor  19                                   (Stage 12 bounded gross directive)
 
-Cadences (config `orchestration`): `tactical` refreshes the fast loop (scores/risk/optimizer/costs
-+ rotation); `strategic` runs every group. The runner is idempotent: stages keep their own
-fail_if_exists seals, and `--force` is forwarded so a re-run rebuilds cleanly with each stage's
-invalidation logic. IB liquidity collection (05c) is never launched here — it needs a live
+Cadences (config `orchestration`): `tactical` refreshes the fast loop, including rotation;
+`strategic` runs every group. Stages are immutable by default; `--force` explicitly rebuilds them.
+Each producer invalidates dependent seals first. IB liquidity collection (05c) is never launched here; it needs a live
 IB session and belongs to the overnight process; 13's spread_source fallback covers its absence.
 
 Every run writes runs/<as_of>/orchestration_meta.json with per-step durations, exit codes, and the
@@ -28,7 +28,6 @@ promotes them; payout/final composition are implemented as shadow-aware Stage 12
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import subprocess
 import sys
@@ -43,7 +42,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    manifest_acceptance_value,
+    read_manifest,
+    sha256_file,
+    write_manifest,
+)
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
@@ -64,6 +68,7 @@ GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
         ("risk", "05_build_return_panel.py", None),
         ("risk", "06_build_risk_coverage.py", None),
         ("risk", "07_build_covariance_model.py", None),
+        ("risk", "05d_audit_liquidity_panel.py", None),
         ("risk", "08_validate_risk_panel.py", "risk/risk_manifest.json"),
     ],
     "optimizer": [
@@ -109,6 +114,9 @@ GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
     "payout": [
         ("payout", "14_build_payout_liability.py", "payout/payout_manifest.json"),
     ],
+    "governor": [
+        ("orchestration", "19_run_risk_governor.py", "governor/governor_manifest.json"),
+    ],
     "final": [
         ("orchestration", "20_compose_final_target_book.py", "final/final_manifest.json"),
     ],
@@ -116,9 +124,9 @@ GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
 # read-only checks take no --force (nothing to overwrite)
 NO_FORCE_SCRIPTS = {"04_check_risk_readiness.py"}
 DEFAULT_CADENCES = {
-    "tactical": ["scores", "risk", "optimizer", "costs", "rotation", "final"],
+    "tactical": ["scores", "risk", "optimizer", "costs", "rotation", "governor", "final"],
     "strategic": ["scores", "risk", "optimizer", "costs", "rotation", "macro", "bl", "sleeves",
-                  "ledger", "exits", "payout", "final"],
+                  "ledger", "exits", "payout", "governor", "final"],
 }
 
 
@@ -130,10 +138,35 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--groups", default="", help="Comma-separated explicit group list (overrides cadence).")
     p.add_argument("--skip", default="", help="Comma-separated groups to skip.")
     p.add_argument("--force", action="store_true", help="Forwarded to every stage script.")
+    p.add_argument(
+        "--reuse-risk-price-data",
+        action="store_true",
+        help=(
+            "Explicitly allow Stage 2 to seed from this run's hash-checked adjusted-price panel "
+            "and current local price cache. Useful for deterministic historical rebuilds when "
+            "the remote provider is unavailable; never enabled implicitly."
+        ),
+    )
     p.add_argument("--dry-run", action="store_true", help="Print the plan without executing.")
     p.add_argument("--continue-on-fail", action="store_true",
                    help="Keep running later groups after a failure (default: stop).")
     return p.parse_args()
+
+
+def script_args(args: argparse.Namespace, script: str) -> list[str]:
+    """Return the exact optional flags for a stage script.
+
+    Dry-run and execution both call this function so the displayed plan cannot drift from the
+    command that is actually launched.
+    """
+    flags: list[str] = []
+    if args.force and script not in NO_FORCE_SCRIPTS:
+        flags.append("--force")
+    if args.force and script == "01_collect_sector_scores.py":
+        flags.append("--reuse-sealed-run-raw")
+    if args.reuse_risk_price_data and script == "05_build_return_panel.py":
+        flags.extend(("--reuse-existing-panel", "--reuse-price-cache"))
+    return flags
 
 
 def manifest_acceptance(run_dir: Path, rel: str) -> str:
@@ -141,8 +174,14 @@ def manifest_acceptance(run_dir: Path, rel: str) -> str:
     if not path.exists():
         return "MISSING"
     try:
-        return str(json.loads(path.read_text(encoding="utf-8")).get("acceptance", "UNKNOWN"))
-    except (OSError, json.JSONDecodeError):
+        manifest = read_manifest(path)
+        manifest_as_of = str(
+            manifest.get("run_as_of", manifest.get("run_as_of_date", manifest.get("ledger_as_of", "")))
+        ).strip()
+        if manifest_as_of and manifest_as_of != run_dir.name:
+            return f"DATE_MISMATCH:{manifest_as_of}"
+        return manifest_acceptance_value(manifest) or "UNKNOWN"
+    except ValueError:
         return "UNREADABLE"
 
 
@@ -166,9 +205,19 @@ def _broker_statement_available(config: dict[str, Any], config_path: Path, as_of
 def plan_groups(args: argparse.Namespace, config: dict[str, Any], run_dir: Path) -> list[str]:
     orch = cfg_get(config, "orchestration", {}) or {}
     cadences = {**DEFAULT_CADENCES, **(orch.get("cadences") or {})}
-    groups = [g.strip() for g in args.groups.split(",") if g.strip()] or list(cadences[args.cadence])
+    explicit = [g.strip() for g in args.groups.split(",") if g.strip()]
+    cadence_groups = cadences.get(args.cadence)
+    if not explicit and not isinstance(cadence_groups, (list, tuple)):
+        raise ValueError(f"orchestration cadence {args.cadence!r} must be a list of group names")
+    groups = explicit
+    if not groups:
+        assert isinstance(cadence_groups, (list, tuple))
+        groups = [str(group).strip() for group in cadence_groups if str(group).strip()]
     skip = {g.strip() for g in args.skip.split(",") if g.strip()}
-    planned = [g for g in groups if g in GROUPS and g not in skip]
+    unknown = sorted((set(groups) | skip) - set(GROUPS))
+    if unknown:
+        raise ValueError(f"unknown orchestration groups: {unknown}; valid={sorted(GROUPS)}")
+    planned = [g for g in groups if g not in skip]
     # ledger needs a broker statement dated exactly at this as-of (ledger/30 imports it as the first
     # ledger step); exits need the ledger. Skip both gracefully when neither a sealed import nor a
     # matching statement exists.
@@ -192,27 +241,56 @@ def main() -> int:  # noqa: C901
     run_dir = runs_root / run_as_of
     orch = cfg_get(config, "orchestration", {}) or {}
     step_timeout = float(orch.get("step_timeout_sec", 1800))
-    planned = plan_groups(args, config, run_dir)
+    try:
+        planned = plan_groups(args, config, run_dir)
+    except ValueError as exc:
+        LOGGER.error("Invalid orchestration plan: %s", exc)
+        return 1
     if not planned:
         LOGGER.error("Nothing to run (groups empty after skips)")
         return 1
-    LOGGER.info("PIPELINE as_of=%s cadence=%s groups=%s force=%s", run_as_of, args.cadence, planned, args.force)
+    LOGGER.info(
+        "PIPELINE as_of=%s cadence=%s groups=%s force=%s reuse_risk_price_data=%s",
+        run_as_of,
+        args.cadence,
+        planned,
+        args.force,
+        args.reuse_risk_price_data,
+    )
     if args.dry_run:
         for g in planned:
             for subdir, script, _m in GROUPS[g]:
-                LOGGER.info("  would run %s/%s --as-of %s%s", subdir, script, run_as_of,
-                            " --force" if args.force else "")
+                if script == "05d_audit_liquidity_panel.py" and not (run_dir / "risk" / "spread_snapshot.csv").exists():
+                    LOGGER.info("  would skip %s/%s (no spread_snapshot.csv)", subdir, script)
+                    continue
+                flags = script_args(args, script)
+                suffix = f" {' '.join(flags)}" if flags else ""
+                LOGGER.info("  would run %s/%s --as-of %s%s", subdir, script, run_as_of, suffix)
         return 0
 
     steps: list[dict[str, Any]] = []
     failed_groups: list[str] = []
+    completed_groups: list[str] = []
     for group in planned:
         group_failed = False
         for subdir, script, manifest_rel in GROUPS[group]:
+            if script == "05d_audit_liquidity_panel.py" and not (run_dir / "risk" / "spread_snapshot.csv").exists():
+                steps.append({
+                    "group": group,
+                    "script": script,
+                    "rc": 0,
+                    "seconds": 0.0,
+                    "acceptance": "SKIPPED_NO_SPREAD_SNAPSHOT",
+                    "manifest": "",
+                    "manifest_sha256": "",
+                    "command": [],
+                    "tail": "",
+                })
+                LOGGER.info("[SKIP] %-45s no spread_snapshot.csv", f"{subdir}/{script}")
+                continue
             cmd = [sys.executable, str(PACKAGE_ROOT / subdir / script), "--as-of", run_as_of,
                    "--config", str(config_path)]
-            if args.force and script not in NO_FORCE_SCRIPTS:
-                cmd.append("--force")
+            cmd.extend(script_args(args, script))
             started = time.monotonic()
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT),
@@ -224,8 +302,15 @@ def main() -> int:  # noqa: C901
                 tail = [f"timeout after {step_timeout:.0f}s"]
             elapsed = round(time.monotonic() - started, 1)
             acceptance = manifest_acceptance(run_dir, manifest_rel) if manifest_rel else ""
+            stage_manifest_sha = (
+                sha256_file(run_dir / manifest_rel)
+                if manifest_rel and (run_dir / manifest_rel).is_file()
+                else ""
+            )
             steps.append({"group": group, "script": script, "rc": rc, "seconds": elapsed,
-                          "acceptance": acceptance, "tail": " | ".join(tail) if rc != 0 else ""})
+                          "acceptance": acceptance, "manifest": manifest_rel or "",
+                          "manifest_sha256": stage_manifest_sha, "command": cmd,
+                          "tail": " | ".join(tail) if rc != 0 else ""})
             status = "OK" if rc == 0 else "FAIL"
             LOGGER.info("[%s] %-45s rc=%d %5.1fs %s", status, f"{subdir}/{script}", rc, elapsed,
                         acceptance or "")
@@ -240,21 +325,28 @@ def main() -> int:  # noqa: C901
             if not args.continue_on_fail:
                 LOGGER.error("Stopping after failed group %s (use --continue-on-fail to proceed)", group)
                 break
+        else:
+            completed_groups.append(group)
 
     meta = {
         "stage": "stage12_orchestration",
+        "acceptance": "PASS" if not failed_groups else "FAIL",
         "run_as_of": run_as_of,
         "cadence": args.cadence,
         "groups_planned": planned,
+        "groups_completed": completed_groups,
         "groups_failed": failed_groups,
         "force": bool(args.force),
+        "reuse_risk_price_data": bool(args.reuse_risk_price_data),
         "steps": steps,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "inputs_sha256": {"config.yaml": sha256_file(config_path)},
+        "source_sha256": {"18_run_portfolio_pipeline.py": sha256_file(Path(__file__).resolve())},
     }
     run_dir.mkdir(parents=True, exist_ok=True)
     write_manifest(run_dir / "orchestration_meta.json", meta)
     LOGGER.info("PIPELINE %s: %d/%d groups clean -> %s",
-                "PASS" if not failed_groups else "FAIL", len(planned) - len(failed_groups),
+                "PASS" if not failed_groups else "FAIL", len(completed_groups),
                 len(planned), run_dir / "orchestration_meta.json")
     return 0 if not failed_groups else 1
 

@@ -216,10 +216,11 @@ def active_symbol_for_ticker(config: dict[str, Any], ticker: str, as_of: str) ->
     risk-panel alias map for true same-issuer ticker migrations.
     """
     key = str(ticker).strip().upper()
-    alias_rows: list[dict[str, Any]] = []
-    for aliases in [
-        cfg_get(config, "liquidity_panel.ticker_aliases", {}) or {},
-        cfg_get(config, "risk_panel.ticker_aliases", {}) or {},
+    alias_rows: list[tuple[int, dict[str, Any]]] = []
+    # A liquidity-specific broker symbol wins an effective-date tie over a generic price alias.
+    for priority, aliases in [
+        (1, cfg_get(config, "risk_panel.ticker_aliases", {}) or {}),
+        (2, cfg_get(config, "liquidity_panel.ticker_aliases", {}) or {}),
     ]:
         if isinstance(aliases, dict):
             for raw_key, raw_value in aliases.items():
@@ -227,13 +228,14 @@ def active_symbol_for_ticker(config: dict[str, Any], ticker: str, as_of: str) ->
                     continue
                 row = dict(raw_value)
                 row.setdefault("ticker", raw_key)
-                alias_rows.append(row)
+                alias_rows.append((priority, row))
         elif isinstance(aliases, list):
-            alias_rows.extend(raw for raw in aliases if isinstance(raw, dict))
+            alias_rows.extend((priority, raw) for raw in aliases if isinstance(raw, dict))
     run_date = date.fromisoformat(as_of)
     best: dict[str, Any] | None = None
     best_effective = date.min
-    for raw in alias_rows:
+    best_priority = -1
+    for priority, raw in alias_rows:
         alias_ticker = str(raw.get("ticker", "")).strip().upper()
         if alias_ticker != key:
             continue
@@ -246,9 +248,10 @@ def active_symbol_for_ticker(config: dict[str, Any], ticker: str, as_of: str) ->
                 continue
             if effective > run_date:
                 continue
-        if best is None or effective >= best_effective:
+        if best is None or (effective, priority) > (best_effective, best_priority):
             best = raw
             best_effective = effective
+            best_priority = priority
     if not best:
         return key, None
     active = str(best.get("ib_symbol") or best.get("query_symbol") or best.get("active_ticker") or key).strip().upper()
@@ -293,8 +296,8 @@ def summarize_spread_samples(
     grouped: dict[str, list[dict[str, Any]]] = {str(t).strip().upper(): [] for t in tickers if str(t).strip()}
     for row in rows:
         ticker = str(row.get("ticker", "")).strip().upper()
-        if ticker:
-            grouped.setdefault(ticker, []).append(row)
+        if ticker in grouped:
+            grouped[ticker].append(row)
 
     snapshot: list[dict[str, Any]] = []
     for ticker in sorted(grouped):
@@ -302,7 +305,16 @@ def summarize_spread_samples(
         extreme: list[float] = []
         reasons: list[str] = []
         hard_fail_reasons: list[str] = []
+        seen_targets: set[str] = set()
         for row in grouped[ticker]:
+            target_time = str(row.get("target_time_et", "")).strip()
+            if target_time not in sample_times:
+                hard_fail_reasons.append(f"unexpected_target_time:{target_time or '<blank>'}")
+                continue
+            if target_time in seen_targets:
+                hard_fail_reasons.append(f"duplicate_target_time:{target_time}")
+                continue
+            seen_targets.add(target_time)
             status = str(row.get("status", "")).strip().lower()
             reason = str(row.get("reason", "")).strip()
             if reason:
@@ -317,13 +329,36 @@ def summarize_spread_samples(
             except ValueError:
                 sample_day = None
             age_ok = sample_day is not None and 0 <= (as_of_date - sample_day).days <= max_stale_days
+            quote_error = ""
+            if status == "ok":
+                try:
+                    bid = finite_float(row.get("bid"), name=f"{ticker}.bid")
+                    ask = finite_float(row.get("ask"), name=f"{ticker}.ask")
+                    if bid <= 0.0 or ask <= 0.0:
+                        quote_error = "nonpositive_quote"
+                    elif ask < bid:
+                        quote_error = "crossed_quote"
+                    else:
+                        expected_half = ((ask - bid) / ((ask + bid) / 2.0)) * 5_000.0
+                        if half is None or abs(half - expected_half) > max(0.01, abs(expected_half) * 1e-4):
+                            quote_error = "quote_spread_mismatch"
+                except ValueError:
+                    quote_error = "missing_or_invalid_quote"
+                if quote_error:
+                    status = "invalid"
+                    reason = quote_error
+                    reasons.append(reason)
             if status != "ok":
-                # extreme samples marked invalid by the collector stay VISIBLE to the audit as a
-                # hard failure (never silently replaced by the fallback default) — but only while
+                # Extreme samples marked invalid by the collector stay visible to the audit as a
+                # hard failure (never silently replaced by the fallback default), but only while
                 # fresh: a stale extreme print must not poison the name forever
-                if ("half_spread_bps>=" in reason or "spread_bps>=" in reason) and (sample_day is None or age_ok):
+                if (
+                    "half_spread_bps>=" in reason
+                    or "spread_bps>=" in reason
+                    or reason in {"crossed_quote", "nonpositive_quote", "quote_spread_mismatch", "missing_or_invalid_quote"}
+                ) and (sample_day is None or age_ok):
                     hard_fail_reasons.append(reason)
-                    if half is not None and age_ok:
+                    if half is not None and half >= 0.0 and age_ok:
                         extreme.append(half)
                 continue
             if half is None or sample_day is None:
@@ -334,6 +369,26 @@ def summarize_spread_samples(
             elif half >= max_half_spread_bps and age_ok:
                 hard_fail_reasons.append(f"half_spread_bps>={max_half_spread_bps:g}")
                 extreme.append(half)
+        # Quote-integrity and hard-ceiling failures take precedence over the number of otherwise
+        # valid samples. A bad quote must never be averaged away into an apparently healthy name.
+        if hard_fail_reasons:
+            reason = ";".join(sorted(set(hard_fail_reasons))[:3])
+            snapshot.append({
+                "as_of_date": as_of,
+                "ticker": ticker,
+                "requested_sample_count": sample_count,
+                "valid_sample_count": len(valid),
+                "latest_sample_date_et": "",
+                "latest_sample_age_days": "",
+                "median_half_spread_bps": round(float(statistics.median(extreme)), 6) if extreme else "",
+                "max_half_spread_bps": round(max(extreme), 6) if extreme else "",
+                "min_half_spread_bps": round(min(extreme), 6) if extreme else "",
+                "spread_source": "ibkr_historical_bid_ask" if extreme else "",
+                "spread_status": "failed",
+                "spread_reason": reason,
+            })
+            continue
+
         if len(valid) >= min_valid_samples:
             values = [half for half, _sample_day in valid]
             latest_day = max(sample_day for _half, sample_day in valid)
@@ -355,13 +410,10 @@ def summarize_spread_samples(
             })
             continue
 
-        hard_fail = bool(hard_fail_reasons) and len(valid) < min_valid_samples
         reason = "insufficient_valid_samples"
-        if hard_fail:
-            reason = ";".join(sorted(set(hard_fail_reasons))[:3])
-        if not hard_fail and not valid and reasons:
+        if not valid and reasons:
             reason = ";".join(sorted(set(reasons))[:3])
-        if allow_fallback and not hard_fail:
+        if allow_fallback:
             snapshot.append({
                 "as_of_date": as_of,
                 "ticker": ticker,
@@ -384,12 +436,10 @@ def summarize_spread_samples(
                 "valid_sample_count": len(valid),
                 "latest_sample_date_et": "",
                 "latest_sample_age_days": "",
-                # a hard-failed name carries its OBSERVED extreme spread so the audit's
-                # extreme-spread gate and per-row flag fire on the real number, not on a blank
-                "median_half_spread_bps": round(float(statistics.median(extreme)), 6) if extreme else "",
-                "max_half_spread_bps": round(max(extreme), 6) if extreme else "",
-                "min_half_spread_bps": round(min(extreme), 6) if extreme else "",
-                "spread_source": "ibkr_historical_bid_ask" if extreme else "",
+                "median_half_spread_bps": "",
+                "max_half_spread_bps": "",
+                "min_half_spread_bps": "",
+                "spread_source": "",
                 "spread_status": "failed",
                 "spread_reason": reason,
             })
@@ -401,6 +451,15 @@ def init_liquidity_tables(conn: sqlite3.Connection) -> None:
         conn.executescript(LIQUIDITY_TABLES_SQL)
         _ensure_column(conn, "spread_snapshot", "latest_sample_date_et", "TEXT")
         _ensure_column(conn, "spread_snapshot", "latest_sample_age_days", "INTEGER")
+
+
+def clear_liquidity_run(conn: sqlite3.Connection, as_of: str) -> None:
+    """Remove a prior same-date run before replacement so stale tickers cannot survive a refresh."""
+    init_liquidity_tables(conn)
+    with conn:
+        conn.execute("DELETE FROM ib_spread_samples WHERE as_of_date = ?", (as_of,))
+        conn.execute("DELETE FROM spread_snapshot WHERE as_of_date = ?", (as_of,))
+        conn.execute("DELETE FROM spread_snapshot_runs WHERE as_of_date = ?", (as_of,))
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_type: str) -> None:

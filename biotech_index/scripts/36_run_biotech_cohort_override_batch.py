@@ -220,15 +220,16 @@ def main() -> None:
         cohort = str(target.get("biotech_primary_cohort") or "").strip()
         target_dir = run_dir / f"{idx:02d}_{safe_name(cohort)}"
         run_script35("calibrate-one", target_dir, args, target_cohort=cohort)
-        target_row = {field: target.get(field, "") for field in TARGET_FIELDS}
+        target_row: dict[str, Any] = {field: target.get(field, "") for field in TARGET_FIELDS}
         target_row["target_rank"] = idx
         target_row["output_dir"] = str(target_dir)
         target_rows.append(target_row)
         rows = read_csv(target_dir / "promotion_recommendations.csv")
         for row in rows:
-            row["target_rank"] = idx
-            row["source_output_dir"] = str(target_dir)
-            promotion_rows.append(row)
+            promotion_row: dict[str, Any] = dict(row)
+            promotion_row["target_rank"] = idx
+            promotion_row["source_output_dir"] = str(target_dir)
+            promotion_rows.append(promotion_row)
         best = best_promotion_row(rows)
         if best is not None:
             best_rows.append(

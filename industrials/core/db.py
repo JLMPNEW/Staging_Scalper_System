@@ -64,6 +64,20 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("us-gaap", "NetCashProvidedByUsedInOperatingActivities", "operating_cash_flow", "cash_flow", "duration", priority=10),
     _xbrl_concept("us-gaap", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations", "operating_cash_flow", "cash_flow", "duration", priority=20),
     _xbrl_concept("us-gaap", "PaymentsToAcquirePropertyPlantAndEquipment", "capex", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "DepreciationDepletionAndAmortization", "depreciation_and_amortization", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "DepreciationAndAmortization", "depreciation_and_amortization", "cash_flow", "duration", priority=20, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "Depreciation", "depreciation_and_amortization", "cash_flow", "duration", priority=30, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "InterestExpense", "interest_expense", "income_statement", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "InterestExpenseNonoperating", "interest_expense", "income_statement", "duration", priority=20, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "InterestExpenseDebt", "interest_expense", "income_statement", "duration", priority=30, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "IncomeTaxExpenseBenefit", "income_tax_expense", "income_statement", "duration", priority=10),
+    _xbrl_concept("us-gaap", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest", "pretax_income", "income_statement", "duration", priority=10),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfCommonStock", "equity_issuance_proceeds", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfCommonStockIncludingAdditionalCapitalContribution", "equity_issuance_proceeds", "cash_flow", "duration", priority=20, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfCommonAndPreferredStock", "equity_issuance_proceeds", "cash_flow", "duration", priority=30, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfLongTermDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfShortTermDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=20, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=30, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "ResearchAndDevelopmentExpense", "research_and_development", "income_statement", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "ShareBasedCompensation", "stock_based_compensation", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "WeightedAverageNumberOfDilutedSharesOutstanding", "diluted_shares", "income_statement", "duration", priority=10),
@@ -96,6 +110,13 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("ifrs-full", "NetCashFlowsFromUsedInOperatingActivities", "operating_cash_flow", "cash_flow", "duration", priority=20),
     _xbrl_concept("ifrs-full", "PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities", "capex", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "PaymentsToAcquirePropertyPlantAndEquipment", "capex", "cash_flow", "duration", priority=20, sign_policy="positive_abs"),
+    _xbrl_concept("ifrs-full", "DepreciationAndAmortisationExpense", "depreciation_and_amortization", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("ifrs-full", "AdjustmentsForDepreciationAndAmortisationExpense", "depreciation_and_amortization", "cash_flow", "duration", priority=20, sign_policy="positive_abs"),
+    _xbrl_concept("ifrs-full", "InterestExpense", "interest_expense", "income_statement", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("ifrs-full", "IncomeTaxExpenseContinuingOperations", "income_tax_expense", "income_statement", "duration", priority=10),
+    _xbrl_concept("ifrs-full", "ProfitLossBeforeTax", "pretax_income", "income_statement", "duration", priority=10),
+    _xbrl_concept("ifrs-full", "ProceedsFromIssuingShares", "equity_issuance_proceeds", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("ifrs-full", "ProceedsFromBorrowings", "debt_issuance_proceeds", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "ResearchAndDevelopmentExpense", "research_and_development", "income_statement", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "SharebasedPaymentArrangementExpense", "stock_based_compensation", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "WeightedAverageNumberOfDilutedSharesOutstanding", "diluted_shares", "income_statement", "duration", priority=10),
@@ -119,6 +140,10 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("sec-text", "AccountsPayable", "accounts_payable", "balance_sheet", "instant", priority=200),
     _xbrl_concept("sec-text", "OperatingCashFlow", "operating_cash_flow", "cash_flow", "duration", priority=200),
     _xbrl_concept("sec-text", "Capex", "capex", "cash_flow", "duration", priority=200, sign_policy="positive_abs"),
+    _xbrl_concept("sec-text", "DepreciationAndAmortization", "depreciation_and_amortization", "cash_flow", "duration", priority=200, sign_policy="positive_abs"),
+    _xbrl_concept("sec-text", "InterestExpense", "interest_expense", "income_statement", "duration", priority=200, sign_policy="positive_abs"),
+    _xbrl_concept("sec-text", "Orders", "orders", "orders", "duration", priority=200, sign_policy="positive_abs"),
+    _xbrl_concept("sec-text", "FundedBacklog", "funded_backlog", "backlog", "instant", priority=200, sign_policy="positive_abs"),
     _xbrl_concept("sec-text", "ResearchAndDevelopment", "research_and_development", "income_statement", "duration", priority=200, sign_policy="positive_abs"),
     _xbrl_concept("sec-text", "DilutedShares", "diluted_shares", "income_statement", "duration", priority=200),
     _xbrl_concept("sec-text", "DebtTotal", "debt_total", "balance_sheet", "instant", priority=200),
@@ -639,6 +664,13 @@ CREATE TABLE IF NOT EXISTS feature_financial_statement (
     accounts_payable REAL,
     operating_cash_flow REAL,
     capex REAL,
+    depreciation_and_amortization REAL,
+    interest_expense REAL,
+    pretax_income REAL,
+    income_tax_expense REAL,
+    equity_issuance_proceeds REAL,
+    debt_issuance_proceeds REAL,
+    orders REAL,
     free_cash_flow REAL,
     research_and_development REAL,
     stock_based_compensation REAL,
@@ -649,6 +681,11 @@ CREATE TABLE IF NOT EXISTS feature_financial_statement (
     net_income_usd REAL,
     operating_cash_flow_usd REAL,
     capex_usd REAL,
+    depreciation_and_amortization_usd REAL,
+    interest_expense_usd REAL,
+    equity_issuance_proceeds_usd REAL,
+    debt_issuance_proceeds_usd REAL,
+    orders_usd REAL,
     free_cash_flow_usd REAL,
     assets_usd REAL,
     liabilities_usd REAL,
@@ -677,6 +714,16 @@ CREATE TABLE IF NOT EXISTS feature_financial_statement (
     net_income_ttm_usd REAL,
     free_cash_flow_ttm REAL,
     free_cash_flow_ttm_usd REAL,
+    depreciation_and_amortization_ttm REAL,
+    depreciation_and_amortization_ttm_usd REAL,
+    interest_expense_ttm REAL,
+    interest_expense_ttm_usd REAL,
+    equity_issuance_proceeds_ttm REAL,
+    equity_issuance_proceeds_ttm_usd REAL,
+    debt_issuance_proceeds_ttm REAL,
+    debt_issuance_proceeds_ttm_usd REAL,
+    orders_ttm REAL,
+    orders_ttm_usd REAL,
     gross_margin REAL,
     operating_margin REAL,
     fcf_margin REAL,
@@ -705,6 +752,25 @@ CREATE TABLE IF NOT EXISTS feature_financial_statement (
     remaining_performance_obligation REAL,
     book_to_bill REAL,
     funded_backlog REAL,
+    funded_backlog_usd REAL,
+    orders_yoy_growth REAL,
+    backlog_yoy_growth REAL,
+    backlog_to_revenue REAL,
+    invested_capital_usd REAL,
+    roic REAL,
+    asset_turnover REAL,
+    incremental_operating_margin REAL,
+    inventory_growth REAL,
+    inventory_sales_growth_spread REAL,
+    cash_conversion_cycle_change REAL,
+    ebitda_ttm_usd REAL,
+    net_debt_to_ebitda REAL,
+    interest_coverage REAL,
+    cash_burn_ttm_usd REAL,
+    cash_runway_years REAL,
+    gross_capital_raised_ttm_usd REAL,
+    capital_raise_dependence REAL,
+    diluted_shares_yoy_growth REAL,
     development_stage TEXT,
     -- SC-10: nullable on purpose. NULL means "confidence unknown" while 0.0 is a
     -- deliberate worst-case assignment written explicitly by the feature builder.
@@ -1242,6 +1308,47 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "feature_financial_statement", "contract_liabilities", "REAL")
     ensure_column(conn, "feature_financial_statement", "book_to_bill", "REAL")
     ensure_column(conn, "feature_financial_statement", "funded_backlog", "REAL")
+    ensure_column(conn, "feature_financial_statement", "depreciation_and_amortization", "REAL")
+    ensure_column(conn, "feature_financial_statement", "interest_expense", "REAL")
+    ensure_column(conn, "feature_financial_statement", "pretax_income", "REAL")
+    ensure_column(conn, "feature_financial_statement", "income_tax_expense", "REAL")
+    ensure_column(conn, "feature_financial_statement", "equity_issuance_proceeds", "REAL")
+    ensure_column(conn, "feature_financial_statement", "debt_issuance_proceeds", "REAL")
+    ensure_column(conn, "feature_financial_statement", "orders", "REAL")
+    ensure_column(conn, "feature_financial_statement", "depreciation_and_amortization_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "interest_expense_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "equity_issuance_proceeds_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "debt_issuance_proceeds_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "orders_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "depreciation_and_amortization_ttm", "REAL")
+    ensure_column(conn, "feature_financial_statement", "depreciation_and_amortization_ttm_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "interest_expense_ttm", "REAL")
+    ensure_column(conn, "feature_financial_statement", "interest_expense_ttm_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "equity_issuance_proceeds_ttm", "REAL")
+    ensure_column(conn, "feature_financial_statement", "equity_issuance_proceeds_ttm_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "debt_issuance_proceeds_ttm", "REAL")
+    ensure_column(conn, "feature_financial_statement", "debt_issuance_proceeds_ttm_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "orders_ttm", "REAL")
+    ensure_column(conn, "feature_financial_statement", "orders_ttm_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "funded_backlog_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "orders_yoy_growth", "REAL")
+    ensure_column(conn, "feature_financial_statement", "backlog_yoy_growth", "REAL")
+    ensure_column(conn, "feature_financial_statement", "backlog_to_revenue", "REAL")
+    ensure_column(conn, "feature_financial_statement", "invested_capital_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "roic", "REAL")
+    ensure_column(conn, "feature_financial_statement", "asset_turnover", "REAL")
+    ensure_column(conn, "feature_financial_statement", "incremental_operating_margin", "REAL")
+    ensure_column(conn, "feature_financial_statement", "inventory_growth", "REAL")
+    ensure_column(conn, "feature_financial_statement", "inventory_sales_growth_spread", "REAL")
+    ensure_column(conn, "feature_financial_statement", "cash_conversion_cycle_change", "REAL")
+    ensure_column(conn, "feature_financial_statement", "ebitda_ttm_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "net_debt_to_ebitda", "REAL")
+    ensure_column(conn, "feature_financial_statement", "interest_coverage", "REAL")
+    ensure_column(conn, "feature_financial_statement", "cash_burn_ttm_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "cash_runway_years", "REAL")
+    ensure_column(conn, "feature_financial_statement", "gross_capital_raised_ttm_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "capital_raise_dependence", "REAL")
+    ensure_column(conn, "feature_financial_statement", "diluted_shares_yoy_growth", "REAL")
     ensure_column(conn, "feature_financial_statement", "revenue_stub_annualized", "REAL")
     ensure_column(conn, "feature_financial_statement", "revenue_stub_annualized_usd", "REAL")
     ensure_column(conn, "feature_financial_statement", "revenue_stub_period_days", "REAL")

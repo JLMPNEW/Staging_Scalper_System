@@ -13,7 +13,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -344,8 +344,7 @@ def main() -> int:
         if str(row.get("source_candidate_row_status") or "") == "strict_usable"
         and (not selected or str(row.get("ticker") or "").upper() in selected)
     ]
-    conn = connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = cast(sqlite3.Connection, connect(db_path))
     ensure_table(conn)
 
     output_rows: list[dict[str, Any]] = []

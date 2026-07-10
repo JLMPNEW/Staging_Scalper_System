@@ -143,6 +143,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-submissions", action="store_true", help="Refetch submissions metadata without forcing companyfacts/archive caches.")
     parser.add_argument("--force-companyfacts", action="store_true", help="Refetch companyfacts JSON without forcing archive document caches.")
     parser.add_argument("--force-archive", action="store_true", help="Refetch SEC archive index/document caches.")
+    parser.add_argument(
+        "--archive-bootstrap",
+        action="store_true",
+        help="Process every configured family member through SEC archives while reusing valid cached documents.",
+    )
     parser.add_argument("--allow-partial", action="store_true", help="Finish with success when individual tickers fail.")
     parser.add_argument(
         "--asof",
@@ -1318,6 +1323,10 @@ TEXT_TABLE_LABELS: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = [
     ("AccountsPayable", "instant", (r"^accounts\s+payable\b", r"^trade\s+payables\b"), ()),
     ("OperatingCashFlow", "duration", (r"^net\s+cash\s+(?:provided\s+by|used\s+in|provided\s+by\s+\(used\s+in\))\s+operating\s+activities\b",), ()),
     ("Capex", "duration", (r"^(?:purchases?|payments?)\s+(?:of|to\s+acquire)\s+(?:property|plant|equipment)", r"^capital\s+expenditures\b"), ()),
+    ("DepreciationAndAmortization", "duration", (r"^(?:depreciation\s+and\s+amortization|depreciation\s*&\s*amortization)\b",), (r"accumulated", r"%")),
+    ("InterestExpense", "duration", (r"^interest\s+expense\b",), (r"income", r"%")),
+    ("Orders", "duration", (r"^(?:new\s+)?(?:orders|bookings)(?:\s+received)?\b",), (r"backlog", r"cancell", r"%")),
+    ("FundedBacklog", "instant", (r"^(?:funded|firm)\s+(?:order\s+)?backlog\b",), (r"unfunded", r"potential", r"remaining\s+performance", r"%")),
     ("ResearchAndDevelopment", "duration", (r"^(?:research\s+and\s+development|r\s*&\s*d)\b",), (r"%",)),
     ("DilutedShares", "duration", (r"^weighted\s+average.{0,35}diluted\s+shares\b",), (r"per\s+share",)),
     ("DebtTotal", "instant", (r"^total\s+(?:debt|borrowings)\b",), ()),
@@ -1717,6 +1726,7 @@ def parse_archive_text_table_facts(
     document_name: str,
     filing: dict[str, Any],
     company_currency: str = "",
+    special_metrics_only: bool = False,
 ) -> list[ArchiveFact]:
     lower_document_name = document_name.lower()
     if lower_document_name.endswith(("-index.html", "-index-headers.html")):
@@ -1729,15 +1739,26 @@ def parse_archive_text_table_facts(
     seen: set[tuple[str, str, str, float]] = set()
     for table_index, match in enumerate(re.finditer(r"(?is)<table\b[^>]*>.*?</table>", document_text), start=1):
         table_html = match.group(0)
+        if special_metrics_only and not re.search(r"(?i)\b(?:orders?|bookings?|backlog)\b", table_html):
+            continue
         rows = html_table_rows(table_html)
-        concept_row_flags = [bool(row and text_table_label_concept(row[0])) for row in rows]
-        if sum(1 for flag in concept_row_flags if flag) < 2:
+        concept_rows = [text_table_label_concept(row[0]) if row else None for row in rows]
+        if special_metrics_only:
+            concept_rows = [
+                concept if concept is not None and concept[0] in {"Orders", "FundedBacklog"} else None
+                for concept in concept_rows
+            ]
+        concept_row_flags = [concept is not None for concept in concept_rows]
+        special_operating_rows = [
+            concept for concept in concept_rows if concept is not None and concept[0] in {"Orders", "FundedBacklog"}
+        ]
+        if sum(1 for flag in concept_row_flags if flag) < 2 and not special_operating_rows:
             continue
         table_text = strip_html_cell(table_html)
         scale_context = document_text[max(0, match.start() - 2500) : min(len(document_text), match.end() + 500)]
         unit, currency_confidence = text_table_unit(document_text, scale_context, company_currency=company_currency)
         normalized_table_text = f"{strip_html_cell(scale_context)} {table_text}".lower()
-        if not any(
+        financial_table = any(
             marker in normalized_table_text
             for marker in (
                 "consolidated",
@@ -1748,7 +1769,11 @@ def parse_archive_text_table_facts(
                 "cash flows",
                 "financial position",
             )
-        ):
+        )
+        operating_table = bool(special_operating_rows) and any(
+            marker in normalized_table_text for marker in ("orders", "bookings", "backlog")
+        )
+        if not financial_table and not operating_table:
             continue
         scale, scale_source, scale_confidence = table_scale_info(f"{scale_context} {table_text[:1000]}")
         if currency_confidence == "low":
@@ -1764,6 +1789,8 @@ def parse_archive_text_table_facts(
             if label_result is None:
                 continue
             concept_name, period_type = label_result
+            if special_metrics_only and concept_name not in {"Orders", "FundedBacklog"}:
+                continue
             values = row_values(cells)
             if not values:
                 continue
@@ -1827,11 +1854,20 @@ def parse_archive_text_table_facts(
     return facts
 
 
-def archive_document_candidates(index_payload: dict[str, Any], *, primary_document: str, max_documents: int) -> list[str]:
+def archive_document_candidates(
+    index_payload: dict[str, Any],
+    *,
+    primary_document: str,
+    max_documents: int,
+    text_tables_only: bool = False,
+) -> list[str]:
     raw_items = ((index_payload.get("directory") or {}).get("item") or [])
     candidates: list[str] = []
     primary = str(primary_document or "").strip()
-    if primary and primary.lower().endswith(ARCHIVE_ALLOWED_DOCUMENT_SUFFIXES):
+    text_table_suffixes = (".xhtml", ".htm", ".html")
+    if primary and primary.lower().endswith(
+        text_table_suffixes if text_tables_only else ARCHIVE_ALLOWED_DOCUMENT_SUFFIXES
+    ):
         candidates.append(primary)
     for item in raw_items:
         if not isinstance(item, dict):
@@ -1841,6 +1877,8 @@ def archive_document_candidates(index_payload: dict[str, Any], *, primary_docume
         if not name or name in candidates:
             continue
         if not lower.endswith(ARCHIVE_ALLOWED_DOCUMENT_SUFFIXES):
+            continue
+        if text_tables_only and not lower.endswith(text_table_suffixes):
             continue
         if any(lower.endswith(suffix) for suffix in ARCHIVE_EXCLUDED_SUFFIXES):
             continue
@@ -2055,6 +2093,56 @@ def purge_archive_xbrl_facts(conn: Any, *, ticker: str, source_id: str, model_fa
     )
 
 
+def purge_archive_text_table_facts(conn: Any, *, ticker: str, source_id: str, model_family: str) -> None:
+    conn.execute(
+        """
+        DELETE FROM fact_financial_statement_canonical
+        WHERE ticker = ?
+          AND source_id = ?
+          AND model_family = ?
+          AND EXISTS (
+                SELECT 1
+                FROM fact_sec_xbrl_fact f
+                WHERE f.ticker = fact_financial_statement_canonical.ticker
+                  AND f.source_id = fact_financial_statement_canonical.source_id
+                  AND f.canonical_metric = fact_financial_statement_canonical.canonical_metric
+                  AND f.period_end = fact_financial_statement_canonical.period_end
+                  AND COALESCE(f.accession_number, '') = COALESCE(fact_financial_statement_canonical.accession_number, '')
+                  AND COALESCE(f.unit, '') = COALESCE(fact_financial_statement_canonical.unit, '')
+                  AND f.source_detail = 'sec_archive_text_table_mapped'
+          )
+        """,
+        (ticker, source_id, model_family),
+    )
+    conn.execute(
+        """
+        DELETE FROM fact_sec_xbrl_fact
+        WHERE ticker = ?
+          AND source_id = ?
+          AND (
+                source_detail = 'sec_archive_text_table_mapped'
+             OR raw_fact_id IN (
+                    SELECT raw_fact_id
+                    FROM fact_sec_xbrl_fact_raw
+                    WHERE ticker = ?
+                      AND source_id = ?
+                      AND source_detail = 'sec_archive_text_table'
+                )
+          )
+        """,
+        (ticker, source_id, ticker, source_id),
+    )
+    conn.execute(
+        """
+        DELETE FROM fact_sec_xbrl_fact_raw
+        WHERE ticker = ?
+          AND source_id = ?
+          AND source_detail = 'sec_archive_text_table'
+        """,
+        (ticker, source_id),
+    )
+
+
 def should_attempt_archive(override: ReportingOverride | None) -> bool:
     if override is None:
         return False
@@ -2082,6 +2170,7 @@ def sync_archive_xbrl(
     max_filings: int,
     max_documents: int,
     parse_all_documents: bool = False,
+    text_tables_only: bool = False,
     company_currency: str = "",
     min_refetch_fact_fraction: float = 0.5,
     ingestion_run_id: int,
@@ -2091,8 +2180,9 @@ def sync_archive_xbrl(
     Phase 1 fetches and parses every filing document with no write transaction
     open. Phase 2 opens one short transaction that purges the prior archive
     facts and swaps in the staged ones — and refuses (raises, rolling back the
-    purge) when the refetch produced an implausibly small fraction of the
-    previously stored facts, so fetch failures can never silently destroy state.
+    purge) when document fetch failures leave an implausibly small fraction of
+    the previously stored facts. A complete reparse may legitimately remove
+    facts after a mapping or parser-policy correction.
     """
     filing_rows = conn.execute(
         """
@@ -2143,7 +2233,12 @@ def sync_archive_xbrl(
         if index_fetch_mode == "network":
             # FN-8: cache hits are not new observations; only record network fetches.
             raw_responses.append((index_url, status, index_text))
-        for document_name in archive_document_candidates(index_payload, primary_document=str(filing.get("primary_document") or ""), max_documents=max_documents):
+        for document_name in archive_document_candidates(
+            index_payload,
+            primary_document=str(filing.get("primary_document") or ""),
+            max_documents=max_documents,
+            text_tables_only=text_tables_only,
+        ):
             document_url = document_url_template.format(cik_int=cik_int, accession_nodash=accession_nodash, document_name=document_name)
             document_cache = archive_cache_file(cache_dir, cik=cik, accession=accession, document_name=document_name)
             requests += 1
@@ -2162,15 +2257,18 @@ def sync_archive_xbrl(
                 fetch_failures += 1
                 LOGGER.warning("Unavailable SEC archive document ticker=%s accession=%s document=%s status=%s", ticker, accession, document_name, exc.status_code)
                 continue
-            facts = [
-                *parse_archive_facts(document_text, document_name=document_name, concept_map=concept_map),
-                *parse_archive_text_table_facts(
-                    document_text,
-                    document_name=document_name,
-                    filing=filing,
-                    company_currency=company_currency,
-                ),
-            ]
+            facts = parse_archive_text_table_facts(
+                document_text,
+                document_name=document_name,
+                filing=filing,
+                company_currency=company_currency,
+                special_metrics_only=text_tables_only,
+            )
+            if not text_tables_only:
+                facts = [
+                    *parse_archive_facts(document_text, document_name=document_name, concept_map=concept_map),
+                    *facts,
+                ]
             staged.append((filing, document_name, facts))
             mapped_estimate = sum(len(concept_map.get((fact.taxonomy, fact.concept_name), [])) for fact in facts)
             if mapped_estimate > 0 and not parse_all_documents:
@@ -2205,24 +2303,34 @@ def sync_archive_xbrl(
                 asof_date=datetime.now(timezone.utc).date().isoformat(),
                 ingestion_run_id=ingestion_run_id,
             )
+        source_filter = "source_detail = 'sec_archive_text_table'" if text_tables_only else (
+            "source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table')"
+        )
         prior_row = conn.execute(
-            """
+            f"""
             SELECT COUNT(*)
             FROM fact_sec_xbrl_fact_raw
             WHERE ticker = ?
               AND source_id = ?
-              AND source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table')
+              AND {source_filter}
             """,
             (ticker, source_id),
         ).fetchone()
         prior_fact_count = int(prior_row[0] or 0)
-        if prior_fact_count > 0 and staged_fact_count < prior_fact_count * min_refetch_fact_fraction:
+        if (
+            prior_fact_count > 0
+            and fetch_failures > 0
+            and staged_fact_count < prior_fact_count * min_refetch_fact_fraction
+        ):
             raise RuntimeError(
                 f"SEC archive refetch for ticker={ticker} staged only {staged_fact_count} facts vs "
                 f"{prior_fact_count} previously stored (fetch_failures={fetch_failures}, "
                 f"min_refetch_fact_fraction={min_refetch_fact_fraction}); refusing to purge existing archive facts."
             )
-        purge_archive_xbrl_facts(conn, ticker=ticker, source_id=source_id, model_family=model_family)
+        if text_tables_only:
+            purge_archive_text_table_facts(conn, ticker=ticker, source_id=source_id, model_family=model_family)
+        else:
+            purge_archive_xbrl_facts(conn, ticker=ticker, source_id=source_id, model_family=model_family)
         for filing, document_name, facts in staged:
             raw_count, mapped_count = upsert_archive_facts(
                 conn,
@@ -2769,6 +2877,7 @@ def main() -> None:
     allowed_forms = {str(form).upper() for form in (cfg_get(config, "sec_fundamentals.forms", []) or [])}
     cache_dir = resolve_path(cfg_get(config, "sec_fundamentals.cache_dir"), base_dir=base_dir)
     archive_enabled = as_bool(cfg_get(config, "sec_archive.enabled", True))
+    archive_all_family_members = as_bool(cfg_get(config, "sec_archive.all_family_members", False))
     archive_index_template = str(
         cfg_get(config, "sec_archive.index_url_template")
         or "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/index.json"
@@ -2817,6 +2926,9 @@ def main() -> None:
     force_submission_history = bool(args.force or args.force_submissions)
     force_companyfacts = bool(args.force or args.force_companyfacts)
     force_archive = bool(args.force or args.force_archive)
+    archive_bootstrap = bool(args.archive_bootstrap)
+    if archive_bootstrap and not archive_all_family_members:
+        raise ValueError("--archive-bootstrap requires sec_archive.all_family_members=true")
 
     with closing(connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0)))) as conn:
         init_db(conn)
@@ -2835,13 +2947,14 @@ def main() -> None:
         if not tickers:
             raise ValueError(f"No tickers found for model_family={model_family}")
         LOGGER.info(
-            "SEC fundamentals sync mode: tickers=%d incremental=%s include_historical=%s force_submissions=%s force_companyfacts=%s force_archive=%s",
+            "SEC fundamentals sync mode: tickers=%d incremental=%s include_historical=%s force_submissions=%s force_companyfacts=%s force_archive=%s archive_bootstrap=%s",
             len(tickers),
             bool(args.incremental),
             include_historical,
             force_submissions,
             force_companyfacts,
             force_archive,
+            archive_bootstrap,
         )
 
         concept_map = load_concept_map(conn)
@@ -3022,7 +3135,7 @@ def main() -> None:
                         # XC-23: the history/browse helpers fetch before writing and
                         # manage their own short transactions, so they must run
                         # outside any open write transaction.
-                        if archive_enabled and should_attempt_archive(reporting_override) and (
+                        if archive_enabled and (archive_all_family_members or should_attempt_archive(reporting_override)) and (
                             not args.incremental or not existing_archive_metadata or force_submission_history
                         ):
                             extra_filing_count, extra_submission_requests = sync_submission_history_files(
@@ -3081,7 +3194,7 @@ def main() -> None:
                             incremental=bool(args.incremental),
                             new_filing_keys=new_filing_keys,
                             force_companyfacts=force_companyfacts,
-                            force_archive=force_archive,
+                            force_archive=force_archive or archive_bootstrap,
                             prior_sync_failed=prior_sync_failed,
                             has_existing_state=has_existing_state,
                         ):
@@ -3180,7 +3293,7 @@ def main() -> None:
                         archive_requests = 0
                         archive_mapped_count = 0
                         archive_attempted = False
-                        if archive_enabled and should_attempt_archive(reporting_override):
+                        if archive_enabled and (archive_all_family_members or should_attempt_archive(reporting_override)):
                             # XC-23/FN-2: fetches outside write transactions with
                             # stage-then-swap purge protection inside the helper.
                             archive_attempted = True
@@ -3206,6 +3319,9 @@ def main() -> None:
                                 parse_all_documents=(
                                     reporting_override is not None
                                     and reporting_override.reporting_profile in FPI_HYBRID_PROFILES
+                                ),
+                                text_tables_only=(
+                                    archive_all_family_members and not should_attempt_archive(reporting_override)
                                 ),
                                 company_currency=company_currency,
                                 min_refetch_fact_fraction=archive_min_refetch_fraction,
@@ -3278,7 +3394,7 @@ def main() -> None:
                             archive_enabled
                             and endpoint_source_id == companyfacts_source_id
                             and cik
-                            and should_attempt_archive(reporting_override)
+                            and (archive_all_family_members or should_attempt_archive(reporting_override))
                         ):
                             # XC-23: the archive helper fetches before writing and
                             # manages its own short transactions, so it must run

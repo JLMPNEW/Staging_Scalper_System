@@ -6,7 +6,6 @@ import compileall
 import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,8 +16,6 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PACKAGE_ROOT.parent
-DEFAULT_TEMP_ROOT = Path(os.environ.get("BIOTECH_QUALITY_GATE_TMP_ROOT", tempfile.gettempdir()))
-PYTEST_TEMP_DIR = Path(os.environ.get("BIOTECH_PYTEST_TMP", str(DEFAULT_TEMP_ROOT / "biotech_pytest_tmp")))
 LOGGER = logging.getLogger("run_biotech_quality_gate")
 
 
@@ -26,6 +23,38 @@ LOGGER = logging.getLogger("run_biotech_quality_gate")
 class GateStep:
     name: str
     command: list[str]
+
+
+def _is_writable_directory(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".biotech_quality_gate_probe_{os.getpid()}"
+        probe.write_text("ok", encoding="ascii")
+        probe.unlink()
+    except OSError:
+        return False
+    return True
+
+
+def resolve_pytest_temp_dir() -> Path:
+    exact_override = str(os.environ.get("BIOTECH_PYTEST_TMP") or "").strip()
+    if exact_override:
+        exact_path = Path(exact_override).expanduser().resolve()
+        if not _is_writable_directory(exact_path.parent):
+            raise RuntimeError(f"BIOTECH_PYTEST_TMP parent is not writable: {exact_path.parent}")
+        return exact_path
+
+    root_override = str(os.environ.get("BIOTECH_QUALITY_GATE_TMP_ROOT") or "").strip()
+    candidates = [Path(root_override).expanduser()] if root_override else []
+    candidates.append(Path(tempfile.gettempdir()))
+    if os.name == "nt":
+        candidates.append(Path(os.environ.get("SYSTEMDRIVE", "C:")) / "tmp")
+    candidates.append(PROJECT_ROOT / ".pytest_tmp")
+    for candidate in candidates:
+        root = candidate.resolve()
+        if _is_writable_directory(root):
+            return root / f"biotech_quality_gate_{os.getpid()}"
+    raise RuntimeError("No writable pytest temporary directory is available for the biotech quality gate")
 
 
 def compile_biotech_sources() -> None:
@@ -43,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pyright",
         action="store_true",
-        help="Also run the current biotech Pyright baseline. This is opt-in until the existing type backlog is resolved.",
+        help="Also run the biotech Pyright gate.",
     )
     parser.add_argument("--skip-pytest", action="store_true", help="Skip pytest regression tests.")
     parser.add_argument(
@@ -52,17 +81,6 @@ def parse_args() -> argparse.Namespace:
         help="Allow running with all substantive checks skipped (compileall only). Off by default because that passes vacuously.",
     )
     return parser.parse_args()
-
-
-def require_executable(name: str) -> None:
-    if shutil.which(name) is None:
-        raise SystemExit(
-            f"Required executable not found: {name}. "
-            "Run through uv with the needed tools, for example: "
-            "uv run --with pytest --with ruff --with pyright --with pyyaml --with pandas "
-            "--with requests --with ib-insync --with yfinance "
-            "python biotech_index/scripts/00_run_biotech_quality_gate.py"
-        )
 
 
 def run_step(step: GateStep) -> None:
@@ -92,6 +110,7 @@ def main() -> None:
         GateStep("compileall", ["__compile_biotech_sources__"]),
     ]
     if not args.skip_pytest:
+        pytest_temp_dir = resolve_pytest_temp_dir()
         steps.append(
             GateStep(
                 "pytest",
@@ -104,7 +123,7 @@ def main() -> None:
                     "-p",
                     "no:cacheprovider",
                     "--basetemp",
-                    str(PYTEST_TEMP_DIR),
+                    str(pytest_temp_dir),
                 ],
             )
         )
@@ -116,8 +135,12 @@ def main() -> None:
             )
         )
     if args.pyright:
-        require_executable("pyright")
-        steps.append(GateStep("pyright", ["pyright", "--project", "pyrightconfig.biotech.json"]))
+        steps.append(
+            GateStep(
+                "pyright",
+                [sys.executable, "-m", "pyright", "--project", "pyrightconfig.biotech.json"],
+            )
+        )
 
     for step in steps:
         run_step(step)

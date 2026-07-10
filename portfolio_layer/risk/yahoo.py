@@ -1,7 +1,7 @@
 """Minimal self-contained price fetchers (urllib only; no sector imports).
 
-Primary source returns Yahoo ``adjclose`` (dividend + split adjusted). Stooq is a best-effort fallback
-for Yahoo symbol-specific failures; its source is recorded per ticker so mixed-provider rows are auditable.
+Primary source returns Yahoo ``adjclose`` (dividend + split adjusted). Stooq can be probed as a
+diagnostic fallback, but its dividend-unadjusted closes are never admitted to the adjusted-price panel.
 """
 from __future__ import annotations
 
@@ -183,8 +183,9 @@ def fetch_adjclose_with_splits(
             timeout_sec=timeout_sec,
         )
         if status == "ok" and rows:
-            return rows, [], "ok", "stooq_us_daily", source_symbol
-        statuses.append(f"stooq_us_daily:{status}")
+            statuses.append("stooq_us_daily:unadjusted_close_not_admissible")
+        else:
+            statuses.append(f"stooq_us_daily:{status}")
     return [], [], "|".join(statuses) if statuses else "no_providers", "", ticker
 
 

@@ -1,0 +1,51 @@
+ticker,company,cohort,exit_type,terminal_type,acquirer,exit_year,cik,confidence
+BUCY,Bucyrus International,construction_agriculture_and_heavy_machinery,strategic,acquisition,Caterpillar,2011,0000740761,verified
+JOY,Joy Global,construction_agriculture_and_heavy_machinery,strategic,acquisition,Komatsu,2017,0000801898,verified
+NAV,Navistar International,construction_agriculture_and_heavy_machinery,strategic,acquisition,Traton (Volkswagen),2021,0000808450,high
+WBC,WABCO Holdings,construction_agriculture_and_heavy_machinery,strategic,acquisition,ZF Friedrichshafen,2020,0001390844,high
+MTOR,Meritor,construction_agriculture_and_heavy_machinery,strategic,acquisition,Cummins,2022,0001113256,verified
+ARII,American Railcar Industries,construction_agriculture_and_heavy_machinery,pe_buyout,acquisition,ITE Management / Icahn,2018,0001344596,high
+STS,Supreme Industries,construction_agriculture_and_heavy_machinery,strategic,acquisition,Wabash National,2017,0000350846,high
+BLT,Blount International,construction_agriculture_and_heavy_machinery,pe_buyout,acquisition,American Securities / P2 Capital,2016,0001001606,high
+ACW,Accuride,construction_agriculture_and_heavy_machinery,pe_buyout,acquisition,Crestview Partners,2016,0000817979,high
+CASC,Cascade Corp,construction_agriculture_and_heavy_machinery,strategic,acquisition,Toyota Industries,2013,0000018061,high
+PLL,Pall Corporation,fluid_flow_control_and_filtration,strategic,acquisition,Danaher,2015,0000075829,verified
+CLC,CLARCOR,fluid_flow_control_and_filtration,strategic,acquisition,Parker Hannifin,2017,0000020740,high
+CIR,CIRCOR International,fluid_flow_control_and_filtration,pe_buyout,acquisition,KKR,2023,0001091883,verified
+GDI,Gardner Denver,fluid_flow_control_and_filtration,pe_buyout,acquisition,KKR,2013,0000916459,high
+FLOW,SPX FLOW,fluid_flow_control_and_filtration,pe_buyout,acquisition,Lone Star Funds,2022,0001641991,high
+RBN,Robbins & Myers,fluid_flow_control_and_filtration,strategic,acquisition,National Oilwell Varco,2013,0000084290,high
+LAYN,Layne Christensen,fluid_flow_control_and_filtration,strategic,acquisition,Granite Construction,2018,0000888504,high
+CUNO,CUNO Incorporated,fluid_flow_control_and_filtration,strategic,acquisition,3M,2005,0001019779,medium
+CCC,Calgon Carbon,fluid_flow_control_and_filtration,strategic,acquisition,Kuraray,2018,0000812701,high
+AQUA,Evoqua Water Technologies,fluid_flow_control_and_filtration,strategic,acquisition,Xylem,2023,0001604643,verified
+CBE,Cooper Industries,hvac_climate_electrical_and_power_systems,strategic,acquisition,Eaton,2012,0000024454,high
+TNB,Thomas & Betts,hvac_climate_electrical_and_power_systems,strategic,acquisition,ABB,2012,0000097854,high
+BEZ,Baldor Electric,hvac_climate_electrical_and_power_systems,strategic,acquisition,ABB,2011,0000009342,high
+BGC,General Cable,hvac_climate_electrical_and_power_systems,strategic,acquisition,Prysmian,2018,0000886035,high
+APCC,American Power Conversion,hvac_climate_electrical_and_power_systems,strategic,acquisition,Schneider Electric,2007,0000835910,high
+FWLT,Foster Wheeler,hvac_climate_electrical_and_power_systems,merger,acquisition,AMEC (AMEC Foster Wheeler),2014,0001130385,high
+ENOC,EnerNOC,hvac_climate_electrical_and_power_systems,strategic,acquisition,Enel,2017,0001244937,high
+NTK,Nortek,hvac_climate_electrical_and_power_systems,strategic,acquisition,Melrose Industries,2016,0000072423,high
+AXE,Anixter International,hvac_climate_electrical_and_power_systems,strategic,acquisition,WESCO International,2020,0000052795,high
+POWR,PowerSecure International,hvac_climate_electrical_and_power_systems,strategic,acquisition,Southern Company,2016,0000882154,high
+NATI,National Instruments,diversified_machinery_automation_and_tools,strategic,acquisition,Emerson Electric,2023,0000935494,verified
+MTSC,MTS Systems,diversified_machinery_automation_and_tools,strategic,acquisition,Amphenol,2021,0000068709,verified
+FARO,FARO Technologies,diversified_machinery_automation_and_tools,strategic,acquisition,AMETEK,2025,0000917491,verified
+B,Barnes Group,diversified_machinery_automation_and_tools,pe_buyout,acquisition,Apollo Global Management,2025,0000009984,verified
+MCRN,Milacron Holdings,diversified_machinery_automation_and_tools,strategic,acquisition,Hillenbrand,2019,0001637913,high
+WBT,Welbilt,diversified_machinery_automation_and_tools,strategic,acquisition,Ali Group,2022,0001650962,verified
+NEWP,Newport Corporation,diversified_machinery_automation_and_tools,strategic,acquisition,MKS Instruments,2016,0000225263,high
+ZIGO,Zygo Corporation,diversified_machinery_automation_and_tools,strategic,acquisition,AMETEK,2014,0000730716,high
+ESIO,Electro Scientific Industries,diversified_machinery_automation_and_tools,strategic,acquisition,MKS Instruments,2019,0000726514,high
+PRCP,Perceptron,diversified_machinery_automation_and_tools,strategic,acquisition,Atlas Copco,2020,0000887226,high
+NKLA,Nikola,development_stage_emerging_machinery,bankruptcy,wipeout,Chapter 11 (assets sold),2025,0001731289,verified
+RIDE,Lordstown Motors,development_stage_emerging_machinery,bankruptcy,distressed_nonzero,Chapter 11 (shell survived as Nu Ride),2023,0001759546,verified
+PTRA,Proterra,development_stage_emerging_machinery,bankruptcy,wipeout,Chapter 11 (assets to Volvo / Phoenix),2023,0001820630,verified
+GOEV,Canoo,development_stage_emerging_machinery,bankruptcy,wipeout,Chapter 7 liquidation,2025,0001750153,verified
+ELMS,Electric Last Mile Solutions,development_stage_emerging_machinery,bankruptcy,wipeout,Chapter 7 liquidation,2022,0001784168,high
+DM,Desktop Metal,development_stage_emerging_machinery,strategic,acquisition,Nano Dimension,2025,0001754820,verified
+MKFG,Markforged Holding,development_stage_emerging_machinery,strategic,acquisition,Nano Dimension,2025,0001816613,verified
+XONE,ExOne,development_stage_emerging_machinery,strategic,acquisition,Desktop Metal,2021,0001561627,high
+BGRY,Berkshire Grey,development_stage_emerging_machinery,pe_buyout,acquisition,SoftBank Group,2023,0001824734,high
+VLDR,Velodyne Lidar,development_stage_emerging_machinery,merger,acquisition,Ouster,2023,0001745317,verified

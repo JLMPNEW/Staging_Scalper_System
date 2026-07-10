@@ -10,13 +10,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
-import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -26,9 +25,17 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pandas as pd  # noqa: E402
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.config import resolve_path  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    read_csv,
+    sha256_file,
+    write_csv,
+    write_manifest,
+    write_via_temp,
+)
 from portfolio_layer.core.db import connect, finish_run, start_run  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
@@ -47,6 +54,37 @@ def iso_date_arg(raw: str) -> str:
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"must be YYYY-MM-DD, got {raw!r}") from exc
     return raw
+
+
+def same_day_bar_finality(
+    run_as_of: str,
+    master_bars: list[tuple[str, float]],
+    *,
+    final_after_local: str,
+    timezone_name: str,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """Reject a current-session daily bar until the configured post-close finality time."""
+    try:
+        zone = ZoneInfo(timezone_name)
+        cutoff_time = datetime.strptime(final_after_local, "%H:%M").time()
+    except (ValueError, KeyError) as exc:
+        raise ValueError(
+            f"Invalid Stage 2 market finality config timezone={timezone_name!r} "
+            f"same_day_bar_final_after_et={final_after_local!r}"
+        ) from exc
+    current = now or datetime.now(zone)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=zone)
+    local_now = current.astimezone(zone)
+    has_same_day_bar = any(str(bar_date)[:10] == run_as_of for bar_date, _ in master_bars)
+    if date.fromisoformat(run_as_of) != local_now.date() or not has_same_day_bar:
+        return True, f"historical_or_no_same_day_bar now={local_now.isoformat(timespec='seconds')}"
+    is_final = local_now.time() >= cutoff_time
+    return is_final, (
+        f"same_day_bar={run_as_of} now={local_now.isoformat(timespec='seconds')} "
+        f"final_after={final_after_local} {timezone_name}"
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,13 +107,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def write_df(path: Path, frame: pd.DataFrame) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    os.close(fd)
     out = frame.copy()
     out.index = [d.date().isoformat() for d in out.index]
-    out.to_csv(tmp, lineterminator="\n")
-    os.replace(tmp, path)
+    write_via_temp(path, lambda temp: out.to_csv(temp, lineterminator="\n"))
 
 
 def unlink_artifacts(paths: list[Path]) -> None:
@@ -198,7 +232,10 @@ def load_cached_bars(
     if not bars:
         return None
     dates = [d for d, _ in bars]
-    if min(dates) > (start + timedelta(days=7)).isoformat() or max(dates) < end.isoformat():
+    required_end = end
+    while required_end.weekday() >= 5:
+        required_end -= timedelta(days=1)
+    if min(dates) > (start + timedelta(days=7)).isoformat() or max(dates) < required_end.isoformat():
         return None
     source_symbol = str(payload.get("source_symbol") or query_symbol).strip()
     split_events = [
@@ -250,12 +287,30 @@ def load_existing_price_seed(path: Path, *, end: date) -> dict[str, list[tuple[s
         return {}
     seed: dict[str, list[tuple[str, float]]] = {}
     end_s = end.isoformat()
+    required_end = end
+    while required_end.weekday() >= 5:
+        required_end -= timedelta(days=1)
+    required_end_s = required_end.isoformat()
     for ticker in frame.columns:
         series = frame[ticker].dropna()
-        if series.empty or str(series.index[-1]) < end_s:
+        if series.empty or str(series.index[-1]) < required_end_s:
             continue
         seed[str(ticker)] = [(str(idx), float(value)) for idx, value in series.items() if str(idx) <= end_s]
     return seed
+
+
+def existing_seed_is_adjusted(prices_path: Path, snapshot_path: Path) -> bool:
+    """Only reuse a panel whose seal proves a uniform adjusted-price basis."""
+    if not prices_path.exists() or not snapshot_path.exists():
+        return False
+    try:
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    expected = (((snapshot.get("files") or {}).get("prices_adjclose.csv") or {}).get("sha256"))
+    exceptions = snapshot.get("adjustment_policy_exceptions") or {}
+    exception_names = [ticker for values in exceptions.values() if isinstance(values, list) for ticker in values]
+    return bool(expected) and expected == sha256_file(prices_path) and not exception_names
 
 
 def load_existing_split_seed(path: Path, *, end: date) -> dict[str, list[dict[str, str]]]:
@@ -389,6 +444,12 @@ def main() -> int:
     split_events_path = risk_dir / "split_events.csv"
     snapshot_path = risk_dir / "price_snapshot.json"
     if args.force:
+        invalidate_dependents(run_dir, "risk")
+        # Liquidity samples/snapshots are produced by 05c/05d, not by this price-panel builder.
+        # Keep those independently collected artifacts across a failed price refresh. Gate 08
+        # verifies their sealed requested universe against the rebuilt risk universe and will
+        # fail closed if they are stale. Deleting them here used to destroy valid IB evidence
+        # before a replacement price panel had been fetched successfully.
         unlink_artifacts([
             risk_dir / "risk_coverage.csv",
             risk_dir / "covariance.csv",
@@ -397,12 +458,6 @@ def main() -> int:
             risk_dir / "covariance_meta.json",
             risk_dir / "return_outliers.csv",
             risk_dir / "data_quality_review.csv",
-            risk_dir / "ib_spread_samples.csv",
-            risk_dir / "spread_snapshot.csv",
-            risk_dir / "spread_snapshot_meta.json",
-            risk_dir / "liquidity_audit.csv",
-            risk_dir / "liquidity_audit_by_sector.csv",
-            risk_dir / "liquidity_audit_summary.json",
             risk_dir / "validation" / "risk_panel_validation.csv",
             risk_dir / "risk_manifest.json",
         ])
@@ -434,10 +489,13 @@ def main() -> int:
     master_retry_attempts = max(0, int(fetch_cfg.get("master_calendar_retry_attempts", 3)))
     master_retry_sleep_sec = max(0.0, float(fetch_cfg.get("master_calendar_retry_sleep_sec", 5.0)))
     workers = int(fetch_cfg.get("max_workers", 10))
-    enable_stooq = bool(fetch_cfg.get("enable_stooq_fallback", True))
+    enable_stooq = bool(fetch_cfg.get("enable_stooq_fallback", False))
     price_cache_dir = paths.cache_dir / "risk_prices"
-    existing_seed = load_existing_price_seed(prices_path, end=run_date) if args.reuse_existing_panel else {}
-    existing_split_seed = load_existing_split_seed(split_events_path, end=run_date) if args.reuse_existing_panel else {}
+    seed_allowed = args.reuse_existing_panel and existing_seed_is_adjusted(prices_path, snapshot_path)
+    if args.reuse_existing_panel and not seed_allowed:
+        LOGGER.warning("Existing panel seed rejected: missing/invalid seal or non-adjusted provider exception")
+    existing_seed = load_existing_price_seed(prices_path, end=run_date) if seed_allowed else {}
+    existing_split_seed = load_existing_split_seed(split_events_path, end=run_date) if seed_allowed else {}
     try:
         ticker_aliases = parse_ticker_aliases(rc)
     except ValueError as exc:
@@ -488,18 +546,22 @@ def main() -> int:
         )
         if cached:
             bars, split_events, provider, query_symbol, source_symbol = cached
-            return (
-                bars,
-                split_events,
-                "ok",
-                f"cache:{provider}",
-                source_symbol,
-                query_symbol,
-                alias_applied,
-                alias_effective_date,
-                alias_issuer_id,
-                alias_reason,
-            )
+            if "stooq" in provider.lower():
+                LOGGER.warning("Ignoring unadjusted Stooq cache for %s", ticker)
+                cached = None
+            else:
+                return (
+                    bars,
+                    split_events,
+                    "ok",
+                    f"cache:{provider}",
+                    source_symbol,
+                    query_symbol,
+                    alias_applied,
+                    alias_effective_date,
+                    alias_issuer_id,
+                    alias_reason,
+                )
 
         combined_bars: dict[str, float] = {}
         combined_splits: list[dict[str, str]] = []
@@ -748,6 +810,25 @@ def main() -> int:
         LOGGER.error("Master calendar ticker %s failed to fetch; cannot align panel", master_ticker)
         return 1
 
+    final_after = str(cfg_get(config, "risk_panel.same_day_bar_final_after_et", "17:00"))
+    market_timezone = str(cfg_get(config, "risk_panel.market_timezone", "America/New_York"))
+    try:
+        same_day_final, finality_detail = same_day_bar_finality(
+            run_as_of,
+            list(series_by_ticker[master_ticker].items()),
+            final_after_local=final_after,
+            timezone_name=market_timezone,
+        )
+    except ValueError as exc:
+        LOGGER.error("%s", exc)
+        return 1
+    if not same_day_final:
+        LOGGER.error(
+            "Refusing to seal an intraday partial Yahoo daily bar: %s. Re-run after the finality cutoff.",
+            finality_detail,
+        )
+        return 1
+
     calendar = master_calendar(series_by_ticker[master_ticker], run_as_of, lookback)
     panel_tickers = [u["ticker"] for u in sorted(universe, key=lambda u: u["ticker"])]
     prices = assemble_prices({t: series_by_ticker[t] for t in panel_tickers if t in series_by_ticker}, calendar)
@@ -790,6 +871,12 @@ def main() -> int:
         "master_calendar_ticker": master_ticker,
         "master_calendar_retry_attempts": master_retry_attempts,
         "master_calendar_retry_sleep_sec": master_retry_sleep_sec,
+        "same_day_bar_finality": {
+            "status": "PASS",
+            "detail": finality_detail,
+            "final_after_local": final_after,
+            "timezone": market_timezone,
+        },
         "covariance_frequency": frequency,
         "lookback_trading_days": lookback,
         "start_date": start.isoformat(),
@@ -813,9 +900,7 @@ def main() -> int:
         ],
         "price_history_overrides": price_history_overrides,
         "fallbacks_enabled": {"stooq_us_daily": enable_stooq},
-        # Stooq closes are dividend-unadjusted; the panel-level policy below does not hold for these
-        # names. Recorded per ticker so consumers (covariance review, Stage 11 calibration) can see
-        # exactly which series carry a different adjustment basis.
+        # This must remain empty: dividend-unadjusted sources are never admitted to this panel.
         "adjustment_policy_exceptions": {
             "stooq_us_daily_close_unadjusted_dividends": sorted(
                 str(r["ticker"]) for r in fetch_rows

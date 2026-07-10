@@ -77,9 +77,12 @@ def parse_date(raw: object) -> date | None:
         return None
     for fmt in ("%Y-%m-%d", "%Y%m%d", "%m/%d/%Y", "%d-%b-%Y", "%d-%B-%Y"):
         try:
-            return datetime.strptime(text[: min(10, len(text))], fmt).date()
+            return datetime.strptime(text, fmt).date()
         except ValueError:
-            pass
+            try:
+                return datetime.strptime(text[:10], fmt).date()
+            except ValueError:
+                pass
     return None
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib
 import json
 import logging
 import sqlite3
@@ -11,7 +12,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
@@ -138,14 +139,21 @@ def choose_symbol(norgatedata: Any, member: HistoricalMember, delisted_symbols: 
     if not hits:
         return SymbolMatch(None, "missing_norgate_symbol")
 
-    target = pd.Timestamp(member.end_date)
+    try:
+        target = pd.Timestamp(member.end_date)
+    except (TypeError, ValueError):
+        return SymbolMatch(None, "invalid_membership_end_date")
+    if cast(bool, pd.isna(target)):
+        return SymbolMatch(None, "invalid_membership_end_date")
     scored: list[tuple[int, str]] = []
     for symbol in hits:
         try:
             last = pd.Timestamp(norgatedata.last_quoted_date(symbol))
         except Exception:
             continue
-        scored.append((abs((last - target).days), symbol))
+        if cast(bool, pd.isna(last)):
+            continue
+        scored.append((int(abs((last - target).days)), symbol))
     if not scored:
         return SymbolMatch(None, "symbol_metadata_error")
     scored.sort()
@@ -251,6 +259,8 @@ def start_ingestion(conn: sqlite3.Connection, source_id: str, timestamp: str) ->
         """,
         (source_id, timestamp, RUN_TYPE, timestamp),
     )
+    if cur.lastrowid is None:
+        raise RuntimeError("Failed to create Norgate ingestion run.")
     return int(cur.lastrowid)
 
 
@@ -278,6 +288,13 @@ def upsert_price_rows(
     timestamp = now_utc()
     adjustment = f"norgate_total_return_adj_close;source_symbol={source_symbol};match={match_reason}"
     for idx, row in prices.iterrows():
+        try:
+            bar_timestamp = pd.Timestamp(str(idx))
+        except (TypeError, ValueError):
+            continue
+        if cast(bool, pd.isna(bar_timestamp)):
+            continue
+        bar_date = cast(pd.Timestamp, bar_timestamp).date().isoformat()
         close = safe_float(row.get("Close"))
         adj_close = safe_float(row.get("AdjClose"))
         if close is None or adj_close is None:
@@ -303,7 +320,7 @@ def upsert_price_rows(
             """,
             (
                 ticker,
-                idx.isoformat(),
+                bar_date,
                 source_id,
                 safe_float(row.get("Open")),
                 safe_float(row.get("High")),
@@ -331,7 +348,7 @@ def main() -> int:
     start_date = args.start_date or str(cfg_get(config, "technology_universe.optimization_start_date", "2010-01-01"))
 
     try:
-        import norgatedata
+        norgatedata = importlib.import_module("norgatedata")
     except ImportError as exc:
         raise SystemExit("norgatedata package is not installed in this Python environment.") from exc
 
@@ -345,9 +362,11 @@ def main() -> int:
     loaded_rows = 0
     request_count = 0
 
-    conn = sqlite3.connect(db_path)
+    sqlite_timeout = float(cfg_get(config, "runtime.sqlite_timeout_sec", 120.0))
+    conn = sqlite3.connect(db_path, timeout=sqlite_timeout)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(f"PRAGMA busy_timeout = {int(sqlite_timeout * 1000)}")
     run_id: int | None = None
     started = now_utc()
     try:

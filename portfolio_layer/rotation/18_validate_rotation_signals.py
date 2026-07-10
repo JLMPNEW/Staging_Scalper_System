@@ -24,7 +24,14 @@ import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.artifacts import invalidate_rotation_outputs_after_validation  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    manifest_acceptance_value,
+    read_csv,
+    sha256_file,
+    write_csv,
+    write_manifest,
+)
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.liquidity import finite_float  # noqa: E402
@@ -99,6 +106,7 @@ def main() -> int:  # noqa: C901
     foreign_path = rotation_dir / "foreign_etfs.csv"
     foreign_opt_path = rotation_dir / "foreign_etfs_optimizer.csv"
     meta_path = rotation_dir / "rotation_signals_meta.json"
+    score_manifest_path = run_dir / "manifest.json"
     risk_manifest_path = risk_dir / "risk_manifest.json"
     prices_path = risk_dir / "prices_adjclose.csv"
     returns_path = risk_dir / "returns_panel.csv"
@@ -106,7 +114,8 @@ def main() -> int:  # noqa: C901
     scores_path = run_dir / "stocks_scores.csv"
     for required in (
         sector_path, sector_opt_path, foreign_path, foreign_opt_path, meta_path,
-        risk_manifest_path, prices_path, returns_path, risk_coverage_path, scores_path,
+        score_manifest_path, risk_manifest_path, prices_path, returns_path, risk_coverage_path,
+        scores_path,
     ):
         if not required.exists():
             LOGGER.error("Run 17 / Stage 2 first; missing %s", required)
@@ -161,6 +170,28 @@ def main() -> int:  # noqa: C901
     rec("pit_no_lookahead", "PASS" if pit_ok else "FAIL",
         f"panel_end={panel_end} <= as_of={run_as_of}, meta_panel_end={meta.get('panel_end')}")
 
+    # 2a. The score universe used to select active sleeves is itself sealed by Stage 1.
+    stage1_bad = []
+    try:
+        score_manifest = json.loads(score_manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        score_manifest = {}
+        stage1_bad.append(f"score_manifest_unreadable:{type(exc).__name__}")
+    if manifest_acceptance_value(score_manifest) != "PASS":
+        stage1_bad.append(f"score_manifest_acceptance={manifest_acceptance_value(score_manifest)}")
+    expected_scores_hash = (
+        ((score_manifest.get("files") or {}).get("stocks_scores.csv") or {}).get("sha256")
+    )
+    if expected_scores_hash != sha256_file(scores_path):
+        stage1_bad.append("stocks_scores.csv:score_manifest_hash_mismatch")
+    rec(
+        "stage1_scores_sealed",
+        "PASS" if not stage1_bad else "FAIL",
+        "Stage 1 manifest PASS and stocks_scores hash matches"
+        if not stage1_bad
+        else f"{stage1_bad[:8]}",
+    )
+
     # 2b. Stage 2 panel is sealed and current: risk manifest PASS + panel hashes match.
     stage2_bad = []
     try:
@@ -187,6 +218,7 @@ def main() -> int:  # noqa: C901
     meta_bad = []
     meta_inputs = meta.get("inputs_sha256") or {}
     for filename, path in {
+        "stocks_scores.csv": scores_path,
         "prices_adjclose.csv": prices_path,
         "returns_panel.csv": returns_path,
         "config.yaml": config_path,

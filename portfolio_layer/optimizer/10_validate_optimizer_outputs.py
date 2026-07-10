@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np  # noqa: E402
 from scipy.stats import spearmanr  # noqa: E402
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
@@ -95,6 +96,8 @@ def main() -> int:  # noqa: C901
         if not required.exists():
             LOGGER.error("Missing required Stage 3 validation input: %s", required)
             return 1
+    if args.force:
+        invalidate_dependents(run_dir, "optimizer")
     try:
         fail_if_exists([validation_path, manifest_path], force=args.force)
     except FileExistsError as exc:
@@ -262,12 +265,12 @@ def main() -> int:  # noqa: C901
     wh = np.array([p[1] for p in valid_pairs], dtype=float)
     rho = float(cast(Any, spearmanr(mu, wh)).correlation) if len(valid_pairs) > 2 else float("nan")
     neg_mu_held = [ticker for mu_val, _, ticker in valid_pairs if float(mu_val) < 0]
-    ok_rel = (np.isnan(rho) or rho > 0)
+    ok_rel = bool(np.isfinite(rho) and rho > 0)
     rec(
         "mu_weight_relationship",
         "PASS" if ok_rel else "FAIL",
         f"spearman(mu_used,weight)={round(rho, 3)}; held_with_negative_mu={len(neg_mu_held)} "
-        f"(diversifiers; allowed)",
+        f"(diversifiers; allowed); undefined correlation fails closed",
     )
 
     # 7. optimizer meta matches current output files.

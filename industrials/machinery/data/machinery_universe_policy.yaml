@@ -1,0 +1,33 @@
+model_family: machinery
+source_of_truth: true
+expected_ticker_count: 114
+expected_delisted_count: 50
+history_start_date: "2019-01-02"
+default_sector: Industrials
+default_industry: Machinery
+default_subsector: Machinery
+benchmark_tickers: [XLI, VIS, SPY]
+investable_security_types:
+  - common stock
+  - ordinary shares
+active_listing_statuses:
+  - active
+required_columns:
+  - ticker
+  - investability_status
+  - company_name
+  - cik
+  - exchange
+  - sector
+  - industry
+  - subsector
+  - country
+  - currency
+  - security_type
+  - listing_status
+  - is_primary_listing
+  - calibration_cohort
+known_norgate_exclusions:
+  RIDE: "Local Norgate catalog resolves RIDE only to an unrelated 1999 issuer."
+  ELMS: "Local Norgate catalog resolves ELMS only to Elmer's Restaurant, not Electric Last Mile Solutions."
+  GOEV: "No GOEV issuer history is present in the local Norgate US equities catalogs."

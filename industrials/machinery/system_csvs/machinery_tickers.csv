@@ -1,0 +1,115 @@
+ticker,investability_status,company_name,cik,exchange,sector,industry,subsector,country,currency,security_type,listing_status,is_primary_listing,calibration_cohort
+CAT,investable,Caterpillar Inc.,18230,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+DE,investable,Deere & Company,315189,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+CMI,investable,Cummins Inc.,26172,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+PCAR,investable,PACCAR Inc,75362,Nasdaq,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+CNH,investable,CNH Industrial N.V.,1567094,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+OSK,investable,Oshkosh Corporation,775158,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+AGCO,investable,AGCO Corporation,880266,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+TEX,investable,Terex Corporation,97216,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+FSS,investable,Federal Signal Corporation,277509,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+BLBD,investable,Blue Bird Corporation,1589526,Nasdaq,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+ALG,investable,Alamo Group Inc.,897077,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+ASTE,investable,"Astec Industries, Inc.",792987,Nasdaq,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+LNN,investable,Lindsay Corporation,836157,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+AEBI,investable,Aebi Schmidt Holding AG,2048519,Nasdaq,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+HY,investable,"Hyster-Yale, Inc.",1173514,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+WNC,investable,Wabash National Corporation,879526,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+TWI,investable,"Titan International, Inc.",899751,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+MTW,investable,"The Manitowoc Company, Inc.",61986,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+CMCO,investable,Columbus McKinnon Corporation,1005229,Nasdaq,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+WAB,investable,Westinghouse Air Brake Technologies Corporation,943452,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+ALSN,investable,"Allison Transmission Holdings, Inc.",1411207,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+TTC,investable,The Toro Company,737758,NYSE,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,construction_agriculture_and_heavy_machinery
+XE,investable,"X-Energy, Inc.",2088896,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+SMR,investable,NuScale Power Corporation,1822966,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+NNE,investable,NANO Nuclear Energy Inc.,1923891,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+FISN,investable,"Deep Fission, Inc.",1918102,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+SERV,investable,Serve Robotics Inc.,1832483,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+SHMD,investable,SCHMID Group N.V.,1987240,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Ordinary Shares,active,TRUE,development_stage_emerging_machinery
+AIRJ,investable,AirJoule Technologies Corporation,1855474,Nasdaq,Industrials,Building Products & Equipment,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+NPWR,investable,NET Power Inc.,1845437,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+BWEN,investable,"Broadwind, Inc.",1120370,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+LASE,investable,Laser Photonics Corporation,1807887,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+XOS,investable,"Xos, Inc.",1819493,Nasdaq,Industrials,Farm & Heavy Construction Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+OKLO,investable,Oklo Inc.,1849056,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+LEU,investable,Centrus Energy Corp.,1065059,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+PLUG,investable,Plug Power Inc.,1093691,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+BLDP,investable,Ballard Power Systems Inc.,1453015,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+FCEL,investable,"FuelCell Energy, Inc.",886128,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+EOSE,investable,"Eos Energy Enterprises, Inc.",1805077,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+SSYS,investable,Stratasys Ltd.,1517396,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+DDD,investable,3D Systems Corporation,910638,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+OUST,investable,"Ouster, Inc.",1816581,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,development_stage_emerging_machinery
+PH,investable,Parker-Hannifin Corporation,76334,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+ITW,investable,Illinois Tool Works Inc.,49826,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+ROK,investable,"Rockwell Automation, Inc.",1024478,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+IR,investable,Ingersoll Rand Inc.,1699150,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+DOV,investable,Dover Corporation,29905,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+NPO,investable,Enpro Inc.,1164863,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+MIDD,investable,The Middleby Corporation,769520,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+JBTM,investable,JBT Marel Corporation,1433660,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+SYM,investable,Symbotic Inc.,1837240,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+CSW,investable,"CSW Industrials, Inc.",1624794,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+MIR,investable,"Mirion Technologies, Inc.",1809987,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+SXI,investable,Standex International Corporation,310354,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+CXT,investable,"Crane NXT, Co.",25445,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+ATS,investable,ATS Corporation,1394832,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+EPAC,investable,Enerpac Tool Group Corp.,6955,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+TNC,investable,Tennant Company,97134,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+GHM,investable,Graham Corporation,716314,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+KRNT,investable,Kornit Digital Ltd.,1625791,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Ordinary Shares,active,TRUE,diversified_machinery_automation_and_tools
+PKOH,investable,Park-Ohio Holdings Corp.,76282,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+AME,investable,"AMETEK, Inc.",1037868,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+ROP,investable,"Roper Technologies, Inc.",882835,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+SWK,investable,"Stanley Black & Decker, Inc.",93556,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+SNA,investable,Snap-on Incorporated,91440,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+ENOV,investable,Enovis Corporation,1420800,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+AIT,investable,"Applied Industrial Technologies, Inc.",109563,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,diversified_machinery_automation_and_tools
+XYL,investable,Xylem Inc.,1524472,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+ITT,investable,ITT Inc.,216228,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+IEX,investable,IDEX Corporation,832101,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+NDSN,investable,Nordson Corporation,72331,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+GGG,investable,Graco Inc.,42888,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+CR,investable,Crane Company,1944013,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+PNR,investable,Pentair plc,77360,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Ordinary Shares,active,TRUE,fluid_flow_control_and_filtration
+WTS,investable,"Watts Water Technologies, Inc.",795403,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+DCI,investable,"Donaldson Company, Inc.",29644,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+GTLS,investable,"Chart Industries, Inc.",892553,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+FLS,investable,Flowserve Corporation,30625,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+AOS,investable,A. O. Smith Corporation,91142,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+GTES,investable,Gates Industrial Corporation plc,1718512,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Ordinary Shares,active,TRUE,fluid_flow_control_and_filtration
+FELE,investable,"Franklin Electric Co., Inc.",38725,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+MWA,investable,"Mueller Water Products, Inc.",1350593,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+KAI,investable,Kadant Inc.,886346,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+HLIO,investable,"Helios Technologies, Inc.",1024795,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+GRC,investable,The Gorman-Rupp Company,42682,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+LXFR,investable,Luxfer Holdings PLC,1096056,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Ordinary Shares,active,TRUE,fluid_flow_control_and_filtration
+TWIN,investable,"Twin Disc, Incorporated",100378,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+MLI,investable,"Mueller Industries, Inc.",89439,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+MOD,investable,Modine Manufacturing Company,67347,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,fluid_flow_control_and_filtration
+GEV,investable,GE Vernova Inc.,1996810,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+ETN,investable,Eaton Corporation plc,1551182,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Ordinary Shares,active,TRUE,hvac_climate_electrical_and_power_systems
+JCI,investable,Johnson Controls International plc,833444,NYSE,Industrials,Building Products & Equipment,Machinery,United States,USD,Ordinary Shares,active,TRUE,hvac_climate_electrical_and_power_systems
+EMR,investable,Emerson Electric Co.,32604,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+CARR,investable,Carrier Global Corporation,1783180,NYSE,Industrials,Building Products & Equipment,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+OTIS,investable,Otis Worldwide Corporation,1781335,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+INIO,investable,Innio N.V.,2109150,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Ordinary Shares,active,TRUE,hvac_climate_electrical_and_power_systems
+LII,investable,Lennox International Inc.,1069202,NYSE,Industrials,Building Products & Equipment,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+MAIR,investable,Madison Air Solutions Corporation,2098430,NYSE,Industrials,Building Products & Equipment,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+GNRC,investable,Generac Holdings Inc.,1474735,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+RRX,investable,Regal Rexnord Corporation,82811,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+SPXC,investable,"SPX Technologies, Inc.",88205,NYSE,Industrials,Building Products & Equipment,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+AAON,investable,"AAON, Inc.",824142,Nasdaq,Industrials,Building Products & Equipment,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+BW,investable,"Babcock & Wilcox Enterprises, Inc.",1630805,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+AMSC,investable,American Superconductor Corporation,880807,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+PSIX,investable,"Power Solutions International, Inc.",1137091,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+HUBB,investable,Hubbell Incorporated,48898,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+NVT,investable,nVent Electric plc,1720635,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Ordinary Shares,active,TRUE,hvac_climate_electrical_and_power_systems
+VRT,investable,Vertiv Holdings Co,1674101,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+AYI,investable,Acuity Inc.,1144215,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+ENS,investable,EnerSys,1289308,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+POWL,investable,"Powell Industries, Inc.",80420,Nasdaq,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+ATKR,investable,Atkore Inc.,1666138,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems
+TT,investable,Trane Technologies plc,1466258,NYSE,Industrials,Building Products & Equipment,Machinery,United States,USD,Ordinary Shares,active,TRUE,hvac_climate_electrical_and_power_systems
+BE,investable,Bloom Energy Corporation,1664703,NYSE,Industrials,Specialty Industrial Machinery,Machinery,United States,USD,Common Stock,active,TRUE,hvac_climate_electrical_and_power_systems

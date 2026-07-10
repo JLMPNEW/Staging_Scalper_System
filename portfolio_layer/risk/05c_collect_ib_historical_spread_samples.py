@@ -44,6 +44,7 @@ from portfolio_layer.risk.liquidity import (  # noqa: E402
     IB_SPREAD_SAMPLE_FIELDS,
     SPREAD_SNAPSHOT_FIELDS,
     active_symbol_for_ticker,
+    clear_liquidity_run,
     configured_fallback_half_spread_bps,
     finite_float,
     init_liquidity_tables,
@@ -78,17 +79,32 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--as-of", type=iso_date_arg, default=None)
     p.add_argument("--db", type=Path, default=None)
     p.add_argument("--force", action="store_true")
-    p.add_argument(
+    replay = p.add_mutually_exclusive_group()
+    replay.add_argument(
         "--input-samples",
         type=Path,
         default=None,
         help="Use an existing ib_spread_samples-format CSV instead of connecting to IB (test/recovery mode).",
+    )
+    replay.add_argument(
+        "--reuse-db-samples",
+        action="store_true",
+        help=(
+            "Rebuild this run's CSV artifacts from the same-date samples already stored in the "
+            "portfolio-owned SQLite database. Fails if no exact-date rows exist."
+        ),
     )
     p.add_argument(
         "--universe-source",
         choices=["risk_eligible_scores", "investable_scores", "target_weights", "trade_list", "auto"],
         default=None,
         help="Override liquidity_panel.universe_source for this run only.",
+    )
+    p.add_argument(
+        "--ib-client-id",
+        type=int,
+        default=None,
+        help="Override liquidity_panel.ib.client_id for this run only; useful when another TWS API session owns the default.",
     )
     return p.parse_args()
 
@@ -158,11 +174,10 @@ def _sample_rows_for_ticker(
             continue
         if bid <= 0 or ask <= 0:
             continue
-        if ask < bid:
-            bid, ask = ask, bid
+        crossed = ask < bid
         mid = (bid + ask) / 2.0
         spread_bps = (ask - bid) / mid * 1e4 if mid > 0 else math.nan
-        if not math.isfinite(spread_bps) or spread_bps < 0:
+        if not math.isfinite(spread_bps):
             continue
         parsed.append({
             "timestamp": ts,
@@ -171,6 +186,8 @@ def _sample_rows_for_ticker(
             "midpoint": mid,
             "spread_bps": spread_bps,
             "half_spread_bps": spread_bps / 2.0,
+            "status": "invalid" if crossed else "ok",
+            "reason": "crossed_quote" if crossed else "",
         })
 
     # Walk back through the fetched sessions (newest first): an early close (e.g. 13:00 ET) makes the
@@ -216,9 +233,9 @@ def _sample_rows_for_ticker(
                                "reason": f"nearest_bar_lag>{max_lag_minutes:g}m_all_sessions"})
             continue
         day, nearest = hit
-        status = "ok"
-        reason = ""
-        if float(nearest["half_spread_bps"]) >= max_half_spread_bps:
+        status = str(nearest.get("status", "ok"))
+        reason = str(nearest.get("reason", ""))
+        if status == "ok" and float(nearest["half_spread_bps"]) >= max_half_spread_bps:
             status = "invalid"
             reason = f"half_spread_bps>={max_half_spread_bps:g}"
         out.append({
@@ -314,18 +331,49 @@ def _load_universe(run_dir: Path, config: dict[str, Any], override: str | None =
     return _tickers_from_scores(run_dir, risk_eligible_only=False), "auto:stocks_scores.csv:investable_eligible"
 
 
-def _load_input_samples(path: Path, *, as_of: str, tickers: Sequence[str]) -> list[dict[str, Any]]:
+def _normalize_replay_samples(
+    rows: Sequence[dict[str, Any]], *, as_of: str, tickers: Sequence[str]
+) -> list[dict[str, Any]]:
     wanted = set(tickers)
-    out = []
-    for row in read_csv(path):
+    out: list[dict[str, Any]] = []
+    wrong_dates: set[str] = set()
+    for source_row in rows:
+        row = {field: source_row.get(field, "") for field in IB_SPREAD_SAMPLE_FIELDS}
+        source_as_of = str(row.get("as_of_date") or "").strip()
+        if source_as_of and source_as_of != as_of:
+            wrong_dates.add(source_as_of)
+            continue
         ticker = str(row.get("ticker", "")).strip().upper()
         if ticker not in wanted:
             continue
-        row = {field: row.get(field, "") for field in IB_SPREAD_SAMPLE_FIELDS}
         row["as_of_date"] = as_of
         row["ticker"] = ticker
         out.append(row)
+    if wrong_dates:
+        raise ValueError(
+            f"Replay samples contain dates other than requested as-of {as_of}: {sorted(wrong_dates)}"
+        )
     return out
+
+
+def _load_input_samples(path: Path, *, as_of: str, tickers: Sequence[str]) -> list[dict[str, Any]]:
+    return _normalize_replay_samples(read_csv(path), as_of=as_of, tickers=tickers)
+
+
+def _load_db_samples(db_path: Path, *, as_of: str, tickers: Sequence[str]) -> list[dict[str, Any]]:
+    with connect(db_path) as conn:
+        init_liquidity_tables(conn)
+        rows = [
+            {field: "" if row[field] is None else row[field] for field in IB_SPREAD_SAMPLE_FIELDS}
+            for row in conn.execute(
+                f"SELECT {', '.join(IB_SPREAD_SAMPLE_FIELDS)} "
+                "FROM ib_spread_samples WHERE as_of_date = ? ORDER BY ticker, target_time_et",
+                (as_of,),
+            ).fetchall()
+        ]
+    if not rows:
+        raise ValueError(f"No portfolio SQLite liquidity samples exist for {as_of}")
+    return _normalize_replay_samples(rows, as_of=as_of, tickers=tickers)
 
 
 def _collect_from_ib(
@@ -334,6 +382,7 @@ def _collect_from_ib(
     as_of: str,
     tickers: Sequence[str],
     sample_times: Sequence[str],
+    ib_client_id: int | None = None,
 ) -> list[dict[str, Any]]:
     try:
         from ib_insync import IB, Stock  # type: ignore
@@ -346,7 +395,7 @@ def _collect_from_ib(
     ib_cfg = lc.get("ib", {}) if isinstance(lc.get("ib"), dict) else {}
     host = str(ib_cfg.get("host", "127.0.0.1"))
     port = int(ib_cfg.get("port", 7497))
-    client_id = int(ib_cfg.get("client_id", 41))
+    client_id = int(ib_client_id if ib_client_id is not None else ib_cfg.get("client_id", 41))
     duration_days = max(1, int(lc.get("duration_days", 5)))
     duration = f"{duration_days} D"
     bar_size = str(lc.get("bar_size", "5 mins"))
@@ -446,7 +495,7 @@ def main() -> int:  # noqa: C901
     if not run_as_of:
         LOGGER.error("No run found under %s", runs_root)
         return 1
-    if not liquidity_panel_active(config) and args.input_samples is None:
+    if not liquidity_panel_active(config) and args.input_samples is None and not args.reuse_db_samples:
         LOGGER.info("Enhanced intraday liquidity panel inactive; Stage 4 will use config/default spread.")
         return 0
 
@@ -455,12 +504,6 @@ def main() -> int:  # noqa: C901
     samples_path = risk_dir / "ib_spread_samples.csv"
     snapshot_path = risk_dir / "spread_snapshot.csv"
     meta_path = risk_dir / "spread_snapshot_meta.json"
-    if args.force:
-        for path in (samples_path, snapshot_path, meta_path):
-            if path.exists() and path.is_file():
-                path.unlink()
-        invalidate_risk_outputs_after_spread_change(risk_dir)
-        invalidate_cost_outputs_after_spread_change(run_dir)
     try:
         fail_if_exists([samples_path, snapshot_path, meta_path], force=args.force)
     except FileExistsError as exc:
@@ -487,8 +530,17 @@ def main() -> int:  # noqa: C901
             input_path = args.input_samples.expanduser().resolve()
             sample_rows = _load_input_samples(input_path, as_of=run_as_of, tickers=tickers)
             provider = f"input_samples:{input_path}"
+        elif args.reuse_db_samples:
+            sample_rows = _load_db_samples(db_path, as_of=run_as_of, tickers=tickers)
+            provider = f"portfolio_sqlite_replay:{db_path}"
         else:
-            sample_rows = _collect_from_ib(config=config, as_of=run_as_of, tickers=tickers, sample_times=sample_times)
+            sample_rows = _collect_from_ib(
+                config=config,
+                as_of=run_as_of,
+                tickers=tickers,
+                sample_times=sample_times,
+                ib_client_id=args.ib_client_id,
+            )
             provider = str(cfg_get(config, "liquidity_panel.provider", "ibkr_historical_bid_ask"))
     except Exception as exc:  # noqa: BLE001 - collector should fail closed with a clear log line.
         LOGGER.error("Liquidity collection failed: %s", exc)
@@ -510,6 +562,11 @@ def main() -> int:  # noqa: C901
         LOGGER.error("%s", exc)
         return 1
 
+    # Invalidate accepted consumers only after a complete replacement snapshot has been computed.
+    # This keeps the previous auditable artifacts intact when collection/replay fails early.
+    if args.force:
+        invalidate_risk_outputs_after_spread_change(risk_dir)
+        invalidate_cost_outputs_after_spread_change(run_dir)
     write_csv(samples_path, IB_SPREAD_SAMPLE_FIELDS, sample_rows)
     write_csv(snapshot_path, SPREAD_SNAPSHOT_FIELDS, snapshot_rows)
     status_counts = Counter(str(r.get("spread_status", "")) for r in snapshot_rows)
@@ -532,6 +589,7 @@ def main() -> int:  # noqa: C901
         "enhanced_intraday_enabled": cfg_get(config, "liquidity_panel.enhanced_intraday_enabled", False),
         "spread_source": cfg_get(config, "transaction_costs.spread_source", "auto"),
         "universe_source": universe_source,
+        "requested_tickers": sorted(set(tickers)),
         "sample_times_et": sample_times,
         "bar_size": str(cfg_get(config, "liquidity_panel.bar_size", "5 mins")),
         "duration_days": int(cfg_get(config, "liquidity_panel.duration_days", 5)),
@@ -555,6 +613,9 @@ def main() -> int:  # noqa: C901
     with connect(db_path) as conn:
         init_liquidity_tables(conn)
         run_id = start_run(conn, run_type="collect_ib_spread_samples", input_path=run_dir)
+        # Replace the full date partition. Upserts alone leave tickers from an older, wider
+        # universe active in SQLite after a same-date refresh.
+        clear_liquidity_run(conn, run_as_of)
         upsert_spread_samples(conn, sample_rows)
         upsert_spread_snapshot(conn, snapshot_rows)
         db_meta = dict(meta)

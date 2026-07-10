@@ -35,6 +35,11 @@ TTM_USD_COLUMN_PAIRS = [
     ("operating_income_ttm", "operating_income_ttm_usd"),
     ("net_income_ttm", "net_income_ttm_usd"),
     ("free_cash_flow_ttm", "free_cash_flow_ttm_usd"),
+    ("depreciation_and_amortization_ttm", "depreciation_and_amortization_ttm_usd"),
+        ("interest_expense_ttm", "interest_expense_ttm_usd"),
+        ("equity_issuance_proceeds_ttm", "equity_issuance_proceeds_ttm_usd"),
+        ("debt_issuance_proceeds_ttm", "debt_issuance_proceeds_ttm_usd"),
+        ("orders_ttm", "orders_ttm_usd"),
     ("net_cash", "net_cash_usd"),
 ]
 ACCEPTED_DATE_SQL = """

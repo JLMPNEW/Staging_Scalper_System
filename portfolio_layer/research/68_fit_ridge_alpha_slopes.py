@@ -49,8 +49,8 @@ from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.research.stage11_common import (  # noqa: E402
-    admit_calibration_rows, independent_windows, load_lockbox, manifest_file_errors, mean_t, parse_finite,
-    per_date_slope, pooled_slopes, rank_ic_of,
+    admit_calibration_rows, forward_status_is_valid, independent_windows, load_lockbox,
+    manifest_file_errors, mean_t, mean_t_hac, parse_finite, per_date_slope, pooled_slopes, rank_ic_of,
 )
 
 
@@ -241,7 +241,7 @@ def main() -> int:  # noqa: C901
             status_col = f"fwd_status_{h}d"
             usable = []
             for r in sub:
-                if str(r.get(status_col, "")) != "ok":
+                if not forward_status_is_valid(r.get(status_col)):
                     label_missing[f"{pipe}:{h}d:status"] = label_missing.get(f"{pipe}:{h}d:status", 0) + 1
                     continue
                 z = parse_finite(r.get("score_z_pipeline_date"))
@@ -280,8 +280,9 @@ def main() -> int:  # noqa: C901
                     })
                 if ric is not None:
                     date_rics.append(ric)
-            fm_mean, fm_se, fm_t = mean_t(fm_slopes)
-            _ric_mean, _ric_se, ric_t = mean_t(date_rics)
+            hac_lag = max(0, h - 1)
+            fm_mean, fm_se, fm_t = mean_t_hac(fm_slopes, max_lag=hac_lag)
+            _ric_mean, _ric_se, ric_t = mean_t_hac(date_rics, max_lag=hac_lag)
             ic_pool = None
             if len(z_pool) >= 3 and z_pool.std() > 0 and y_pool.std() > 0:
                 ic_pool = float(np.corrcoef(z_pool, y_pool)[0, 1])
@@ -328,9 +329,14 @@ def main() -> int:  # noqa: C901
 
     rec("lockbox_no_sealed_rows", "PASS" if leaked_lockbox == 0 else "FAIL",
         "panel rows are all dev-window" if leaked_lockbox == 0 else f"{leaked_lockbox} sealed rows in panel input")
-    rec("purge_enforced", "PASS",
-        f"admitted rows all usable_for_promoted_training=1; excluded={exclusions['not_usable_for_promoted_training']}")
-    rec("admission_accounted", "PASS",
+    admission_ok = len(admitted) + sum(exclusions.values()) == len(rows)
+    rec(
+        "training_admission_enforced",
+        "PASS" if admission_ok else "FAIL",
+        f"admitted rows all usable_for_promoted_training=1; excluded={exclusions['not_usable_for_promoted_training']}"
+        if admission_ok else f"admitted={len(admitted)} exclusions={sum(exclusions.values())} rows={len(rows)}",
+    )
+    rec("admission_accounted", "PASS" if admission_ok else "FAIL",
         f"admitted={len(admitted)}/{len(rows)}; exclusions={exclusions}")
     approved_rows = [r for r in slope_rows if r["approved"] == 1]
     rec("approval_conservatism", "PASS" if all(

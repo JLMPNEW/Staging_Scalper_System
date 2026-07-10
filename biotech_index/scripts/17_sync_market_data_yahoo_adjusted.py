@@ -658,40 +658,30 @@ def build_market_rows(
         max_missing_days=continuity_max_missing_days,
     )
     close = closes[-1]
-    raw_closes = [
-        to_float(row.get("raw_close"))
-        if to_float(row.get("raw_close")) is not None and (to_float(row.get("raw_close")) or 0.0) > 0.0
-        else to_float(row.get("close")) or 0.0
-        for row in usable_bars
-    ]
+    raw_closes: list[float] = []
+    for row in usable_bars:
+        raw_close = to_float(row.get("raw_close"))
+        adjusted_close = to_float(row.get("close"))
+        raw_closes.append(raw_close if raw_close is not None and raw_close > 0.0 else adjusted_close or 0.0)
     # Bars with a missing volume are excluded from the averages (numerator and
     # denominator) instead of being counted as zero-volume days.
-    dollar_volumes = [
-        raw_closes[idx] * volumes[idx] if volumes[idx] is not None else None
-        for idx in range(min(len(raw_closes), len(volumes)))
-    ]
+    dollar_volumes: list[float | None] = []
+    for raw_close, volume in zip(raw_closes, volumes):
+        dollar_volumes.append(raw_close * volume if volume is not None else None)
     avg_volume_20d = window_average(volumes, 20)
     avg_dollar_volume_20d = window_average(dollar_volumes, 20)
     avg_dollar_volume_60d = window_average(dollar_volumes, 60)
     window_52w = usable_bars[-260:]
-    high_52w = max(
-        (
-            to_float(row.get("high"))
-            if to_float(row.get("high")) is not None
-            else to_float(row.get("close")) or 0.0
-            for row in window_52w
-        ),
-        default=None,
-    )
-    low_52w = min(
-        (
-            to_float(row.get("low"))
-            if to_float(row.get("low")) is not None
-            else to_float(row.get("close")) or close
-            for row in window_52w
-        ),
-        default=None,
-    )
+    high_values: list[float] = []
+    low_values: list[float] = []
+    for row in window_52w:
+        row_close = to_float(row.get("close"))
+        row_high = to_float(row.get("high"))
+        row_low = to_float(row.get("low"))
+        high_values.append(row_high if row_high is not None else row_close or 0.0)
+        low_values.append(row_low if row_low is not None else row_close or close)
+    high_52w = max(high_values, default=None)
+    low_52w = min(low_values, default=None)
     market_cap = close * shares if shares and shares > 0 else None
     sma_200 = sum(closes[-200:]) / min(200, len(closes)) if closes else None
     return_1m = pct_return(closes, 21)

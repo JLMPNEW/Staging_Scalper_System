@@ -1295,9 +1295,10 @@ biotech_historical_sequence:
   # calibration universe by default. Use --current-universe-replay only for a
   # diagnostic replay that must not feed Stage 11.
   survivorship_corrected_panel: true
-  # Blank means generated history is pre-lock research. Set a YYYY-MM-DD date
-  # only after a formal Stage 11 lockbox/OOS start date is declared.
-  strict_oos_start_date: ""
+  # Formal lockbox boundary for the promoted live allocation policy. Historical
+  # rows before this date remain pre-lock research; rows on/after it can be
+  # strict OOS only when their source snapshot is same-day and PIT-valid.
+  strict_oos_start_date: "2026-07-07"
 
 biotech_refresh:
   timing_csv: "../output/biotech_index_reports/biotech_refresh_timing.csv"
@@ -1358,11 +1359,16 @@ biotech_refresh:
         column: "filing_date"
       - table: "form4_buy_events_v1"
         column: "filing_date"
-  max_snapshot_history: 30
+  # Dated report folders are also the Stage 11 historical panel. Never prune
+  # them from the shared report root during a daily refresh.
+  max_snapshot_history: 0
   snapshot_outputs:
     enabled: true
     source_dir: "../output/biotech_index_reports"
     root_dir: "../output/biotech_index_reports"
+    copy_only_refreshed_since_run_start: true
+    mtime_tolerance_sec: 5
+    prune_old_snapshot_dirs: false
     include_extensions:
       - ".csv"
       - ".json"

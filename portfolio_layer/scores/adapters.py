@@ -1,7 +1,8 @@
 """Per-sector adapters: read a sector's published score CSV and map it onto CanonicalScore rows.
 
-Three shapes cover all sub-sectors:
+Four shapes cover all sub-sectors:
   - tech_family : semiconductors, software_infrastructure, technology_hardware (shared `final_score`)
+  - industrial_family : industrials final-rank tables using the shared `final_score` contract
   - biotech     : biotech_index daily scores using `portfolio_candidate_*` when present
   - med_devices : med_device daily composite scores gated by `portfolio_candidate_gate`
 
@@ -20,6 +21,44 @@ from portfolio_layer.core.contracts import read_csv
 
 
 LOGGER = logging.getLogger(__name__)
+
+INDUSTRIAL_FAMILY_REQUIRED_COLUMNS = (
+    "asof_date",
+    "ticker",
+    "company_name",
+    "sector",
+    "industry",
+    "calibration_cohort",
+    "final_score",
+    "final_rank",
+    "rank_ready_flag",
+    "model_status",
+    "score_confidence",
+    "score_model_version",
+    "model_version",
+    "scoring_contract_version",
+    "portfolio_candidate_gate",
+    "portfolio_candidate_score",
+    "portfolio_candidate_status",
+    "portfolio_candidate_reason",
+    "calibration_eligible_flag",
+    "research_calibration_input_eligible_flag",
+    "research_calibration_reason",
+    "calibration_sample_role",
+    "stage11_calibration_panel_source",
+    "stage11_calibration_input_eligible_flag",
+    "stage11_calibration_input_reason",
+    "survivorship_corrected_panel_flag",
+    "oos_score_valid_flag",
+    "oos_score_asof_date",
+    "oos_invalid_reason",
+    "calibration_lock_date",
+)
+
+INDUSTRIAL_FAMILY_ONE_OF_COLUMNS = (
+    ("industry_aggregate", "subsector"),
+    ("score_confidence", "data_quality_confidence"),
+)
 
 
 def _f(value: Any) -> float | None:
@@ -227,7 +266,12 @@ def _resolve_file(cfg: dict[str, Any], root: Path, run_as_of: str | None) -> Pat
     raise ValueError(f"Unknown file_mode: {mode}")
 
 
-def _adapt_tech_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[CanonicalScore]:
+def _adapt_final_rank_family(
+    cfg: dict[str, Any],
+    rows: list[dict[str, str]],
+    *,
+    enforce_candidate_status: bool,
+) -> list[CanonicalScore]:
     out: list[CanonicalScore] = []
     require_oos_score_valid = bool(cfg.get("require_oos_score_valid", False))
     skipped = 0
@@ -241,8 +285,13 @@ def _adapt_tech_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
         calib_ok = _truthy(r.get("calibration_eligible_flag"))
         complete = str(r.get("model_status", "")).strip().lower() == "complete"
         oos_score_valid = _oos_score_valid(r, cfg, default_requires_oos=require_oos_score_valid)
+        status_denied = False
         if "portfolio_candidate_gate" in r:
-            eligible = _truthy(r.get("portfolio_candidate_gate"))
+            candidate_gate = _truthy(r.get("portfolio_candidate_gate"))
+            candidate_status = str(r.get("portfolio_candidate_status") or "").strip().lower()
+            status_allows = not enforce_candidate_status or candidate_status in {"", "eligible"}
+            status_denied = bool(candidate_gate and not status_allows)
+            eligible = candidate_gate and status_allows
         else:
             eligible = rank_ready and calib_ok and complete and (oos_score_valid or not require_oos_score_valid)
         demoted_not_oos = bool(eligible and not oos_score_valid)
@@ -253,6 +302,8 @@ def _adapt_tech_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
             "ok" if eligible else
             f"not_oos_score_valid:{str(r.get('oos_invalid_reason') or '').strip()[:180]}" if demoted_not_oos else
             source_reason if source_reason and source_reason.lower() != "ok" else
+            f"portfolio_candidate_status:{str(r.get('portfolio_candidate_status') or '').strip()[:80]}"
+            if status_denied else
             "not_rank_ready" if not rank_ready else
             "not_calibration_eligible" if not calib_ok else
             "model_incomplete" if not complete else
@@ -346,6 +397,33 @@ def _adapt_tech_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
         LOGGER.warning("Adapter %s skipped %d rows with blank ticker or non-finite native score",
                        cfg.get("model_family", "tech_family"), skipped)
     return out
+
+
+def _adapt_tech_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[CanonicalScore]:
+    return _adapt_final_rank_family(cfg, rows, enforce_candidate_status=False)
+
+
+def _adapt_industrial_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[CanonicalScore]:
+    for idx, row in enumerate(rows, start=1):
+        missing = sorted(set(INDUSTRIAL_FAMILY_REQUIRED_COLUMNS) - set(row))
+        missing_groups = [
+            "/".join(group)
+            for group in INDUSTRIAL_FAMILY_ONE_OF_COLUMNS
+            if not any(column in row for column in group)
+        ]
+        if missing:
+            raise ValueError(
+                f"industrial_family score file for {cfg.get('model_family')} row {idx} "
+                f"ticker={str(row.get('ticker') or '').strip() or '<blank>'} "
+                f"is missing required columns: {missing}"
+            )
+        if missing_groups:
+            raise ValueError(
+                f"industrial_family score file for {cfg.get('model_family')} row {idx} "
+                f"ticker={str(row.get('ticker') or '').strip() or '<blank>'} "
+                f"must include one column from each group: {missing_groups}"
+            )
+    return _adapt_final_rank_family(cfg, rows, enforce_candidate_status=True)
 
 
 def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[CanonicalScore]:
@@ -662,6 +740,7 @@ def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
 
 _ADAPTERS: dict[str, Callable[[dict[str, Any], list[dict[str, str]]], list[CanonicalScore]]] = {
     "tech_family": _adapt_tech_family,
+    "industrial_family": _adapt_industrial_family,
     "biotech": _adapt_biotech,
     "med_devices": _adapt_med_devices,
 }
@@ -724,8 +803,9 @@ def run_adapter(cfg: dict[str, Any], sector_output_root: Path, run_as_of: str | 
         raise ValueError(f"Unknown adapter '{adapter_name}' for {cfg.get('model_family')}")
     source_file = _resolve_file(cfg, sector_output_root, run_as_of)
     rows = read_csv(source_file)
-    if adapter_name == "tech_family":
-        # Tech rank tables replay the CURRENT universe, so delisted members exist only in the
+    consumed_sidecar: Path | None = None
+    if adapter_name in {"tech_family", "industrial_family"}:
+        # Final-rank tables may replay the CURRENT universe, so delisted members can exist only in
         # Stage 11 survivorship panels. Merge sidecar-only rows the sector itself certifies as
         # calibration inputs (stage11_calibration_input_eligible_flag=1) so they flow through the
         # contract as calibration-only rows: their gate/oos flags keep them non-investable, and
@@ -752,6 +832,7 @@ def run_adapter(cfg: dict[str, Any], sector_output_root: Path, run_as_of: str | 
                     sidecar_source.name if sidecar_source else "",
                 )
                 rows = rows + list(merged.values())
+                consumed_sidecar = sidecar_source
     canonical = _ADAPTERS[adapter_name](cfg, rows)
     source_asof = _dominant([{"d": c.source_asof_date} for c in canonical], "d") if canonical else ""
     return AdapterResult(
@@ -760,4 +841,5 @@ def run_adapter(cfg: dict[str, Any], sector_output_root: Path, run_as_of: str | 
         source_file=source_file,
         source_asof_date=source_asof,
         rows=canonical,
+        source_files=tuple(path for path in (source_file, consumed_sidecar) if path is not None),
     )

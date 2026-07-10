@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import hashlib
+import json
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -110,6 +111,18 @@ MACRO_SERVING_CONTRACT_TABLES = [
     "foreign_sleeve_candidate_daily",
 ]
 
+REGIME_SOURCE_TABLES = {
+    "v1": "macro_regime_decision_daily",
+    "v2": "macro_regime_v2_decision_daily",
+}
+
+MACRO_REGIME_LABELS = {
+    "EXPANSION_DISINFLATION",
+    "HEATING_UP",
+    "SLOW_GROWTH",
+    "STAGFLATION",
+}
+
 
 def finite_or_blank(value: Any) -> float | str:
     try:
@@ -127,6 +140,35 @@ def int_or_blank(value: Any) -> int | str:
     if not math.isfinite(parsed):
         return ""
     return int(parsed)
+
+
+def regime_application_errors(row: dict[str, Any] | None) -> list[str]:
+    """Return reasons a regime row must not influence portfolio allocation."""
+    if row is None:
+        return ["missing_regime_row"]
+
+    errors: list[str] = []
+    coverage = finite_or_blank(row.get("coverage_flag"))
+    if coverage == "" or float(coverage) != 1.0:
+        coverage_detail = repr(coverage) if coverage == "" else f"{float(coverage):g}"
+        errors.append(f"coverage_flag={coverage_detail}")
+
+    current = str(row.get("active_current_regime") or "").strip()
+    next_regime = str(row.get("active_next_regime") or "").strip()
+    if current not in MACRO_REGIME_LABELS:
+        errors.append(f"invalid_current_regime={current!r}")
+    if next_regime not in MACRO_REGIME_LABELS:
+        errors.append(f"invalid_next_regime={next_regime!r}")
+
+    for field in ("current_confidence", "next_confidence"):
+        value = finite_or_blank(row.get(field))
+        if value == "" or not 0.0 <= float(value) <= 1.0:
+            errors.append(f"invalid_{field}={row.get(field)!r}")
+
+    reason = str(row.get("regime_override_reason") or "").strip().upper()
+    if "UNCOVERED" in reason:
+        errors.append(f"override_reason={reason}")
+    return errors
 
 
 def staleness_days(run_as_of: str, macro_as_of: str) -> int | None:
@@ -177,7 +219,80 @@ def _digest_value(value: Any) -> bytes:
     return str(value).encode("utf-8")
 
 
-def macro_serving_content_sha256(path: Path, run_as_of: str) -> str:
+def regime_table_for_source(source: str) -> str:
+    normalized = str(source or "").strip().lower()
+    if normalized not in REGIME_SOURCE_TABLES:
+        raise ValueError(f"Unsupported macro regime source {source!r}; expected one of {sorted(REGIME_SOURCE_TABLES)}.")
+    return REGIME_SOURCE_TABLES[normalized]
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_v2_promotion_manifest(
+    path: Path,
+    *,
+    model_version: str,
+    macro_config_path: Path,
+    builder_path: Path,
+    allowed_root: Path,
+) -> list[str]:
+    """Verify a v2 promotion seal and every artifact it transitively pins."""
+    resolved = path.expanduser().resolve()
+    root = allowed_root.expanduser().resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return [f"manifest_outside_v2_output_root={resolved}"]
+    if not resolved.is_file():
+        return [f"missing_manifest={resolved}"]
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"unreadable_manifest={type(exc).__name__}"]
+
+    errors: list[str] = []
+    if payload.get("acceptance") != "PROMOTABLE":
+        errors.append(f"manifest_acceptance={payload.get('acceptance')}")
+    if payload.get("model_version") != model_version:
+        errors.append("manifest_model_version_mismatch")
+    if not macro_config_path.is_file() or payload.get("config_sha256") != _file_sha256(macro_config_path):
+        errors.append("macro_config_hash_mismatch")
+    if not builder_path.is_file() or payload.get("builder_sha256") != _file_sha256(builder_path):
+        errors.append("promotion_builder_hash_mismatch")
+
+    for section, prefix in (
+        ("files", "promotion_artifact"),
+        ("upstream_files", "promotion_upstream"),
+    ):
+        entries = payload.get(section)
+        if not isinstance(entries, dict):
+            errors.append(f"invalid_{section}_mapping")
+            continue
+        for filename, expected_hash in entries.items():
+            artifact = (resolved.parent / str(filename)).resolve()
+            try:
+                artifact.relative_to(resolved.parent)
+            except ValueError:
+                errors.append(f"{prefix}_outside_manifest_dir:{filename}")
+                continue
+            if not artifact.is_file() or _file_sha256(artifact) != str(expected_hash):
+                errors.append(f"{prefix}_hash_mismatch:{filename}")
+    return errors
+
+
+def macro_serving_content_sha256(
+    path: Path,
+    run_as_of: str,
+    *,
+    regime_table: str = "macro_regime_decision_daily",
+    regime_model_version: str | None = None,
+) -> str:
     """Hash the deterministic serving DB rows consumed by the Stage 6 contract.
 
     The live SQLite file and its WAL sidecar are mutable storage artifacts: checkpoints, readers,
@@ -187,8 +302,21 @@ def macro_serving_content_sha256(path: Path, run_as_of: str) -> str:
     h = hashlib.sha256()
     conn = open_macro_serving_db(path)
     try:
+        selected_regime_table = regime_table_for_source(
+            "v2" if regime_table == REGIME_SOURCE_TABLES["v2"] else "v1"
+        )
+        if selected_regime_table != regime_table:
+            raise ValueError(f"Unsupported regime_table={regime_table!r}.")
+        if selected_regime_table == REGIME_SOURCE_TABLES["v2"] and not str(regime_model_version or "").strip():
+            raise ValueError("regime_model_version is required when hashing the v2 regime source.")
+        tables = [
+            selected_regime_table if table == REGIME_SOURCE_TABLES["v1"] else table
+            for table in MACRO_SERVING_CONTRACT_TABLES
+        ]
         h.update(f"run_as_of={run_as_of}\n".encode("utf-8"))
-        for table in MACRO_SERVING_CONTRACT_TABLES:
+        h.update(f"regime_table={selected_regime_table}\n".encode("utf-8"))
+        h.update(f"regime_model_version={regime_model_version or ''}\n".encode("utf-8"))
+        for table in tables:
             columns = _table_columns(conn, table)
             h.update(f"table={table}\n".encode("utf-8"))
             if not columns:
@@ -198,15 +326,24 @@ def macro_serving_content_sha256(path: Path, run_as_of: str) -> str:
             if "as_of_date" not in columns:
                 h.update(b"missing_as_of_date\n")
                 continue
-            as_of = latest_as_of(conn, table, run_as_of)
+            model_filter = regime_model_version if table == REGIME_SOURCE_TABLES["v2"] else None
+            as_of = latest_as_of(conn, table, run_as_of, model_version=model_filter)
             h.update(f"as_of={as_of or ''}\n".encode("utf-8"))
             if not as_of:
                 continue
             quoted_table = _quote_identifier(table)
             order_clause = ", ".join(_quote_identifier(col) for col in columns)
-            sql = f"SELECT * FROM {quoted_table} WHERE as_of_date = ? ORDER BY {order_clause}"
+            if model_filter is None:
+                sql = f"SELECT * FROM {quoted_table} WHERE as_of_date = ? ORDER BY {order_clause}"
+                params: tuple[Any, ...] = (as_of,)
+            else:
+                sql = (
+                    f"SELECT * FROM {quoted_table} WHERE as_of_date = ? AND model_version = ? "
+                    f"ORDER BY {order_clause}"
+                )
+                params = (as_of, model_filter)
             row_count = 0
-            for row in conn.execute(sql, (as_of,)):
+            for row in conn.execute(sql, params):
                 row_count += 1
                 for col in columns:
                     h.update(col.encode("utf-8"))
@@ -220,11 +357,23 @@ def macro_serving_content_sha256(path: Path, run_as_of: str) -> str:
     return h.hexdigest()
 
 
-def latest_as_of(conn: sqlite3.Connection, table: str, run_as_of: str) -> str | None:
-    row = conn.execute(
-        f"SELECT MAX(as_of_date) AS as_of_date FROM {table} WHERE as_of_date <= ?",
-        (run_as_of,),
-    ).fetchone()
+def latest_as_of(
+    conn: sqlite3.Connection,
+    table: str,
+    run_as_of: str,
+    *,
+    model_version: str | None = None,
+) -> str | None:
+    if model_version is None:
+        row = conn.execute(
+            f"SELECT MAX(as_of_date) AS as_of_date FROM {table} WHERE as_of_date <= ?",
+            (run_as_of,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            f"SELECT MAX(as_of_date) AS as_of_date FROM {table} WHERE as_of_date <= ? AND model_version = ?",
+            (run_as_of, model_version),
+        ).fetchone()
     value = None if row is None else row["as_of_date"]
     return str(value) if value else None
 
@@ -242,3 +391,44 @@ def single_latest_row(conn: sqlite3.Connection, table: str, run_as_of: str) -> s
     if not as_of:
         return None
     return conn.execute(f"SELECT * FROM {table} WHERE as_of_date = ? LIMIT 1", (as_of,)).fetchone()
+
+
+def single_latest_regime_row(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    run_as_of: str,
+    model_version: str | None = None,
+) -> sqlite3.Row | None:
+    normalized_source = str(source or "").strip().lower()
+    table = regime_table_for_source(normalized_source)
+    if normalized_source == "v1":
+        return single_latest_row(conn, table, run_as_of)
+    model = str(model_version or "").strip()
+    if not model:
+        raise ValueError("A model_version is required for the v2 regime source.")
+    as_of = latest_as_of(conn, table, run_as_of, model_version=model)
+    if not as_of:
+        return None
+    return conn.execute(
+        f"SELECT * FROM {table} WHERE as_of_date = ? AND model_version = ? LIMIT 1",
+        (as_of, model),
+    ).fetchone()
+
+
+def v2_promotion_status(
+    conn: sqlite3.Connection,
+    *,
+    model_version: str,
+    run_as_of: str,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT *
+        FROM macro_regime_v2_promotion_summary
+        WHERE model_version = ? AND evidence_as_of_date <= ?
+        ORDER BY evidence_as_of_date DESC
+        LIMIT 1
+        """,
+        (model_version, run_as_of),
+    ).fetchone()

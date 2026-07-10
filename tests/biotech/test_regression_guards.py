@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,13 @@ from typing import Any
 import pytest
 
 from tests.biotech.conftest import load_script_module
+
+
+def test_legacy_13f_date_parser_preserves_eleven_character_sec_dates() -> None:
+    module = load_script_module("54_backfill_legacy_13f_text_filings.py", "legacy_13f_date_regression")
+
+    assert module.parse_date("31-JAN-2025") == date(2025, 1, 31)
+    assert module.parse_date("2025-01-31T12:00:00Z") == date(2025, 1, 31)
 
 
 def test_sec_event_worker_exception_does_not_write_parse_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1095,3 +1103,216 @@ def test_phase1_score_sort_value_preserves_zero_scores() -> None:
 
     ranked = sorted(rows, key=lambda row: module.score_sort_value(row, "score"), reverse=True)
     assert [row["ticker"] for row in ranked] == ["POSITIVE", "ZERO", "MISSING"]
+
+
+def test_borrow_rank_lift_preserves_zero_score_and_zero_risk() -> None:
+    module = load_script_module("44_validate_biotech_borrow_rank_lift.py", "borrow_rank_zero_regression")
+    rows = [
+        {"ticker": "NEG", "score": -1.0, "risk_score": 0.0},
+        {"ticker": "ZHI", "score": 0.0, "risk_score": 100.0},
+        {"ticker": "ZLO", "score": 0.0, "risk_score": 0.0},
+    ]
+
+    ranked = module.rank_rows(rows, score_field="score")
+
+    assert [row["ticker"] for row in ranked] == ["ZLO", "ZHI", "NEG"]
+
+
+def test_borrow_diagnostics_treats_zero_financial_quality_as_distress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_script_module("40_validate_biotech_borrow_availability.py", "borrow_quality_zero_regression")
+    monkeypatch.setattr(
+        module,
+        "point_in_time_borrow_features",
+        lambda **_kwargs: {
+            "borrow_pressure_score": 40.0,
+            "borrow_rate_current": 0.20,
+            "borrow_data_available_flag": 1.0,
+        },
+    )
+    rows = [
+        {
+            "ticker": "AAA",
+            "asof_date": "2026-07-07",
+            "short_interest_pct_float": 0.20,
+            "forward_catalyst_score": 80.0,
+            "financial_quality_score_raw": 0.0,
+        }
+    ]
+
+    module.enrich_borrow_diagnostics(
+        rows,
+        history_by_ticker={},
+        snapshots_by_ticker={},
+        high_borrow_pressure_min=30.0,
+        elevated_borrow_pressure_min=20.0,
+        high_borrow_rate_min=0.15,
+        squeeze_short_interest_min=50.0,
+        squeeze_catalyst_min=60.0,
+        hard_to_borrow_shares=50_000.0,
+        max_fee_staleness_days=7,
+        max_snapshot_staleness_days=7,
+    )
+
+    assert rows[0]["borrow_distress_flag"] == 1.0
+    assert rows[0]["borrow_squeeze_setup_flag"] == 0.0
+
+
+def test_oos_role_honors_configured_lock_date() -> None:
+    module = load_script_module("11_score_biotech_index.py", "score_oos_lock_regression")
+    config = {"biotech_historical_sequence": {"strict_oos_start_date": "2026-07-07"}}
+
+    def row(asof: str) -> dict[str, Any]:
+        return {
+            "ticker": "AAA",
+            "asof_date": asof,
+            "source_snapshot_asof_date": asof,
+            "price_data_asof_date": asof,
+            "opportunity_score": 55.0,
+            "production_rank_score": 55.0,
+            "production_rank_score_field": "opportunity_score",
+            "biotech_cohort_investible_flag": 1.0,
+            "biotech_cohort_calibration_eligible_flag": 1.0,
+            "core_structural_veto_flag": 0.0,
+            "rank_quality_cap_vetoed": 0.0,
+            "allocation_bucket": "watch",
+            "calibration_only": 0.0,
+        }
+
+    rows = [row("2026-07-06"), row("2026-07-07")]
+    module.enrich_portfolio_layer_contract_rows(rows, config)
+
+    assert rows[0]["calibration_sample_role"] == "pre_lock_research"
+    assert rows[0]["oos_score_valid_flag"] == 0.0
+    assert rows[1]["calibration_sample_role"] == "strict_oos"
+    assert rows[1]["oos_score_valid_flag"] == 1.0
+
+
+def test_adcom_unknown_or_future_announcement_is_not_pit_visible() -> None:
+    module = load_script_module("10_build_biotech_features.py", "adcom_announcement_pit_regression")
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE fda_adcom_events(
+            company_id INTEGER,
+            ticker TEXT,
+            meeting_date TEXT,
+            committee TEXT,
+            drug_name TEXT,
+            indication TEXT,
+            vote_result TEXT,
+            source_url TEXT,
+            announced_date TEXT
+        );
+        INSERT INTO fda_adcom_events VALUES
+            (1, 'KNOWN', '2026-08-01', '', '', '', '', '', '2026-07-01'),
+            (2, 'UNKNOWN', '2026-08-01', '', '', '', '', '', NULL),
+            (3, 'FUTURE', '2026-08-01', '', '', '', '', '', '2026-07-08');
+        """
+    )
+
+    rows = module.load_fda_adcom_events(conn, date(2026, 7, 7), lookahead_days=120)
+
+    assert set(rows) == {1}
+
+
+def test_trial_status_override_is_not_applied_before_verification_date() -> None:
+    module = load_script_module("10_build_biotech_features.py", "trial_override_pit_regression")
+    evidence = module.pd.DataFrame(
+        [
+            {
+                "ticker": "AAA",
+                "nct_id": "NCT00000001",
+                "overall_status": "RECRUITING",
+                "is_active_status": "True",
+                "is_therapeutic": "True",
+                "qualifying_trial": "True",
+                "trial_score": "8.0",
+            }
+        ]
+    )
+    overrides = module.pd.DataFrame(
+        [
+            {
+                "enabled": "true",
+                "ticker": "AAA",
+                "nct_id": "NCT00000001",
+                "verified_date": "2026-04-22",
+                "override_status": "failed_parent_program",
+                "exclude_from_scoring": "true",
+            }
+        ]
+    )
+
+    before = module.apply_trial_status_overrides(evidence, overrides, asof_date=date(2026, 4, 21))
+    after = module.apply_trial_status_overrides(evidence, overrides, asof_date=date(2026, 4, 22))
+
+    assert str(before.iloc[0].get("outcome_override_applied") or "") == ""
+    assert after.iloc[0]["outcome_override_applied"] == "True"
+    assert after.iloc[0]["qualifying_trial"] == "False"
+
+
+def test_ctgov_manual_decision_requires_verification_by_asof() -> None:
+    module = load_script_module("05_audit_ctgov_trial_links.py", "ctgov_manual_decision_pit_regression")
+    row = {"manual_verified_date": "2026-05-27"}
+
+    assert not module.row_verified_asof(row, asof_date=date(2026, 5, 26), field="manual_verified_date")
+    assert module.row_verified_asof(row, asof_date=date(2026, 5, 27), field="manual_verified_date")
+    assert not module.row_verified_asof({}, asof_date=date(2026, 5, 27), field="manual_verified_date")
+
+
+def test_oos_diagnostic_zero_lcb_beats_negative_lcb() -> None:
+    module = load_script_module("58_diagnose_biotech_oos_calibration.py", "oos_zero_lcb_regression")
+    rows = [
+        {
+            "horizon_days": "120",
+            "top_n": "10",
+            "sample": "all",
+            "candidate_name": "zero_lcb",
+            "test_selected_lcb_return_pct": "0.0",
+        },
+        {
+            "horizon_days": "120",
+            "top_n": "10",
+            "sample": "all",
+            "candidate_name": "negative_lcb",
+            "test_selected_lcb_return_pct": "-1.0",
+        },
+    ]
+
+    best = module.best_by_scope_rows(rows)
+
+    assert best[0]["candidate_name"] == "zero_lcb"
+
+
+def test_optuna_help_formats_percent_text(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    module = load_script_module("46_optuna_biotech_candidate_optimizer.py", "optuna_help_regression")
+    monkeypatch.setattr(sys, "argv", ["46_optuna_biotech_candidate_optimizer.py", "--help"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.parse_args()
+
+    assert exc_info.value.code == 0
+    assert "Maximum 20% loss rate" in capsys.readouterr().out
+
+
+def test_ranked_report_surfaces_portfolio_contract_fields() -> None:
+    module = load_script_module("12_publish_biotech_reports.py", "report_portfolio_contract_regression")
+    row = {
+        "ticker": "AAA",
+        "top_evidence_json": "{}",
+        "portfolio_candidate_gate": 1.0,
+        "portfolio_candidate_score": 55.0,
+        "portfolio_candidate_status": "eligible",
+        "portfolio_candidate_reason": "promoted_policy",
+        "calibration_sample_role": "strict_oos",
+        "oos_score_valid_flag": 1.0,
+    }
+
+    flattened = module.flatten_score_row(row)
+
+    assert flattened["portfolio_candidate_gate"] == 1.0
+    assert flattened["portfolio_candidate_reason"] == "promoted_policy"
+    assert flattened["calibration_sample_role"] == "strict_oos"
+    assert {"portfolio_candidate_gate", "oos_score_valid_flag"}.issubset(module.TOP_SCORE_FIELDS)

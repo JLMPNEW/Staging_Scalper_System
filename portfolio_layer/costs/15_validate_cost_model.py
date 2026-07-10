@@ -357,17 +357,32 @@ def main() -> int:  # noqa: C901
         prior_w = f(d.get("prior_weight") or 0.0, f"decision:{ticker}.prior_weight")
         target_w = f(d.get("target_weight") or 0.0, f"decision:{ticker}.target_weight")
         actual_w = adjusted_by_ticker.get(ticker, 0.0)
+        raw_scale = d.get("budget_scale")
+        budget_scale = f(1.0 if raw_scale in (None, "") else raw_scale, f"decision:{ticker}.budget_scale")
+        if not 0.0 < budget_scale <= 1.0 + 1e-12:
+            decision_bad.append(f"{ticker}:invalid_budget_scale={budget_scale}")
+            continue
         if decision in ("open", "execute"):
-            expected_w = target_w
+            expected_pre_scale = target_w
         elif decision == "drop_to_cash":
-            expected_w = 0.0
+            expected_pre_scale = 0.0
         elif decision == "suppress_keep_prior":
-            expected_w = prior_w
+            expected_pre_scale = prior_w
             if prior_w > 0:
                 prior_kept.add(ticker)
         else:
             decision_bad.append(f"{ticker}:unknown_decision={decision}")
             continue
+        expected_w = expected_pre_scale * budget_scale
+        raw_applied = d.get("applied_weight")
+        if raw_applied in (None, ""):
+            decision_bad.append(f"{ticker}:missing_applied_weight")
+            continue
+        recorded_applied = f(raw_applied, f"decision:{ticker}.applied_weight")
+        if abs(recorded_applied - expected_w) > 1e-8:
+            decision_bad.append(
+                f"{ticker}:{decision} recorded={recorded_applied:.10f} expected={expected_w:.10f}"
+            )
         if abs(actual_w - expected_w) > 1e-8:
             decision_bad.append(f"{ticker}:{decision} actual={actual_w:.10f} expected={expected_w:.10f}")
     allowed_adjusted = set(target_weights) | prior_kept

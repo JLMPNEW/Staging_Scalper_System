@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 from collections import Counter
 from datetime import date, datetime, timezone
@@ -23,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
@@ -183,6 +185,7 @@ def main() -> int:  # noqa: C901
     ]
     outputs = [trade_path, trade_meta_path, report_path, summary_path, adjusted_path, decisions_path, meta_path, *downstream]
     if args.force:
+        invalidate_dependents(run_dir, "blacklitterman")
         _unlink_existing(outputs)
     try:
         fail_if_exists(outputs, force=args.force)
@@ -421,8 +424,52 @@ def main() -> int:  # noqa: C901
     write_csv(decisions_path, DECISION_FIELDS, sorted(decision_rows, key=lambda r: r["ticker"]))
 
     n_dropped = sum(1 for d in decision_rows if d["decision"] == "drop_to_cash")
-    rec("bl_cost_overlay_built", "PASS", f"trades={len(trade_rows)} orders={n_orders} dropped={n_dropped} cash={cash_weight:.6f}")
-    rec("bl_cost_uses_stage4_policy", "PASS", f"spread_mode={summary['spread_mode']} one_way_bps={summary['one_way_cost_bps_of_aum']}")
+    overlay_bad: list[str] = []
+    adjusted_map: dict[str, float] = {}
+    for row in adjusted_rows:
+        ticker = str(row["ticker"]).strip().upper()
+        weight = float(row["weight"])
+        if ticker in adjusted_map:
+            overlay_bad.append(f"duplicate_adjusted_ticker:{ticker}")
+        if not math.isfinite(weight) or weight < -EPS:
+            overlay_bad.append(f"invalid_adjusted_weight:{ticker}={weight}")
+        adjusted_map[ticker] = weight
+    if list(adjusted_map).count("CASH") != 1:
+        overlay_bad.append("cash_row_count_not_one")
+    if abs(sum(adjusted_map.values()) - 1.0) > 1e-8:
+        overlay_bad.append(f"adjusted_sum={sum(adjusted_map.values()):.12f}")
+    if not set(adjusted_map).issubset(set(target) | set(prior) | {"CASH"}):
+        overlay_bad.append(f"new_tickers={sorted(set(adjusted_map) - set(target) - set(prior) - {'CASH'})[:8]}")
+    rec(
+        "bl_cost_overlay_built",
+        "PASS" if not overlay_bad else "FAIL",
+        f"trades={len(trade_rows)} orders={n_orders} dropped={n_dropped} cash={cash_weight:.6f}"
+        if not overlay_bad else f"{overlay_bad[:8]}",
+    )
+
+    policy_bad: list[str] = []
+    orders_by_ticker = {str(row["ticker"]).strip().upper(): int(row["n_orders"]) for row in trade_rows}
+    for row in cost_rows:
+        ticker = str(row["ticker"]).strip().upper()
+        notional = float(row["trade_notional"])
+        half_bps = float(row["half_spread_bps_used"])
+        expected_spread = half_bps / 1e4 * notional
+        expected_commission = comm_base * orders_by_ticker.get(ticker, 0)
+        expected_total = expected_spread + expected_commission + float(row["impact_cost"])
+        if abs(float(row["spread_cost"]) - expected_spread) > 1e-3:
+            policy_bad.append(f"{ticker}:spread_formula")
+        if abs(float(row["commission_base"]) - expected_commission) > 1e-3:
+            policy_bad.append(f"{ticker}:commission_formula")
+        if abs(float(row["total_cost_base"]) - expected_total) > 2e-3:
+            policy_bad.append(f"{ticker}:total_formula")
+    if abs(one_way_base - sum(float(row["total_cost_base"]) for row in cost_rows)) > 1e-6:
+        policy_bad.append("aggregate_cost_mismatch")
+    rec(
+        "bl_cost_uses_stage4_policy",
+        "PASS" if not policy_bad else "FAIL",
+        f"spread_mode={summary['spread_mode']} one_way_bps={summary['one_way_cost_bps_of_aum']}"
+        if not policy_bad else f"{policy_bad[:8]}",
+    )
     passed = all(c["status"] == "PASS" for c in checks)
     meta = {
         "run_as_of": run_as_of,

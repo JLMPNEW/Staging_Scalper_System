@@ -88,7 +88,7 @@ def parse_asof(raw: object) -> date:
     return parse_date(raw) or date.today()
 
 
-def safe_float(raw: object) -> float | None:
+def safe_float(raw: Any) -> float | None:
     try:
         value = float(raw)
     except (TypeError, ValueError):

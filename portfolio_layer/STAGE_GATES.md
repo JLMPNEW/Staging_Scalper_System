@@ -456,6 +456,29 @@ Stage 6 maps MacroLayer industry/aggregate/sector fits to those sleeves through
 **PIT rule:** every MacroLayer table is queried as `MAX(as_of_date) <= run_as_of`. The adapter may use a
 newer MacroLayer DB seed, but it must never consume rows after the portfolio run's as-of date.
 
+**Regime calibration boundary:** `macro.regime_source` is the only active-source selector and remains
+`v1` by default. The
+versioned v2 research calibration predicts independent first-release outcomes (real-GDP growth at/above
+the configured resilience threshold and four-way CPI/PCE inflation at/above the configured pressure
+threshold) with expanding ridge-logistic fits. It then passes through the same smoothing, transition, and
+hysteresis primitives as v1, but writes only namespaced `macro_probability_v2_*`, `macro_regime_v2_*`, and
+`macro_transition_v2_*` tables. Promotion requires all four probability cells to pass on the same common,
+independent OOS outcomes: configured sample and class-count floors, positive Brier skill versus expanding
+climatology, non-negative Brier improvement versus v1, AUC at or above the configured floor, and a
+calibration slope inside the configured interval. The evidence builder emits a dated sealed verdict.
+Changing the selector to `v2` fails closed unless the SQLite verdict is `PROMOTABLE`, the selected model
+version and evidence date match the selected decision, the manifest is under `MacroLayer/out/regime_v2`,
+and every manifest, artifact, builder, config, and upstream hash is current. Current-day confidence is a
+decision/hysteresis input, not a model-promotion criterion. `PASS`, `INSUFFICIENT_DATA`, or
+`NOT_PROMOTABLE` never activates v2.
+
+**V2 history-readiness audit:** every v2 evidence build runs a local, read-only audit after promotion
+validation. It computes each cell's OOS/class deficit, the earlier model-ready date needed to meet the
+configured sample floor, and expands mandatory composites into their raw PIT/vintage dependencies while
+accounting for feature lookback and standardization warmup. The dated report is diagnostic and sealed; it
+never weakens promotion gates. Optional `--probe-fred` checks ALFRED's earliest provider vintage manually
+and is excluded from the unattended DAG so network availability cannot block a daily portfolio run.
+
 **Build:**
 1. `MacroLayer/00_validate_macro_layer_foundation.py` - foundation check for the vendored engine.
 2. `macro/20_run_macro_serving.py` - optional convenience runner for the vendored serving DAG; always
@@ -468,6 +491,8 @@ newer MacroLayer DB seed, but it must never consume rows after the portfolio run
 
 **Acceptance tests:**
 - **independence_shadow_only** - macro wrapper has no PROD path token; `macro.enabled_in_production=false`.
+- **regime_source_selection** - config, contract metadata, allowlisted source table, model version, SQLite
+  promotion verdict, and the transitive v2 promotion seal agree; v1 remains the default.
 - **macro_contract_schema** - all Stage 6 CSVs expose exact schemas expected by Stage 7.
 - **stage1_contract_unchanged** - `stocks_scores.csv` still matches the sealed Stage 1 manifest and the
   macro build metadata pins the same hash.
@@ -812,7 +837,7 @@ constraint, harvest-staggering so realized gains spread over time).
 **Goal:** the rigorous gate wrapping the combined system; lockbox period untouched until final.
 
 **Binding protocol:** `docs/LOCKBOX_PROTOCOL.md` (declared 2026-06-27, sealed BEFORE any historical
-replay/calibration result was inspected). It fixes the windows — development 2024-01-02..2025-12-31,
+replay/calibration result was inspected). It fixes the windows — development 2019-01-04..2025-12-31,
 lockbox 2026-01-01..Open Event — plus purge/embargo rules, the registered comparison arms (payout
 excluded by default), promotion criteria, the one-open policy, and enforcement (`65`/`66`/`16` refuse
 sealed dates without `--lockbox-open`; manifests record the protocol file's sha256).
@@ -821,16 +846,16 @@ sealed dates without `--lockbox-open`; manifests record the protocol file's sha2
 
 | area | current implementation / data status | still required for full Stage 11 |
 |---|---|---|
-| Sector score snapshots | Stage 1 consumes dated sector files and emits sealed `stocks_scores.csv` snapshots. Med-devices has generated daily `score_review_pack/<yyyy-mm-dd>/med_device_daily_composite_scores.csv` history from 2019-01-04 through current, with candidate gate, candidate score, model/version fields, calibration eligibility, component scores, and liquidity/capacity fields. Tech/biotech historical file generation is in progress. | Generate the same PIT dated Stage-1-consumed CSV history for biotech, semiconductors, technology hardware, and software infrastructure. Each file must include `asof_date`, ticker/company/taxonomy, native score, investability gate, `calibration_eligible_flag`, score/model/scoring versions, confidence/data-completeness, component scores, review/veto reasons, and `avg_dollar_volume_60d` when available. |
-| Stage 1 replay | Current Stage 1 can build the live canonical contract and already points med-devices to the dated path template. It preserves source hashes, duplicate-resolution provenance, finite/range gates, canonical overrides, and model/version fields where published. | Add/run the historical replay driver that iterates dates, requires all enabled sectors for each date, writes one sealed `stocks_scores.csv` snapshot per date, and stores a PIT snapshot index/table. Historical replay must fail loudly on missing sector files, score-scale drift, stale/mixed as-of dates, or missing calibration-critical fields. |
-| Forward returns | Stage 2 owns the live/current price panel and covariance model. | Build Stage 11 target-generation over historical snapshots: 21d, 63d, 126d, and 252d forward returns; sector-excess returns; benchmark returns; drawdown targets; and factor-residual returns. Targets must align `snapshot_as_of_date` to future returns without look-ahead. |
-| Survivorship | Stage 2 is intentionally live/current-book oriented and does not solve long-horizon survivorship. Some sectors have delisted/Norgate support outside the portfolio layer. | Build `backtest/15b_build_survivorship_panel.py`: a survivorship-complete return panel for historical backtests. Use layer-owned ingestion or published sector delisted-price exports, never live reads of sector DBs. Yahoo-only history is not acceptable for the full Stage 11 backtest because delisted names disappear. |
-| Benchmarks / factors | Stage 2 already carries broad and sleeve ETFs used for risk, rotation, and factor decomposition. | Ensure historical benchmark/ETF coverage exists for every snapshot date and forward-return horizon: SPY/QQQ plus sleeve ETFs such as SMH/SOXX, XBI, IHI, and configured software/hardware/foreign proxies. |
-| Macro regime | Stage 6 produces a sealed macro contract from independent MacroLayer outputs with PIT `MAX(as_of_date) <= run_as_of` semantics. | Build historical macro-regime joins for each score snapshot date, including regime label, gross scalar, sector macro fits, and foreign-budget state. Historical macro features must use vintages/releases available by the snapshot date. |
-| Rotation state | Stage 5 produces sealed rotation signals and optimizer-compatible sector states. | Recompute or load historical rotation state for each snapshot date using only prices available at that date. Join `Positive`/`Neutral`/`Negative` sleeve state and foreign eligibility to the PIT snapshot store. |
+| Sector score snapshots | Stage 1 consumes the final dated sector exports; research/65 archives immutable, hash-sealed canonical snapshots. Historical exports and technology survivorship sidecars use the agreed Stage 11 fields. | Keep all enabled sectors publishing each trading date. Fill remaining date gaps and publish delisted-price/events exports; never substitute current-universe replay rows for survivorship-correct calibration rows. |
+| Stage 1 replay | `research/65_build_pit_score_snapshot_store.py` implements archive/replay/validate/supersede, requires the complete sector set, and records raw/config/override hashes plus the lockbox partition. | Run `65 --replay` incrementally as sector generation progresses; resolve every missing-sector/date or schema/scale failure before fitting. No additional replay subsystem is pending. |
+| Forward returns | `research/66_define_calibration_targets.py` emits PIT 21d/63d/126d/252d returns, sector/SPY excess and residual labels, drawdown, realized volatility, terminal delisting handling, and lockbox-purge eligibility. | Rebuild after snapshot/panel expansion and wait for complete forward windows. No label-engine build is pending. |
+| Survivorship | `backtest/15b_build_survivorship_panel.py` builds and seals the historical panel with warm-up history, aliases, delisted exports/events, seam checks, right-edge finality, and explicit `ended_uncovered` flags. | Raise completeness by publishing sector delisted-price/events exports, especially biotech; uncovered names remain excluded from promoted training. Yahoo-only history is not promotion-grade. |
+| Benchmarks / factors | 15b/66 validate and consume the configured broad/sleeve ETF history; missing market-instrument coverage is a hard panel failure. | Maintain full historical coverage whenever a sector or benchmark mapping is added. |
+| Macro regime | Stage 6 is independent and sealed; research/67 joins PIT macro regime/sector/stock/foreign state with vintage checks and hashes the serving DB. | Continue point-in-time raw/serving refreshes; resolve missing historical vintages rather than backfilling with latest revised values. |
+| Rotation state | Research/67 recomputes historical rotation from the matching accepted survivorship panel and distinguishes real states from missing-panel placeholders. | No engine build is pending; maintain ETF warm-up coverage and rerun 67 whenever 15b changes. |
 | Risk / liquidity state | Stages 2, 2.5, and 4 build current risk eligibility, covariance, liquidity snapshots, and transaction-cost overlays. | Store historical risk eligibility, coverage reason, spread/cost assumptions, ADV/capacity, and cost estimates by snapshot date. Liquidity can use historical IB spread samples when available, then latest-prior fallback, then documented default spread. |
-| BL / sleeves / exits | Stages 7, 8, 8.5, and 9 are implemented as sealed shadow layers: BL fusion, sleeve risk proposal, broker ledger ingestion, and actual-holdings exits. | For Stage 11, replay these layers through time as comparison arms: AQR-only, +rotation, +macro/BL, +sleeves, +exits. Exit tests require historical or replayed holdings/ledger state; otherwise exits remain a current-book diagnostic until Stage 12 orchestration/backtest support exists. |
-| Calibration model | Stage 1 slopes are provisional; Stage 7 consumes them as annual alpha views but does not prove the payoff. | Estimate payoff slopes by sector, horizon, and regime after enough PIT snapshots exist. Start with within-sector/date standardization and ridge shrinkage; add elastic-net and Bayesian hierarchical shrinkage only after basic diagnostics are stable. Emit calibrated slopes plus confidence intervals back to Stage 1/Stage 7 only after OOS gates pass. |
+| BL / sleeves / exits | Stages 7–9 are sealed shadow layers. Stage 16 replays AQR, rotation, macro/BL, sleeves, regime-gate and regime-lever arms; 16c tests sector-neutral active weights. | Historical exits still require replayed holdings/lot state. Keep exits current-book diagnostic until that state exists; promote no overlay without net-of-cost lockbox evidence. |
+| Calibration model | Research/67 standardizes the joined panel; 68 fits ridge/Fama-MacBeth slopes; 69 performs purged OOS validation; 71 validates regime cells; 72 runs component IC with global FDR; 70 emits feedback only from approved evidence. | Accumulate independent windows and lockbox evidence. Add elastic-net/Bayesian hierarchy only after ridge cells are stable; apply no Stage 1/7 slope until 69/71/70 and protocol gates approve it. |
 | Optional modules | Forecasting (6.7) and hedging (7.5) are intentionally deferred. | Test ML forecasting and hedging only inside Stage 11 after the rule-based stack has a valid OOS baseline. They remain shadow-only unless they beat the simpler stack OOS net of cost. |
 
 **Minimum Stage 11 dataset row:** one row per `(snapshot_as_of_date, ticker)` containing the sealed Stage 1
@@ -853,21 +878,19 @@ practical minimum for stable sector/horizon/regime calibration. Weekly sampling 
 or lower-overlap diagnostics, but the raw snapshot store should remain daily so Stage 11 can choose the
 proper sampling cadence without losing information.
 
-**Build - optimal Stage 11 sequence:**
-- `backtest/15b_build_survivorship_panel.py` - the **survivorship-complete** return panel. Delisted/Norgate
-  history is mandatory here, unlike Stage 2's live-only panel. Source decision: self-ingest delisted history
-  into the layer vs. consume each sector's *published* delisted-price export - never a live sector-DB read.
-- `research/65_build_pit_score_snapshot_store.py` - PIT snapshot history for score calibration: score rows,
-  eligibility/risk status, sector/sleeve membership, regime label, rotation state, and sealed source hashes.
-- `research/66_define_calibration_targets.py` - forward-return targets needed first:
-  `forward_return_21d`, `forward_return_63d`, `forward_return_126d`,
-  `forward_excess_return_vs_sector`, `drawdown_next_63d`, and `regime_at_snapshot`.
-- `backtest/16_run_ablation_walkforward.py` - walk-forward across the existing rule-based stack:
-  AQR-only, +rotation, +macro/BL, +sleeves, +exits, net of cost.
-- `backtest/16b_run_regime_parameter_sweep.py` - research-only regime-gated parameter sweep over the
-  Stage 16 `regime_lever` arm: supportive-regime score multiplier, rebalance cadence, and unsupported-regime
-  fallback mode. It emits evidence only; promotion still requires the Stage 11 lockbox gates.
-- `backtest/17_publish_lockbox_ledger.py` - sealed out-of-sample ledger.
+**Implemented Stage 11 evidence sequence (run in this order):**
+- `research/65_build_pit_score_snapshot_store.py` - immutable PIT score archive/replay.
+- `backtest/15b_build_survivorship_panel.py` - survivorship panel with published delisted exports/events.
+- `research/66_define_calibration_targets.py` - 21d/63d/126d/252d forward, excess/residual and risk labels.
+- `research/67_join_calibration_panel.py` - PIT macro/rotation/sidecar joins and within-date/sector features.
+- `research/68_fit_ridge_alpha_slopes.py` - ridge/Fama-MacBeth slope evidence.
+- `research/69_validate_stage11_calibration.py` and `71_validate_regime_conditional_calibration.py` -
+  purged OOS unconditional and regime-conditional validation.
+- `research/72_component_ic_by_regime.py` - component-level IC with global multiplicity control.
+- `research/70_apply_calibration_feedback.py` - sealed proposal only for cells that passed the evidence gates.
+- `backtest/16_run_ablation_walkforward.py`, `16b_run_regime_parameter_sweep.py`, and
+  `16c_sector_neutral_active_arm.py` - net-of-cost overlay, parameter-grid, and active-weight tests.
+- `backtest/17_publish_lockbox_ledger.py` - one-time sealed OOS publication after the Open Event.
 
 Only after those pass should optional modules be tested: `forecast/67_train_models.py` /
 `forecast/67_calibrate.py` for ML forecasting, and `hedging/75_run_hedging_overlay.py` for hedging. They are
@@ -913,7 +936,7 @@ calibration module, not a premature Stage 1 rewrite.
 portfolio-level kill-switch.
 
 **Build:** `orchestration/18_run_portfolio_pipeline.py` core DAG:
-`scores -> risk -> liquidity/costs -> rotation -> macro -> BL -> sleeves -> exits -> payout`.
+`scores -> risk -> liquidity/costs -> rotation -> macro -> BL -> sleeves -> ledger/exits -> payout -> governor -> final`.
 Optional branches (`forecast`, `hedging`) are disabled unless Stage 11 OOS validation promotes them.
 `orchestration/19_run_risk_governor.py` handles drawdown circuit-breaker + regime kill-switch using the
 rule-based stack first; ML/hedging governors are later optional plugins, not baseline dependencies.

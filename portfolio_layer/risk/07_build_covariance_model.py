@@ -27,8 +27,11 @@ from scipy.cluster.hierarchy import fcluster, linkage  # noqa: E402
 from scipy.spatial.distance import squareform  # noqa: E402
 from sklearn.covariance import OAS, LedoitWolf  # noqa: E402
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists, read_csv, sha256_file, write_csv, write_manifest, write_via_temp,
+)
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.covariance_utils import safe_cond, stabilize_covariance, symmetrize  # noqa: E402
@@ -94,7 +97,8 @@ def main() -> int:  # noqa: C901
     if not run_as_of:
         LOGGER.error("No run found under %s", runs_root)
         return 1
-    risk_dir = runs_root / run_as_of / "risk"
+    run_dir = runs_root / run_as_of
+    risk_dir = run_dir / "risk"
     returns_path = risk_dir / "returns_panel.csv"
     coverage_path = risk_dir / "risk_coverage.csv"
     if not (returns_path.exists() and coverage_path.exists()):
@@ -106,6 +110,7 @@ def main() -> int:  # noqa: C901
     meta_path = risk_dir / "covariance_meta.json"
     outliers_path = risk_dir / "return_outliers.csv"
     if args.force:
+        invalidate_dependents(run_dir, "risk")
         unlink_artifacts([
             risk_dir / "data_quality_review.csv",
             risk_dir / "validation" / "risk_panel_validation.csv",
@@ -236,10 +241,10 @@ def main() -> int:  # noqa: C901
     index_labels = pd.Index(names, name="ticker")
     column_labels = pd.Index(names)
     period_cov_df = pd.DataFrame(C_period_fixed, index=index_labels, columns=column_labels)
-    period_cov_df.to_csv(period_cov_path, lineterminator="\n")
+    write_via_temp(period_cov_path, lambda temp: period_cov_df.to_csv(temp, lineterminator="\n"))
 
     cov_df = pd.DataFrame(C_fixed, index=index_labels, columns=column_labels)
-    cov_df.to_csv(cov_path, lineterminator="\n")
+    write_via_temp(cov_path, lambda temp: cov_df.to_csv(temp, lineterminator="\n"))
 
     # Hierarchical clusters from correlation distance (clustering-sanity gate).
     std = np.sqrt(np.diag(C_fixed))

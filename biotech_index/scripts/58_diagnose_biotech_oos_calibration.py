@@ -16,6 +16,7 @@ import json
 import math
 import os
 import sqlite3
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,9 +25,16 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+
+
+DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_SEQUENCE_DIR = PROJECT_ROOT / "output" / "biotech_index_reports" / "clean_historical_sequence_20190104_20260702"
 DEFAULT_CALIBRATION_DIR = DEFAULT_SEQUENCE_DIR / "candidate_calibration"
-DEFAULT_DB_PATH = Path(r"C:\Users\josel\Documents\STAGING\DB\biotech_index.sqlite")
 RETURN_BASIS_COLUMNS = {
     "absolute": "net_forward_return_pct",
     "xbi_alpha": "net_benchmark_alpha_return_pct",
@@ -110,8 +118,9 @@ class ReturnStats:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Diagnose biotech OOS calibration failures by cohort/regime/return basis.")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--calibration-dir", type=Path, default=DEFAULT_CALIBRATION_DIR)
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--lcb-z", type=float, default=1.0)
     return parser.parse_args()
@@ -135,6 +144,11 @@ def to_float(raw: object, default: float | None = None) -> float | None:
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default
+
+
+def float_or_default(raw: object, default: float) -> float:
+    value = to_float(raw, None)
+    return default if value is None else value
 
 
 def as_bool(raw: object) -> bool:
@@ -407,7 +421,7 @@ def holdout_diagnostic_rows(holdout_rows: list[dict[str, str]]) -> list[dict[str
             int(to_float(item.get("horizon_days"), 0.0) or 0.0),
             int(to_float(item.get("top_n"), 0.0) or 0.0),
             str(item.get("sample", "")),
-            -(to_float(item.get("test_lcb_return_pct"), -1e9) or -1e9),
+            -float_or_default(item.get("test_lcb_return_pct"), -1e9),
         )
     )
     return out
@@ -419,7 +433,7 @@ def best_by_scope_rows(holdout_rows: list[dict[str, str]]) -> list[dict[str, Any
         grouped[(str(row.get("horizon_days", "")), str(row.get("top_n", "")), str(row.get("sample", "")))].append(row)
     out: list[dict[str, Any]] = []
     for (horizon, top_n, sample), rows in sorted(grouped.items()):
-        best = max(rows, key=lambda item: to_float(item.get("test_selected_lcb_return_pct"), -1e9) or -1e9)
+        best = max(rows, key=lambda item: float_or_default(item.get("test_selected_lcb_return_pct"), -1e9))
         out.append(
             {
                 "horizon_days": horizon,
@@ -598,6 +612,13 @@ def write_markdown_summary(
 
 def main() -> None:
     args = parse_args()
+    config_path = args.config.expanduser().resolve()
+    config = load_yaml(config_path)
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db is not None
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=config_path.parent)
+    )
     calibration_dir = args.calibration_dir.resolve()
     output_dir = (
         args.output_dir.resolve()
@@ -613,7 +634,7 @@ def main() -> None:
 
     holdout_rows = read_csv_rows(holdout_path)
     dates, tickers = gather_selected_pairs(selected_path)
-    cohort_map = load_cohort_map(args.db, dates=dates, tickers=tickers)
+    cohort_map = load_cohort_map(db_path, dates=dates, tickers=tickers)
     selected_outputs = aggregate_selected_diagnostics(selected_path, cohort_map=cohort_map, lcb_z=float(args.lcb_z))
 
     holdout_diagnostics = holdout_diagnostic_rows(holdout_rows)
@@ -644,7 +665,7 @@ def main() -> None:
         "calibration_dir": str(calibration_dir),
         "selected_ticker_diagnostics": str(selected_path),
         "holdout_csv": str(holdout_path),
-        "db_path": str(args.db),
+        "db_path": str(db_path),
         "output_dir": str(output_dir),
         "holdout_rows": len(holdout_rows),
         "train_and_test_pass_rows": both_pass,

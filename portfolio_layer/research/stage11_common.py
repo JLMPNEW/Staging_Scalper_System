@@ -110,6 +110,14 @@ def _truthy_flag(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "1.0", "true", "yes"}
 
 
+VALID_FORWARD_STATUSES = frozenset({"ok", "ok_delisted_terminal"})
+
+
+def forward_status_is_valid(value: Any) -> bool:
+    """Whether a forward label represents a complete investable-horizon outcome."""
+    return str(value).strip() in VALID_FORWARD_STATUSES
+
+
 def admit_calibration_rows(rows: list[dict[str, str]]) -> tuple[list[dict[str, str]], dict[str, int]]:
     """Admit panel rows usable for promoted training, with full exclusion accounting.
 
@@ -202,6 +210,37 @@ def mean_t(values: list[float]) -> tuple[float | None, float | None, float | Non
         return mean, 0.0, None
     se = sd / math.sqrt(len(arr))
     return mean, se, mean / se
+
+
+def mean_t_hac(values: list[float], *, max_lag: int) -> tuple[float | None, float | None, float | None]:
+    """Mean and Newey-West HAC t-statistic for serially dependent observations.
+
+    Forward-return labels overlap heavily at multi-month horizons. Treating each daily cross-section
+    as independent materially understates uncertainty, so evidence gates use this estimator with a
+    lag tied to the target horizon.
+    """
+    if not values:
+        return None, None, None
+    arr = np.asarray(values, dtype=float)
+    if not np.isfinite(arr).all():
+        raise ValueError("HAC t-stat inputs must be finite")
+    mean = float(arr.mean())
+    n = len(arr)
+    if n < 3:
+        return mean, None, None
+    lag = min(max(0, int(max_lag)), n - 2)
+    centered = arr - mean
+    gamma0 = float(centered @ centered) / n
+    long_run_var = gamma0
+    for k in range(1, lag + 1):
+        gamma = float(centered[k:] @ centered[:-k]) / n
+        long_run_var += 2.0 * (1.0 - k / (lag + 1.0)) * gamma
+    # Finite samples can produce a slightly negative estimate from noisy autocovariances. A zero
+    # standard error is not evidence, so return no t-stat rather than an infinite one.
+    if long_run_var <= 0.0:
+        return mean, 0.0, None
+    se = math.sqrt(long_run_var / n)
+    return mean, se, mean / se if se > 0.0 else None
 
 
 def independent_windows(dates: list[str], horizon_days: int) -> int:

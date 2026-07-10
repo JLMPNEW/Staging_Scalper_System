@@ -424,23 +424,44 @@ def top_entry_exit_rows(
     return out
 
 
-def load_form4_staging_state(db_path: Path, config: dict[str, Any]) -> dict[str, Any]:
+def load_form4_staging_state(
+    db_path: Path,
+    config: dict[str, Any],
+    *,
+    report_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
     form4_path = resolve_path(cfg_get(config, "governance_events.form4_db_path"), base_dir=PACKAGE_ROOT)
     state = {
         "form4_db_path": str(form4_path),
         "form4_db_exists": 1 if form4_path.exists() else 0,
         "form4_db_is_staging": 1 if "STAGING" in str(form4_path).upper() else 0,
         "form4_snapshot_date": "",
+        "form4_snapshot_source": "",
+        "form4_db_latest_snapshot_date": "",
         "governance_rows_using_form4_staging": "",
     }
     if not form4_path.exists():
         return state
     try:
         with sqlite3.connect(f"file:{form4_path}?mode=ro", uri=True, timeout=10.0) as form4_conn:
-            row = form4_conn.execute("SELECT last_index_date FROM sec_form4_daily_state LIMIT 1").fetchone()
-            state["form4_snapshot_date"] = row[0] if row else ""
+            row = form4_conn.execute("SELECT MAX(last_index_date) FROM sec_form4_daily_state").fetchone()
+            state["form4_db_latest_snapshot_date"] = row[0] if row else ""
     except sqlite3.Error as exc:
-        state["form4_snapshot_date"] = f"error:{type(exc).__name__}"
+        state["form4_db_latest_snapshot_date"] = f"error:{type(exc).__name__}"
+
+    report_dates = sorted(
+        {
+            str(row.get("insider_data_asof_date") or "").strip()
+            for row in report_rows
+            if str(row.get("insider_data_asof_date") or "").strip()
+        }
+    )
+    if report_dates:
+        state["form4_snapshot_date"] = report_dates[-1]
+        state["form4_snapshot_source"] = "biotech_daily_scores.insider_data_asof_date"
+    else:
+        state["form4_snapshot_date"] = state["form4_db_latest_snapshot_date"]
+        state["form4_snapshot_source"] = "sec_form4_daily_state.max_last_index_date_fallback"
     try:
         with connect(db_path, timeout_sec=10.0) as conn:
             count = conn.execute(
@@ -505,7 +526,7 @@ def main() -> None:
         {"group": "ctgov_forward_catalyst_shadow_daily_scores_db", **row}
         for row in field_population(source_population_rows, CTGOV_FIELDS)
     ] + report_surface_rows(allocation_rows, source_fields, report_name="allocation_top_candidates")
-    form4_state = load_form4_staging_state(db_path, config)
+    form4_state = load_form4_staging_state(db_path, config, report_rows=daily_rows)
     ctgov_guardrail_violations = ctgov_shadow_guardrail_audit(source_population_rows)
     data_population.append(
         {
@@ -562,7 +583,14 @@ def main() -> None:
 
     snapshot_raw = str(form4_state.get("form4_snapshot_date") or "").strip()
     try:
-        snapshot_status = "PASS" if date.fromisoformat(snapshot_raw) >= date.fromisoformat(asof) else "WARN"
+        snapshot_day = date.fromisoformat(snapshot_raw)
+        report_day = date.fromisoformat(asof)
+        if snapshot_day > report_day:
+            snapshot_status = "FAIL"
+        elif snapshot_day == report_day:
+            snapshot_status = "PASS"
+        else:
+            snapshot_status = "WARN"
     except ValueError:
         snapshot_status = "FAIL" if snapshot_raw.startswith("error:") else "WARN"
     summary_rows = [
@@ -578,7 +606,14 @@ def main() -> None:
         status_row("discovery_file_rank_purpose", "PASS" if not discovery_violations else "FAIL", len(discovery_violations), "Discovery list must be discovery-only; avoid bucket names must be research-only."),
         status_row("form4_staging_db_exists", "PASS" if form4_state.get("form4_db_exists") else "FAIL", form4_state.get("form4_db_exists"), str(form4_state.get("form4_db_path"))),
         status_row("form4_staging_boundary", "PASS" if form4_state.get("form4_db_is_staging") else "FAIL", form4_state.get("form4_db_is_staging"), str(form4_state.get("form4_db_path"))),
-        status_row("form4_snapshot_date", snapshot_status, form4_state.get("form4_snapshot_date"), "Snapshot should be a valid ISO date at or after the report date."),
+        status_row(
+            "form4_snapshot_date",
+            snapshot_status,
+            form4_state.get("form4_snapshot_date"),
+            "Snapshot should equal the report date; "
+            f"source={form4_state.get('form4_snapshot_source')} "
+            f"db_latest={form4_state.get('form4_db_latest_snapshot_date')}",
+        ),
         status_row(
             "ctgov_shadow_guardrail",
             "FAIL" if db_read_error else ("PASS" if not ctgov_guardrail_violations else "FAIL"),

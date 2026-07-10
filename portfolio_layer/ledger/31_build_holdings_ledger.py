@@ -17,8 +17,17 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    read_csv,
+    read_manifest,
+    sealed_artifact_errors,
+    sha256_file,
+    write_csv,
+    write_manifest,
+)
 from portfolio_layer.core.db import connect, init_db  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
@@ -76,6 +85,34 @@ def _manual_overrides(config: dict[str, Any]) -> dict[str, list[dict[str, Any]]]
     return out
 
 
+def _manual_override_errors(
+    overrides: dict[str, list[dict[str, Any]]], *, run_as_of: str,
+) -> list[str]:
+    errors: list[str] = []
+    cutoff = date.fromisoformat(run_as_of)
+    for symbol, rows in sorted(overrides.items()):
+        seen: set[tuple[str, float]] = set()
+        for index, row in enumerate(rows, start=1):
+            quantity = parse_number(row.get("quantity"))
+            entry_text = str(row.get("entry_date", "")).strip()
+            try:
+                entry_date = date.fromisoformat(entry_text)
+            except ValueError:
+                entry_date = None
+            asset = str(row.get("asset_category", "Stocks")).strip() or "Stocks"
+            if quantity is None or float(quantity) <= 0.0:
+                errors.append(f"{symbol}[{index}]:quantity_must_be_positive")
+            if entry_date is None:
+                errors.append(f"{symbol}[{index}]:invalid_entry_date={entry_text!r}")
+            elif entry_date > cutoff:
+                errors.append(f"{symbol}[{index}]:future_entry_date={entry_text}")
+            key = (asset, float(quantity or 0.0))
+            if key in seen:
+                errors.append(f"{symbol}[{index}]:duplicate_asset_quantity_override")
+            seen.add(key)
+    return errors
+
+
 def _open_stock_positions(open_positions: list[dict[str, str]]) -> dict[str, dict[str, str]]:
     return {
         str(row.get("symbol", "")).strip().upper(): row
@@ -94,6 +131,27 @@ def _open_option_positions(open_positions: list[dict[str, str]]) -> dict[str, di
 
 def _trade_sort_key(row: dict[str, str]) -> tuple[str, int]:
     return (row.get("date_time", ""), int(_f(row.get("source_row"))))
+
+
+def _trades_after_prior(
+    trades: list[dict[str, str]], prior_as_of: str | None,
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Return only trades not already represented by carried-forward prior lots."""
+    if prior_as_of is None:
+        return list(trades), []
+    cutoff = date.fromisoformat(prior_as_of)
+    filtered: list[dict[str, str]] = []
+    errors: list[str] = []
+    for row in trades:
+        raw_date = str(row.get("trade_date", "")).strip()[:10]
+        try:
+            trade_date = date.fromisoformat(raw_date)
+        except ValueError:
+            errors.append(f"source_row={row.get('source_row')}:invalid_trade_date={raw_date!r}")
+            continue
+        if trade_date > cutoff:
+            filtered.append(row)
+    return filtered, errors
 
 
 def _previous_ledger_inputs(runs_root: Path, run_as_of: str) -> tuple[str | None, Path | None, Path | None]:
@@ -506,7 +564,8 @@ def main() -> int:
     if not run_as_of:
         LOGGER.error("No imported IB ledger run found under %s", runs_root)
         return 1
-    ledger_dir = runs_root / run_as_of / "ledger"
+    run_dir = runs_root / run_as_of
+    ledger_dir = run_dir / "ledger"
     input_paths = {
         "ib_statement_meta.json": ledger_dir / "ib_statement_meta.json",
         "broker_statement_sources.csv": ledger_dir / "broker_statement_sources.csv",
@@ -532,6 +591,7 @@ def main() -> int:
         "ledger_build_meta.json": ledger_dir / "ledger_build_meta.json",
     }
     if args.force:
+        invalidate_dependents(run_dir, "ledger")
         for path in out_paths.values():
             if path.exists():
                 path.unlink()
@@ -541,14 +601,28 @@ def main() -> int:
         LOGGER.error("%s", exc)
         return 1
 
-    meta30 = json.loads(input_paths["ib_statement_meta.json"].read_text(encoding="utf-8"))
-    if meta30.get("acceptance") != "PASS":
-        LOGGER.error("Stage 30 import acceptance is not PASS: %s", meta30.get("acceptance"))
+    meta30 = read_manifest(input_paths["ib_statement_meta.json"])
+    stage30_errors: list[str] = []
+    raw_source = meta30.get("raw_source") or {}
+    if str(raw_source.get("period_end", "")) != run_as_of:
+        stage30_errors.append(f"statement_period_end={raw_source.get('period_end')} expected={run_as_of}")
+    for name, path in input_paths.items():
+        if name == "ib_statement_meta.json":
+            continue
+        stage30_errors.extend(
+            sealed_artifact_errors(meta30, path, name, run_as_of=run_as_of)
+        )
+    if stage30_errors:
+        LOGGER.error("Stage 30 normalized artifacts are unsealed/stale: %s", stage30_errors[:12])
         return 1
     source_sha = (meta30.get("raw_source") or {}).get("sha256", "")
     statement_sources = read_csv(input_paths["broker_statement_sources.csv"])
     if not statement_sources:
         LOGGER.error("broker_statement_sources.csv has zero rows (damaged import artifact); re-run 30")
+        return 1
+    current_account = str(statement_sources[0].get("account_id", "")).strip()
+    if not current_account:
+        LOGGER.error("Current statement has no account_id; refusing ledger lineage")
         return 1
     open_positions = read_csv(input_paths["broker_open_positions.csv"])
     net_stock_positions = read_csv(input_paths["broker_net_stock_positions.csv"])
@@ -561,24 +635,69 @@ def main() -> int:
     securities_lending = read_csv(input_paths["broker_securities_lending.csv"])
 
     prior_as_of, prior_manifest_path, prior_lots_path = _previous_ledger_inputs(runs_root, run_as_of)
-    prior_lots = read_csv(prior_lots_path) if prior_lots_path is not None else []
+    prior_lots: list[dict[str, str]] = []
+    if prior_as_of and prior_manifest_path is not None and prior_lots_path is not None:
+        prior_manifest = read_manifest(prior_manifest_path)
+        prior_errors = sealed_artifact_errors(
+            prior_manifest, prior_lots_path, "holding_lots", run_as_of=prior_as_of,
+        )
+        if prior_errors:
+            LOGGER.error("Prior ledger %s is unsealed/stale: %s", prior_as_of, prior_errors)
+            return 1
+        prior_import_path = prior_manifest_path.parent / "ib_statement_meta.json"
+        if not prior_import_path.exists():
+            LOGGER.error("Prior ledger %s lacks ib_statement_meta.json", prior_as_of)
+            return 1
+        expected_prior_import = (prior_manifest.get("provenance_sha256") or {}).get("ib_statement_meta")
+        if not expected_prior_import or sha256_file(prior_import_path) != expected_prior_import:
+            LOGGER.error("Prior ledger %s does not seal its IB import metadata", prior_as_of)
+            return 1
+        prior_import = read_manifest(prior_import_path)
+        prior_account = str((prior_import.get("raw_source") or {}).get("account_id", "")).strip()
+        if not prior_account or prior_account != current_account:
+            LOGGER.error(
+                "Broker account lineage mismatch: prior=%r current=%r", prior_account, current_account,
+            )
+            return 1
+        prior_lots = read_csv(prior_lots_path)
     if prior_as_of:
         LOGGER.info("Using prior sealed ledger %s as lot carry-forward seed", prior_as_of)
 
+    incremental_trades, trade_filter_errors = _trades_after_prior(trades, prior_as_of)
+    if trade_filter_errors:
+        LOGGER.error("Cannot establish incremental statement trade window: %s", trade_filter_errors[:12])
+        return 1
+    LOGGER.info(
+        "Lot reconstruction uses %d/%d statement trades after prior ledger %s",
+        len(incremental_trades), len(trades), prior_as_of or "none",
+    )
+
     overrides = _manual_overrides(config)
+    override_errors = _manual_override_errors(overrides, run_as_of=run_as_of)
+    if override_errors:
+        LOGGER.error("Invalid holdings_ledger.manual_lot_overrides: %s", override_errors[:12])
+        return 1
     open_stocks = _open_stock_positions(open_positions)
     open_options = _open_option_positions(open_positions)
     stock_lots, recs = _build_stock_holding_lots(
         run_as_of=run_as_of,
         source_sha=source_sha,
         open_stocks=open_stocks,
-        trades=trades,
+        trades=incremental_trades,
         overrides=overrides,
         prior_lots=prior_lots,
         prior_as_of=prior_as_of,
     )
-    option_lots, option_recs = _build_option_lots(run_as_of, source_sha, open_options, trades, prior_lots, prior_as_of)
+    option_lots, option_recs = _build_option_lots(
+        run_as_of, source_sha, open_options, incremental_trades, prior_lots, prior_as_of,
+    )
     recs.extend(option_recs)
+    recs.append({
+        "run_as_of": run_as_of,
+        "check": "incremental_trade_window",
+        "status": "PASS",
+        "detail": f"applied={len(incremental_trades)}/{len(trades)} trades after prior_as_of={prior_as_of}",
+    })
     recs.extend(_additional_reconciliations(
         run_as_of=run_as_of,
         open_positions=open_positions,
@@ -624,11 +743,13 @@ def main() -> int:
         "source_sha256": source_sha,
         "input_paths": {
             **{name: str(path) for name, path in input_paths.items()},
+            "config.yaml": str(config_path),
             **({"prior_ledger_manifest.json": str(prior_manifest_path)} if prior_manifest_path is not None else {}),
             **({"prior_holding_lots.csv": str(prior_lots_path)} if prior_lots_path is not None else {}),
         },
         "inputs_sha256": {
             **{name: sha256_file(path) for name, path in input_paths.items()},
+            "config.yaml": sha256_file(config_path),
             **({"prior_ledger_manifest.json": sha256_file(prior_manifest_path)} if prior_manifest_path is not None else {}),
             **({"prior_holding_lots.csv": sha256_file(prior_lots_path)} if prior_lots_path is not None else {}),
         },

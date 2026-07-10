@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from technology.core.refresh_orchestration import asof_governance_conflict  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -73,7 +74,15 @@ def py_script(relative: str) -> Path:
     return PROJECT_ROOT / relative
 
 
-def build_steps(*, asof: str, manual_wsts_xlsx: Path | None, skip_ibkr_borrow: bool, force_refresh: bool) -> list[Step]:
+def build_steps(
+    *,
+    asof: str,
+    manual_wsts_xlsx: Path | None,
+    skip_ibkr_borrow: bool,
+    force_refresh: bool,
+    financial_batch_size: int,
+    financial_batch_timeout_sec: float,
+) -> list[Step]:
     asof_args = ["--asof", asof] if asof else []
     end_date_args = ["--end-date", asof] if asof else []
     semiconductor_market_args = ["--model-family", "semiconductors", "--benchmark-tickers", "SMH,SOXX,QQQ,SPY"]
@@ -106,7 +115,20 @@ def build_steps(*, asof: str, manual_wsts_xlsx: Path | None, skip_ibkr_borrow: b
         Step("06_validate_market", "stage_3", "Validate market stage", py_script("technology/scripts/06_validate_technology_market_stage.py"), [*semiconductor_market_validate_args, *asof_args]),
         Step("07_sync_sec_fundamentals", "stage_4", "Sync SEC submissions/companyfacts", py_script("technology/scripts/07_sync_technology_sec_fundamentals.py"), sec_args, network=True),
         Step("11_sync_fx_rates", "stage_4", "Sync FX rates for non-USD reporters", py_script("technology/scripts/11_sync_technology_fx_rates.py"), fx_args, network=True),
-        Step("08_build_financial_features", "stage_4", "Build SEC financial features", py_script("technology/scripts/08_build_technology_financial_features.py")),
+        Step(
+            "08_build_financial_features",
+            "stage_4",
+            "Build SEC financial features in recoverable sequential batches",
+            py_script("technology/scripts/08_build_technology_financial_features_batched.py"),
+            [
+                "--model-family",
+                "semiconductors",
+                "--batch-size",
+                str(financial_batch_size),
+                "--batch-timeout-sec",
+                str(financial_batch_timeout_sec),
+            ],
+        ),
         Step("12_sync_sec_ownership", "stage_5", "Sync direct SEC ownership filings", py_script("technology/scripts/12_sync_technology_sec_ownership.py"), ownership_args, network=True),
         Step("13_sync_positioning_upstream", "stage_5", "Sync upstream 13F/FINRA/IBKR positioning feeds", py_script("technology/scripts/13_sync_technology_positioning_upstream.py"), positioning_args, pass_db=False, network=True),
         Step("09_import_positioning", "stage_5", "Import positioning into technology.sqlite", py_script("technology/scripts/09_import_technology_positioning.py"), asof_args),
@@ -234,6 +256,10 @@ def main() -> int:
         manual_wsts_xlsx=args.manual_wsts_xlsx,
         skip_ibkr_borrow=bool(args.skip_ibkr_borrow),
         force_refresh=bool(args.force_refresh),
+        financial_batch_size=int(cfg_get(config, f"{CONFIG_KEY}.financial_feature_batch_size", 8)),
+        financial_batch_timeout_sec=float(
+            cfg_get(config, f"{CONFIG_KEY}.financial_feature_batch_timeout_sec", 1800.0)
+        ),
     )
     if args.list_steps:
         for step in steps:
@@ -247,6 +273,13 @@ def main() -> int:
         return 0
 
     planned = selected_steps(steps, args, config)
+    governance_conflict = asof_governance_conflict(
+        str(args.asof or ""),
+        planned,
+        publisher_script="16_publish_semiconductor_lockbox_ledger.py",
+    )
+    if governance_conflict:
+        raise SystemExit(governance_conflict)
     rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     started = datetime.now(timezone.utc)

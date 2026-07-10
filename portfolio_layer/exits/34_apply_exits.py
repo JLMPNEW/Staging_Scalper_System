@@ -16,6 +16,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
@@ -74,7 +75,8 @@ def main() -> int:
     if not ledger_as_of:
         LOGGER.error("No Stage 9 exit-signal run found under %s", runs_root)
         return 1
-    exits_dir = runs_root / ledger_as_of / "exits"
+    run_dir = runs_root / ledger_as_of
+    exits_dir = run_dir / "exits"
     signal_meta_path = exits_dir / "exit_signals_meta.json"
     signals_path = exits_dir / "exit_signals.csv"
     unsupported_path = exits_dir / "unsupported_positions.csv"
@@ -90,6 +92,7 @@ def main() -> int:
         "exit_actions_meta.json": exits_dir / "exit_actions_meta.json",
     }
     if args.force:
+        invalidate_dependents(run_dir, "exits")
         for path in output_paths.values():
             if path.exists():
                 path.unlink()
@@ -169,6 +172,7 @@ def main() -> int:
     passed = not transform_errors
     summary: dict[str, Any] = {
         "stage": "stage9_apply_exits_summary",
+        "run_as_of": ledger_as_of,
         "ledger_as_of": ledger_as_of,
         "signal_as_of": signal_as_of,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -202,6 +206,7 @@ def main() -> int:
     meta = {
         "stage": "stage9_apply_exits",
         "phase": str(cfg_get(config, "exit_engine.phase", "phase1_actual_equity_holdings")),
+        "run_as_of": ledger_as_of,
         "ledger_as_of": ledger_as_of,
         "signal_as_of": signal_as_of,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),

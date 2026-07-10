@@ -21,6 +21,7 @@ import json
 import math
 import os
 import sqlite3
+import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from datetime import datetime, timezone
@@ -29,6 +30,14 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+
+
+DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_CALIBRATION_DIR = (
     PROJECT_ROOT
     / "output"
@@ -37,7 +46,6 @@ DEFAULT_CALIBRATION_DIR = (
     / "20210827_20260605"
     / "candidate_calibration_scoped_optuna_20260608"
 )
-DEFAULT_DB_PATH = Path(r"C:\Users\josel\Documents\STAGING\DB\biotech_index.sqlite")
 DEFAULT_HORIZONS = "60,120"
 DEFAULT_TOP_N = "10,20"
 DEFAULT_RAW_POLICY = "raw_legacy_score"
@@ -62,8 +70,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Diagnose raw-vs-guardrail selection-policy failure modes from Tier-1 calibration diagnostics."
     )
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--calibration-dir", type=Path, default=DEFAULT_CALIBRATION_DIR)
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--sample", type=str, default="all")
     parser.add_argument("--split", type=str, default="test")
@@ -219,8 +228,10 @@ def load_selected_rows(
                 continue
             if str(row.get("evaluation_split") or "") != split:
                 continue
-            horizon = int(to_float(row.get("horizon_days"), -1.0) or -1)
-            top_n = int(to_float(row.get("top_n"), -1.0) or -1)
+            horizon_value = to_float(row.get("horizon_days"), None)
+            top_n_value = to_float(row.get("top_n"), None)
+            horizon = int(horizon_value) if horizon_value is not None else -1
+            top_n = int(top_n_value) if top_n_value is not None else -1
             if horizons and horizon not in horizons:
                 continue
             if top_ns and top_n not in top_ns:
@@ -364,7 +375,11 @@ def example_rows(
     max_rows: int,
     reverse: bool,
 ) -> list[dict[str, Any]]:
-    ranked = sorted(rows, key=lambda row: to_float(row.get(return_column), -1e9), reverse=reverse)
+    def return_sort_value(row: dict[str, Any]) -> float:
+        value = to_float(row.get(return_column), -1e9)
+        return value if value is not None else -1e9
+
+    ranked = sorted(rows, key=return_sort_value, reverse=reverse)
     out: list[dict[str, Any]] = []
     for row in ranked[: max(0, max_rows)]:
         out.append(
@@ -393,6 +408,13 @@ def example_rows(
 
 def main() -> None:
     args = parse_args()
+    config_path = args.config.expanduser().resolve()
+    config = load_yaml(config_path)
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db is not None
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=config_path.parent)
+    )
     calibration_dir = args.calibration_dir.resolve()
     diagnostics_path = calibration_dir / "tier1_selected_ticker_diagnostics.csv"
     if not diagnostics_path.exists():
@@ -411,7 +433,7 @@ def main() -> None:
         horizons=horizons,
         top_ns=top_ns,
     )
-    cohort_map = load_cohort_map(args.db, tickers=tickers, dates=dates)
+    cohort_map = load_cohort_map(db_path, tickers=tickers, dates=dates)
 
     summary_rows: list[dict[str, Any]] = []
     reason_rows: list[dict[str, Any]] = []
@@ -595,7 +617,7 @@ def main() -> None:
             "written_at_utc": datetime.now(timezone.utc).isoformat(),
             "calibration_dir": str(calibration_dir),
             "diagnostics_path": str(diagnostics_path),
-            "db_path": str(args.db),
+            "db_path": str(db_path),
             "output_dir": str(output_dir),
             "sample": args.sample,
             "split": args.split,

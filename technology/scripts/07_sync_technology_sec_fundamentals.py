@@ -124,7 +124,7 @@ def is_before(left: object, right: object) -> bool:
     return left_date is not None and right_date is not None and left_date < right_date
 
 
-def to_float(raw: object) -> float | None:
+def to_float(raw: Any) -> float | None:
     try:
         value = float(raw)
     except (TypeError, ValueError):
@@ -136,7 +136,7 @@ def cik10(raw: str) -> str:
     return normalize_cik(raw).zfill(10)
 
 
-def load_universe(conn: Any, ticker_filter: set[str], *, model_family: str, include_historical: bool = False) -> list[dict[str, str]]:
+def load_universe(conn: Any, ticker_filter: set[str], *, model_family: str, include_historical: bool = False) -> list[dict[str, Any]]:
     # Historical (delisted/acquired) members carry universe_status='historical'
     # from the membership loader; their EDGAR fundamentals are backfillable even
     # though their price feeds are not, so they are opt-in for this sync only.
@@ -166,7 +166,7 @@ def load_universe(conn: Any, ticker_filter: set[str], *, model_family: str, incl
             """,
             (model_family,),
         ).fetchall()
-    out: list[dict[str, str]] = []
+    out: list[dict[str, Any]] = []
     for row in rows:
         ticker = normalize_ticker(row["ticker"])
         if ticker_filter and ticker not in ticker_filter:
@@ -315,11 +315,7 @@ def upsert_filings(conn: Any, ticker: str, cik: str, rows: list[dict[str, Any]],
         if not accession:
             continue
         report_date = parse_date(row.get("reportDate"))
-        fiscal_year = row.get("fy")
-        try:
-            fiscal_year = int(fiscal_year) if str(fiscal_year or "").strip() else None
-        except ValueError:
-            fiscal_year = None
+        fiscal_year = to_int_or_none(row.get("fy"))
         conn.execute(
             """
             INSERT INTO fact_sec_filing(
@@ -897,7 +893,8 @@ def parse_inline_xbrl_facts(document_text: str, *, filing: dict[str, Any]) -> li
         if value is None:
             continue
         taxonomy, concept = name.split(":", 1)
-        fy = fallback_fy or (parse_date(end_date).year if parse_date(end_date) else None)
+        parsed_end_date = parse_date(end_date)
+        fy = fallback_fy or (parsed_end_date.year if parsed_end_date is not None else None)
         out.append(
             {
                 "taxonomy": taxonomy,

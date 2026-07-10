@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from technology.core.refresh_orchestration import asof_governance_conflict  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -73,7 +74,14 @@ def py_script(relative: str) -> Path:
     return PROJECT_ROOT / relative
 
 
-def build_steps(*, asof: str, skip_ibkr_borrow: bool, force_refresh: bool) -> list[Step]:
+def build_steps(
+    *,
+    asof: str,
+    skip_ibkr_borrow: bool,
+    force_refresh: bool,
+    financial_batch_size: int,
+    financial_batch_timeout_sec: float,
+) -> list[Step]:
     asof_args = ["--asof", asof] if asof else []
     end_date_args = ["--end-date", asof] if asof else []
     refresh_args = ["--force-refresh"] if force_refresh else []
@@ -93,7 +101,20 @@ def build_steps(*, asof: str, skip_ibkr_borrow: bool, force_refresh: bool) -> li
         Step("06_validate_market", "stage_3", "Validate market stage", py_script("technology/technology_hardware/scripts/06_validate_technology_hardware_market_stage.py"), asof_args),
         Step("07_sync_sec_fundamentals", "stage_4", "Sync SEC submissions/companyfacts", py_script("technology/technology_hardware/scripts/07_sync_technology_hardware_sec_fundamentals.py"), [*refresh_args, "--allow-partial"], network=True),
         Step("11_sync_fx_rates", "stage_4", "Sync FX rates for non-USD reporters", py_script("technology/technology_hardware/scripts/11_sync_technology_hardware_fx_rates.py"), refresh_args, network=True),
-        Step("08_build_financial_features", "stage_4", "Build SEC financial features", py_script("technology/technology_hardware/scripts/08_build_technology_hardware_financial_features.py")),
+        Step(
+            "08_build_financial_features",
+            "stage_4",
+            "Build SEC financial features in recoverable sequential batches",
+            py_script("technology/scripts/08_build_technology_financial_features_batched.py"),
+            [
+                "--model-family",
+                "technology_hardware",
+                "--batch-size",
+                str(financial_batch_size),
+                "--batch-timeout-sec",
+                str(financial_batch_timeout_sec),
+            ],
+        ),
         Step("12_sync_sec_ownership", "stage_5", "Sync direct SEC ownership filings", py_script("technology/technology_hardware/scripts/12_sync_technology_hardware_sec_ownership.py"), refresh_args, network=True),
         Step("13_sync_positioning_upstream", "stage_5", "Sync upstream 13F/FINRA/IBKR positioning feeds", py_script("technology/technology_hardware/scripts/13_sync_technology_hardware_positioning_upstream.py"), positioning_args, pass_db=False, network=True),
         Step("09_import_positioning", "stage_5", "Import positioning into technology.sqlite", py_script("technology/technology_hardware/scripts/09_import_technology_hardware_positioning.py"), asof_args),
@@ -231,7 +252,15 @@ def main() -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("technology_hardware_refresh_%Y%m%dT%H%M%SZ")
 
-    steps = build_steps(asof=str(args.asof or "").strip(), skip_ibkr_borrow=bool(args.skip_ibkr_borrow), force_refresh=bool(args.force_refresh))
+    steps = build_steps(
+        asof=str(args.asof or "").strip(),
+        skip_ibkr_borrow=bool(args.skip_ibkr_borrow),
+        force_refresh=bool(args.force_refresh),
+        financial_batch_size=int(cfg_get(config, f"{CONFIG_KEY}.financial_feature_batch_size", 8)),
+        financial_batch_timeout_sec=float(
+            cfg_get(config, f"{CONFIG_KEY}.financial_feature_batch_timeout_sec", 1800.0)
+        ),
+    )
     if args.list_steps:
         for step in steps:
             flags = ",".join(flag for flag, enabled in [
@@ -244,23 +273,13 @@ def main() -> int:
         return 0
 
     planned = selected_steps(steps, args, config)
-    asof = str(args.asof or "").strip()
-    if asof:
-        # 10b_publish/10b_validate accept --asof and receive it, but the Stage
-        # 10b governance publisher/validator have no --asof support and always
-        # snapshot the latest artifacts; running them under a historical asof
-        # would publish a wrong-asof governance ledger.
-        governance_step_ids = {"16_publish_governance", "16_validate_governance"}
-        blocked = [step.step_id for step in planned if step.step_id in governance_step_ids]
-        if blocked:
-            raise SystemExit(
-                f"--asof {asof} cannot be combined with governance steps {blocked}: "
-                "16_publish_technology_hardware_lockbox_ledger.py does not accept --asof and would "
-                "record latest-run artifacts under a historical label. Skip them with "
-                "--skip-step 16_publish_governance --skip-step 16_validate_governance, or use the "
-                "technology/scripts/18_backfill_technology_historical_dashboard_reports.py flow for "
-                "historical snapshots."
-            )
+    governance_conflict = asof_governance_conflict(
+        str(args.asof or ""),
+        planned,
+        publisher_script="16_publish_technology_hardware_lockbox_ledger.py",
+    )
+    if governance_conflict:
+        raise SystemExit(governance_conflict)
     rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     started = datetime.now(timezone.utc)

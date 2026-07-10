@@ -30,7 +30,6 @@ gross untouched, and the PIT guard must hold.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from datetime import date, timedelta
@@ -46,17 +45,24 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, sha256_file, write_csv, write_manifest  # noqa: E402
-from portfolio_layer.core.contracts import read_csv  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    manifest_accepts,
+    read_csv,
+    read_manifest,
+    sha256_file,
+    write_csv,
+    write_manifest,
+)
 from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.macro.contract import open_macro_serving_db, rows_at_latest, single_latest_row  # noqa: E402
 from portfolio_layer.macro.taxonomy import select_sleeve_macro_fit, sleeve_taxonomy  # noqa: E402
 from portfolio_layer.backtest.walkforward_common import (  # noqa: E402
-    ARM_FIELDS, ARMS, perf_stats, run_walkforward, summarize_arms,
+    ARM_FIELDS, ARMS, finite_or_default, perf_stats, run_walkforward, summarize_arms,
 )
-from portfolio_layer.research.stage11_common import load_lockbox  # noqa: E402
+from portfolio_layer.research.stage11_common import load_lockbox, manifest_file_errors  # noqa: E402
 from portfolio_layer.rotation.sector_rotation_selector import build_sector_rotation  # noqa: E402
 
 
@@ -248,6 +254,7 @@ def main() -> int:  # noqa: C901
     # dev-window snapshots from the immutable store
     store_dir = paths.output_dir / str(cfg_get(config, "snapshot_store.dir", "snapshot_store"))
     snapshots: dict[str, list[dict[str, str]]] = {}
+    snapshot_hashes: dict[str, dict[str, str]] = {}
     sealed_skipped = 0
     if store_dir.exists():
         for snap in sorted(store_dir.iterdir()):
@@ -256,7 +263,33 @@ def main() -> int:  # noqa: C901
             if snap.name >= lockbox["sealed_start"]:
                 sealed_skipped += 1
                 continue
-            snapshots[snap.name] = read_csv(snap / "stocks_scores.csv")
+            scores_path = snap / "stocks_scores.csv"
+            meta_path = snap / "snapshot_meta.json"
+            source_manifest_path = snap / "manifest.json"
+            try:
+                meta = read_manifest(meta_path)
+            except ValueError as exc:
+                LOGGER.error("Snapshot %s metadata unreadable: %s", snap.name, exc)
+                return 1
+            scores_sha = sha256_file(scores_path)
+            snapshot_bad = []
+            if not manifest_accepts(meta):
+                snapshot_bad.append(f"acceptance={meta.get('acceptance')}")
+            if str(meta.get("stocks_scores_sha256", "")) != scores_sha:
+                snapshot_bad.append("stocks_scores_hash_mismatch")
+            if not source_manifest_path.exists() or str(meta.get("manifest_sha256", "")) != sha256_file(
+                source_manifest_path
+            ):
+                snapshot_bad.append("source_manifest_hash_mismatch")
+            if snapshot_bad:
+                LOGGER.error("Snapshot %s is unsealed/stale: %s", snap.name, snapshot_bad)
+                return 1
+            snapshots[snap.name] = read_csv(scores_path)
+            snapshot_hashes[snap.name] = {
+                "stocks_scores.csv": scores_sha,
+                "snapshot_meta.json": sha256_file(meta_path),
+                "manifest.json": sha256_file(source_manifest_path),
+            }
     if not snapshots:
         LOGGER.error("No dev-window snapshots in %s; run research/65 first", store_dir)
         return 1
@@ -269,12 +302,18 @@ def main() -> int:  # noqa: C901
         LOGGER.error("No survivorship panel build under %s; run backtest/15b first", panel_root)
         return 1
     panel_dir = builds[-1]
-    panel_manifest = json.loads((panel_dir / "survivorship_manifest.json").read_text(encoding="utf-8"))
-    if panel_manifest.get("acceptance") != "PASS":
+    panel_manifest_path = panel_dir / "survivorship_manifest.json"
+    panel_manifest = read_manifest(panel_manifest_path)
+    if not manifest_accepts(panel_manifest, allow_deferred=False):
         LOGGER.error("Survivorship panel %s acceptance=%s; refusing", panel_dir.name,
                      panel_manifest.get("acceptance"))
         return 1
-    prices = pd.read_csv(panel_dir / "prices_adjclose.csv", index_col=0)
+    prices_path = panel_dir / "prices_adjclose.csv"
+    panel_errors = manifest_file_errors(panel_manifest, {"prices_adjclose.csv": prices_path})
+    if panel_errors:
+        LOGGER.error("Survivorship panel %s is stale/unsealed: %s", panel_dir.name, panel_errors)
+        return 1
+    prices = pd.read_csv(prices_path, index_col=0)
     prices.columns = [str(c).strip().upper() for c in prices.columns]
 
     out_dir = paths.output_dir / str(wf.get("dir", "walkforward")) / panel_dir.name
@@ -298,6 +337,7 @@ def main() -> int:  # noqa: C901
     gross_map = cfg_get(config, "black_litterman_fusion.regime_to_gross_scalar", {}) or {}
     budgets_cfg = cfg_get(config, "sleeves.sleeve_risk_budgets", {}) or {}
     risk_off = {str(r).upper() for r in cfg_get(config, "sleeves.risk_off_regimes", []) or []}
+    macro_hash_before = sha256_file(paths.macro_serving_db_path)
     conn = open_macro_serving_db(paths.macro_serving_db_path)
     rotation_sector_etf_map = {
         str(k).strip(): str(v).strip().upper()
@@ -318,9 +358,12 @@ def main() -> int:  # noqa: C901
         row = single_latest_row(conn, "macro_regime_decision_daily", d)
         label = str(row["active_current_regime"] or "").upper() if row is not None else ""
         bucket = "risk_off" if label in risk_off else "default"
+        gross_scalar = finite_or_default(gross_map.get(label, gross_map.get("default", 1.0)), 1.0)
+        if not 0.0 <= gross_scalar <= 1.0:
+            raise ValueError(f"regime gross scalar outside [0,1] for {label or 'UNKNOWN'}: {gross_scalar}")
         return {
             "label": label,
-            "gross_scalar": float(gross_map.get(label, gross_map.get("default", 1.0)) or 1.0),
+            "gross_scalar": gross_scalar,
             "budgets": dict(budgets_cfg.get(bucket, budgets_cfg.get("default", {})) or {}),
         }
 
@@ -372,24 +415,72 @@ def main() -> int:  # noqa: C901
         )
     finally:
         conn.close()
+    macro_hash_after = sha256_file(paths.macro_serving_db_path)
+    if macro_hash_before != macro_hash_after:
+        LOGGER.error("Macro serving DB changed during walk-forward replay; retry the build")
+        return 1
     arm_rows = summarize_arms(result, arms, verdict_cfg=wf)
+    base_solver_failures = int(result["skipped"].get("solver", 0))
+    arm_solver_fallbacks = {
+        str(arm): int(count)
+        for arm, count in (result.get("arm_solver_fallbacks") or {}).items()
+    }
+    for row in arm_rows:
+        arm_failures = base_solver_failures + arm_solver_fallbacks.get(str(row.get("arm", "")), 0)
+        if arm_failures:
+            row["promotable"] = 0
+            existing = str(row.get("rejection_reasons", "")).strip(";")
+            row["rejection_reasons"] = ";".join(
+                reason for reason in (existing, f"solver_failures={arm_failures}") if reason
+            )
 
     checks: list[dict[str, str]] = []
 
     def rec(name: str, status: str, detail: str) -> None:
         checks.append({"check": name, "status": status, "detail": detail})
 
-    rec("lockbox_dev_window_only", "PASS",
-        f"dev snapshots={len(snapshots)}, sealed skipped={sealed_skipped}")
+    bad_snapshot_dates = [
+        as_of for as_of in snapshots
+        if as_of < lockbox["dev_window_start"]
+        or as_of > lockbox["dev_window_end"]
+        or as_of >= lockbox["sealed_start"]
+    ]
+    rec(
+        "lockbox_dev_window_only",
+        "PASS" if not bad_snapshot_dates else "FAIL",
+        f"dev snapshots={len(snapshots)}, sealed skipped={sealed_skipped}"
+        if not bad_snapshot_dates else f"out_of_partition={bad_snapshot_dates[:8]}",
+    )
     rec("pit_no_lookahead", "PASS" if not result["pit_violations"] else "FAIL",
-        "covariance and state windows end at/before every rebalance date"
-        if not result["pit_violations"] else f"{result['pit_violations'][:8]}")
+         "covariance and state windows end at/before every rebalance date"
+         if not result["pit_violations"] else f"{result['pit_violations'][:8]}")
+    total_solver_failures = base_solver_failures + sum(arm_solver_fallbacks.values())
+    rec(
+        "solver_reliability",
+        "PASS" if total_solver_failures == 0 else "FAIL",
+        f"base_failures={base_solver_failures}; arm_fallbacks={arm_solver_fallbacks}",
+    )
     rec("baseline_present", "PASS" if any(r["arm"] == "aqr_only" for r in arm_rows) else "FAIL",
         "aqr_only baseline replayed")
     promotable = [r["arm"] for r in arm_rows if r["promotable"] == 1]
-    rec("promotion_honesty", "PASS",
-        f"promotable arms={promotable or 'none'}; verdicts require days>={wf.get('min_days', 250)}, "
-        f"windows>={wf.get('min_independent_windows', 6)}, net IR and active t thresholds")
+    promotion_bad = []
+    for row in arm_rows:
+        if int(row.get("promotable", 0)) != 1:
+            continue
+        if int(row.get("n_days", 0)) < int(wf.get("min_days", 250)):
+            promotion_bad.append(f"{row['arm']}:insufficient_days")
+        if int(row.get("n_independent_windows", 0)) < int(wf.get("min_independent_windows", 6)):
+            promotion_bad.append(f"{row['arm']}:insufficient_windows")
+        if float(row.get("net_ir_vs_baseline", float("-inf"))) <= float(wf.get("promote_net_ir_min", 0.0)):
+            promotion_bad.append(f"{row['arm']}:net_ir")
+        if float(row.get("active_t", float("-inf"))) < float(wf.get("promote_active_t_min", 2.0)):
+            promotion_bad.append(f"{row['arm']}:active_t")
+    rec(
+        "promotion_honesty",
+        "PASS" if not promotion_bad else "FAIL",
+        f"promotable arms={promotable or 'none'}; verdict thresholds independently rechecked"
+        if not promotion_bad else f"{promotion_bad[:8]}",
+    )
     rec("shadow_only", "PASS",
         "walk-forward evidence is research-only; promotion additionally requires 68/69 approvals "
         "and a dated protocol amendment")
@@ -418,7 +509,18 @@ def main() -> int:  # noqa: C901
         "rebalances": result["n_rebalances"],
         "days": len(result["day_index"]),
         "skipped": result["skipped"],
+        "arm_solver_fallbacks": arm_solver_fallbacks,
         "checks": checks,
+        "inputs_sha256": {
+            "survivorship_manifest.json": sha256_file(panel_manifest_path),
+            "prices_adjclose.csv": sha256_file(prices_path),
+            "macro_serving.sqlite": macro_hash_after,
+            **{
+                f"snapshot/{as_of}/{name}": sha
+                for as_of, files in sorted(snapshot_hashes.items())
+                for name, sha in sorted(files.items())
+            },
+        },
         "files": {
             "arm_comparison.csv": {"sha256": sha256_file(arm_path), "rows": len(arm_rows)},
             "daily_curves.csv": {"sha256": sha256_file(curves_path), "rows": len(curve_rows)},

@@ -37,9 +37,12 @@ from portfolio_layer.macro.contract import (  # noqa: E402
     int_or_blank,
     macro_serving_content_sha256,
     open_macro_serving_db,
+    regime_table_for_source,
     rows_at_latest,
-    single_latest_row,
+    single_latest_regime_row,
     staleness_days,
+    v2_promotion_status,
+    verify_v2_promotion_manifest,
 )
 from portfolio_layer.macro.taxonomy import (  # noqa: E402
     base_target_weights,
@@ -84,21 +87,73 @@ def _macro_serving_path(default_path: Path, override: Path | None) -> Path:
     return ensure_not_prod_path(default_path, label="macro serving db")
 
 
-def _source_hashes(config_path: Path, serving_db_path: Path, run_dir: Path, run_as_of: str) -> dict[str, str]:
+def _source_hashes(
+    config_path: Path,
+    serving_db_path: Path,
+    run_dir: Path,
+    run_as_of: str,
+    *,
+    regime_table: str,
+    regime_model_version: str | None,
+    promotion_manifest_path: Path | None,
+) -> dict[str, str]:
     paths = {
         "config.yaml": config_path,
+        "MacroLayer/config_macro_raw.yaml": PACKAGE_ROOT / "MacroLayer" / "config_macro_raw.yaml",
+        "MacroLayer/macro_metric_policy.csv": PACKAGE_ROOT / "MacroLayer" / "macro_metric_policy.csv",
+        "MacroLayer/macro_feature_policy.csv": PACKAGE_ROOT / "MacroLayer" / "macro_feature_policy.csv",
+        "MacroLayer/macro_composite_policy.csv": PACKAGE_ROOT / "MacroLayer" / "macro_composite_policy.csv",
+        "MacroLayer/macro_serving_common.py": PACKAGE_ROOT / "MacroLayer" / "macro_serving_common.py",
+        "MacroLayer/build_macro_observation_daily_pit.py": (
+            PACKAGE_ROOT / "MacroLayer" / "build_macro_observation_daily_pit.py"
+        ),
         "stocks_scores.csv": run_dir / "stocks_scores.csv",
         "manifest.json": run_dir / "manifest.json",
         "optimizer/target_weights.csv": run_dir / "optimizer" / "target_weights.csv",
         "optimizer/optimizer_manifest.json": run_dir / "optimizer" / "optimizer_manifest.json",
     }
+    if promotion_manifest_path is not None:
+        paths["MacroLayer/regime_v2_promotion_manifest.json"] = promotion_manifest_path
     for name in SOURCE_FILES:
         path = PACKAGE_ROOT / "macro" / name
         if path.exists():
             paths[f"source/{name}"] = path
     hashes = {name: sha256_file(path) for name, path in paths.items() if path.exists()}
-    hashes["macro_serving.sqlite:content"] = macro_serving_content_sha256(serving_db_path, run_as_of)
+    hashes["macro_serving.sqlite:content"] = macro_serving_content_sha256(
+        serving_db_path,
+        run_as_of,
+        regime_table=regime_table,
+        regime_model_version=regime_model_version,
+    )
     return hashes
+
+
+def _verify_v2_promotion_manifest(
+    *,
+    promotion_row: Any | None,
+    model_version: str,
+    macro_config_path: Path,
+) -> tuple[Path | None, list[str]]:
+    if promotion_row is None:
+        return None, ["missing_v2_promotion_summary"]
+    errors: list[str] = []
+    if str(promotion_row["acceptance"] or "") != "PROMOTABLE":
+        errors.append(f"acceptance={promotion_row['acceptance']}")
+    raw_path = str(promotion_row["artifact_manifest_path"] or "").strip()
+    if not raw_path:
+        return None, [*errors, "missing_artifact_manifest_path"]
+    path = ensure_not_prod_path(Path(raw_path), label="v2 promotion manifest").resolve()
+    builder_path = PACKAGE_ROOT / "MacroLayer" / "validate_macro_regime_v2_promotion.py"
+    errors.extend(
+        verify_v2_promotion_manifest(
+            path,
+            model_version=model_version,
+            macro_config_path=macro_config_path,
+            builder_path=builder_path,
+            allowed_root=PACKAGE_ROOT / "MacroLayer" / "out" / "regime_v2",
+        )
+    )
+    return path, errors
 
 
 def _load_sealed_optimizer_targets(run_dir: Path) -> tuple[list[dict[str, str]] | None, list[str]]:
@@ -133,7 +188,7 @@ def _coverage_flag(value: Any) -> int | str:
     return parsed
 
 
-def _regime_row(run_as_of: str, row: Any | None) -> dict[str, Any]:
+def _regime_row(run_as_of: str, row: Any | None, *, source_table: str) -> dict[str, Any]:
     if row is None:
         return {
             "run_as_of": run_as_of,
@@ -143,7 +198,7 @@ def _regime_row(run_as_of: str, row: Any | None) -> dict[str, Any]:
             "current_confidence": "",
             "next_confidence": "",
             "coverage_flag": "",
-            "regime_override_reason": "missing_macro_regime_decision_daily",
+            "regime_override_reason": f"missing_{source_table}",
             "staleness_days": "",
         }
     stale = staleness_days(run_as_of, str(row["as_of_date"]))
@@ -347,6 +402,20 @@ def main() -> int:
         return 1
 
     serving_db_path = _macro_serving_path(paths.macro_serving_db_path, args.serving_db)
+    regime_source = str(cfg_get(config, "macro.regime_source", "v1") or "").strip().lower()
+    try:
+        regime_table = regime_table_for_source(regime_source)
+    except ValueError as exc:
+        LOGGER.error("%s", exc)
+        return 1
+    regime_model_version = (
+        str(cfg_get(config, "macro.regime_v2_model_version", "") or "").strip()
+        if regime_source == "v2"
+        else None
+    )
+    if regime_source == "v2" and not regime_model_version:
+        LOGGER.error("macro.regime_v2_model_version is required when macro.regime_source=v2")
+        return 1
     macro_dir = run_dir / "macro"
     paths_out = {
         "macro_regime.csv": macro_dir / "macro_regime.csv",
@@ -376,8 +445,43 @@ def main() -> int:
 
     taxonomy = sleeve_taxonomy(config)
     conn = open_macro_serving_db(serving_db_path)
+    promotion_manifest_path: Path | None = None
+    promotion: Any | None = None
     try:
-        regime = _regime_row(run_as_of, single_latest_row(conn, "macro_regime_decision_daily", run_as_of))
+        if regime_source == "v2":
+            promotion = v2_promotion_status(
+                conn,
+                model_version=str(regime_model_version),
+                run_as_of=run_as_of,
+            )
+            promotion_manifest_path, promotion_errors = _verify_v2_promotion_manifest(
+                promotion_row=promotion,
+                model_version=str(regime_model_version),
+                macro_config_path=PACKAGE_ROOT / "MacroLayer" / "config_macro_raw.yaml",
+            )
+            if promotion_errors:
+                LOGGER.error("V2 regime source is not promotable/current: %s", promotion_errors[:8])
+                return 1
+        regime = _regime_row(
+            run_as_of,
+            single_latest_regime_row(
+                conn,
+                source=regime_source,
+                run_as_of=run_as_of,
+                model_version=regime_model_version,
+            ),
+            source_table=regime_table,
+        )
+        if regime_source == "v2" and promotion is not None:
+            promotion_date = str(promotion["evidence_as_of_date"] or "")
+            regime_date = str(regime.get("macro_as_of_date") or "")
+            if promotion_date != regime_date:
+                LOGGER.error(
+                    "V2 promotion evidence is stale relative to the selected decision: evidence=%s regime=%s",
+                    promotion_date,
+                    regime_date,
+                )
+                return 1
         sector_as_of, sector_macro_rows = rows_at_latest(conn, "sector_macro_fit_daily", run_as_of)
         industry_as_of, industry_rows = rows_at_latest(conn, "industry_macro_fit_daily", run_as_of)
         aggregate_as_of, aggregate_rows = rows_at_latest(conn, "industry_aggregate_macro_fit_daily", run_as_of)
@@ -420,7 +524,7 @@ def main() -> int:
     write_csv(paths_out["macro_foreign_candidates.csv"], MACRO_FOREIGN_CANDIDATE_FIELDS, foreign_candidate_rows)
 
     source_dates = {
-        "macro_regime_decision_daily": regime["macro_as_of_date"],
+        regime_table: regime["macro_as_of_date"],
         "sector_macro_fit_daily": sector_as_of,
         "industry_macro_fit_daily": industry_as_of,
         "industry_aggregate_macro_fit_daily": aggregate_as_of,
@@ -445,6 +549,10 @@ def main() -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "shadow_only": True,
         "enabled_in_production": bool(cfg_get(config, "macro.enabled_in_production", False)),
+        "regime_source": regime_source,
+        "regime_source_table": regime_table,
+        "regime_model_version": regime_model_version,
+        "regime_promotion_manifest_path": str(promotion_manifest_path) if promotion_manifest_path else "",
         "serving_db_path": str(serving_db_path),
         "source_dates": source_dates,
         "sleeve_taxonomy": taxonomy,
@@ -459,7 +567,15 @@ def main() -> int:
             "stock_fallback_rows": len(fallback_tickers),
             "eligible_stock_fallback_rows": len(fallback_tickers & eligible_tickers),
         },
-        "inputs_sha256": _source_hashes(config_path, serving_db_path, run_dir, run_as_of),
+        "inputs_sha256": _source_hashes(
+            config_path,
+            serving_db_path,
+            run_dir,
+            run_as_of,
+            regime_table=regime_table,
+            regime_model_version=regime_model_version,
+            promotion_manifest_path=promotion_manifest_path,
+        ),
         "files": {
             name: {"sha256": sha256_file(path), "rows": sum(1 for _ in path.open("r", encoding="utf-8")) - 1}
             for name, path in paths_out.items()

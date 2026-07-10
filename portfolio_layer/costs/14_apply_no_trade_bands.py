@@ -43,7 +43,7 @@ LOGGER = logging.getLogger("apply_no_trade_bands")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DECISION_FIELDS = [
     "ticker", "prior_weight", "target_weight", "decision", "reason", "position_notional",
-    "commission_fraction", "utility_gain", "cost_drag",
+    "commission_fraction", "utility_gain", "cost_drag", "applied_weight", "budget_scale",
 ]
 
 
@@ -100,9 +100,9 @@ def utility_gain_for_delta(
     cov: np.ndarray,
     gamma: float,
     k: float,
-) -> float:
+) -> float | None:
     if ticker not in names:
-        return 0.0
+        return None
     w_execute = np.array([current_final.get(t, 0.0) for t in names], dtype=float)
     w_suppress = w_execute.copy()
     idx = names.index(ticker)
@@ -267,6 +267,24 @@ def main() -> int:  # noqa: C901
             gamma=gamma,
             k=k,
         )
+        if gain is None:
+            # A prior-only name absent from the sealed covariance cannot be evaluated. Never let
+            # that uncertainty suppress a de-risking sale or authorize a risk increase.
+            if tw <= pw:
+                final[ticker] = tw
+                decision = "execute"
+                reason = "risk_unknown_forces_de_risk"
+            else:
+                final[ticker] = pw
+                decision = "suppress_keep_prior"
+                reason = "risk_unknown_blocks_increase"
+            decisions.append({
+                "ticker": ticker, "prior_weight": round(pw, 10), "target_weight": round(tw, 10),
+                "decision": decision, "reason": reason,
+                "position_notional": round(notional, 2), "utility_gain": "",
+                "cost_drag": round(cost_drag, 8),
+            })
+            continue
         if gain > cost_drag + buffer:
             final[ticker] = tw
             decisions.append({
@@ -286,23 +304,29 @@ def main() -> int:  # noqa: C901
 
     asset_sum = sum(final.values())
     cash_weight = gross - asset_sum
+    budget_scale = 1.0
     if cash_weight < -1e-8:
         # Suppressed sells kept prior weights above the gross budget (possible on a rebalance whose
         # target de-grosses the book). Scale the whole asset block back to the budget — a pure
         # proportional de-risking that keeps every no-trade decision, recorded per name.
         scale = gross / asset_sum
+        budget_scale = scale
         LOGGER.warning(
             "Suppressed sells over-invest the book (assets=%.10f > gross=%.10f); scaling all "
             "positions by %.8f to restore the budget", asset_sum, gross, scale,
         )
         final = {t: w * scale for t, w in final.items()}
         for d in decisions:
-            d["decision"] = f"{d['decision']}+budget_rescale" if d["ticker"] in final else d["decision"]
-            d["reason"] = f"{d['reason']};budget_rescale={scale:.8f}" if d["ticker"] in final else d["reason"]
+            if d["ticker"] in final:
+                d["reason"] = f"{d['reason']};budget_rescale={scale:.8f}"
         asset_sum = sum(final.values())
         cash_weight = gross - asset_sum
     if abs(cash_weight) <= 1e-10:
         cash_weight = 0.0
+
+    for decision in decisions:
+        decision["applied_weight"] = round(final.get(str(decision["ticker"]), 0.0), 10)
+        decision["budget_scale"] = round(budget_scale, 10)
 
     rows = [{"ticker": t, "weight": round(w, 10)} for t, w in sorted(final.items()) if w > 0]
     rows.append({"ticker": "CASH", "weight": round(cash_weight, 10)})

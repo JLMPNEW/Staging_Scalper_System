@@ -28,9 +28,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists, read_csv, sha256_file, write_csv, write_manifest, write_text_atomic,
+)
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import ensure_not_prod_path, resolve_runtime_paths  # noqa: E402
+from portfolio_layer.macro.contract import regime_application_errors  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
 
@@ -108,8 +112,7 @@ def _acceptance_ok(manifest: dict) -> bool:
         val = manifest.get(key)
         if isinstance(val, str):
             return val.upper().startswith("PASS")
-    # Stage 1 manifest has no explicit acceptance string; treat presence as ok (hash check still applies).
-    return True
+    return False
 
 
 def _zscores(values: list[float]) -> list[float]:
@@ -144,6 +147,75 @@ def _renormalize_with_floors(weights: dict[str, float], floors: dict[str, float]
         return dict(floor_vals)
     scale = (1.0 - floor_sum) / excess_sum
     return {k: floor_vals[k] + excess[k] * scale for k in keys}
+
+
+def _project_weights_to_caps(
+    weights: dict[str, float],
+    caps: dict[str, float],
+    *,
+    target_sum: float = 1.0,
+    tol: float = 1e-12,
+) -> tuple[dict[str, float], list[str], float]:
+    """Project non-negative sleeve weights onto per-sleeve upper caps.
+
+    The BL optimizer receives sleeve targets that sum to one over risky capital, then applies the
+    regime gross. If a sleeve has too few names to absorb its target under the per-name cap, the
+    excess must move to sleeves with remaining capacity before tier1 sees the benchmark.
+    """
+    keys = list(weights)
+    result = {k: max(0.0, weights.get(k, 0.0)) for k in keys}
+    cap_vals = {k: max(0.0, caps.get(k, 0.0)) for k in keys}
+    total_cap = sum(cap_vals.values())
+    if not keys:
+        return {}, [], target_sum
+    if total_cap <= tol:
+        return {k: 0.0 for k in keys}, sorted(keys), target_sum
+    if total_cap < target_sum - tol:
+        return dict(cap_vals), sorted(k for k in keys if cap_vals[k] <= weights.get(k, 0.0) + tol), target_sum - total_cap
+
+    # Start from normalized requested weights.
+    total = sum(result.values())
+    if total <= tol:
+        result = {k: target_sum / len(keys) for k in keys}
+    else:
+        result = {k: result[k] * target_sum / total for k in keys}
+
+    capped: set[str] = set()
+    for _ in range(len(keys) + 1):
+        over = [k for k in keys if result[k] > cap_vals[k] + tol]
+        if not over:
+            break
+        excess = 0.0
+        for k in over:
+            capped.add(k)
+            excess += result[k] - cap_vals[k]
+            result[k] = cap_vals[k]
+        slack_keys = [k for k in keys if result[k] < cap_vals[k] - tol]
+        if excess <= tol or not slack_keys:
+            break
+        slack_total = sum(cap_vals[k] - result[k] for k in slack_keys)
+        if slack_total <= tol:
+            break
+        for k in slack_keys:
+            result[k] += excess * (cap_vals[k] - result[k]) / slack_total
+
+    # Numerical cleanup: fill any tiny residual into remaining slack.
+    residual = target_sum - sum(result.values())
+    if residual > tol:
+        slack_keys = [k for k in keys if result[k] < cap_vals[k] - tol]
+        slack_total = sum(cap_vals[k] - result[k] for k in slack_keys)
+        if slack_keys and slack_total > tol:
+            for k in slack_keys:
+                result[k] += residual * (cap_vals[k] - result[k]) / slack_total
+    elif residual < -tol:
+        scale_keys = [k for k in keys if result[k] > tol]
+        scale_total = sum(result[k] for k in scale_keys)
+        if scale_total > tol:
+            for k in scale_keys:
+                result[k] += residual * result[k] / scale_total
+
+    unallocated = max(0.0, target_sum - sum(result.values()))
+    return {k: max(0.0, min(cap_vals[k], result[k])) for k in keys}, sorted(capped), unallocated
 
 
 def _tier1_rating(label: Any) -> str:
@@ -256,6 +328,7 @@ def main() -> int:  # noqa: C901
     }
     probe_path = out_dir / "validation" / "bl_inputs_probe.csv"
     if args.force:
+        invalidate_dependents(run_dir, "blacklitterman")
         downstream = [
             out_dir / "bl_target_weights.csv",
             out_dir / "bl_optimizer_summary.csv",
@@ -295,7 +368,8 @@ def main() -> int:  # noqa: C901
         "stage1": (json.loads(art["stage1_manifest"].read_text(encoding="utf-8")), [("stocks_scores.csv", art["scores"])]),
         "stage2": (json.loads(art["risk_manifest"].read_text(encoding="utf-8")),
                    [("covariance.csv", art["covariance"]), ("prices_adjclose.csv", art["prices"]),
-                    ("risk_coverage.csv", art["risk_coverage"])]),
+                    ("risk_coverage.csv", art["risk_coverage"]),
+                    ("covariance_meta.json", art["cov_meta"])]),
         "stage3": (json.loads(art["optimizer_manifest"].read_text(encoding="utf-8")), [("target_weights.csv", art["target_weights"])]),
         "stage5": (json.loads(art["rotation_manifest"].read_text(encoding="utf-8")),
                    [("sector_rotation.csv", art["sector_rotation"]),
@@ -339,6 +413,22 @@ def main() -> int:  # noqa: C901
     macro_sector = {str(r.get("source_pipeline", "")).strip(): r for r in read_csv(art["macro_sector_fit"])}
     pipelines = sorted({str(r.get("source_pipeline", "")).strip() for r in score_rows
                         if str(r.get("source_pipeline", "")).strip()})
+    regime_rows = read_csv(art["macro_regime"])
+    regime_row = regime_rows[0] if len(regime_rows) == 1 else None
+    macro_application_bad = []
+    if len(regime_rows) != 1:
+        macro_application_bad.append(f"row_count={len(regime_rows)} expected=1")
+    macro_application_bad.extend(regime_application_errors(regime_row))
+    macro_applied = not macro_application_bad
+    source_regime_label = str((regime_row or {}).get("active_current_regime", "")).strip()
+    effective_regime_label = source_regime_label if macro_applied else "NEUTRAL_UNCOVERED"
+    rec(
+        "macro_application_coverage_policy",
+        "PASS",
+        f"applied covered regime={source_regime_label}"
+        if macro_applied
+        else f"neutralized uncovered regime; reasons={macro_application_bad[:8]}",
+    )
 
     # ---- BL optimization universe = investable_eligible AND risk_eligible AND in covariance ----
     universe = sorted(
@@ -437,7 +527,10 @@ def main() -> int:  # noqa: C901
         f"source={baseline_source_label}; weights={{{', '.join(f'{p}:{base_by_pipe.get(p, 0.0):.4f}' for p in pipelines)}}}"
         if not baseline_bad else f"{baseline_bad[:8]}")
 
-    fit_scores = [_f_default(macro_sector.get(p, {}).get("macro_fit_score"), 0.0) for p in pipelines]
+    fit_scores = [
+        _f_default(macro_sector.get(p, {}).get("macro_fit_score"), 0.0) if macro_applied else 0.0
+        for p in pipelines
+    ]
     fit_z = dict(zip(pipelines, _zscores(fit_scores)))
     shift_scale = _f_default(bl.get("macro_sector_shift_scale"), 0.05)
     max_shift = _f_default(bl.get("macro_sector_max_shift"), 0.10)
@@ -476,6 +569,16 @@ def main() -> int:  # noqa: C901
         "rotation_state": rotation_state.get(p, "Neutral"),
     } for p in pipelines]
 
+    # ---- regime -> gross scalar ----
+    gross_map = cfg_get(config, "black_litterman_fusion.regime_to_gross_scalar", {}) or {}
+    base_gross = _f_default(bl.get("base_gross_exposure"), 1.0)
+    regime_scalar = (
+        _f_default(gross_map.get(source_regime_label, gross_map.get("default", 0.85)), 0.85)
+        if macro_applied
+        else 1.0
+    )
+    gross_exposure = round(base_gross * regime_scalar, 8)
+
     # Ticker-level BL benchmark: preserve Stage-3 weights inside each sleeve when available, otherwise
     # equal-weight the sleeve. This is the tier1-supported way to express macro-shifted sector budgets.
     universe_by_pipe: dict[str, list[str]] = {p: [] for p in pipelines}
@@ -501,6 +604,36 @@ def main() -> int:  # noqa: C901
         "PASS",
         "no empty sleeves with positive budgets" if not empty_budget_pipes
         else f"zeroed_and_renormalized={empty_budget_pipes}",
+    )
+    max_w = _f_default(bl.get("max_weight_per_name"), 0.05)
+    pre_capacity_target = dict(sector_target)
+    sector_capacity = {
+        p: (len(universe_by_pipe.get(p, [])) * max_w / gross_exposure if gross_exposure > 0.0 else 0.0)
+        for p in pipelines
+    }
+    sector_target, capacity_capped_pipes, capacity_unallocated = _project_weights_to_caps(
+        sector_target,
+        sector_capacity,
+    )
+    if capacity_capped_pipes or capacity_unallocated > 1e-9:
+        for row in sector_target_rows:
+            p = str(row["sector_name"])
+            row["target_weight"] = round(sector_target.get(p, 0.0), 10)
+            row["realized_shift"] = round(sector_target.get(p, 0.0) - base_by_pipe.get(p, 0.0), 10)
+    capacity_detail = (
+        "no capacity adjustment required"
+        if not capacity_capped_pipes and capacity_unallocated <= 1e-9
+        else "capped="
+        + ",".join(
+            f"{p}:{pre_capacity_target.get(p, 0.0):.4f}->{sector_target.get(p, 0.0):.4f}"
+            for p in capacity_capped_pipes
+        )
+        + f"; unallocated={capacity_unallocated:.10f}"
+    )
+    rec(
+        "sleeve_capacity_budget_adjustment",
+        "PASS" if capacity_unallocated <= 1e-9 else "FAIL",
+        capacity_detail,
     )
     benchmark_rows = []
     within_source = str(bl.get("benchmark_within_sector_source", "equal")).strip().lower()
@@ -534,21 +667,14 @@ def main() -> int:  # noqa: C901
     rec("benchmark_within_sector_valid", "PASS" if not benchmark_bad else "FAIL",
         f"source={within_source}; rows={len(benchmark_rows)}" if not benchmark_bad else f"{benchmark_bad[:8]}")
 
-    # ---- regime -> gross scalar ----
-    regime_rows = read_csv(art["macro_regime"])
-    regime_label = str(regime_rows[0].get("active_current_regime", "")).strip() if regime_rows else ""
-    gross_map = cfg_get(config, "black_litterman_fusion.regime_to_gross_scalar", {}) or {}
-    base_gross = _f_default(bl.get("base_gross_exposure"), 1.0)
-    regime_scalar = _f_default(gross_map.get(regime_label, gross_map.get("default", 0.85)), 0.85)
-    gross_exposure = round(base_gross * regime_scalar, 8)
-
     # ---- foreign budget (respect active_flag) ----
     fb = read_csv(art["macro_foreign_budget"])
     fb_row = fb[0] if fb else {}
     policy = str(bl.get("foreign_activation_policy", "respect_active_flag")).strip()
-    active = str(fb_row.get("active_flag", "0")).strip() == "1"
+    active = macro_applied and str(fb_row.get("active_flag", "0")).strip() == "1"
     macro_budget = _f_default(fb_row.get("foreign_budget"), 0.0)
-    if policy == "respect_active_flag" and not active:
+    effective_foreign_policy = policy if macro_applied else "neutral_uncovered_macro"
+    if not macro_applied or (policy == "respect_active_flag" and not active):
         fmin, fmax = 0.0, 0.0
     else:
         fmin = _f_default(fb_row.get("min_budget"), 0.0)
@@ -556,7 +682,7 @@ def main() -> int:  # noqa: C901
     foreign_rows = [{
         "region": "FOREIGN", "min_budget": round(fmin, 8), "max_budget": round(fmax, 8),
         "active_flag": 1 if active else 0, "macro_foreign_budget": round(macro_budget, 8),
-        "activation_policy": policy,
+        "activation_policy": effective_foreign_policy,
     }]
 
     # ---- probe / feasibility checks ----
@@ -698,7 +824,14 @@ def main() -> int:  # noqa: C901
             "benchmark_weight_source": "csv",
             "benchmark_weights_csv": str(out["bl_benchmark_weights.csv"]),
         },
-        "regime": {"label": regime_label, "gross_scalar": regime_scalar, "base_gross_exposure": base_gross},
+        "regime": {
+            "label": effective_regime_label,
+            "source_label": source_regime_label,
+            "gross_scalar": regime_scalar,
+            "base_gross_exposure": base_gross,
+            "macro_applied": macro_applied,
+            "application_reason": "covered" if macro_applied else ";".join(macro_application_bad),
+        },
         "allocation": {
             "region_budgets": {
                 "US": {"min": us_min, "max": us_max},
@@ -719,7 +852,7 @@ def main() -> int:  # noqa: C901
     write_csv(out["bl_sector_targets_optimizer.csv"], SECTOR_TARGET_FIELDS, sector_target_rows)
     write_csv(out["bl_benchmark_weights.csv"], BENCHMARK_FIELDS, benchmark_rows)
     write_csv(out["bl_foreign_budget_optimizer.csv"], FOREIGN_BUDGET_FIELDS, foreign_rows)
-    out["bl_optimizer_config.yaml"].write_text(yaml.safe_dump(gen_config, sort_keys=True), encoding="utf-8")
+    write_text_atomic(out["bl_optimizer_config.yaml"], yaml.safe_dump(gen_config, sort_keys=True))
 
     # generated config must reference only run-local sealed files (no PROD, no MacroLayer DB, run-local)
     cfg_text = out["bl_optimizer_config.yaml"].read_text(encoding="utf-8")
@@ -821,7 +954,14 @@ def main() -> int:  # noqa: C901
         "enabled_in_production": bool(cfg_get(config, "black_litterman_fusion.enabled_in_production", False)),
         "acceptance": "PASS" if passed else "FAIL",
         "universe_size": len(view_rows),
-        "regime": {"label": regime_label, "gross_scalar": regime_scalar, "gross_exposure": gross_exposure},
+        "regime": {
+            "label": effective_regime_label,
+            "source_label": source_regime_label,
+            "gross_scalar": regime_scalar,
+            "gross_exposure": gross_exposure,
+            "macro_applied": macro_applied,
+            "application_reason": "covered" if macro_applied else ";".join(macro_application_bad),
+        },
         "foreign": {"active": active, "min_budget": fmin, "max_budget": fmax},
         "sector_baseline": {"source": baseline_source_label, "weights": base_by_pipe},
         "benchmark_within_sector_source": "stage3_weights" if within_source in {"stage3", "stage3_weights", "stage3_or_equal"} else "equal",
@@ -839,7 +979,7 @@ def main() -> int:  # noqa: C901
         LOGGER.info("[%s] %s -- %s", c["status"], c["check"], c["detail"])
     if passed:
         LOGGER.info("STAGE 7 BL INPUTS: PASS (as_of=%s, universe=%d, gross=%.3f, regime=%s) -> %s",
-                    run_as_of, len(view_rows), gross_exposure, regime_label, out["bl_inputs_meta.json"])
+                    run_as_of, len(view_rows), gross_exposure, effective_regime_label, out["bl_inputs_meta.json"])
         return 0
     LOGGER.error("STAGE 7 BL INPUTS: FAIL")
     return 1

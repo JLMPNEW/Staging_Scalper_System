@@ -36,8 +36,17 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    read_csv,
+    read_manifest,
+    sealed_artifact_errors,
+    sha256_file,
+    write_csv,
+    write_manifest,
+)
 from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
@@ -252,9 +261,15 @@ def main() -> int:  # noqa: C901
         if not required.exists():
             LOGGER.error("Required input missing (run Stage 3+4 first): %s", required)
             return 1
-    cost_manifest = json.loads(cost_manifest_path.read_text(encoding="utf-8"))
-    if str(cost_manifest.get("acceptance", "")) != "PASS":
-        LOGGER.error("Stage 4 cost manifest acceptance=%s; refusing", cost_manifest.get("acceptance"))
+    cost_manifest = read_manifest(cost_manifest_path)
+    cost_seal_errors = sealed_artifact_errors(
+        cost_manifest,
+        cost_book_path,
+        "cost_adjusted_target_weights.csv",
+        run_as_of=run_as_of,
+    )
+    if cost_seal_errors:
+        LOGGER.error("Stage 4 cost book is unsealed/stale: %s", cost_seal_errors)
         return 1
 
     # book source: Stage 9 P2 exit-adjusted book when sealed and passing, else the Stage 4 book
@@ -262,8 +277,14 @@ def main() -> int:  # noqa: C901
     exits_book_path = run_dir / "exits" / "exit_adjusted_book.csv"
     exits_meta_path = run_dir / "exits" / "exit_adjusted_book_meta.json"
     if exits_book_path.exists() and exits_meta_path.exists():
-        exits_meta = json.loads(exits_meta_path.read_text(encoding="utf-8"))
-        if str(exits_meta.get("acceptance", "")) == "PASS":
+        exits_meta = read_manifest(exits_meta_path)
+        exit_seal_errors = sealed_artifact_errors(
+            exits_meta,
+            exits_book_path,
+            "exit_adjusted_book.csv",
+            run_as_of=run_as_of,
+        )
+        if not exit_seal_errors:
             book_source = "exits/exit_adjusted_book.csv"
     if book_source.startswith("exits"):
         book = [{"ticker": r["ticker"], "weight": r.get("post_exit_weight", "0")}
@@ -284,6 +305,8 @@ def main() -> int:  # noqa: C901
     plan_path = out_dir / "payout_plan.csv"
     book_path = out_dir / "payout_adjusted_book.csv"
     manifest_path = out_dir / "payout_manifest.json"
+    if args.force:
+        invalidate_dependents(run_dir, "payout")
     try:
         fail_if_exists([plan_path, book_path, manifest_path], force=args.force)
     except FileExistsError as exc:
@@ -337,6 +360,18 @@ def main() -> int:  # noqa: C901
         "planned_sells_observed_usd": round(planned_sells_usd, 2),
         "summary": summary,
         "checks": checks,
+        "inputs_sha256": {
+            "cost_manifest.json": sha256_file(cost_manifest_path),
+            "book_source": sha256_file(exits_book_path if book_source.startswith("exits") else cost_book_path),
+            "target_weights.csv": sha256_file(weights_path),
+            "trade_list_meta.json": sha256_file(trade_meta_path),
+            **({"exit_adjusted_book_meta.json": sha256_file(exits_meta_path)}
+               if book_source.startswith("exits") else {}),
+        },
+        "outputs_sha256": {
+            "payout_plan.csv": sha256_file(plan_path),
+            "payout_adjusted_book.csv": sha256_file(book_path),
+        },
     })
     for c in checks:
         LOGGER.info("[%s] %s -- %s", c["status"], c["check"], c["detail"])

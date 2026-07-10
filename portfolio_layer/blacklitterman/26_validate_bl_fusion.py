@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
@@ -292,6 +293,7 @@ def main() -> int:  # noqa: C901
     manifest_path = bl_dir / "bl_manifest.json"
     replay_path = bl_dir / "bl_net_static_replay_metrics.json"
     if args.force:
+        invalidate_dependents(run_dir, "blacklitterman")
         for path in (validation_path, manifest_path, replay_path):
             if path.exists():
                 path.unlink()

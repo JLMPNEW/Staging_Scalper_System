@@ -341,21 +341,27 @@ def account_id(account: str) -> str:
     return text.split(" ", 1)[0].strip()
 
 
-def csv_trade_key(source_sha: str, row: dict[str, str]) -> str:
+TRADE_IDENTITY_FIELDS = (
+    "asset_category", "currency", "account", "symbol", "date_time", "quantity",
+    "trade_price", "proceeds", "commission_fee", "basis", "code",
+)
+
+
+def trade_identity(row: dict[str, str]) -> str:
+    return "|".join(str(row.get(field, "")).strip() for field in TRADE_IDENTITY_FIELDS)
+
+
+def csv_trade_key(source_sha: str, row: dict[str, str], *, occurrence: int | None = None) -> str:
+    """Stable cross-statement key for an economic fill.
+
+    `source_sha` remains in the signature for backward API compatibility but is deliberately not
+    part of the identity. The occurrence ordinal preserves repeated identical fills in one statement.
+    """
+    del source_sha
+    ordinal = int(row.get("source_row", "0") or 0) if occurrence is None else int(occurrence)
     parts = [
-        source_sha,
-        row.get("source_row", ""),
-        row.get("asset_category", ""),
-        row.get("currency", ""),
-        row.get("account", ""),
-        row.get("symbol", ""),
-        row.get("date_time", ""),
-        row.get("quantity", ""),
-        row.get("trade_price", ""),
-        row.get("proceeds", ""),
-        row.get("commission_fee", ""),
-        row.get("basis", ""),
-        row.get("code", ""),
+        trade_identity(row),
+        str(ordinal),
     ]
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
@@ -398,6 +404,7 @@ def parse_ib_activity_statement(path: Path) -> ParsedStatement:
     cash_transactions: list[dict[str, str]] = []
     fees: list[dict[str, str]] = []
     securities_lending: list[dict[str, str]] = []
+    trade_occurrences: dict[str, int] = {}
 
     raw_rows: list[list[str]]
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -498,7 +505,10 @@ def parse_ib_activity_statement(path: Path) -> ParsedStatement:
                 "mtm_pl": fmt_number(_pick(mapped, "MTM P/L")),
                 "code": _pick(mapped, "Code"),
             }
-            out["trade_key"] = csv_trade_key(source_sha, out)
+            identity = trade_identity(out)
+            occurrence = trade_occurrences.get(identity, 0) + 1
+            trade_occurrences[identity] = occurrence
+            out["trade_key"] = csv_trade_key(source_sha, out, occurrence=occurrence)
             trades.append(out)
         elif section == "Financial Instrument Information" and _pick(mapped, "Asset Category"):
             instruments.append({

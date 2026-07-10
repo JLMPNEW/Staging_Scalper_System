@@ -13,8 +13,9 @@ survivorship panel (backtest/15b):
   realized_vol_{dd}d               annualized std of daily returns over the same forward window
 
 PIT rules: entry = first available bar at/after the snapshot as-of (bounded lag); exits use only bars
-at/before the horizon row; a delisted name's label is its return through its final bar
-(status=truncated_delisted); horizons past the panel right edge are status=incomplete_future.
+at/before the horizon row; a verified delisted name is liquidated at its terminal value and held as
+cash through the horizon (status=ok_delisted_terminal). Horizons past the panel right edge are
+status=incomplete_future because their benchmark-relative outcome is not yet observable.
 Every label carries the panel's `survivorship_complete` flag.
 
 LOCKBOX: snapshots dated inside the sealed window are SKIPPED. Computing their labels requires
@@ -26,7 +27,6 @@ entry in docs/LOCKBOX_PROTOCOL.md). Flag state + protocol sha256 are recorded in
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import re
 import sys
@@ -43,11 +43,19 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    manifest_accepts,
+    read_csv,
+    read_manifest,
+    sha256_file,
+    write_csv,
+    write_manifest,
+)
 from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
-from portfolio_layer.research.stage11_common import load_lockbox  # noqa: E402
+from portfolio_layer.research.stage11_common import load_lockbox, manifest_file_errors  # noqa: E402
 
 
 LOGGER = logging.getLogger("define_calibration_targets")
@@ -121,7 +129,7 @@ def forward_label(
         verified_delisted = ended
     target_row = entry_row + horizon
     series_last = int(rows[-1]) if len(rows) else -1
-    if target_row > last_panel_row and not (ended and series_last <= last_panel_row):
+    if target_row > last_panel_row:
         return {"status": "incomplete_future", "ret": None, "end_row": None}
     hit = exit_bar(rows, vals, entry_row, min(target_row, last_panel_row))
     if hit is None:
@@ -129,7 +137,13 @@ def forward_label(
     end_row, end_price = hit
     ret = end_price / entry_price - 1.0
     if series_last < target_row:
-        status = "truncated_delisted" if ended and verified_delisted else "truncated_data_end"
+        if ended and verified_delisted:
+            # The verified terminal value is liquidated at delisting and then held as cash through
+            # the requested horizon. Use the horizon end for benchmark/excess-return alignment.
+            status = "ok_delisted_terminal"
+            end_row = target_row
+        else:
+            status = "truncated_data_end"
     else:
         status = "ok"
     return {"status": status, "ret": ret, "end_row": end_row}
@@ -218,12 +232,13 @@ def _selftest() -> None:
 
     rows_b, vals_b = ticker_series(prices, "BBB")
     lab = forward_label(rows_b, vals_b, entry_row=10, entry_price=110.0, horizon=21, last_panel_row=last, ended=True)
-    assert lab["status"] == "truncated_delisted" and abs(lab["ret"] - (120.0 / 110.0 - 1.0)) < 1e-12, lab
+    assert lab["status"] == "ok_delisted_terminal" and lab["end_row"] == 31
+    assert abs(lab["ret"] - (120.0 / 110.0 - 1.0)) < 1e-12, lab
 
     lab = forward_label(rows_a, vals_a, entry_row=50, entry_price=150.0, horizon=21, last_panel_row=last, ended=False)
     assert lab["status"] == "incomplete_future" and lab["ret"] is None, lab
     lab = forward_label(rows_b, vals_b, entry_row=10, entry_price=110.0, horizon=100, last_panel_row=last, ended=True)
-    assert lab["status"] == "truncated_delisted" and abs(lab["ret"] - (120.0 / 110.0 - 1.0)) < 1e-12, lab
+    assert lab["status"] == "incomplete_future" and lab["ret"] is None, lab
 
     rows_c, vals_c = ticker_series(prices, "CCC")
     ent = entry_bar(rows_c, vals_c, 10, 5)
@@ -255,7 +270,7 @@ def _selftest() -> None:
         vals_b,
         entry_row=10,
         entry_price=110.0,
-        horizon=100,
+        horizon=21,
         last_panel_row=last,
         ended=True,
         verified_delisted=False,
@@ -316,14 +331,42 @@ def main() -> int:  # noqa: C901
     if panel_dir is None:
         LOGGER.error("No survivorship panel build found under %s; run backtest/15b first", panel_root)
         return 1
-    panel_manifest = json.loads((panel_dir / "survivorship_manifest.json").read_text(encoding="utf-8"))
-    if panel_manifest.get("acceptance") != "PASS":
+    panel_manifest_path = panel_dir / "survivorship_manifest.json"
+    panel_manifest = read_manifest(panel_manifest_path)
+    if not manifest_accepts(panel_manifest, allow_deferred=False):
         LOGGER.error("Survivorship panel %s acceptance=%s; refusing", panel_dir.name, panel_manifest.get("acceptance"))
         return 1
-    prices = pd.read_csv(panel_dir / "prices_adjclose.csv", index_col=0)
+    prices_path = panel_dir / "prices_adjclose.csv"
+    coverage_path = panel_dir / "ticker_coverage.csv"
+    coverage_rows = read_csv(coverage_path)
+    panel_errors = manifest_file_errors(
+        panel_manifest,
+        {"prices_adjclose.csv": prices_path, "ticker_coverage.csv": coverage_path},
+        row_counts={"ticker_coverage.csv": len(coverage_rows)},
+    )
+    if panel_errors:
+        LOGGER.error("Survivorship panel %s is stale/unsealed: %s", panel_dir.name, panel_errors[:8])
+        return 1
+    prices = pd.read_csv(prices_path, index_col=0)
     calendar = [str(d) for d in prices.index]
     last_panel_row = len(calendar) - 1
-    coverage = {r["ticker"]: r for r in read_csv(panel_dir / "ticker_coverage.csv")}
+    coverage = {str(r.get("ticker", "")).strip().upper(): r for r in coverage_rows}
+
+    snapshot_index_path = store_dir / "snapshot_index.csv"
+    if not snapshot_index_path.exists():
+        LOGGER.error("Snapshot-store index missing: %s; run research/65 validation/replay", snapshot_index_path)
+        return 1
+    snapshot_index_rows = read_csv(snapshot_index_path)
+    snapshot_index: dict[str, dict[str, str]] = {}
+    duplicate_index_dates: list[str] = []
+    for row in snapshot_index_rows:
+        as_of = str(row.get("as_of_date", ""))
+        if as_of in snapshot_index:
+            duplicate_index_dates.append(as_of)
+        snapshot_index[as_of] = row
+    if duplicate_index_dates:
+        LOGGER.error("Snapshot-store index has duplicate dates: %s", duplicate_index_dates[:8])
+        return 1
 
     snap_dirs = sorted(
         p for p in store_dir.iterdir()
@@ -372,6 +415,7 @@ def main() -> int:  # noqa: C901
     no_entry = 0
     out_rows: list[dict[str, Any]] = []
     status_counts: dict[str, int] = {}
+    snapshot_input_sha256: dict[str, dict[str, str]] = {}
 
     def update_max_end(current: str, end_row: Any | None) -> str:
         if end_row is None:
@@ -390,7 +434,38 @@ def main() -> int:  # noqa: C901
             LOGGER.warning("Snapshot %s is beyond the panel right edge; skipped", as_of)
             panel_edge_skipped.append(as_of)
             continue
-        snap_rows = read_csv(snap / "stocks_scores.csv")
+        scores_path = snap / "stocks_scores.csv"
+        snapshot_meta_path = snap / "snapshot_meta.json"
+        source_manifest_path = snap / "manifest.json"
+        try:
+            snapshot_meta = read_manifest(snapshot_meta_path)
+        except ValueError as exc:
+            LOGGER.error("Snapshot %s metadata unreadable: %s", as_of, exc)
+            return 1
+        index_row = snapshot_index.get(as_of)
+        scores_sha = sha256_file(scores_path)
+        snapshot_errors: list[str] = []
+        if index_row is None:
+            snapshot_errors.append("missing_index_row")
+        elif str(index_row.get("stocks_scores_sha256", "")) != scores_sha:
+            snapshot_errors.append("index_scores_hash_mismatch")
+        if not manifest_accepts(snapshot_meta):
+            snapshot_errors.append(f"meta_acceptance={snapshot_meta.get('acceptance')}")
+        if str(snapshot_meta.get("stocks_scores_sha256", "")) != scores_sha:
+            snapshot_errors.append("meta_scores_hash_mismatch")
+        if not source_manifest_path.exists() or str(snapshot_meta.get("manifest_sha256", "")) != sha256_file(
+            source_manifest_path
+        ):
+            snapshot_errors.append("source_manifest_hash_mismatch")
+        if snapshot_errors:
+            LOGGER.error("Snapshot %s is unsealed/stale: %s", as_of, snapshot_errors)
+            return 1
+        snapshot_input_sha256[as_of] = {
+            "stocks_scores.csv": scores_sha,
+            "snapshot_meta.json": sha256_file(snapshot_meta_path),
+            "manifest.json": sha256_file(source_manifest_path),
+        }
+        snap_rows = read_csv(scores_path)
         by_pipe: dict[str, list[dict[str, str]]] = {}
         for r in snap_rows:
             by_pipe.setdefault(str(r.get("source_pipeline", "")).strip(), []).append(r)
@@ -516,9 +591,31 @@ def main() -> int:  # noqa: C901
                 bad_end.append(f"{r['as_of_date']}:{r['ticker']}:{h}d")
     rec("label_windows_within_panel", "PASS" if not bad_end else "FAIL",
         "all label end bars in (entry, panel_end]" if not bad_end else f"{bad_end[:8]}")
+    coverage_tickers = [str(r.get("ticker", "")).strip().upper() for r in coverage_rows]
+    coverage_counts: dict[str, int] = {}
+    for ticker in coverage_tickers:
+        coverage_counts[ticker] = coverage_counts.get(ticker, 0) + 1
+    coverage_duplicates = sorted(t for t, count in coverage_counts.items() if count > 1)
+    survivorship_bad: list[str] = []
+    for row in out_rows:
+        ticker = str(row.get("ticker", "")).strip().upper()
+        source = coverage.get(ticker)
+        if source is None:
+            survivorship_bad.append(f"{ticker}:missing_coverage")
+            continue
+        expected_complete = str(source.get("survivorship_complete", "0")).strip()
+        expected_status = str(source.get("status", "missing_from_panel")).strip()
+        if str(row.get("survivorship_complete", "")).strip() != expected_complete:
+            survivorship_bad.append(f"{ticker}:survivorship_complete_mismatch")
+        if str(row.get("coverage_status", "")).strip() != expected_status:
+            survivorship_bad.append(f"{ticker}:coverage_status_mismatch")
+    if coverage_duplicates:
+        survivorship_bad.extend(f"{ticker}:duplicate_coverage" for ticker in coverage_duplicates)
     incomplete_names = sum(1 for r in out_rows if str(r["survivorship_complete"]) != "1")
-    rec("survivorship_flags_carried", "PASS",
-        f"{incomplete_names} label rows flagged survivorship-incomplete (of {len(out_rows)})")
+    rec("survivorship_flags_carried", "PASS" if not survivorship_bad else "FAIL",
+        f"{incomplete_names} label rows flagged survivorship-incomplete (of {len(out_rows)}); "
+        "all flags/statuses match sealed coverage"
+        if not survivorship_bad else f"mismatches={survivorship_bad[:12]}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
     write_csv(targets_path, fields, out_rows)
@@ -528,7 +625,13 @@ def main() -> int:  # noqa: C901
         "generated_at": utc_now(),
         "acceptance": "PASS" if passed else "FAIL",
         "panel_build": panel_dir.name,
-        "panel_manifest_sha256": sha256_file(panel_dir / "survivorship_manifest.json"),
+        "panel_manifest_sha256": sha256_file(panel_manifest_path),
+        "panel_inputs_sha256": {
+            "prices_adjclose.csv": sha256_file(prices_path),
+            "ticker_coverage.csv": sha256_file(coverage_path),
+        },
+        "snapshot_index_sha256": sha256_file(snapshot_index_path),
+        "snapshot_inputs_sha256": snapshot_input_sha256,
         "protocol_sha256": lockbox["protocol_sha256"],
         "lockbox_open_flag": bool(args.lockbox_open),
         "lockbox_opened_config": lockbox["lockbox_opened"],

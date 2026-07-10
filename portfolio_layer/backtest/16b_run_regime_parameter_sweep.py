@@ -21,6 +21,7 @@ import logging
 import sys
 from datetime import date, timedelta
 from pathlib import Path
+from statistics import NormalDist
 from typing import Any
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +70,9 @@ SWEEP_FIELDS = [
     "active_t",
     "turnover_per_year",
     "cost_drag_per_year_bps",
+    "solver_failures",
+    "raw_promotable",
+    "multiple_test_active_t_min",
     "promotable",
     "rejection_reasons",
 ]
@@ -370,6 +374,14 @@ def main() -> int:
             by_arm = {str(r["arm"]): r for r in summary}
             base = by_arm["aqr_only"]
             candidate = by_arm["regime_lever"]
+            solver_failures = int(result["skipped"].get("solver", 0)) + int(
+                (result.get("arm_solver_fallbacks") or {}).get("regime_lever", 0)
+            )
+            rejection_reasons = str(candidate["rejection_reasons"]).strip(";")
+            if solver_failures:
+                rejection_reasons = ";".join(
+                    reason for reason in (rejection_reasons, f"solver_failures={solver_failures}") if reason
+                )
             rows.append({
                 "case_id": case["case_id"],
                 "supportive_regimes": "|".join(str(s).upper() for s in case["supportive_regimes"]),
@@ -389,12 +401,35 @@ def main() -> int:
                 "active_t": candidate["active_t"],
                 "turnover_per_year": candidate["turnover_per_year"],
                 "cost_drag_per_year_bps": candidate["cost_drag_per_year_bps"],
-                "promotable": candidate["promotable"],
-                "rejection_reasons": candidate["rejection_reasons"],
+                "solver_failures": solver_failures,
+                "raw_promotable": int(candidate["promotable"] == 1 and solver_failures == 0),
+                "multiple_test_active_t_min": "",
+                "promotable": 0,
+                "rejection_reasons": rejection_reasons,
             })
     finally:
         conn.close()
 
+    familywise_alpha = float(
+        (verdict_cfg.get("regime_sweep") or {}).get("familywise_alpha", 0.05)
+    )
+    if not 0.0 < familywise_alpha < 1.0:
+        LOGGER.error("walkforward.regime_sweep.familywise_alpha must be in (0,1)")
+        return 1
+    corrected_t = max(
+        float(verdict_cfg.get("promote_active_t_min", 2.0)),
+        NormalDist().inv_cdf(1.0 - familywise_alpha / max(1, len(rows))),
+    )
+    for row in rows:
+        active_t = float(row["active_t"])
+        raw = str(row.get("raw_promotable")) == "1"
+        familywise = raw and np.isfinite(active_t) and active_t >= corrected_t
+        row["multiple_test_active_t_min"] = round(corrected_t, 6)
+        row["promotable"] = int(familywise)
+        if raw and not familywise:
+            existing = str(row.get("rejection_reasons", "")).strip(";")
+            correction_reason = f"familywise_active_t<{corrected_t:.3f}"
+            row["rejection_reasons"] = ";".join(x for x in (existing, correction_reason) if x)
     write_csv(sweep_path, SWEEP_FIELDS, rows)
     sortable = [
         r for r in rows
@@ -411,6 +446,14 @@ def main() -> int:
         "panel_build": panel_dir.name,
         "cases": len(rows),
         "promoted_cases": len(promoted),
+        "raw_promotable_cases": sum(str(row.get("raw_promotable")) == "1" for row in rows),
+        "solver_failure_cases": sum(int(row.get("solver_failures", 0)) > 0 for row in rows),
+        "multiple_testing": {
+            "method": "bonferroni_one_sided_normal_active_t",
+            "familywise_alpha": familywise_alpha,
+            "tests": len(rows),
+            "required_active_t": corrected_t,
+        },
         "sealed_snapshots_skipped": sealed_skipped,
         "inputs_sha256": {
             "config": sha256_file(config_path),
@@ -423,6 +466,7 @@ def main() -> int:
         "best_by_net_ir_vs_baseline": best_ir,
         "notes": [
             "Research-only sweep. A promotable row is evidence for review, not a production change.",
+            "Promotable is familywise-error controlled across the full configured parameter grid.",
             "Unsupported regimes fail closed according to the tested mode; default is min_var.",
         ],
         "files": {

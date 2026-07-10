@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 import numpy as np  # noqa: E402
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
     fail_if_exists, read_csv, sha256_file, write_csv, write_manifest,
@@ -87,6 +88,8 @@ def main() -> int:  # noqa: C901
     validation_path = risk_dir / "validation" / "risk_panel_validation.csv"
     review_path = risk_dir / "data_quality_review.csv"
     manifest_path = risk_dir / "risk_manifest.json"
+    if args.force:
+        invalidate_dependents(run_dir, "risk")
     try:
         fail_if_exists([validation_path, review_path, manifest_path], force=args.force)
     except FileExistsError as exc:
@@ -132,6 +135,18 @@ def main() -> int:  # noqa: C901
     rec("calendar_no_future_dates", "PASS" if not future and monotonic else "FAIL",
         f"rows={len(dates)} last={dates[-1] if dates else 'none'}" if not future and monotonic
         else f"future={future[:3]} monotonic={monotonic}")
+
+    finality = snapshot.get("same_day_bar_finality") or {}
+    finality_ok = panel_end != run_as_of or (
+        isinstance(finality, dict) and str(finality.get("status", "")) == "PASS"
+    )
+    rec(
+        "same_day_daily_bar_final",
+        "PASS" if finality_ok else "FAIL",
+        f"panel_end={panel_end}; {finality.get('detail', 'historical panel')}"
+        if finality_ok else
+        f"panel ends on run_as_of={run_as_of} without a sealed post-close finality check",
+    )
 
     # 1b. returns must be recomputable from prices without forward-filling missing bars
     expected_returns_input = prices.copy()
@@ -355,7 +370,12 @@ def main() -> int:  # noqa: C901
 
     meta_min_eig = _meta_float("psd_min_eig")
     meta_condition = _meta_float("condition_number")
-    max_condition = _meta_float("max_condition_number") or float(rc.get("max_condition_number", 1e6))
+    meta_max_condition = _meta_float("max_condition_number")
+    max_condition = (
+        meta_max_condition
+        if meta_max_condition is not None
+        else float(rc.get("max_condition_number", 1e6))
+    )
     matrix_psd = (
         cov_square and cov_labels_match and cov_finite and cov_symmetric
         and cov_min_eig is not None and cov_min_eig > 0
@@ -455,6 +475,26 @@ def main() -> int:  # noqa: C901
                 fp = risk_dir / fname
                 if not fp.exists() or sha256_file(fp) != info.get("sha256"):
                     liquidity_bad.append(f"hash_mismatch:{fname}")
+            requested = spread_meta.get("requested_tickers")
+            if requested is not None:
+                if not isinstance(requested, list):
+                    liquidity_bad.append("requested_tickers_not_list")
+                else:
+                    requested_set = {str(ticker).strip().upper() for ticker in requested if str(ticker).strip()}
+                    if len(requested_set) != len(requested):
+                        liquidity_bad.append("requested_tickers_blank_or_duplicate")
+                    if requested_set != set(spread_rows):
+                        liquidity_bad.append(
+                            f"requested_ticker_set_mismatch missing={sorted(requested_set - set(spread_rows))[:8]} "
+                            f"unexpected={sorted(set(spread_rows) - requested_set)[:8]}"
+                        )
+            try:
+                requested_count = int((spread_meta.get("counts") or {}).get("requested_tickers", -1))
+            except (TypeError, ValueError):
+                requested_count = -1
+                liquidity_bad.append("requested_count_not_integer")
+            if requested_count != len(spread_rows):
+                liquidity_bad.append(f"requested_count={requested_count} snapshot_rows={len(spread_rows)}")
         fallback = sum(1 for row in spread_rows.values() if str(row.get("spread_status", "")) == "fallback")
         failed = sum(1 for row in spread_rows.values() if str(row.get("spread_status", "")) == "failed")
         max_fallback = finite_float(cfg_get(config, "liquidity_panel.max_universe_fallback_fraction", 0.10),

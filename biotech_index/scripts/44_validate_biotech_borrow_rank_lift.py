@@ -248,6 +248,11 @@ def load_score_rows(
     return [dict(row) for row in rows]
 
 
+def float_or_default(raw: object, default: float) -> float:
+    value = to_float(raw, None)
+    return default if value is None else value
+
+
 def rank_rows(rows: list[dict[str, Any]], *, score_field: str) -> list[dict[str, Any]]:
     ranked = [
         row
@@ -257,8 +262,8 @@ def rank_rows(rows: list[dict[str, Any]], *, score_field: str) -> list[dict[str,
     return sorted(
         ranked,
         key=lambda row: (
-            -(to_float(row.get(score_field), -1e12) or -1e12),
-            to_float(row.get("risk_score"), 100.0) or 100.0,
+            -float_or_default(row.get(score_field), -1e12),
+            float_or_default(row.get("risk_score"), 100.0),
             normalize_ticker(row.get("ticker")),
         ),
     )
@@ -379,8 +384,8 @@ def simulate_bonus_for_date(
     ranked = sorted(
         simulated,
         key=lambda row: (
-            -(to_float(row.get("_adjusted_score"), -1e12) or -1e12),
-            to_float(row.get("risk_score"), 100.0) or 100.0,
+            -float_or_default(row.get("_adjusted_score"), -1e12),
+            float_or_default(row.get("risk_score"), 100.0),
             normalize_ticker(row.get("ticker")),
         ),
     )

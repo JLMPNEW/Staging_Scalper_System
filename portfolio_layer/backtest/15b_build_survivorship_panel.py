@@ -35,7 +35,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists, manifest_accepts, read_csv, read_manifest, sha256_file, write_csv,
+    write_manifest, write_via_temp,
+)
 from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
@@ -100,18 +103,48 @@ def _panel_end_is_final(panel_end: date, *, now: datetime | None = None) -> tupl
 # ---------------------------------------------------------------------------
 # universe from the PIT snapshot store
 # ---------------------------------------------------------------------------
-def snapshot_universe(store_dir: Path) -> tuple[dict[str, dict[str, Any]], list[str]]:
+def snapshot_universe(
+    store_dir: Path,
+) -> tuple[dict[str, dict[str, Any]], list[str], dict[str, str]]:
     """Ticker -> {pipeline, first/last snapshot, count} from every archived snapshot."""
     universe: dict[str, dict[str, Any]] = {}
     snap_dates: list[str] = []
+    provenance: dict[str, str] = {}
     if not store_dir.exists():
-        return universe, snap_dates
+        return universe, snap_dates, provenance
+    index_path = store_dir / "snapshot_index.csv"
+    if not index_path.exists():
+        raise ValueError(f"snapshot store lacks index: {index_path}")
+    index_rows = read_csv(index_path)
+    index: dict[str, dict[str, str]] = {}
+    for row in index_rows:
+        as_of = str(row.get("as_of_date", "")).strip()
+        if not as_of or as_of in index:
+            raise ValueError(f"snapshot index has blank/duplicate date: {as_of!r}")
+        index[as_of] = row
+    provenance["snapshot_index.csv"] = sha256_file(index_path)
     for child in sorted(store_dir.iterdir()):
         if not (child.is_dir() and DATE_RE.match(child.name)):
             continue
         scores = child / "stocks_scores.csv"
-        if not scores.exists():
-            continue
+        meta_path = child / "snapshot_meta.json"
+        if not scores.exists() or not meta_path.exists():
+            raise ValueError(f"snapshot {child.name} missing scores or metadata")
+        index_row = index.get(child.name)
+        if index_row is None:
+            raise ValueError(f"snapshot {child.name} absent from snapshot_index.csv")
+        meta = read_manifest(meta_path)
+        if not manifest_accepts(meta) or not str(index_row.get("acceptance", "")).startswith("PASS"):
+            raise ValueError(f"snapshot {child.name} is not accepted")
+        score_hash = sha256_file(scores)
+        if score_hash != str(index_row.get("stocks_scores_sha256", "")):
+            raise ValueError(f"snapshot {child.name} score hash differs from index")
+        if score_hash != str(meta.get("stocks_scores_sha256", "")):
+            raise ValueError(f"snapshot {child.name} score hash differs from snapshot metadata")
+        if str(meta.get("as_of_date", "")) != child.name:
+            raise ValueError(f"snapshot {child.name} metadata date mismatch")
+        provenance[f"snapshots/{child.name}/stocks_scores.csv"] = score_hash
+        provenance[f"snapshots/{child.name}/snapshot_meta.json"] = sha256_file(meta_path)
         snap_dates.append(child.name)
         for r in read_csv(scores):
             ticker = str(r.get("ticker", "")).strip().upper()
@@ -124,7 +157,12 @@ def snapshot_universe(store_dir: Path) -> tuple[dict[str, dict[str, Any]], list[
             item["count"] += 1
     for item in universe.values():
         item["pipeline"] = max(item["pipelines"], key=lambda k: item["pipelines"][k]) if item["pipelines"] else ""
-    return universe, snap_dates
+    indexed_dates = {as_of for as_of in index if DATE_RE.match(as_of)}
+    if indexed_dates != set(snap_dates):
+        raise ValueError(
+            f"snapshot index/directory date mismatch: {sorted(indexed_dates ^ set(snap_dates))[:12]}"
+        )
+    return universe, snap_dates, provenance
 
 
 def market_instruments(config: dict[str, Any]) -> list[str]:
@@ -282,7 +320,11 @@ def main() -> int:  # noqa: C901
     overlap_warn_rel = float(sp.get("overlap_disagreement_warn_rel", 0.02))
     min_complete_warn = float(sp.get("min_complete_fraction_warn", 0.95))
 
-    universe, snap_dates = snapshot_universe(store_dir)
+    try:
+        universe, snap_dates, snapshot_inputs = snapshot_universe(store_dir)
+    except ValueError as exc:
+        LOGGER.error("Snapshot-store integrity failure: %s", exc)
+        return 1
     if not universe:
         LOGGER.error("PIT snapshot store is empty (%s); run research/65 first", store_dir)
         return 1
@@ -310,6 +352,7 @@ def main() -> int:  # noqa: C901
     # Corporate-action ticker aliases (same config Stage 2 uses): fetch the active market-data symbol
     # for a migrated contract ticker and stitch its lineage price-history CSV in as export bars.
     alias_query: dict[str, str] = {}
+    lineage_files: list[Path] = []
     for raw_ticker, alias_cfg in (cfg_get(config, "risk_panel.ticker_aliases", {}) or {}).items():
         contract_ticker = str(raw_ticker).strip().upper()
         alias_cfg = alias_cfg or {}
@@ -323,6 +366,7 @@ def main() -> int:  # noqa: C901
         history_path = resolve_path(history_rel, base_dir=config_path.parent)
         if not history_path.exists():
             continue
+        lineage_files.append(history_path)
         allowed = {contract_ticker, active, predecessor} - {""}
         merged = export_prices.setdefault(contract_ticker, {})
         for r in read_csv(history_path):
@@ -571,10 +615,16 @@ def main() -> int:  # noqa: C901
     out_dir.mkdir(parents=True, exist_ok=True)
     out_prices = prices.copy()
     out_prices.index = [d.date().isoformat() for d in out_prices.index]
-    out_prices.to_csv(artifacts["prices_adjclose.csv"], lineterminator="\n")
+    write_via_temp(
+        artifacts["prices_adjclose.csv"],
+        lambda temp: out_prices.to_csv(temp, lineterminator="\n"),
+    )
     out_returns = returns.copy()
     out_returns.index = [d.date().isoformat() for d in out_returns.index]
-    out_returns.to_csv(artifacts["returns_daily.csv"], lineterminator="\n")
+    write_via_temp(
+        artifacts["returns_daily.csv"],
+        lambda temp: out_returns.to_csv(temp, lineterminator="\n"),
+    )
     write_csv(artifacts["ticker_coverage.csv"], COVERAGE_FIELDS, coverage_rows)
     write_csv(artifacts["delisting_events.csv"], EVENT_FIELDS,
               sorted(events.values(), key=lambda e: str(e["ticker"])))
@@ -602,6 +652,14 @@ def main() -> int:  # noqa: C901
         "export_files": [str(p) for p in export_files],
         "event_files": [str(p) for p in event_files],
         "hint_files": [str(p) for p in hint_files],
+        "inputs_sha256": {
+            "config.yaml": sha256_file(config_path),
+            **snapshot_inputs,
+            **{f"delisted_price_export:{path}": sha256_file(path) for path in export_files},
+            **{f"delisting_event:{path}": sha256_file(path) for path in event_files},
+            **{f"delisting_hint:{path}": sha256_file(path) for path in hint_files},
+            **{f"ticker_lineage:{path}": sha256_file(path) for path in sorted(set(lineage_files))},
+        },
         "checks": checks,
         "files": {name: {"sha256": sha256_file(path)} for name, path in artifacts.items()
                   if name != "survivorship_manifest.json" and path.exists()},

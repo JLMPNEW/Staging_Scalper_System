@@ -258,6 +258,245 @@ CREATE TABLE IF NOT EXISTS macro_probabilities_daily (
     PRIMARY KEY (as_of_date, probability_key)
 );
 
+CREATE TABLE IF NOT EXISTS macro_probability_v2_target (
+    model_version               TEXT NOT NULL,
+    probability_key             TEXT NOT NULL,
+    predictor_as_of_date        TEXT NOT NULL,
+    target_period_start         TEXT NOT NULL,
+    target_period_end           TEXT NOT NULL,
+    target_value                REAL,
+    label_value                 INTEGER,
+    label_available_date        TEXT,
+    label_source                TEXT NOT NULL,
+    label_threshold             REAL NOT NULL,
+    predictor_complete_flag     INTEGER NOT NULL DEFAULT 0,
+    updated_at_utc              TEXT NOT NULL,
+    PRIMARY KEY (model_version, probability_key, predictor_as_of_date)
+);
+
+CREATE TABLE IF NOT EXISTS macro_probability_v2_model (
+    model_version               TEXT NOT NULL,
+    calibration_as_of_date      TEXT NOT NULL,
+    probability_key             TEXT NOT NULL,
+    target_name                 TEXT NOT NULL,
+    target_horizon              TEXT NOT NULL,
+    predictor_names_json        TEXT NOT NULL,
+    mandatory_predictors_json   TEXT NOT NULL,
+    predictor_mean_json         TEXT,
+    predictor_std_json          TEXT,
+    coefficients_json           TEXT,
+    intercept_value             REAL,
+    ridge_penalty               REAL NOT NULL,
+    training_sample_count       INTEGER NOT NULL DEFAULT 0,
+    positive_sample_count       INTEGER NOT NULL DEFAULT 0,
+    negative_sample_count       INTEGER NOT NULL DEFAULT 0,
+    positive_rate               REAL,
+    max_label_available_date    TEXT,
+    calibration_ready_flag      INTEGER NOT NULL DEFAULT 0,
+    updated_at_utc              TEXT NOT NULL,
+    PRIMARY KEY (model_version, calibration_as_of_date, probability_key)
+);
+
+CREATE TABLE IF NOT EXISTS macro_probability_v2_daily (
+    model_version               TEXT NOT NULL,
+    as_of_date                  TEXT NOT NULL,
+    probability_key             TEXT NOT NULL,
+    probability_value           REAL,
+    calibration_as_of_date      TEXT,
+    target_period_start         TEXT,
+    target_period_end           TEXT,
+    training_sample_count       INTEGER NOT NULL DEFAULT 0,
+    positive_rate               REAL,
+    predictor_coverage_ratio    REAL,
+    coverage_flag               INTEGER NOT NULL DEFAULT 0,
+    updated_at_utc              TEXT NOT NULL,
+    PRIMARY KEY (model_version, as_of_date, probability_key)
+);
+
+CREATE TABLE IF NOT EXISTS macro_probability_v2_diagnostics (
+    model_version               TEXT NOT NULL,
+    diagnostic_as_of_date       TEXT NOT NULL,
+    probability_key             TEXT NOT NULL,
+    oos_sample_count            INTEGER NOT NULL DEFAULT 0,
+    positive_sample_count       INTEGER NOT NULL DEFAULT 0,
+    negative_sample_count       INTEGER NOT NULL DEFAULT 0,
+    oos_brier_score             REAL,
+    climatology_brier_score     REAL,
+    brier_skill_score           REAL,
+    oos_log_loss                REAL,
+    oos_auc                     REAL,
+    calibration_intercept       REAL,
+    calibration_slope           REAL,
+    evidence_status             TEXT NOT NULL,
+    evidence_reason             TEXT NOT NULL,
+    updated_at_utc              TEXT NOT NULL,
+    PRIMARY KEY (model_version, diagnostic_as_of_date, probability_key)
+);
+
+CREATE TABLE IF NOT EXISTS macro_regime_v2_daily (
+    model_version                           TEXT NOT NULL,
+    as_of_date                              TEXT NOT NULL,
+    p_g_now                                 REAL,
+    p_g_lead                                REAL,
+    p_pi_now                                REAL,
+    p_pi_lead                               REAL,
+    p_current_expansion_disinflation        REAL,
+    p_current_heating_up                    REAL,
+    p_current_slow_growth                   REAL,
+    p_current_stagflation                   REAL,
+    p_next_expansion_disinflation           REAL,
+    p_next_heating_up                       REAL,
+    p_next_slow_growth                      REAL,
+    p_next_stagflation                      REAL,
+    current_regime                          TEXT,
+    next_regime                             TEXT,
+    current_regime_probability              REAL,
+    next_regime_probability                 REAL,
+    current_regime_confidence               REAL,
+    next_regime_confidence                  REAL,
+    energy_shock_score                      REAL,
+    energy_shock_flag                       INTEGER NOT NULL DEFAULT 0,
+    shadow_only_flag                        INTEGER NOT NULL DEFAULT 1,
+    coverage_flag                           INTEGER NOT NULL DEFAULT 0,
+    updated_at_utc                          TEXT NOT NULL,
+    PRIMARY KEY (model_version, as_of_date)
+);
+
+CREATE TABLE IF NOT EXISTS macro_regime_v2_smoothed_daily (
+    model_version                           TEXT NOT NULL,
+    as_of_date                              TEXT NOT NULL,
+    p_smoothed_current_expansion_disinflation REAL,
+    p_smoothed_current_heating_up           REAL,
+    p_smoothed_current_slow_growth          REAL,
+    p_smoothed_current_stagflation          REAL,
+    p_smoothed_next_3m_expansion_disinflation REAL,
+    p_smoothed_next_3m_heating_up           REAL,
+    p_smoothed_next_3m_slow_growth          REAL,
+    p_smoothed_next_3m_stagflation          REAL,
+    raw_current_regime                      TEXT,
+    smoothed_current_regime                 TEXT,
+    raw_next_regime                         TEXT,
+    smoothed_next_regime                    TEXT,
+    raw_current_regime_probability          REAL,
+    smoothed_current_regime_probability     REAL,
+    raw_next_regime_probability             REAL,
+    smoothed_next_regime_probability        REAL,
+    raw_regime_confidence                   REAL,
+    smoothed_regime_confidence              REAL,
+    smoothed_transition_bias                TEXT,
+    smoothed_transition_bias_strength       REAL,
+    raw_to_smoothed_shift_l1                REAL,
+    next_raw_to_smoothed_shift_l1           REAL,
+    coverage_flag                           INTEGER NOT NULL DEFAULT 0,
+    updated_at_utc                          TEXT NOT NULL,
+    PRIMARY KEY (model_version, as_of_date)
+);
+
+CREATE TABLE IF NOT EXISTS macro_transition_v2_matrix (
+    model_version                           TEXT NOT NULL,
+    as_of_date                              TEXT NOT NULL,
+    from_regime                             TEXT NOT NULL,
+    to_regime                               TEXT NOT NULL,
+    prior_transition_probability            REAL,
+    empirical_transition_probability        REAL,
+    transition_probability                  REAL,
+    empirical_transition_count              INTEGER NOT NULL DEFAULT 0,
+    total_from_count                        INTEGER NOT NULL DEFAULT 0,
+    updated_at_utc                          TEXT NOT NULL,
+    PRIMARY KEY (model_version, as_of_date, from_regime, to_regime)
+);
+
+CREATE TABLE IF NOT EXISTS macro_transition_v2_diagnostics (
+    model_version                           TEXT NOT NULL,
+    as_of_date                              TEXT NOT NULL,
+    transition_count_before                 INTEGER NOT NULL DEFAULT 0,
+    raw_current_regime                      TEXT,
+    predicted_current_regime                TEXT,
+    smoothed_current_regime                 TEXT,
+    raw_next_regime                         TEXT,
+    smoothed_next_regime                    TEXT,
+    raw_current_regime_probability          REAL,
+    predicted_current_regime_probability    REAL,
+    smoothed_current_regime_probability     REAL,
+    raw_next_regime_probability             REAL,
+    smoothed_next_regime_probability        REAL,
+    raw_regime_confidence                   REAL,
+    smoothed_regime_confidence              REAL,
+    raw_to_smoothed_shift_l1                REAL,
+    next_raw_to_smoothed_shift_l1           REAL,
+    raw_flip_flag                           INTEGER NOT NULL DEFAULT 0,
+    smoothed_flip_flag                      INTEGER NOT NULL DEFAULT 0,
+    raw_smoothed_agreement_flag             INTEGER NOT NULL DEFAULT 0,
+    coverage_flag                           INTEGER NOT NULL DEFAULT 0,
+    updated_at_utc                          TEXT NOT NULL,
+    PRIMARY KEY (model_version, as_of_date)
+);
+
+CREATE TABLE IF NOT EXISTS macro_regime_v2_decision_daily (
+    model_version                           TEXT NOT NULL,
+    as_of_date                              TEXT NOT NULL,
+    decision_date_flag                      INTEGER NOT NULL DEFAULT 0,
+    smoothed_current_regime                 TEXT,
+    smoothed_next_regime                    TEXT,
+    active_current_regime                   TEXT,
+    active_next_regime                      TEXT,
+    current_top_probability                 REAL,
+    next_top_probability                    REAL,
+    current_confidence                      REAL,
+    next_confidence                         REAL,
+    current_switch_margin                   REAL,
+    next_switch_margin                      REAL,
+    current_switch_flag                     INTEGER NOT NULL DEFAULT 0,
+    next_switch_flag                        INTEGER NOT NULL DEFAULT 0,
+    regime_switch_flag                      INTEGER NOT NULL DEFAULT 0,
+    current_pending_regime                  TEXT,
+    next_pending_regime                     TEXT,
+    current_pending_count                   INTEGER NOT NULL DEFAULT 0,
+    next_pending_count                      INTEGER NOT NULL DEFAULT 0,
+    regime_switch_pending_flag              INTEGER NOT NULL DEFAULT 0,
+    regime_override_reason                  TEXT,
+    coverage_flag                           INTEGER NOT NULL DEFAULT 0,
+    updated_at_utc                          TEXT NOT NULL,
+    PRIMARY KEY (model_version, as_of_date)
+);
+
+CREATE TABLE IF NOT EXISTS macro_regime_v2_promotion_evidence (
+    model_version                           TEXT NOT NULL,
+    evidence_as_of_date                     TEXT NOT NULL,
+    probability_key                         TEXT NOT NULL,
+    common_oos_sample_count                 INTEGER NOT NULL DEFAULT 0,
+    positive_sample_count                   INTEGER NOT NULL DEFAULT 0,
+    negative_sample_count                   INTEGER NOT NULL DEFAULT 0,
+    v1_brier_score                          REAL,
+    v2_brier_score                          REAL,
+    v2_brier_skill_score                    REAL,
+    brier_improvement_vs_v1                 REAL,
+    v1_auc                                  REAL,
+    v2_auc                                  REAL,
+    v2_calibration_intercept                REAL,
+    v2_calibration_slope                    REAL,
+    cell_status                             TEXT NOT NULL,
+    cell_reason                             TEXT NOT NULL,
+    updated_at_utc                          TEXT NOT NULL,
+    PRIMARY KEY (model_version, evidence_as_of_date, probability_key)
+);
+
+CREATE TABLE IF NOT EXISTS macro_regime_v2_promotion_summary (
+    model_version                           TEXT NOT NULL,
+    evidence_as_of_date                     TEXT NOT NULL,
+    acceptance                              TEXT NOT NULL,
+    validated_cell_count                    INTEGER NOT NULL DEFAULT 0,
+    required_cell_count                     INTEGER NOT NULL DEFAULT 0,
+    common_decision_day_count               INTEGER NOT NULL DEFAULT 0,
+    regime_disagreement_fraction            REAL,
+    v1_switch_count                         INTEGER NOT NULL DEFAULT 0,
+    v2_switch_count                         INTEGER NOT NULL DEFAULT 0,
+    current_candidate_confident_flag        INTEGER NOT NULL DEFAULT 0,
+    artifact_manifest_path                  TEXT,
+    updated_at_utc                          TEXT NOT NULL,
+    PRIMARY KEY (model_version, evidence_as_of_date)
+);
+
 CREATE TABLE IF NOT EXISTS macro_regime_raw_daily (
     as_of_date                              TEXT PRIMARY KEY,
     p_g_now                                REAL,
@@ -845,6 +1084,39 @@ CREATE INDEX IF NOT EXISTS idx_macro_probabilities_daily_key_date
 CREATE INDEX IF NOT EXISTS idx_macro_probabilities_daily_date
     ON macro_probabilities_daily(as_of_date, coverage_flag);
 
+CREATE INDEX IF NOT EXISTS idx_macro_probability_v2_target_key_date
+    ON macro_probability_v2_target(model_version, probability_key, predictor_as_of_date);
+
+CREATE INDEX IF NOT EXISTS idx_macro_probability_v2_model_key_date
+    ON macro_probability_v2_model(model_version, probability_key, calibration_as_of_date, calibration_ready_flag);
+
+CREATE INDEX IF NOT EXISTS idx_macro_probability_v2_daily_key_date
+    ON macro_probability_v2_daily(model_version, probability_key, as_of_date, coverage_flag);
+
+CREATE INDEX IF NOT EXISTS idx_macro_probability_v2_diagnostics_key_date
+    ON macro_probability_v2_diagnostics(model_version, probability_key, diagnostic_as_of_date);
+
+CREATE INDEX IF NOT EXISTS idx_macro_regime_v2_daily_date
+    ON macro_regime_v2_daily(model_version, as_of_date, coverage_flag);
+
+CREATE INDEX IF NOT EXISTS idx_macro_regime_v2_smoothed_date
+    ON macro_regime_v2_smoothed_daily(model_version, as_of_date, coverage_flag);
+
+CREATE INDEX IF NOT EXISTS idx_macro_transition_v2_matrix_date
+    ON macro_transition_v2_matrix(model_version, as_of_date);
+
+CREATE INDEX IF NOT EXISTS idx_macro_transition_v2_diagnostics_date
+    ON macro_transition_v2_diagnostics(model_version, as_of_date, coverage_flag);
+
+CREATE INDEX IF NOT EXISTS idx_macro_regime_v2_decision_date
+    ON macro_regime_v2_decision_daily(model_version, as_of_date, coverage_flag);
+
+CREATE INDEX IF NOT EXISTS idx_macro_regime_v2_promotion_evidence_date
+    ON macro_regime_v2_promotion_evidence(model_version, evidence_as_of_date, cell_status);
+
+CREATE INDEX IF NOT EXISTS idx_macro_regime_v2_promotion_summary_date
+    ON macro_regime_v2_promotion_summary(model_version, evidence_as_of_date, acceptance);
+
 CREATE INDEX IF NOT EXISTS idx_macro_regime_raw_daily_date
     ON macro_regime_raw_daily(as_of_date, coverage_flag);
 
@@ -958,6 +1230,17 @@ _CLEARABLE_TABLES = {
     "macro_probability_calibration",
     "macro_probability_diagnostics",
     "macro_probabilities_daily",
+    "macro_probability_v2_target",
+    "macro_probability_v2_model",
+    "macro_probability_v2_daily",
+    "macro_probability_v2_diagnostics",
+    "macro_regime_v2_daily",
+    "macro_regime_v2_smoothed_daily",
+    "macro_transition_v2_matrix",
+    "macro_transition_v2_diagnostics",
+    "macro_regime_v2_decision_daily",
+    "macro_regime_v2_promotion_evidence",
+    "macro_regime_v2_promotion_summary",
     "macro_regime_raw_daily",
     "macro_regime_smoothed_daily",
     "macro_transition_matrix",

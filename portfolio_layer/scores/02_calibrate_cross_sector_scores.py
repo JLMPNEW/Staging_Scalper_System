@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
     CONTRACT_FIELDS, DEFAULT_RATING_BANDS, contract_version, expected_alpha, fail_if_exists,
     percentiles_within, rating_for_percentile, read_csv, upsert_stocks_scores, validate_rating_bands, write_csv,
@@ -126,6 +127,7 @@ def invalidate_downstream_artifacts(run_dir: Path) -> None:
         for path in validation_dir.iterdir():
             if path.is_file():
                 path.unlink()
+    invalidate_dependents(run_dir, "scores")
 
 
 def main() -> int:

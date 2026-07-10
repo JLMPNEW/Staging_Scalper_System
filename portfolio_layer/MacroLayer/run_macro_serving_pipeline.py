@@ -19,7 +19,8 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Run the MacroLayer serving build DAG in dependency order: "
             "calendar -> PIT -> metric latest -> country coverage -> feature -> composite "
-            "-> probability -> regime raw -> regime smoothed -> regime decision -> industry macro -> country macro "
+            "-> probability -> shadow probability v2 -> regime raw -> regime smoothed -> regime decision "
+            "-> industry macro -> country macro "
             "-> stock macro overlay -> portfolio inputs -> stock sleeve targets -> foreign sleeve budget "
             "-> final optimizer integration."
         )
@@ -44,6 +45,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-feature", action="store_true", help="Skip rebuilding macro features.")
     parser.add_argument("--skip-composites", action="store_true", help="Skip rebuilding macro composites.")
     parser.add_argument("--skip-probabilities", action="store_true", help="Skip rebuilding macro probabilities.")
+    parser.add_argument(
+        "--skip-probabilities-v2",
+        action="store_true",
+        help="Skip the shadow independent-outcome v2 probability build and validation.",
+    )
     parser.add_argument("--skip-regime-raw", action="store_true", help="Skip rebuilding macro_regime_raw_daily.")
     parser.add_argument("--skip-regime-smoothed", action="store_true", help="Skip rebuilding macro_regime_smoothed_daily.")
     parser.add_argument("--skip-regime-decision", action="store_true", help="Skip rebuilding macro_regime_decision_daily.")
@@ -288,6 +294,56 @@ def main() -> None:
         _append_text_arg(probability_cmd, "--end-date", args.end_date)
         _append_multi_arg(probability_cmd, "--probability-keys", args.probability_keys)
         _run_step(step_name="probability_layer", command=probability_cmd)
+
+    probability_v2_enabled = parse_boolish(cfg_get(cfg, "probability_v2", "enabled", default=False), default=False)
+    if probability_v2_enabled and not args.skip_probabilities_v2:
+        probability_v2_cmd = [
+            str(args.python_executable),
+            str(SCRIPT_DIR / "build_macro_probabilities_v2.py"),
+            *common_cfg,
+        ]
+        _append_path_arg(probability_v2_cmd, "--serving-db-path", args.serving_db_path)
+        _append_text_arg(probability_v2_cmd, "--start-date", args.start_date)
+        _append_text_arg(probability_v2_cmd, "--end-date", args.end_date)
+        _run_step(step_name="probability_v2_research", command=probability_v2_cmd)
+
+        probability_v2_validate_cmd = [
+            str(args.python_executable),
+            str(SCRIPT_DIR / "validate_macro_probabilities_v2.py"),
+            *common_cfg,
+        ]
+        _append_path_arg(probability_v2_validate_cmd, "--serving-db-path", args.serving_db_path)
+        _append_text_arg(probability_v2_validate_cmd, "--end-date", args.end_date)
+        _run_step(step_name="probability_v2_validation", command=probability_v2_validate_cmd)
+
+        regime_v2_decision_cmd = [
+            str(args.python_executable),
+            str(SCRIPT_DIR / "build_macro_regime_v2_decision.py"),
+            *common_cfg,
+        ]
+        _append_path_arg(regime_v2_decision_cmd, "--serving-db-path", args.serving_db_path)
+        _append_text_arg(regime_v2_decision_cmd, "--start-date", args.start_date)
+        _append_text_arg(regime_v2_decision_cmd, "--end-date", args.end_date)
+        _run_step(step_name="regime_v2_decision_research", command=regime_v2_decision_cmd)
+
+        regime_v2_promotion_cmd = [
+            str(args.python_executable),
+            str(SCRIPT_DIR / "validate_macro_regime_v2_promotion.py"),
+            *common_cfg,
+        ]
+        _append_path_arg(regime_v2_promotion_cmd, "--serving-db-path", args.serving_db_path)
+        _append_text_arg(regime_v2_promotion_cmd, "--end-date", args.end_date)
+        _run_step(step_name="regime_v2_promotion_evidence", command=regime_v2_promotion_cmd)
+
+        vintage_audit_cmd = [
+            str(args.python_executable),
+            str(SCRIPT_DIR / "audit_macro_v2_vintage_gaps.py"),
+            *common_cfg,
+        ]
+        _append_path_arg(vintage_audit_cmd, "--raw-db-path", args.raw_db_path)
+        _append_path_arg(vintage_audit_cmd, "--serving-db-path", args.serving_db_path)
+        _append_text_arg(vintage_audit_cmd, "--end-date", args.end_date)
+        _run_step(step_name="regime_v2_vintage_gap_audit", command=vintage_audit_cmd)
 
     if not args.skip_regime_raw:
         regime_raw_cmd = [str(args.python_executable), str(SCRIPT_DIR / "build_macro_regime_raw.py"), *common_cfg]

@@ -15,7 +15,7 @@ import sqlite3
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from portfolio_layer.core.db import utc_now
 
@@ -111,6 +111,7 @@ class AdapterResult:
     source_file: Path
     source_asof_date: str
     rows: list[CanonicalScore]
+    source_files: tuple[Path, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +160,110 @@ def write_manifest(path: Path, payload: dict[str, Any]) -> None:
             os.remove(tmp_name)
 
 
+def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline="") as handle:
+            handle.write(text)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+
+
+def write_via_temp(path: Path, writer: Callable[[Path], None]) -> None:
+    """Run a path-based writer against a sibling temp file, then atomically publish it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        writer(tmp_path)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+def read_manifest(path: Path) -> dict[str, Any]:
+    """Read a JSON manifest and require a top-level object."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read manifest {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Manifest {path} must contain a JSON object")
+    return payload
+
+
+def manifest_acceptance_value(manifest: dict[str, Any]) -> str:
+    """Return the authoritative acceptance value used across portfolio stages."""
+    hard = str(manifest.get("hard_gate_acceptance", "")).strip()
+    return hard or str(manifest.get("acceptance", "")).strip()
+
+
+def manifest_accepts(manifest: dict[str, Any], *, allow_deferred: bool = True) -> bool:
+    acceptance = manifest_acceptance_value(manifest)
+    return acceptance == "PASS" or (allow_deferred and acceptance.startswith("PASS_"))
+
+
+def manifest_recorded_sha256(manifest: dict[str, Any], *artifact_keys: str) -> str | None:
+    """Find an artifact hash in one of the manifest layouts used by the pipeline.
+
+    Callers provide explicit keys, including any relative prefix. Basename guessing is intentionally
+    avoided because a manifest can contain multiple files with the same basename in different stages.
+    """
+    for section_name in ("files", "provenance_sha256", "outputs_sha256", "inputs_sha256"):
+        section = manifest.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        for key in artifact_keys:
+            value = section.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, dict):
+                sha = str(value.get("sha256", "")).strip()
+                if sha:
+                    return sha
+    for key in artifact_keys:
+        value = manifest.get(f"{key}_sha256")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def sealed_artifact_errors(
+    manifest: dict[str, Any],
+    artifact: Path,
+    *artifact_keys: str,
+    run_as_of: str | None = None,
+    allow_deferred: bool = True,
+) -> list[str]:
+    """Validate acceptance, run date, presence, and the manifest-recorded artifact hash."""
+    errors: list[str] = []
+    acceptance = manifest_acceptance_value(manifest)
+    if not manifest_accepts(manifest, allow_deferred=allow_deferred):
+        errors.append(f"acceptance={acceptance or 'MISSING'}")
+    manifest_as_of = str(manifest.get("run_as_of", manifest.get("run_as_of_date", ""))).strip()
+    if run_as_of:
+        if not manifest_as_of:
+            errors.append(f"run_as_of=MISSING expected={run_as_of}")
+        elif manifest_as_of != run_as_of:
+            errors.append(f"run_as_of={manifest_as_of} expected={run_as_of}")
+    if not artifact.exists():
+        errors.append(f"artifact_missing={artifact}")
+        return errors
+    expected = manifest_recorded_sha256(manifest, *artifact_keys)
+    if not expected:
+        errors.append(f"artifact_sha_missing={list(artifact_keys)}")
+    else:
+        actual = sha256_file(artifact)
+        if actual != expected:
+            errors.append(f"artifact_sha_mismatch={actual[:12]}!={expected[:12]}")
+    return errors
+
+
 def fail_if_exists(paths: Iterable[Path], *, force: bool = False) -> None:
     """Protect run artifacts from accidental overwrite unless the caller opts in."""
     existing = [path for path in paths if path.exists()]
@@ -189,8 +294,8 @@ def expected_alpha(native_score: float, *, neutral: float, scale: float, expecte
     values = (native_score, neutral, scale, expected_alpha_at_full)
     if not all(math.isfinite(v) for v in values):
         raise ValueError(f"expected_alpha inputs must be finite: {values}")
-    if scale == 0:
-        return 0.0
+    if scale <= 0:
+        raise ValueError(f"expected_alpha scale must be positive, got {scale}")
     return expected_alpha_at_full * (native_score - neutral) / scale
 
 

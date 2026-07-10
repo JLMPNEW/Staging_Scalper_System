@@ -10,9 +10,9 @@ Evidence gate per (pipeline, horizon) cell — ALL required:
 For qualifying cells the script converts the empirical ridge slope (return per 1 z of standardized
 score over the horizon) into the Stage 1 calibration vocabulary:
 
-  slope_annualized        = fm_slope * 252 / horizon_days
+  slope_annualized        = slope_pooled_ridge * 252 / horizon_days
   native_sigma            = mean within-(pipeline,date) std of native_score (from the 67 panel)
-  expected_alpha_at_full  = slope_annualized * (100 - neutral_estimate) / native_sigma
+  expected_alpha_at_full  = slope_annualized * configured_native_scale / native_sigma
 
 and writes a REVIEW artifact + a proposed config snippet. It NEVER edits config.yaml: promoting
 calibration into production is a human, provenance-logged step (and, per the lockbox protocol,
@@ -35,7 +35,16 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    manifest_accepts,
+    read_csv,
+    read_manifest,
+    sha256_file,
+    write_csv,
+    write_manifest,
+    write_text_atomic,
+)
 from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
@@ -46,8 +55,9 @@ LOGGER = logging.getLogger("apply_calibration_feedback")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 
 PROPOSAL_FIELDS = [
-    "source_pipeline", "horizon_days", "fm_slope", "fm_t", "oof_rank_ic", "oos_r2_vs_zero",
-    "slope_annualized", "native_sigma", "neutral_estimate", "current_expected_alpha_at_full",
+    "source_pipeline", "horizon_days", "ridge_slope", "fm_t", "oof_rank_ic", "oos_r2_vs_zero",
+    "slope_annualized", "native_sigma", "neutral_estimate", "calibration_scale",
+    "current_expected_alpha_at_full",
     "proposed_expected_alpha_at_full", "evidence",
 ]
 
@@ -70,6 +80,18 @@ def _latest(root: Path, marker: str, wanted: str | None) -> Path | None:
     return builds[-1] if builds else None
 
 
+def _common_build(
+    roots: list[tuple[Path, str]], wanted: str | None,
+) -> str | None:
+    if wanted:
+        return wanted if all((root / wanted / marker).exists() for root, marker in roots) else None
+    names: set[str] | None = None
+    for root, marker in roots:
+        available = {p.name for p in root.iterdir() if p.is_dir() and (p / marker).exists()} if root.exists() else set()
+        names = available if names is None else names & available
+    return max(names) if names else None
+
+
 def main() -> int:  # noqa: C901
     configure_utc_logging()
     args = parse_args()
@@ -84,15 +106,56 @@ def main() -> int:  # noqa: C901
 
     fb = cfg_get(config, "calibration_feedback", {}) or {}
     feedback_horizon = int(fb.get("horizon_days", 252))
-    slopes_dir = _latest(paths.output_dir / str(cfg_get(config, "alpha_calibration.dir", "alpha_calibration")),
-                         "alpha_calibration_manifest.json", args.build)
-    valid_dir = _latest(paths.output_dir / str(cfg_get(config, "calibration_validation.dir", "calibration_validation")),
-                        "validation_manifest.json", args.build)
-    panel_dir = _latest(paths.output_dir / str(cfg_get(config, "calibration_panel.dir", "calibration_panel")),
-                        "calibration_panel_manifest.json", args.build)
-    if not (slopes_dir and valid_dir and panel_dir):
-        LOGGER.error("Need 68 + 69 + 67 builds first (missing: %s)",
-                     [n for n, d in (("68", slopes_dir), ("69", valid_dir), ("67", panel_dir)) if d is None])
+    slopes_root = paths.output_dir / str(cfg_get(config, "alpha_calibration.dir", "alpha_calibration"))
+    valid_root = paths.output_dir / str(cfg_get(config, "calibration_validation.dir", "calibration_validation"))
+    panel_root = paths.output_dir / str(cfg_get(config, "calibration_panel.dir", "calibration_panel"))
+    common_build = _common_build([
+        (slopes_root, "alpha_calibration_manifest.json"),
+        (valid_root, "validation_manifest.json"),
+        (panel_root, "calibration_panel_manifest.json"),
+    ], args.build)
+    if common_build is None:
+        LOGGER.error("Need a common 67/68/69 build id; pass --build only after all three stages complete")
+        return 1
+    slopes_dir = slopes_root / common_build
+    valid_dir = valid_root / common_build
+    panel_dir = panel_root / common_build
+
+    slopes_manifest_path = slopes_dir / "alpha_calibration_manifest.json"
+    validation_manifest_path = valid_dir / "validation_manifest.json"
+    panel_manifest_path = panel_dir / "calibration_panel_manifest.json"
+    slopes_manifest = read_manifest(slopes_manifest_path)
+    validation_manifest = read_manifest(validation_manifest_path)
+    panel_manifest = read_manifest(panel_manifest_path)
+    lineage_errors: list[str] = []
+    for label, manifest in (("68", slopes_manifest), ("69", validation_manifest), ("67", panel_manifest)):
+        if not manifest_accepts(manifest, allow_deferred=False):
+            lineage_errors.append(f"{label}:acceptance")
+    if str(slopes_manifest.get("panel_build", "")) != common_build:
+        lineage_errors.append("68:panel_build")
+    if str(validation_manifest.get("panel_build", "")) != common_build:
+        lineage_errors.append("69:panel_build")
+    panel_manifest_sha = sha256_file(panel_manifest_path)
+    if str(slopes_manifest.get("panel_manifest_sha256", "")) != panel_manifest_sha:
+        lineage_errors.append("68:panel_manifest_sha")
+    if str(validation_manifest.get("panel_manifest_sha256", "")) != panel_manifest_sha:
+        lineage_errors.append("69:panel_manifest_sha")
+    if str(validation_manifest.get("alpha_calibration_manifest_sha256", "")) != sha256_file(slopes_manifest_path):
+        lineage_errors.append("69:alpha_manifest_sha")
+    input_files = {
+        "alpha_slopes.csv": slopes_dir / "alpha_slopes.csv",
+        "oos_validation.csv": valid_dir / "oos_validation.csv",
+        "calibration_panel.csv": panel_dir / "calibration_panel.csv",
+    }
+    for name, path in input_files.items():
+        source_manifest = slopes_manifest if name == "alpha_slopes.csv" else (
+            validation_manifest if name == "oos_validation.csv" else panel_manifest
+        )
+        expected = ((source_manifest.get("files") or {}).get(name) or {}).get("sha256")
+        if not path.exists() or not expected or sha256_file(path) != expected:
+            lineage_errors.append(f"{name}:hash")
+    if lineage_errors:
+        LOGGER.error("Calibration-feedback evidence chain is stale/mixed: %s", lineage_errors)
         return 1
 
     out_dir = paths.output_dir / str(fb.get("dir", "calibration_feedback")) / slopes_dir.name
@@ -131,14 +194,23 @@ def main() -> int:  # noqa: C901
             native_sigma[pipe] = float(np.mean(stds))
             neutral_est[pipe] = float(np.mean(medians))
 
-    current_alpha = {
-        str(s.get("model_family")): float((s.get("calibration") or {}).get("expected_alpha_at_full", 0.15))
+    calibration_cfg = {
+        str(s.get("model_family")): dict(s.get("calibration") or {})
         for s in cfg_get(config, "score_contract.sectors", []) or []
+    }
+    current_alpha = {
+        pipe: float(values.get("expected_alpha_at_full", 0.15)) for pipe, values in calibration_cfg.items()
     }
 
     proposals: list[dict[str, Any]] = []
-    rejected: dict[str, int] = {"not_approved_68": 0, "not_validated_69": 0, "no_native_sigma": 0,
-                                "wrong_horizon": 0}
+    rejected: dict[str, int] = {
+        "not_approved_68": 0,
+        "not_validated_69": 0,
+        "no_native_sigma": 0,
+        "missing_ridge_slope": 0,
+        "invalid_calibration_scale": 0,
+        "wrong_horizon": 0,
+    }
     for key, s in slopes.items():
         pipe, horizon = key
         if pipe == "ALL":
@@ -157,20 +229,24 @@ def main() -> int:  # noqa: C901
         if not sigma or sigma <= 0:
             rejected["no_native_sigma"] += 1
             continue
-        raw_fm_slope = s.get("fm_slope")
-        if raw_fm_slope is None:
-            rejected["missing_fm_slope"] += 1
+        ridge_slope = parse_finite(s.get("slope_pooled_ridge"))
+        if ridge_slope is None:
+            rejected["missing_ridge_slope"] += 1
             continue
-        fm_slope = float(raw_fm_slope)
-        slope_ann = fm_slope * 252.0 / float(horizon)
+        scale = parse_finite(calibration_cfg.get(pipe, {}).get("scale"))
+        if scale is None or scale <= 0.0:
+            rejected["invalid_calibration_scale"] += 1
+            continue
+        slope_ann = ridge_slope * 252.0 / float(horizon)
         neutral = neutral_est.get(pipe, 50.0)
-        proposed = slope_ann * (100.0 - neutral) / sigma
+        proposed = slope_ann * scale / sigma
         proposals.append({
             "source_pipeline": pipe, "horizon_days": horizon,
-            "fm_slope": s.get("fm_slope"), "fm_t": s.get("fm_t"),
+            "ridge_slope": s.get("slope_pooled_ridge"), "fm_t": s.get("fm_t"),
             "oof_rank_ic": v.get("oof_rank_ic"), "oos_r2_vs_zero": v.get("oos_r2_vs_zero"),
             "slope_annualized": round(slope_ann, 6),
             "native_sigma": round(sigma, 4), "neutral_estimate": round(neutral, 4),
+            "calibration_scale": round(scale, 4),
             "current_expected_alpha_at_full": current_alpha.get(pipe, ""),
             "proposed_expected_alpha_at_full": round(proposed, 6),
             "evidence": f"68:{slopes_dir.name};69:{valid_dir.name}",
@@ -188,7 +264,7 @@ def main() -> int:  # noqa: C901
     if not proposals:
         snippet_lines.append("# NO QUALIFYING EVIDENCE: zero cells are both 68-approved and 69-validated.")
         snippet_lines.append("# This file is intentionally empty of proposals (the gate is working).")
-    snippet_path.write_text("\n".join(snippet_lines) + "\n", encoding="utf-8")
+    write_text_atomic(snippet_path, "\n".join(snippet_lines) + "\n")
 
     checks = [
         {"check": "evidence_gate", "status": "PASS",
@@ -211,6 +287,19 @@ def main() -> int:  # noqa: C901
         "proposals": len(proposals),
         "rejected": rejected,
         "checks": checks,
+        "inputs_sha256": {
+            "config.yaml": sha256_file(config_path),
+            "alpha_calibration_manifest.json": sha256_file(slopes_manifest_path),
+            "alpha_slopes.csv": sha256_file(input_files["alpha_slopes.csv"]),
+            "validation_manifest.json": sha256_file(validation_manifest_path),
+            "oos_validation.csv": sha256_file(input_files["oos_validation.csv"]),
+            "calibration_panel_manifest.json": sha256_file(panel_manifest_path),
+            "calibration_panel.csv": sha256_file(input_files["calibration_panel.csv"]),
+        },
+        "files": {
+            "proposed_calibration.csv": {"sha256": sha256_file(proposal_path), "rows": len(proposals)},
+            "proposed_config_snippet.yaml": {"sha256": sha256_file(snippet_path)},
+        },
     })
     for c in checks:
         LOGGER.info("[%s] %s -- %s", c["status"], c["check"], c["detail"])

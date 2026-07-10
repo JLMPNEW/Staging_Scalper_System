@@ -692,18 +692,16 @@ def build_market_rows(
     # Dollar volume uses the raw close when available (TRADES bars). ADJUSTED_LAST
     # bars carry no raw close, so the adjusted close is used there and historical
     # dollar volume is biased by later splits/dividends.
-    raw_closes = [
-        to_float(row.get("raw_close"))
-        if to_float(row.get("raw_close")) is not None and (to_float(row.get("raw_close")) or 0.0) > 0.0
-        else to_float(row.get("close")) or 0.0
-        for row in usable_bars
-    ]
+    raw_closes: list[float] = []
+    for row in usable_bars:
+        raw_close = to_float(row.get("raw_close"))
+        adjusted_close = to_float(row.get("close"))
+        raw_closes.append(raw_close if raw_close is not None and raw_close > 0.0 else adjusted_close or 0.0)
     # Bars with a missing volume are excluded from the averages (numerator and
     # denominator) instead of being counted as zero-volume days.
-    dollar_volumes = [
-        raw_closes[idx] * volumes[idx] if volumes[idx] is not None else None
-        for idx in range(min(len(raw_closes), len(volumes)))
-    ]
+    dollar_volumes: list[float | None] = []
+    for raw_close, volume in zip(raw_closes, volumes):
+        dollar_volumes.append(raw_close * volume if volume is not None else None)
     avg_volume_20d = window_average(volumes, 20)
     avg_dollar_volume_20d = window_average(dollar_volumes, 20)
     window_52w = usable_bars[-260:]

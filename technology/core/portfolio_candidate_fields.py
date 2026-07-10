@@ -1,6 +1,7 @@
 """Portfolio-candidate fields for technology rank-table exports."""
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any
 
 
@@ -70,6 +71,16 @@ def _text(value: Any) -> str:
 def _has_value(value: Any) -> bool:
     text = _text(value).lower()
     return text not in {"", "none", "null", "nan"}
+
+
+def _iso_date(value: Any) -> date | None:
+    text = _text(value)[:10]
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def portfolio_candidate_reason(row: dict[str, Any]) -> str:
@@ -143,6 +154,7 @@ def stage11_calibration_input_reason(
     research_input_eligible: bool,
     research_reason: str,
     survivorship_corrected: bool,
+    score_recomputed_pit: bool,
 ) -> str:
     """Return the Stage 11 input verdict for dashboard rank snapshots.
 
@@ -155,8 +167,10 @@ def stage11_calibration_input_reason(
         return "ok"
     if not research_input_eligible:
         return research_reason or "not_research_calibration_input_eligible"
-    if survivorship_corrected:
+    if survivorship_corrected and score_recomputed_pit:
         return "ok"
+    if survivorship_corrected:
+        return "survivorship_panel_score_not_recomputed_pit"
     existing_reason = _text(row.get("stage11_calibration_input_reason"))
     if existing_reason:
         return existing_reason
@@ -181,20 +195,28 @@ def add_portfolio_candidate_fields(rows: list[dict[str, Any]], *, score_neutral_
         reason = portfolio_candidate_reason(row)
         gate = int(reason == "ok")
         asof = row.get("asof_date", "")
-        price_asof = row.get("latest_price_date") or row.get("market_feature_asof_date") or asof
+        # Never substitute the snapshot date for missing price provenance. Doing
+        # so certifies a row as research-ready even when no market observation
+        # exists. A market feature date is acceptable because it is produced
+        # only from a price row at or before that date.
+        price_asof = row.get("latest_price_date") or row.get("market_feature_asof_date") or ""
         positioning_asof = row.get("positioning_feature_asof_date") or ""
         research_reason = research_calibration_reason(row, price_asof=price_asof)
         research_input_eligible = research_reason == "ok"
         sample_role = calibration_sample_role(row, research_input_eligible=research_input_eligible)
         status_reason = calibration_status_reason(row, sample_role=sample_role, research_reason=research_reason)
         survivorship_corrected = _flag(row.get("survivorship_corrected_panel_flag"))
-        stage11_input_eligible = research_input_eligible and (sample_role == "strict_oos" or survivorship_corrected)
+        score_recomputed_pit = _flag(row.get("score_recomputed_pit_flag"))
+        stage11_input_eligible = research_input_eligible and (
+            sample_role == "strict_oos" or (survivorship_corrected and score_recomputed_pit)
+        )
         stage11_reason = stage11_calibration_input_reason(
             row,
             sample_role=sample_role,
             research_input_eligible=research_input_eligible,
             research_reason=research_reason,
             survivorship_corrected=survivorship_corrected,
+            score_recomputed_pit=score_recomputed_pit,
         )
         stage11_panel_source = (
             row.get("stage11_calibration_panel_source")
@@ -259,3 +281,64 @@ def add_portfolio_candidate_fields(rows: list[dict[str, Any]], *, score_neutral_
         )
         out.append(item)
     return out
+
+
+def validate_portfolio_candidate_rows(rows: list[dict[str, Any]]) -> list[str]:
+    """Validate cross-field invariants for published technology rank rows."""
+    errors: list[str] = []
+    for row in rows:
+        ticker = _text(row.get("ticker")) or "<missing>"
+        gate = _flag(row.get("portfolio_candidate_gate"))
+        expected_gate = portfolio_candidate_reason(row) == "ok"
+        research_eligible = _flag(row.get("research_calibration_input_eligible_flag"))
+        stage11_eligible = _flag(row.get("stage11_calibration_input_eligible_flag"))
+        survivorship_corrected = _flag(row.get("survivorship_corrected_panel_flag"))
+        score_recomputed_pit = _flag(row.get("score_recomputed_pit_flag"))
+        strict_oos = _text(row.get("calibration_sample_role")) == "strict_oos"
+        oos_valid = _flag(row.get("oos_score_valid_flag"))
+
+        if gate != expected_gate:
+            errors.append(f"{ticker}: portfolio_candidate_gate does not match its eligibility inputs")
+        if gate and _text(row.get("portfolio_candidate_status")) != "eligible":
+            errors.append(f"{ticker}: portfolio candidate gate=1 but status is not eligible")
+        if not gate and _text(row.get("portfolio_candidate_status")) != "excluded":
+            errors.append(f"{ticker}: portfolio candidate gate=0 but status is not excluded")
+        if gate and not strict_oos:
+            errors.append(f"{ticker}: investable row is not calibration_sample_role=strict_oos")
+        if strict_oos and not oos_valid:
+            errors.append(f"{ticker}: strict_oos row has oos_score_valid_flag=0")
+        if gate and not research_eligible:
+            errors.append(f"{ticker}: investable row is not research-calibration eligible")
+        if stage11_eligible and not research_eligible:
+            errors.append(f"{ticker}: Stage 11 eligible row is not research-calibration eligible")
+        if stage11_eligible and not (strict_oos or (survivorship_corrected and score_recomputed_pit)):
+            errors.append(
+                f"{ticker}: Stage 11 eligible row is neither strict OOS nor a PIT-recomputed survivorship panel row"
+            )
+        if survivorship_corrected and not score_recomputed_pit and stage11_eligible:
+            errors.append(f"{ticker}: survivorship-corrected row lacks score_recomputed_pit_flag=1")
+
+        asof_text = _text(row.get("asof_date"))[:10]
+        asof = _iso_date(asof_text)
+        if asof is None:
+            errors.append(f"{ticker}: invalid or missing asof_date={asof_text!r}")
+        else:
+            for field in (
+                "latest_price_date",
+                "price_data_asof_date",
+                "feature_data_asof_date",
+                "financial_data_asof_date",
+                "short_interest_asof_date",
+                "institutional_data_asof_date",
+                "insider_data_asof_date",
+                "borrow_data_asof_date",
+            ):
+                value_text = _text(row.get(field))[:10]
+                if not value_text:
+                    continue
+                value = _iso_date(value_text)
+                if value is None:
+                    errors.append(f"{ticker}: invalid {field}={value_text!r}")
+                elif value > asof:
+                    errors.append(f"{ticker}: {field}={value_text} is after asof_date={asof_text}")
+    return errors

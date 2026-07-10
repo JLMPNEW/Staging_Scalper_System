@@ -85,6 +85,13 @@ FEATURE_COLUMNS = [
     "accounts_payable",
     "operating_cash_flow",
     "capex",
+    "depreciation_and_amortization",
+    "interest_expense",
+    "pretax_income",
+    "income_tax_expense",
+    "equity_issuance_proceeds",
+    "debt_issuance_proceeds",
+    "orders",
     "free_cash_flow",
     "research_and_development",
     "stock_based_compensation",
@@ -95,6 +102,11 @@ FEATURE_COLUMNS = [
     "net_income_usd",
     "operating_cash_flow_usd",
     "capex_usd",
+    "depreciation_and_amortization_usd",
+    "interest_expense_usd",
+    "equity_issuance_proceeds_usd",
+    "debt_issuance_proceeds_usd",
+    "orders_usd",
     "free_cash_flow_usd",
     "assets_usd",
     "liabilities_usd",
@@ -118,6 +130,16 @@ FEATURE_COLUMNS = [
     "net_income_ttm_usd",
     "free_cash_flow_ttm",
     "free_cash_flow_ttm_usd",
+    "depreciation_and_amortization_ttm",
+    "depreciation_and_amortization_ttm_usd",
+    "interest_expense_ttm",
+    "interest_expense_ttm_usd",
+    "equity_issuance_proceeds_ttm",
+    "equity_issuance_proceeds_ttm_usd",
+    "debt_issuance_proceeds_ttm",
+    "debt_issuance_proceeds_ttm_usd",
+    "orders_ttm",
+    "orders_ttm_usd",
     "gross_margin",
     "operating_margin",
     "fcf_margin",
@@ -146,6 +168,25 @@ FEATURE_COLUMNS = [
     "remaining_performance_obligation",
     "book_to_bill",
     "funded_backlog",
+    "funded_backlog_usd",
+    "orders_yoy_growth",
+    "backlog_yoy_growth",
+    "backlog_to_revenue",
+    "invested_capital_usd",
+    "roic",
+    "asset_turnover",
+    "incremental_operating_margin",
+    "inventory_growth",
+    "inventory_sales_growth_spread",
+    "cash_conversion_cycle_change",
+    "ebitda_ttm_usd",
+    "net_debt_to_ebitda",
+    "interest_coverage",
+    "cash_burn_ttm_usd",
+    "cash_runway_years",
+    "gross_capital_raised_ttm_usd",
+    "capital_raise_dependence",
+    "diluted_shares_yoy_growth",
     "development_stage",
     "financial_confidence",
     "financial_fallback_status",
@@ -163,6 +204,13 @@ DURATION_METRICS = {
     "eps_diluted",
     "operating_cash_flow",
     "capex",
+    "depreciation_and_amortization",
+    "interest_expense",
+    "pretax_income",
+    "income_tax_expense",
+    "equity_issuance_proceeds",
+    "debt_issuance_proceeds",
+    "orders",
     "research_and_development",
     "stock_based_compensation",
     "diluted_shares",
@@ -187,6 +235,13 @@ METRIC_SELECTION_ORDER = (
     "accounts_receivable",
     "accounts_payable",
     "capex",
+    "depreciation_and_amortization",
+    "interest_expense",
+    "pretax_income",
+    "income_tax_expense",
+    "equity_issuance_proceeds",
+    "debt_issuance_proceeds",
+    "orders",
     "research_and_development",
     "stock_based_compensation",
     "diluted_shares",
@@ -197,6 +252,7 @@ METRIC_SELECTION_ORDER = (
     "deferred_revenue_noncurrent",
     "deferred_revenue_total",
     "remaining_performance_obligation",
+    "funded_backlog",
 )
 
 # Maximum spread (in days) allowed between the durations of facts combined into
@@ -211,6 +267,16 @@ class TtmResult:
     quality_flag: str
     window_start: date | None = None
     window_end: date | None = None
+
+
+def ttm_windows_match(left: TtmResult, right: TtmResult) -> bool:
+    if left.value is None or right.value is None or left.window_end is None or right.window_end is None:
+        return False
+    if abs((left.window_end - right.window_end).days) > PERIOD_DURATION_TOLERANCE_DAYS:
+        return False
+    if left.window_start is None or right.window_start is None:
+        return True
+    return abs((left.window_start - right.window_start).days) <= PERIOD_DURATION_TOLERANCE_DAYS
 
 ACCEPTED_DATE_SQL = """
 CASE
@@ -633,6 +699,30 @@ def select_previous_annual(rows: list[dict[str, Any]], metric: str, current: dic
     return candidates[offset - 1] if len(candidates) >= offset else None
 
 
+def select_previous_comparable(
+    rows: list[dict[str, Any]],
+    metric: str,
+    current: dict[str, Any] | None,
+    *,
+    instant_metric: bool = False,
+) -> dict[str, Any] | None:
+    if current is None:
+        return None
+    candidates = [
+        row
+        for row in rows
+        if str(row.get("canonical_metric") or "") == metric
+        and row is not current
+        and as_float(row.get("value")) is not None
+        and (
+            period_ends_are_one_year_apart(current, row)
+            if instant_metric
+            else periods_are_one_year_apart(current, row)
+        )
+    ]
+    return max(candidates, key=row_sort_key) if candidates else None
+
+
 def is_quarterly_or_interim_fact(row: dict[str, Any]) -> bool:
     fiscal_period = str(row.get("fiscal_period") or "").upper()
     days = duration_days(row)
@@ -741,6 +831,19 @@ def periods_are_one_year_apart(current: dict[str, Any], prior: dict[str, Any], *
         345 <= days_between(current_start, prior_start) <= 385 + tolerance_days
         and 345 <= days_between(current_end, prior_end) <= 385 + tolerance_days
     )
+
+
+def period_ends_are_one_year_apart(
+    current: dict[str, Any],
+    prior: dict[str, Any],
+    *,
+    tolerance_days: int = 20,
+) -> bool:
+    current_end = parse_date(current.get("period_end"))
+    prior_end = parse_date(prior.get("period_end"))
+    if current_end is None or prior_end is None:
+        return False
+    return 345 <= days_between(current_end, prior_end) <= 385 + tolerance_days
 
 
 def valid_consecutive_quarter_window(quarters: list[dict[str, Any]]) -> bool:
@@ -1148,6 +1251,13 @@ def build_feature_from_facts(
     payables = metric_value(selected, "accounts_payable")
     operating_cash_flow = metric_value(selected, "operating_cash_flow")
     capex = metric_value(selected, "capex")
+    depreciation_and_amortization = metric_value(selected, "depreciation_and_amortization")
+    interest_expense = metric_value(selected, "interest_expense")
+    pretax_income = metric_value(selected, "pretax_income")
+    income_tax_expense = metric_value(selected, "income_tax_expense")
+    equity_issuance_proceeds = metric_value(selected, "equity_issuance_proceeds")
+    debt_issuance_proceeds = metric_value(selected, "debt_issuance_proceeds")
+    orders = metric_value(selected, "orders")
     free_cash_flow = None
     if operating_cash_flow is not None and capex is not None:
         if combined_periods_match(selected.get("operating_cash_flow"), selected.get("capex")):
@@ -1164,6 +1274,7 @@ def build_feature_from_facts(
         else:
             period_flags.append("period_mismatch_deferred_revenue")
     rpo = metric_value(selected, "remaining_performance_obligation")
+    funded_backlog = metric_value(selected, "funded_backlog")
     zero_revenue_defaulted = False
     if revenue is None and should_default_missing_revenue_to_zero(company=company, profile=profile):
         revenue = 0.0
@@ -1250,6 +1361,11 @@ def build_feature_from_facts(
     net_income_usd = usd_income(net_income)
     operating_cash_flow_usd = usd_income(operating_cash_flow)
     capex_usd = usd_income(capex)
+    depreciation_and_amortization_usd = usd_income(depreciation_and_amortization)
+    interest_expense_usd = usd_income(interest_expense)
+    equity_issuance_proceeds_usd = usd_income(equity_issuance_proceeds)
+    debt_issuance_proceeds_usd = usd_income(debt_issuance_proceeds)
+    orders_usd = usd_income(orders)
     free_cash_flow_usd = usd_income(free_cash_flow)
     assets_usd = usd_balance(assets)
     liabilities_usd = usd_balance(liabilities)
@@ -1259,6 +1375,7 @@ def build_feature_from_facts(
     inventory_usd = usd_balance(inventory)
     receivables_usd = usd_balance(receivables)
     payables_usd = usd_balance(payables)
+    funded_backlog_usd = usd_balance(funded_backlog)
     revenue_row = selected.get("revenue")
     revenue_stub_annualized: float | None = None
     revenue_stub_period_days: float | None = None
@@ -1306,6 +1423,13 @@ def build_feature_from_facts(
             "net_income",
             "operating_cash_flow",
             "capex",
+            "depreciation_and_amortization",
+            "interest_expense",
+            "pretax_income",
+            "income_tax_expense",
+            "equity_issuance_proceeds",
+            "debt_issuance_proceeds",
+            "orders",
         ]
     }
     revenue_ttm_local = ttm_results["revenue"].value
@@ -1316,6 +1440,11 @@ def build_feature_from_facts(
     net_income_ttm_local = ttm_results["net_income"].value
     operating_cash_flow_ttm_local = ttm_results["operating_cash_flow"].value
     capex_ttm_local = ttm_results["capex"].value
+    depreciation_and_amortization_ttm_local = ttm_results["depreciation_and_amortization"].value
+    interest_expense_ttm_local = ttm_results["interest_expense"].value
+    equity_issuance_proceeds_ttm_local = ttm_results["equity_issuance_proceeds"].value
+    debt_issuance_proceeds_ttm_local = ttm_results["debt_issuance_proceeds"].value
+    orders_ttm_local = ttm_results["orders"].value
     free_cash_flow_ttm_local = (
         operating_cash_flow_ttm_local - capex_ttm_local
         if operating_cash_flow_ttm_local is not None and capex_ttm_local is not None
@@ -1324,6 +1453,285 @@ def build_feature_from_facts(
 
     reasons: list[str] = []
     quality_flags: list[str] = []
+    previous_assets_row = select_previous_comparable(
+        currency_rows,
+        "assets",
+        selected.get("assets"),
+        instant_metric=True,
+    )
+    previous_equity_row = select_previous_comparable(
+        currency_rows,
+        "equity",
+        selected.get("equity"),
+        instant_metric=True,
+    )
+    previous_cash_row = select_previous_comparable(
+        currency_rows,
+        "cash_and_equivalents",
+        selected.get("cash_and_equivalents"),
+        instant_metric=True,
+    )
+    previous_debt_row = select_previous_comparable(
+        currency_rows,
+        "debt_total",
+        selected.get("debt_total"),
+        instant_metric=True,
+    )
+    previous_inventory_row = select_previous_comparable(
+        currency_rows,
+        "inventory",
+        selected.get("inventory"),
+        instant_metric=True,
+    )
+    previous_receivables_row = select_previous_comparable(
+        currency_rows,
+        "accounts_receivable",
+        selected.get("accounts_receivable"),
+        instant_metric=True,
+    )
+    previous_payables_row = select_previous_comparable(
+        currency_rows,
+        "accounts_payable",
+        selected.get("accounts_payable"),
+        instant_metric=True,
+    )
+    previous_backlog_row = select_previous_comparable(
+        currency_rows,
+        "funded_backlog",
+        selected.get("funded_backlog"),
+        instant_metric=True,
+    )
+    previous_diluted_shares_row = select_previous_comparable(
+        currency_rows,
+        "diluted_shares",
+        selected.get("diluted_shares"),
+    )
+    previous_orders_row = select_previous_comparable(currency_rows, "orders", selected.get("orders"))
+    previous_assets = as_float(previous_assets_row.get("value")) if previous_assets_row is not None else None
+    previous_equity = as_float(previous_equity_row.get("value")) if previous_equity_row is not None else None
+    previous_cash = as_float(previous_cash_row.get("value")) if previous_cash_row is not None else None
+    previous_debt = as_float(previous_debt_row.get("value")) if previous_debt_row is not None else None
+    previous_inventory = as_float(previous_inventory_row.get("value")) if previous_inventory_row is not None else None
+    previous_backlog = as_float(previous_backlog_row.get("value")) if previous_backlog_row is not None else None
+    previous_diluted_shares = (
+        as_float(previous_diluted_shares_row.get("value")) if previous_diluted_shares_row is not None else None
+    )
+    previous_orders = as_float(previous_orders_row.get("value")) if previous_orders_row is not None else None
+
+    current_debt_rows = (
+        [selected.get("debt_total")]
+        if selected.get("debt_total") is not None
+        else [selected.get("debt_current"), selected.get("debt_noncurrent")]
+    )
+    current_capital_periods_match = combined_periods_match(
+        *current_debt_rows,
+        selected.get("equity"),
+        selected.get("cash_and_equivalents"),
+    )
+    invested_capital = (
+        debt_total + equity - cash
+        if debt_total is not None
+        and equity is not None
+        and cash is not None
+        and current_capital_periods_match
+        else None
+    )
+    previous_capital_periods_match = combined_periods_match(
+        previous_debt_row,
+        previous_equity_row,
+        previous_cash_row,
+    )
+    previous_invested_capital = (
+        previous_debt + previous_equity - previous_cash
+        if previous_debt is not None
+        and previous_equity is not None
+        and previous_cash is not None
+        and previous_capital_periods_match
+        else None
+    )
+    average_invested_capital = (
+        (invested_capital + previous_invested_capital) / 2.0
+        if invested_capital is not None and previous_invested_capital is not None
+        else None
+    )
+    average_assets = (assets + previous_assets) / 2.0 if assets is not None and previous_assets is not None else None
+    pretax_ttm = ttm_results["pretax_income"].value
+    tax_ttm = ttm_results["income_tax_expense"].value
+    if pretax_ttm is not None and pretax_ttm > 0 and tax_ttm is not None:
+        effective_tax_rate = min(0.35, max(0.0, tax_ttm / pretax_ttm))
+    else:
+        effective_tax_rate = 0.21
+        quality_flags.append("roic_tax_rate_fallback_21pct")
+    nopat = (
+        operating_income_ttm_local * (1.0 - effective_tax_rate)
+        if operating_income_ttm_local is not None
+        else None
+    )
+    roic = (
+        safe_div(nopat, average_invested_capital)
+        if average_invested_capital is not None and average_invested_capital > 0
+        else None
+    )
+    asset_turnover = safe_div(revenue_ttm_local, average_assets) if average_assets is not None and average_assets > 0 else None
+    invested_capital_usd = usd_balance(invested_capital)
+
+    previous_revenue_comparable_row = select_previous_comparable(
+        currency_rows,
+        "revenue",
+        selected.get("revenue"),
+    )
+    previous_operating_income_comparable_row = select_previous_comparable(
+        currency_rows,
+        "operating_income",
+        selected.get("operating_income"),
+    )
+    previous_revenue_comparable = (
+        as_float(previous_revenue_comparable_row.get("value"))
+        if previous_revenue_comparable_row is not None
+        else None
+    )
+    previous_operating_income_comparable = (
+        as_float(previous_operating_income_comparable_row.get("value"))
+        if previous_operating_income_comparable_row is not None
+        else None
+    )
+    revenue_delta = (
+        revenue - previous_revenue_comparable
+        if revenue is not None and previous_revenue_comparable is not None
+        else None
+    )
+    operating_income_delta = (
+        operating_income - previous_operating_income_comparable
+        if operating_income is not None and previous_operating_income_comparable is not None
+        else None
+    )
+    incremental_operating_margin = None
+    if (
+        revenue_delta is not None
+        and operating_income_delta is not None
+        and previous_revenue_comparable is not None
+        and revenue_delta >= max(abs(previous_revenue_comparable) * 0.01, 1e-12)
+    ):
+        incremental_operating_margin = operating_income_delta / revenue_delta
+
+    inventory_growth = growth(inventory, previous_inventory)
+    inventory_sales_growth_spread = (
+        inventory_growth - cur_revenue_growth
+        if inventory_growth is not None and cur_revenue_growth is not None
+        else None
+    )
+    previous_cost_row = select_previous_comparable(
+        currency_rows,
+        "cost_of_sales",
+        selected.get("cost_of_sales"),
+    )
+    previous_revenue_row = previous_revenue_comparable_row
+    previous_cost = as_float(previous_cost_row.get("value")) if previous_cost_row is not None else None
+    previous_revenue_for_ccc = (
+        as_float(previous_revenue_row.get("value")) if previous_revenue_row is not None else None
+    )
+    previous_receivables = (
+        as_float(previous_receivables_row.get("value")) if previous_receivables_row is not None else None
+    )
+    previous_payables = as_float(previous_payables_row.get("value")) if previous_payables_row is not None else None
+    previous_ccc_periods_match = combined_periods_match(
+        previous_inventory_row,
+        previous_receivables_row,
+        previous_payables_row,
+        previous_cost_row,
+        previous_revenue_row,
+    )
+    previous_inventory_days = safe_div(previous_inventory, previous_cost) if previous_ccc_periods_match else None
+    previous_dso = safe_div(previous_receivables, previous_revenue_for_ccc) if previous_ccc_periods_match else None
+    previous_dpo = safe_div(previous_payables, previous_cost) if previous_ccc_periods_match else None
+    previous_ccc = (
+        (previous_inventory_days + previous_dso - previous_dpo) * 365.0
+        if previous_inventory_days is not None and previous_dso is not None and previous_dpo is not None
+        else None
+    )
+
+    depreciation_and_amortization_ttm_usd = usd_ttm(
+        depreciation_and_amortization_ttm_local,
+        ttm_results["depreciation_and_amortization"],
+    )
+    interest_expense_ttm_usd = usd_ttm(interest_expense_ttm_local, ttm_results["interest_expense"])
+    equity_issuance_proceeds_ttm_usd = usd_ttm(
+        equity_issuance_proceeds_ttm_local,
+        ttm_results["equity_issuance_proceeds"],
+    )
+    debt_issuance_proceeds_ttm_usd = usd_ttm(
+        debt_issuance_proceeds_ttm_local,
+        ttm_results["debt_issuance_proceeds"],
+    )
+    orders_ttm_usd = usd_ttm(orders_ttm_local, ttm_results["orders"])
+    operating_income_ttm_usd = usd_ttm(operating_income_ttm_local, ttm_results["operating_income"])
+    revenue_ttm_usd = usd_ttm(revenue_ttm_local, ttm_results["revenue"])
+    ebitda_ttm_usd = (
+        operating_income_ttm_usd + depreciation_and_amortization_ttm_usd
+        if operating_income_ttm_usd is not None and depreciation_and_amortization_ttm_usd is not None
+        else None
+    )
+    net_debt_usd = debt_usd - cash_usd if debt_usd is not None and cash_usd is not None else None
+    net_debt_to_ebitda = (
+        net_debt_usd / ebitda_ttm_usd
+        if net_debt_usd is not None and ebitda_ttm_usd is not None and ebitda_ttm_usd > 0
+        else None
+    )
+    interest_coverage = (
+        operating_income_ttm_usd / interest_expense_ttm_usd
+        if operating_income_ttm_usd is not None
+        and interest_expense_ttm_usd is not None
+        and interest_expense_ttm_usd > 0
+        else None
+    )
+    free_cash_flow_ttm_usd = usd_ttm(free_cash_flow_ttm_local, ttm_results["operating_cash_flow"])
+    cash_burn_ttm_usd = max(-free_cash_flow_ttm_usd, 0.0) if free_cash_flow_ttm_usd is not None else None
+    cash_runway_years = (
+        cash_usd / cash_burn_ttm_usd
+        if cash_usd is not None and cash_burn_ttm_usd is not None and cash_burn_ttm_usd > 0
+        else None
+    )
+    capital_raise_components = [
+        value
+        for value in (equity_issuance_proceeds_ttm_usd, debt_issuance_proceeds_ttm_usd)
+        if value is not None
+    ]
+    gross_capital_raised_ttm_usd = sum(capital_raise_components) if capital_raise_components else None
+    if len(capital_raise_components) == 1:
+        quality_flags.append("capital_raise_proceeds_partial_component_coverage")
+    capital_raise_dependence = (
+        gross_capital_raised_ttm_usd / cash_burn_ttm_usd
+        if len(capital_raise_components) == 2
+        and gross_capital_raised_ttm_usd is not None
+        and cash_burn_ttm_usd is not None
+        and cash_burn_ttm_usd > 0
+        else None
+    )
+    diluted_shares_yoy_growth = growth(diluted_shares, previous_diluted_shares)
+    orders_yoy_growth = growth(orders, previous_orders)
+    backlog_yoy_growth = growth(funded_backlog, previous_backlog)
+    book_to_bill = None
+    if orders_ttm_local is not None and revenue_ttm_local is not None and revenue_ttm_local > 0:
+        if ttm_windows_match(ttm_results["orders"], ttm_results["revenue"]):
+            book_to_bill = orders_ttm_local / revenue_ttm_local
+        else:
+            quality_flags.append("period_mismatch_book_to_bill")
+    backlog_row = selected.get("funded_backlog")
+    backlog_period_end = parse_date(backlog_row.get("period_end")) if backlog_row is not None else None
+    revenue_window_end = ttm_results["revenue"].window_end
+    backlog_to_revenue = (
+        funded_backlog / revenue_ttm_local
+        if funded_backlog is not None
+        and revenue_ttm_local is not None
+        and revenue_ttm_local > 0
+        and backlog_period_end is not None
+        and revenue_window_end is not None
+        and abs((backlog_period_end - revenue_window_end).days) <= PERIOD_DURATION_TOLERANCE_DAYS
+        else None
+    )
+    if funded_backlog is not None and backlog_to_revenue is None:
+        quality_flags.append("period_mismatch_backlog_to_revenue")
+
     if revenue is None:
         reasons.append("missing_revenue")
     elif zero_revenue_defaulted:
@@ -1408,6 +1816,21 @@ def build_feature_from_facts(
         *debt_operand_rows,
         selected.get("assets"),
     )
+    inventory_days = inventory_to_cogs * 365.0 if inventory_to_cogs is not None else None
+    days_sales_outstanding = receivables_to_revenue * 365.0 if receivables_to_revenue is not None else None
+    days_payables_outstanding = payables_to_cogs * 365.0 if payables_to_cogs is not None else None
+    cash_conversion_cycle = (
+        inventory_days + days_sales_outstanding - days_payables_outstanding
+        if inventory_days is not None
+        and days_sales_outstanding is not None
+        and days_payables_outstanding is not None
+        else None
+    )
+    cash_conversion_cycle_change = (
+        cash_conversion_cycle - previous_ccc
+        if cash_conversion_cycle is not None and previous_ccc is not None
+        else None
+    )
     quality_flags.extend(currency_flags)
     quality_flags.extend(period_flags)
 
@@ -1432,6 +1855,13 @@ def build_feature_from_facts(
             "accounts_payable": payables,
             "operating_cash_flow": operating_cash_flow,
             "capex": capex,
+            "depreciation_and_amortization": depreciation_and_amortization,
+            "interest_expense": interest_expense,
+            "pretax_income": pretax_income,
+            "income_tax_expense": income_tax_expense,
+            "equity_issuance_proceeds": equity_issuance_proceeds,
+            "debt_issuance_proceeds": debt_issuance_proceeds,
+            "orders": orders,
             "free_cash_flow": free_cash_flow,
             "research_and_development": r_and_d,
             "stock_based_compensation": sbc,
@@ -1442,6 +1872,11 @@ def build_feature_from_facts(
             "net_income_usd": net_income_usd,
             "operating_cash_flow_usd": operating_cash_flow_usd,
             "capex_usd": capex_usd,
+            "depreciation_and_amortization_usd": depreciation_and_amortization_usd,
+            "interest_expense_usd": interest_expense_usd,
+            "equity_issuance_proceeds_usd": equity_issuance_proceeds_usd,
+            "debt_issuance_proceeds_usd": debt_issuance_proceeds_usd,
+            "orders_usd": orders_usd,
             "free_cash_flow_usd": free_cash_flow_usd,
             "assets_usd": assets_usd,
             "liabilities_usd": liabilities_usd,
@@ -1454,7 +1889,7 @@ def build_feature_from_facts(
             # FN-14: unsuffixed TTM columns hold the local reported-currency
             # values; USD conversions (TTM-window-average FX) live in *_usd.
             "revenue_ttm": revenue_ttm_local,
-            "revenue_ttm_usd": usd_ttm(revenue_ttm_local, ttm_results["revenue"]),
+            "revenue_ttm_usd": revenue_ttm_usd,
             "revenue_stub_annualized": revenue_stub_annualized,
             "revenue_stub_annualized_usd": revenue_stub_annualized_usd,
             "revenue_stub_period_days": revenue_stub_period_days,
@@ -1462,11 +1897,21 @@ def build_feature_from_facts(
             "gross_profit_ttm": gross_profit_ttm_local,
             "gross_profit_ttm_usd": usd_ttm(gross_profit_ttm_local, ttm_results["gross_profit"]),
             "operating_income_ttm": operating_income_ttm_local,
-            "operating_income_ttm_usd": usd_ttm(operating_income_ttm_local, ttm_results["operating_income"]),
+            "operating_income_ttm_usd": operating_income_ttm_usd,
             "net_income_ttm": net_income_ttm_local,
             "net_income_ttm_usd": usd_ttm(net_income_ttm_local, ttm_results["net_income"]),
             "free_cash_flow_ttm": free_cash_flow_ttm_local,
-            "free_cash_flow_ttm_usd": usd_ttm(free_cash_flow_ttm_local, ttm_results["operating_cash_flow"]),
+            "free_cash_flow_ttm_usd": free_cash_flow_ttm_usd,
+            "depreciation_and_amortization_ttm": depreciation_and_amortization_ttm_local,
+            "depreciation_and_amortization_ttm_usd": depreciation_and_amortization_ttm_usd,
+            "interest_expense_ttm": interest_expense_ttm_local,
+            "interest_expense_ttm_usd": interest_expense_ttm_usd,
+            "equity_issuance_proceeds_ttm": equity_issuance_proceeds_ttm_local,
+            "equity_issuance_proceeds_ttm_usd": equity_issuance_proceeds_ttm_usd,
+            "debt_issuance_proceeds_ttm": debt_issuance_proceeds_ttm_local,
+            "debt_issuance_proceeds_ttm_usd": debt_issuance_proceeds_ttm_usd,
+            "orders_ttm": orders_ttm_local,
+            "orders_ttm_usd": orders_ttm_usd,
             "gross_margin": gross_margin,
             "operating_margin": operating_margin,
             "fcf_margin": fcf_margin,
@@ -1475,10 +1920,10 @@ def build_feature_from_facts(
             "net_cash": net_cash,
             "net_cash_usd": net_cash_usd,
             "net_cash_to_assets": net_cash_to_assets,
-            "inventory_days": inventory_to_cogs * 365.0 if inventory_to_cogs is not None else None,
-            "days_sales_outstanding": receivables_to_revenue * 365.0 if receivables_to_revenue is not None else None,
-            "days_payables_outstanding": payables_to_cogs * 365.0 if payables_to_cogs is not None else None,
-            "cash_conversion_cycle": None,
+            "inventory_days": inventory_days,
+            "days_sales_outstanding": days_sales_outstanding,
+            "days_payables_outstanding": days_payables_outstanding,
+            "cash_conversion_cycle": cash_conversion_cycle,
             "revenue_yoy_growth": cur_revenue_growth,
             "gross_profit_yoy_growth": growth(gross_profit, prev_gross_profit),
             "operating_income_yoy_growth": growth(operating_income, prev_operating_income),
@@ -1493,15 +1938,32 @@ def build_feature_from_facts(
             "deferred_revenue": deferred_revenue,
             "contract_liabilities": deferred_revenue,
             "remaining_performance_obligation": rpo,
-            "book_to_bill": None,
-            "funded_backlog": None,
+            "book_to_bill": book_to_bill,
+            "funded_backlog": funded_backlog,
+            "funded_backlog_usd": funded_backlog_usd,
+            "orders_yoy_growth": orders_yoy_growth,
+            "backlog_yoy_growth": backlog_yoy_growth,
+            "backlog_to_revenue": backlog_to_revenue,
+            "invested_capital_usd": invested_capital_usd,
+            "roic": roic,
+            "asset_turnover": asset_turnover,
+            "incremental_operating_margin": incremental_operating_margin,
+            "inventory_growth": inventory_growth,
+            "inventory_sales_growth_spread": inventory_sales_growth_spread,
+            "cash_conversion_cycle_change": cash_conversion_cycle_change,
+            "ebitda_ttm_usd": ebitda_ttm_usd,
+            "net_debt_to_ebitda": net_debt_to_ebitda,
+            "interest_coverage": interest_coverage,
+            "cash_burn_ttm_usd": cash_burn_ttm_usd,
+            "cash_runway_years": cash_runway_years,
+            "gross_capital_raised_ttm_usd": gross_capital_raised_ttm_usd,
+            "capital_raise_dependence": capital_raise_dependence,
+            "diluted_shares_yoy_growth": diluted_shares_yoy_growth,
             "canonical_quality": "mapped_xbrl" + (f";{';'.join(quality_flags)}" if quality_flags else ""),
             "data_quality_status": "complete" if not reasons else "review",
             "review_reason": ";".join(reasons),
         }
     )
-    if feature["inventory_days"] is not None and feature["days_sales_outstanding"] is not None and feature["days_payables_outstanding"] is not None:
-        feature["cash_conversion_cycle"] = feature["inventory_days"] + feature["days_sales_outstanding"] - feature["days_payables_outstanding"]
     coverage_components = [
         revenue,
         gross_profit,

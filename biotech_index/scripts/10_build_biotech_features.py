@@ -394,7 +394,12 @@ def read_optional_csv(path: Path | None) -> pd.DataFrame:
     return pd.read_csv(path, dtype=str).fillna("")
 
 
-def apply_trial_status_overrides(evidence_df: pd.DataFrame, overrides_df: pd.DataFrame) -> pd.DataFrame:
+def apply_trial_status_overrides(
+    evidence_df: pd.DataFrame,
+    overrides_df: pd.DataFrame,
+    *,
+    asof_date: date | None = None,
+) -> pd.DataFrame:
     if evidence_df.empty or overrides_df.empty:
         return evidence_df
     out = evidence_df.copy()
@@ -422,6 +427,9 @@ def apply_trial_status_overrides(evidence_df: pd.DataFrame, overrides_df: pd.Dat
 
     for override in overrides_df.to_dict("records"):
         if not as_bool(override.get("enabled", "true")):
+            continue
+        verified_date = parse_date(override.get("verified_date"))
+        if asof_date is not None and (verified_date is None or verified_date > asof_date):
             continue
         ticker = str(override.get("ticker") or "").strip().upper()
         nct_id = str(override.get("nct_id") or "").strip().upper()
@@ -592,10 +600,16 @@ def load_indication_success_settings(config: dict[str, Any]) -> dict[str, Any]:
     raw = cfg_get(config, "biotech_features.indication_success_weighting", {}) or {}
     if not isinstance(raw, dict):
         raw = {}
-    configured_rates = raw.get("phase_success_rates") if isinstance(raw.get("phase_success_rates"), dict) else {}
+    configured_rates_value = raw.get("phase_success_rates")
+    configured_rates: dict[str, Any] = (
+        cast(dict[str, Any], configured_rates_value)
+        if isinstance(configured_rates_value, dict)
+        else {}
+    )
     rates: dict[str, dict[str, float]] = {}
     for area, defaults in DEFAULT_INDICATION_SUCCESS_RATES.items():
-        area_raw = configured_rates.get(area, {}) if isinstance(configured_rates.get(area), dict) else {}
+        area_value = configured_rates.get(area)
+        area_raw: dict[str, Any] = cast(dict[str, Any], area_value) if isinstance(area_value, dict) else {}
         rates[area] = {
             "phase2": bounded_float(area_raw.get("phase2"), defaults["phase2"], low=0.01, high=0.99),
             "phase3": bounded_float(area_raw.get("phase3"), defaults["phase3"], low=0.01, high=0.99),
@@ -682,8 +696,14 @@ def indication_success_probability(
     rates = settings.get("phase_success_rates", DEFAULT_INDICATION_SUCCESS_RATES)
     if not isinstance(rates, dict):
         rates = DEFAULT_INDICATION_SUCCESS_RATES
-    area_rates = rates.get(area) if isinstance(rates.get(area), dict) else rates.get("general", {})
-    general_rates = rates.get("general", DEFAULT_INDICATION_SUCCESS_RATES["general"])
+    area_value = rates.get(area)
+    area_rates: dict[str, Any] = cast(dict[str, Any], area_value) if isinstance(area_value, dict) else {}
+    general_value = rates.get("general")
+    general_rates: dict[str, Any] = (
+        cast(dict[str, Any], general_value)
+        if isinstance(general_value, dict)
+        else DEFAULT_INDICATION_SUCCESS_RATES["general"]
+    )
     phase3_rate = bounded_float(area_rates.get("phase3"), general_rates["phase3"], low=0.01, high=0.99)
     phase2_rate = bounded_float(area_rates.get("phase2"), general_rates["phase2"], low=0.01, high=0.99)
     general_phase3 = bounded_float(general_rates.get("phase3"), DEFAULT_INDICATION_SUCCESS_RATES["general"]["phase3"], low=0.01, high=0.99)
@@ -1118,14 +1138,18 @@ def load_fda_adcom_events(
     """Return company_id → list of upcoming AdCom meeting dicts."""
     cutoff = asof_date.isoformat()
     max_meeting_date = (asof_date + timedelta(days=lookahead_days)).isoformat()
-    # Point-in-time guard: exclude meetings announced after asof. NULL announced_date
-    # means a legacy row predating announcement tracking (treated as already known).
+    # Point-in-time guard: an unknown first-seen/announcement date cannot prove
+    # that the event was known at asof, so legacy NULL rows must stay out of a
+    # survivorship-correct historical panel until they are re-seen by the sync.
     has_announced_date = any(
         str(col[1]) == "announced_date"
         for col in conn.execute("PRAGMA table_info(fda_adcom_events)").fetchall()
     )
-    announced_filter = "AND (announced_date IS NULL OR announced_date <= ?)" if has_announced_date else ""
-    params: tuple[str, ...] = (cutoff, max_meeting_date, cutoff) if has_announced_date else (cutoff, max_meeting_date)
+    if not has_announced_date:
+        LOGGER.warning("fda_adcom_events lacks announced_date; excluding AdCom features to preserve PIT integrity")
+        return {}
+    announced_filter = "AND announced_date IS NOT NULL AND announced_date <= ?"
+    params: tuple[str, ...] = (cutoff, max_meeting_date, cutoff)
     rows = conn.execute(
         f"""
         SELECT company_id, ticker, meeting_date, committee, drug_name, indication, vote_result, source_url
@@ -1246,15 +1270,28 @@ def load_risk_decomposition_settings(config: dict[str, Any]) -> dict[str, Any]:
     raw = cfg_get(config, "biotech_features.risk_decomposition", {}) or {}
     if not isinstance(raw, dict):
         raw = {}
-    weights_raw = raw.get("weights") if isinstance(raw.get("weights"), dict) else {}
-    compensated_weights_raw = (
-        raw.get("compensated_weights")
-        if isinstance(raw.get("compensated_weights"), dict)
+    weights_value = raw.get("weights")
+    weights_raw: dict[str, Any] = cast(dict[str, Any], weights_value) if isinstance(weights_value, dict) else {}
+    compensated_weights_value = raw.get("compensated_weights")
+    compensated_weights_raw: dict[str, Any] = (
+        cast(dict[str, Any], compensated_weights_value)
+        if isinstance(compensated_weights_value, dict)
         else {}
     )
-    penalty_weights_raw = raw.get("penalty_weights") if isinstance(raw.get("penalty_weights"), dict) else {}
-    free_bands_raw = raw.get("penalty_free_bands") if isinstance(raw.get("penalty_free_bands"), dict) else {}
-    caps_raw = raw.get("penalty_caps") if isinstance(raw.get("penalty_caps"), dict) else {}
+    penalty_weights_value = raw.get("penalty_weights")
+    penalty_weights_raw: dict[str, Any] = (
+        cast(dict[str, Any], penalty_weights_value)
+        if isinstance(penalty_weights_value, dict)
+        else {}
+    )
+    free_bands_value = raw.get("penalty_free_bands")
+    free_bands_raw: dict[str, Any] = (
+        cast(dict[str, Any], free_bands_value)
+        if isinstance(free_bands_value, dict)
+        else {}
+    )
+    caps_value = raw.get("penalty_caps")
+    caps_raw: dict[str, Any] = cast(dict[str, Any], caps_value) if isinstance(caps_value, dict) else {}
     return {
         "compute_enabled": as_bool(raw.get("compute_enabled", raw.get("enabled", True))),
         "use_for_penalty": as_bool(raw.get("use_for_penalty", False)),
@@ -3010,7 +3047,16 @@ def main() -> None:
         asof_date=asof_date.isoformat(),
         logger=LOGGER,
     )
-    evidence_csv = resolve_path(cfg_get(config, "biotech_features.ctgov_evidence_csv"), base_dir=base_dir)
+    configured_evidence_csv = resolve_path(
+        cfg_get(config, "biotech_features.ctgov_evidence_csv"),
+        base_dir=base_dir,
+    )
+    evidence_csv = resolve_dated_report_input_csv(
+        configured_evidence_csv,
+        base_output_dir=output_dir,
+        asof_date=asof_date.isoformat(),
+        logger=LOGGER,
+    )
     trial_status_overrides_csv = resolve_optional_path(cfg_get(config, "ctgov_audit.trial_status_overrides_csv"), base_dir=base_dir)
     category_overrides_csv = resolve_optional_path(
         cfg_get(config, "biotech_features.company_strategy_overrides_csv"),
@@ -3073,8 +3119,19 @@ def main() -> None:
 
     universe = read_csv(universe_csv)
     evidence_df = read_csv(evidence_csv)
-    evidence_df = apply_trial_status_overrides(evidence_df, read_optional_csv(trial_status_overrides_csv))
+    evidence_df = apply_trial_status_overrides(
+        evidence_df,
+        read_optional_csv(trial_status_overrides_csv),
+        asof_date=asof_date,
+    )
     screen = read_optional_csv(screen_csv)
+    if asof_date < datetime.now(timezone.utc).date() and not screen.empty:
+        LOGGER.info(
+            "Ignoring undated current screen rows for historical/replay asof=%s to prevent look-ahead; "
+            "market and SEC point-in-time fallbacks remain active",
+            asof_date.isoformat(),
+        )
+        screen = pd.DataFrame()
     if screen.empty:
         LOGGER.warning(
             "Screen results CSV missing or empty; using market/SEC fallback fields for biotech features: %s",

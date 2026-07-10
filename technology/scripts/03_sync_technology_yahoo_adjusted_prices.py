@@ -146,9 +146,24 @@ def to_float(raw: object) -> float | None:
 
 def to_int(raw: object, default: int = 0) -> int:
     try:
-        return int(raw)
+        return int(str(raw).strip())
     except (TypeError, ValueError):
         return int(default)
+
+
+def positive_timestamp(raw: object) -> int | None:
+    value = to_int(raw, default=0)
+    return value if value > 0 else None
+
+
+def timestamp_date_text(raw: object) -> str:
+    timestamp = positive_timestamp(raw)
+    if timestamp is None:
+        return ""
+    try:
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        return ""
 
 
 def int_set(raw: object, default: set[int]) -> set[int]:
@@ -322,16 +337,20 @@ def parse_chart_result(job: PriceJob, payload_text: str, source_id: str) -> tupl
     results = chart.get("result")
     if not isinstance(results, list) or not results:
         return [], [], {}, "missing_chart_result"
-    result = results[0] if isinstance(results[0], dict) else {}
-    meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+    result: dict[str, Any] = results[0] if isinstance(results[0], dict) else {}
+    raw_meta = result.get("meta")
+    meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
     timestamps = result.get("timestamp") or []
-    indicators = result.get("indicators") if isinstance(result.get("indicators"), dict) else {}
-    quote = (indicators.get("quote") or [{}])[0]
-    adjclose = (indicators.get("adjclose") or [{}])[0]
-    if not isinstance(quote, dict):
-        quote = {}
-    if not isinstance(adjclose, dict):
-        adjclose = {}
+    raw_indicators = result.get("indicators")
+    indicators: dict[str, Any] = raw_indicators if isinstance(raw_indicators, dict) else {}
+    quote_rows = indicators.get("quote")
+    quote: dict[str, Any] = quote_rows[0] if isinstance(quote_rows, list) and quote_rows and isinstance(quote_rows[0], dict) else {}
+    adjclose_rows = indicators.get("adjclose")
+    adjclose: dict[str, Any] = (
+        adjclose_rows[0]
+        if isinstance(adjclose_rows, list) and adjclose_rows and isinstance(adjclose_rows[0], dict)
+        else {}
+    )
     opens = quote.get("open") or []
     highs = quote.get("high") or []
     lows = quote.get("low") or []
@@ -342,12 +361,16 @@ def parse_chart_result(job: PriceJob, payload_text: str, source_id: str) -> tupl
     dividends_by_date: dict[str, float] = {}
     split_by_date: dict[str, float] = {}
     actions: list[CorporateAction] = []
-    events = result.get("events") if isinstance(result.get("events"), dict) else {}
-    dividends = events.get("dividends") if isinstance(events.get("dividends"), dict) else {}
+    raw_events = result.get("events")
+    events: dict[str, Any] = raw_events if isinstance(raw_events, dict) else {}
+    raw_dividends = events.get("dividends")
+    dividends: dict[str, Any] = raw_dividends if isinstance(raw_dividends, dict) else {}
     for raw_event in dividends.values():
         if not isinstance(raw_event, dict):
             continue
-        action_date = datetime.fromtimestamp(int(raw_event.get("date", 0)), tz=timezone.utc).date().isoformat()
+        action_date = timestamp_date_text(raw_event.get("date"))
+        if not action_date:
+            continue
         amount = to_float(raw_event.get("amount"))
         if amount is None:
             continue
@@ -362,11 +385,14 @@ def parse_chart_result(job: PriceJob, payload_text: str, source_id: str) -> tupl
                 raw_value=json.dumps(raw_event, sort_keys=True),
             )
         )
-    splits = events.get("splits") if isinstance(events.get("splits"), dict) else {}
+    raw_splits = events.get("splits")
+    splits: dict[str, Any] = raw_splits if isinstance(raw_splits, dict) else {}
     for raw_event in splits.values():
         if not isinstance(raw_event, dict):
             continue
-        action_date = datetime.fromtimestamp(int(raw_event.get("date", 0)), tz=timezone.utc).date().isoformat()
+        action_date = timestamp_date_text(raw_event.get("date"))
+        if not action_date:
+            continue
         numerator = to_float(raw_event.get("numerator"))
         denominator = to_float(raw_event.get("denominator"))
         factor = numerator / denominator if numerator is not None and denominator not in (None, 0) else None
@@ -389,8 +415,10 @@ def parse_chart_result(job: PriceJob, payload_text: str, source_id: str) -> tupl
     bars: list[YahooBar] = []
     for idx, raw_ts in enumerate(timestamps):
         try:
-            bar_date = datetime.fromtimestamp(int(raw_ts), tz=timezone.utc).date().isoformat()
-        except (TypeError, ValueError, OSError):
+            bar_date = timestamp_date_text(raw_ts)
+            if not bar_date:
+                continue
+        except (TypeError, ValueError, OSError, OverflowError):
             continue
         close = to_float(closes[idx] if idx < len(closes) else None)
         if close is None:
@@ -674,6 +702,8 @@ def main() -> None:
     start = parse_date(args.start_date) or parse_date(cfg_get(config, "yahoo_price_ingestion.start_date")) or date(2016, 1, 1)
     asof_arg = parse_date(args.asof)
     end = asof_arg or date.today()
+    if end > date.today():
+        raise ValueError(f"asof date {end} is in the future")
     is_current_run = asof_arg is None or asof_arg >= date.today()
     if end < start:
         raise ValueError(f"asof date {end} is before start date {start}")

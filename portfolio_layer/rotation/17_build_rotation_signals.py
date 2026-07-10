@@ -28,7 +28,7 @@ import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.artifacts import invalidate_rotation_outputs_after_signal_change  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.liquidity import finite_float  # noqa: E402
@@ -137,10 +137,11 @@ def main() -> int:
         return 1
     run_dir = runs_root / run_as_of
     risk_dir = run_dir / "risk"
+    scores_path = run_dir / "stocks_scores.csv"
     prices_path = risk_dir / "prices_adjclose.csv"
     returns_path = risk_dir / "returns_panel.csv"
-    if not (prices_path.exists() and returns_path.exists()):
-        LOGGER.error("Need a sealed Stage 2 panel (prices_adjclose.csv + returns_panel.csv)")
+    if not (scores_path.exists() and prices_path.exists() and returns_path.exists()):
+        LOGGER.error("Need sealed Stage 1 scores and Stage 2 prices/returns")
         return 1
 
     rotation_dir = run_dir / "rotation"
@@ -212,7 +213,24 @@ def main() -> int:
     returns = pd.read_csv(returns_path, index_col=0)
     prices.columns = [str(c).strip().upper() for c in prices.columns]
     returns.columns = [str(c).strip().upper() for c in returns.columns]
-    sector_etf_map = {str(k).strip(): str(v).strip().upper() for k, v in sector_etf_map.items()}
+    configured_sector_etf_map = {
+        str(k).strip(): str(v).strip().upper() for k, v in sector_etf_map.items()
+    }
+    active_pipelines = {
+        str(row.get("source_pipeline") or "").strip()
+        for row in read_csv(scores_path)
+        if str(row.get("source_pipeline") or "").strip()
+    }
+    missing_etf_mappings = sorted(active_pipelines - set(configured_sector_etf_map))
+    if missing_etf_mappings:
+        LOGGER.error("Active score pipelines lack risk_panel.sector_etf_map entries: %s", missing_etf_mappings)
+        return 1
+    # Optional sectors with no rows in this as-of contract are not optimizer sleeves yet. Emitting
+    # their ETF signal would create a SectorName that cannot join to any stock and can silently
+    # distort downstream budgets.
+    sector_etf_map = {
+        pipeline: configured_sector_etf_map[pipeline] for pipeline in sorted(active_pipelines)
+    }
     market_map = {str(k).strip().upper(): str(v).strip() for k, v in market_map.items()}
     panel_end = str(prices.index[-1]) if not prices.empty else ""
     if panel_end and panel_end > run_as_of:
@@ -261,6 +279,7 @@ def main() -> int:
                    "sector_present": sum(1 for r in sector_rows if r["present_in_panel"]),
                    "foreign_present": sum(1 for r in foreign_rows if r["present_in_panel"])},
         "inputs_sha256": {
+            "stocks_scores.csv": sha256_file(scores_path),
             "prices_adjclose.csv": sha256_file(prices_path),
             "returns_panel.csv": sha256_file(returns_path),
             "config.yaml": sha256_file(config_path),

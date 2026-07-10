@@ -47,7 +47,16 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    manifest_accepts,
+    manifest_recorded_sha256,
+    read_csv,
+    read_manifest,
+    sha256_file,
+    write_csv,
+    write_manifest,
+)
 from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
@@ -270,27 +279,64 @@ def rotation_state(prices: pd.DataFrame, as_of: str, *, config: dict[str, Any],
 
 def run_dir_joins(runs_root: Path, as_of: str) -> dict[str, Any]:
     """Availability-flagged per-ticker joins from a same-date sealed run, when one exists."""
-    out: dict[str, Any] = {"risk": None, "sleeve": None, "liquidity": None}
+    out: dict[str, Any] = {"risk": None, "sleeve": None, "liquidity": None, "hashes": {}, "errors": []}
     run_dir = runs_root / as_of
+    risk_manifest_path = run_dir / "risk" / "risk_manifest.json"
+    risk_manifest: dict[str, Any] = {}
+    if risk_manifest_path.exists():
+        try:
+            risk_manifest = read_manifest(risk_manifest_path)
+        except ValueError as exc:
+            out["errors"].append(f"{as_of}:risk_manifest:{exc}")
+        else:
+            if not manifest_accepts(risk_manifest, allow_deferred=False):
+                out["errors"].append(f"{as_of}:risk_acceptance={risk_manifest.get('acceptance')}")
+            out["hashes"]["risk/risk_manifest.json"] = sha256_file(risk_manifest_path)
     risk_path = run_dir / "risk" / "risk_coverage.csv"
     if risk_path.exists():
-        out["risk"] = {str(r.get("ticker", "")).strip().upper():
-                       (str(r.get("risk_eligible", "")), str(r.get("risk_status", "")))
-                       for r in read_csv(risk_path)}
+        expected = manifest_recorded_sha256(risk_manifest, "risk_coverage.csv")
+        if not expected or expected != sha256_file(risk_path):
+            out["errors"].append(f"{as_of}:risk_coverage_unsealed")
+        else:
+            out["risk"] = {str(r.get("ticker", "")).strip().upper():
+                           (str(r.get("risk_eligible", "")), str(r.get("risk_status", "")))
+                           for r in read_csv(risk_path)}
+            out["hashes"]["risk/risk_coverage.csv"] = expected
     sleeve_path = run_dir / "sleeves" / "sleeve_assignments.csv"
     if sleeve_path.exists():
-        out["sleeve"] = {str(r.get("ticker", "")).strip().upper(): str(r.get("sleeve", ""))
-                         for r in read_csv(sleeve_path)}
+        sleeve_manifest_path = run_dir / "sleeves" / "sleeve_manifest.json"
+        if not sleeve_manifest_path.exists():
+            out["errors"].append(f"{as_of}:sleeve_manifest_missing")
+        else:
+            try:
+                sleeve_manifest = read_manifest(sleeve_manifest_path)
+            except ValueError as exc:
+                out["errors"].append(f"{as_of}:sleeve_manifest:{exc}")
+            else:
+                expected = manifest_recorded_sha256(sleeve_manifest, "sleeve_assignments.csv")
+                if not manifest_accepts(sleeve_manifest, allow_deferred=False) or not expected \
+                        or expected != sha256_file(sleeve_path):
+                    out["errors"].append(f"{as_of}:sleeve_assignments_unsealed")
+                else:
+                    out["sleeve"] = {str(r.get("ticker", "")).strip().upper(): str(r.get("sleeve", ""))
+                                     for r in read_csv(sleeve_path)}
+                    out["hashes"]["sleeves/sleeve_assignments.csv"] = expected
+                    out["hashes"]["sleeves/sleeve_manifest.json"] = sha256_file(sleeve_manifest_path)
     spread_path = run_dir / "risk" / "spread_snapshot.csv"
     if spread_path.exists():
-        liq: dict[str, str] = {}
-        for r in read_csv(spread_path):
-            ticker = str(r.get("ticker", "")).strip().upper()
-            for col in ("median_half_spread_bps", "half_spread_bps"):
-                if str(r.get(col, "")).strip():
-                    liq[ticker] = str(r.get(col, "")).strip()
-                    break
-        out["liquidity"] = liq
+        expected = manifest_recorded_sha256(risk_manifest, "spread_snapshot.csv")
+        if not expected or expected != sha256_file(spread_path):
+            out["errors"].append(f"{as_of}:spread_snapshot_unsealed")
+        else:
+            liq: dict[str, str] = {}
+            for r in read_csv(spread_path):
+                ticker = str(r.get("ticker", "")).strip().upper()
+                for col in ("median_half_spread_bps", "half_spread_bps"):
+                    if str(r.get(col, "")).strip():
+                        liq[ticker] = str(r.get(col, "")).strip()
+                        break
+            out["liquidity"] = liq
+            out["hashes"]["risk/spread_snapshot.csv"] = expected
     return out
 
 
@@ -394,6 +440,7 @@ def _load_accepted_panel(
     panel_dir: Path,
     *,
     expected_manifest_sha256: str | None = None,
+    expected_prices_sha256: str | None = None,
 ) -> tuple[pd.DataFrame | None, list[str]]:
     manifest_path = panel_dir / "survivorship_manifest.json"
     prices_path = panel_dir / "prices_adjclose.csv"
@@ -414,6 +461,8 @@ def _load_accepted_panel(
         )
     if not prices_path.exists():
         errors.append(f"{panel_dir.name}:missing_prices_adjclose.csv")
+    elif expected_prices_sha256 and sha256_file(prices_path) != expected_prices_sha256:
+        errors.append(f"{panel_dir.name}:prices_adjclose_hash_mismatch")
     if errors:
         return None, errors
     panel_prices = pd.read_csv(prices_path, index_col=0)
@@ -511,18 +560,25 @@ def main() -> int:  # noqa: C901
         )
         return 1
     target_panel_dir = panel_root / targets_dir.name
+    targets_path = targets_dir / "calibration_targets.csv"
+    target_file_info = (targets_manifest.get("files") or {}).get("calibration_targets.csv") or {}
+    target_expected_sha = str(target_file_info.get("sha256", "")) if isinstance(target_file_info, dict) else ""
+    if not targets_path.exists() or not target_expected_sha or sha256_file(targets_path) != target_expected_sha:
+        LOGGER.error("Targets build %s calibration_targets.csv is unsealed/stale", targets_dir.name)
+        return 1
     panel_prices, panel_errors = _load_accepted_panel(
         target_panel_dir,
         expected_manifest_sha256=str(targets_manifest.get("panel_manifest_sha256") or ""),
+        expected_prices_sha256=str((targets_manifest.get("panel_inputs_sha256") or {}).get("prices_adjclose.csv") or ""),
     )
     if panel_errors or panel_prices is None:
         LOGGER.error("Targets build %s requires matching accepted survivorship panel; %s", targets_dir.name, panel_errors[:8])
         return 1
     panel_build = target_panel_dir.name
-    with (targets_dir / "calibration_targets.csv").open(encoding="utf-8", newline="") as handle:
+    with targets_path.open(encoding="utf-8", newline="") as handle:
         header = handle.readline().strip()
     target_fields = header.split(",") if header else []
-    rows: list[dict[str, Any]] = [dict(r) for r in read_csv(targets_dir / "calibration_targets.csv")]
+    rows: list[dict[str, Any]] = [dict(r) for r in read_csv(targets_path)]
 
     out_dir = paths.output_dir / str(cp.get("dir", "calibration_panel")) / targets_dir.name
     panel_path = out_dir / "calibration_panel.csv"
@@ -543,6 +599,7 @@ def main() -> int:  # noqa: C901
     rotation_cache: dict[str, dict[str, dict[str, Any]]] = {}
     rundir_cache: dict[str, dict[str, Any]] = {}
     sidecar_index = build_sidecar_index(config, config_path, sidecar_hashes)
+    macro_hash_before = sha256_file(paths.macro_serving_db_path)
     conn = open_macro_serving_db(paths.macro_serving_db_path)
     try:
         for r in rows:
@@ -605,6 +662,10 @@ def main() -> int:  # noqa: C901
                 r.update(side)
     finally:
         conn.close()
+    macro_hash_after = sha256_file(paths.macro_serving_db_path)
+    if macro_hash_before != macro_hash_after:
+        LOGGER.error("Macro serving DB changed during Stage 11 state join; retry the build")
+        return 1
 
     standardize_groups(rows)
 
@@ -631,6 +692,10 @@ def main() -> int:  # noqa: C901
                 lookahead.append(f"{as_of}:{r.get('ticker')}:{col}={val}")
     rec("pit_no_lookahead", "PASS" if not lookahead else "FAIL",
         "every joined macro as-of <= snapshot as-of" if not lookahead else f"{lookahead[:8]}")
+    run_join_errors = sorted({err for joined in rundir_cache.values() for err in joined.get("errors", [])})
+    rec("optional_run_joins_sealed", "PASS" if not run_join_errors else "FAIL",
+        "every consumed risk/sleeve/liquidity artifact matches an accepted same-date manifest"
+        if not run_join_errors else f"{run_join_errors[:8]}")
     if rows:
         rotation_required_rows = _rotation_required_history(config)
         panel_index = np.array([str(d) for d in panel_prices.index]) if panel_prices is not None else np.array([])
@@ -697,6 +762,18 @@ def main() -> int:  # noqa: C901
         "rows": len(rows),
         "snapshots_joined": sorted(macro_cache),
         "sidecar_files_sha256": sidecar_hashes,
+        "inputs_sha256": {
+            "targets_manifest.json": sha256_file(targets_dir / "targets_manifest.json"),
+            "calibration_targets.csv": sha256_file(targets_path),
+            "survivorship_manifest.json": sha256_file(panel_root / panel_build / "survivorship_manifest.json"),
+            "prices_adjclose.csv": sha256_file(panel_root / panel_build / "prices_adjclose.csv"),
+            "macro_serving.sqlite": macro_hash_after,
+            **{
+                f"runs/{as_of}/{name}": sha
+                for as_of, joined in sorted(rundir_cache.items())
+                for name, sha in sorted(joined.get("hashes", {}).items())
+            },
+        },
         "checks": checks,
         "files": {"calibration_panel.csv": {"sha256": sha256_file(panel_path), "rows": len(rows)}},
     }

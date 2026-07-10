@@ -132,6 +132,96 @@ sources:
     status: active
     notes: Manual reviewed exceptions for ticker/CIK/company reconciliation.
 
+  - source_id: machinery_ticker_seed
+    stage: security_master
+    source_name: Machinery active ticker seed
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/machinery/system_csvs/machinery_tickers.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema: [machinery_tickers_csv]
+    canonical_tables: [dim_company, dim_security, dim_identifier, dim_universe_membership]
+    feature_stages: [security_master]
+    subsector_scope: machinery
+    priority: 10
+    status: active
+    notes: Canonical active machinery universe system CSV.
+
+  - source_id: machinery_cohort_policy
+    stage: security_master
+    source_name: Machinery cohort policy
+    source_owner: internal
+    source_type: yaml
+    base_url: industrials/machinery/data/machinery_cohorts.yaml
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema: [machinery_cohorts_yaml]
+    canonical_tables: [dim_industrials_taxonomy]
+    feature_stages: [security_master]
+    subsector_scope: machinery
+    priority: 20
+    status: active
+    notes: Five machinery calibration cohorts, including a dedicated development-stage cohort.
+
+  - source_id: machinery_historical_membership_seed
+    stage: security_master
+    source_name: Machinery PIT membership contract
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/machinery/system_csvs/machinery_historical_membership.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema: [machinery_historical_membership_csv]
+    canonical_tables: [dim_company, dim_universe_membership]
+    feature_stages: [calibration_research]
+    subsector_scope: machinery
+    priority: 30
+    status: active
+    notes: Norgate-resolved survivorship-corrected membership from 2019-01-02.
+
+  - source_id: machinery_delisted_calibration_seed
+    stage: security_master
+    source_name: Machinery delisted calibration seed
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/machinery/system_csvs/machinery_delisted.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema: [machinery_delisted_csv]
+    canonical_tables: [dim_company, dim_universe_membership, dim_delisted_calibration_seed]
+    feature_stages: [calibration_research]
+    subsector_scope: machinery
+    priority: 35
+    status: active
+    notes: Delisted machinery names retained for survivorship-corrected calibration.
+
+  - source_id: machinery_ticker_alias_seed
+    stage: security_master
+    source_name: Machinery ticker aliases
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/machinery/system_csvs/machinery_ticker_aliases.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema: [machinery_ticker_aliases_csv]
+    canonical_tables: [dim_ticker_alias, fact_corporate_action]
+    feature_stages: [security_master, portfolio_layer_handoff]
+    subsector_scope: machinery
+    priority: 40
+    status: active
+    notes: Reviewed machinery ticker migrations and predecessor mappings.
+
   - source_id: sec_company_tickers
     stage: security_master
     source_name: SEC company ticker mapping

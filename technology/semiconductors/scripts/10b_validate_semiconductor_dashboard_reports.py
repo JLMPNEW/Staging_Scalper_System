@@ -18,7 +18,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
 from technology.core.oos_provenance import OOS_RANK_FIELDS, validate_oos_rank_rows  # noqa: E402
-from technology.core.portfolio_candidate_fields import PORTFOLIO_CANDIDATE_FIELDS  # noqa: E402
+from technology.core.portfolio_candidate_fields import (  # noqa: E402
+    PORTFOLIO_CANDIDATE_FIELDS,
+    validate_portfolio_candidate_rows,
+)
 
 
 LOGGER = logging.getLogger("semiconductor_dashboard_validator")
@@ -132,6 +135,7 @@ def main() -> int:
                 errors.append(f"Rank table contains rows outside asof={args.asof}: {bad_dates[:5]}")
         if args.historical_mode:
             errors.extend(validate_oos_rank_rows(rank_rows, asof=args.asof or str(rank_rows[0].get("asof_date") or ""), historical_mode=True))
+        errors.extend(validate_portfolio_candidate_rows(rank_rows))
 
     if paths["manifest"].exists():
         try:

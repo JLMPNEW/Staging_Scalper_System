@@ -1172,8 +1172,22 @@ def production_rank_blocked(row: dict[str, Any], *, apply_core_veto_to_rank: boo
     )
 
 
-def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]]) -> None:
+def configured_strict_oos_start_date(config: dict[str, Any]) -> date | None:
+    raw = str(cfg_get(config, "biotech_historical_sequence.strict_oos_start_date", "") or "").strip()
+    if not raw:
+        return None
+    parsed = parse_date(raw)
+    if parsed is None:
+        raise ValueError(
+            "biotech_historical_sequence.strict_oos_start_date must be blank or YYYY-MM-DD; "
+            f"got {raw!r}"
+        )
+    return parsed
+
+
+def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]], config: dict[str, Any]) -> None:
     """Add cross-sector portfolio/calibration aliases without changing scoring math."""
+    strict_oos_start = configured_strict_oos_start_date(config)
     for row in rows:
         ticker = str(row.get("ticker") or "").strip().upper()
         investible = to_float(row.get("biotech_cohort_investible_flag"), 1.0) > 0.0
@@ -1277,8 +1291,12 @@ def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]]) -> None:
             if survivorship_corrected
             else "biotech_current_universe_replay_not_survivorship_corrected"
         )
+        row_asof_date = parse_date(row.get("asof_date"))
         oos_score_valid = bool(
             research_eligible
+            and strict_oos_start is not None
+            and row_asof_date is not None
+            and row_asof_date >= strict_oos_start
             and str(row.get("source_snapshot_asof_date") or row.get("asof_date") or "").strip()
             == str(row.get("asof_date") or "").strip()
             and to_float(row.get("calibration_only"), 0.0) <= 0.0
@@ -3414,7 +3432,7 @@ def score_rows(
         )
     enrich_biotech_cohort_rank_stats(scored)
     apply_biotech_cohort_policy(scored, cohort_policy)
-    enrich_portfolio_layer_contract_rows(scored)
+    enrich_portfolio_layer_contract_rows(scored, config)
     apply_promoted_portfolio_candidate_policy(scored, config)
     if production_score_field == "discovery_opportunity_score":
         # routed_discovery is active: rank must follow the routed production score,

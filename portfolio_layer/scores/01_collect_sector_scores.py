@@ -21,7 +21,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from portfolio_layer.core.contracts import COLLECTED_FIELDS, fail_if_exists, write_csv  # noqa: E402
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    COLLECTED_FIELDS,
+    fail_if_exists,
+    manifest_accepts,
+    read_manifest,
+    sha256_file,
+    write_csv,
+)
 from portfolio_layer.core.db import add_issue, connect, finish_run, start_run  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
@@ -43,6 +51,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--force", action="store_true", help="Overwrite artifacts for an existing as-of run.")
+    parser.add_argument(
+        "--reuse-sealed-run-raw",
+        action="store_true",
+        help="On a forced historical rebuild, reuse a missing sector source only when the same-date run "
+        "manifest seals the archived raw bytes.",
+    )
     return parser.parse_args()
 
 
@@ -72,6 +86,7 @@ def invalidate_downstream_artifacts(run_dir: Path) -> None:
         for path in validation_dir.iterdir():
             if path.is_file():
                 path.unlink()
+    invalidate_dependents(run_dir, "scores")
 
 
 def refresh_collect_issues(conn, run_as_of: str, failures: list[dict[str, str]]) -> None:
@@ -99,6 +114,28 @@ def clear_contract_rows(conn, run_as_of: str) -> None:
     except sqlite3.OperationalError as exc:
         if "no such table" not in str(exc).lower():
             raise
+
+
+def sealed_run_raw_fallback(paths, *, run_as_of: str, pipeline: str) -> Path | None:
+    """Return a same-date archived source only when the prior Stage 1 manifest proves its bytes."""
+    run_dir = paths.output_dir / "runs" / run_as_of
+    manifest_path = run_dir / "manifest.json"
+    raw_name = f"{pipeline}_scores.csv"
+    raw_path = run_dir / "raw" / raw_name
+    if not manifest_path.exists() or not raw_path.exists():
+        return None
+    try:
+        manifest = read_manifest(manifest_path)
+    except ValueError:
+        return None
+    manifest_as_of = str(manifest.get("run_as_of", manifest.get("run_as_of_date", ""))).strip()
+    if not manifest_accepts(manifest) or manifest_as_of != run_as_of:
+        return None
+    raw_entry = (manifest.get("raw") or {}).get(raw_name)
+    expected = str(raw_entry.get("sha256", "")).strip() if isinstance(raw_entry, dict) else ""
+    if not expected or sha256_file(raw_path) != expected:
+        return None
+    return raw_path
 
 
 def main() -> int:
@@ -136,13 +173,34 @@ def main() -> int:
         try:
             result = run_adapter(cfg, sector_root, args.as_of)
         except FileNotFoundError as exc:
-            LOGGER.warning("Sector %s skipped: %s", pipeline, exc)
-            failures.append({
-                "source_pipeline": pipeline,
-                "issue_type": "sector_collect_failed",
-                "detail": f"{pipeline} skipped during collect: {exc}",
-            })
-            continue
+            fallback = (
+                sealed_run_raw_fallback(paths, run_as_of=args.as_of, pipeline=pipeline)
+                if args.force and args.reuse_sealed_run_raw and args.as_of
+                else None
+            )
+            if fallback is not None:
+                fallback_cfg = dict(cfg)
+                fallback_cfg["file_mode"] = "flat"
+                fallback_cfg["file_path"] = str(fallback)
+                result = run_adapter(fallback_cfg, sector_root, args.as_of)
+                LOGGER.warning(
+                    "Sector %s live source missing; reusing same-date manifest-sealed raw archive %s",
+                    pipeline,
+                    fallback,
+                )
+                failures.append({
+                    "source_pipeline": pipeline,
+                    "issue_type": "sealed_raw_replay",
+                    "detail": f"{pipeline} rebuilt from manifest-sealed same-date raw archive {fallback}",
+                })
+            else:
+                LOGGER.warning("Sector %s skipped: %s", pipeline, exc)
+                failures.append({
+                    "source_pipeline": pipeline,
+                    "issue_type": "sector_collect_failed",
+                    "detail": f"{pipeline} skipped during collect: {exc}",
+                })
+                continue
         raw_results.append(result)
         if not result.rows:
             LOGGER.warning("Sector %s skipped: adapter produced zero contract rows", result.source_pipeline)
@@ -246,7 +304,16 @@ def main() -> int:
 
     run_dir = paths.output_dir / "runs" / run_as_of
     raw_dir = run_dir / "raw"
-    planned_raw = [raw_dir / f"{result.source_pipeline}_scores.csv" for result in raw_results]
+    planned_raw: list[Path] = []
+    for result in raw_results:
+        sources = result.source_files or (result.source_file,)
+        for index, source in enumerate(sources):
+            name = (
+                f"{result.source_pipeline}_scores.csv"
+                if index == 0
+                else f"{result.source_pipeline}_source_{index + 1:02d}_{source.name}"
+            )
+            planned_raw.append(raw_dir / name)
     planned_artifacts = [run_dir / "collected_scores.csv", *planned_raw]
     try:
         fail_if_exists(planned_artifacts, force=args.force)
@@ -258,12 +325,28 @@ def main() -> int:
     (run_dir / "validation").mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
     if args.force:
+        preserved_sources = {
+            source.resolve()
+            for result in raw_results
+            for source in (result.source_files or (result.source_file,))
+            if source.parent.resolve() == raw_dir.resolve()
+        }
         for path in raw_dir.glob("*.csv"):
-            path.unlink()
+            if path.resolve() not in preserved_sources:
+                path.unlink()
 
     collected: list[dict] = []
     for result in raw_results:
-        shutil.copy2(result.source_file, raw_dir / f"{result.source_pipeline}_scores.csv")
+        sources = result.source_files or (result.source_file,)
+        for index, source in enumerate(sources):
+            name = (
+                f"{result.source_pipeline}_scores.csv"
+                if index == 0
+                else f"{result.source_pipeline}_source_{index + 1:02d}_{source.name}"
+            )
+            destination = raw_dir / name
+            if source.resolve() != destination.resolve():
+                shutil.copy2(source, destination)
     for result in results:
         for row in result.rows:
             collected.append({

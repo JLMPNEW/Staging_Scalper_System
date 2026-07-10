@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from portfolio_layer.core.config import cfg_get
+from portfolio_layer.core.artifacts import invalidate_dependents
 from portfolio_layer.core.artifacts import unlink_if_exists
 from portfolio_layer.core.contracts import sha256_file
 from portfolio_layer.risk.liquidity import (
@@ -199,6 +200,7 @@ def invalidate_bl_final_after_baseline_cost_change(costs_dir: Path) -> None:
         bl_dir / "bl_net_static_replay_metrics.json",
         bl_dir / "validation" / "bl_fusion_validation.csv",
     ])
+    invalidate_dependents(costs_dir.parent, "costs")
 
 
 def invalidate_after_trade_list(costs_dir: Path) -> None:

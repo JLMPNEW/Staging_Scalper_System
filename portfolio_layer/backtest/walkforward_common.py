@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from portfolio_layer.optimizer.optimizer_core import finalize_long_only_weights, solve_long_only_mv
-from portfolio_layer.research.stage11_common import independent_windows, mean_t
+from portfolio_layer.research.stage11_common import independent_windows, mean_t_hac
 from portfolio_layer.risk.covariance_utils import stabilize_covariance
 from portfolio_layer.sleeves.risk_model import enforce_rc_cap_to_cash
 
@@ -28,6 +28,14 @@ ARM_FIELDS = [
     "active_net_ann_vs_baseline", "tracking_error_ann", "net_ir_vs_baseline", "active_t",
     "promotable", "rejection_reasons",
 ]
+
+
+def finite_or_default(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed if np.isfinite(parsed) else float(default)
 
 
 # ---------------------------------------------------------------------------
@@ -69,10 +77,15 @@ def turnover_between(prev: dict[str, float], new: dict[str, float]) -> float:
 def rotation_tilt(weights: dict[str, float], pipe_of: dict[str, str],
                   multiplier_of: dict[str, float], *, gross: float) -> dict[str, float]:
     """Bounded multiplicative sleeve tilt, renormalized to the same gross (Stage 5 semantics)."""
-    tilted = {t: w * float(multiplier_of.get(pipe_of.get(t, ""), 1.0)) for t, w in weights.items()}
+    tilted: dict[str, float] = {}
+    for ticker, weight in weights.items():
+        multiplier = float(multiplier_of.get(pipe_of.get(ticker, ""), 1.0))
+        if not np.isfinite(multiplier) or multiplier < 0.0:
+            raise ValueError(f"rotation multiplier must be finite and non-negative: {ticker}={multiplier}")
+        tilted[ticker] = weight * multiplier
     total = sum(tilted.values())
     if total <= 0:
-        return dict(weights)
+        return {}
     return {t: w * gross / total for t, w in tilted.items()}
 
 
@@ -88,7 +101,7 @@ def macro_overlay(weights: dict[str, float], pipe_of: dict[str, str], *, gross_s
     base = sum(weights.values())
     if total > 0 and base > 0:
         tilted = {t: w * base / total for t, w in tilted.items()}  # tilt preserves risky mass
-    scalar = max(0.0, min(1.5, float(gross_scalar)))
+    scalar = max(0.0, min(1.0, float(gross_scalar)))
     return {t: w * scalar for t, w in tilted.items()}
 
 
@@ -105,9 +118,11 @@ def sleeve_overlay(weights: dict[str, float], cov: pd.DataFrame, pipe_of: dict[s
         adjusted = {}
         for t, w in weights.items():
             s = sleeve_of[t]
-            target = float(budgets.get(s, share.get(s, 0.0)) or 0.0)
+            target = finite_or_default(budgets.get(s, share.get(s, 0.0)), share.get(s, 0.0))
             current = share.get(s, 0.0)
-            scale = (target / current) if current > 1e-9 and target > 0 else 1.0
+            if target < 0.0 or not np.isfinite(target):
+                raise ValueError(f"invalid sleeve budget {s}={target}")
+            scale = (target / current) if current > 1e-9 else 0.0
             adjusted[t] = w * max(0.5, min(2.0, scale))
         total = sum(adjusted.values())
         if total > 0:
@@ -178,6 +193,7 @@ def run_walkforward(
     holdings: dict[str, dict[str, float]] = {arm: {} for arm in arms}
     pit_violations: list[str] = []
     skipped: dict[str, int] = {"no_calendar": 0, "thin_universe": 0, "solver": 0}
+    arm_solver_fallbacks: dict[str, int] = {arm: 0 for arm in arms}
     n_rebalances = 0
 
     for i, rb_date in enumerate(rebalance_dates):
@@ -246,7 +262,7 @@ def run_walkforward(
         aqr = {t: float(w) for t, w in zip(common, base_w) if w > 0}
 
         rotation_rows = rotation_provider(rb_date)
-        multiplier_of = {p: float(r.get("rotation_multiplier", 1.0) or 1.0)
+        multiplier_of = {p: finite_or_default(r.get("rotation_multiplier"), 1.0)
                          for p, r in rotation_rows.items()}
         positive_pipes = {p for p, r in rotation_rows.items() if str(r.get("state")) == "Positive"}
         regime = regime_provider(rb_date)
@@ -281,7 +297,8 @@ def run_walkforward(
                         max_weight=float(params["max_weight"]), gross=float(params["gross"]))
                     min_var_book = {t: float(x) for t, x in zip(common, mv_w) if x > 0}
                 else:
-                    min_var_book = dict(holdings[arm_name])
+                    arm_solver_fallbacks[arm_name] += 1
+                    return dict(holdings[arm_name])
             return dict(min_var_book)
 
         pending_cost: dict[str, float] = {}
@@ -292,7 +309,9 @@ def run_walkforward(
                     w = _min_var_or_prior(arm)
             elif arm == "regime_lever":
                 if regime_label in supportive:
-                    lever = max(1.0, float(params.get("regime_lever_mu_multiplier", 1.5) or 1.5))
+                    lever = finite_or_default(params.get("regime_lever_mu_multiplier"), 1.5)
+                    if lever < 0.0:
+                        raise ValueError(f"regime_lever_mu_multiplier must be non-negative, got {lever}")
                     try:
                         lever_w, lever_info = solve_long_only_mv(
                             mu_used * lever, sigma,
@@ -309,6 +328,7 @@ def run_walkforward(
                             max_weight=float(params["max_weight"]), gross=float(params["gross"]))
                         w = {t: float(x) for t, x in zip(common, lever_w) if x > 0}
                     else:
+                        arm_solver_fallbacks[arm] += 1
                         w = dict(aqr)
                 else:
                     unsupported_mode = str(
@@ -351,6 +371,7 @@ def run_walkforward(
         "gross": gross, "net": net, "day_index": day_index, "turnovers": turnovers,
         "costs_paid": costs_paid, "n_rebalances": n_rebalances,
         "pit_violations": pit_violations, "skipped": skipped,
+        "arm_solver_fallbacks": arm_solver_fallbacks,
     }
 
 
@@ -368,7 +389,8 @@ def summarize_arms(result: dict[str, Any], arms: list[str], *, verdict_cfg: dict
         te = float(active.std(ddof=1) * np.sqrt(252)) if len(active) > 2 else 0.0
         active_ann = float(active.mean() * 252) if len(active) else 0.0
         ir = active_ann / te if te > 0 else None
-        _m, _se, a_t = mean_t(list(active)) if len(active) else (None, None, None)
+        hac_lag = max(0, int(verdict_cfg.get("active_t_hac_lag_days", 20)))
+        _m, _se, a_t = mean_t_hac(list(active), max_lag=hac_lag) if len(active) else (None, None, None)
         if arm == baseline:
             promotable, reasons = 0, ["baseline_arm"]
         else:
@@ -432,9 +454,12 @@ def build_real_providers(config: dict[str, Any], *, conn: Any, prices: pd.DataFr
         row = single_latest_row(conn, "macro_regime_decision_daily", d)
         label = str(row["active_current_regime"] or "").upper() if row is not None else ""
         bucket = "risk_off" if label in risk_off else "default"
+        gross_scalar = finite_or_default(gross_map.get(label, gross_map.get("default", 1.0)), 1.0)
+        if not 0.0 <= gross_scalar <= 1.0:
+            raise ValueError(f"regime gross scalar outside [0,1] for {label or 'UNKNOWN'}: {gross_scalar}")
         return {
             "label": label,
-            "gross_scalar": float(gross_map.get(label, gross_map.get("default", 1.0)) or 1.0),
+            "gross_scalar": gross_scalar,
             "budgets": dict(budgets_cfg.get(bucket, budgets_cfg.get("default", {})) or {}),
         }
 

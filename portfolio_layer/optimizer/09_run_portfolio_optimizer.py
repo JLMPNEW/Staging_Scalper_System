@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.db import connect, finish_run, start_run  # noqa: E402
@@ -139,6 +140,7 @@ def invalidate_downstream_artifacts(opt_dir: Path) -> None:
         for path in validation_dir.iterdir():
             if path.is_file():
                 path.unlink()
+    invalidate_dependents(opt_dir.parent, "optimizer")
 
 
 def main() -> int:  # noqa: C901

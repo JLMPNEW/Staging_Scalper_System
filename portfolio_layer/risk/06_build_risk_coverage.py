@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pandas as pd  # noqa: E402
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, write_csv  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
@@ -77,6 +78,7 @@ def main() -> int:
         return 1
     coverage_path = risk_dir / "risk_coverage.csv"
     if args.force:
+        invalidate_dependents(run_dir, "risk")
         unlink_artifacts([
             risk_dir / "covariance.csv",
             risk_dir / "covariance_period.csv",

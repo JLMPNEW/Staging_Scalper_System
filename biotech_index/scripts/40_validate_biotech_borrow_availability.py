@@ -414,14 +414,16 @@ def enrich_borrow_diagnostics(
             (to_float(row.get("short_interest_pct_float"), 0.0) or 0.0) >= 0.10
             or (to_float(row.get("short_interest_signal_score"), 0.0) or 0.0) >= squeeze_short_interest_min
         )
+        indication_multiplier = to_float(row.get("indication_success_multiplier"), None)
+        financial_quality = to_float(row.get("financial_quality_score_raw"), None)
         catalyst_or_quality = (
             (to_float(row.get("forward_catalyst_score"), 0.0) or 0.0) >= squeeze_catalyst_min
             or (to_float(row.get("sec_catalyst_score_used"), 0.0) or 0.0) >= 10.0
-            or (to_float(row.get("indication_success_multiplier"), 1.0) or 1.0) > 1.05
+            or (1.0 if indication_multiplier is None else indication_multiplier) > 1.05
         )
         weak_or_distressed = (
             (to_float(row.get("risk_for_penalty_score_raw"), 0.0) or 0.0) >= 65.0
-            or (to_float(row.get("financial_quality_score_raw"), 100.0) or 100.0) < 40.0
+            or (100.0 if financial_quality is None else financial_quality) < 40.0
             or (to_float(row.get("uncompensated_risk_score_raw"), 0.0) or 0.0) >= 60.0
             or (to_float(row.get("diag_core_hard_weakness_flag"), 0.0) or 0.0) > 0.0
         )

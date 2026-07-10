@@ -39,6 +39,7 @@ import logging
 import math
 import os
 import copy
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
@@ -73,6 +74,19 @@ try:
     import yfinance as yf
 except Exception:
     yf = None
+
+
+def _atomic_dataframe_csv(frame: Any, path: str) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+    os.close(fd)
+    try:
+        frame.to_csv(tmp_name, index=False)
+        os.replace(tmp_name, target)
+    finally:
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
 
 
 # --------------------------
@@ -3641,7 +3655,7 @@ def run_end_to_end_from_cfg(
     df_lo = assemble_output(assets_lo_f, w_lo, low_lo, high_lo, cfg)
     results["LONG_ONLY"] = OptResult("LONG_ONLY", df_lo, metrics_lo)
     if write_weights_csvs:
-        df_lo.to_csv(os.path.join(out_dir, "weights_long_only.csv"), index=False)
+        _atomic_dataframe_csv(df_lo, os.path.join(out_dir, "weights_long_only.csv"))
 
     # ---- Long-short ----
     if ls_enabled:
@@ -3675,7 +3689,7 @@ def run_end_to_end_from_cfg(
         df_ls = assemble_output(assets_ls_f, w_ls, low_ls, high_ls, cfg)
         results["LONG_SHORT"] = OptResult("LONG_SHORT", df_ls, metrics_ls)
         if write_weights_csvs:
-            df_ls.to_csv(os.path.join(out_dir, "weights_long_short.csv"), index=False)
+            _atomic_dataframe_csv(df_ls, os.path.join(out_dir, "weights_long_short.csv"))
     else:
         logger.info("LONG_SHORT portfolio disabled in config (optimization.long_short.enabled=false).")
 
@@ -3718,7 +3732,7 @@ def run_end_to_end_from_cfg(
         combined_frames.append(weights_df)
 
     combined = pd.concat(combined_frames, ignore_index=True, sort=False)
-    combined.to_csv(os.path.join(out_dir, "optimization_results.csv"), index=False)
+    _atomic_dataframe_csv(combined, os.path.join(out_dir, "optimization_results.csv"))
 
     return results
 
@@ -3918,7 +3932,7 @@ def optimize_user_portfolio(
     )
 
     df_up = assemble_output(assets_up_f, w_up, low_up, high_up, cfg)
-    df_up.to_csv(os.path.join(out_dir, "weights_user_portfolio.csv"), index=False)
+    _atomic_dataframe_csv(df_up, os.path.join(out_dir, "weights_user_portfolio.csv"))
 
     return OptResult("USER_PORTFOLIO", df_up, metrics_up)
 

@@ -1290,7 +1290,15 @@ def main() -> None:
         if args.survivorship_corrected_panel is not None
         else as_bool(cfg_get(config, "biotech_historical_sequence.survivorship_corrected_panel", True), True)
     )
-    strict_oos_start_date = parse_date(cfg_get(config, "biotech_historical_sequence.strict_oos_start_date", ""))
+    strict_oos_start_raw = str(
+        cfg_get(config, "biotech_historical_sequence.strict_oos_start_date", "") or ""
+    ).strip()
+    strict_oos_start_date = parse_date(strict_oos_start_raw)
+    if strict_oos_start_raw and strict_oos_start_date is None:
+        raise ValueError(
+            "biotech_historical_sequence.strict_oos_start_date must be blank or YYYY-MM-DD; "
+            f"got {strict_oos_start_raw!r}"
+        )
     if strict_oos_start_date is None:
         LOGGER.warning(
             "biotech_historical_sequence.strict_oos_start_date is blank/unset: no row in this run will ever "

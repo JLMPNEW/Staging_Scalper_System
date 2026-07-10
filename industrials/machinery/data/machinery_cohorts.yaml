@@ -1,0 +1,22 @@
+model_family: machinery
+cohorts:
+  - cohort_id: construction_agriculture_and_heavy_machinery
+    cohort_name: Construction, Agriculture & Heavy Machinery
+    calibration_use: core
+    development_stage: operating
+  - cohort_id: diversified_machinery_automation_and_tools
+    cohort_name: Diversified Machinery, Automation & Tools
+    calibration_use: core
+    development_stage: operating
+  - cohort_id: fluid_flow_control_and_filtration
+    cohort_name: Fluid, Flow Control & Filtration
+    calibration_use: core
+    development_stage: operating
+  - cohort_id: hvac_climate_electrical_and_power_systems
+    cohort_name: HVAC, Climate, Electrical & Power Systems
+    calibration_use: core
+    development_stage: operating
+  - cohort_id: development_stage_emerging_machinery
+    cohort_name: Development-stage & Emerging Machinery
+    calibration_use: development_stage
+    development_stage: development_stage

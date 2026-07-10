@@ -159,18 +159,108 @@ def information_ratios(alpha: dict[str, float], sigma: dict[str, float], *, eps:
     return out
 
 
-def trailing_book_drawdown(weights: dict[str, float], returns: pd.DataFrame, *, window: int) -> float:
+def target_risk_budget(
+    *,
+    members: dict[str, list[str]],
+    sleeve_budgets: dict[str, float],
+    information_ratio: dict[str, float],
+    tilt: float,
+    rc_cap: float,
+) -> dict[str, float]:
+    """Create deterministic per-name risk budgets from sleeve budgets and positive IR.
+
+    A zero tilt is meaningful and produces equal risk budgets within each sleeve. Invalid
+    policy values fail closed rather than being silently replaced by defaults.
+    """
+    tilt_value = float(tilt)
+    cap = float(rc_cap)
+    if not math.isfinite(tilt_value) or not 0.0 <= tilt_value <= 1.0:
+        raise ValueError(f"tilt must be finite and in [0,1], got {tilt}")
+    if not math.isfinite(cap) or cap <= 0.0:
+        raise ValueError(f"rc_cap must be positive and finite, got {rc_cap}")
+    present = {sleeve: sorted(set(tickers)) for sleeve, tickers in members.items() if tickers}
+    total_budget = sum(max(0.0, float(sleeve_budgets.get(sleeve, 0.0))) for sleeve in present)
+    if not math.isfinite(total_budget) or total_budget <= 0.0:
+        raise ValueError("present sleeves have no positive finite aggregate risk budget")
+
+    budgets: dict[str, float] = {}
+    for sleeve, tickers in sorted(present.items()):
+        sleeve_raw = float(sleeve_budgets.get(sleeve, 0.0))
+        if not math.isfinite(sleeve_raw) or sleeve_raw < 0.0:
+            raise ValueError(f"invalid sleeve risk budget {sleeve}={sleeve_raw}")
+        sleeve_share = sleeve_raw / total_budget
+        if sleeve_share <= 0.0:
+            continue
+        positive_ir = {ticker: max(0.0, float(information_ratio.get(ticker, 0.0))) for ticker in tickers}
+        if not all(math.isfinite(value) for value in positive_ir.values()):
+            raise ValueError(f"non-finite information ratio in sleeve {sleeve}")
+        ir_sum = sum(positive_ir.values())
+        equal = 1.0 / len(tickers)
+        for ticker in tickers:
+            tilted = positive_ir[ticker] / ir_sum if ir_sum > 0.0 else equal
+            budgets[ticker] = sleeve_share * ((1.0 - tilt_value) * equal + tilt_value * tilted)
+
+    # Normalize and iteratively redistribute capped excess among names with capacity.
+    for _ in range(max(16, len(budgets) + 1)):
+        total = sum(budgets.values())
+        if total <= 0.0:
+            raise ValueError("per-name risk budgets collapsed to zero")
+        budgets = {ticker: value / total for ticker, value in budgets.items()}
+        over = {ticker for ticker, value in budgets.items() if value > cap + 1e-12}
+        if not over:
+            return {ticker: value for ticker, value in budgets.items() if value > 0.0}
+        capped = sum(cap for _ in over)
+        free = {ticker: value for ticker, value in budgets.items() if ticker not in over}
+        free_total = sum(free.values())
+        if not free or free_total <= 0.0 or capped >= 1.0 - 1e-12:
+            raise ValueError(
+                f"per-name RC cap {cap} is infeasible for {len(budgets)} names"
+            )
+        residual = 1.0 - capped
+        budgets = {
+            ticker: cap if ticker in over else residual * value / free_total
+            for ticker, value in budgets.items()
+        }
+    raise ValueError("per-name target risk-budget cap redistribution did not converge")
+
+
+def trailing_book_drawdown(
+    weights: dict[str, float],
+    returns: pd.DataFrame,
+    *,
+    window: int,
+    min_complete_fraction: float = 0.80,
+) -> float:
     """Current drawdown (<= 0) of the book held statically over the last `window` panel days.
 
     Shared by the Stage 8 drawdown throttle and the Stage 12 risk governor so both read the same
     number for the same book.
     """
-    names = [t for t in weights if t in returns.columns]
-    if not names:
-        return 0.0
-    w = np.array([weights[t] for t in names], dtype=float)
-    sub = returns[names].tail(window).apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
-    sub = np.nan_to_num(sub, nan=0.0)
+    if window < 2:
+        raise ValueError(f"drawdown window must be >=2, got {window}")
+    if not 0.0 < min_complete_fraction <= 1.0:
+        raise ValueError(f"min_complete_fraction must be in (0,1], got {min_complete_fraction}")
+    active = {
+        str(t).strip().upper(): float(w)
+        for t, w in weights.items()
+        if math.isfinite(float(w)) and abs(float(w)) > 1e-15
+    }
+    if not active:
+        raise ValueError("drawdown requires at least one non-zero finite risky weight")
+    missing = sorted(t for t in active if t not in returns.columns)
+    if missing:
+        raise ValueError(f"drawdown return coverage missing held names: {missing[:12]}")
+    names = sorted(active)
+    w = np.array([active[t] for t in names], dtype=float)
+    tail = returns[names].tail(window).apply(pd.to_numeric, errors="coerce")
+    complete = tail.dropna(axis=0, how="any")
+    required = max(2, int(math.ceil(min(window, len(tail)) * min_complete_fraction)))
+    if len(complete) < required:
+        raise ValueError(
+            f"drawdown has {len(complete)} complete observations, requires {required} "
+            f"({min_complete_fraction:.0%} of {min(window, len(tail))})"
+        )
+    sub = complete.to_numpy(dtype=float)
     port = sub @ w
     equity = np.concatenate(([1.0], np.cumprod(1.0 + port)))
     running = np.maximum.accumulate(equity)

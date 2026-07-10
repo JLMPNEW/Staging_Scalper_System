@@ -4,6 +4,74 @@ from __future__ import annotations
 from pathlib import Path
 
 
+DEPENDENCIES: dict[str, set[str]] = {
+    "scores": {"risk", "optimizer", "costs", "rotation", "macro", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
+    "risk": {"optimizer", "costs", "rotation", "macro", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
+    "liquidity": {"risk", "costs", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
+    "optimizer": {"costs", "rotation", "macro", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
+    "costs": {"blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
+    "rotation": {"blacklitterman", "sleeves", "exits", "final"},
+    "macro": {"blacklitterman", "sleeves", "exits", "final"},
+    "blacklitterman": {"sleeves", "exits", "final"},
+    "sleeves": {"exits", "final"},
+    "ledger": {"exits", "payout", "final"},
+    "exits": {"payout", "final"},
+    "payout": {"final"},
+    "governor": {"final"},
+}
+
+CONSUMER_FILES: dict[str, tuple[str, ...]] = {
+    "risk": ("risk/risk_manifest.json", "risk/validation/risk_panel_validation.csv"),
+    "optimizer": ("optimizer/optimizer_manifest.json", "optimizer/validation/optimizer_validation.csv"),
+    "costs": (
+        "costs/cost_manifest.json", "costs/net_static_replay_metrics.json",
+        "costs/validation/cost_validation.csv",
+    ),
+    "rotation": (
+        "rotation/rotation_manifest.json", "rotation/rotation_ablation_metrics.json",
+        "rotation/rotation_ablation_weights.csv", "rotation/validation/rotation_validation.csv",
+    ),
+    "macro": ("macro/macro_manifest.json", "macro/validation/macro_contract_validation.csv"),
+    "blacklitterman": (
+        "blacklitterman/bl_manifest.json", "blacklitterman/bl_net_static_replay_metrics.json",
+        "blacklitterman/validation/bl_fusion_validation.csv",
+    ),
+    "sleeves": (
+        "sleeves/sleeve_manifest.json", "sleeves/validation/sleeve_validation.csv",
+        "sleeves/validation/sleeve_framework_validation.csv",
+        "sleeves/validation/risk_budget_validation.csv",
+    ),
+    "exits": (
+        "exits/exit_manifest.json", "exits/exit_adjusted_book_meta.json",
+        "exits/exit_adjusted_book.csv", "exits/validation/exit_validation.csv",
+    ),
+    "payout": (
+        "payout/payout_manifest.json", "payout/payout_adjusted_book.csv",
+        "payout/payout_plan.csv",
+    ),
+    "governor": ("governor/governor_manifest.json", "governor/gross_exposure_directive.json"),
+    "final": ("final/final_manifest.json", "final/final_target_book.csv"),
+}
+
+
+def invalidate_dependents(run_dir: Path, producer: str) -> list[Path]:
+    """Invalidate every accepted artifact that transitively consumes `producer` outputs."""
+    if producer not in DEPENDENCIES:
+        raise ValueError(f"unknown artifact producer {producer!r}")
+    removed: list[Path] = []
+    for consumer in sorted(DEPENDENCIES[producer]):
+        for relative in CONSUMER_FILES.get(consumer, ()):
+            path = run_dir / relative
+            if path.is_file():
+                path.unlink()
+                removed.append(path)
+    orchestration_meta = run_dir / "orchestration_meta.json"
+    if orchestration_meta.is_file():
+        orchestration_meta.unlink()
+        removed.append(orchestration_meta)
+    return removed
+
+
 def unlink_if_exists(paths: list[Path]) -> None:
     for path in paths:
         if path.exists() and path.is_file():
@@ -26,6 +94,7 @@ def invalidate_risk_outputs_after_spread_change(risk_dir: Path) -> None:
         risk_dir / "risk_manifest.json",
     ])
     clear_dir_files(risk_dir / "validation")
+    invalidate_dependents(risk_dir.parent, "liquidity")
 
 
 def invalidate_cost_outputs_after_spread_change(run_dir: Path) -> None:
@@ -52,6 +121,7 @@ def invalidate_cost_outputs_after_spread_change(run_dir: Path) -> None:
         bl_dir / "validation" / "bl_fusion_validation.csv",
     ])
     clear_dir_files(costs_dir / "validation")
+    invalidate_dependents(run_dir, "liquidity")
 
 
 def invalidate_rotation_outputs_after_signal_change(rotation_dir: Path) -> None:
@@ -62,6 +132,7 @@ def invalidate_rotation_outputs_after_signal_change(rotation_dir: Path) -> None:
         rotation_dir / "rotation_ablation_weights.csv",
     ])
     clear_dir_files(rotation_dir / "validation")
+    invalidate_dependents(rotation_dir.parent, "rotation")
 
 
 def invalidate_rotation_outputs_after_validation(rotation_dir: Path) -> None:
@@ -70,6 +141,7 @@ def invalidate_rotation_outputs_after_validation(rotation_dir: Path) -> None:
         rotation_dir / "rotation_ablation_metrics.json",
         rotation_dir / "rotation_ablation_weights.csv",
     ])
+    invalidate_dependents(rotation_dir.parent, "rotation")
 
 
 def invalidate_macro_outputs_after_contract_change(macro_dir: Path) -> None:
@@ -78,3 +150,4 @@ def invalidate_macro_outputs_after_contract_change(macro_dir: Path) -> None:
         macro_dir / "macro_manifest.json",
     ])
     clear_dir_files(macro_dir / "validation")
+    invalidate_dependents(macro_dir.parent, "macro")

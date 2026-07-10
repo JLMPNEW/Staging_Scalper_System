@@ -68,7 +68,7 @@ def unix_timestamp(day: date) -> int:
     return int(datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp())
 
 
-def safe_float(raw: object) -> float | None:
+def safe_float(raw: Any) -> float | None:
     try:
         value = float(raw)
     except (TypeError, ValueError):

@@ -20,6 +20,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
@@ -128,7 +129,12 @@ def _import_statement(paths: Any, ib_csv: Path, as_of: str | None, *, force: boo
 
     run_as_of = as_of or parsed.meta["period_end"]
     if run_as_of != parsed.meta["period_end"]:
-        LOGGER.warning("Run as-of %s differs from IB statement end %s", run_as_of, parsed.meta["period_end"])
+        LOGGER.error(
+            "Run as-of %s differs from IB statement end %s; refusing to mislabel broker state",
+            run_as_of,
+            parsed.meta["period_end"],
+        )
+        return 1
 
     ledger_dir = paths.output_dir / "runs" / run_as_of / "ledger"
     artifacts = {
@@ -145,6 +151,7 @@ def _import_statement(paths: Any, ib_csv: Path, as_of: str | None, *, force: boo
         "broker_securities_lending.csv": ledger_dir / "broker_securities_lending.csv",
     }
     if force:
+        invalidate_dependents(ledger_dir.parent, "ledger")
         for path in artifacts.values():
             if path.exists():
                 path.unlink()

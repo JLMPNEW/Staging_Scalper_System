@@ -13,14 +13,14 @@ from pathlib import Path
 from macro_policy import MetricPolicy, load_metric_policy
 from macro_raw_config import cfg_get, configure_pipeline_logging, connect_sqlite, load_macro_raw_config, resolve_db_path, resolve_path, utc_now_iso
 from macro_serving_common import (
-    MetricServingSpec,
+    RELEASE_STALENESS_POLICY_VERSION,
     RawCandidate,
     candidate_rank,
     effective_available_date,
     freshness_anchor_date,
     load_metric_serving_specs,
     parse_calendar_date,
-    period_end_date,
+    release_staleness_days,
     resolve_calendar_bounds,
     resolve_serving_db_path,
     select_latest_completed_ingest_run,
@@ -167,7 +167,11 @@ def _null_pit_row(metric: MetricTask, as_of: date, now_iso: str) -> tuple:
 
 def _pit_row(metric: MetricTask, as_of: date, candidate: RawCandidate, now_iso: str) -> tuple:
     anchor_date = freshness_anchor_date(candidate, metric.policy)
-    staleness_days = (as_of - anchor_date).days
+    staleness_days = release_staleness_days(
+        as_of=as_of,
+        anchor=anchor_date,
+        frequency=metric.frequency or metric.policy.frequency,
+    )
     carry_forward_flag = 1 if as_of > candidate.effective_available_date else 0
     within_staleness = staleness_days <= metric.policy.max_staleness_days
     coverage_flag = 1 if within_staleness and (metric.policy.carry_forward_allowed or carry_forward_flag == 0) else 0
@@ -267,6 +271,19 @@ def main() -> None:
     configure_pipeline_logging()
     args = parse_args()
     config_path, cfg = load_macro_raw_config(args.config)
+    configured_staleness_policy = str(
+        cfg_get(
+            cfg,
+            "serving",
+            "staleness_policy_version",
+            default=RELEASE_STALENESS_POLICY_VERSION,
+        )
+    ).strip()
+    if configured_staleness_policy != RELEASE_STALENESS_POLICY_VERSION:
+        raise ValueError(
+            "Unsupported macro_raw.serving.staleness_policy_version="
+            f"{configured_staleness_policy!r}; expected {RELEASE_STALENESS_POLICY_VERSION!r}."
+        )
     raw_db_path = resolve_db_path(cfg, config_path, override=args.raw_db_path)
     serving_db_path = resolve_serving_db_path(cfg, config_path, override=args.serving_db_path)
     policy_path = args.policy_csv or resolve_path(
@@ -316,6 +333,7 @@ def main() -> None:
             metric_count=len(tasks),
             notes=(
                 f"Building PIT rows with workers={worker_count}. "
+                f"Staleness policy={configured_staleness_policy}. "
                 f"Skipped metrics without policy={len(skipped_metric_keys)}."
             ),
         )
@@ -389,6 +407,7 @@ def main() -> None:
             rows_written=rows_written,
             notes=(
                 f"PIT rows built for {len(tasks)} metrics. "
+                f"Staleness policy={configured_staleness_policy}. "
                 f"Skipped metrics without policy={len(skipped_metric_keys)}."
             ),
         )

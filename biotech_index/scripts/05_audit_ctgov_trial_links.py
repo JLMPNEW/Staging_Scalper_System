@@ -8,6 +8,7 @@ import csv
 import hashlib
 import json
 import logging
+import shutil
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list,
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import validate_nonempty_selection, validate_requested_tickers
+from biotech_index.core.report_inputs import dated_output_dir
 from biotech_index.core.text_norm import normalize_ticker
 
 
@@ -122,6 +124,11 @@ def days_since(raw: object, *, asof_date: date) -> int | None:
     if parsed is None:
         return None
     return (asof_date - parsed).days
+
+
+def row_verified_asof(row: dict[str, Any], *, asof_date: date, field: str) -> bool:
+    verified = parse_date(row.get(field))
+    return verified is not None and verified <= asof_date
 
 
 def split_codes(raw: object) -> list[str]:
@@ -1219,6 +1226,7 @@ def main() -> None:
         (normalize_ticker(row.get("ticker")), str(row.get("nct_id") or "").strip().upper()): row
         for row in load_trial_status_overrides(trial_status_overrides_csv)
         if normalize_ticker(row.get("ticker")) and str(row.get("nct_id") or "").strip()
+        and row_verified_asof(row, asof_date=asof_date, field="verified_date")
     }
 
     audit_rows: list[dict[str, Any]] = []
@@ -1433,12 +1441,24 @@ def main() -> None:
     clean_csv = output_dir / str(cfg_get(config, "ctgov_audit.locked_clean_universe_csv", "ctgov_clean_universe_locked.csv"))
     clean_json = output_dir / str(cfg_get(config, "ctgov_audit.locked_clean_universe_json", "ctgov_clean_universe_locked.json"))
     manifest_json = output_dir / str(cfg_get(config, "ctgov_audit.manifest_json", "ctgov_audit_manifest.json"))
-    manual_decisions = load_manual_decisions(manual_verification_csv)
+    manual_decisions = {
+        ticker: row
+        for ticker, row in load_manual_decisions(manual_verification_csv).items()
+        if row_verified_asof(row, asof_date=asof_date, field="manual_verified_date")
+    }
     manual_activation_overrides_csv = resolve_optional_path(
         cfg_get(config, "ctgov_audit.manual_activation_overrides_csv"),
         base_dir=config_path.parent,
     )
-    manual_activation_overrides = load_manual_decisions(manual_activation_overrides_csv) if manual_activation_overrides_csv else {}
+    manual_activation_overrides = (
+        {
+            ticker: row
+            for ticker, row in load_manual_decisions(manual_activation_overrides_csv).items()
+            if row_verified_asof(row, asof_date=asof_date, field="manual_verified_date")
+        }
+        if manual_activation_overrides_csv
+        else {}
+    )
     if manual_activation_overrides:
         manual_decisions.update(manual_activation_overrides)
         LOGGER.info(
@@ -1510,7 +1530,22 @@ def main() -> None:
         },
         "config": cfg_get(config, "ctgov_audit", {}),
     }
+    dated_mirror_dir = dated_output_dir(output_dir, asof_date.isoformat()) if args.output_dir is None else output_dir
+    manifest["dated_mirror_dir"] = str(dated_mirror_dir)
     write_output_with_run_failure(write_json, manifest_json, manifest)
+    if dated_mirror_dir != output_dir:
+        dated_mirror_dir.mkdir(parents=True, exist_ok=True)
+        for source in (
+            audit_csv,
+            review_csv,
+            manual_verification_csv,
+            evidence_csv,
+            clean_csv,
+            final_scoring_universe_csv,
+            clean_json,
+            manifest_json,
+        ):
+            shutil.copy2(source, dated_mirror_dir / source.name)
     if run_id is not None:
         with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
             finish_run(

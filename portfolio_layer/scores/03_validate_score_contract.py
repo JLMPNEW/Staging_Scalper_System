@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
     CONTRACT_FIELDS, DEFAULT_RATING_BANDS, contract_version, fail_if_exists, percentiles_within,
     rating_for_percentile, read_csv, sha256_file, validate_rating_bands, write_csv, write_manifest,
@@ -207,6 +208,8 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
     validation_path = run_dir / "validation" / "score_contract_validation.csv"
     manifest_path = run_dir / "manifest.json"
     duplicate_path = run_dir / "validation" / "duplicate_resolution.csv"
+    if args.force:
+        invalidate_dependents(run_dir, "scores")
     try:
         fail_if_exists([validation_path, manifest_path], force=args.force)
     except FileExistsError as exc:

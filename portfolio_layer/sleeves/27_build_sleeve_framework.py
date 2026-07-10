@@ -8,6 +8,7 @@ This step does NOT re-budget weights; it seals the assignments + risk diagnostic
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import sys
@@ -24,7 +25,16 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    read_csv,
+    read_manifest,
+    sealed_artifact_errors,
+    sha256_file,
+    write_csv,
+    write_manifest,
+)
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
@@ -79,6 +89,19 @@ def _parse_iso_date(value: Any) -> date | None:
         return None
 
 
+def _resolve_event_source(raw: Any, *, run_dir: Path) -> Path | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    candidate = Path(text).expanduser()
+    candidates = [candidate] if candidate.is_absolute() else [run_dir / candidate, PROJECT_ROOT / candidate]
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved.is_file():
+            return resolved
+    return None
+
+
 def main() -> int:  # noqa: C901
     configure_utc_logging()
     args = parse_args()
@@ -97,8 +120,11 @@ def main() -> int:  # noqa: C901
         "bl_cost_adjusted": bl_dir / "costs" / "bl_cost_adjusted_target_weights.csv",
         "bl_target_weights": bl_dir / "bl_target_weights.csv",
         "scores": run_dir / "stocks_scores.csv",
+        "stage1_manifest": run_dir / "manifest.json",
         "rotation": run_dir / "rotation" / "sector_rotation.csv",
+        "rotation_manifest": run_dir / "rotation" / "rotation_manifest.json",
         "macro_regime": run_dir / "macro" / "macro_regime.csv",
+        "macro_manifest": run_dir / "macro" / "macro_manifest.json",
         "covariance": run_dir / "risk" / "covariance.csv",
         "risk_manifest": run_dir / "risk" / "risk_manifest.json",
         "config": config_path,
@@ -114,6 +140,7 @@ def main() -> int:  # noqa: C901
     validation_path = sleeves_dir / "validation" / "sleeve_framework_validation.csv"
     outputs = [assignments_path, meta_path]
     if args.force:
+        invalidate_dependents(run_dir, "sleeves")
         for path in (*outputs, validation_path):
             if path.exists():
                 path.unlink()
@@ -146,6 +173,26 @@ def main() -> int:  # noqa: C901
     rec("covariance_sealed_stage2", "PASS" if cov_ok else "FAIL",
         "covariance.csv hash matches sealed Stage 2" if cov_ok else "covariance_hash_mismatch")
 
+    upstream_seal_errors: list[str] = []
+    for manifest_key, artifact_key, recorded_key in (
+        ("stage1_manifest", "scores", "stocks_scores.csv"),
+        ("bl_manifest", "bl_target_weights", "bl_target_weights.csv"),
+        ("rotation_manifest", "rotation", "sector_rotation.csv"),
+        ("macro_manifest", "macro_regime", "macro_regime.csv"),
+    ):
+        manifest = read_manifest(art[manifest_key])
+        upstream_seal_errors.extend(
+            f"{artifact_key}:{error}" for error in sealed_artifact_errors(
+                manifest, art[artifact_key], recorded_key, run_as_of=run_as_of,
+            )
+        )
+    rec(
+        "state_inputs_sealed_current",
+        "PASS" if not upstream_seal_errors else "FAIL",
+        "scores, raw BL weights, rotation, and macro regime match accepted upstream manifests"
+        if not upstream_seal_errors else f"{upstream_seal_errors[:8]}",
+    )
+
     # --- load book + metadata ---
     scores = {str(r.get("ticker", "")).strip().upper(): r for r in read_csv(art["scores"])}
     sector_by_ticker = {str(r.get("Ticker", "")).strip().upper(): str(r.get("SectorName", "")).strip()
@@ -157,21 +204,43 @@ def main() -> int:  # noqa: C901
 
     held: dict[str, float] = {}
     cash_weight = 0.0
+    book_bad: list[str] = []
+    seen_book: set[str] = set()
     for row in read_csv(art["bl_cost_adjusted"]):
         ticker = str(row.get("ticker") or row.get("Ticker") or "").strip().upper()
-        weight = _f(row.get("weight") or row.get("Weight"))
-        if not ticker or weight is None:
+        raw_weight = row.get("weight") if "weight" in row else row.get("Weight")
+        weight = _f(raw_weight)
+        if not ticker:
+            book_bad.append("blank_ticker")
+            continue
+        if ticker in seen_book:
+            book_bad.append(f"duplicate_ticker:{ticker}")
+            continue
+        seen_book.add(ticker)
+        if weight is None or weight < 0.0:
+            book_bad.append(f"invalid_weight:{ticker}={raw_weight!r}")
             continue
         if ticker == "CASH":
-            cash_weight += max(0.0, weight)
+            cash_weight = weight
         elif weight > 0:
             held[ticker] = weight
+    if abs(sum(held.values()) + cash_weight - 1.0) > 1e-6:
+        book_bad.append(f"book_sum={sum(held.values()) + cash_weight:.10f}")
+    if "CASH" not in seen_book:
+        book_bad.append("missing_cash_row")
+    rec(
+        "stage7_book_well_formed",
+        "PASS" if not book_bad else "FAIL",
+        f"held={len(held)}; cash={cash_weight:.8f}; sum={sum(held.values()) + cash_weight:.10f}"
+        if not book_bad else f"{book_bad[:10]}",
+    )
 
     # --- catalyst event contract (Phase 1: absent => disable + WARN) ---
     events_rel = str(cfg_get(config, "sleeves.catalyst_events_csv", "events/catalyst_events.csv"))
     events_path = run_dir / events_rel
     catalyst_enabled = bool(cfg_get(config, "sleeves.sleeve_defs.short_catalyst.enabled", False))
     catalyst_tickers: set[str] = set()
+    event_input_paths: dict[str, Path] = {}
     run_date = _parse_iso_date(run_as_of)
     if catalyst_enabled and events_path.exists():
         event_rows = read_csv(events_path)
@@ -181,8 +250,7 @@ def main() -> int:  # noqa: C901
         }
         # a header-only file is "zero events", not "missing every field" — read the raw header
         with events_path.open(encoding="utf-8", newline="") as handle:
-            raw_header = handle.readline().strip()
-        header = {h.strip() for h in raw_header.split(",") if h.strip()}
+            header = {str(h).strip() for h in (csv.reader(handle).__next__() or []) if str(h).strip()}
         missing_event_fields = sorted(required_event_fields - header)
         if missing_event_fields:
             # a failed contract must not route names into short_catalyst from unverifiable rows
@@ -192,10 +260,42 @@ def main() -> int:  # noqa: C901
         else:
             horizons = cfg_get(config, "sleeves.sleeve_defs.short_catalyst.horizon_months", [1, 3]) or [1, 3]
             max_days = int(max(float(v) for v in horizons) * 31) if horizons else 93
-            for row in event_rows:
+            event_bad: list[str] = []
+            eligible_events: set[str] = set()
+            seen_events: set[tuple[str, str, str, str]] = set()
+            for row_number, row in enumerate(event_rows, start=2):
                 ev_asof = _parse_iso_date(row.get("event_asof_date"))
                 ev_date = _parse_iso_date(row.get("event_date"))
                 tkr = str(row.get("ticker", "")).strip().upper()
+                event_type = str(row.get("event_type", "")).strip()
+                pipeline = str(row.get("source_pipeline", "")).strip()
+                confidence = _f(row.get("confidence"))
+                source = _resolve_event_source(row.get("source_artifact"), run_dir=run_dir)
+                recorded_source_hash = str(row.get("source_sha256", "")).strip().lower()
+                key = (tkr, event_type, str(row.get("event_date", "")).strip(), pipeline)
+                row_errors: list[str] = []
+                if not tkr or not event_type or not pipeline:
+                    row_errors.append("missing_identity")
+                if ev_asof is None or ev_date is None:
+                    row_errors.append("invalid_date")
+                elif run_date is not None and ev_asof > run_date:
+                    row_errors.append("future_event_asof")
+                if confidence is None or not 0.0 <= confidence <= 1.0:
+                    row_errors.append("invalid_confidence")
+                if key in seen_events:
+                    row_errors.append("duplicate_event")
+                seen_events.add(key)
+                if source is None:
+                    row_errors.append("missing_source_artifact")
+                elif sha256_file(source) != recorded_source_hash:
+                    row_errors.append("source_hash_mismatch")
+                else:
+                    input_key = f"catalyst_source:{len(event_input_paths):04d}:{source.name}"
+                    if source not in event_input_paths.values():
+                        event_input_paths[input_key] = source
+                if row_errors:
+                    event_bad.append(f"row{row_number}:{','.join(row_errors)}")
+                    continue
                 if (
                     tkr
                     and run_date is not None
@@ -204,8 +304,19 @@ def main() -> int:  # noqa: C901
                     and ev_asof <= run_date
                     and run_date <= ev_date <= run_date + timedelta(days=max_days)
                 ):
-                    catalyst_tickers.add(tkr)
-            rec("short_catalyst_contract", "PASS", f"catalyst events active: {len(catalyst_tickers)} PIT events")
+                    eligible_events.add(tkr)
+            if event_bad:
+                event_input_paths.clear()
+                rec("short_catalyst_contract", "FAIL", f"invalid event provenance: {event_bad[:10]}")
+            else:
+                catalyst_tickers = eligible_events
+                event_input_paths["catalyst_events"] = events_path.resolve()
+                rec(
+                    "short_catalyst_contract",
+                    "PASS",
+                    f"catalyst events active: {len(catalyst_tickers)} PIT events; "
+                    f"verified_sources={len(event_input_paths) - 1}",
+                )
     else:
         rec("short_catalyst_contract", "WARN",
             "short_catalyst disabled (no events/catalyst_events.csv contract); Phase 1 long_core+medium_rotation only")
@@ -332,8 +443,14 @@ def main() -> int:  # noqa: C901
             "per_name_rc_max": None if rc is None else round(max(rc.rc.values()), 6),
         },
         "short_catalyst_enabled": catalyst_enabled and bool(catalyst_tickers),
-        "input_paths": {k: str(p) for k, p in art.items()},
-        "inputs_sha256": {k: sha256_file(p) for k, p in art.items()},
+        "input_paths": {
+            **{k: str(p) for k, p in art.items()},
+            **{k: str(p) for k, p in event_input_paths.items()},
+        },
+        "inputs_sha256": {
+            **{k: sha256_file(p) for k, p in art.items()},
+            **{k: sha256_file(p) for k, p in event_input_paths.items()},
+        },
         "outputs_sha256": {"sleeve_assignments.csv": sha256_file(assignments_path)},
         "source_sha256": {n: sha256_file(PACKAGE_ROOT / "sleeves" / n)
                           for n in SOURCE_FILES if (PACKAGE_ROOT / "sleeves" / n).exists()},

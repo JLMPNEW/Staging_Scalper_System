@@ -136,7 +136,7 @@ def parse_date(raw: object) -> date | None:
         return None
 
 
-def safe_float(raw: object) -> float | None:
+def safe_float(raw: Any) -> float | None:
     try:
         value = float(raw)
     except (TypeError, ValueError):
@@ -825,13 +825,17 @@ YOY_METRICS = (
 
 def _derive_levels(values: dict[str, float | None]) -> None:
     """Fill gross_profit and free_cash_flow within one duration class."""
-    if values.get("gross_profit") is None and values.get("revenue") is not None and values.get("cost_of_sales") is not None:
-        values["gross_profit"] = float(values["revenue"]) - float(values["cost_of_sales"])
+    revenue = values.get("revenue")
+    cost_of_sales = values.get("cost_of_sales")
+    if values.get("gross_profit") is None and revenue is not None and cost_of_sales is not None:
+        values["gross_profit"] = revenue - cost_of_sales
     capex = values.get("capex")
     if capex is not None:
-        values["capex"] = abs(float(capex))
-    if values.get("operating_cash_flow") is not None and values.get("capex") is not None:
-        values["free_cash_flow"] = float(values["operating_cash_flow"]) - float(values["capex"])
+        values["capex"] = abs(capex)
+    operating_cash_flow = values.get("operating_cash_flow")
+    normalized_capex = values.get("capex")
+    if operating_cash_flow is not None and normalized_capex is not None:
+        values["free_cash_flow"] = operating_cash_flow - normalized_capex
     else:
         values.setdefault("free_cash_flow", None)
 
@@ -1139,16 +1143,11 @@ def build_ticker_features(
         if feature.get("accounts_payable") is not None and cogs_ttm and cogs_ttm > 0:
             feature["days_payables_outstanding"] = float(feature["accounts_payable"]) / cogs_ttm * 365.0
         feature["cash_conversion_cycle"] = None
-        if (
-            feature.get("inventory_days") is not None
-            and feature.get("days_sales_outstanding") is not None
-            and feature.get("days_payables_outstanding") is not None
-        ):
-            feature["cash_conversion_cycle"] = (
-                float(feature["inventory_days"])
-                + float(feature["days_sales_outstanding"])
-                - float(feature["days_payables_outstanding"])
-            )
+        inventory_days = safe_float(feature.get("inventory_days"))
+        days_sales_outstanding = safe_float(feature.get("days_sales_outstanding"))
+        days_payables_outstanding = safe_float(feature.get("days_payables_outstanding"))
+        if inventory_days is not None and days_sales_outstanding is not None and days_payables_outstanding is not None:
+            feature["cash_conversion_cycle"] = inventory_days + days_sales_outstanding - days_payables_outstanding
         # Point-in-time valuation: shares-from-filings x close price at the filing date.
         market_cap = pit_market_cap(
             conn,

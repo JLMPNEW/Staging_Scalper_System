@@ -73,6 +73,22 @@ REQUIRED_SERVING_TABLES: dict[str, set[str]] = {
         "current_confidence",
         "next_confidence",
     },
+    "macro_regime_v2_decision_daily": {
+        "model_version",
+        "as_of_date",
+        "active_current_regime",
+        "active_next_regime",
+        "current_confidence",
+        "next_confidence",
+        "coverage_flag",
+    },
+    "macro_regime_v2_promotion_summary": {
+        "model_version",
+        "evidence_as_of_date",
+        "acceptance",
+        "validated_cell_count",
+        "required_cell_count",
+    },
     "stock_sector_target_daily": {
         "as_of_date",
         "sector_name",

@@ -88,6 +88,10 @@ def build_oos_provenance(
     if asof_date is None:
         reasons.append("invalid_asof_date")
 
+    asof_not_future = asof_date is not None and asof_date <= date.today()
+    if not asof_not_future:
+        reasons.append("asof_date_in_future")
+
     feature_pit = 1
     future_return_excluded = 1
     non_pit_omitted = 1 if historical_mode else 0
@@ -110,6 +114,7 @@ def build_oos_provenance(
     )
     oos_score_valid = int(
         scoring_weights_frozen
+        and bool(asof_not_future)
         and bool(model_available_on_asof)
         and bool(outside_training_window)
         and feature_pit == 1

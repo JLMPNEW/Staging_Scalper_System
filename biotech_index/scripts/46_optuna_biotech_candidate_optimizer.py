@@ -112,7 +112,7 @@ def parse_args() -> argparse.Namespace:
         "--max-loss20-rate-pct",
         type=float,
         default=30.0,
-        help="Maximum 20% loss rate allowed for Optuna survivors. Defaults to the Tier-1 calibration threshold.",
+        help="Maximum 20%% loss rate allowed for Optuna survivors. Defaults to the Tier-1 calibration threshold.",
     )
     parser.add_argument("--max-loss40-rate-pct", type=float, default=12.5)
     parser.add_argument("--max-top3-gain-contribution-pct", type=float, default=50.0)
