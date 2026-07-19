@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import csv
 import io
+import sys
+import types
 import zipfile
 from datetime import date
 
 from market_positioning import api_collectors
 from market_positioning.api_collectors import (
+    filter_ibkr_tickers_for_asof,
     finra_short_interest_records,
+    load_universe_membership_end_map,
     normalize_ibkr_fee_rate,
+    prune_ibkr_rows_after_membership_end,
     sync_finra_equity_short_interest_files,
+    sync_ibkr_borrow_availability,
     sync_sec_13f_data_sets,
 )
 from market_positioning.core import aggregate_13f_ownership_for_tickers, connect, init_db
@@ -35,6 +41,208 @@ def test_normalize_ibkr_fee_rate_rejects_unknown_unit() -> None:
         assert "Unsupported IBKR fee-rate unit" in str(exc)
     else:
         raise AssertionError("Expected ValueError for unsupported IBKR fee-rate unit")
+
+
+def test_ibkr_shortable_generic_tick_uses_streaming_request(monkeypatch, tmp_path) -> None:
+    class FakeContract:
+        conId = 123
+
+    class FakeTicker:
+        shortableShares = 5000.0
+
+    class FakeBar:
+        date = date(2026, 7, 17)
+        close = 0.01
+
+    class FakeIB:
+        instances: list[FakeIB] = []
+
+        def __init__(self) -> None:
+            self.connected = False
+            self.market_data_requests: list[dict[str, object]] = []
+            self.cancelled: list[object] = []
+            self.active_market_data_lines = 0
+            self.max_active_market_data_lines = 0
+            self.__class__.instances.append(self)
+
+        def connect(self, *_args, **_kwargs) -> None:
+            self.connected = True
+
+        def disconnect(self) -> None:
+            self.connected = False
+
+        def isConnected(self) -> bool:  # noqa: N802
+            return self.connected
+
+        def reqMarketDataType(self, _market_data_type: int) -> None:  # noqa: N802
+            return None
+
+        def qualifyContracts(self, _contract) -> list[FakeContract]:  # noqa: N802
+            return [FakeContract()]
+
+        def reqHistoricalData(self, *_args, **_kwargs) -> list[object]:  # noqa: N802
+            return [FakeBar()]
+
+        def reqMktData(self, contract, **kwargs) -> FakeTicker:  # noqa: N802
+            self.market_data_requests.append({"contract": contract, **kwargs})
+            self.active_market_data_lines += 1
+            self.max_active_market_data_lines = max(
+                self.max_active_market_data_lines,
+                self.active_market_data_lines,
+            )
+            return FakeTicker()
+
+        def cancelMktData(self, contract) -> None:  # noqa: N802
+            self.cancelled.append(contract)
+            self.active_market_data_lines -= 1
+
+        def sleep(self, _seconds: float) -> None:
+            return None
+
+    class FakeStock:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+    monkeypatch.setitem(sys.modules, "ib_insync", types.SimpleNamespace(IB=FakeIB, Stock=FakeStock))
+
+    universe = tmp_path / "tickers.csv"
+    universe.write_text(
+        "ticker,exchange\n" + "".join(f"TEST{index:03d},NASDAQ\n" for index in range(101)),
+        encoding="utf-8",
+    )
+    with connect(tmp_path / "market_positioning.sqlite") as conn:
+        init_db(conn)
+        sync_ibkr_borrow_availability(
+            conn,
+            tickers_csv=universe,
+            history_start_date=date(2026, 7, 10),
+            end_date=date(2026, 7, 17),
+            snapshot_wait_sec=0.0,
+            sleep_sec=0.0,
+            batch_size=500,
+        )
+
+    fake_ib = FakeIB.instances[-1]
+    assert len(fake_ib.market_data_requests) == 101
+    assert fake_ib.market_data_requests[0]["genericTickList"] == "236"
+    assert fake_ib.market_data_requests[0]["snapshot"] is False
+    assert fake_ib.max_active_market_data_lines == 100
+    assert fake_ib.active_market_data_lines == 0
+    assert len(fake_ib.cancelled) == 101
+
+
+def test_ibkr_historical_catchup_can_skip_current_shortable_snapshot(monkeypatch, tmp_path) -> None:
+    class FakeContract:
+        conId = 123
+
+    class FakeBar:
+        date = date(2026, 7, 17)
+        close = 0.01
+
+    class FakeIB:
+        instances: list[FakeIB] = []
+
+        def __init__(self) -> None:
+            self.connected = False
+            self.market_data_requests = 0
+            self.__class__.instances.append(self)
+
+        def connect(self, *_args, **_kwargs) -> None:
+            self.connected = True
+
+        def disconnect(self) -> None:
+            self.connected = False
+
+        def isConnected(self) -> bool:  # noqa: N802
+            return self.connected
+
+        def reqMarketDataType(self, _market_data_type: int) -> None:  # noqa: N802
+            return None
+
+        def qualifyContracts(self, _contract) -> list[FakeContract]:  # noqa: N802
+            return [FakeContract()]
+
+        def reqHistoricalData(self, *_args, **_kwargs) -> list[object]:  # noqa: N802
+            return [FakeBar()]
+
+        def reqMktData(self, *_args, **_kwargs):  # noqa: ANN201, N802
+            self.market_data_requests += 1
+            raise AssertionError("Current shortableShares must not be requested during historical catch-up")
+
+        def sleep(self, _seconds: float) -> None:
+            return None
+
+    class FakeStock:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+    monkeypatch.setitem(sys.modules, "ib_insync", types.SimpleNamespace(IB=FakeIB, Stock=FakeStock))
+
+    universe = tmp_path / "tickers.csv"
+    universe.write_text("ticker,exchange\nTEST,NASDAQ\n", encoding="utf-8")
+    with connect(tmp_path / "market_positioning.sqlite") as conn:
+        init_db(conn)
+        sync_ibkr_borrow_availability(
+            conn,
+            tickers_csv=universe,
+            history_start_date=date(2026, 7, 10),
+            end_date=date(2026, 7, 17),
+            shortable_snapshot=False,
+            sleep_sec=0.0,
+        )
+        fee_dates = [
+            row[0]
+            for row in conn.execute(
+                "SELECT asof_date FROM ibkr_borrow_fee_rate_daily WHERE ticker = 'TEST'"
+            )
+        ]
+        shortable_count = int(conn.execute("SELECT COUNT(*) FROM ibkr_shortable_shares_snapshots").fetchone()[0])
+
+    assert FakeIB.instances[-1].market_data_requests == 0
+    assert fee_dates == ["2026-07-17"]
+    assert shortable_count == 0
+
+
+def test_ibkr_membership_filter_and_prune_recycled_symbol_rows(tmp_path) -> None:
+    universe = tmp_path / "tickers.csv"
+    universe.write_text(
+        "ticker,membership_end_date\nACTIVE,\nINVN,2017-05-18\n",
+        encoding="utf-8",
+    )
+    membership_ends = load_universe_membership_end_map(universe)
+    eligible, ended = filter_ibkr_tickers_for_asof(
+        ["ACTIVE", "INVN"],
+        membership_ends,
+        date(2026, 7, 17),
+    )
+    assert eligible == ["ACTIVE"]
+    assert ended == {"INVN"}
+
+    with connect(tmp_path / "market_positioning.sqlite") as conn:
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO ibkr_borrow_fee_rate_daily(
+                ticker, asof_date, con_id, borrow_fee_rate, source, created_at, updated_at
+            ) VALUES ('INVN', '2017-05-18', 1, 0.01, 'interactive_brokers', 'now', 'now')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO ibkr_borrow_fee_rate_daily(
+                ticker, asof_date, con_id, borrow_fee_rate, source, created_at, updated_at
+            ) VALUES ('INVN', '2026-07-17', 2, 0.10, 'interactive_brokers', 'now', 'now')
+            """
+        )
+        deleted = prune_ibkr_rows_after_membership_end(conn, membership_ends)
+        remaining_dates = [
+            row[0]
+            for row in conn.execute(
+                "SELECT asof_date FROM ibkr_borrow_fee_rate_daily WHERE ticker = 'INVN' ORDER BY asof_date"
+            )
+        ]
+    assert deleted == (1, 0)
+    assert remaining_dates == ["2017-05-18"]
 
 
 def test_finra_short_interest_records_maps_current_short_position(monkeypatch) -> None:

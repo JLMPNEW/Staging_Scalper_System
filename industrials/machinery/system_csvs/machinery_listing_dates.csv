@@ -38,7 +38,7 @@ EPAC,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_s
 ETN,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=ETN
 FCEL,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=FCEL
 FELE,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=FELE
-FISN,2026-06-18,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=FISN
+FISN,2026-06-18,,analyst_verified_first_trading_date,sec_edgar_and_norgate_audit,1.00,SEC 8-K confirms Nasdaq trading began 2026-06-18; norgate_symbol=FISN
 FLS,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=FLS
 FSS,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=FSS
 GEV,2024-03-27,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=GEV
@@ -65,7 +65,7 @@ LEU,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_sy
 LII,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=LII
 LNN,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=LNN
 LXFR,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=LXFR
-MAIR,2026-04-16,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=MAIR
+MAIR,2026-04-16,,analyst_verified_first_trading_date,sec_edgar_and_norgate_audit,1.00,No eligibility before SEC IPO pricing on 2026-04-15; Norgate first quote 2026-04-16; norgate_symbol=MAIR
 MIDD,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=MIDD
 MIR,2020-08-20,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=MIR
 MLI,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=MLI

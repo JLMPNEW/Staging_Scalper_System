@@ -21,6 +21,31 @@ from industrials.machinery.contracts import (  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+# Untracked working copies of the seed CSVs (ticker_mapping/ is gitignored).
+# They are not read by the pipeline, but silent drift against the canonical
+# system_csvs copies has already happened once — fail loudly when they fork.
+TICKER_MAPPING_DUPLICATES = {
+    "industrials_universe.seed_csv": PROJECT_ROOT / "ticker_mapping" / "machinery_tickers.csv",
+    "industrials_universe.delisted_seed_csv": PROJECT_ROOT / "ticker_mapping" / "machinery_delisted.csv",
+}
+
+
+def duplicate_copy_errors(config: dict, base_dir: Path) -> list[str]:
+    errors: list[str] = []
+    for config_key, duplicate_path in TICKER_MAPPING_DUPLICATES.items():
+        if not duplicate_path.exists():
+            continue
+        canonical_path = resolve_path(cfg_get(config, config_key), base_dir=base_dir)
+        if duplicate_path.resolve() == canonical_path.resolve():
+            continue
+        # Row-level comparison: newline style / trailing-EOF differences are
+        # not data drift.
+        if read_csv_rows(duplicate_path) != read_csv_rows(canonical_path):
+            errors.append(
+                f"Untracked duplicate {duplicate_path} has diverged from canonical {canonical_path}; "
+                "reconcile them (system_csvs is the pipeline source of truth)."
+            )
+    return errors
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,6 +74,7 @@ def main() -> int:
         expected_active=int(policy.get("expected_ticker_count") or 0),
         expected_delisted=int(policy.get("expected_delisted_count") or 0),
     )
+    errors.extend(duplicate_copy_errors(config, base_dir))
     summary = {
         "status": "PASS" if not errors else "FAIL",
         "active_tickers": len(active_rows),

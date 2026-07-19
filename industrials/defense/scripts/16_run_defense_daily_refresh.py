@@ -27,6 +27,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--asof", required=True, help="Market/PIT as-of date, YYYY-MM-DD.")
     parser.add_argument("--positioning-history-start", default="2018-01-01")
+    parser.add_argument(
+        "--positioning-through-publish-only",
+        action="store_true",
+        help=(
+            "Rebuild positioning, eligibility, scores, and publish artifacts only. "
+            "Use after market and financial stages already passed for the requested date."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -104,13 +112,45 @@ def main() -> None:
     asof = parse_asof(args.asof)
     history_start = parse_asof(args.positioning_history_start)
 
-    run_step("sync prices", ["industrials/defense/scripts/03_sync_defense_prices.py", "--asof", asof, "--allow-partial"])
-    run_step("build market features", ["industrials/defense/scripts/05_build_defense_market_features.py", "--asof", asof])
-    run_step("validate market stage", ["industrials/defense/scripts/06_validate_defense_market_stage.py", "--asof", asof])
-    run_step("sync FX", ["industrials/defense/scripts/11_sync_defense_yahoo_fx_rates.py", "--end-date", asof])
-    run_step("sync SEC fundamentals incremental", ["industrials/defense/scripts/07_sync_defense_sec_fundamentals.py", "--incremental", "--allow-partial"])
-    run_step("build financial features", ["industrials/defense/scripts/08_build_defense_financial_features.py", "--asof", asof])
-    run_step("validate financial stage", ["industrials/defense/scripts/08_validate_defense_financial_stage.py", "--asof", asof])
+    if not args.positioning_through_publish_only:
+        run_step(
+            "sync prices",
+            ["industrials/defense/scripts/03_sync_defense_prices.py", "--asof", asof, "--allow-partial"],
+        )
+        run_step(
+            "build market features",
+            ["industrials/defense/scripts/05_build_defense_market_features.py", "--asof", asof],
+        )
+        run_step(
+            "validate market stage",
+            ["industrials/defense/scripts/06_validate_defense_market_stage.py", "--asof", asof],
+        )
+        run_step(
+            "sync FX",
+            ["industrials/defense/scripts/11_sync_defense_yahoo_fx_rates.py", "--end-date", asof],
+        )
+        run_step(
+            "sync SEC fundamentals incremental",
+            [
+                "industrials/defense/scripts/07_sync_defense_sec_fundamentals.py",
+                "--incremental",
+                "--allow-partial",
+                "--asof",
+                asof,
+            ],
+        )
+        run_step(
+            "build financial features",
+            ["industrials/defense/scripts/08_build_defense_financial_features.py", "--asof", asof],
+        )
+        run_step(
+            "validate financial stage",
+            ["industrials/defense/scripts/08_validate_defense_financial_stage.py", "--asof", asof],
+        )
+        run_step(
+            "audit reporting-profile graduation",
+            ["industrials/defense/scripts/09_evaluate_defense_profile_graduation.py", "--asof", asof],
+        )
     run_step(
         "refresh positioning daily",
         [
@@ -122,7 +162,16 @@ def main() -> None:
             asof,
         ],
     )
-    run_step("validate positioning stage", ["industrials/scripts/14_validate_industrials_sec_positioning_stages.py", "--model-family", MODEL_FAMILY])
+    run_step(
+        "validate positioning stage",
+        [
+            "industrials/scripts/14_validate_industrials_sec_positioning_stages.py",
+            "--model-family",
+            MODEL_FAMILY,
+            "--asof",
+            asof,
+        ],
+    )
     run_step(
         "validate scoring eligibility",
         ["industrials/defense/scripts/10_validate_defense_scoring_eligibility_policy.py", "--asof", asof],

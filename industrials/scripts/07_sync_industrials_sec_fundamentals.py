@@ -13,7 +13,7 @@ import sys
 import time
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -52,6 +52,180 @@ ARCHIVE_FALLBACK_PROFILES = frozenset(
         "FPI_HYBRID_LOADED",
     }
 )
+FULL_STATEMENT_ARCHIVE_HANDLING_TYPES = frozenset({"Ingestion_Gap_Pending"})
+MACHINERY_EXTRA_CONCEPT_MAPPINGS = (
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "ReceivablesNetCurrent",
+        "canonical_metric": "accounts_receivable",
+        "financial_statement": "balance_sheet",
+        "period_type": "instant",
+        "sign_policy": "as_reported",
+        "priority": 15,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "AccountsReceivableNet",
+        "canonical_metric": "accounts_receivable",
+        "financial_statement": "balance_sheet",
+        "period_type": "instant",
+        "sign_policy": "as_reported",
+        "priority": 20,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "AccountsNotesAndLoansReceivableNetCurrent",
+        "canonical_metric": "accounts_receivable",
+        "financial_statement": "balance_sheet",
+        "period_type": "instant",
+        "sign_policy": "as_reported",
+        "priority": 25,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "AccountsAndNotesReceivableNet",
+        "canonical_metric": "accounts_receivable",
+        "financial_statement": "balance_sheet",
+        "period_type": "instant",
+        "sign_policy": "as_reported",
+        "priority": 30,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "AccountsPayableTradeCurrent",
+        "canonical_metric": "accounts_payable",
+        "financial_statement": "balance_sheet",
+        "period_type": "instant",
+        "sign_policy": "as_reported",
+        "priority": 15,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "LongTermDebt",
+        "canonical_metric": "debt_total",
+        "financial_statement": "balance_sheet",
+        "period_type": "instant",
+        "sign_policy": "as_reported",
+        "priority": 15,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",
+        "canonical_metric": "debt_total",
+        "financial_statement": "balance_sheet",
+        "period_type": "instant",
+        "sign_policy": "as_reported",
+        "priority": 20,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "LongTermDebtAndCapitalLeaseObligations",
+        "canonical_metric": "debt_total",
+        "financial_statement": "balance_sheet",
+        "period_type": "instant",
+        "sign_policy": "as_reported",
+        "priority": 25,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "PaymentsToAcquireProductiveAssets",
+        "canonical_metric": "capex",
+        "financial_statement": "cash_flow",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 20,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "OtherDepreciationAndAmortization",
+        "canonical_metric": "depreciation_and_amortization",
+        "financial_statement": "cash_flow",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 20,
+    },
+    {
+        "taxonomy": "sec-text",
+        "concept_name": "PretaxIncome",
+        "canonical_metric": "pretax_income",
+        "financial_statement": "income_statement",
+        "period_type": "duration",
+        "sign_policy": "as_reported",
+        "priority": 200,
+    },
+    {
+        "taxonomy": "sec-text",
+        "concept_name": "IncomeTaxExpense",
+        "canonical_metric": "income_tax_expense",
+        "financial_statement": "income_statement",
+        "period_type": "duration",
+        "sign_policy": "as_reported",
+        "priority": 200,
+    },
+    {
+        "taxonomy": "sec-text",
+        "concept_name": "ReportedBacklog",
+        "canonical_metric": "reported_backlog",
+        "financial_statement": "backlog",
+        "period_type": "instant",
+        "sign_policy": "positive_abs",
+        "priority": 200,
+    },
+    {
+        "taxonomy": "sec-text",
+        "concept_name": "RemainingPerformanceObligation",
+        "canonical_metric": "remaining_performance_obligation",
+        "financial_statement": "backlog",
+        "period_type": "instant",
+        "sign_policy": "positive_abs",
+        "priority": 180,
+    },
+    {
+        "taxonomy": "sec-footnote",
+        "concept_name": "RemainingPerformanceObligation",
+        "canonical_metric": "remaining_performance_obligation",
+        "financial_statement": "backlog",
+        "period_type": "instant",
+        "sign_policy": "positive_abs",
+        "priority": 40,
+    },
+    {
+        "taxonomy": "sec-footnote",
+        "concept_name": "RemainingPerformanceObligationCurrent",
+        "canonical_metric": "rpo_current",
+        "financial_statement": "backlog",
+        "period_type": "instant",
+        "sign_policy": "positive_abs",
+        "priority": 40,
+    },
+    {
+        "taxonomy": "sec-footnote",
+        "concept_name": "ReportedBacklog",
+        "canonical_metric": "reported_backlog",
+        "financial_statement": "backlog",
+        "period_type": "instant",
+        "sign_policy": "positive_abs",
+        "priority": 40,
+    },
+    {
+        "taxonomy": "sec-footnote",
+        "concept_name": "FundedBacklog",
+        "canonical_metric": "funded_backlog",
+        "financial_statement": "backlog",
+        "period_type": "instant",
+        "sign_policy": "positive_abs",
+        "priority": 40,
+    },
+    {
+        "taxonomy": "sec-footnote",
+        "concept_name": "Orders",
+        "canonical_metric": "orders",
+        "financial_statement": "orders",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 40,
+    },
+)
 REPORT_FIELDS = [
     "ticker",
     "cik",
@@ -84,6 +258,12 @@ ARCHIVE_EXCLUDED_SUFFIXES = (
 ARCHIVE_ALLOWED_DOCUMENT_SUFFIXES = (".xml", ".xhtml", ".htm", ".html", ".txt")
 TEXT_TABLE_SOURCE_DETAIL = "sec_archive_text_table"
 XBRL_ARCHIVE_SOURCE_DETAIL = "sec_archive_xbrl"
+FOOTNOTE_XBRL_SOURCE_DETAIL = "sec_archive_footnote_xbrl"
+ARCHIVE_SOURCE_DETAILS = (
+    XBRL_ARCHIVE_SOURCE_DETAIL,
+    TEXT_TABLE_SOURCE_DETAIL,
+    FOOTNOTE_XBRL_SOURCE_DETAIL,
+)
 
 
 class SecRequestError(RuntimeError):
@@ -121,6 +301,14 @@ class ArchiveFact:
     decimals: str
     payload_json: str
     source_detail: str = XBRL_ARCHIVE_SOURCE_DETAIL
+
+
+@dataclass(frozen=True)
+class ContextInfo:
+    period_start: str
+    period_end: str
+    context_id: str
+    dimensions: tuple[tuple[str, str], ...]
 
 
 def parse_args() -> argparse.Namespace:
@@ -209,23 +397,31 @@ def resolve_reporting_overrides_path(config: dict[str, Any], *, base_dir: Path, 
     return resolve_path(overrides_raw, base_dir=base_dir)
 
 
-def load_reporting_overrides(path: Path | None, *, asof: str) -> dict[str, ReportingOverride]:
-    """Load reporting overrides effective at the evaluation asof (EL-3).
+def resolve_reporting_graduations_path(config: dict[str, Any], *, base_dir: Path, model_family: str) -> Path | None:
+    """Resolve the optional append-only profile-graduation decision ledger."""
+    raw = str(
+        cfg_get(
+            config,
+            f"scoring_policy.families.{model_family}.reporting_profile_graduations_csv",
+            "",
+        )
+        or ""
+    ).strip()
+    return resolve_path(raw, base_dir=base_dir) if raw else None
 
-    Rows carry point-in-time metadata: valid_from gates effectiveness (same-day
-    inclusive at the evaluation asof); reviewed_at is provenance documentation
-    only and is not interpreted. Multiple rows per ticker with distinct
-    valid_from dates are versions; the latest row with valid_from <= asof wins.
-    """
+
+def _load_reporting_override_versions(
+    path: Path | None,
+    *,
+    asof: str,
+) -> dict[tuple[str, str], ReportingOverride]:
+    """Load every effective dated version from one override-format CSV."""
     if path is None:
-        # Genuinely unset config key: overrides are optional.
         return {}
     if not path.exists():
-        # DR-2: a config-named CSV that is missing on disk is an operator error,
-        # never a silent "no overrides" run.
         raise FileNotFoundError(f"Reporting overrides CSV not found: {path}")
-    effective: dict[str, tuple[str, ReportingOverride]] = {}
-    seen_versions: set[tuple[str, str]] = set()
+
+    versions: dict[tuple[str, str], ReportingOverride] = {}
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         fieldnames = [str(name or "").strip() for name in (reader.fieldnames or [])]
@@ -241,16 +437,15 @@ def load_reporting_overrides(path: Path | None, *, asof: str) -> dict[str, Repor
             valid_from = parse_date(row_value(row, "valid_from"))
             if not valid_from:
                 raise ValueError(f"{path}:{line_number} ticker={ticker} missing or invalid valid_from")
-            if (ticker, valid_from) in seen_versions:
+            key = (ticker, valid_from)
+            if key in versions:
                 raise ValueError(f"{path}:{line_number} duplicate override ticker={ticker} valid_from={valid_from}")
-            seen_versions.add((ticker, valid_from))
             confidence = as_float(row_value(row, "financial_confidence"))
             if confidence is None:
                 raise ValueError(f"{path}:{line_number} ticker={ticker} missing financial_confidence")
             if valid_from > asof:
-                # Not yet effective at the evaluation asof; never applied retroactively.
                 continue
-            override = ReportingOverride(
+            versions[key] = ReportingOverride(
                 ticker=ticker,
                 handling_type=row_value(row, "handling_type"),
                 parent_ticker=normalize_ticker(row_value(row, "parent_ticker")),
@@ -263,10 +458,51 @@ def load_reporting_overrides(path: Path | None, *, asof: str) -> dict[str, Repor
                 review_reason=row_value(row, "review_reason"),
                 notes=row_value(row, "notes"),
             )
-            current = effective.get(ticker)
-            if current is None or valid_from > current[0]:
-                effective[ticker] = (valid_from, override)
+    return versions
+
+
+def _select_effective_reporting_overrides(
+    versions: dict[tuple[str, str], ReportingOverride],
+) -> dict[str, ReportingOverride]:
+    effective: dict[str, tuple[str, ReportingOverride]] = {}
+    for (ticker, valid_from), override in versions.items():
+        current = effective.get(ticker)
+        if current is None or valid_from > current[0]:
+            effective[ticker] = (valid_from, override)
     return {ticker: override for ticker, (_, override) in effective.items()}
+
+
+def load_reporting_override_sources(
+    paths: list[Path | None],
+    *,
+    asof: str,
+) -> dict[str, ReportingOverride]:
+    """Merge base overrides and dated graduation decisions without ambiguity."""
+    merged: dict[tuple[str, str], ReportingOverride] = {}
+    origins: dict[tuple[str, str], Path] = {}
+    for path in paths:
+        for key, override in _load_reporting_override_versions(path, asof=asof).items():
+            existing = merged.get(key)
+            if existing is not None and existing != override:
+                raise ValueError(
+                    "Conflicting reporting override versions for "
+                    f"ticker={key[0]} valid_from={key[1]} in {origins[key]} and {path}"
+                )
+            merged[key] = override
+            if path is not None:
+                origins[key] = path
+    return _select_effective_reporting_overrides(merged)
+
+
+def load_reporting_overrides(path: Path | None, *, asof: str) -> dict[str, ReportingOverride]:
+    """Load reporting overrides effective at the evaluation asof (EL-3).
+
+    Rows carry point-in-time metadata: valid_from gates effectiveness (same-day
+    inclusive at the evaluation asof); reviewed_at is provenance documentation
+    only and is not interpreted. Multiple rows per ticker with distinct
+    valid_from dates are versions; the latest row with valid_from <= asof wins.
+    """
+    return load_reporting_override_sources([path], asof=asof)
 
 
 def parse_date(raw: object) -> str:
@@ -400,9 +636,33 @@ def request_text(url: str, *, user_agent: str, timeout_sec: float, max_retries: 
 def write_cache_atomic(cache_file: Path, text: str) -> None:
     """Write an HTTP cache file via tmp + os.replace so readers never see a truncated file (MK-10)."""
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp_file = cache_file.with_name(cache_file.name + ".tmp")
+    tmp_file = cache_file.with_name(
+        f"{cache_file.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
     tmp_file.write_text(text, encoding="utf-8")
-    os.replace(tmp_file, cache_file)
+    try:
+        for attempt in range(8):
+            try:
+                os.replace(tmp_file, cache_file)
+                return
+            except OSError as exc:
+                if getattr(exc, "winerror", None) not in {5, 32} and not isinstance(
+                    exc, PermissionError
+                ):
+                    raise
+                try:
+                    if cache_file.exists() and cache_file.read_text(encoding="utf-8") == text:
+                        return
+                except OSError:
+                    pass
+                if attempt == 7:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
+    finally:
+        try:
+            tmp_file.unlink(missing_ok=True)
+        except OSError:
+            LOGGER.warning("Unable to remove SEC cache temp file: %s", tmp_file)
 
 
 def load_or_fetch_json(
@@ -541,6 +801,36 @@ def resolve_open_issue(
         """,
         (resolution_status, now, RUN_TYPE, model_family, ticker, source_id, issue_type, detail),
     )
+
+
+def resolve_successful_sync_issues(
+    conn: Any,
+    *,
+    ticker: str,
+    model_family: str,
+    source_id: str,
+) -> int:
+    now = utc_now()
+    result = conn.execute(
+        """
+        UPDATE data_quality_issues
+        SET resolution_status = 'resolved_by_successful_retry',
+            updated_at = ?
+        WHERE stage = ?
+          AND model_family = ?
+          AND ticker = ?
+          AND source_id = ?
+          AND issue_type IN (
+                'sec_sync_failed',
+                'sec_endpoint_not_available',
+                'sec_archive_xbrl_unavailable',
+                'sec_archive_xbrl_no_filing_metadata'
+          )
+          AND resolution_status = 'open'
+        """,
+        (now, RUN_TYPE, model_family, ticker, source_id),
+    )
+    return int(result.rowcount or 0)
 
 
 def load_universe(conn: Any, *, model_family: str, ticker_filter: list[str], include_historical: bool) -> list[dict[str, Any]]:
@@ -1103,6 +1393,20 @@ def load_concept_map(conn: Any) -> dict[tuple[str, str], list[dict[str, Any]]]:
     return out
 
 
+def add_family_concept_mappings(
+    concept_map: dict[tuple[str, str], list[dict[str, Any]]],
+    *,
+    model_family: str,
+) -> None:
+    if model_family != "machinery":
+        return
+    for mapping in MACHINERY_EXTRA_CONCEPT_MAPPINGS:
+        key = (str(mapping["taxonomy"]), str(mapping["concept_name"]))
+        family_mapping = dict(mapping)
+        if family_mapping not in concept_map.setdefault(key, []):
+            concept_map[key].append(family_mapping)
+
+
 def make_fact_key(*parts: object) -> str:
     text = "|".join(str(part or "") for part in parts)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -1115,6 +1419,10 @@ def apply_sign(value: float | None, sign_policy: str) -> float | None:
         return abs(value)
     if sign_policy == "negative_abs":
         return -abs(value)
+    if sign_policy == "expense_from_net":
+        # Net income/expense lines report net expense as negative. Net income
+        # (positive raw value) maps to 0 expense, never abs() into a phantom one.
+        return max(-value, 0.0)
     return value
 
 
@@ -1165,6 +1473,550 @@ def parse_namespace_prefixes(document_text: str) -> dict[str, str]:
     for match in re.finditer(r"xmlns:([A-Za-z0-9_\-]+)\s*=\s*['\"]([^'\"]+)['\"]", document_text[:200000]):
         prefixes[match.group(1)] = match.group(2)
     return prefixes
+
+
+def xml_attribute(element: ET.Element, name: str) -> str:
+    target = name.lower()
+    for key, value in element.attrib.items():
+        if local_name(key).lower() == target:
+            return str(value or "").strip()
+    return ""
+
+
+def parse_xbrl_label_linkbase(document_text: str) -> dict[str, list[str]]:
+    """Resolve extension-concept labels from a filing's XBRL label linkbase."""
+    try:
+        root = ET.fromstring(document_text.encode("utf-8"))
+    except ET.ParseError:
+        return {}
+    locators: dict[str, str] = {}
+    labels: dict[str, str] = {}
+    arcs: list[tuple[str, str]] = []
+    for element in root.iter():
+        element_name = local_name(element.tag).lower()
+        if element_name == "loc":
+            locator_id = xml_attribute(element, "label")
+            href = xml_attribute(element, "href")
+            concept = href.rsplit("#", 1)[-1].strip()
+            if locator_id and concept:
+                locators[locator_id] = concept
+        elif element_name == "label":
+            label_id = xml_attribute(element, "label")
+            text = " ".join("".join(element.itertext()).split())
+            if label_id and text:
+                labels[label_id] = text
+        elif element_name == "labelarc":
+            source = xml_attribute(element, "from")
+            target = xml_attribute(element, "to")
+            if source and target:
+                arcs.append((source, target))
+    output: dict[str, list[str]] = {}
+    for source, target in arcs:
+        concept = locators.get(source, "")
+        label = labels.get(target, "")
+        if not concept or not label:
+            continue
+        keys = {concept, concept.split("_", 1)[-1]}
+        for key in keys:
+            if label not in output.setdefault(key, []):
+                output[key].append(label)
+    return output
+
+
+def read_context_details(root: ET.Element) -> dict[str, ContextInfo]:
+    contexts: dict[str, ContextInfo] = {}
+    for element in root.iter():
+        if local_name(element.tag).lower() != "context":
+            continue
+        context_id = str(element.attrib.get("id") or "").strip()
+        if not context_id:
+            continue
+        start = ""
+        end = ""
+        instant = ""
+        dimensions: list[tuple[str, str]] = []
+        for child in element.iter():
+            child_name = local_name(child.tag).lower()
+            child_text = parse_date(child.text)
+            if child_name == "startdate":
+                start = child_text
+            elif child_name == "enddate":
+                end = child_text
+            elif child_name == "instant":
+                instant = child_text
+            elif child_name in {"explicitmember", "typedmember"}:
+                axis = xml_attribute(child, "dimension")
+                member = " ".join("".join(child.itertext()).split())
+                dimensions.append((axis, member))
+        period_end = end or instant
+        if period_end:
+            contexts[context_id] = ContextInfo(
+                period_start=start,
+                period_end=period_end,
+                context_id=context_id,
+                dimensions=tuple(dimensions),
+            )
+    return contexts
+
+
+def humanize_xbrl_name(raw: str) -> str:
+    text = str(raw or "").replace("_", " ").replace("-", " ")
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
+    return " ".join(text.lower().split())
+
+
+def classify_machinery_footnote_concept(
+    concept_name: str,
+    *,
+    labels: list[str],
+    period_type: str,
+) -> str:
+    semantic = " ".join([humanize_xbrl_name(concept_name), *(label.lower() for label in labels)])
+    semantic = " ".join(semantic.split())
+    reject = {
+        "abstract",
+        "axis",
+        "domain",
+        "line items",
+        "member",
+        "percentage",
+        "percent",
+        "description",
+        "table",
+        "growth rate",
+    }
+    if any(token in semantic for token in reject):
+        return ""
+    if "remaining performance obligation" in semantic:
+        if "practical expedient" in semantic or "expected timing" in semantic:
+            return ""
+        if any(token in semantic for token in ("next twelve months", "next 12 months", "within one year", "current")):
+            return "RemainingPerformanceObligationCurrent"
+        return "RemainingPerformanceObligation"
+    if period_type == "instant" and "backlog" in semantic:
+        if any(token in semantic for token in ("unfunded", "potential", "growth", "cancellation")):
+            return ""
+        if "funded backlog" in semantic or "firm backlog" in semantic:
+            return "FundedBacklog"
+        if re.search(r"\b(?:total\s+)?(?:order\s+)?backlog\b", semantic):
+            return "ReportedBacklog"
+    if period_type == "duration" and any(
+        token in semantic
+        for token in ("new orders", "orders received", "order intake", "bookings received", "customer bookings")
+    ):
+        if not any(token in semantic for token in ("backlog", "cancellation", "purchase order obligation")):
+            return "Orders"
+    return ""
+
+
+def rpo_dimensions_only(dimensions: tuple[tuple[str, str], ...]) -> bool:
+    return all(
+        "remainingperformanceobligationexpectedtimingofsatisfaction" in re.sub(
+            r"[^a-z]", "", axis.lower()
+        )
+        or "rangeaxis" in re.sub(r"[^a-z]", "", axis.lower())
+        for axis, _ in dimensions
+    )
+
+
+def practical_expedient_evidence(document_text: str) -> str:
+    plain_text = normalize_table_label(strip_html_cell(document_text))
+    matches = (
+        r"practical expedient.{0,500}(?:does not|do not|not required to) disclose.{0,250}remaining performance obligations?",
+        r"remaining performance obligations?.{0,500}practical expedient.{0,250}(?:does not|do not|not required to) disclose",
+    )
+    for pattern in matches:
+        match = re.search(pattern, plain_text, re.IGNORECASE)
+        if match:
+            return match.group(0)[:1000]
+    return ""
+
+
+def parse_iso_date_value(raw: object) -> date | None:
+    parsed = parse_date(raw)
+    if not parsed:
+        return None
+    try:
+        return datetime.strptime(parsed, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def parse_xbrl_duration(raw: object) -> tuple[int, int] | None:
+    text = " ".join(str(raw or "").strip().split())
+    match = re.search(r"P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?", text, re.IGNORECASE)
+    if match and any(match.groups()):
+        years = int(match.group(1) or 0)
+        months = int(match.group(2) or 0)
+        days = int(match.group(3) or 0)
+        return years * 12 + months, days
+    human = re.search(r"\b(\d+)\s*(years?|months?|days?)\b", text, re.IGNORECASE)
+    if not human:
+        return None
+    amount = int(human.group(1))
+    unit = human.group(2).lower()
+    if unit.startswith("year"):
+        return amount * 12, 0
+    if unit.startswith("month"):
+        return amount, 0
+    return 0, amount
+
+
+def add_calendar_months(value: date, months: int) -> date:
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    month_ends = (31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    return value.replace(year=year, month=month, day=min(value.day, month_ends[month - 1]))
+
+
+def apply_xbrl_duration(start: date, duration: tuple[int, int]) -> date:
+    months, days = duration
+    return add_calendar_months(start, months) + timedelta(days=days)
+
+
+def rpo_timing_start(context: ContextInfo) -> date | None:
+    for axis, member in context.dimensions:
+        compact_axis = re.sub(r"[^a-z]", "", axis.lower())
+        if "remainingperformanceobligationexpectedtimingofsatisfaction" not in compact_axis:
+            continue
+        match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", member)
+        if match:
+            return parse_iso_date_value(match.group(1))
+    return None
+
+
+def rpo_timing_percentage_from_text(document_text: str) -> float | None:
+    plain = normalize_table_label(strip_html_cell(document_text))
+    for match in re.finditer(r"remaining performance obligations?", plain, re.IGNORECASE):
+        segment = plain[match.start() : match.start() + 900]
+        percentage = re.search(
+            r"(\d{1,3}(?:\.\d+)?)\s*%.{0,180}?(?:next|following|within)\s+(?:the\s+)?(?:12|twelve)\s+months",
+            segment,
+            re.IGNORECASE,
+        )
+        if percentage:
+            value = float(percentage.group(1)) / 100.0
+            return value if 0.0 <= value <= 1.0 else None
+    return None
+
+
+def rpo_bucket_is_current(
+    *,
+    report_end: date,
+    bucket_start: date,
+    bucket_end: date,
+) -> bool:
+    horizon = add_calendar_months(report_end, 12)
+    return (
+        report_end - timedelta(days=31) <= bucket_start <= horizon
+        and bucket_start < bucket_end
+        and bucket_end <= horizon + timedelta(days=7)
+    )
+
+
+def derived_rpo_current_fact(
+    *,
+    document_name: str,
+    period_end: str,
+    unit: str,
+    value: float,
+    method: str,
+    evidence: dict[str, Any],
+) -> ArchiveFact:
+    return ArchiveFact(
+        taxonomy="sec-footnote",
+        concept_name="RemainingPerformanceObligationCurrent",
+        unit=unit,
+        value=value,
+        period_start="",
+        period_end=period_end,
+        frame=f"footnote_derived:{document_name}:{period_end}:rpo_current:{method}",
+        decimals="",
+        payload_json=compact_json(
+            {
+                "document": document_name,
+                "source": FOOTNOTE_XBRL_SOURCE_DETAIL,
+                "derivation": method,
+                **evidence,
+            }
+        ),
+        source_detail=FOOTNOTE_XBRL_SOURCE_DETAIL,
+    )
+
+
+def parse_machinery_footnote_facts(
+    document_text: str,
+    *,
+    document_name: str,
+    filing: dict[str, Any],
+    concept_labels: dict[str, list[str]] | None = None,
+) -> list[ArchiveFact]:
+    """Extract conservative machinery disclosures from standard/custom Inline XBRL."""
+    labels_by_concept = concept_labels or {}
+    filing_period_end = parse_date(filing.get("report_date")) or parse_date(filing.get("filing_date"))
+    evidence = practical_expedient_evidence(document_text)
+    evidence_facts: list[ArchiveFact] = []
+    if evidence and filing_period_end:
+        evidence_facts.append(
+            ArchiveFact(
+                taxonomy="sec-footnote",
+                concept_name="RPOPracticalExpedient",
+                unit="boolean",
+                value=1.0,
+                period_start="",
+                period_end=filing_period_end,
+                frame=f"footnote_evidence:{document_name}:rpo_practical_expedient",
+                decimals="",
+                payload_json=compact_json(
+                    {
+                        "document": document_name,
+                        "source": FOOTNOTE_XBRL_SOURCE_DETAIL,
+                        "evidence": evidence,
+                        "availability_hint": "EXEMPT",
+                    }
+                ),
+                source_detail=FOOTNOTE_XBRL_SOURCE_DETAIL,
+            )
+        )
+    try:
+        root = ET.fromstring(document_text.encode("utf-8"))
+    except ET.ParseError:
+        cleaned = re.sub(r"<\?xml[^>]*\?>", "", document_text, count=1).strip()
+        try:
+            root = ET.fromstring(cleaned.encode("utf-8"))
+        except ET.ParseError:
+            return evidence_facts
+    contexts = read_context_details(root)
+    units = read_units(root)
+    prefix_map = parse_namespace_prefixes(document_text)
+    timing_durations: dict[str, tuple[int, int]] = {}
+    timing_percentages: dict[str, float] = {}
+    for element in root.iter():
+        context_ref = xml_attribute(element, "contextref")
+        context = contexts.get(context_ref)
+        if context is None or not context.dimensions or not rpo_dimensions_only(context.dimensions):
+            continue
+        raw_name = xml_attribute(element, "name") or local_name(element.tag)
+        concept_name = raw_name.split(":", 1)[-1]
+        labels = labels_by_concept.get(concept_name, [])
+        semantic = " ".join([humanize_xbrl_name(concept_name), *(label.lower() for label in labels)])
+        compact_semantic = re.sub(r"[^a-z]", "", semantic.lower())
+        if "remainingperformanceobligationexpectedtimingofsatisfactionperiod" in compact_semantic:
+            duration = parse_xbrl_duration(" ".join(element.itertext()))
+            if duration is not None:
+                timing_durations[context_ref] = duration
+            continue
+        if "remainingperformanceobligation" not in compact_semantic or not any(
+            token in compact_semantic for token in ("percentage", "percent")
+        ):
+            continue
+        value = (
+            parse_inline_numeric_value(element)
+            if local_name(element.tag).lower() in INLINE_XBRL_LOCAL_NAMES
+            else parse_float_text(element.text)
+        )
+        if value is None:
+            continue
+        fraction = value / 100.0 if 1.0 < value <= 100.0 else value
+        if 0.0 <= fraction <= 1.0:
+            timing_percentages[context_ref] = fraction
+
+    candidates: dict[tuple[str, str, str, str], list[tuple[int, ArchiveFact]]] = {}
+    timing_buckets: list[tuple[ContextInfo, ArchiveFact]] = []
+    for element in root.iter():
+        element_local = local_name(element.tag)
+        element_local_lower = element_local.lower()
+        context_ref = xml_attribute(element, "contextref")
+        context = contexts.get(context_ref)
+        if context is None:
+            continue
+        unit_ref = xml_attribute(element, "unitref")
+        unit = units.get(unit_ref, unit_ref).upper()
+        if not unit or unit in {"PURE", "SHARES", "PERCENT"} or "PER" in unit:
+            continue
+        original_taxonomy = ""
+        original_concept = element_local
+        value: float | None
+        if element_local_lower in INLINE_XBRL_LOCAL_NAMES and xml_attribute(element, "name"):
+            raw_name = xml_attribute(element, "name")
+            if ":" in raw_name:
+                prefix, original_concept = raw_name.split(":", 1)
+                original_taxonomy = taxonomy_from_namespace(prefix_map.get(prefix, prefix)) or prefix
+            else:
+                original_concept = raw_name
+            value = parse_inline_numeric_value(element)
+        else:
+            original_taxonomy = taxonomy_from_namespace(namespace_uri(element.tag)) or namespace_uri(element.tag)
+            value = parse_float_text(element.text)
+        if value is None:
+            continue
+        period_type = "duration" if context.period_start else "instant"
+        concept_labels_for_fact = [
+            *labels_by_concept.get(original_concept, []),
+            *labels_by_concept.get(f"{str(original_taxonomy).split(':')[-1]}_{original_concept}", []),
+        ]
+        if original_concept == "RevenueRemainingPerformanceObligation":
+            synthetic_concept = "RemainingPerformanceObligation"
+        else:
+            synthetic_concept = classify_machinery_footnote_concept(
+                original_concept,
+                labels=concept_labels_for_fact,
+                period_type=period_type,
+            )
+        if not synthetic_concept:
+            continue
+        if context.dimensions:
+            if not synthetic_concept.startswith("RemainingPerformanceObligation"):
+                continue
+            if not rpo_dimensions_only(context.dimensions):
+                continue
+        payload = {
+            "document": document_name,
+            "source": FOOTNOTE_XBRL_SOURCE_DETAIL,
+            "original_taxonomy": original_taxonomy,
+            "original_concept": original_concept,
+            "labels": concept_labels_for_fact,
+            "contextRef": context_ref,
+            "dimensions": list(context.dimensions),
+            "unitRef": unit_ref,
+        }
+        fact = ArchiveFact(
+            taxonomy="sec-footnote",
+            concept_name=synthetic_concept,
+            unit=unit,
+            value=value,
+            period_start=context.period_start,
+            period_end=context.period_end,
+            frame=f"footnote:{document_name}:{context_ref}:{original_concept}",
+            decimals=xml_attribute(element, "decimals"),
+            payload_json=compact_json(payload),
+            source_detail=FOOTNOTE_XBRL_SOURCE_DETAIL,
+        )
+        if context.dimensions and synthetic_concept.startswith("RemainingPerformanceObligation"):
+            timing_buckets.append((context, fact))
+            continue
+        key = (synthetic_concept, context.period_start, context.period_end, unit)
+        candidates.setdefault(key, []).append((len(context.dimensions), fact))
+    facts = list(evidence_facts)
+    for (synthetic_concept, _, _, _), grouped in candidates.items():
+        grouped.sort(key=lambda item: (item[0], item[1].frame))
+        nondimensional = [item for item in grouped if item[0] == 0]
+        if nondimensional:
+            facts.append(nondimensional[0][1])
+            continue
+        facts.append(grouped[0][1])
+
+    direct_current_periods = {
+        (fact.period_end, fact.unit)
+        for fact in facts
+        if fact.concept_name == "RemainingPerformanceObligationCurrent"
+    }
+    totals = {
+        (fact.period_end, fact.unit): fact
+        for fact in facts
+        if fact.concept_name == "RemainingPerformanceObligation"
+    }
+    buckets_by_period: dict[tuple[str, str], list[tuple[ContextInfo, ArchiveFact]]] = {}
+    for context, fact in timing_buckets:
+        buckets_by_period.setdefault((fact.period_end, fact.unit), []).append((context, fact))
+
+    for period_key in sorted(set(buckets_by_period) | set(totals)):
+        if period_key in direct_current_periods:
+            continue
+        period_end, unit = period_key
+        period_buckets = buckets_by_period.get(period_key, [])
+        report_end = parse_iso_date_value(period_end)
+        if report_end is None:
+            continue
+        starts: dict[date, tuple[ContextInfo, ArchiveFact | None]] = {}
+        for context, fact in period_buckets:
+            start = rpo_timing_start(context)
+            if start is not None:
+                current = starts.get(start)
+                if current is None or current[1] is None or fact.frame < current[1].frame:
+                    starts[start] = (context, fact)
+        for context in contexts.values():
+            if (
+                context.period_end != period_end
+                or (
+                    context.context_id not in timing_durations
+                    and context.context_id not in timing_percentages
+                )
+            ):
+                continue
+            start = rpo_timing_start(context)
+            if start is not None and start not in starts:
+                starts[start] = (context, None)
+        ordered = sorted(starts.items())
+        current_values: list[float] = []
+        current_contexts: list[str] = []
+        for index, (start, (context, fact)) in enumerate(ordered):
+            if fact is None:
+                continue
+            duration = timing_durations.get(context.context_id)
+            if duration is not None:
+                bucket_end = apply_xbrl_duration(start, duration)
+            elif index + 1 < len(ordered):
+                bucket_end = ordered[index + 1][0]
+            else:
+                continue
+            if rpo_bucket_is_current(report_end=report_end, bucket_start=start, bucket_end=bucket_end):
+                current_values.append(fact.value)
+                current_contexts.append(context.context_id)
+        current_value = sum(current_values) if current_values else None
+        method = "timing_bucket_amounts"
+        derivation_evidence: dict[str, Any] = {"contexts": current_contexts}
+        total = totals.get(period_key)
+        if current_value is None and total is not None:
+            current_percentages: list[float] = []
+            percentage_contexts: list[str] = []
+            for index, (start, (context, _)) in enumerate(ordered):
+                percentage = timing_percentages.get(context.context_id)
+                if percentage is None:
+                    continue
+                duration = timing_durations.get(context.context_id)
+                if duration is not None:
+                    bucket_end = apply_xbrl_duration(start, duration)
+                elif index + 1 < len(ordered):
+                    bucket_end = ordered[index + 1][0]
+                else:
+                    continue
+                if rpo_bucket_is_current(report_end=report_end, bucket_start=start, bucket_end=bucket_end):
+                    current_percentages.append(percentage)
+                    percentage_contexts.append(context.context_id)
+            if current_percentages and sum(current_percentages) <= 1.000001:
+                current_value = total.value * sum(current_percentages)
+                method = "timing_bucket_percentage"
+                derivation_evidence = {
+                    "contexts": percentage_contexts,
+                    "percentage": sum(current_percentages),
+                    "total_rpo": total.value,
+                }
+        if current_value is None and total is not None:
+            text_percentage = rpo_timing_percentage_from_text(document_text)
+            if text_percentage is not None:
+                current_value = total.value * text_percentage
+                method = "text_disclosed_12_month_percentage"
+                derivation_evidence = {
+                    "percentage": text_percentage,
+                    "total_rpo": total.value,
+                }
+        if current_value is None or current_value < 0:
+            continue
+        if total is not None and current_value > total.value * 1.02:
+            continue
+        facts.append(
+            derived_rpo_current_fact(
+                document_name=document_name,
+                period_end=period_end,
+                unit=unit,
+                value=current_value,
+                method=method,
+                evidence=derivation_evidence,
+            )
+        )
+    return facts
 
 
 def read_context_periods(root: ET.Element) -> dict[str, tuple[str, str, str]]:
@@ -1322,15 +2174,236 @@ TEXT_TABLE_LABELS: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = [
     ("AccountsReceivable", "instant", (r"^accounts\s+receivable\b", r"^trade\s+receivables\b"), ()),
     ("AccountsPayable", "instant", (r"^accounts\s+payable\b", r"^trade\s+payables\b"), ()),
     ("OperatingCashFlow", "duration", (r"^net\s+cash\s+(?:provided\s+by|used\s+in|provided\s+by\s+\(used\s+in\))\s+operating\s+activities\b",), ()),
-    ("Capex", "duration", (r"^(?:purchases?|payments?)\s+(?:of|to\s+acquire)\s+(?:property|plant|equipment)", r"^capital\s+expenditures\b"), ()),
+    (
+        "Capex",
+        "duration",
+        (
+            r"^(?:purchases?|payments?)\s+(?:of|to\s+acquire)\s+(?:property|plant|equipment)",
+            r"^(?:additions?|acquisitions?)\s+(?:of|to)\s+(?:property|plant|equipment)",
+            r"^acquired\s+(?:property|plant|equipment)",
+            r"^capital\s+expenditures\b",
+        ),
+        (),
+    ),
     ("DepreciationAndAmortization", "duration", (r"^(?:depreciation\s+and\s+amortization|depreciation\s*&\s*amortization)\b",), (r"accumulated", r"%")),
     ("InterestExpense", "duration", (r"^interest\s+expense\b",), (r"income", r"%")),
     ("Orders", "duration", (r"^(?:new\s+)?(?:orders|bookings)(?:\s+received)?\b",), (r"backlog", r"cancell", r"%")),
     ("FundedBacklog", "instant", (r"^(?:funded|firm)\s+(?:order\s+)?backlog\b",), (r"unfunded", r"potential", r"remaining\s+performance", r"%")),
+    (
+        "ReportedBacklog",
+        "instant",
+        (r"^(?:total\s+)?(?:order\s+)?backlog(?:\s+at\s+(?:period|year)\s+end)?$",),
+        (r"funded", r"unfunded", r"potential", r"remaining\s+performance", r"growth", r"%"),
+    ),
+    (
+        "RemainingPerformanceObligation",
+        "instant",
+        (
+            r"^(?:total\s+)?remaining\s+performance\s+obligations?$",
+            r"^transaction\s+price\s+allocated\s+to\s+remaining\s+performance\s+obligations?$",
+        ),
+        (r"expected", r"percentage", r"timing", r"recognized", r"%"),
+    ),
     ("ResearchAndDevelopment", "duration", (r"^(?:research\s+and\s+development|r\s*&\s*d)\b",), (r"%",)),
     ("DilutedShares", "duration", (r"^weighted\s+average.{0,35}diluted\s+shares\b",), (r"per\s+share",)),
     ("DebtTotal", "instant", (r"^total\s+(?:debt|borrowings)\b",), ()),
 ]
+
+# Registration statements frequently embed audited predecessor statements even
+# when CompanyFacts has no usable issuer taxonomy. This stricter label set is
+# used only for explicitly reviewed ingestion-gap issuers; it avoids mapping
+# segment rows, margins, growth rates, and cash-flow working-capital changes as
+# consolidated statement values.
+REGISTRATION_TEXT_TABLE_LABELS: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = [
+    (
+        "Revenue",
+        "duration",
+        (
+            r"^(?:total\s+)?(?:net\s+)?(?:sales|revenues?|revenue)$",
+            r"^operating\s+revenues?$",
+        ),
+        (),
+    ),
+    (
+        "CostOfRevenue",
+        "duration",
+        (r"^cost\s+of\s+(?:sales|revenues?|revenue|goods\s+sold)$",),
+        (),
+    ),
+    ("GrossProfit", "duration", (r"^gross\s+profit$",), ()),
+    (
+        "OperatingIncomeLoss",
+        "duration",
+        (r"^(?:income|loss)\s+from\s+operations$", r"^operating\s+(?:income|loss)$"),
+        (),
+    ),
+    (
+        "PretaxIncome",
+        "duration",
+        (
+            r"^(?:income(?:\s+\(?loss\)?)?|loss)\s+from\s+continuing\s+operations\s+before\s+income\s+taxes$",
+            r"^(?:income(?:\s+\(?loss\)?)?|loss)\s+before\s+income\s+taxes$",
+        ),
+        (),
+    ),
+    (
+        "IncomeTaxExpense",
+        "duration",
+        (r"^income\s+tax\s+expense(?:\s+\(?benefit\)?)?$",),
+        (),
+    ),
+    (
+        "NetIncomeLoss",
+        "duration",
+        (r"^net\s+(?:income|loss|earnings)(?:\s+\(?loss\)?)?$",),
+        (),
+    ),
+    ("Assets", "instant", (r"^total\s+assets$",), ()),
+    ("Liabilities", "instant", (r"^total\s+liabilities$",), ()),
+    (
+        "Equity",
+        "instant",
+        (
+            r"^total\s+(?:stockholder(?:s|')?|shareholder(?:s|')?|members?|owners?)\s+equity(?:\s+\(?deficit\)?)?$",
+            r"^total\s+equity(?:\s+\(?deficit\)?)?$",
+        ),
+        (r"liabilities",),
+    ),
+    (
+        "CashAndCashEquivalents",
+        "instant",
+        (r"^cash\s+and\s+cash\s+equivalents$",),
+        (r"restricted", r"cash\s+flows?"),
+    ),
+    ("Inventory", "instant", (r"^inventor(?:y|ies)$",), ()),
+    (
+        "AccountsReceivable",
+        "instant",
+        (r"^accounts\s+receivable(?:\s*-?\s*net)?$", r"^trade\s+receivables(?:\s*-?\s*net)?$"),
+        (),
+    ),
+    ("AccountsPayable", "instant", (r"^accounts\s+payable$", r"^trade\s+payables$"), ()),
+    (
+        "OperatingCashFlow",
+        "duration",
+        (
+            r"^net\s+cash\s+flows?\s+(?:provided\s+by|used\s+in|provided\s+by\s+\(?used\s+in\)?)\s+operating\s+activities(?:\s*-?\s*continuing\s+operations)?$",
+            r"^net\s+cash\s+(?:provided\s+by|used\s+in|provided\s+by\s+\(?used\s+in\)?)\s+operating\s+activities(?:\s*-?\s*continuing\s+operations)?$",
+        ),
+        (r"discontinued", r"conversion"),
+    ),
+    (
+        "Capex",
+        "duration",
+        (
+            r"^(?:purchases?|payments?)\s+(?:of|to\s+acquire)\s+property\s+plant(?:\s+and)?\s+equipment$",
+            r"^(?:additions?|acquisitions?)\s+(?:of|to)\s+property\s+plant(?:\s+and)?\s+equipment$",
+            r"^capital\s+expenditures$",
+        ),
+        (),
+    ),
+    (
+        "DepreciationAndAmortization",
+        "duration",
+        (r"^(?:depreciation\s+and\s+amortization|depreciation\s*&\s*amortization)$",),
+        (),
+    ),
+    (
+        "DepreciationComponent",
+        "duration",
+        (r"^depreciation(?:\s+of\s+property\s+plant\s+and\s+equipment)?$",),
+        (),
+    ),
+    (
+        "AmortizationComponent",
+        "duration",
+        (r"^amortization\s+of\s+intangible\s+assets$",),
+        (),
+    ),
+    (
+        "InterestExpense",
+        "duration",
+        (
+            r"^interest\s+expense(?:\s+and\s+related\s+financing\s+costs)?(?:\s*-?\s*net)?$",
+            r"^interest\s+and\s+financing\s+expenses?(?:\s+net)?$",
+        ),
+        (r"income",),
+    ),
+    (
+        "Orders",
+        "duration",
+        (
+            r"^(?:new\s+)?(?:orders|bookings)(?:\s+received)?$",
+            r"^(?:equipment\s+)?order\s+intake$",
+        ),
+        (r"backlog", r"cancell"),
+    ),
+    (
+        "FundedBacklog",
+        "instant",
+        (r"^(?:funded|firm)\s+(?:order\s+)?backlog$",),
+        (r"unfunded", r"potential", r"remaining\s+performance"),
+    ),
+    (
+        "ResearchAndDevelopment",
+        "duration",
+        (r"^(?:research\s+and\s+development|r\s*&\s*d)(?:\s+expenses?)?$",),
+        (),
+    ),
+    (
+        "DilutedShares",
+        "duration",
+        (r"^weighted\s+average.{0,35}diluted\s+shares(?:\s+outstanding)?$",),
+        (r"per\s+share",),
+    ),
+    ("DebtTotal", "instant", (r"^total\s+(?:debt|borrowings)$",), ()),
+    (
+        "DebtTotal",
+        "instant",
+        (r"^long-term\s+debt\s+\(?including\s+current\s+portion\)?$",),
+        (),
+    ),
+    (
+        "DebtCurrentComponent",
+        "instant",
+        (r"^current\s+maturities\s+of\s+long-term\s+debt$",),
+        (),
+    ),
+    (
+        "DebtNoncurrentComponent",
+        "instant",
+        (r"^long-term\s+debt(?:\s*-?\s*net)?$",),
+        (),
+    ),
+]
+
+REGISTRATION_STATEMENT_TYPES: dict[str, set[str]] = {
+    "Revenue": {"income_statement"},
+    "CostOfRevenue": {"income_statement"},
+    "GrossProfit": {"income_statement"},
+    "OperatingIncomeLoss": {"income_statement"},
+    "NetIncomeLoss": {"income_statement"},
+    "PretaxIncome": {"income_statement"},
+    "IncomeTaxExpense": {"income_statement"},
+    "InterestExpense": {"income_statement"},
+    "ResearchAndDevelopment": {"income_statement"},
+    "DilutedShares": {"income_statement"},
+    "Assets": {"balance_sheet"},
+    "Liabilities": {"balance_sheet"},
+    "Equity": {"balance_sheet"},
+    "CashAndCashEquivalents": {"balance_sheet"},
+    "Inventory": {"balance_sheet"},
+    "AccountsReceivable": {"balance_sheet"},
+    "AccountsPayable": {"balance_sheet"},
+    "DebtTotal": {"balance_sheet"},
+    "DebtCurrentComponent": {"balance_sheet"},
+    "DebtNoncurrentComponent": {"balance_sheet"},
+    "OperatingCashFlow": {"cash_flow"},
+    "Capex": {"cash_flow"},
+    "DepreciationAndAmortization": {"cash_flow", "income_statement"},
+    "DepreciationComponent": {"cash_flow"},
+    "AmortizationComponent": {"cash_flow"},
+}
 
 
 def strip_html_cell(raw: str) -> str:
@@ -1353,6 +2426,18 @@ def html_table_rows(table_html: str) -> list[list[str]]:
         if cells:
             rows.append(cells)
     return rows
+
+
+BACKLOG_ORDER_TEXT_CONCEPTS = {
+    "Orders",
+    "FundedBacklog",
+    "ReportedBacklog",
+    "RemainingPerformanceObligation",
+}
+# Backlog/orders aggregates below this are noise for this universe: verified
+# junk captures ($200K "backlog" at a $3.7B-revenue filer, raw "21.0" from an
+# undetected millions scale) all sit far below any genuine disclosure.
+BACKLOG_ORDER_MIN_PLAUSIBLE_USD = 1_000_000.0
 
 
 def table_scale(text: str) -> float:
@@ -1512,13 +2597,85 @@ def text_table_label_concept(label: str) -> tuple[str, str] | None:
     return None
 
 
+def registration_text_table_label_concept(label: str) -> tuple[str, str] | None:
+    normalized = normalize_table_label(label)
+    normalized = re.sub(r"\s*\((?:note\s*)?\d+\)\s*$", "", normalized)
+    if not normalized or len(normalized) > 180:
+        return None
+    for concept_name, period_type, allow_patterns, reject_patterns in REGISTRATION_TEXT_TABLE_LABELS:
+        if any(re.search(pattern, normalized) for pattern in reject_patterns):
+            continue
+        if any(re.search(pattern, normalized) for pattern in allow_patterns):
+            return concept_name, period_type
+    return None
+
+
 def row_values(cells: list[str]) -> list[float]:
     values: list[float] = []
-    for cell in cells[1:]:
-        value = parse_table_number(cell)
+    value_cells = cells[1:]
+    idx = 0
+    while idx < len(value_cells):
+        cell = value_cells[idx].strip()
+        if cell in {"$", "US$", "USD", "C$", "CAD", "Â£", "â‚¬", "Â¥"}:
+            idx += 1
+            continue
+        combined = cell
+        if cell.startswith("(") and not cell.endswith(")") and idx + 1 < len(value_cells):
+            closing = value_cells[idx + 1].strip()
+            if closing == ")":
+                combined = f"{cell})"
+                idx += 1
+        value = parse_table_number(combined)
         if value is not None:
             values.append(value)
+        idx += 1
     return values
+
+
+def text_table_statement_provenance(context_text: str, table_text: str) -> tuple[str, int, int]:
+    """Classify a table without treating forecasts/pro-forma tables as history."""
+    normalized = normalize_table_label(f"{context_text} {table_text[:1200]}")
+    statement_patterns = {
+        "cash_flow": r"\bsta\s*tements?\s+of\s+cash\s+flows?\b",
+        "balance_sheet": r"\b(?:balance\s+sheets?|sta\s*tements?\s+of\s+financial\s+position)\b",
+        "income_statement": r"\bsta\s*tements?\s+of\s+(?:operations|income)(?:\s+loss)?\b",
+    }
+    statement_matches = [
+        (match.start(), statement_type)
+        for statement_type, pattern in statement_patterns.items()
+        for match in re.finditer(pattern, normalized)
+    ]
+    latest_statement_position = max((position for position, _ in statement_matches), default=-1)
+    statement_type = (
+        max(statement_matches, key=lambda item: item[0])[1]
+        if statement_matches
+        else "financial_summary"
+    )
+    projection_matches = list(
+        re.finditer(
+            r"\b(?:unaudited\s+pro\s+forma|pro\s+forma|projected|projection|forecast|estimated\s+financial)\b",
+            normalized,
+        )
+    )
+    latest_projection_position = max((match.start() for match in projection_matches), default=-1)
+    # A pro-forma footnote can immediately precede the next historical
+    # statement. The later formal statement heading resets that context.
+    projection_flag = int(
+        latest_projection_position >= 0
+        and (
+            latest_projection_position > latest_statement_position
+            or latest_statement_position - latest_projection_position <= 100
+        )
+    )
+    formal_statement = bool(
+        re.search(
+            r"\b(?:condensed\s+)?(?:co\s*nso\s*l\s*idated|combined)\s+"
+            r"(?:balance\s+sheets?|sta\s*tements?\s+of\s+(?:operations|income(?:\s+loss)?|cash\s+flows?|financial\s+position))\b",
+            normalized,
+        )
+    )
+    historical_statement_flag = int(formal_statement and projection_flag == 0)
+    return statement_type, projection_flag, historical_statement_flag
 
 
 MONTH_LOOKUP = {
@@ -1628,6 +2785,7 @@ def infer_text_table_periods(
     fallback_period_end: str,
     context_text: str,
     form_type: str = "",
+    strict_mixed_periods: bool = False,
 ) -> list[tuple[str, int, str, str]]:
     header_text = " ".join(cell for row in header_rows for cell in row if cell)
     combined = re.sub(r"\s+", " ", f"{header_text} {strip_html_cell(context_text[:1200])}").strip()
@@ -1655,6 +2813,37 @@ def infer_text_table_periods(
 
     pairs = month_day_pairs(header_text)
     years = standalone_years(header_text)
+    if strict_mixed_periods and years and len(pairs) >= 2:
+        duplicate_boundary = next(
+            (idx + 1 for idx in range(len(years) - 1) if years[idx] == years[idx + 1]),
+            None,
+        )
+        if duplicate_boundary is not None and duplicate_boundary < value_count:
+            grouped_pairs = [pairs[0]] * duplicate_boundary + [pairs[1]] * (value_count - duplicate_boundary)
+            inferred_mixed: list[tuple[str, int, str, str]] = []
+            for year, (month, day, pair_evidence) in zip(years[:value_count], grouped_pairs, strict=False):
+                period_end = period_iso(year, month, day)
+                if period_end:
+                    inferred_mixed.append(
+                        (
+                            period_end,
+                            duration_days_for_period_evidence(
+                                month=month,
+                                day=day,
+                                combined_text=combined,
+                                default_days=duration_days,
+                                form_type=form_type,
+                            ),
+                            "table_column_mixed_period_group",
+                            f"{pair_evidence} {year}",
+                        )
+                    )
+            if len(inferred_mixed) == value_count:
+                return inferred_mixed
+    if strict_mixed_periods and years and not pairs:
+        context_pairs = month_day_pairs(strip_html_cell(context_text[-1200:]))
+        if context_pairs:
+            pairs = [context_pairs[-1]]
     if years and pairs:
         inferred: list[tuple[str, int, str, str]] = []
         if len(pairs) == 1:
@@ -1710,6 +2899,45 @@ def infer_text_table_periods(
     ]
 
 
+def text_table_period_count(header_rows: list[list[str]]) -> int:
+    header_text = " ".join(cell for row in header_rows for cell in row if cell)
+    dates = full_text_dates(header_text)
+    years = standalone_years(header_text)
+    return max(len(dates), len(years))
+
+
+def registration_actual_period_count(header_rows: list[list[str]]) -> int:
+    expected = text_table_period_count(header_rows)
+    header_text = normalize_table_label(" ".join(cell for row in header_rows for cell in row))
+    if "pro forma" not in header_text:
+        return expected
+    years = standalone_years(header_text)
+    for idx in range(1, len(years)):
+        if years[idx] >= years[idx - 1]:
+            return idx
+    return expected
+
+
+def align_registration_table_values(cells: list[str], header_rows: list[list[str]]) -> list[float]:
+    """Align statement values to dated columns and discard notes/change columns."""
+    values = row_values(cells)
+    expected = registration_actual_period_count(header_rows)
+    if expected <= 0 or len(values) < expected:
+        return []
+    if len(values) > expected:
+        header_text = normalize_table_label(" ".join(cell for row in header_rows for cell in row))
+        excess = len(values) - expected
+        if "note" in header_text and excess > 0:
+            # Statement note references are leading small integers. Remove no
+            # more than the number of excess numeric cells, preserving values.
+            while excess > 0 and values and values[0].is_integer() and 0 < values[0] < 100:
+                values.pop(0)
+                excess -= 1
+        if len(values) > expected:
+            values = values[:expected]
+    return values if len(values) == expected else []
+
+
 def period_start_for_text_fact(period_end: str, period_type: str, duration_days: int) -> str:
     if period_type == "instant":
         return ""
@@ -1727,6 +2955,7 @@ def parse_archive_text_table_facts(
     filing: dict[str, Any],
     company_currency: str = "",
     special_metrics_only: bool = False,
+    strict_registration_statements: bool = False,
 ) -> list[ArchiveFact]:
     lower_document_name = document_name.lower()
     if lower_document_name.endswith(("-index.html", "-index-headers.html")):
@@ -1739,24 +2968,72 @@ def parse_archive_text_table_facts(
     seen: set[tuple[str, str, str, float]] = set()
     for table_index, match in enumerate(re.finditer(r"(?is)<table\b[^>]*>.*?</table>", document_text), start=1):
         table_html = match.group(0)
-        if special_metrics_only and not re.search(r"(?i)\b(?:orders?|bookings?|backlog)\b", table_html):
+        if special_metrics_only and not re.search(
+            r"(?i)\b(?:orders?|bookings?|backlog|remaining\s+performance\s+obligations?)\b",
+            table_html,
+        ):
             continue
         rows = html_table_rows(table_html)
-        concept_rows = [text_table_label_concept(row[0]) if row else None for row in rows]
+        label_resolver = (
+            registration_text_table_label_concept
+            if strict_registration_statements
+            else text_table_label_concept
+        )
+        concept_rows = [label_resolver(row[0]) if row else None for row in rows]
         if special_metrics_only:
             concept_rows = [
-                concept if concept is not None and concept[0] in {"Orders", "FundedBacklog"} else None
+                concept
+                if concept is not None
+                and concept[0]
+                in {
+                    "Orders",
+                    "FundedBacklog",
+                    "ReportedBacklog",
+                    "RemainingPerformanceObligation",
+                }
+                else None
                 for concept in concept_rows
             ]
         concept_row_flags = [concept is not None for concept in concept_rows]
         special_operating_rows = [
-            concept for concept in concept_rows if concept is not None and concept[0] in {"Orders", "FundedBacklog"}
+            concept
+            for concept in concept_rows
+            if concept is not None
+            and concept[0]
+            in {
+                "Orders",
+                "FundedBacklog",
+                "ReportedBacklog",
+                "RemainingPerformanceObligation",
+            }
         ]
-        if sum(1 for flag in concept_row_flags if flag) < 2 and not special_operating_rows:
+        minimum_concept_rows = 1 if strict_registration_statements else 2
+        if sum(1 for flag in concept_row_flags if flag) < minimum_concept_rows and not special_operating_rows:
             continue
         table_text = strip_html_cell(table_html)
         scale_context = document_text[max(0, match.start() - 2500) : min(len(document_text), match.end() + 500)]
-        unit, currency_confidence = text_table_unit(document_text, scale_context, company_currency=company_currency)
+        provenance_context = document_text[max(0, match.start() - 1200) : match.start()]
+        statement_type, projection_flag, historical_statement_flag = text_table_statement_provenance(
+            strip_html_cell(provenance_context),
+            table_text,
+        )
+        currency_context = (
+            f"{table_text[:1200]} {strip_html_cell(provenance_context)[-500:]}"
+            if strict_registration_statements
+            else scale_context
+        )
+        if (
+            strict_registration_statements
+            and str(company_currency or "").strip().upper() == "USD"
+            and "$" in table_text[:1200]
+        ):
+            unit, currency_confidence = "USD", "high"
+        else:
+            unit, currency_confidence = text_table_unit(
+                document_text,
+                currency_context,
+                company_currency=company_currency,
+            )
         normalized_table_text = f"{strip_html_cell(scale_context)} {table_text}".lower()
         financial_table = any(
             marker in normalized_table_text
@@ -1771,8 +3048,23 @@ def parse_archive_text_table_facts(
             )
         )
         operating_table = bool(special_operating_rows) and any(
-            marker in normalized_table_text for marker in ("orders", "bookings", "backlog")
+            marker in normalized_table_text
+            for marker in ("orders", "bookings", "backlog", "remaining performance obligation")
         )
+        has_actual_columns = "actual" in normalize_table_label(table_text[:500])
+        if (
+            strict_registration_statements
+            and projection_flag
+            and not has_actual_columns
+        ):
+            continue
+        if (
+            strict_registration_statements
+            and not historical_statement_flag
+            and not (projection_flag and has_actual_columns)
+            and not operating_table
+        ):
+            continue
         if not financial_table and not operating_table:
             continue
         scale, scale_source, scale_confidence = table_scale_info(f"{scale_context} {table_text[:1000]}")
@@ -1782,49 +3074,80 @@ def parse_archive_text_table_facts(
             scale_confidence = "low"
         first_concept_idx = next((idx for idx, flag in enumerate(concept_row_flags) if flag), 0)
         table_header_rows = rows[:first_concept_idx]
+        component_facts: dict[tuple[str, str], dict[str, ArchiveFact]] = {}
         for row_index, cells in enumerate(rows):
             if len(cells) < 2:
                 continue
-            label_result = text_table_label_concept(cells[0])
+            label_result = label_resolver(cells[0])
             if label_result is None:
                 continue
             concept_name, period_type = label_result
-            if special_metrics_only and concept_name not in {"Orders", "FundedBacklog"}:
-                continue
-            values = row_values(cells)
-            if not values:
+            if special_metrics_only and concept_name not in BACKLOG_ORDER_TEXT_CONCEPTS:
                 continue
             local_header_rows = [
                 row
                 for row in rows[max(0, row_index - 8) : row_index]
-                if not (row and text_table_label_concept(row[0]))
+                if not (row and label_resolver(row[0]))
             ] or table_header_rows
+            if strict_registration_statements:
+                # Formal statement headers define the dated columns for the
+                # entire table. Nearby component rows can otherwise push a
+                # multi-row header outside the local lookback window.
+                local_header_rows = table_header_rows
+                allowed_statement_types = REGISTRATION_STATEMENT_TYPES.get(concept_name)
+                if allowed_statement_types is not None and statement_type not in allowed_statement_types:
+                    continue
+                preceding_labels = normalize_table_label(
+                    " ".join(row[0] for row in rows[max(0, row_index - 6) : row_index] if row)
+                )
+                if concept_name == "NetIncomeLoss" and "per share" in preceding_labels:
+                    continue
+                values = align_registration_table_values(cells, local_header_rows)
+                if not values and local_header_rows != table_header_rows:
+                    local_header_rows = table_header_rows
+                    values = align_registration_table_values(cells, local_header_rows)
+            else:
+                values = row_values(cells)
+            if not values:
+                continue
+            period_context = provenance_context if strict_registration_statements else scale_context
             periods = infer_text_table_periods(
                 local_header_rows,
                 value_count=len(values),
                 fallback_period_end=period_end,
-                context_text=scale_context,
+                context_text=period_context,
                 form_type=form_type,
+                strict_mixed_periods=strict_registration_statements,
             )
             if table_header_rows and all(item[2] == "fallback_filing_or_report_date" for item in periods):
                 periods = infer_text_table_periods(
                     table_header_rows,
                     value_count=len(values),
                     fallback_period_end=period_end,
-                    context_text=scale_context,
+                    context_text=period_context,
                     form_type=form_type,
+                    strict_mixed_periods=strict_registration_statements,
                 )
             for value_index, raw_value in enumerate(values):
                 fact_period_end, duration_days, period_confidence, period_evidence = periods[min(value_index, len(periods) - 1)]
                 if period_type == "duration" and period_confidence == "fallback_filing_or_report_date":
                     continue
                 value = raw_value * scale
+                if concept_name in BACKLOG_ORDER_TEXT_CONCEPTS and (
+                    period_confidence == "fallback_filing_or_report_date"
+                    or scale_confidence == "low"
+                    or abs(value) < BACKLOG_ORDER_MIN_PLAUSIBLE_USD
+                ):
+                    # Prose/table backlog captures have produced mass mis-scaled
+                    # junk (1,443 sub-$1M facts). These aggregates are only
+                    # trustworthy with a resolved period date, a confidently
+                    # detected scale, and a plausible magnitude.
+                    continue
                 key = (concept_name, fact_period_end, unit, value)
                 if key in seen:
                     continue
                 seen.add(key)
-                facts.append(
-                    ArchiveFact(
+                fact = ArchiveFact(
                         taxonomy="sec-text",
                         concept_name=concept_name,
                         unit=unit,
@@ -1846,12 +3169,129 @@ def parse_archive_text_table_facts(
                                 "period_evidence": period_evidence,
                                 "column_index": value_index,
                                 "column_count": len(values),
+                                "statement_type": statement_type,
+                                "projection_flag": projection_flag,
+                                "historical_statement_flag": historical_statement_flag,
                             }
                         ),
                         source_detail=TEXT_TABLE_SOURCE_DETAIL,
                     )
-                )
-    return facts
+                if strict_registration_statements and concept_name in {
+                    "DepreciationComponent",
+                    "AmortizationComponent",
+                    "DebtCurrentComponent",
+                    "DebtNoncurrentComponent",
+                }:
+                    component_facts.setdefault((fact_period_end, unit), {})[concept_name] = fact
+                else:
+                    facts.append(fact)
+        if strict_registration_statements:
+            for (component_period_end, component_unit), components in component_facts.items():
+                depreciation = components.get("DepreciationComponent")
+                amortization = components.get("AmortizationComponent")
+                if depreciation is not None and amortization is not None:
+                    payload = json.loads(depreciation.payload_json)
+                    payload.update(
+                        {
+                            "label": "Depreciation plus amortization",
+                            "derived_from": ["DepreciationComponent", "AmortizationComponent"],
+                        }
+                    )
+                    combined_value = depreciation.value + amortization.value
+                    combined_key = (
+                        "DepreciationAndAmortization",
+                        component_period_end,
+                        component_unit,
+                        combined_value,
+                    )
+                    if combined_key not in seen:
+                        seen.add(combined_key)
+                        facts.append(
+                            ArchiveFact(
+                                taxonomy="sec-text",
+                                concept_name="DepreciationAndAmortization",
+                                unit=component_unit,
+                                value=combined_value,
+                                period_start=depreciation.period_start,
+                                period_end=component_period_end,
+                                frame=f"text_table:{document_name}:{table_index}:derived_d_and_a",
+                                decimals="",
+                                payload_json=compact_json(payload),
+                                source_detail=TEXT_TABLE_SOURCE_DETAIL,
+                            )
+                        )
+
+                debt_components = [
+                    components[component]
+                    for component in ("DebtCurrentComponent", "DebtNoncurrentComponent")
+                    if component in components
+                ]
+                if debt_components:
+                    debt_payload = json.loads(debt_components[0].payload_json)
+                    debt_payload.update(
+                        {
+                            "label": "Total debt derived from balance-sheet debt components",
+                            "derived_from": [fact.concept_name for fact in debt_components],
+                        }
+                    )
+                    debt_value = sum(fact.value for fact in debt_components)
+                    debt_key = ("DebtTotal", component_period_end, component_unit, debt_value)
+                    if debt_key not in seen:
+                        seen.add(debt_key)
+                        facts.append(
+                            ArchiveFact(
+                                taxonomy="sec-text",
+                                concept_name="DebtTotal",
+                                unit=component_unit,
+                                value=debt_value,
+                                period_start="",
+                                period_end=component_period_end,
+                                frame=f"text_table:{document_name}:{table_index}:derived_total_debt",
+                                decimals="",
+                                payload_json=compact_json(debt_payload),
+                                source_detail=TEXT_TABLE_SOURCE_DETAIL,
+                            )
+                        )
+    if not strict_registration_statements:
+        return facts
+
+    # Registration statements can contain the issuer, acquired subsidiaries,
+    # and repeated summaries under one accession. The canonical table's key is
+    # one metric per period/accession, so choose deterministically here. Prefer
+    # annual duration, consolidated totals over continuing-only subtotals, and
+    # the earlier issuer summary before later acquired-company appendices.
+    best_facts: dict[tuple[str, str, str], ArchiveFact] = {}
+
+    def registration_fact_rank(fact: ArchiveFact) -> tuple[int, int, int, int]:
+        start = parse_date(fact.period_start)
+        end = parse_date(fact.period_end)
+        duration_days = 0
+        if start and end:
+            duration_days = (
+                datetime.strptime(end, "%Y-%m-%d").date()
+                - datetime.strptime(start, "%Y-%m-%d").date()
+            ).days
+        payload = json.loads(fact.payload_json)
+        label = normalize_table_label(str(payload.get("label") or ""))
+        table_match = re.search(r":(\d+):", fact.frame)
+        table_index = int(table_match.group(1)) if table_match else 1_000_000
+        equity_scope_rank = int(
+            fact.concept_name == "Equity"
+            and not label.startswith("total equity")
+        )
+        return (
+            -duration_days,
+            equity_scope_rank,
+            int("continuing operations" in label),
+            table_index,
+        )
+
+    for fact in facts:
+        key = (fact.concept_name, fact.period_end, fact.unit)
+        current = best_facts.get(key)
+        if current is None or registration_fact_rank(fact) < registration_fact_rank(current):
+            best_facts[key] = fact
+    return list(best_facts.values())
 
 
 def archive_document_candidates(
@@ -1893,6 +3333,17 @@ def archive_document_candidates(
     if max_documents > 0:
         return candidates[:max_documents]
     return candidates
+
+
+def archive_label_linkbase_candidates(index_payload: dict[str, Any]) -> list[str]:
+    raw_items = ((index_payload.get("directory") or {}).get("item") or [])
+    candidates = {
+        str(item.get("name") or "").strip()
+        for item in raw_items
+        if isinstance(item, dict)
+        and str(item.get("name") or "").strip().lower().endswith("_lab.xml")
+    }
+    return sorted(name for name in candidates if name)
 
 
 def archive_cache_file(cache_dir: Path, *, cik: str, accession: str, document_name: str) -> Path:
@@ -2051,13 +3502,13 @@ def purge_archive_xbrl_facts(conn: Any, *, ticker: str, source_id: str, model_fa
                   AND COALESCE(f.accession_number, '') = COALESCE(fact_financial_statement_canonical.accession_number, '')
                   AND COALESCE(f.unit, '') = COALESCE(fact_financial_statement_canonical.unit, '')
                   AND (
-                        f.source_detail IN ('sec_archive_xbrl_mapped', 'sec_archive_text_table_mapped')
+                        f.source_detail IN ('sec_archive_xbrl_mapped', 'sec_archive_text_table_mapped', 'sec_archive_footnote_xbrl_mapped')
                      OR f.raw_fact_id IN (
                             SELECT raw_fact_id
                             FROM fact_sec_xbrl_fact_raw r
                             WHERE r.ticker = ?
                               AND r.source_id = ?
-                              AND r.source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table')
+                              AND r.source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl')
                         )
                   )
           )
@@ -2070,13 +3521,13 @@ def purge_archive_xbrl_facts(conn: Any, *, ticker: str, source_id: str, model_fa
         WHERE ticker = ?
           AND source_id = ?
           AND (
-                source_detail IN ('sec_archive_xbrl_mapped', 'sec_archive_text_table_mapped')
+                source_detail IN ('sec_archive_xbrl_mapped', 'sec_archive_text_table_mapped', 'sec_archive_footnote_xbrl_mapped')
              OR raw_fact_id IN (
                     SELECT raw_fact_id
                     FROM fact_sec_xbrl_fact_raw
                     WHERE ticker = ?
                       AND source_id = ?
-                      AND source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table')
+                      AND source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl')
                 )
           )
         """,
@@ -2087,7 +3538,7 @@ def purge_archive_xbrl_facts(conn: Any, *, ticker: str, source_id: str, model_fa
         DELETE FROM fact_sec_xbrl_fact_raw
         WHERE ticker = ?
           AND source_id = ?
-          AND source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table')
+          AND source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl')
         """,
         (ticker, source_id),
     )
@@ -2109,7 +3560,7 @@ def purge_archive_text_table_facts(conn: Any, *, ticker: str, source_id: str, mo
                   AND f.period_end = fact_financial_statement_canonical.period_end
                   AND COALESCE(f.accession_number, '') = COALESCE(fact_financial_statement_canonical.accession_number, '')
                   AND COALESCE(f.unit, '') = COALESCE(fact_financial_statement_canonical.unit, '')
-                  AND f.source_detail = 'sec_archive_text_table_mapped'
+                  AND f.source_detail IN ('sec_archive_text_table_mapped', 'sec_archive_footnote_xbrl_mapped')
           )
         """,
         (ticker, source_id, model_family),
@@ -2120,13 +3571,13 @@ def purge_archive_text_table_facts(conn: Any, *, ticker: str, source_id: str, mo
         WHERE ticker = ?
           AND source_id = ?
           AND (
-                source_detail = 'sec_archive_text_table_mapped'
+                source_detail IN ('sec_archive_text_table_mapped', 'sec_archive_footnote_xbrl_mapped')
              OR raw_fact_id IN (
                     SELECT raw_fact_id
                     FROM fact_sec_xbrl_fact_raw
                     WHERE ticker = ?
                       AND source_id = ?
-                      AND source_detail = 'sec_archive_text_table'
+                      AND source_detail IN ('sec_archive_text_table', 'sec_archive_footnote_xbrl')
                 )
           )
         """,
@@ -2137,7 +3588,7 @@ def purge_archive_text_table_facts(conn: Any, *, ticker: str, source_id: str, mo
         DELETE FROM fact_sec_xbrl_fact_raw
         WHERE ticker = ?
           AND source_id = ?
-          AND source_detail = 'sec_archive_text_table'
+          AND source_detail IN ('sec_archive_text_table', 'sec_archive_footnote_xbrl')
         """,
         (ticker, source_id),
     )
@@ -2147,6 +3598,41 @@ def should_attempt_archive(override: ReportingOverride | None) -> bool:
     if override is None:
         return False
     return override.reporting_profile in ARCHIVE_FALLBACK_PROFILES
+
+
+def select_archive_filing_rows(
+    filing_rows: list[Any],
+    *,
+    max_filings: int,
+    supplemental_forms: set[str],
+    max_supplemental_filings: int,
+) -> list[Any]:
+    """Cap event filings separately so they cannot displace periodic history."""
+    if not supplemental_forms:
+        return filing_rows[:max_filings] if max_filings > 0 else filing_rows
+    core = [
+        row
+        for row in filing_rows
+        if str(row["form_type"] or "").strip().upper() not in supplemental_forms
+    ]
+    supplemental = [
+        row
+        for row in filing_rows
+        if str(row["form_type"] or "").strip().upper() in supplemental_forms
+    ]
+    if max_filings > 0:
+        core = core[:max_filings]
+    if max_supplemental_filings >= 0:
+        supplemental = supplemental[:max_supplemental_filings]
+    selected = [*core, *supplemental]
+    return sorted(
+        selected,
+        key=lambda row: (
+            str(row["filing_date"] or ""),
+            str(row["accession_number"] or ""),
+        ),
+        reverse=True,
+    )
 
 
 def sync_archive_xbrl(
@@ -2168,9 +3654,12 @@ def sync_archive_xbrl(
     index_url_template: str,
     document_url_template: str,
     max_filings: int,
+    supplemental_forms: set[str],
+    max_supplemental_filings: int,
     max_documents: int,
     parse_all_documents: bool = False,
     text_tables_only: bool = False,
+    strict_registration_statements: bool = False,
     company_currency: str = "",
     min_refetch_fact_fraction: float = 0.5,
     ingestion_run_id: int,
@@ -2197,8 +3686,12 @@ def sync_archive_xbrl(
     ).fetchall()
     if not filing_rows:
         return 0, 0, 0
-    if max_filings > 0:
-        filing_rows = filing_rows[:max_filings]
+    filing_rows = select_archive_filing_rows(
+        list(filing_rows),
+        max_filings=max_filings,
+        supplemental_forms=supplemental_forms,
+        max_supplemental_filings=max_supplemental_filings,
+    )
 
     # Phase 1: network fetch + parse, staging facts in memory.
     staged: list[tuple[dict[str, Any], str, list[ArchiveFact]]] = []
@@ -2233,6 +3726,49 @@ def sync_archive_xbrl(
         if index_fetch_mode == "network":
             # FN-8: cache hits are not new observations; only record network fetches.
             raw_responses.append((index_url, status, index_text))
+        concept_labels: dict[str, list[str]] = {}
+        if model_family == "machinery":
+            for label_document in archive_label_linkbase_candidates(index_payload):
+                label_url = document_url_template.format(
+                    cik_int=cik_int,
+                    accession_nodash=accession_nodash,
+                    document_name=label_document,
+                )
+                label_cache = archive_cache_file(
+                    cache_dir,
+                    cik=cik,
+                    accession=accession,
+                    document_name=label_document,
+                )
+                requests += 1
+                try:
+                    label_status, label_text, label_fetch_mode = load_or_fetch_text(
+                        label_url,
+                        cache_file=label_cache,
+                        force=force,
+                        user_agent=user_agent,
+                        timeout_sec=timeout_sec,
+                        max_retries=max_retries,
+                        sleep_sec=sleep_sec,
+                    )
+                except SecRequestError as exc:
+                    raw_responses.append((exc.url, exc.status_code, exc.body))
+                    fetch_failures += 1
+                    LOGGER.warning(
+                        "Unavailable SEC archive label linkbase ticker=%s accession=%s document=%s status=%s",
+                        ticker,
+                        accession,
+                        label_document,
+                        exc.status_code,
+                    )
+                    continue
+                for concept, labels in parse_xbrl_label_linkbase(label_text).items():
+                    for label in labels:
+                        if label not in concept_labels.setdefault(concept, []):
+                            concept_labels[concept].append(label)
+                if label_fetch_mode == "network":
+                    raw_responses.append((label_url, label_status, label_text))
+                    time.sleep(sleep_sec)
         for document_name in archive_document_candidates(
             index_payload,
             primary_document=str(filing.get("primary_document") or ""),
@@ -2263,7 +3799,18 @@ def sync_archive_xbrl(
                 filing=filing,
                 company_currency=company_currency,
                 special_metrics_only=text_tables_only,
+                strict_registration_statements=strict_registration_statements,
             )
+            if model_family == "machinery":
+                facts = [
+                    *facts,
+                    *parse_machinery_footnote_facts(
+                        document_text,
+                        document_name=document_name,
+                        filing=filing,
+                        concept_labels=concept_labels,
+                    ),
+                ]
             if not text_tables_only:
                 facts = [
                     *parse_archive_facts(document_text, document_name=document_name, concept_map=concept_map),
@@ -2303,8 +3850,8 @@ def sync_archive_xbrl(
                 asof_date=datetime.now(timezone.utc).date().isoformat(),
                 ingestion_run_id=ingestion_run_id,
             )
-        source_filter = "source_detail = 'sec_archive_text_table'" if text_tables_only else (
-            "source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table')"
+        source_filter = "source_detail IN ('sec_archive_text_table', 'sec_archive_footnote_xbrl')" if text_tables_only else (
+            "source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl')"
         )
         prior_row = conn.execute(
             f"""
@@ -2539,6 +4086,18 @@ def classify_reporting_profile(
         """,
         (ticker,),
     ).fetchall()
+    taxonomy_metric_rows = conn.execute(
+        """
+        SELECT taxonomy, canonical_metric
+        FROM fact_sec_xbrl_fact
+        WHERE ticker = ?
+        GROUP BY taxonomy, canonical_metric
+        """,
+        (ticker,),
+    ).fetchall()
+    metrics_by_taxonomy: dict[str, set[str]] = {}
+    for row in taxonomy_metric_rows:
+        metrics_by_taxonomy.setdefault(str(row["taxonomy"]), set()).add(str(row["canonical_metric"]))
     metrics = {
         str(row["canonical_metric"])
         for row in conn.execute(
@@ -2548,6 +4107,7 @@ def classify_reporting_profile(
     }
     taxonomies = {str(row["taxonomy"]): int(row["n"] or 0) for row in tax_rows}
     has_core = {"revenue", "assets"} <= metrics
+    has_core_sec_text = {"revenue", "assets"} <= metrics_by_taxonomy.get("sec-text", set())
     has_balance_sheet = "assets" in metrics and bool(metrics.intersection({"cash_and_equivalents", "liabilities", "equity"}))
     has_operating_or_income = bool(metrics.intersection({"operating_income", "net_income", "operating_cash_flow", "capex", "research_and_development"}))
     has_partial_xbrl = has_balance_sheet or has_operating_or_income
@@ -2607,6 +4167,19 @@ def classify_reporting_profile(
             reason = override.review_reason or "fpi_hybrid_stub_loaded_not_rank_ready"
         confidence = max(override.financial_confidence, 0.55 if has_core else 0.35)
         usable_xbrl = 1
+    elif (
+        model_family == "machinery"
+        and override is not None
+        and override.handling_type in FULL_STATEMENT_ARCHIVE_HANDLING_TYPES
+        and has_core_sec_text
+    ):
+        profile = "SEC_ARCHIVE_TEXT_TABLE"
+        standard = "sec_archive_text_table"
+        primary_taxonomy = "sec-text"
+        fallback = "text_table_extracted"
+        confidence = 0.55
+        usable_xbrl = 1
+        reason = ""
     elif has_core and taxonomies.get("us-gaap", 0) > 0:
         profile = "SEC_XBRL_US_GAAP"
         standard = "US_GAAP"
@@ -2768,8 +4341,20 @@ def classify_reporting_profile(
     }
 
 
-def write_report(path: Path, rows: list[dict[str, Any]]) -> None:
-    write_csv_atomic(path, REPORT_FIELDS, rows)
+def write_report(
+    path: Path,
+    rows: list[dict[str, Any]],
+    *,
+    preserve_existing_tickers: bool = False,
+) -> None:
+    merged = {str(row.get("ticker") or ""): row for row in rows}
+    if preserve_existing_tickers and path.exists():
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                ticker = str(row.get("ticker") or "").strip()
+                if ticker and ticker not in merged:
+                    merged[ticker] = dict(row)
+    write_csv_atomic(path, REPORT_FIELDS, [merged[ticker] for ticker in sorted(merged)])
 
 
 def source_status(conn: Any, source_id: str) -> str:
@@ -2896,6 +4481,14 @@ def main() -> None:
     )
     archive_max_submission_files = int(cfg_get(config, "sec_archive.max_submission_history_files", 0) or 0)
     archive_max_filings = int(cfg_get(config, "sec_archive.max_filings_per_ticker", 0) or 0)
+    archive_supplemental_forms = {
+        str(form).strip().upper()
+        for form in (cfg_get(config, "sec_archive.supplemental_forms", []) or [])
+        if str(form).strip()
+    }
+    archive_max_supplemental_filings = int(
+        cfg_get(config, "sec_archive.max_supplemental_filings_per_ticker", 0) or 0
+    )
     archive_max_documents_raw = cfg_get(config, "sec_archive.max_documents_per_filing", 5)
     archive_max_documents = int(archive_max_documents_raw) if archive_max_documents_raw is not None else 5
     # FN-2: minimum fraction of previously stored archive facts a refetch must
@@ -2918,7 +4511,11 @@ def main() -> None:
     # DR-2: per-family CSV resolution with a defense-only legacy fallback;
     # a configured-but-missing file raises instead of loading zero overrides.
     reporting_overrides_path = resolve_reporting_overrides_path(config, base_dir=base_dir, model_family=model_family)
-    reporting_overrides = load_reporting_overrides(reporting_overrides_path, asof=evaluation_asof)
+    reporting_graduations_path = resolve_reporting_graduations_path(config, base_dir=base_dir, model_family=model_family)
+    reporting_overrides = load_reporting_override_sources(
+        [reporting_overrides_path, reporting_graduations_path],
+        asof=evaluation_asof,
+    )
     ticker_filter = parse_ticker_list(args.tickers)
     if args.incremental and args.force:
         raise ValueError("--incremental cannot be combined with --force; use --force-submissions, --force-companyfacts, or --force-archive.")
@@ -2958,6 +4555,7 @@ def main() -> None:
         )
 
         concept_map = load_concept_map(conn)
+        add_family_concept_mappings(concept_map, model_family=model_family)
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         submissions_run_id = start_ingestion_run(conn, source_id=submissions_source_id)
         companyfacts_run_id = start_ingestion_run(conn, source_id=companyfacts_source_id)
@@ -3297,6 +4895,11 @@ def main() -> None:
                             # XC-23/FN-2: fetches outside write transactions with
                             # stage-then-swap purge protection inside the helper.
                             archive_attempted = True
+                            strict_registration_statements = bool(
+                                model_family == "machinery"
+                                and reporting_override is not None
+                                and reporting_override.handling_type in FULL_STATEMENT_ARCHIVE_HANDLING_TYPES
+                            )
                             archive_raw_count, archive_mapped_count, archive_requests = sync_archive_xbrl(
                                 conn,
                                 ticker=ticker,
@@ -3315,6 +4918,8 @@ def main() -> None:
                                 index_url_template=archive_index_template,
                                 document_url_template=archive_document_template,
                                 max_filings=archive_max_filings,
+                                supplemental_forms=archive_supplemental_forms,
+                                max_supplemental_filings=archive_max_supplemental_filings,
                                 max_documents=archive_max_documents,
                                 parse_all_documents=(
                                     reporting_override is not None
@@ -3323,6 +4928,7 @@ def main() -> None:
                                 text_tables_only=(
                                     archive_all_family_members and not should_attempt_archive(reporting_override)
                                 ),
+                                strict_registration_statements=strict_registration_statements,
                                 company_currency=company_currency,
                                 min_refetch_fact_fraction=archive_min_refetch_fraction,
                                 ingestion_run_id=companyfacts_run_id,
@@ -3402,6 +5008,11 @@ def main() -> None:
                             # RuntimeError (rolling back its purge) when the
                             # refetch is implausibly small.
                             try:
+                                strict_registration_statements = bool(
+                                    model_family == "machinery"
+                                    and reporting_override is not None
+                                    and reporting_override.handling_type in FULL_STATEMENT_ARCHIVE_HANDLING_TYPES
+                                )
                                 archive_raw_count, archive_mapped_count, archive_requests = sync_archive_xbrl(
                                     conn,
                                     ticker=ticker,
@@ -3420,11 +5031,17 @@ def main() -> None:
                                     index_url_template=archive_index_template,
                                     document_url_template=archive_document_template,
                                     max_filings=archive_max_filings,
+                                    supplemental_forms=archive_supplemental_forms,
+                                    max_supplemental_filings=archive_max_supplemental_filings,
                                     max_documents=archive_max_documents,
                                     parse_all_documents=(
                                         reporting_override is not None
                                         and reporting_override.reporting_profile in FPI_HYBRID_PROFILES
                                     ),
+                                    text_tables_only=(
+                                        archive_all_family_members and not should_attempt_archive(reporting_override)
+                                    ),
+                                    strict_registration_statements=strict_registration_statements,
                                     company_currency=company_currency,
                                     min_refetch_fact_fraction=archive_min_refetch_fraction,
                                     ingestion_run_id=companyfacts_run_id,
@@ -3504,6 +5121,15 @@ def main() -> None:
                     if not args.allow_partial:
                         raise
 
+                if status != "failed":
+                    with conn:
+                        resolve_successful_sync_issues(
+                            conn,
+                            ticker=ticker,
+                            model_family=model_family,
+                            source_id=companyfacts_source_id,
+                        )
+
                 report_rows.append(
                     {
                         "ticker": ticker,
@@ -3533,7 +5159,11 @@ def main() -> None:
                     ).rowcount
                 if pruned:
                     LOGGER.info("Pruned %d raw_api_responses rows older than %s for SEC sources.", pruned, prune_cutoff)
-            write_report(output_csv, report_rows)
+            write_report(
+                output_csv,
+                report_rows,
+                preserve_existing_tickers=bool(ticker_filter),
+            )
             # XC-18: failures with allow_partial disabled re-raise inside the
             # loop, so reaching this point with failures implies --allow-partial.
             status = "success_with_failures" if failures else "success"

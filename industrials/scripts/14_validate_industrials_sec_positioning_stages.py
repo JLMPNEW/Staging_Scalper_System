@@ -45,6 +45,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--model-family", default="", help="Industrials model family to validate, e.g. defense.")
+    parser.add_argument(
+        "--asof",
+        default="",
+        help="Validate this exact positioning feature date instead of the latest available date.",
+    )
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--allow-missing-borrow", action="store_true", help="Downgrade missing IBKR borrow coverage to warning.")
     parser.add_argument("--13f-exempt-tickers", default="", help="Comma-separated tickers with explicit 13F no-row exemptions.")
@@ -60,6 +65,29 @@ def scalar(conn: Any, sql: str, params: tuple[Any, ...] = ()) -> int:
 def value(conn: Any, sql: str, params: tuple[Any, ...] = ()) -> Any:
     row = conn.execute(sql, params).fetchone()
     return row[0] if row is not None else None
+
+
+def resolve_feature_asof(
+    conn: Any,
+    *,
+    requested_asof: str,
+    source_id: str,
+    model_family: str,
+) -> str:
+    requested = requested_asof.strip()
+    if requested:
+        parsed = parse_date(requested)
+        if parsed is None:
+            raise ValueError(f"Invalid --asof date: {requested_asof!r}")
+        return parsed.isoformat()
+    return str(
+        value(
+            conn,
+            "SELECT MAX(asof_date) FROM feature_positioning WHERE source_id = ? AND model_family = ?",
+            (source_id, model_family),
+        )
+        or ""
+    )
 
 
 def placeholders(values: list[str]) -> str:
@@ -305,6 +333,28 @@ def latest_features(conn: Any, tickers: list[str], source_id: str, model_family:
     return out
 
 
+def feature_tickers_missing_field(
+    tickers: list[str],
+    feature_map: dict[str, dict[str, str]],
+    *,
+    field: str,
+    exempt_tickers: set[str],
+) -> list[str]:
+    """Return non-exempt tickers whose PIT feature lacks a required source."""
+    missing: list[str] = []
+    for ticker in tickers:
+        if ticker in exempt_tickers or ticker not in feature_map:
+            continue
+        missing_fields = {
+            value.strip()
+            for value in str(feature_map[ticker].get("missing_fields", "")).split(";")
+            if value.strip()
+        }
+        if field in missing_fields:
+            missing.append(ticker)
+    return sorted(missing)
+
+
 def write_report(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_csv_atomic(path, CSV_FIELDS, rows)
@@ -355,13 +405,11 @@ def validate() -> int:
     report_rows: list[dict[str, Any]] = []
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
-        feature_asof = str(
-            value(
-                conn,
-                "SELECT MAX(asof_date) FROM feature_positioning WHERE source_id = ? AND model_family = ?",
-                (positioning_source, model_family),
-            )
-            or ""
+        feature_asof = resolve_feature_asof(
+            conn,
+            requested_asof=args.asof,
+            source_id=positioning_source,
+            model_family=model_family,
         )
         # Exemption windows must be evaluated at the feature/evaluation asof,
         # never wall-clock today, or historical rebuilds flip exemptions
@@ -461,7 +509,20 @@ def validate() -> int:
             )
 
         active_missing_feature = sorted(ticker for ticker in active if ticker not in feature_map)
-        active_missing_13f = sorted(ticker for ticker in active if inst_counts.get(ticker, 0) == 0 and ticker not in exempt_13f)
+        active_missing_13f = sorted(
+            ticker for ticker in active if inst_counts.get(ticker, 0) == 0 and ticker not in exempt_13f
+        )
+        active_unusable_13f = sorted(
+            set(active_missing_13f)
+            | set(
+                feature_tickers_missing_field(
+                    active,
+                    feature_map,
+                    field="13f",
+                    exempt_tickers=exempt_13f,
+                )
+            )
+        )
         active_missing_short = sorted(ticker for ticker in active if short_counts.get(ticker, 0) == 0 and ticker not in exempt_short)
         active_missing_short_pct = sorted(
             ticker
@@ -471,7 +532,20 @@ def validate() -> int:
             and ticker in feature_map
             and "short_interest" in set(feature_map[ticker].get("missing_fields", "").split(";"))
         )
-        active_missing_borrow = sorted(ticker for ticker in active if borrow_counts.get(ticker, 0) == 0 and ticker not in exempt_borrow)
+        active_missing_borrow = sorted(
+            ticker for ticker in active if borrow_counts.get(ticker, 0) == 0 and ticker not in exempt_borrow
+        )
+        active_unusable_borrow = sorted(
+            set(active_missing_borrow)
+            | set(
+                feature_tickers_missing_field(
+                    active,
+                    feature_map,
+                    field="borrow",
+                    exempt_tickers=exempt_borrow,
+                )
+            )
+        )
         inactive_missing_any = sorted(
             ticker
             for ticker in inactive
@@ -504,8 +578,11 @@ def validate() -> int:
                 f"({form4_covered_fraction:.3f} < min {min_form4_covered_fraction:.3f}). "
                 "A wholly missing insider feed or a Form 4 routing regression looks exactly like this."
             )
-        if require_13f and active_missing_13f:
-            errors.append(f"13F coverage required; missing active non-exempt tickers: {active_missing_13f}")
+        if require_13f and active_unusable_13f:
+            errors.append(
+                "13F coverage required; missing or stale active non-exempt tickers: "
+                f"{active_unusable_13f}"
+            )
         if require_short and active_missing_short:
             errors.append(f"Short-interest coverage required; missing active tickers: {active_missing_short}")
         if require_short and require_short_pct_float and active_missing_short_pct:
@@ -519,8 +596,11 @@ def validate() -> int:
                 f"tickers={len(active_missing_short_pct)}. Enable positioning_import.require_short_pct_float_for_gate "
                 "only when a float source is wired."
             )
-        if require_borrow and active_missing_borrow:
-            errors.append(f"Borrow coverage required; missing active non-exempt tickers: {active_missing_borrow}")
+        if require_borrow and active_unusable_borrow:
+            errors.append(
+                "Borrow coverage required; missing or stale active non-exempt tickers: "
+                f"{active_unusable_borrow}"
+            )
         if inactive_missing_any:
             warnings.append(f"Inactive calibration tickers with at least one missing positioning source: {inactive_missing_any}")
 

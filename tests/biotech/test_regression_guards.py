@@ -1189,6 +1189,34 @@ def test_oos_role_honors_configured_lock_date() -> None:
     assert rows[1]["oos_score_valid_flag"] == 1.0
 
 
+def test_historical_export_forwards_config_to_contract_enrichment() -> None:
+    module = load_script_module(
+        "56_generate_historical_biotech_score_csvs.py",
+        "historical_export_contract_config_regression",
+    )
+    config = {"biotech_historical_sequence": {"strict_oos_start_date": "2026-07-07"}}
+    observed: dict[str, object] = {}
+
+    class ExportModule:
+        @staticmethod
+        def enrich_portfolio_layer_contract_rows(
+            rows: list[dict[str, Any]],
+            received_config: dict[str, Any],
+        ) -> None:
+            observed["rows"] = rows
+            observed["config"] = received_config
+
+    result = module.prepare_score_rows_for_export(
+        [],
+        ExportModule(),
+        config=config,
+        model_metadata={},
+    )
+
+    assert result == []
+    assert observed == {"rows": [], "config": config}
+
+
 def test_adcom_unknown_or_future_announcement_is_not_pit_visible() -> None:
     module = load_script_module("10_build_biotech_features.py", "adcom_announcement_pit_regression")
     conn = sqlite3.connect(":memory:")

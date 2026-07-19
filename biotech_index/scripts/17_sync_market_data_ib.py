@@ -32,6 +32,7 @@ from biotech_index.core.pipeline_guards import (
     validate_nonempty_selection,
     validate_requested_tickers,
 )
+from biotech_index.core.report_inputs import resolve_dated_report_input_csv
 
 
 LOGGER = logging.getLogger("sync_market_data_ib")
@@ -219,14 +220,22 @@ def read_scoring_tickers(path: Path) -> set[str]:
     return read_final_scoring_tickers(path)
 
 
-def load_companies(conn: sqlite3.Connection, *, scoring_tickers: set[str], ticker_filter: set[str], max_tickers: int) -> list[Company]:
+def load_companies(
+    conn: sqlite3.Connection,
+    *,
+    scoring_tickers: set[str],
+    ticker_filter: set[str],
+    max_tickers: int,
+    include_inactive: bool = False,
+) -> list[Company]:
     rows = conn.execute(
         """
         SELECT company_id, ticker, company_name, currency
         FROM companies
-        WHERE is_active = 1
+        WHERE is_active = 1 OR ? = 1
         ORDER BY ticker
-        """
+        """,
+        (1 if include_inactive else 0,),
     ).fetchall()
     out: list[Company] = []
     for row in rows:
@@ -1054,7 +1063,10 @@ def main() -> None:
         cfg_get(config, "ib_market_data.output_csv", "../output/biotech_index_reports/ib_market_features.csv"),
         base_dir=base_dir,
     )
-    final_universe_csv = resolve_path(cfg_get(config, "ib_market_data.final_scoring_universe_csv"), base_dir=base_dir)
+    configured_final_universe_csv = resolve_path(
+        cfg_get(config, "ib_market_data.final_scoring_universe_csv"),
+        base_dir=base_dir,
+    )
     requested_asof_arg = parse_date(args.asof) if args.asof else None
     if args.asof and requested_asof_arg is None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
@@ -1088,6 +1100,16 @@ def main() -> None:
             asof_decision.reason,
         )
     asof_date = asof_decision.effective_asof
+    report_output_dir = resolve_path(
+        cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"),
+        base_dir=base_dir,
+    )
+    final_universe_csv = resolve_dated_report_input_csv(
+        configured_final_universe_csv,
+        base_output_dir=report_output_dir,
+        asof_date=asof_date.isoformat(),
+        logger=LOGGER,
+    )
     if start_date is not None and start_date > asof_date:
         raise ValueError(f"--start-date {start_date.isoformat()} is after effective as-of date {asof_date.isoformat()}")
     duration = duration_override or str(cfg_get(config, "ib_market_data.duration", "1 Y"))
@@ -1122,7 +1144,13 @@ def main() -> None:
             run_id = start_run(conn, run_type="sync_market_data_ib", input_path=db_path)
             ib = IB() if IB is not None else None
             scoring_tickers = read_scoring_tickers(final_universe_csv)
-            companies = load_companies(conn, scoring_tickers=scoring_tickers, ticker_filter=ticker_filter, max_tickers=args.max_tickers)
+            companies = load_companies(
+                conn,
+                scoring_tickers=scoring_tickers,
+                ticker_filter=ticker_filter,
+                max_tickers=args.max_tickers,
+                include_inactive=offline_existing_bars and asof_date < datetime.now(timezone.utc).date(),
+            )
             subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_tickers))
             output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
             validate_nonempty_selection(count=len(companies), context="IB market sync", subset_mode=subset_mode)

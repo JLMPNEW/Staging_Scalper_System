@@ -825,6 +825,7 @@ def prepare_score_rows_for_export(
     rows: list[dict[str, Any]],
     export_module: Any,
     *,
+    config: dict[str, Any],
     model_metadata: dict[str, Any],
     market_context: dict[str, dict[str, Any]] | None = None,
     delisted_metadata: dict[str, dict[str, Any]] | None = None,
@@ -836,7 +837,7 @@ def prepare_score_rows_for_export(
     rows = [dict(row) for row in rows]
     enrich = getattr(export_module, "enrich_portfolio_layer_contract_rows", None)
     if callable(enrich):
-        enrich(rows)
+        enrich(rows, config)
     for row in rows:
         def fill_blank(field: str, value: object) -> None:
             if is_blank(row.get(field)):
@@ -1401,6 +1402,7 @@ def main() -> None:
                     score_rows = prepare_score_rows_for_export(
                         score_rows,
                         export_module,
+                        config=config,
                         model_metadata=model_metadata,
                         market_context=market_context,
                         delisted_metadata=delisted_metadata,

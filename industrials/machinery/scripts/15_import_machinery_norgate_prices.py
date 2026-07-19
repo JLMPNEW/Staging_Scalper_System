@@ -65,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-partial", action="store_true")
+    parser.add_argument("--no-purge-existing-range", action="store_true")
     return parser.parse_args()
 
 
@@ -224,6 +225,21 @@ def upsert_prices(
     return inserted
 
 
+def purge_existing_range(conn: Any, *, ticker: str, source_id: str, first_bar: str, last_bar: str) -> None:
+    # Remove previously imported bars outside the certified membership interval
+    # (e.g. after a shrunk end_date or a corrected symbol mapping); the upsert
+    # alone can never delete stale rows.
+    conn.execute(
+        """
+        DELETE FROM fact_price_ohlcv
+        WHERE ticker = ?
+          AND source_id = ?
+          AND (bar_date < ? OR bar_date > ?)
+        """,
+        (ticker, source_id, first_bar, last_bar),
+    )
+
+
 def add_issue(conn: Any, *, ticker: str, source_id: str, detail: str) -> None:
     now = utc_now()
     company = conn.execute("SELECT company_id FROM dim_company WHERE ticker = ?", (ticker,)).fetchone()
@@ -261,6 +277,8 @@ def main() -> int:
     membership_path = resolve_path(cfg_get(config, "industrials_universe.historical_membership_csv"), base_dir=base_dir)
     source_id = str(cfg_get(config, "norgate_delisted_import.source_id", "norgate_us_equities_total_return"))
     adjustment_mode = str(cfg_get(config, "norgate_delisted_import.price_adjustment_mode", "CAPITAL")).strip().upper()
+    purge_config = str(cfg_get(config, "norgate_delisted_import.purge_existing_range", True)).strip().lower()
+    purge_ranges = not args.no_purge_existing_range and purge_config not in {"0", "false", "no", "off"}
     output_path = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(
         cfg_get(config, "norgate_delisted_import.output_csv"),
         base_dir=base_dir,
@@ -321,6 +339,14 @@ def main() -> int:
                         row["loaded_rows"] = len(prices)
                     elif conn is not None:
                         with conn:
+                            if purge_ranges:
+                                purge_existing_range(
+                                    conn,
+                                    ticker=member.internal_ticker,
+                                    source_id=source_id,
+                                    first_bar=member.start_date,
+                                    last_bar=member.end_date,
+                                )
                             row["loaded_rows"] = upsert_prices(
                                 conn,
                                 member=member,

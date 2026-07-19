@@ -50,6 +50,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the shadow independent-outcome v2 probability build and validation.",
     )
+    parser.add_argument(
+        "--skip-probabilities-v2-1",
+        action="store_true",
+        help="Skip the shadow V2.1 candidate build and validation (probability_v2_1 block).",
+    )
+    parser.add_argument(
+        "--skip-probabilities-v2-2",
+        action="store_true",
+        help="Skip the shadow V2.2 candidate build and validation (probability_v2_2 block).",
+    )
+    parser.add_argument(
+        "--skip-probabilities-v2-3",
+        action="store_true",
+        help="Skip the shadow V2.3 candidate build and validation (probability_v2_3 block).",
+    )
     parser.add_argument("--skip-regime-raw", action="store_true", help="Skip rebuilding macro_regime_raw_daily.")
     parser.add_argument("--skip-regime-smoothed", action="store_true", help="Skip rebuilding macro_regime_smoothed_daily.")
     parser.add_argument("--skip-regime-decision", action="store_true", help="Skip rebuilding macro_regime_decision_daily.")
@@ -295,55 +310,61 @@ def main() -> None:
         _append_multi_arg(probability_cmd, "--probability-keys", args.probability_keys)
         _run_step(step_name="probability_layer", command=probability_cmd)
 
-    probability_v2_enabled = parse_boolish(cfg_get(cfg, "probability_v2", "enabled", default=False), default=False)
-    if probability_v2_enabled and not args.skip_probabilities_v2:
+    def _run_v2_family_group(*, layer_block: str, step_suffix: str) -> None:
+        layer_args = [] if layer_block == "probability_v2" else ["--layer-block", layer_block]
+
         probability_v2_cmd = [
             str(args.python_executable),
             str(SCRIPT_DIR / "build_macro_probabilities_v2.py"),
             *common_cfg,
+            *layer_args,
         ]
         _append_path_arg(probability_v2_cmd, "--serving-db-path", args.serving_db_path)
         _append_text_arg(probability_v2_cmd, "--start-date", args.start_date)
         _append_text_arg(probability_v2_cmd, "--end-date", args.end_date)
-        _run_step(step_name="probability_v2_research", command=probability_v2_cmd)
+        _run_step(step_name=f"probability_v2_research{step_suffix}", command=probability_v2_cmd)
 
         probability_v2_validate_cmd = [
             str(args.python_executable),
             str(SCRIPT_DIR / "validate_macro_probabilities_v2.py"),
             *common_cfg,
+            *layer_args,
         ]
         _append_path_arg(probability_v2_validate_cmd, "--serving-db-path", args.serving_db_path)
         _append_text_arg(probability_v2_validate_cmd, "--end-date", args.end_date)
-        _run_step(step_name="probability_v2_validation", command=probability_v2_validate_cmd)
+        _run_step(step_name=f"probability_v2_validation{step_suffix}", command=probability_v2_validate_cmd)
 
         regime_v2_decision_cmd = [
             str(args.python_executable),
             str(SCRIPT_DIR / "build_macro_regime_v2_decision.py"),
             *common_cfg,
+            *layer_args,
         ]
         _append_path_arg(regime_v2_decision_cmd, "--serving-db-path", args.serving_db_path)
         _append_text_arg(regime_v2_decision_cmd, "--start-date", args.start_date)
         _append_text_arg(regime_v2_decision_cmd, "--end-date", args.end_date)
-        _run_step(step_name="regime_v2_decision_research", command=regime_v2_decision_cmd)
+        _run_step(step_name=f"regime_v2_decision_research{step_suffix}", command=regime_v2_decision_cmd)
 
         regime_v2_promotion_cmd = [
             str(args.python_executable),
             str(SCRIPT_DIR / "validate_macro_regime_v2_promotion.py"),
             *common_cfg,
+            *layer_args,
         ]
         _append_path_arg(regime_v2_promotion_cmd, "--serving-db-path", args.serving_db_path)
         _append_text_arg(regime_v2_promotion_cmd, "--end-date", args.end_date)
-        _run_step(step_name="regime_v2_promotion_evidence", command=regime_v2_promotion_cmd)
+        _run_step(step_name=f"regime_v2_promotion_evidence{step_suffix}", command=regime_v2_promotion_cmd)
 
         vintage_audit_cmd = [
             str(args.python_executable),
             str(SCRIPT_DIR / "audit_macro_v2_vintage_gaps.py"),
             *common_cfg,
+            *layer_args,
         ]
         _append_path_arg(vintage_audit_cmd, "--raw-db-path", args.raw_db_path)
         _append_path_arg(vintage_audit_cmd, "--serving-db-path", args.serving_db_path)
         _append_text_arg(vintage_audit_cmd, "--end-date", args.end_date)
-        _run_step(step_name="regime_v2_vintage_gap_audit", command=vintage_audit_cmd)
+        _run_step(step_name=f"regime_v2_vintage_gap_audit{step_suffix}", command=vintage_audit_cmd)
 
     if not args.skip_regime_raw:
         regime_raw_cmd = [str(args.python_executable), str(SCRIPT_DIR / "build_macro_regime_raw.py"), *common_cfg]
@@ -365,6 +386,24 @@ def main() -> None:
         _append_text_arg(regime_decision_cmd, "--start-date", args.start_date)
         _append_text_arg(regime_decision_cmd, "--end-date", args.end_date)
         _run_step(step_name="regime_decision_layer", command=regime_decision_cmd)
+
+    # v2-family candidate groups run AFTER the V1 regime decision layer: their promotion
+    # evidence requires a covered V1 decision row on the end date (fail-closed comparison).
+    probability_v2_enabled = parse_boolish(cfg_get(cfg, "probability_v2", "enabled", default=False), default=False)
+    if probability_v2_enabled and not args.skip_probabilities_v2:
+        _run_v2_family_group(layer_block="probability_v2", step_suffix="")
+
+    probability_v2_1_enabled = parse_boolish(cfg_get(cfg, "probability_v2_1", "enabled", default=False), default=False)
+    if probability_v2_1_enabled and not args.skip_probabilities_v2_1:
+        _run_v2_family_group(layer_block="probability_v2_1", step_suffix="_v2_1")
+
+    probability_v2_2_enabled = parse_boolish(cfg_get(cfg, "probability_v2_2", "enabled", default=False), default=False)
+    if probability_v2_2_enabled and not args.skip_probabilities_v2_2:
+        _run_v2_family_group(layer_block="probability_v2_2", step_suffix="_v2_2")
+
+    probability_v2_3_enabled = parse_boolish(cfg_get(cfg, "probability_v2_3", "enabled", default=False), default=False)
+    if probability_v2_3_enabled and not args.skip_probabilities_v2_3:
+        _run_v2_family_group(layer_block="probability_v2_3", step_suffix="_v2_3")
 
     if not args.skip_industry_macro:
         industry_macro_cmd = [str(args.python_executable), str(SCRIPT_DIR / "build_macro_industry_fit.py"), *common_cfg]

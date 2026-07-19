@@ -175,6 +175,29 @@ def test_historical_restatement_rebuilds_ctgov_before_scoring_universe() -> None
     assert names[:2] == ["ctgov_audit", "historical_scoring_universe"]
 
 
+def test_historical_norgate_routing_requires_calibration_only_member(tmp_path: Path) -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_historical_norgate_routing")
+    output_root = tmp_path / "reports"
+    dated_dir = output_root / "20260710"
+    dated_dir.mkdir(parents=True)
+    universe_path = dated_dir / "ctgov_final_scoring_universe.csv"
+    config = {"biotech_scoring": {"output_dir": str(output_root)}}
+
+    universe_path.write_text("ticker,calibration_only\nAAA,false\n", encoding="utf-8")
+    assert not module.historical_universe_requires_norgate(
+        config,
+        base_dir=tmp_path,
+        asof="2026-07-10",
+    )
+
+    universe_path.write_text("ticker,calibration_only\nAAA,false\nOLD,true\n", encoding="utf-8")
+    assert module.historical_universe_requires_norgate(
+        config,
+        base_dir=tmp_path,
+        asof="2026-07-10",
+    )
+
+
 def test_snapshot_copies_only_current_run_outputs_and_never_prunes_shared_history(tmp_path: Path) -> None:
     module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_snapshot_boundary_regression")
     source_dir = tmp_path / "biotech_reports"

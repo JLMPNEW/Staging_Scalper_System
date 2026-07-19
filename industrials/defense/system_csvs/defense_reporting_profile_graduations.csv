@@ -1,0 +1,3 @@
+ticker,handling_type,parent_ticker,skip_sec_network,reporting_profile,reporting_standard,fallback_status,financial_confidence,usable_xbrl_flag,review_reason,notes,valid_from,reviewed_at
+HOVR,controlled_profile_graduation,,false,SEC_XBRL_US_GAAP,US_GAAP,none,0.90,1,,controlled_profile_graduation_v1; evidence_asof=2026-07-09; annual=10-K:2025-05-31; taxonomy=us-gaap; revenue_mode=pre_revenue,2026-07-10,2026-07-12
+MRLN,controlled_despac_profile_graduation,,false,SEC_XBRL_US_GAAP_DESPAC_BRIDGE,US_GAAP_DESPAC_BRIDGE,none,0.75,1,,controlled_profile_graduation_v1; evidence_asof=2026-07-09; annual=424B3:2025-12-31; taxonomy=us-gaap; revenue_mode=revenue_reporting; predecessor_bridge=1,2026-07-10,2026-07-12

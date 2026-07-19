@@ -25,7 +25,8 @@ industrials_universe:
   norgate_symbol_overrides_csv: "system_csvs/machinery_norgate_symbol_overrides.csv"
   optimization_start_date: "2019-01-02"
   delisted_default_start_date: "2019-01-02"
-  expected_ticker_count: 114
+  # CF-4: expected_ticker_count lives ONLY in data/machinery_universe_policy.yaml.
+  # Do not re-add a copy here; validators read the policy YAML.
   sector: Industrials
   industry: Machinery
   subsector: Machinery
@@ -91,7 +92,7 @@ sec_fundamentals:
   companyfacts_url_template: "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
   reporting_overrides_csv: "system_csvs/machinery_sec_reporting_overrides.csv"
   start_date: "2019-01-02"
-  forms: [10-K, 10-K/A, 10-Q, 10-Q/A, 20-F, 20-F/A, 40-F, 40-F/A, 6-K, S-1, S-1/A, S-4, S-4/A]
+  forms: [10-K, 10-K/A, 10-Q, 10-Q/A, 20-F, 20-F/A, 40-F, 40-F/A, 6-K, S-1, S-1/A, S-4, S-4/A, F-1, F-1/A, F-4, F-4/A, 424B3, 424B4, 10-12B, 10-12B/A, 10-12G, 10-12G/A, 8-K, 8-K/A]
   include_historical_members: true
   user_agent: "${INDUSTRIALS_SEC_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
   timeout_sec: 30.0
@@ -101,6 +102,28 @@ sec_fundamentals:
   raw_response_retention_days: 90
   sync_output_csv: "../../output/industrials/machinery/stage4/sec_fundamentals_coverage.csv"
   feature_output_csv: "../../output/industrials/machinery/stage4/financial_feature_coverage.csv"
+  metric_availability_output_csv: "../../output/industrials/machinery/stage4/financial_metric_availability.csv"
+
+financial_validation:
+  availability_policy:
+    # Funded backlog is a government-contracting disclosure; only these
+    # nuclear/government-exposed issuers can structurally report it.
+    funded_backlog_applicable_tickers: [BW, SMR, XE, NNE, OKLO, FISN]
+    # Cancelable (automotive-style) order models publish no binding backlog;
+    # their orders/backlog absences are structural, not ingestion gaps.
+    cancelable_order_model_tickers: [PCAR]
+    # Short-cycle book-and-ship issuers with no XBRL backlog/RPO disclosure
+    # history (AOS/MLI/TT/CSW/HLIO/ALSN/ATKR/OUST: zero RPO facts ever) or that
+    # ceased disclosure under the ASC 606 short-cycle expedient (SNA last
+    # tagged 2021, CARR last tagged 2020). REPORTED always wins over this
+    # classification, so historical asofs where values existed are unaffected.
+    # Round 2 (verified 2026-07-19): AIT/AYI/DCI/ENOV/ITW/TWI/PKOH have zero
+    # RPO or backlog XBRL facts ever; AGCO tagged RPO once in the 2018 ASC 606
+    # transition year and then ceased (expedient adopter). BE and TWIN are
+    # deliberately EXCLUDED: both disclose genuine backlog in filing prose
+    # (thin-tagging, not structural absence).
+    structural_no_backlog_tickers: [AOS, MLI, TT, CSW, HLIO, ALSN, ATKR, OUST, SNA, CARR,
+                                    AIT, AYI, DCI, ENOV, ITW, TWI, PKOH, AGCO]
 
 fx_rates:
   source_id: yahoo_fx_rates
@@ -158,7 +181,7 @@ scoring_policy:
     machinery:
       eligibility_policy_csv: "system_csvs/machinery_scoring_eligibility_policy.csv"
       reporting_overrides_csv: "system_csvs/machinery_sec_reporting_overrides.csv"
-      output_csv: "../../output/industrials/machinery/stage6/scoring_eligibility_validation.csv"
+      eligibility_audit_csv: "../../output/industrials/machinery/stage6/scoring_eligibility_validation.csv"
 
 machinery_scoring:
   contract_version: industrial_family_final_rank_table_v1_shadow
@@ -189,5 +212,7 @@ sec_archive:
   browse_edgar_atom_url_template: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form_type}&owner=exclude&count=100&output=atom"
   max_submission_history_files: 0
   max_filings_per_ticker: 32
+  supplemental_forms: [8-K, 8-K/A]
+  max_supplemental_filings_per_ticker: 12
   max_documents_per_filing: 3
   min_refetch_fact_fraction: 0.5

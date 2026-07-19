@@ -57,6 +57,116 @@ macro_raw:
       minimum_calibration_slope: 0.50
       maximum_calibration_slope: 1.50
 
+  # V2.1 candidate (frozen spec: MacroLayer/V2_1_CANDIDATE_SPEC.md). Identical thresholds
+  # to probability_v2 — only model inputs (G_LEAD_V21/PI_NOW_V21 composites, AHETPI,
+  # market-stress block) and history start differ. Own output_dir: V2/V2.1 artifact paths
+  # are date-keyed and would collide in a shared directory.
+  probability_v2_1:
+    enabled: true
+    shadow_only: true
+    model_version: "macro_regime_v2_1_independent_outcomes_v1"
+    history_start_date: "2001-01-01"
+    output_dir: "MacroLayer/out/regime_v2_1"
+    growth_resilient_qoq_ann_threshold: 0.02
+    inflation_pressure_yoy_threshold: 0.025
+    minimum_inflation_components: 4
+    growth_min_training_samples: 40
+    inflation_min_training_samples: 60
+    lead_min_training_samples: 40
+    minimum_positive_samples: 8
+    minimum_negative_samples: 8
+    ridge_penalty: 5.0
+    output_probability_floor: 0.02
+    energy_shock_z_threshold: 1.5
+    energy_shock_yoy_threshold: 0.25
+    decision_min_top_probability: 0.50
+    decision_min_confidence: 0.10
+    vintage_audit:
+      preferred_history_start_date: "2001-01-01"
+      probe_fred_by_default: false
+    evidence:
+      growth_min_oos_samples: 24
+      inflation_min_oos_samples: 60
+      inflation_lead_min_oos_samples: 16
+      minimum_oos_class_samples: 6
+      minimum_auc: 0.52
+      minimum_brier_skill: 0.0
+      minimum_brier_improvement_vs_v1: 0.0
+      minimum_calibration_slope: 0.50
+      maximum_calibration_slope: 1.50
+
+  # V2.2 candidate (frozen spec: MacroLayer/V2_2_CANDIDATE_SPEC.md): V2.1 inputs + trailing
+  # PIT recalibration. Identical thresholds; own output_dir.
+  probability_v2_2:
+    enabled: true
+    shadow_only: true
+    model_version: "macro_regime_v2_2_recalibrated_v1"
+    history_start_date: "2001-01-01"
+    output_dir: "MacroLayer/out/regime_v2_2"
+    growth_resilient_qoq_ann_threshold: 0.02
+    inflation_pressure_yoy_threshold: 0.025
+    minimum_inflation_components: 4
+    growth_min_training_samples: 40
+    inflation_min_training_samples: 60
+    lead_min_training_samples: 40
+    minimum_positive_samples: 8
+    minimum_negative_samples: 8
+    ridge_penalty: 5.0
+    output_probability_floor: 0.02
+    energy_shock_z_threshold: 1.5
+    energy_shock_yoy_threshold: 0.25
+    decision_min_top_probability: 0.50
+    decision_min_confidence: 0.10
+    vintage_audit:
+      preferred_history_start_date: "2001-01-01"
+      probe_fred_by_default: false
+    evidence:
+      growth_min_oos_samples: 24
+      inflation_min_oos_samples: 60
+      inflation_lead_min_oos_samples: 16
+      minimum_oos_class_samples: 6
+      minimum_auc: 0.52
+      minimum_brier_skill: 0.0
+      minimum_brier_improvement_vs_v1: 0.0
+      minimum_calibration_slope: 0.50
+      maximum_calibration_slope: 1.50
+
+  # V2.3 candidate (frozen spec: MacroLayer/V2_3_CANDIDATE_SPEC.md): V2.1 inputs + CONDITIONAL
+  # pooled recalibration (cell-level trigger, growth-pool correction). Identical thresholds.
+  probability_v2_3:
+    enabled: true
+    shadow_only: true
+    model_version: "macro_regime_v2_3_conditional_recal_v1"
+    history_start_date: "2001-01-01"
+    output_dir: "MacroLayer/out/regime_v2_3"
+    growth_resilient_qoq_ann_threshold: 0.02
+    inflation_pressure_yoy_threshold: 0.025
+    minimum_inflation_components: 4
+    growth_min_training_samples: 40
+    inflation_min_training_samples: 60
+    lead_min_training_samples: 40
+    minimum_positive_samples: 8
+    minimum_negative_samples: 8
+    ridge_penalty: 5.0
+    output_probability_floor: 0.02
+    energy_shock_z_threshold: 1.5
+    energy_shock_yoy_threshold: 0.25
+    decision_min_top_probability: 0.50
+    decision_min_confidence: 0.10
+    vintage_audit:
+      preferred_history_start_date: "2001-01-01"
+      probe_fred_by_default: false
+    evidence:
+      growth_min_oos_samples: 24
+      inflation_min_oos_samples: 60
+      inflation_lead_min_oos_samples: 16
+      minimum_oos_class_samples: 6
+      minimum_auc: 0.52
+      minimum_brier_skill: 0.0
+      minimum_brier_improvement_vs_v1: 0.0
+      minimum_calibration_slope: 0.50
+      maximum_calibration_slope: 1.50
+
   regime_layer:
     transition_bias_deadband: 0.05
     smoothing:

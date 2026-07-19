@@ -29,6 +29,7 @@ C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\07_sync_defense
 C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\11_sync_defense_yahoo_fx_rates.py
 C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\08_build_defense_financial_features.py
 C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\08_validate_defense_financial_stage.py
+C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\09_evaluate_defense_profile_graduation.py --asof YYYY-MM-DD
 C:\Users\josel\miniconda3\python.exe industrials\defense\scripts\04b_validate_defense_stage0_4_production_readiness.py
 ```
 
@@ -37,6 +38,10 @@ Stage 3 generated review reports are intentionally limited to the configured `ou
 Stage 4 generated review reports are limited to `output/industrials/defense/stage4` coverage CSVs. Persistent raw SEC facts, mapped facts, canonical financial facts, issuer reporting profiles, FX rates, and financial features are stored in the shared SQLite database.
 
 `07_sync_defense_sec_fundamentals.py` attempts SEC archive XML/inline-XBRL extraction for rows explicitly marked `SEC_RAW_ARCHIVE_REQUIRED` when CompanyFacts is unavailable or empty. Rows with no modern submissions endpoint remain tagged as archive-required instead of being promoted silently.
+
+Stage 4.5 evaluates `RECENT_IPO_DEVELOPMENT_STAGE` and `RECENT_PUBLIC_STUB` rows against periodic XBRL facts plus, when applicable, a certified audited predecessor bridge. It requires the configured market-history minimum, a current annual baseline, aligned annual-plus-interim TTM cash-flow windows, required statement components, and PIT FX coverage. Audit mode never changes a profile. Applying an eligible decision requires `--apply --effective-date YYYY-MM-DD`, where the effective date must be later than the evidence `--asof`; decisions are appended to `defense_reporting_profile_graduations.csv` and never rewrite the source override or an existing dated dashboard snapshot.
+
+For de-SPAC issuers, Stage 4.5 may use `SEC_XBRL_US_GAAP_DESPAC_BRIDGE` only when audited predecessor facts come from a formal historical statement in an SEC registration filing. Pro-forma/projected tables, fallback-date rows, uncertain scales/currencies, and conflicting duplicate values are rejected. Expensed R&D remains in operating cash flow and is never reclassified as capex. Reparse one controlling cached accession with `08b_refresh_defense_predecessor_bridge.py --ticker TICKER --accession ACCESSION --asof YYYY-MM-DD`; the normal full archive sweep is not required.
 
 Stage 6 scoring policy starts with `industrials/defense/system_csvs/defense_scoring_eligibility_policy.csv` and can be audited with `10_validate_defense_scoring_eligibility_policy.py`; weak-data profiles must be explicitly governed before rank-ready promotion.
 

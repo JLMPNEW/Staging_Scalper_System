@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-date", type=str, default=None)
     parser.add_argument("--end-date", type=str, default=None)
     parser.add_argument("--model-version", type=str, default=None)
+    parser.add_argument("--layer-block", type=str, default="probability_v2",
+                        help="Config block for this candidate (probability_v2 | probability_v2_1).")
     return parser.parse_args()
 
 
@@ -460,9 +462,12 @@ def main() -> None:
     configure_pipeline_logging()
     args = parse_args()
     config_path, cfg = load_macro_raw_config(args.config)
-    v2_cfg = cfg_get(cfg, "probability_v2", default={}) or {}
+    layer_block = str(args.layer_block or "probability_v2").strip()
+    v2_cfg = cfg_get(cfg, layer_block, default={}) or {}
+    if not v2_cfg:
+        raise ValueError(f"Config block {layer_block!r} is missing or empty.")
     if not parse_boolish(cfg_get(v2_cfg, "shadow_only", default=None), default=False):
-        raise ValueError("V2 decision build requires probability_v2.shadow_only=true before promotion.")
+        raise ValueError(f"V2 decision build requires {layer_block}.shadow_only=true before promotion.")
     model_version = str(args.model_version or cfg_get(v2_cfg, "model_version", default=MODEL_VERSION_DEFAULT)).strip()
     serving_db_path = resolve_serving_db_path(cfg, config_path, override=args.serving_db_path)
     conn = connect_sqlite(serving_db_path, row_factory=sqlite3.Row)

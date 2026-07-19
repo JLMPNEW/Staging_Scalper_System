@@ -27,10 +27,19 @@ from industrials.machinery.scoring import (  # noqa: E402
     survivorship_sidecar,
     write_json_atomic,
 )
+from portfolio_layer.scores.adapters import run_adapter  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-REPORT_FIELDS = ["asof_date", "status", "row_count", "rank_ready_count", "output_dir", "error"]
+REPORT_FIELDS = [
+    "asof_date",
+    "status",
+    "row_count",
+    "rank_ready_count",
+    "portfolio_adapter_row_count",
+    "output_dir",
+    "error",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -96,11 +105,35 @@ def weekly_dates(dates: list[str]) -> list[str]:
     return [by_week[key] for key in sorted(by_week)]
 
 
-def rebuild_features(*, config_path: Path, db_path: Path, asof: str) -> None:
+def rebuild_features(
+    *,
+    config_path: Path,
+    db_path: Path,
+    asof: str,
+    report_root: Path,
+) -> None:
+    report_root.mkdir(parents=True, exist_ok=True)
     scripts = [
-        ("industrials/machinery/scripts/05_build_machinery_market_features.py", ["--asof", asof]),
-        ("industrials/machinery/scripts/08_build_machinery_financial_features.py", ["--asof", asof]),
-        ("industrials/machinery/scripts/09_import_machinery_positioning.py", ["--asof", asof]),
+        (
+            "industrials/machinery/scripts/05_build_machinery_market_features.py",
+            ["--asof", asof, "--output-csv", str(report_root / "market_feature_coverage.csv")],
+        ),
+        (
+            "industrials/machinery/scripts/08_build_machinery_financial_features.py",
+            [
+                "--asof",
+                asof,
+                "--output-csv",
+                str(report_root / "financial_feature_coverage.csv"),
+                "--availability-output-csv",
+                str(report_root / "financial_metric_availability.csv"),
+                "--suppress-data-quality-issues",
+            ],
+        ),
+        (
+            "industrials/machinery/scripts/09_import_machinery_positioning.py",
+            ["--asof", asof, "--output-csv", str(report_root / "positioning_import_coverage.csv")],
+        ),
     ]
     for script, extra in scripts:
         subprocess.run(
@@ -108,6 +141,34 @@ def rebuild_features(*, config_path: Path, db_path: Path, asof: str) -> None:
             cwd=PROJECT_ROOT,
             check=True,
         )
+
+
+def validate_portfolio_handoff(*, sector_output_root: Path, asof: str) -> int:
+    result = run_adapter(
+        {
+            "model_family": "machinery",
+            "adapter": "industrial_family",
+            "file_mode": "dated",
+            "file_path": "industrials/machinery/dashboard/{yyyy-mm-dd}/machinery_final_rank_table.csv",
+            "sector": "Industrials",
+            "industry": "Machinery",
+            "industry_aggregate": "Machinery",
+            "require_oos_score_valid": True,
+        },
+        sector_output_root,
+        asof,
+    )
+    if not result.rows:
+        raise ValueError("Portfolio adapter returned no machinery rows")
+    if result.source_asof_date != asof:
+        raise ValueError(
+            f"Portfolio adapter source_asof_date={result.source_asof_date} expected={asof}"
+        )
+    if any(row.investable_eligible for row in result.rows):
+        raise ValueError("Shadow machinery rows must not be investable")
+    if any(row.oos_score_valid_flag for row in result.rows):
+        raise ValueError("Shadow machinery rows must not be OOS-valid")
+    return len(result.rows)
 
 
 def main() -> int:
@@ -121,6 +182,7 @@ def main() -> int:
         raise ValueError("end-date must be on or after start-date")
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     dashboard_root = resolve_path(cfg_get(config, "machinery_scoring.dashboard_root"), base_dir=base_dir)
+    sector_output_root = dashboard_root.parents[2]
     benchmark = str(cfg_get(config, "industrials_universe.benchmark_ticker", "XLI"))
     primary_source = str(cfg_get(config, "market_data_policy.scoring_primary_source", "yahoo_finance_adjusted"))
     timeout = float(cfg_get(config, "runtime.sqlite_timeout_sec", 120.0))
@@ -132,10 +194,13 @@ def main() -> int:
             benchmark=benchmark,
             primary_source=primary_source,
         )
-    if args.frequency == "weekly":
-        dates = weekly_dates(dates)
+    # Exclude the end date BEFORE weekly downsampling: if the end date is a
+    # week's representative (last trading day), excluding it afterwards would
+    # drop that week entirely instead of falling back to an earlier day.
     if args.exclude_end_date:
         dates = [asof for asof in dates if asof != end_date]
+    if args.frequency == "weekly":
+        dates = weekly_dates(dates)
     if args.max_dates > 0:
         dates = dates[: args.max_dates]
     if not dates:
@@ -150,7 +215,17 @@ def main() -> int:
         output_dir = dashboard_root / asof
         try:
             if args.rebuild_features:
-                rebuild_features(config_path=config_path, db_path=db_path, asof=asof)
+                rebuild_features(
+                    config_path=config_path,
+                    db_path=db_path,
+                    asof=asof,
+                    report_root=(
+                        dashboard_root.parent
+                        / "historical_backfill"
+                        / "stage_reports"
+                        / asof
+                    ),
+                )
             with connect(db_path, timeout_sec=timeout) as conn:
                 feature_rows = build_scoring_feature_rows(
                     conn,
@@ -178,12 +253,17 @@ def main() -> int:
                 asof=asof,
                 allow_overwrite=args.force,
             )
+            portfolio_adapter_row_count = validate_portfolio_handoff(
+                sector_output_root=sector_output_root,
+                asof=asof,
+            )
             report.append(
                 {
                     "asof_date": asof,
                     "status": "PASS",
                     "row_count": len(historical_rows),
                     "rank_ready_count": rank_ready_count,
+                    "portfolio_adapter_row_count": portfolio_adapter_row_count,
                     "output_dir": str(output_dir),
                     "error": "",
                 }
@@ -195,6 +275,7 @@ def main() -> int:
                     "status": "FAIL",
                     "row_count": 0,
                     "rank_ready_count": 0,
+                    "portfolio_adapter_row_count": 0,
                     "output_dir": str(output_dir),
                     "error": f"{type(exc).__name__}: {exc}",
                 }

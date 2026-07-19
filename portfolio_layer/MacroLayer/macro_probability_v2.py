@@ -69,6 +69,158 @@ PROBABILITY_V2_SPECS = (
     ),
 )
 
+# --- V2.1 candidate variant (frozen: V2_1_CANDIDATE_SPEC.md) ------------------------------
+# Same architecture, targets, labels, probability keys, and thresholds as V2. Deltas only:
+# G_LEAD -> G_LEAD_V21 (NFCI/ANFCI replaced by pre-registered market-stress components),
+# PI_NOW -> PI_NOW_V21 (all-employee AHE replaced by AHETPI prod/nonsup AHE, no splicing),
+# and the derived financial_conditions predictor swaps its NFCI leg for the stress pair.
+
+MODEL_VERSION_V21 = "macro_regime_v2_1_independent_outcomes_v1"
+MODEL_VERSION_V22 = "macro_regime_v2_2_recalibrated_v1"
+MODEL_VERSION_V23 = "macro_regime_v2_3_conditional_recal_v1"
+
+GROWTH_PREDICTORS_V21 = (
+    "G_NOW",
+    "G_LEAD_V21",
+    "gdp_growth_latest",
+    "growth_activity",
+    "financial_conditions",
+    "policy_tightness",
+    "SHOCK",
+)
+INFLATION_PREDICTORS_V21 = (
+    "PI_NOW_V21",
+    "PI_LEAD",
+    "inflation_level_yoy",
+    "core_inflation",
+    "headline_inflation",
+    "inflation_expectations",
+    "energy_shock",
+    "energy_yoy",
+    "policy_tightness",
+)
+
+PROBABILITY_V2_1_SPECS = (
+    ProbabilityV2Spec("P_G_NOW_V2", "growth", "now", GROWTH_PREDICTORS_V21, ("G_NOW", "G_LEAD_V21"), "quarterly"),
+    ProbabilityV2Spec("P_G_LEAD_V2", "growth", "lead", GROWTH_PREDICTORS_V21, ("G_NOW", "G_LEAD_V21"), "quarterly"),
+    ProbabilityV2Spec(
+        "P_PI_NOW_V2",
+        "inflation",
+        "now",
+        INFLATION_PREDICTORS_V21,
+        ("PI_NOW_V21", "PI_LEAD", "inflation_level_yoy"),
+        "monthly",
+    ),
+    ProbabilityV2Spec(
+        "P_PI_LEAD_V2",
+        "inflation",
+        "lead",
+        INFLATION_PREDICTORS_V21,
+        ("PI_NOW_V21", "PI_LEAD", "inflation_level_yoy"),
+        "quarterly",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class ProbabilityV2Variant:
+    model_version: str
+    specs: tuple[ProbabilityV2Spec, ...]
+    composite_keys: tuple[str, ...]
+    feature_metrics: tuple[str, ...]
+    financial_conditions_metrics: tuple[str, ...]
+    # V2.2+ (V2_2_CANDIDATE_SPEC.md): trailing PIT recalibration of walk-forward probabilities.
+    recalibrate: bool = False
+    recalibration_min_pairs: int = 20
+    recalibration_min_positive: int = 5
+    recalibration_min_negative: int = 5
+    # V2.3 (V2_3_CANDIDATE_SPEC.md): "always" applies the cell's own trailing line
+    # unconditionally; "conditional_pooled" triggers on the cell's own trailing slope being
+    # outside the gate band and applies a line fitted on the cell's pool.
+    recalibration_policy: str = "always"
+    recalibration_pools: tuple[tuple[str, str], ...] = ()
+
+
+_V2_FEATURE_METRICS = (
+    "us_ads_index",
+    "us_cfnai_ma3",
+    "us_nonfarm_payrolls",
+    "us_initial_claims",
+    "us_hy_oas",
+    "us_nfci",
+    "us_effective_fed_funds",
+    "us_10y_real_yield",
+    "us_core_cpi",
+    "us_core_pce",
+    "us_headline_cpi",
+    "us_headline_pce",
+    "us_5y_breakeven",
+    "us_wti_spot",
+    "us_brent_spot",
+)
+
+PROBABILITY_V2_VARIANTS: dict[str, ProbabilityV2Variant] = {
+    MODEL_VERSION_DEFAULT: ProbabilityV2Variant(
+        model_version=MODEL_VERSION_DEFAULT,
+        specs=PROBABILITY_V2_SPECS,
+        composite_keys=("G_NOW", "G_LEAD", "PI_NOW", "PI_LEAD", "SHOCK"),
+        feature_metrics=_V2_FEATURE_METRICS,
+        financial_conditions_metrics=("us_hy_oas", "us_nfci"),
+    ),
+    MODEL_VERSION_V21: ProbabilityV2Variant(
+        model_version=MODEL_VERSION_V21,
+        specs=PROBABILITY_V2_1_SPECS,
+        composite_keys=("G_NOW", "G_LEAD_V21", "PI_NOW_V21", "PI_LEAD", "SHOCK"),
+        feature_metrics=tuple(
+            metric for metric in _V2_FEATURE_METRICS if metric != "us_nfci"
+        ) + ("us_ig_spread_baa10y", "us_equity_vol"),
+        financial_conditions_metrics=("us_hy_oas", "us_ig_spread_baa10y", "us_equity_vol"),
+    ),
+    # V2.2 = V2.1 inputs + trailing PIT recalibration (V2_2_CANDIDATE_SPEC.md). No other delta.
+    MODEL_VERSION_V22: ProbabilityV2Variant(
+        model_version=MODEL_VERSION_V22,
+        specs=PROBABILITY_V2_1_SPECS,
+        composite_keys=("G_NOW", "G_LEAD_V21", "PI_NOW_V21", "PI_LEAD", "SHOCK"),
+        feature_metrics=tuple(
+            metric for metric in _V2_FEATURE_METRICS if metric != "us_nfci"
+        ) + ("us_ig_spread_baa10y", "us_equity_vol"),
+        financial_conditions_metrics=("us_hy_oas", "us_ig_spread_baa10y", "us_equity_vol"),
+        recalibrate=True,
+    ),
+    # V2.3 = V2.1 inputs + CONDITIONAL pooled recalibration (V2_3_CANDIDATE_SPEC.md).
+    MODEL_VERSION_V23: ProbabilityV2Variant(
+        model_version=MODEL_VERSION_V23,
+        specs=PROBABILITY_V2_1_SPECS,
+        composite_keys=("G_NOW", "G_LEAD_V21", "PI_NOW_V21", "PI_LEAD", "SHOCK"),
+        feature_metrics=tuple(
+            metric for metric in _V2_FEATURE_METRICS if metric != "us_nfci"
+        ) + ("us_ig_spread_baa10y", "us_equity_vol"),
+        financial_conditions_metrics=("us_hy_oas", "us_ig_spread_baa10y", "us_equity_vol"),
+        recalibrate=True,
+        recalibration_policy="conditional_pooled",
+        recalibration_pools=(
+            ("P_G_NOW_V2", "growth"),
+            ("P_G_LEAD_V2", "growth"),
+            ("P_PI_NOW_V2", "pi_now"),
+            ("P_PI_LEAD_V2", "pi_lead"),
+        ),
+    ),
+}
+
+
+def variant_for(model_version: str) -> ProbabilityV2Variant:
+    """Resolve the frozen input-variant for a v2-family model version.
+
+    Unknown versions fail closed rather than silently inheriting V2's inputs.
+    """
+    variant = PROBABILITY_V2_VARIANTS.get(str(model_version or "").strip())
+    if variant is None:
+        raise ValueError(
+            f"Unknown v2-family model_version {model_version!r}; "
+            f"registered variants: {sorted(PROBABILITY_V2_VARIANTS)}"
+        )
+    return variant
+
 
 def sigmoid(values: np.ndarray) -> np.ndarray:
     arr = np.asarray(values, dtype=float)
@@ -291,6 +443,13 @@ def regime_probabilities(growth_probability: float, inflation_probability: float
 
 
 def calibration_line(y_true: np.ndarray, probability: np.ndarray) -> tuple[float | None, float | None]:
+    """Fit y ~ sigmoid(intercept + slope * logit(p)) and return (intercept, slope) in LOGIT space.
+
+    fit_ridge_logistic standardizes its design matrix, so its raw coefficient is per-SD of the
+    predicted logit — a quantity invariant under affine recalibration and inflated for models
+    with wide logit spread. The returned values here are de-standardized so that slope carries
+    the conventional Platt meaning: 1.0 = calibrated, >1 = under-confident, <1 = over-confident.
+    """
     y = np.asarray(y_true, dtype=float)
     p = np.asarray(probability, dtype=float)
     finite = np.isfinite(y) & np.isfinite(p) & np.isin(y, [0.0, 1.0])
@@ -298,9 +457,9 @@ def calibration_line(y_true: np.ndarray, probability: np.ndarray) -> tuple[float
     p = p[finite]
     if len(y) < 10 or len(np.unique(y)) < 2:
         return None, None
-    logits = np.asarray([logit(float(item), eps=1e-6) for item in p], dtype=float).reshape(-1, 1)
+    logit_values = np.asarray([logit(float(item), eps=1e-6) for item in p], dtype=float)
     fit = fit_ridge_logistic(
-        logits,
+        logit_values.reshape(-1, 1),
         y,
         predictor_names=["predicted_logit"],
         ridge_penalty=0.0,
@@ -310,4 +469,10 @@ def calibration_line(y_true: np.ndarray, probability: np.ndarray) -> tuple[float
     )
     if not fit["ready"]:
         return None, None
-    return float(fit["intercept"]), float(fit["coefficients"][0])
+    mean = float(fit["predictor_mean"][0])
+    standard_deviation = float(fit["predictor_std"][0])
+    if not math.isfinite(standard_deviation) or standard_deviation <= 1e-8:
+        return None, None
+    slope = float(fit["coefficients"][0]) / standard_deviation
+    intercept = float(fit["intercept"]) - slope * mean
+    return intercept, slope

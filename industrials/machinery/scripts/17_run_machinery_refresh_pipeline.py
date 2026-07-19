@@ -253,6 +253,8 @@ def select_steps(steps: list[Step], args: argparse.Namespace) -> list[Step]:
             raise ValueError(f"Unknown --to-step={args.to_step}")
         selected = [step for step in selected if positions[step.step_id] <= positions[args.to_step]]
     if args.only:
+        if args.from_step or args.to_step:
+            raise ValueError("--only cannot be combined with --from-step/--to-step")
         wanted = {item.strip() for item in args.only.split(",") if item.strip()}
         unknown = sorted(wanted - set(positions))
         if unknown:

@@ -31,7 +31,7 @@ FIELDNAMES = [
     "notes",
 ]
 
-COMPOSITE_ORDER = ["G_NOW", "G_LEAD", "PI_NOW", "PI_LEAD", "SHOCK"]
+COMPOSITE_ORDER = ["G_NOW", "G_LEAD", "PI_NOW", "PI_LEAD", "SHOCK", "G_LEAD_V21", "PI_NOW_V21"]
 COMPOSITE_FROM_BLOCK = {
     "growth_now": "G_NOW",
     "growth_lead": "G_LEAD",
@@ -39,12 +39,30 @@ COMPOSITE_FROM_BLOCK = {
     "inflation_lead": "PI_LEAD",
     "external_shock": "SHOCK",
 }
+# V2.1 candidate composites (frozen spec: V2_1_CANDIDATE_SPEC.md). Derived from the base
+# composite of the same regime block, with membership deltas. The V21-only metrics are
+# excluded from base composites so V1/V2 composite rows regenerate byte-identically.
+V21_BASE_COMPOSITE = {
+    "G_LEAD_V21": "G_LEAD",
+    "PI_NOW_V21": "PI_NOW",
+}
+V21_EXCLUDED_METRICS = {
+    "G_LEAD_V21": {"us_nfci", "us_anfci"},
+    "PI_NOW_V21": {"us_avg_hourly_earnings"},
+}
+V21_ADDED_METRICS = {
+    "G_LEAD_V21": {"us_ig_spread_baa10y", "us_equity_vol"},
+    "PI_NOW_V21": {"us_avg_hourly_earnings_prod"},
+}
+V21_ONLY_METRICS = frozenset().union(*V21_ADDED_METRICS.values())
 SMOOTHING_WINDOW_BY_COMPOSITE = {
     "G_NOW": 5,
     "G_LEAD": 5,
     "PI_NOW": 5,
     "PI_LEAD": 5,
     "SHOCK": 3,
+    "G_LEAD_V21": 5,
+    "PI_NOW_V21": 5,
 }
 MIN_COVERAGE_RATIO_BY_COMPOSITE = {
     "G_NOW": 0.40,
@@ -52,6 +70,8 @@ MIN_COVERAGE_RATIO_BY_COMPOSITE = {
     "PI_NOW": 0.50,
     "PI_LEAD": 0.67,
     "SHOCK": 0.50,
+    "G_LEAD_V21": 0.40,
+    "PI_NOW_V21": 0.50,
 }
 MIN_REQUIRED_COVERAGE_RATIO_BY_COMPOSITE = {
     "G_NOW": 1.00,
@@ -59,6 +79,8 @@ MIN_REQUIRED_COVERAGE_RATIO_BY_COMPOSITE = {
     "PI_NOW": 1.00,
     "PI_LEAD": 1.00,
     "SHOCK": 0.00,
+    "G_LEAD_V21": 1.00,
+    "PI_NOW_V21": 1.00,
 }
 REQUIRED_METRICS_BY_COMPOSITE = {
     "G_NOW": {
@@ -90,6 +112,22 @@ REQUIRED_METRICS_BY_COMPOSITE = {
         "us_10y_real_yield",
     },
     "SHOCK": set(),
+    "G_LEAD_V21": {
+        "us_cli",
+        "us_bci",
+        "us_cci",
+        "us_yield_curve_10y2y",
+        "us_hy_oas",
+        "us_ig_spread_baa10y",
+        "us_equity_vol",
+    },
+    "PI_NOW_V21": {
+        "us_headline_cpi",
+        "us_core_cpi",
+        "us_headline_pce",
+        "us_core_pce",
+        "us_avg_hourly_earnings_prod",
+    },
 }
 
 
@@ -125,6 +163,10 @@ def _composite_key(row: dict[str, str]) -> str | None:
     regime_block = str(row.get("regime_block", "") or "").strip()
     if not metric_key or not regime_block:
         return None
+    if metric_key in V21_ONLY_METRICS:
+        # V2.1-only components never join the base composites (keeps V1/V2 rows identical);
+        # they are routed into their V21 composite in build_rows.
+        return None
     composite_key = COMPOSITE_FROM_BLOCK.get(regime_block)
     if composite_key is None:
         return None
@@ -145,6 +187,30 @@ def build_rows(feature_rows: list[dict[str, str]]) -> list[dict[str, str]]:
         if composite_key is None:
             continue
         grouped[composite_key].append(row)
+
+    # V2.1 candidate composites: base membership minus exclusions, plus the V21-only
+    # metrics (whose feature rows were withheld from base grouping above).
+    feature_by_metric: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in feature_rows:
+        feature_by_metric[str(row.get("metric_key", "") or "").strip()].append(row)
+    for v21_key, base_key in V21_BASE_COMPOSITE.items():
+        members = [
+            row for row in grouped.get(base_key, [])
+            if str(row.get("metric_key", "") or "").strip() not in V21_EXCLUDED_METRICS[v21_key]
+        ]
+        missing_added = []
+        for metric_key in sorted(V21_ADDED_METRICS[v21_key]):
+            added_rows = feature_by_metric.get(metric_key, [])
+            if not added_rows:
+                missing_added.append(metric_key)
+                continue
+            members.extend(added_rows)
+        if missing_added:
+            raise ValueError(
+                f"V2.1 composite {v21_key} is missing feature-policy rows for required added metrics: {missing_added}. "
+                "Register the metrics and rebuild the feature policy first."
+            )
+        grouped[v21_key] = members
 
     out: list[dict[str, str]] = []
     for composite_key in COMPOSITE_ORDER:

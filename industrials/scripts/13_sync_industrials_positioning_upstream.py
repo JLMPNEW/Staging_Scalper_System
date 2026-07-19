@@ -145,8 +145,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ibkr-port", type=int, default=7497)
     parser.add_argument("--ibkr-client-id", type=int, default=7822)
     parser.add_argument("--ibkr-market-data-type", type=int, default=1)
+    parser.add_argument(
+        "--ibkr-fee-rate-incremental-duration",
+        default="45 D",
+        help="IB historical FEE_RATE duration for tickers with existing coverage, e.g. '10 D'.",
+    )
     parser.add_argument("--ibkr-max-tickers", type=int, default=0)
     parser.add_argument("--ibkr-snapshot-wait-sec", type=float, default=4.0)
+    parser.add_argument(
+        "--skip-ibkr-shortable-snapshot",
+        action="store_true",
+        help=(
+            "Load dated IBKR fee-rate history without sampling current shortableShares. "
+            "Use for historical catch-up runs so a current observation is not backdated."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1049,8 +1062,10 @@ def main() -> None:
                 port=args.ibkr_port,
                 client_id=args.ibkr_client_id,
                 market_data_type=args.ibkr_market_data_type,
+                fee_rate_incremental_duration=args.ibkr_fee_rate_incremental_duration,
                 snapshot_wait_sec=args.ibkr_snapshot_wait_sec,
                 max_tickers=args.ibkr_max_tickers,
+                shortable_snapshot=not args.skip_ibkr_shortable_snapshot,
             )
             LOGGER.info("%s rows=%d message=%s", result.feed_name, result.rows, result.message)
         if not args.skip_float_proxy:

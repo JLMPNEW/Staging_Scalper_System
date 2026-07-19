@@ -196,7 +196,10 @@ def load_status_overrides(path: Optional[Path]) -> dict[str, dict[str, str]]:
             "manual_review": row_get(row, "manual_review", "ManualReview"),
             "reason_codes": row_get(row, "reason_codes", "ReasonCodes"),
             "notes": row_get(row, "notes", "Notes"),
+            "effective_date": row_get(row, "effective_date", "EffectiveDate"),
         }
+        if overrides[ticker]["effective_date"]:
+            parse_date(overrides[ticker]["effective_date"])
     return overrides
 
 
@@ -302,7 +305,19 @@ def synthesize_successor_companies(
     return out
 
 
-def override_protects_absent_ticker(override: dict[str, str], *, active_decisions: set[str]) -> bool:
+def status_override_is_effective(override: dict[str, str], *, asof_date: str) -> bool:
+    effective_date = str(override.get("effective_date") or "").strip()
+    return not effective_date or effective_date <= asof_date
+
+
+def override_protects_absent_ticker(
+    override: dict[str, str],
+    *,
+    active_decisions: set[str],
+    asof_date: str,
+) -> bool:
+    if not status_override_is_effective(override, asof_date=asof_date):
+        return False
     if as_bool(override.get("manual_exclude")):
         return False
     decision = str(override.get("decision") or "").strip().lower()
@@ -341,9 +356,14 @@ def company_from_absent_status_override(ticker: str, override: dict[str, str], r
     )
 
 
-def apply_status_override(company: ScreenCompany, overrides: dict[str, dict[str, str]]) -> ScreenCompany:
+def apply_status_override(
+    company: ScreenCompany,
+    overrides: dict[str, dict[str, str]],
+    *,
+    asof_date: str,
+) -> ScreenCompany:
     override = overrides.get(company.ticker)
-    if not override:
+    if not override or not status_override_is_effective(override, asof_date=asof_date):
         return company
     return replace(
         company,
@@ -664,7 +684,11 @@ def main() -> None:
     protected_override_tickers = {
         ticker
         for ticker, override in status_overrides.items()
-        if override_protects_absent_ticker(override, active_decisions=active_decisions)
+        if override_protects_absent_ticker(
+            override,
+            active_decisions=active_decisions,
+            asof_date=history_asof_date,
+        )
     }
     parsed_tickers = {company.ticker for company in companies}
     protected_absent_tickers = protected_override_tickers - parsed_tickers
@@ -708,7 +732,11 @@ def main() -> None:
                         continue
                     companies_to_process.append(company_from_absent_status_override(ticker, status_overrides[ticker], row))
                 for company in companies_to_process:
-                    company = apply_status_override(company, status_overrides)
+                    company = apply_status_override(
+                        company,
+                        status_overrides,
+                        asof_date=history_asof_date,
+                    )
                     company_id = upsert_company(conn, company, active_decisions=active_decisions)
                     alias_delete_ids.append((company_id,))
                     if company.decision in active_decisions:

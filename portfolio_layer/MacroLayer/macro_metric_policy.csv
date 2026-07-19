@@ -86,6 +86,7 @@ us_ads_index,USA,daily,growth_now,3,1,1.00,GLOBAL,0,0,0,finite,,,Generated tier-
 us_advance_retail_sales,USA,monthly,growth_lead,45,1,1.00,GLOBAL,0,0,0,positive,0.0,,Generated tier-1 policy defaults for QA and PIT serving.
 us_anfci,USA,weekly,growth_lead,10,1,1.00,GLOBAL,0,0,0,finite,,,Generated tier-1 policy defaults for QA and PIT serving.
 us_avg_hourly_earnings,USA,monthly,inflation_now,45,1,1.00,GLOBAL,0,0,0,positive,0.0,,Generated tier-1 policy defaults for QA and PIT serving.
+us_avg_hourly_earnings_prod,USA,monthly,inflation_now,45,1,1.00,GLOBAL,0,0,0,finite,,,Generated tier-1 policy defaults for QA and PIT serving.
 us_bci,USA,monthly,growth_lead,105,1,0.95,GLOBAL,0,0,0,finite,,,Generated tier-1 policy defaults for QA and PIT serving.
 us_building_permits,USA,monthly,growth_lead,45,1,1.00,GLOBAL,0,0,0,positive,0.0,,Generated tier-1 policy defaults for QA and PIT serving.
 us_cci,USA,monthly,growth_lead,105,1,0.95,GLOBAL,0,0,0,finite,,,Generated tier-1 policy defaults for QA and PIT serving.
@@ -98,11 +99,13 @@ us_durable_goods_ex_transport,USA,monthly,growth_lead,45,1,1.00,GLOBAL,0,0,0,pos
 us_durable_goods_orders,USA,monthly,growth_lead,45,1,1.00,GLOBAL,0,0,0,positive,0.0,,Generated tier-1 policy defaults for QA and PIT serving.
 us_eci_all,USA,quarterly,inflation_now,120,1,1.00,GLOBAL,0,0,0,positive,0.0,,Generated tier-1 policy defaults for QA and PIT serving.
 us_effective_fed_funds,USA,daily,growth_lead,3,1,1.00,GLOBAL,0,0,0,bounded,-100.0,100.0,Generated tier-1 policy defaults for QA and PIT serving.
+us_equity_vol,USA,daily,growth_lead,3,1,1.00,GLOBAL,0,0,0,finite,,,Generated tier-1 policy defaults for QA and PIT serving.
 us_headline_cpi,USA,monthly,inflation_now,45,1,1.00,GLOBAL,0,0,0,positive,0.0,,Generated tier-1 policy defaults for QA and PIT serving.
 us_headline_pce,USA,monthly,inflation_now,45,1,1.00,GLOBAL,0,0,0,positive,0.0,,Generated tier-1 policy defaults for QA and PIT serving.
 us_henry_hub_natgas,USA,daily,external_shock,3,1,1.00,GLOBAL,0,0,0,bounded,-50.0,100.0,Generated tier-1 policy defaults for QA and PIT serving.
 us_housing_starts,USA,monthly,growth_lead,45,1,1.00,GLOBAL,0,0,0,positive,0.0,,Generated tier-1 policy defaults for QA and PIT serving.
 us_hy_oas,USA,daily,growth_lead,3,1,1.00,GLOBAL,0,0,0,bounded,-100.0,100.0,Generated tier-1 policy defaults for QA and PIT serving.
+us_ig_spread_baa10y,USA,monthly,growth_lead,45,1,1.00,GLOBAL,0,0,0,finite,,,Generated tier-1 policy defaults for QA and PIT serving.
 us_industrial_production,USA,monthly,growth_now,45,1,1.00,GLOBAL,0,0,0,positive,0.0,,Generated tier-1 policy defaults for QA and PIT serving.
 us_initial_claims,USA,weekly,growth_now,10,1,1.00,GLOBAL,0,0,0,positive,0.0,,Generated tier-1 policy defaults for QA and PIT serving.
 us_initial_claims_4w,USA,weekly,growth_now,10,1,1.00,GLOBAL,0,0,0,positive,0.0,,Generated tier-1 policy defaults for QA and PIT serving.

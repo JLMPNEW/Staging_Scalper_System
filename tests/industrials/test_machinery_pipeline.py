@@ -7,9 +7,12 @@ import sys
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from industrials.core.config import cfg_get, load_yaml
-from industrials.core.db import connect, utc_now
+from industrials.core.db import connect, init_db, utc_now
 from industrials.machinery.contracts import resolve_norgate_mappings
+from industrials.machinery.financial_contract import required_metric_names
 from industrials.machinery.scoring import (
     FINAL_RANK_FIELDS,
     PORTFOLIO_REQUIRED_FIELDS,
@@ -278,6 +281,36 @@ def seed_scoring_features(db_path: Path, *, count: int = 12) -> None:
                     now,
                 ),
             )
+        availability_tickers = [
+            str(row["ticker"])
+            for row in conn.execute(
+                """
+                SELECT DISTINCT ticker
+                FROM dim_universe_membership
+                WHERE model_family = 'machinery'
+                  AND start_date <= ?
+                  AND COALESCE(end_date, '9999-12-31') >= ?
+                ORDER BY ticker
+                """,
+                (ASOF, ASOF),
+            ).fetchall()
+        ]
+        conn.executemany(
+            """
+            INSERT INTO feature_financial_metric_availability(
+                ticker, asof_date, model_family, metric_name, availability_status,
+                source_id, extraction_method, confidence, status_reason,
+                created_at, updated_at
+            )
+            VALUES (?, ?, 'machinery', ?, 'NOT_DISCLOSED', 'sec_companyfacts',
+                    'synthetic_test_fixture', 0.0, 'fixture_has_no_reported_value', ?, ?)
+            """,
+            [
+                (ticker, ASOF, metric_name, now, now)
+                for ticker in availability_tickers
+                for metric_name in required_metric_names()
+            ],
+        )
 
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -484,13 +517,22 @@ def test_machinery_special_metric_schema_and_text_labels(tmp_path: Path) -> None
         "orders_yoy_growth",
         "book_to_bill",
         "backlog_yoy_growth",
-        "backlog_to_revenue",
+            "backlog_to_revenue",
+            "reported_backlog_yoy_growth",
+            "reported_backlog_to_revenue",
+            "rpo_yoy_growth",
+            "rpo_to_revenue",
+            "rpo_implied_orders",
+            "rpo_implied_book_to_bill",
+            "financial_metric_classified_fraction",
         "roic",
+        "roic_not_meaningful_flag",
         "asset_turnover",
         "incremental_operating_margin",
         "inventory_sales_growth_spread",
         "cash_conversion_cycle_change",
         "net_debt_to_ebitda",
+        "negative_ebitda_leverage_flag",
         "interest_coverage",
         "cash_runway_years",
         "capital_raise_dependence",
@@ -506,9 +548,20 @@ def test_machinery_special_metric_schema_and_text_labels(tmp_path: Path) -> None
     label_concept = namespace["text_table_label_concept"]
     assert label_concept("New orders received") == ("Orders", "duration")
     assert label_concept("Funded backlog") == ("FundedBacklog", "instant")
-    assert label_concept("Backlog") is None
-    assert label_concept("Remaining performance obligation") is None
+    assert label_concept("Backlog") == ("ReportedBacklog", "instant")
+    assert label_concept("Remaining performance obligation") == (
+        "RemainingPerformanceObligation",
+        "instant",
+    )
     parse_tables = namespace["parse_archive_text_table_facts"]
+    family_concept_map: dict[tuple[str, str], list[dict[str, object]]] = {}
+    namespace["add_family_concept_mappings"](family_concept_map, model_family="defense")
+    assert family_concept_map == {}
+    namespace["add_family_concept_mappings"](family_concept_map, model_family="machinery")
+    assert ("us-gaap", "PaymentsToAcquireProductiveAssets") in family_concept_map
+    assert ("us-gaap", "ReceivablesNetCurrent") in family_concept_map
+    assert ("us-gaap", "AccountsPayableTradeCurrent") in family_concept_map
+    assert ("us-gaap", "LongTermDebt") in family_concept_map
     archive_candidates = namespace["archive_document_candidates"]
     assert archive_candidates(
         {
@@ -592,6 +645,500 @@ def test_machinery_special_metric_schema_and_text_labels(tmp_path: Path) -> None
     assert [row["ticker"] for row in read_rows(borrow_path)] == ["CAT"]
 
 
+def test_machinery_review_overrides_and_zero_revenue_guardrails() -> None:
+    override_path = (
+        PROJECT_ROOT
+        / "industrials"
+        / "machinery"
+        / "system_csvs"
+        / "machinery_sec_reporting_overrides.csv"
+    )
+    overrides = {row["ticker"]: row for row in read_rows(override_path)}
+    assert {overrides[ticker]["handling_type"] for ticker in ("AIRJ", "FISN", "NNE", "OKLO")} == {
+        "Is_Development_Stage"
+    }
+    assert {overrides[ticker]["handling_type"] for ticker in ("INIO", "MAIR")} == {
+        "Ingestion_Gap_Pending"
+    }
+    assert all(overrides[ticker]["usable_xbrl_flag"] == "true" for ticker in ("AIRJ", "FISN", "NNE", "OKLO"))
+    assert all(overrides[ticker]["usable_xbrl_flag"] == "false" for ticker in ("INIO", "MAIR"))
+    assert all(overrides[ticker]["reporting_profile"] == "SEC_RAW_ARCHIVE_REQUIRED" for ticker in ("INIO", "MAIR"))
+
+    sec_namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "scripts" / "07_sync_industrials_sec_fundamentals.py")
+    )
+    load_overrides = sec_namespace["load_reporting_overrides"]
+    assert "FISN" not in load_overrides(override_path, asof="2026-06-17")
+    assert load_overrides(override_path, asof="2026-06-18")["FISN"].handling_type == "Is_Development_Stage"
+    assert "MAIR" not in load_overrides(override_path, asof="2026-04-15")
+    assert load_overrides(override_path, asof="2026-04-16")["MAIR"].handling_type == "Ingestion_Gap_Pending"
+    assert sec_namespace["should_attempt_archive"](
+        load_overrides(override_path, asof="2026-04-16")["MAIR"]
+    )
+
+    financial_namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "scripts" / "08_build_industrials_financial_features.py")
+    )
+    should_default = financial_namespace["should_default_missing_revenue_to_zero"]
+    development_company = {"development_stage": "development_stage"}
+    partial_profile = {"reporting_profile": "SEC_XBRL_US_GAAP_PARTIAL"}
+    assert should_default(
+        company=development_company,
+        profile=partial_profile,
+        operating_cash_flow=-1.0,
+    )
+    assert not should_default(
+        company=development_company,
+        profile=partial_profile,
+        operating_cash_flow=0.0,
+    )
+    assert not should_default(
+        company=development_company,
+        profile=partial_profile,
+        operating_cash_flow=None,
+    )
+    assert not should_default(
+        company={"development_stage": "operating"},
+        profile={"reporting_profile": "NO_FINANCIALS_REVIEW"},
+        operating_cash_flow=-1.0,
+    )
+
+    listing_rows = {
+        row["ticker"]: row
+        for row in read_rows(
+            PROJECT_ROOT / "industrials" / "machinery" / "system_csvs" / "machinery_listing_dates.csv"
+        )
+    }
+    assert listing_rows["FISN"]["first_eligible_date"] == "2026-06-18"
+    assert listing_rows["MAIR"]["first_eligible_date"] == "2026-04-16"
+
+    membership_rows = {
+        row["internal_ticker"]: row
+        for row in read_rows(
+            PROJECT_ROOT
+            / "industrials"
+            / "machinery"
+            / "system_csvs"
+            / "machinery_historical_membership.csv"
+        )
+    }
+    assert membership_rows["FISN"]["start_date"] == "2026-06-18"
+    assert membership_rows["MAIR"]["start_date"] == "2026-04-16"
+
+
+def test_machinery_inline_xbrl_footnote_and_custom_label_extraction() -> None:
+    namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "scripts" / "07_sync_industrials_sec_fundamentals.py")
+    )
+    labels = namespace["parse_xbrl_label_linkbase"](
+        """
+        <link:linkbase xmlns:link="http://www.xbrl.org/2003/linkbase"
+                       xmlns:xlink="http://www.w3.org/1999/xlink">
+          <link:labelLink>
+            <link:loc xlink:label="loc_backlog" xlink:href="issuer.xsd#mach_OrderBacklog"/>
+            <link:label xlink:label="lab_backlog">Total order backlog</link:label>
+            <link:labelArc xlink:from="loc_backlog" xlink:to="lab_backlog"/>
+            <link:loc xlink:label="loc_orders" xlink:href="issuer.xsd#mach_NewOrdersReceived"/>
+            <link:label xlink:label="lab_orders">New orders received</link:label>
+            <link:labelArc xlink:from="loc_orders" xlink:to="lab_orders"/>
+            <link:loc xlink:label="loc_rpo" xlink:href="issuer.xsd#mach_ContractedRevenue"/>
+            <link:label xlink:label="lab_rpo">Remaining performance obligations</link:label>
+            <link:labelArc xlink:from="loc_rpo" xlink:to="lab_rpo"/>
+          </link:labelLink>
+        </link:linkbase>
+        """
+    )
+    assert labels["OrderBacklog"] == ["Total order backlog"]
+    facts = namespace["parse_machinery_footnote_facts"](
+        """
+        <html xmlns="http://www.w3.org/1999/xhtml"
+              xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"
+              xmlns:xbrli="http://www.xbrl.org/2003/instance"
+              xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
+              xmlns:mach="http://example.com/machinery/2026">
+          <body>
+            <xbrli:context id="instant"><xbrli:entity><xbrli:identifier scheme="cik">1</xbrli:identifier></xbrli:entity><xbrli:period><xbrli:instant>2026-03-31</xbrli:instant></xbrli:period></xbrli:context>
+            <xbrli:context id="duration"><xbrli:entity><xbrli:identifier scheme="cik">1</xbrli:identifier></xbrli:entity><xbrli:period><xbrli:startDate>2025-04-01</xbrli:startDate><xbrli:endDate>2026-03-31</xbrli:endDate></xbrli:period></xbrli:context>
+            <xbrli:context id="quarter"><xbrli:entity><xbrli:identifier scheme="cik">1</xbrli:identifier></xbrli:entity><xbrli:period><xbrli:startDate>2026-01-01</xbrli:startDate><xbrli:endDate>2026-03-31</xbrli:endDate></xbrli:period></xbrli:context>
+            <xbrli:unit id="USD"><xbrli:measure>iso4217:USD</xbrli:measure></xbrli:unit>
+            <p>The company applies the practical expedient and does not disclose remaining performance obligations for contracts of one year or less.</p>
+            <ix:nonFraction name="mach:OrderBacklog" contextRef="instant" unitRef="USD" scale="6">500</ix:nonFraction>
+            <ix:nonFraction name="mach:NewOrdersReceived" contextRef="duration" unitRef="USD" scale="6">900</ix:nonFraction>
+            <ix:nonFraction name="mach:NewOrdersReceived" contextRef="quarter" unitRef="USD" scale="6">250</ix:nonFraction>
+            <ix:nonFraction name="mach:ContractedRevenue" contextRef="instant" unitRef="USD" scale="6">300</ix:nonFraction>
+          </body>
+        </html>
+        """,
+        document_name="issuer-20260331.htm",
+        filing={"report_date": "2026-03-31", "filing_date": "2026-05-01"},
+        concept_labels=labels,
+    )
+    values = {fact.concept_name: fact.value for fact in facts}
+    assert values["ReportedBacklog"] == 500_000_000.0
+    assert values["RemainingPerformanceObligation"] == 300_000_000.0
+    assert values["RPOPracticalExpedient"] == 1.0
+    assert {
+        (fact.period_start, fact.value)
+        for fact in facts
+        if fact.concept_name == "Orders"
+    } == {
+        ("2025-04-01", 900_000_000.0),
+        ("2026-01-01", 250_000_000.0),
+    }
+    assert all(
+        fact.source_detail == "sec_archive_footnote_xbrl"
+        for fact in facts
+    )
+
+
+def test_machinery_rpo_timing_dimensions_and_text_percentage() -> None:
+    namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "scripts" / "07_sync_industrials_sec_fundamentals.py")
+    )
+    parse_facts = namespace["parse_machinery_footnote_facts"]
+    timing_facts = parse_facts(
+        """
+        <html xmlns="http://www.w3.org/1999/xhtml"
+              xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"
+              xmlns:xbrli="http://www.xbrl.org/2003/instance"
+              xmlns:xbrldi="http://xbrl.org/2006/xbrldi"
+              xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
+              xmlns:us-gaap="http://fasb.org/us-gaap/2026">
+          <body>
+            <xbrli:context id="total"><xbrli:entity><xbrli:identifier scheme="cik">1</xbrli:identifier></xbrli:entity><xbrli:period><xbrli:instant>2026-03-31</xbrli:instant></xbrli:period></xbrli:context>
+            <xbrli:context id="current"><xbrli:entity><xbrli:identifier scheme="cik">1</xbrli:identifier><xbrli:segment><xbrldi:typedMember dimension="us-gaap:RevenueRemainingPerformanceObligationExpectedTimingOfSatisfactionStartDateAxis"><us-gaap:StartDate>2026-04-01</us-gaap:StartDate></xbrldi:typedMember></xbrli:segment></xbrli:entity><xbrli:period><xbrli:instant>2026-03-31</xbrli:instant></xbrli:period></xbrli:context>
+            <xbrli:context id="later"><xbrli:entity><xbrli:identifier scheme="cik">1</xbrli:identifier><xbrli:segment><xbrldi:typedMember dimension="us-gaap:RevenueRemainingPerformanceObligationExpectedTimingOfSatisfactionStartDateAxis"><us-gaap:StartDate>2027-04-01</us-gaap:StartDate></xbrldi:typedMember></xbrli:segment></xbrli:entity><xbrli:period><xbrli:instant>2026-03-31</xbrli:instant></xbrli:period></xbrli:context>
+            <xbrli:unit id="USD"><xbrli:measure>iso4217:USD</xbrli:measure></xbrli:unit>
+            <ix:nonFraction name="us-gaap:RevenueRemainingPerformanceObligation" contextRef="total" unitRef="USD">1000</ix:nonFraction>
+            <ix:nonFraction name="us-gaap:RevenueRemainingPerformanceObligation" contextRef="current" unitRef="USD">400</ix:nonFraction>
+            <ix:nonNumeric name="us-gaap:RevenueRemainingPerformanceObligationExpectedTimingOfSatisfactionPeriod1" contextRef="current">P1Y</ix:nonNumeric>
+            <ix:nonFraction name="us-gaap:RevenueRemainingPerformanceObligation" contextRef="later" unitRef="USD">600</ix:nonFraction>
+            <ix:nonNumeric name="us-gaap:RevenueRemainingPerformanceObligationExpectedTimingOfSatisfactionPeriod1" contextRef="later">P2Y</ix:nonNumeric>
+          </body>
+        </html>
+        """,
+        document_name="timing.htm",
+        filing={"report_date": "2026-03-31", "filing_date": "2026-05-01"},
+    )
+    values = {fact.concept_name: fact.value for fact in timing_facts}
+    assert values["RemainingPerformanceObligation"] == 1000.0
+    assert values["RemainingPerformanceObligationCurrent"] == 400.0
+
+    text_facts = parse_facts(
+        """
+        <html xmlns="http://www.w3.org/1999/xhtml"
+              xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"
+              xmlns:xbrli="http://www.xbrl.org/2003/instance"
+              xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
+              xmlns:us-gaap="http://fasb.org/us-gaap/2026">
+          <body>
+            <xbrli:context id="total"><xbrli:entity><xbrli:identifier scheme="cik">1</xbrli:identifier></xbrli:entity><xbrli:period><xbrli:instant>2026-03-31</xbrli:instant></xbrli:period></xbrli:context>
+            <xbrli:unit id="USD"><xbrli:measure>iso4217:USD</xbrli:measure></xbrli:unit>
+            <p>Remaining performance obligations were $1 billion. We expect to recognize 41% over the following 12 months.</p>
+            <ix:nonFraction name="us-gaap:RevenueRemainingPerformanceObligation" contextRef="total" unitRef="USD">1000</ix:nonFraction>
+          </body>
+        </html>
+        """,
+        document_name="timing-text.htm",
+        filing={"report_date": "2026-03-31", "filing_date": "2026-05-01"},
+    )
+    text_values = {fact.concept_name: fact.value for fact in text_facts}
+    assert text_values["RemainingPerformanceObligationCurrent"] == pytest.approx(410.0)
+
+
+def test_machinery_ccc_uses_aligned_ttm_windows() -> None:
+    namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "scripts" / "08_build_industrials_financial_features.py")
+    )
+
+    def duration(metric: str, start: str, end: str, value: float) -> dict[str, object]:
+        return {
+            "canonical_metric": metric,
+            "period_start": start,
+            "period_end": end,
+            "filing_date": end,
+            "form_type": "10-K",
+            "fiscal_period": "FY",
+            "source_priority": 10,
+            "value": value,
+        }
+
+    def instant(metric: str, end: str, value: float) -> dict[str, object]:
+        return {
+            "canonical_metric": metric,
+            "period_start": "",
+            "period_end": end,
+            "filing_date": end,
+            "form_type": "10-K",
+            "fiscal_period": "FY",
+            "source_priority": 10,
+            "value": value,
+        }
+
+    rows = [
+        duration("revenue", "2025-04-01", "2026-03-31", 1200.0),
+        duration("gross_profit", "2025-04-01", "2026-03-31", 400.0),
+        duration("revenue", "2024-04-01", "2025-03-31", 1000.0),
+        duration("gross_profit", "2024-04-01", "2025-03-31", 300.0),
+        instant("inventory", "2026-03-31", 200.0),
+        instant("accounts_receivable", "2026-03-31", 150.0),
+        instant("accounts_payable", "2026-03-31", 100.0),
+        instant("inventory", "2025-03-31", 180.0),
+        instant("accounts_receivable", "2025-03-31", 120.0),
+        instant("accounts_payable", "2025-03-31", 90.0),
+    ]
+    current, change, flags = namespace["build_machinery_ccc"](rows)
+    assert current is not None
+    assert current.inventory_days == pytest.approx(200.0 / 800.0 * 365.0)
+    assert current.days_sales_outstanding == pytest.approx(150.0 / 1200.0 * 365.0)
+    assert current.days_payables_outstanding == pytest.approx(100.0 / 800.0 * 365.0)
+    assert change is not None
+    assert "ccc_cost_of_sales_ttm_derived_from_revenue_less_gross_profit" in flags
+
+
+def test_machinery_archive_event_filings_have_separate_cap() -> None:
+    namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "scripts" / "07_sync_industrials_sec_fundamentals.py")
+    )
+    rows = [
+        {"form_type": "8-K", "filing_date": "2026-07-01", "accession_number": "4"},
+        {"form_type": "10-Q", "filing_date": "2026-06-01", "accession_number": "3"},
+        {"form_type": "8-K", "filing_date": "2026-05-01", "accession_number": "2"},
+        {"form_type": "10-K", "filing_date": "2026-04-01", "accession_number": "1"},
+    ]
+    selected = namespace["select_archive_filing_rows"](
+        rows,
+        max_filings=2,
+        supplemental_forms={"8-K", "8-K/A"},
+        max_supplemental_filings=1,
+    )
+    assert [row["form_type"] for row in selected].count("8-K") == 1
+    assert {row["form_type"] for row in selected} >= {"10-Q", "10-K"}
+    config = load_yaml(MACHINERY_CONFIG)
+    forms = {str(form).upper() for form in cfg_get(config, "sec_fundamentals.forms", [])}
+    assert {"424B3", "424B4", "F-1", "F-4", "10-12B", "10-12G", "8-K"} <= forms
+
+
+def test_undefined_roic_and_leverage_are_classified_not_applicable(tmp_path: Path) -> None:
+    namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "scripts" / "08_build_industrials_financial_features.py")
+    )
+    db_path = tmp_path / "industrials.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        availability = namespace["classify_financial_metric_availability"](
+            conn,
+            feature={
+                "revenue": 100.0,
+                "reporting_profile": "SEC_XBRL_US_GAAP",
+                "data_quality_status": "complete",
+                "roic_not_meaningful_flag": 1,
+                "negative_ebitda_leverage_flag": 1,
+            },
+            rows=[],
+            company={"ticker": "TEST", "development_stage": "operating"},
+            source_id="sec_companyfacts",
+            model_family="machinery",
+            asof=date(2026, 7, 9),
+        )
+    by_metric = {row["metric_name"]: row for row in availability}
+    assert by_metric["roic"]["availability_status"] == "NOT_APPLICABLE"
+    assert by_metric["net_debt_to_ebitda"]["availability_status"] == "NOT_APPLICABLE"
+
+
+def test_historical_feature_reports_are_date_scoped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace = runpy.run_path(
+        str(
+            PROJECT_ROOT
+            / "industrials"
+            / "machinery"
+            / "scripts"
+            / "18_backfill_machinery_historical_dashboard_reports.py"
+        )
+    )
+    calls: list[list[str]] = []
+
+    def capture_run(command: list[str], **_: object) -> None:
+        calls.append(command)
+
+    monkeypatch.setattr(namespace["subprocess"], "run", capture_run)
+    report_root = tmp_path / "historical_backfill" / "stage_reports" / ASOF
+    namespace["rebuild_features"](
+        config_path=MACHINERY_CONFIG,
+        db_path=tmp_path / "industrials.sqlite",
+        asof=ASOF,
+        report_root=report_root,
+    )
+
+    assert len(calls) == 3
+    flattened = [str(item) for command in calls for item in command]
+    assert str(report_root / "market_feature_coverage.csv") in flattened
+    assert str(report_root / "financial_feature_coverage.csv") in flattened
+    assert str(report_root / "financial_metric_availability.csv") in flattened
+    assert str(report_root / "positioning_import_coverage.csv") in flattened
+    assert "--availability-output-csv" in flattened
+    assert "--suppress-data-quality-issues" in flattened
+
+
+def test_machinery_strict_registration_statement_parser() -> None:
+    namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "scripts" / "07_sync_industrials_sec_fundamentals.py")
+    )
+    label_concept = namespace["registration_text_table_label_concept"]
+    assert label_concept("Equipment Order Intake") == ("Orders", "duration")
+    assert label_concept("Orders (15)") == ("Orders", "duration")
+    assert label_concept("Net cash flows provided by (used in) operating activities") == (
+        "OperatingCashFlow",
+        "duration",
+    )
+    assert label_concept("Net sales growth rate") is None
+    assert label_concept("Gross Profit Margin") is None
+    assert label_concept("Income (loss) from continuing operations before income taxes") == (
+        "PretaxIncome",
+        "duration",
+    )
+    assert label_concept("Current maturities of long-term debt (Note 10)") == (
+        "DebtCurrentComponent",
+        "instant",
+    )
+
+    parse_tables = namespace["parse_archive_text_table_facts"]
+    filing = {
+        "report_date": "2026-03-31",
+        "filing_date": "2026-05-01",
+        "form_type": "S-1/A",
+    }
+    mixed_facts = parse_tables(
+        """
+        <p>Issuer Consolidated Statements of Operations</p>
+        <table>
+          <tr><th>Three Months Ended March 31</th><th>Years Ended December 31</th></tr>
+          <tr><th>(in millions of $)</th><th>2026</th><th>2025</th><th>2025</th><th>2024</th><th>2023</th></tr>
+          <tr><td>Net sales</td><td>668.6</td><td>494.0</td><td>2,636.8</td><td>2,159.1</td><td>2,015.0</td></tr>
+          <tr><td>Operating income</td><td>63.1</td><td>74.9</td><td>346.5</td><td>297.8</td><td>238.7</td></tr>
+        </table>
+        """,
+        document_name="issuer-registration.htm",
+        filing=filing,
+        company_currency="USD",
+        strict_registration_statements=True,
+    )
+    revenue_periods = {
+        (fact.period_end, fact.value)
+        for fact in mixed_facts
+        if fact.concept_name == "Revenue"
+    }
+    assert revenue_periods == {
+        ("2026-03-31", 668_600_000.0),
+        ("2025-03-31", 494_000_000.0),
+        ("2025-12-31", 2_636_800_000.0),
+        ("2024-12-31", 2_159_100_000.0),
+        ("2023-12-31", 2_015_000_000.0),
+    }
+
+    actual_facts = parse_tables(
+        """
+        <p>Issuer Consolidated Statements of Operations</p>
+        <table>
+          <tr><th>Actual</th><th>Pro Forma (Unaudited)</th></tr>
+          <tr><th>Years Ended December 31</th><th>Years Ended December 31</th></tr>
+          <tr><th>(in millions of $)</th><th>2025</th><th>2024</th><th>2023</th><th>2025</th></tr>
+          <tr><td>Net sales</td><td>3,340.1</td><td>2,624.7</td><td>2,556.2</td><td>3,518.9</td></tr>
+        </table>
+        """,
+        document_name="issuer-actual-pro-forma.htm",
+        filing=filing,
+        company_currency="USD",
+        strict_registration_statements=True,
+    )
+    assert [(fact.period_end, fact.value) for fact in actual_facts] == [
+        ("2025-12-31", 3_340_100_000.0),
+        ("2024-12-31", 2_624_700_000.0),
+        ("2023-12-31", 2_556_200_000.0),
+    ]
+
+    balance_facts = parse_tables(
+        """
+        <p>Issuer Condensed Consolidated Balance Sheets</p>
+        <table>
+          <tr><th>(in millions of $)</th><th>Note</th><th>March 31, 2026</th><th>December 31, 2025</th></tr>
+          <tr><td>Inventories</td><td>12</td><td>815.2</td><td>601.2</td></tr>
+          <tr><td>Current maturities of long-term debt (Note 10)</td><td>27.7</td><td>27.8</td></tr>
+          <tr><td>Long-term debt (Note 10)</td><td>5,621.0</td><td>5,622.6</td></tr>
+          <tr><td>Total assets</td><td>5,290.1</td><td>4,902.5</td></tr>
+        </table>
+        """,
+        document_name="issuer-balance.htm",
+        filing=filing,
+        company_currency="USD",
+        strict_registration_statements=True,
+    )
+    assert [(fact.period_end, fact.value) for fact in balance_facts if fact.concept_name == "Inventory"] == [
+        ("2026-03-31", 815_200_000.0),
+        ("2025-12-31", 601_200_000.0),
+    ]
+    assert [(fact.period_end, fact.value) for fact in balance_facts if fact.concept_name == "DebtTotal"] == [
+        ("2026-03-31", 5_648_700_000.0),
+        ("2025-12-31", 5_650_400_000.0),
+    ]
+
+    pro_forma_facts = parse_tables(
+        """
+        <p>Unaudited Pro Forma Condensed Combined Statements of Operations</p>
+        <table>
+          <tr><th>(in millions of $)</th><th>2025</th><th>2024</th></tr>
+          <tr><td>Net sales</td><td>9,999</td><td>8,999</td></tr>
+        </table>
+        """,
+        document_name="issuer-pro-forma.htm",
+        filing=filing,
+        company_currency="USD",
+        strict_registration_statements=True,
+    )
+    assert pro_forma_facts == []
+
+    financial_namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "scripts" / "08_build_industrials_financial_features.py")
+    )
+    rows = [
+        {"taxonomy": "us-gaap", "canonical_metric": "assets", "value": 0.0},
+        {"taxonomy": "sec-text", "canonical_metric": "assets", "value": 8_309_200_000.0},
+    ]
+    filtered, taxonomy = financial_namespace["rows_for_reporting_profile"](
+        rows,
+        {"reporting_profile": "SEC_ARCHIVE_TEXT_TABLE"},
+        model_family="machinery",
+    )
+    assert taxonomy == "sec-text"
+    assert filtered == [rows[1]]
+    defense_rows, defense_taxonomy = financial_namespace["rows_for_reporting_profile"](
+        rows,
+        {"reporting_profile": "SEC_ARCHIVE_TEXT_TABLE"},
+        model_family="defense",
+    )
+    assert defense_taxonomy is None
+    assert defense_rows == rows
+
+    supplemental_rows = [
+        {"taxonomy": "us-gaap", "canonical_metric": "assets", "value": 10.0},
+        {"taxonomy": "sec-text", "canonical_metric": "assets", "value": 999.0},
+        {"taxonomy": "sec-footnote", "canonical_metric": "reported_backlog", "value": 50.0},
+        {"taxonomy": "sec-text", "canonical_metric": "orders", "value": 25.0},
+    ]
+    machinery_rows, machinery_taxonomy = financial_namespace["rows_for_reporting_profile"](
+        supplemental_rows,
+        {"reporting_profile": "SEC_XBRL_US_GAAP"},
+        model_family="machinery",
+    )
+    assert machinery_taxonomy == "us-gaap"
+    assert supplemental_rows[0] in machinery_rows
+    assert supplemental_rows[1] not in machinery_rows
+    assert supplemental_rows[2:] == machinery_rows[1:]
+
+
 def test_machinery_loaders_preserve_defense_rows(tmp_path: Path) -> None:
     db_path = load_machinery_db(tmp_path)
     insert_defense_sentinel(db_path)
@@ -661,6 +1208,12 @@ def test_machinery_end_to_end_smoke(tmp_path: Path) -> None:
         str(tmp_path / "machinery_scoring_feature_validation.json"),
     )
     scoring_rows = read_rows(feature_path)
+    seeded_scoring_rows = [row for row in scoring_rows if row["financial_feature_source_id"]]
+    assert seeded_scoring_rows
+    assert {row["financial_fallback_status"] for row in seeded_scoring_rows} == {"none"}
+    assert {row["market_data_quality"] for row in seeded_scoring_rows} == {"complete"}
+    assert {row["positioning_quality"] for row in seeded_scoring_rows} == {"complete"}
+    assert {row["latest_bar_date"] for row in seeded_scoring_rows} == {ASOF}
     development_totals = {
         int(row["score_input_total_count"])
         for row in scoring_rows
@@ -746,6 +1299,10 @@ def test_machinery_end_to_end_smoke(tmp_path: Path) -> None:
     assert len(rank_rows) == 114
     assert set(FINAL_RANK_FIELDS) == set(rank_rows[0])
     assert set(PORTFOLIO_REQUIRED_FIELDS).issubset(rank_rows[0])
+    assert {row["financial_metric_availability_asof_date"] for row in rank_rows} == {ASOF}
+    for metric_name in required_metric_names():
+        status_field = f"{metric_name}_availability_status"
+        assert {row[status_field] for row in rank_rows} == {"NOT_DISCLOSED"}
     assert sum(row["rank_ready_flag"] == "1" for row in rank_rows) == 12
     assert all(row["portfolio_candidate_gate"] == "0" for row in rank_rows)
 
@@ -758,6 +1315,19 @@ def test_machinery_end_to_end_smoke(tmp_path: Path) -> None:
     adapted = run_adapter(adapter_config(), sector_root, ASOF)
     assert len(adapted.rows) == 114
     assert sum(row.investable_eligible for row in adapted.rows) == 0
+    history_namespace = runpy.run_path(
+        str(
+            PROJECT_ROOT
+            / "industrials"
+            / "machinery"
+            / "scripts"
+            / "18_backfill_machinery_historical_dashboard_reports.py"
+        )
+    )
+    assert history_namespace["validate_portfolio_handoff"](
+        sector_output_root=sector_root,
+        asof=ASOF,
+    ) == 114
     assert sum(row.calibration_research_eligible for row in adapted.rows) == 0
 
     history_root = tmp_path / "h"

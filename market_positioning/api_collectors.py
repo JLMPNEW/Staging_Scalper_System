@@ -180,6 +180,39 @@ def load_universe_ibkr_symbol_map(path: Path | None) -> dict[str, str]:
     return out
 
 
+def load_universe_membership_end_map(path: Path | None) -> dict[str, date]:
+    """Return terminal membership dates for tickers without an open interval."""
+    if path is None or not path.exists():
+        return {}
+    terminal_dates: dict[str, date] = {}
+    open_tickers: set[str] = set()
+    for row in read_csv_rows(path):
+        ticker = normalize_ticker(row.get("ticker") or row.get("symbol"))
+        if not ticker:
+            continue
+        raw_end = row.get("membership_end_date") or row.get("end_date") or row.get("terminal_date")
+        terminal_date = parse_date(raw_end)
+        if terminal_date is None:
+            open_tickers.add(ticker)
+            continue
+        prior = terminal_dates.get(ticker)
+        if prior is None or terminal_date > prior:
+            terminal_dates[ticker] = terminal_date
+    return {ticker: terminal_date for ticker, terminal_date in terminal_dates.items() if ticker not in open_tickers}
+
+
+def filter_ibkr_tickers_for_asof(
+    tickers: list[str],
+    membership_end_by_ticker: dict[str, date],
+    end_date: date,
+) -> tuple[list[str], set[str]]:
+    """Exclude historical lineages that had already ended by the IB as-of date."""
+    ended_before_asof = {
+        ticker for ticker, membership_end in membership_end_by_ticker.items() if membership_end < end_date
+    }
+    return [ticker for ticker in tickers if ticker not in ended_before_asof], ended_before_asof
+
+
 def load_cusip_ticker_map(path: Path | None) -> dict[str, str]:
     if path is None or not path.exists():
         return {}
@@ -1061,6 +1094,35 @@ def upsert_ibkr_shortable_rows(conn: sqlite3.Connection, rows: list[tuple[Any, .
         )
 
 
+def prune_ibkr_rows_after_membership_end(
+    conn: sqlite3.Connection,
+    membership_end_by_ticker: dict[str, date],
+) -> tuple[int, int]:
+    """Remove current-security IB rows that fall after a historical lineage ended."""
+    fee_rows_deleted = 0
+    shortable_rows_deleted = 0
+    with conn:
+        for ticker, terminal_date in membership_end_by_ticker.items():
+            terminal_iso = terminal_date.isoformat()
+            fee_result = conn.execute(
+                """
+                DELETE FROM ibkr_borrow_fee_rate_daily
+                WHERE ticker = ? AND source = 'interactive_brokers' AND asof_date > ?
+                """,
+                (ticker, terminal_iso),
+            )
+            shortable_result = conn.execute(
+                """
+                DELETE FROM ibkr_shortable_shares_snapshots
+                WHERE ticker = ? AND source = 'interactive_brokers' AND asof_date > ?
+                """,
+                (ticker, terminal_iso),
+            )
+            fee_rows_deleted += max(0, int(fee_result.rowcount))
+            shortable_rows_deleted += max(0, int(shortable_result.rowcount))
+    return fee_rows_deleted, shortable_rows_deleted
+
+
 def sync_ibkr_borrow_availability(
     conn: sqlite3.Connection,
     *,
@@ -1084,8 +1146,10 @@ def sync_ibkr_borrow_availability(
     """Load IBKR borrow fee history and current shortable-share availability.
 
     Historical availability is only supported for FEE_RATE in the tested TWS
-    feed.  shortableShares is a current market-data snapshot and must be
-    captured daily if historical supply availability is needed.
+    feed.  shortableShares is sampled from a streaming generic-tick
+    subscription because IBKR rejects generic tick 236 in snapshot mode.  The
+    subscription is cancelled immediately after the configured wait interval.
+    It must be captured daily if historical supply availability is needed.
     """
     try:
         from ib_insync import IB, Stock  # type: ignore[import-not-found]
@@ -1095,6 +1159,12 @@ def sync_ibkr_borrow_availability(
     tickers = load_universe_tickers(tickers_csv)
     primary_exchange_by_ticker = load_universe_exchange_map(tickers_csv)
     ibkr_symbol_by_ticker = load_universe_ibkr_symbol_map(tickers_csv)
+    membership_end_by_ticker = load_universe_membership_end_map(tickers_csv)
+    pruned_fee_rows, pruned_shortable_rows = prune_ibkr_rows_after_membership_end(
+        conn,
+        membership_end_by_ticker,
+    )
+    tickers, ended_before_asof = filter_ibkr_tickers_for_asof(tickers, membership_end_by_ticker, end_date)
     if max_tickers and max_tickers > 0:
         tickers = tickers[:max_tickers]
     if not tickers:
@@ -1176,58 +1246,61 @@ def sync_ibkr_borrow_availability(
             if sleep_sec > 0:
                 ib.sleep(float(sleep_sec))
 
-        qualified_items = list(qualified.items())
-        for start in range(0, len(qualified_items), max(1, int(batch_size))):
-            batch = qualified_items[start : start + max(1, int(batch_size))]
-            subscriptions: list[tuple[str, Any, Any]] = []
-            for ticker, contract in batch:
-                try:
-                    if not ib.isConnected():
-                        raise RuntimeError("IBKR connection lost during shortable-share snapshot sync")
-                    ticker_obj = ib.reqMktData(
-                        contract,
-                        genericTickList="236",
-                        snapshot=bool(shortable_snapshot),
-                        regulatorySnapshot=False,
+        shortable_batch_size = min(100, max(1, int(batch_size)))
+        if shortable_snapshot:
+            qualified_items = list(qualified.items())
+            for start in range(0, len(qualified_items), shortable_batch_size):
+                batch = qualified_items[start : start + shortable_batch_size]
+                subscriptions: list[tuple[str, Any, Any]] = []
+                for ticker, contract in batch:
+                    try:
+                        if not ib.isConnected():
+                            raise RuntimeError("IBKR connection lost during shortable-share snapshot sync")
+                        ticker_obj = ib.reqMktData(
+                            contract,
+                            genericTickList="236",
+                            # Generic ticks are invalid in IBKR snapshot requests.
+                            # Stream briefly, sample shortableShares, then cancel.
+                            snapshot=False,
+                            regulatorySnapshot=False,
+                        )
+                        subscriptions.append((ticker, contract, ticker_obj))
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as exc:
+                        if not ib.isConnected():
+                            raise RuntimeError("IBKR connection lost during shortable-share snapshot sync") from exc
+                        failed_tickers.append(ticker)
+                ib.sleep(max(0.1, float(snapshot_wait_sec)))
+                now = utc_now()
+                snapshot_rows: list[tuple[Any, ...]] = []
+                for ticker, contract, ticker_obj in subscriptions:
+                    raw_shortable = getattr(ticker_obj, "shortableShares", None)
+                    shortable = to_float(raw_shortable)
+                    if shortable is None or not math.isfinite(shortable) or shortable < 0.0:
+                        continue
+                    snapshot_rows.append(
+                        (
+                            ticker,
+                            end_date.isoformat(),
+                            now,
+                            int(getattr(contract, "conId", 0) or 0),
+                            shortable,
+                            int(market_data_type),
+                            "interactive_brokers",
+                            now,
+                            now,
+                        )
                     )
-                    subscriptions.append((ticker, contract, ticker_obj))
-                except KeyboardInterrupt:
-                    raise
-                except Exception as exc:
-                    if not ib.isConnected():
-                        raise RuntimeError("IBKR connection lost during shortable-share snapshot sync") from exc
-                    failed_tickers.append(ticker)
-            ib.sleep(max(0.1, float(snapshot_wait_sec)))
-            now = utc_now()
-            snapshot_rows: list[tuple[Any, ...]] = []
-            for ticker, contract, ticker_obj in subscriptions:
-                raw_shortable = getattr(ticker_obj, "shortableShares", None)
-                shortable = to_float(raw_shortable)
-                if shortable is None or not math.isfinite(shortable) or shortable < 0.0:
-                    continue
-                snapshot_rows.append(
-                    (
-                        ticker,
-                        end_date.isoformat(),
-                        now,
-                        int(getattr(contract, "conId", 0) or 0),
-                        shortable,
-                        int(market_data_type),
-                        "interactive_brokers",
-                        now,
-                        now,
-                    )
-                )
-            upsert_ibkr_shortable_rows(conn, snapshot_rows)
-            shortable_rows_written += len(snapshot_rows)
-            if not bool(shortable_snapshot):
+                upsert_ibkr_shortable_rows(conn, snapshot_rows)
+                shortable_rows_written += len(snapshot_rows)
                 for _ticker, contract, _ticker_obj in subscriptions:
                     try:
                         ib.cancelMktData(contract)
                     except Exception:
                         pass
-            if sleep_sec > 0:
-                ib.sleep(float(sleep_sec))
+                if sleep_sec > 0:
+                    ib.sleep(float(sleep_sec))
     finally:
         if ib.isConnected():
             ib.disconnect()
@@ -1250,6 +1323,10 @@ def sync_ibkr_borrow_availability(
         f"fee_history_skipped_current={skipped_fee_history} shortable_rows_new_or_refreshed={shortable_rows_written} "
         f"shortable_coverage_pct={shortable_coverage_pct:.1f} "
         f"shortable_snapshot={bool(shortable_snapshot)} failed_tickers={len(set(failed_tickers))} "
+        f"ended_memberships_skipped={len(ended_before_asof)} "
+        f"post_membership_fee_rows_pruned={pruned_fee_rows} "
+        f"post_membership_shortable_rows_pruned={pruned_shortable_rows} "
+        f"max_concurrent_shortable_requests={shortable_batch_size} "
         f"total_fee_rows={total_fee_rows} total_shortable_rows={total_shortable_rows}{coverage_warning}"
     )
     update_feed_state(

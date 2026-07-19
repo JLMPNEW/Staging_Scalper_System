@@ -186,7 +186,9 @@ def validate_seed_contracts(
     active_tickers = [normalize_ticker(row.get("ticker")) for row in active_rows]
     delisted_tickers = [normalize_ticker(row.get("ticker")) for row in delisted_rows]
     if blanks := [index + 2 for index, ticker in enumerate(active_tickers) if not ticker]:
-        errors.append(f"active: blank/invalid tickers at CSV lines={blanks[:20]}")
+        # read_csv_rows filters fully-blank physical lines, so these are
+        # header-relative data-row ordinals, not raw file line numbers.
+        errors.append(f"active: blank/invalid tickers at data rows={blanks[:20]}")
     if duplicates := _duplicates(active_tickers):
         errors.append(f"active: duplicate tickers={duplicates}")
     if duplicates := _duplicates(delisted_tickers):

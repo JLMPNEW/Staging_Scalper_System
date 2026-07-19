@@ -88,6 +88,43 @@ def placeholders(values: list[str]) -> str:
     return ",".join("?" for _ in values)
 
 
+def load_open_financial_review_issue_tickers(
+    conn: Any,
+    *,
+    model_family: str,
+    universe: list[str],
+) -> tuple[set[str], list[str]]:
+    """Return open review issues scoped to one industrial model family."""
+    ph = placeholders(universe)
+    review_issue_rows = conn.execute(
+        f"""
+        SELECT DISTINCT ticker
+        FROM data_quality_issues
+        WHERE stage = ?
+          AND model_family = ?
+          AND issue_type = 'financial_feature_review'
+          AND resolution_status = 'open'
+          AND ticker IN ({ph})
+        """,
+        (FEATURE_STAGE, model_family, *universe),
+    ).fetchall()
+    out_of_universe_issue_rows = conn.execute(
+        f"""
+        SELECT DISTINCT ticker
+        FROM data_quality_issues
+        WHERE stage = ?
+          AND model_family = ?
+          AND issue_type = 'financial_feature_review'
+          AND resolution_status = 'open'
+          AND ticker NOT IN ({ph})
+        """,
+        (FEATURE_STAGE, model_family, *universe),
+    ).fetchall()
+    review_issue_tickers = {str(row["ticker"]) for row in review_issue_rows}
+    out_of_universe_issue_tickers = sorted(str(row["ticker"]) for row in out_of_universe_issue_rows)
+    return review_issue_tickers, out_of_universe_issue_tickers
+
+
 def load_universe(conn: Any, model_family: str, *, asof: date | None) -> list[str]:
     if asof is not None:
         rows = conn.execute(
@@ -162,7 +199,15 @@ def validate() -> int:
     model_family = str(args.model_family or cfg_get(config, "industrials_universe.initial_subsector", "defense") or "defense").strip()
     source_id = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts") or "sec_companyfacts")
     submissions_source_id = str(cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions") or "sec_submissions")
-    expected_count = int(cfg_get(config, "industrials_universe.expected_ticker_count", 0) or 0)
+    # CF-4: expected_ticker_count lives ONLY in the universe policy YAML; the
+    # config-level copy was removed as a duplicated source of truth. Fall back
+    # to the legacy config key only when no policy file is wired.
+    policy_raw = str(cfg_get(config, "industrials_universe.policy_path", "") or "").strip()
+    if policy_raw:
+        policy = load_yaml(resolve_path(policy_raw, base_dir=base_dir))
+        expected_count = int(policy.get("expected_ticker_count") or 0)
+    else:
+        expected_count = int(cfg_get(config, "industrials_universe.expected_ticker_count", 0) or 0)
     asof_text = str(args.asof or "").strip()
     requested_asof = parse_date(asof_text)
     if asof_text and requested_asof is None:
@@ -570,30 +615,11 @@ def validate() -> int:
         if future_canonical:
             warnings.append(f"Canonical table has {future_canonical} rows after validation asof; feature builder filters them out for PIT panels.")
 
-        review_issue_rows = conn.execute(
-            f"""
-            SELECT DISTINCT ticker
-            FROM data_quality_issues
-            WHERE stage = ?
-              AND issue_type = 'financial_feature_review'
-              AND resolution_status = 'open'
-              AND ticker IN ({ph})
-            """,
-            (FEATURE_STAGE, *universe),
-        ).fetchall()
-        review_issue_tickers = {str(row["ticker"]) for row in review_issue_rows}
-        out_of_universe_issue_rows = conn.execute(
-            f"""
-            SELECT DISTINCT ticker
-            FROM data_quality_issues
-            WHERE stage = ?
-              AND issue_type = 'financial_feature_review'
-              AND resolution_status = 'open'
-              AND ticker NOT IN ({ph})
-            """,
-            (FEATURE_STAGE, *universe),
-        ).fetchall()
-        out_of_universe_issue_tickers = sorted(str(row["ticker"]) for row in out_of_universe_issue_rows)
+        review_issue_tickers, out_of_universe_issue_tickers = load_open_financial_review_issue_tickers(
+            conn,
+            model_family=model_family,
+            universe=universe,
+        )
         # review_rows holds "ticker:status:reason" strings; recover the ticker key.
         review_feature_tickers = {entry.split(":", 1)[0] for entry in review_rows}
         at_latest_asof = audit_asof.isoformat() == str(latest_feature_asof or "").strip()

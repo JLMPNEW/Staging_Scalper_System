@@ -112,6 +112,10 @@ def _feature_spec(metric_key: str, ref_area: str, frequency: str, regime_block: 
         "us_5y_breakeven",
         "us_5y5y_forward_inflation",
         "us_10y_real_yield",
+        # V2.1 stress components (V2_1_CANDIDATE_SPEC.md): spreads/vol are levels —
+        # a pct_change of a spread that can cross zero is undefined.
+        "us_ig_spread_baa10y",
+        "us_equity_vol",
     }
     if metric_key in level_metrics or suffix in level_suffixes:
         return "level", "level", 0, None
@@ -158,7 +162,7 @@ def _sign_multiplier(
         return -1.0
     if metric_key in {"us_nominal_broad_dollar", "us_real_broad_dollar", "us_wti_spot", "us_brent_spot", "us_henry_hub_natgas", "global_copper", "global_wheat"}:
         return 1.0
-    if metric_key in {"us_initial_claims", "us_initial_claims_4w", "us_hy_oas", "us_nfci", "us_anfci", "us_effective_fed_funds", "us_sofr", "us_10y_real_yield"}:
+    if metric_key in {"us_initial_claims", "us_initial_claims_4w", "us_hy_oas", "us_nfci", "us_anfci", "us_effective_fed_funds", "us_sofr", "us_10y_real_yield", "us_ig_spread_baa10y", "us_equity_vol"}:
         return -1.0
     if suffix in {"unemployment_rate", "short_term_rate", "long_term_yield"}:
         return -1.0

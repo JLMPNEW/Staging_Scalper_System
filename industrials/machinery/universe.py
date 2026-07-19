@@ -358,11 +358,20 @@ def load_active_universe(
             """,
             (ticker, MODEL_FAMILY),
         ).fetchone()
-        if current_elsewhere is None:
-            conn.execute(
-                "UPDATE dim_company SET is_active = 0, universe_status = 'removed_from_machinery_seed', updated_at = ? WHERE ticker = ?",
-                (utc_now(), ticker),
-            )
+        if current_elsewhere is not None:
+            continue
+        machinery_history = conn.execute(
+            "SELECT 1 FROM dim_universe_membership WHERE ticker = ? AND model_family = ? LIMIT 1",
+            (ticker, MODEL_FAMILY),
+        ).fetchone()
+        if machinery_history is not None:
+            # Historical machinery members (e.g. delisted calibration names) keep the
+            # status assigned by the historical loader; only true seed removals flip here.
+            continue
+        conn.execute(
+            "UPDATE dim_company SET is_active = 0, universe_status = 'removed_from_machinery_seed', updated_at = ? WHERE ticker = ?",
+            (utc_now(), ticker),
+        )
     placeholders = ",".join("?" for _ in active_tickers)
     conn.execute(
         f"""
@@ -515,18 +524,22 @@ def load_historical_membership(
         cohort_id = row["calibration_cohort_id"]
         if cohort_id not in cohorts:
             raise ValueError(f"{ticker}: unknown historical cohort={cohort_id}")
-        _upsert_taxonomy(
-            conn,
-            company_id=company_id,
-            ticker=ticker,
-            sector="Industrials",
-            industry="Machinery",
-            subsector="Machinery",
-            cohort_id=cohort_id,
-            cohort=cohorts[cohort_id],
-            taxonomy_source=membership_source_id,
-            historical_only=ticker not in active_tickers,
-        )
+        if ticker not in active_tickers:
+            # Active-seed tickers keep the granular taxonomy loaded from the seed CSV
+            # (script 01); upserting here would overwrite industry/subsector/source
+            # with the coarse membership-level labels on every 01b rerun.
+            _upsert_taxonomy(
+                conn,
+                company_id=company_id,
+                ticker=ticker,
+                sector="Industrials",
+                industry="Machinery",
+                subsector="Machinery",
+                cohort_id=cohort_id,
+                cohort=cohorts[cohort_id],
+                taxonomy_source=membership_source_id,
+                historical_only=True,
+            )
         _upsert_membership(
             conn,
             company_id=company_id,
@@ -544,6 +557,8 @@ def load_historical_membership(
     for row in delisted_rows:
         ticker = normalize_ticker(row.get("ticker"))
         cohort_id = str(row.get("cohort") or "").strip()
+        if cohort_id not in cohorts:
+            raise ValueError(f"{ticker}: unknown delisted cohort={cohort_id}")
         confidence_label = str(row.get("confidence") or "").strip().lower()
         confidence_score = {"verified": 0.95, "high": 0.90, "medium": 0.70, "low": 0.50}.get(
             confidence_label,
@@ -643,6 +658,32 @@ def load_ticker_aliases(conn: sqlite3.Connection, *, path: Path, source_id: str)
                 now,
             ),
         )
+        conn.execute(
+            """
+            INSERT INTO fact_corporate_action(
+                issuer_id, ticker, related_ticker, action_type, action_date,
+                source_id, reason, notes, created_at, updated_at
+            )
+            VALUES (NULLIF(?, ''), ?, ?, 'ticker_alias', ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, related_ticker, action_type, action_date) DO UPDATE SET
+                issuer_id = excluded.issuer_id,
+                source_id = excluded.source_id,
+                reason = excluded.reason,
+                notes = excluded.notes,
+                updated_at = excluded.updated_at
+            """,
+            (
+                row.get("issuer_id") or "",
+                contract,
+                active,
+                effective,
+                source_id,
+                row.get("reason") or "",
+                row.get("notes") or "",
+                now,
+                now,
+            ),
+        )
         count += 1
     return count
 
@@ -701,10 +742,14 @@ def validate_database_contract(
             """
             SELECT COUNT(*)
             FROM dim_universe_membership m
-            JOIN dim_industrials_taxonomy t ON t.ticker = m.ticker AND t.model_family = m.model_family
-            WHERE m.model_family = ? AND t.model_family <> ?
+            WHERE m.model_family = ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM dim_industrials_taxonomy t
+                  WHERE t.ticker = m.ticker AND t.model_family = m.model_family
+              )
             """,
-            (MODEL_FAMILY, MODEL_FAMILY),
+            (MODEL_FAMILY,),
         ).fetchone()[0]
         or 0
     )

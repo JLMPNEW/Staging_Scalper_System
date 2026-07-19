@@ -442,6 +442,12 @@ def import_borrow(
 ) -> dict[str, int]:
     stats = {ticker: 0 for ticker in tickers}
     now = utc_now()
+    # Full replace for the scoped universe so upstream recycled-symbol cleanup
+    # cannot leave stale IBKR rows in the technology database.
+    dest.execute(
+        f"DELETE FROM fact_ibkr_borrow_snapshot WHERE source_id = ? AND ticker IN ({qmarks(tickers)})",
+        (source_id, *tickers),
+    )
     rows = source.execute(
         f"SELECT * FROM ibkr_borrow_fee_rate_daily WHERE UPPER(ticker) IN ({qmarks(query_tickers)})",
         query_tickers,

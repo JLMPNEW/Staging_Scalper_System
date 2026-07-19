@@ -41,6 +41,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -509,8 +510,27 @@ def review_pack_complete(base_output_dir: Path, asof: date, required_files: list
     return True
 
 
-def run_command(command: list[str]) -> None:
-    subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+def run_command(command: list[str], *, max_attempts: int = 3, retry_delay_seconds: float = 5.0) -> None:
+    if max_attempts <= 0:
+        raise ValueError("max_attempts must be positive")
+    for attempt in range(1, max_attempts + 1):
+        try:
+            subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+            return
+        except (OSError, subprocess.CalledProcessError) as exc:
+            if attempt >= max_attempts:
+                raise
+            delay = retry_delay_seconds * attempt
+            LOGGER.warning(
+                "Stage command failed; retrying attempt=%s/%s delay_seconds=%g command=%s error=%s",
+                attempt,
+                max_attempts,
+                delay,
+                subprocess.list2cmdline(command),
+                exc,
+            )
+            if delay > 0:
+                time.sleep(delay)
 
 
 def run_setup_stage(*, stage: str, config_path: Path, db_path: Path | None) -> None:
@@ -580,7 +600,21 @@ def write_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=MANIFEST_FIELDNAMES, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
-    os.replace(tmp_name, path)
+    attempts = 8
+    try:
+        for attempt in range(1, attempts + 1):
+            try:
+                os.replace(tmp_name, path)
+                return
+            except PermissionError:
+                if attempt >= attempts:
+                    raise
+                time.sleep(min(0.25 * (2 ** (attempt - 1)), 4.0))
+    finally:
+        try:
+            Path(tmp_name).unlink(missing_ok=True)
+        except OSError:
+            LOGGER.warning("Unable to remove temporary manifest file: %s", tmp_name)
 
 
 def load_manifest_rows(path: Path) -> list[dict[str, str]]:

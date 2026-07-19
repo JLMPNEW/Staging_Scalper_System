@@ -86,6 +86,7 @@ us_ads_index,level,USA,daily,growth_now,level,0,,252,252,63,1.00,-5.0,5.0,Genera
 us_advance_retail_sales,yoy_pct,USA,monthly,growth_lead,pct_change,12,,60,60,24,1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_anfci,level,USA,weekly,growth_lead,level,0,,104,104,26,-1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_avg_hourly_earnings,yoy_pct,USA,monthly,inflation_now,pct_change,12,,60,60,24,1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
+us_avg_hourly_earnings_prod,yoy_pct,USA,monthly,inflation_now,pct_change,12,,60,60,24,1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_bci,level,USA,monthly,growth_lead,level,0,,60,60,24,1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_building_permits,yoy_pct,USA,monthly,growth_lead,pct_change,12,,60,60,24,1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_cci,level,USA,monthly,growth_lead,level,0,,60,60,24,1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
@@ -98,11 +99,13 @@ us_durable_goods_ex_transport,yoy_pct,USA,monthly,growth_lead,pct_change,12,,60,
 us_durable_goods_orders,yoy_pct,USA,monthly,growth_lead,pct_change,12,,60,60,24,1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_eci_all,yoy_pct,USA,quarterly,inflation_now,pct_change,4,,40,40,12,1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_effective_fed_funds,level,USA,daily,growth_lead,level,0,,252,252,63,-1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
+us_equity_vol,level,USA,daily,growth_lead,level,0,,252,252,63,-1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_headline_cpi,yoy_pct,USA,monthly,inflation_now,pct_change,12,,60,60,24,1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_headline_pce,yoy_pct,USA,monthly,inflation_now,pct_change,12,,60,60,24,1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_henry_hub_natgas,pct_21d,USA,daily,external_shock,pct_change,21,,252,252,63,1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_housing_starts,yoy_pct,USA,monthly,growth_lead,pct_change,12,,60,60,24,1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_hy_oas,level,USA,daily,growth_lead,level,0,,252,252,63,-1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
+us_ig_spread_baa10y,level,USA,monthly,growth_lead,level,0,,60,60,24,-1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_industrial_production,yoy_pct,USA,monthly,growth_now,pct_change,12,,60,60,24,1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_initial_claims,yoy_pct,USA,weekly,growth_now,pct_change,52,,104,104,26,-1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.
 us_initial_claims_4w,yoy_pct,USA,weekly,growth_now,pct_change,52,,104,104,26,-1.00,-5.0,5.0,Generated tier-1 feature policy defaults from metric policy and country metadata.

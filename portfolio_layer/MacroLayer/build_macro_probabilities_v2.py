@@ -19,12 +19,16 @@ from macro_probability_v2 import (
     MODEL_VERSION_DEFAULT,
     PROBABILITY_V2_SPECS,
     ProbabilityV2Spec,
+    ProbabilityV2Variant,
     binary_auc,
     calibration_line,
     fit_ridge_logistic,
+    logit,
     predict_ridge_logistic,
     regime_probabilities,
+    sigmoid,
     target_period_bounds,
+    variant_for,
 )
 from macro_raw_config import (
     cfg_get,
@@ -41,24 +45,6 @@ from macro_serving_storage import finish_serving_run, init_db, start_serving_run
 
 logger = logging.getLogger(__name__)
 
-COMPOSITE_KEYS = ("G_NOW", "G_LEAD", "PI_NOW", "PI_LEAD", "SHOCK")
-FEATURE_METRICS = (
-    "us_ads_index",
-    "us_cfnai_ma3",
-    "us_nonfarm_payrolls",
-    "us_initial_claims",
-    "us_hy_oas",
-    "us_nfci",
-    "us_effective_fed_funds",
-    "us_10y_real_yield",
-    "us_core_cpi",
-    "us_core_pce",
-    "us_headline_cpi",
-    "us_headline_pce",
-    "us_5y_breakeven",
-    "us_wti_spot",
-    "us_brent_spot",
-)
 INFLATION_LABEL_METRICS = ("us_headline_cpi", "us_core_cpi", "us_headline_pce", "us_core_pce")
 
 
@@ -69,6 +55,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-date", type=str, default=None, help="Optional daily output start YYYY-MM-DD override.")
     parser.add_argument("--end-date", type=str, default=None, help="Optional build end YYYY-MM-DD override.")
     parser.add_argument("--model-version", type=str, default=None, help="Optional model-version override.")
+    parser.add_argument(
+        "--layer-block",
+        type=str,
+        default="probability_v2",
+        help="Config block for this candidate (probability_v2 | probability_v2_1).",
+    )
     return parser.parse_args()
 
 
@@ -124,8 +116,15 @@ def _row_mean(frame: pd.DataFrame, columns: Iterable[str]) -> pd.Series:
     return frame[existing].mean(axis=1, skipna=True)
 
 
-def _load_predictors(conn: sqlite3.Connection, *, end_date: pd.Timestamp) -> pd.DataFrame:
-    placeholders = ",".join("?" for _ in COMPOSITE_KEYS)
+def _load_predictors(
+    conn: sqlite3.Connection,
+    *,
+    end_date: pd.Timestamp,
+    variant: ProbabilityV2Variant,
+) -> pd.DataFrame:
+    composite_keys = variant.composite_keys
+    feature_metrics = variant.feature_metrics
+    placeholders = ",".join("?" for _ in composite_keys)
     composites = pd.read_sql_query(
         f"""
         SELECT as_of_date, composite_key,
@@ -135,17 +134,17 @@ def _load_predictors(conn: sqlite3.Connection, *, end_date: pd.Timestamp) -> pd.
         ORDER BY as_of_date, composite_key
         """,
         conn,
-        params=[end_date.date().isoformat(), *COMPOSITE_KEYS],
+        params=[end_date.date().isoformat(), *composite_keys],
         parse_dates=["as_of_date"],
     )
     if composites.empty:
         raise ValueError("No composite history is available for v2 calibration.")
     predictor_frame = composites.pivot(index="as_of_date", columns="composite_key", values="value").sort_index()
-    for key in COMPOSITE_KEYS:
+    for key in composite_keys:
         if key not in predictor_frame.columns:
             predictor_frame[key] = np.nan
 
-    feature_placeholders = ",".join("?" for _ in FEATURE_METRICS)
+    feature_placeholders = ",".join("?" for _ in feature_metrics)
     features = pd.read_sql_query(
         f"""
         SELECT as_of_date, metric_key,
@@ -158,7 +157,7 @@ def _load_predictors(conn: sqlite3.Connection, *, end_date: pd.Timestamp) -> pd.
         ORDER BY as_of_date, metric_key
         """,
         conn,
-        params=[end_date.date().isoformat(), *FEATURE_METRICS],
+        params=[end_date.date().isoformat(), *feature_metrics],
         parse_dates=["as_of_date"],
     )
     standardized = features.pivot(index="as_of_date", columns="metric_key", values="standardized_value")
@@ -174,7 +173,7 @@ def _load_predictors(conn: sqlite3.Connection, *, end_date: pd.Timestamp) -> pd.
         standardized,
         ("us_ads_index", "us_cfnai_ma3", "us_nonfarm_payrolls", "us_initial_claims"),
     )
-    predictor_frame["financial_conditions"] = _row_mean(standardized, ("us_hy_oas", "us_nfci"))
+    predictor_frame["financial_conditions"] = _row_mean(standardized, variant.financial_conditions_metrics)
     predictor_frame["policy_tightness"] = _row_mean(zscores, ("us_effective_fed_funds", "us_10y_real_yield"))
     predictor_frame["gdp_growth_latest"] = transformed.get("us_real_gdp", np.nan)
     inflation_level_columns = [
@@ -427,6 +426,75 @@ def _build_predictions(
     out["target_period_start"] = [item[0] for item in target_bounds]
     out["target_period_end"] = [item[1] for item in target_bounds]
     return out.reset_index(names="as_of_date")
+
+
+def _recalibration_pairs(predictions: pd.DataFrame, target_frame: pd.DataFrame) -> pd.DataFrame:
+    """Resolved (raw walk-forward prediction, label) pairs with their availability dates."""
+    raw_by_date = predictions.set_index("as_of_date")["probability_value"]
+    label_dates = pd.to_datetime(target_frame["label_available_date"], errors="coerce").dt.normalize()
+    pairs = target_frame.loc[
+        target_frame["label_value"].notna() & label_dates.notna(),
+        ["predictor_as_of_date", "label_value"],
+    ].copy()
+    pairs["label_available_date"] = label_dates.loc[pairs.index]
+    pairs["raw_probability"] = pd.to_numeric(pairs["predictor_as_of_date"].map(raw_by_date), errors="coerce")
+    return pairs.loc[np.isfinite(pairs["raw_probability"].astype(float))].reset_index(drop=True)
+
+
+def _apply_trailing_recalibration(
+    predictions: pd.DataFrame,
+    *,
+    own_pairs: pd.DataFrame,
+    pool_pairs: pd.DataFrame,
+    probability_floor: float,
+    min_pairs: int,
+    min_positive: int,
+    min_negative: int,
+    conditional: bool,
+) -> pd.DataFrame:
+    """Trailing PIT recalibration (V2_2/V2_3_CANDIDATE_SPEC.md).
+
+    Per calibration window: fit the correction line on pool_pairs with labels available at or
+    before the window's calibration date and apply it to the window's predictions. When
+    `conditional` (V2.3), the cell recalibrates ONLY if its OWN trailing raw slope falls
+    outside the gate band [0.5, 1.5]; an unready own-fit passes raw through. A not-ready pool
+    fit or non-positive slope also passes raw through.
+    """
+    out = predictions.copy()
+    floor = float(probability_floor)
+    calibration_dates = pd.to_datetime(out["calibration_as_of_date"], errors="coerce")
+    latched = False
+    for calibration_date in sorted(calibration_dates.dropna().unique()):
+        window = (calibration_dates == calibration_date).to_numpy()
+        cutoff = pd.Timestamp(calibration_date)
+        if conditional and not latched:
+            own = own_pairs.loc[own_pairs["label_available_date"] <= cutoff]
+            if not own.empty:
+                _own_intercept, own_slope = calibration_line(
+                    own["label_value"].to_numpy(dtype=float),
+                    own["raw_probability"].to_numpy(dtype=float),
+                )
+                if own_slope is not None and not (0.5 <= own_slope <= 1.5):
+                    latched = True
+        if conditional and not latched:
+            continue
+        eligible = pool_pairs.loc[pool_pairs["label_available_date"] <= cutoff]
+        y = eligible["label_value"].to_numpy(dtype=float)
+        positive_count = int((y == 1.0).sum())
+        negative_count = int((y == 0.0).sum())
+        if len(eligible) < int(min_pairs) or positive_count < int(min_positive) or negative_count < int(min_negative):
+            continue
+        intercept, slope = calibration_line(y, eligible["raw_probability"].to_numpy(dtype=float))
+        if intercept is None or slope is None or slope <= 0.0:
+            continue
+        raw = pd.to_numeric(out.loc[window, "probability_value"], errors="coerce").to_numpy(dtype=float)
+        finite = np.isfinite(raw)
+        if not finite.any():
+            continue
+        logits = np.asarray([logit(value) for value in raw[finite]], dtype=float)
+        raw[finite] = np.clip(sigmoid(intercept + slope * logits), floor, 1.0 - floor)
+        out.loc[window, "probability_value"] = raw
+    return out
 
 
 def _diagnostics(
@@ -764,12 +832,16 @@ def main() -> None:
     configure_pipeline_logging()
     args = parse_args()
     config_path, cfg = load_macro_raw_config(args.config)
-    layer_cfg = cfg_get(cfg, "probability_v2", default={}) or {}
+    layer_block = str(args.layer_block or "probability_v2").strip()
+    layer_cfg = cfg_get(cfg, layer_block, default={}) or {}
+    if not layer_cfg:
+        raise ValueError(f"Config block {layer_block!r} is missing or empty.")
     if not parse_boolish(cfg_get(layer_cfg, "shadow_only", default=None), default=False):
-        raise ValueError("probability_v2.shadow_only must remain true until formal promotion.")
+        raise ValueError(f"{layer_block}.shadow_only must remain true until formal promotion.")
     model_version = str(args.model_version or cfg_get(layer_cfg, "model_version", default=MODEL_VERSION_DEFAULT)).strip()
     if not model_version:
-        raise ValueError("probability_v2.model_version must be non-empty.")
+        raise ValueError(f"{layer_block}.model_version must be non-empty.")
+    variant = variant_for(model_version)
     serving_db_path = resolve_serving_db_path(cfg, config_path, override=args.serving_db_path)
     conn = connect_sqlite(serving_db_path, row_factory=sqlite3.Row)
     serving_run_id = uuid.uuid4().hex
@@ -790,12 +862,12 @@ def main() -> None:
             raw_ingest_run_id=raw_ingest_run_id,
             as_of_start_date=output_start.date().isoformat(),
             as_of_end_date=end_date.date().isoformat(),
-            metric_count=len(PROBABILITY_V2_SPECS),
+            metric_count=len(variant.specs),
             notes=f"Shadow v2 independent-outcome calibration model_version={model_version}.",
         )
         run_started = True
 
-        predictors = _load_predictors(conn, end_date=end_date)
+        predictors = _load_predictors(conn, end_date=end_date, variant=variant)
         history_floor = pd.Timestamp(configured_start) if configured_start is not None else predictors.index.min()
         predictors = predictors[(predictors.index >= history_floor) & (predictors.index <= end_date)].copy()
         monthly = _monthly_predictors(predictors)
@@ -826,7 +898,8 @@ def main() -> None:
         model_frames: list[pd.DataFrame] = []
         prediction_frames: list[pd.DataFrame] = []
         diagnostic_rows: list[dict[str, Any]] = []
-        for spec in PROBABILITY_V2_SPECS:
+        built_specs: list[tuple[ProbabilityV2Spec, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = []
+        for spec in variant.specs:
             threshold = growth_threshold if spec.target_kind == "growth" else inflation_threshold
             target_frame = _build_target_frame(
                 monthly_predictors=monthly,
@@ -856,6 +929,48 @@ def main() -> None:
                 spec=spec,
                 probability_floor=probability_floor,
             )
+            built_specs.append((spec, target_frame, models, predictions))
+
+        # Recalibration pass runs AFTER all raw predictions exist so pooled policies
+        # (V2.3) can share pairs across cells; "always" (V2.2) pools = own pairs.
+        if variant.recalibrate:
+            pair_by_key = {
+                spec.probability_key: _recalibration_pairs(predictions, target_frame)
+                for spec, target_frame, _models, predictions in built_specs
+            }
+            pool_names = dict(variant.recalibration_pools)
+            pooled_frames: dict[str, list[pd.DataFrame]] = {}
+            for key, pool_name in pool_names.items():
+                if key in pair_by_key:
+                    pooled_frames.setdefault(pool_name, []).append(pair_by_key[key])
+            pooled_pairs = {
+                name: pd.concat(frames, ignore_index=True) for name, frames in pooled_frames.items()
+            }
+            conditional = str(variant.recalibration_policy) == "conditional_pooled"
+            built_specs = [
+                (
+                    spec,
+                    target_frame,
+                    models,
+                    _apply_trailing_recalibration(
+                        predictions,
+                        own_pairs=pair_by_key[spec.probability_key],
+                        pool_pairs=(
+                            pooled_pairs.get(pool_names.get(spec.probability_key, ""), pair_by_key[spec.probability_key])
+                            if conditional
+                            else pair_by_key[spec.probability_key]
+                        ),
+                        probability_floor=probability_floor,
+                        min_pairs=variant.recalibration_min_pairs,
+                        min_positive=variant.recalibration_min_positive,
+                        min_negative=variant.recalibration_min_negative,
+                        conditional=conditional,
+                    ),
+                )
+                for spec, target_frame, models, predictions in built_specs
+            ]
+
+        for spec, target_frame, models, predictions in built_specs:
             diagnostic_rows.append(
                 _diagnostics(
                     target_frame=target_frame,

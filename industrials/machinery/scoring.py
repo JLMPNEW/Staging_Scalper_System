@@ -5,11 +5,12 @@ import hashlib
 import json
 import math
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 from industrials.core.reports import write_csv_atomic, write_text_atomic
+from industrials.machinery.financial_contract import AVAILABILITY_STATUSES, required_metric_names
 
 
 MODEL_FAMILY = "machinery"
@@ -32,7 +33,23 @@ RAW_FEATURE_FIELDS = [
     "above_ma_50d",
     "above_ma_200d",
     "market_cap",
+    "accession_number",
+    "form_type",
+    "fiscal_period_end",
+    "fiscal_year",
+    "fiscal_period",
+    "reporting_standard",
+    "reporting_profile",
+    "financial_frequency",
+    "reported_currency",
+    "fx_conversion_status",
+    "canonical_quality",
+    "data_quality_status",
+    "review_reason",
     "revenue_ttm_usd",
+    "revenue_stub_annualized_usd",
+    "revenue_stub_period_days",
+    "revenue_stub_quality",
     "gross_margin",
     "operating_margin",
     "fcf_margin",
@@ -50,20 +67,29 @@ RAW_FEATURE_FIELDS = [
     "cash_conversion_cycle",
     "book_to_bill",
     "funded_backlog",
+    "reported_backlog",
     "remaining_performance_obligation",
+    "rpo_current",
     "operating_cash_flow_ttm_usd",
     "capex_usd",
+    "capex_ttm_usd",
     "orders_ttm_usd",
     "funded_backlog_usd",
+    "reported_backlog_usd",
+    "remaining_performance_obligation_usd",
+    "rpo_current_usd",
     "orders_yoy_growth",
     "backlog_yoy_growth",
+    "reported_backlog_yoy_growth",
     "roic",
+    "roic_not_meaningful_flag",
     "asset_turnover",
     "incremental_operating_margin",
     "inventory_growth",
     "inventory_sales_growth_spread",
     "cash_conversion_cycle_change",
     "net_debt_to_ebitda",
+    "negative_ebitda_leverage_flag",
     "interest_coverage",
     "cash_burn_ttm_usd",
     "cash_runway_years",
@@ -81,8 +107,40 @@ RAW_FEATURE_FIELDS = [
     "latest_borrow_fee_rate",
     "positioning_quality",
     "backlog_to_revenue",
+    "reported_backlog_to_revenue",
     "rpo_to_revenue",
+    "rpo_yoy_growth",
+    "rpo_implied_orders_usd",
+    "rpo_implied_book_to_bill",
     "capex_to_revenue",
+    "financial_metric_reported_count",
+    "financial_metric_proxy_count",
+    "financial_metric_unavailable_count",
+    "financial_metric_classified_fraction",
+]
+RAW_TEXT_FIELDS = {
+    "latest_bar_date",
+    "market_data_quality",
+    "financial_fallback_status",
+    "accession_number",
+    "form_type",
+    "fiscal_period_end",
+    "fiscal_year",
+    "fiscal_period",
+    "reporting_standard",
+    "reporting_profile",
+    "financial_frequency",
+    "reported_currency",
+    "fx_conversion_status",
+    "canonical_quality",
+    "data_quality_status",
+    "review_reason",
+    "revenue_stub_quality",
+    "positioning_quality",
+}
+
+AVAILABILITY_STATUS_FIELDS = [
+    f"{metric_name}_availability_status" for metric_name in required_metric_names()
 ]
 
 COMPONENT_FIELDS = [
@@ -123,6 +181,8 @@ SCORING_FEATURE_FIELDS = [
     "positioning_feature_asof_date",
     "positioning_feature_source_id",
     *RAW_FEATURE_FIELDS,
+    "financial_metric_availability_asof_date",
+    *AVAILABILITY_STATUS_FIELDS,
     "market_cap_source",
     "liquidity_capacity_reason",
     *COMPONENT_FIELDS,
@@ -226,6 +286,7 @@ METRIC_DIRECTIONS: dict[str, int] = {
     "cash_conversion_cycle_change": -1,
     "inventory_sales_growth_spread": -1,
     "net_debt_to_ebitda": -1,
+    "negative_ebitda_leverage_flag": -1,
     "interest_coverage": 1,
     "roic": 1,
     "asset_turnover": 1,
@@ -269,6 +330,7 @@ COMPONENT_METRICS: dict[str, list[str]] = {
         "latest_borrow_fee_rate",
         "latest_days_to_cover",
         "net_debt_to_ebitda",
+        "negative_ebitda_leverage_flag",
         "cash_conversion_cycle_change",
     ],
     "market_behavior_score": [
@@ -363,6 +425,46 @@ def _latest_rows(
         str(row["ticker"]): {key: row[key] for key in row.keys() if key != "source_row_number"}
         for row in rows
     }
+
+
+def _latest_metric_availability(
+    conn: sqlite3.Connection,
+    *,
+    asof: str,
+) -> dict[str, dict[str, str]]:
+    rows = conn.execute(
+        """
+        SELECT ticker, asof_date, metric_name, availability_status
+        FROM feature_financial_metric_availability
+        WHERE model_family = ? AND asof_date = ?
+        """,
+        (MODEL_FAMILY, asof),
+    ).fetchall()
+    output: dict[str, dict[str, str]] = {}
+    for row in rows:
+        ticker = str(row["ticker"])
+        metric_name = str(row["metric_name"])
+        ticker_values = output.setdefault(ticker, {})
+        ticker_values[f"{metric_name}_availability_status"] = str(row["availability_status"])
+        ticker_values["financial_metric_availability_asof_date"] = str(row["asof_date"])
+    required_count = len(AVAILABILITY_STATUS_FIELDS)
+    for ticker_values in output.values():
+        statuses = [
+            ticker_values[field]
+            for field in AVAILABILITY_STATUS_FIELDS
+            if field in ticker_values
+        ]
+        reported = sum(status == "REPORTED" for status in statuses)
+        proxy = sum(status == "PROXY" for status in statuses)
+        ticker_values["financial_metric_reported_count"] = str(reported)
+        ticker_values["financial_metric_proxy_count"] = str(proxy)
+        ticker_values["financial_metric_unavailable_count"] = str(
+            len(statuses) - reported - proxy
+        )
+        ticker_values["financial_metric_classified_fraction"] = _fmt(
+            len(statuses) / required_count if required_count else 1.0
+        )
+    return output
 
 
 def _membership_rows(conn: sqlite3.Connection, *, asof: str) -> list[dict[str, Any]]:
@@ -476,7 +578,16 @@ def _development_score(row: dict[str, Any]) -> float:
             observations.append(75.0 if sbc_ratio <= 0.05 else 50.0 if sbc_ratio <= 0.15 else 25.0)
         return sum(observations) / len(observations) if observations else 35.0
     if stage == "historical_delisted":
-        return 70.0
+        # Point-in-time guard: the historical_delisted taxonomy label encodes
+        # today's knowledge. At an asof before the membership end date the exit
+        # was unknowable, so haircutting there leaks the future outcome into
+        # backfilled/survivorship panels. Only haircut once the delisting has
+        # actually occurred as of the scoring date.
+        end_date = str(row.get("membership_end_date") or "")
+        asof_date = str(row.get("asof_date") or "")
+        if end_date and asof_date and end_date <= asof_date:
+            return 70.0
+        return 100.0
     return 100.0
 
 
@@ -507,6 +618,7 @@ def build_scoring_feature_rows(
         raise ValueError(f"No machinery membership rows are effective at {asof}")
     market = _latest_rows(conn, "feature_market_technical", asof=asof)
     financial = _latest_rows(conn, "feature_financial_statement", asof=asof)
+    availability = _latest_metric_availability(conn, asof=asof)
     positioning = _latest_rows(conn, "feature_positioning", asof=asof)
     weights = _validate_weights(component_weights)
     combined: list[dict[str, Any]] = []
@@ -514,6 +626,7 @@ def build_scoring_feature_rows(
         ticker = str(membership["ticker"])
         market_row = market.get(ticker, {})
         financial_row = financial.get(ticker, {})
+        availability_row = availability.get(ticker, {})
         positioning_row = positioning.get(ticker, {})
         row: dict[str, Any] = {
             "asof_date": asof,
@@ -539,7 +652,12 @@ def build_scoring_feature_rows(
             "financial_feature_source_id": financial_row.get("source_id", ""),
             "positioning_feature_asof_date": positioning_row.get("asof_date", ""),
             "positioning_feature_source_id": positioning_row.get("source_id", ""),
+            "financial_metric_availability_asof_date": availability_row.get(
+                "financial_metric_availability_asof_date", ""
+            ),
         }
+        for field in AVAILABILITY_STATUS_FIELDS:
+            row[field] = availability_row.get(field, "")
         for field in RAW_FEATURE_FIELDS:
             if field in market_row:
                 row[field] = market_row[field]
@@ -549,13 +667,25 @@ def build_scoring_feature_rows(
                 row[field] = positioning_row[field]
             else:
                 row[field] = ""
-        revenue_usd = financial_row.get("revenue_ttm_usd") or financial_row.get("revenue_usd")
-        revenue_local = financial_row.get("revenue_ttm") or financial_row.get("revenue")
+        for field in (
+            "financial_metric_reported_count",
+            "financial_metric_proxy_count",
+            "financial_metric_unavailable_count",
+            "financial_metric_classified_fraction",
+        ):
+            if field in availability_row:
+                row[field] = availability_row[field]
         # Stage 4 owns backlog period/currency alignment. Preserve its null on a
         # failed alignment rather than recomputing from mixed local/USD values.
         row["backlog_to_revenue"] = financial_row.get("backlog_to_revenue", "")
-        row["rpo_to_revenue"] = _ratio(financial_row.get("remaining_performance_obligation"), revenue_local)
-        row["capex_to_revenue"] = _ratio(financial_row.get("capex_usd"), revenue_usd, absolute_numerator=True)
+        row["rpo_to_revenue"] = financial_row.get("rpo_to_revenue", "")
+        # TTM/TTM only: single-period capex over TTM revenue sawtooths with
+        # filing frequency (10-K vs 10-Q YTD), biasing cross-sectional ranks.
+        row["capex_to_revenue"] = _ratio(
+            financial_row.get("capex_ttm_usd"),
+            financial_row.get("revenue_ttm_usd"),
+            absolute_numerator=True,
+        )
         row["market_cap_source"] = str(financial_row.get("source_id") or "") if _float(row.get("market_cap")) is not None else ""
         combined.append(row)
 
@@ -614,7 +744,7 @@ def build_scoring_feature_rows(
         formatted: dict[str, str] = {}
         for field in SCORING_FEATURE_FIELDS:
             value = row.get(field, "")
-            if field in RAW_FEATURE_FIELDS or field in COMPONENT_FIELDS or field in {
+            if (field in RAW_FEATURE_FIELDS and field not in RAW_TEXT_FIELDS) or field in COMPONENT_FIELDS or field in {
                 "membership_confidence",
                 "score_confidence",
                 "final_score",
@@ -738,6 +868,37 @@ def validate_rank_rows(rows: list[dict[str, str]], *, asof: str) -> list[str]:
             errors.append(f"{ticker}: invalid final_rank={row.get('final_rank')!r}")
     if sorted(ranks) != list(range(1, len(rows) + 1)):
         errors.append("final_rank must be contiguous from 1 through row count")
+    errors.extend(validate_metric_availability_contract(rows, asof=asof))
+    return errors
+
+
+def validate_metric_availability_contract(
+    rows: list[dict[str, str]],
+    *,
+    asof: str,
+) -> list[str]:
+    errors: list[str] = []
+    for row in rows:
+        ticker = str(row.get("ticker") or "<blank>")
+        availability_asof = str(row.get("financial_metric_availability_asof_date") or "")
+        if availability_asof != asof:
+            errors.append(
+                f"{ticker}: financial metric availability asof={availability_asof!r} expected={asof}"
+            )
+        classified_fraction = _float(row.get("financial_metric_classified_fraction"))
+        if classified_fraction is None or not math.isclose(
+            classified_fraction,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            errors.append(
+                f"{ticker}: financial_metric_classified_fraction={row.get('financial_metric_classified_fraction')!r}"
+            )
+        for field in AVAILABILITY_STATUS_FIELDS:
+            status = str(row.get(field) or "")
+            if status not in AVAILABILITY_STATUSES:
+                errors.append(f"{ticker}: invalid {field}={status!r}")
     return errors
 
 
@@ -855,7 +1016,9 @@ def publish_dashboard(
         ),
         "contract_fields": FINAL_RANK_FIELDS,
         "scoring_contract_versions": sorted({row["scoring_contract_version"] for row in rows}),
-        "published_at_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "published_at_utc": datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
     }
     write_json_atomic(manifest_path, manifest)
     return manifest

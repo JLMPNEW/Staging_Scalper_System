@@ -278,6 +278,13 @@ scoring_policy:
       # DR-2: family-scoped reporting-overrides resolution for script 07 (legacy
       # fallback: the flat sec_fundamentals.reporting_overrides_csv; keep both in sync).
       reporting_overrides_csv: "defense/system_csvs/defense_sec_reporting_overrides.csv"
+      # Append-only decisions produced by Stage 4.5. Keeping these separate from
+      # source overrides makes every profile graduation dated and reviewable.
+      reporting_profile_graduations_csv: "defense/system_csvs/defense_reporting_profile_graduations.csv"
+      reporting_profile_graduation_audit_csv: "../output/industrials/defense/stage4/reporting_profile_graduation_audit.csv"
+      profile_graduation:
+        max_annual_age_days: 550
+        min_periodic_filings: 2
   # Legacy flat key kept for backward compatibility while readers migrate to
   # scoring_policy.families.defense.eligibility_policy_csv above; keep both in sync.
   defense_eligibility_policy_csv: "defense/system_csvs/defense_scoring_eligibility_policy.csv"

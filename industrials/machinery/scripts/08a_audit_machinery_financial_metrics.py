@@ -20,6 +20,10 @@ from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from industrials.core.db import connect  # noqa: E402
 from industrials.core.reports import write_csv_atomic, write_text_atomic  # noqa: E402
 from industrials.machinery.scoring import parse_asof  # noqa: E402
+from industrials.machinery.financial_contract import (  # noqa: E402
+    AVAILABILITY_STATUSES,
+    required_metric_names,
+)
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -49,10 +53,21 @@ class MetricGate:
 
 
 METRIC_GATES = [
+    MetricGate("orders", "orders_backlog_source", 10, 0.10),
+    MetricGate("funded_backlog", "orders_backlog_source", 10, 0.10),
+    MetricGate("reported_backlog", "orders_backlog_source", 5, 0.04),
+    MetricGate("remaining_performance_obligation", "rpo_source", 5, 0.04),
+    MetricGate("rpo_current", "rpo_source", 3, 0.02),
     MetricGate("orders_yoy_growth", "orders_backlog", 10, 0.10),
     MetricGate("book_to_bill", "orders_backlog", 10, 0.10),
     MetricGate("backlog_yoy_growth", "orders_backlog", 10, 0.10),
     MetricGate("backlog_to_revenue", "orders_backlog", 10, 0.10),
+    MetricGate("reported_backlog_yoy_growth", "orders_backlog", 5, 0.04),
+    MetricGate("reported_backlog_to_revenue", "orders_backlog", 5, 0.04),
+    MetricGate("rpo_yoy_growth", "rpo", 5, 0.04),
+    MetricGate("rpo_to_revenue", "rpo", 5, 0.04),
+    MetricGate("rpo_implied_orders", "rpo_proxy", 5, 0.04),
+    MetricGate("rpo_implied_book_to_bill", "rpo_proxy", 5, 0.04),
     MetricGate("roic", "capital_efficiency", 50, 0.45, 0.25),
     MetricGate("asset_turnover", "capital_efficiency", 60, 0.55, 0.30),
     MetricGate("incremental_operating_margin", "operating_leverage", 40, 0.35, 0.20),
@@ -140,6 +155,8 @@ def raw_concept_candidates(conn: sqlite3.Connection, *, members: dict[str, str])
               LOWER(concept_name) LIKE '%order%'
               OR LOWER(concept_name) LIKE '%booking%'
               OR LOWER(concept_name) LIKE '%backlog%'
+              OR LOWER(concept_name) LIKE '%performanceobligation%'
+              OR LOWER(concept_name) LIKE '%remaining%obligation%'
               OR LOWER(concept_name) LIKE '%depreciation%'
               OR LOWER(concept_name) LIKE '%ebitda%'
               OR LOWER(concept_name) LIKE '%interestexpense%'
@@ -153,6 +170,57 @@ def raw_concept_candidates(conn: sqlite3.Connection, *, members: dict[str, str])
         tuple(members),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def audit_metric_availability(
+    conn: sqlite3.Connection,
+    *,
+    asof: str,
+    members: dict[str, str],
+) -> tuple[dict[str, int], list[str]]:
+    metrics = required_metric_names()
+    expected = {(ticker, metric) for ticker in members for metric in metrics}
+    rows = conn.execute(
+        """
+        SELECT ticker, metric_name, availability_status
+        FROM feature_financial_metric_availability
+        WHERE model_family = 'machinery'
+          AND asof_date = ?
+        """,
+        (asof,),
+    ).fetchall()
+    actual = {
+        (str(row["ticker"]), str(row["metric_name"]))
+        for row in rows
+        if str(row["ticker"]) in members
+    }
+    errors: list[str] = []
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    invalid = sorted(
+        {
+            str(row["availability_status"])
+            for row in rows
+            if str(row["ticker"]) in members
+            and str(row["availability_status"]) not in AVAILABILITY_STATUSES
+        }
+    )
+    if missing:
+        errors.append(f"metric availability missing {len(missing)} ticker/metric rows; sample={missing[:10]}")
+    if unexpected:
+        errors.append(f"metric availability has {len(unexpected)} unexpected ticker/metric rows; sample={unexpected[:10]}")
+    if invalid:
+        errors.append(f"metric availability contains invalid statuses: {invalid}")
+    counts = {status: 0 for status in sorted(AVAILABILITY_STATUSES)}
+    for row in rows:
+        if str(row["ticker"]) not in members:
+            continue
+        status = str(row["availability_status"])
+        if status in counts:
+            counts[status] += 1
+    counts["EXPECTED"] = len(expected)
+    counts["CLASSIFIED"] = len(actual & expected)
+    return counts, errors
 
 
 def main() -> int:
@@ -171,6 +239,14 @@ def main() -> int:
     )
     errors: list[str] = []
     coverage_rows: list[dict[str, Any]] = []
+    gate_metrics = {gate.metric for gate in METRIC_GATES}
+    contract_metrics = set(required_metric_names())
+    if gate_metrics != contract_metrics:
+        errors.append(
+            "coverage gates do not match the financial metric contract: "
+            f"missing={sorted(contract_metrics - gate_metrics)} "
+            f"unexpected={sorted(gate_metrics - contract_metrics)}"
+        )
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 120.0))) as conn:
         members = eligible_members(conn, asof=asof)
         if not members:
@@ -220,6 +296,12 @@ def main() -> int:
                     "status": status,
                 }
             )
+        availability_counts, availability_errors = audit_metric_availability(
+            conn,
+            asof=asof,
+            members=members,
+        )
+        errors.extend(availability_errors)
         concept_rows = raw_concept_candidates(conn, members=members)
     output_dir.mkdir(parents=True, exist_ok=True)
     coverage_path = output_dir / "machinery_financial_metric_coverage.csv"
@@ -233,6 +315,7 @@ def main() -> int:
         "eligible_count": len(members),
         "implemented_metric_count": sum(int(row["implemented_flag"]) for row in coverage_rows),
         "calibration_ready_metric_count": sum(row["status"] == "CALIBRATION_READY" for row in coverage_rows),
+        "availability_counts": availability_counts,
         "coverage_csv": str(coverage_path),
         "concept_candidates_csv": str(concepts_path),
         "errors": errors,

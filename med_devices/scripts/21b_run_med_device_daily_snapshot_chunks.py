@@ -7,6 +7,7 @@ import csv
 import sqlite3
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-asof", default="")
     parser.add_argument("--end-asof", default="")
     parser.add_argument("--chunk-size", type=int, default=7, help="Market dates per script-21 child run.")
+    parser.add_argument(
+        "--max-chunk-attempts",
+        type=int,
+        default=3,
+        help="Maximum attempts for a failed chunk before the runner stops.",
+    )
+    parser.add_argument(
+        "--retry-delay-seconds",
+        type=float,
+        default=5.0,
+        help="Base delay between chunk retries; later retries use linear backoff.",
+    )
     parser.add_argument("--resume", action="store_true", help="Skip chunks whose dated review-pack folders are complete.")
     parser.add_argument("--force", action="store_true", help="Passed through to script 21 so child runs rebuild existing as-of dates.")
     parser.add_argument("--stop-after-chunks", type=int, default=0)
@@ -176,8 +189,10 @@ def run_chunk(
     log_dir: Path,
     no_run_setup: bool,
     force: bool,
+    attempt: int,
 ) -> tuple[int, Path]:
-    log_path = log_dir / f"daily_snapshot_chunk_{chunk.start_asof}_{chunk.end_asof}.log"
+    attempt_suffix = "" if attempt == 1 else f".attempt{attempt}"
+    log_path = log_dir / f"daily_snapshot_chunk_{chunk.start_asof}_{chunk.end_asof}{attempt_suffix}.log"
     command = [
         sys.executable,
         str(PACKAGE_ROOT / "scripts" / "21_backfill_med_device_historical_scores.py"),
@@ -198,7 +213,7 @@ def run_chunk(
         command.extend(["--db", str(db_path)])
     print(
         f"chunk {chunk_index}/{total_chunks} start={chunk.start_asof} end={chunk.end_asof} "
-        f"asofs={len(chunk.asofs)} log={log_path}",
+        f"asofs={len(chunk.asofs)} attempt={attempt} log={log_path}",
         flush=True,
     )
     with log_path.open("w", encoding="utf-8") as log_handle:
@@ -214,6 +229,10 @@ def run_chunk(
 
 def main() -> int:
     args = parse_args()
+    if args.max_chunk_attempts <= 0:
+        raise ValueError("--max-chunk-attempts must be positive.")
+    if args.retry_delay_seconds < 0:
+        raise ValueError("--retry-delay-seconds cannot be negative.")
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
@@ -258,18 +277,37 @@ def main() -> int:
             )
             completed_chunks += 1
             continue
-        returncode, log_path = run_chunk(
-            chunk=chunk,
-            chunk_index=idx,
-            total_chunks=len(chunks),
-            config_path=config_path,
-            db_path=db_path,
-            log_dir=log_dir,
-            no_run_setup=bool(args.no_run_setup),
-            force=bool(args.force),
-        )
-        status = "success" if returncode == 0 and chunk_complete(review_pack_base_dir, chunk) else "failed"
-        message = f"returncode={returncode}"
+        returncode = 1
+        log_path = log_dir / f"daily_snapshot_chunk_{chunk.start_asof}_{chunk.end_asof}.log"
+        completed = False
+        attempts_used = 0
+        for attempt in range(1, int(args.max_chunk_attempts) + 1):
+            attempts_used = attempt
+            returncode, log_path = run_chunk(
+                chunk=chunk,
+                chunk_index=idx,
+                total_chunks=len(chunks),
+                config_path=config_path,
+                db_path=db_path,
+                log_dir=log_dir,
+                no_run_setup=bool(args.no_run_setup),
+                force=bool(args.force),
+                attempt=attempt,
+            )
+            completed = returncode == 0 and chunk_complete(review_pack_base_dir, chunk)
+            if completed:
+                break
+            if attempt < int(args.max_chunk_attempts):
+                delay = float(args.retry_delay_seconds) * attempt
+                print(
+                    f"chunk_retry index={idx} start={chunk.start_asof} end={chunk.end_asof} "
+                    f"attempt={attempt} returncode={returncode} delay_seconds={delay:g} log={log_path}",
+                    flush=True,
+                )
+                if delay > 0:
+                    time.sleep(delay)
+        status = "success" if completed else "failed"
+        message = f"returncode={returncode}; attempts={attempts_used}"
         append_manifest(
             manifest_path,
             {

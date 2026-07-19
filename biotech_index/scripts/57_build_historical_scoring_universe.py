@@ -74,6 +74,24 @@ def read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         return [str(field or "") for field in reader.fieldnames], rows
 
 
+def load_nonretained_ticker_actions(path: Path | None) -> dict[str, tuple[date, str]]:
+    """Return the first effective membership-ending action for each predecessor."""
+    if path is None or not path.exists():
+        return {}
+    _, rows = read_csv(path)
+    actions: dict[str, tuple[date, str]] = {}
+    for row in rows:
+        ticker = normalize_ticker(row.get("old_ticker"))
+        effective_date = parse_date(row.get("effective_date"))
+        action = str(row.get("action") or "").strip().lower()
+        if not ticker or effective_date is None or not action or as_bool(row.get("retain_in_biotech"), False):
+            continue
+        prior = actions.get(ticker)
+        if prior is None or effective_date < prior[0]:
+            actions[ticker] = (effective_date, action)
+    return actions
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -169,6 +187,7 @@ def live_universe_rows(
     prices: dict[str, dict[str, Any]],
     asof: date,
     max_price_staleness_days: int,
+    nonretained_ticker_actions: dict[str, tuple[date, str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     included: list[dict[str, Any]] = []
     audit: list[dict[str, Any]] = []
@@ -176,6 +195,16 @@ def live_universe_rows(
     for row in root_rows:
         ticker = normalize_ticker(row.get("ticker"))
         if not ticker or not as_bool(row.get("scoring_include"), False):
+            continue
+        terminal_action = (nonretained_ticker_actions or {}).get(ticker)
+        if terminal_action is not None and asof >= terminal_action[0]:
+            audit.append(
+                {
+                    "ticker": ticker,
+                    "decision": "exclude",
+                    "reason": f"membership_ended:{terminal_action[1]}:{terminal_action[0].isoformat()}",
+                }
+            )
             continue
         company = companies.get(ticker)
         if not company:
@@ -331,6 +360,10 @@ def main() -> int:
         cfg_get(config, "biotech_features.final_scoring_universe_csv"),
         base_dir=base_dir,
     )
+    ticker_actions_path = resolve_path(
+        cfg_get(config, "paths.company_ticker_actions_csv"),
+        base_dir=base_dir,
+    )
     dated_pit_universe = output_dir / configured_root_universe.name
     root_universe = (
         args.root_universe_csv.expanduser().resolve()
@@ -344,6 +377,7 @@ def main() -> int:
     manifest_path = output_dir / "historical_scoring_universe_manifest.json"
 
     root_fields, root_rows = read_csv(root_universe)
+    nonretained_ticker_actions = load_nonretained_ticker_actions(ticker_actions_path)
     with connect(db_path) as conn:
         init_db(conn)
         companies = company_rows(conn)
@@ -355,6 +389,7 @@ def main() -> int:
             prices=live_prices,
             asof=asof,
             max_price_staleness_days=max(0, int(args.max_price_staleness_days)),
+            nonretained_ticker_actions=nonretained_ticker_actions,
         )
         delisted_rows: list[dict[str, Any]] = []
         delisted_audit: list[dict[str, Any]] = []
@@ -391,7 +426,8 @@ def main() -> int:
             "delisted": "included only inside price_start_date..min(price_end_date,terminal_date) and with price history on/before asof",
             "current": (
                 "included when active with price history on/before asof; for historical asof dates, "
-                "currently-inactive names are kept when usable as-of price bars exist (survivorship correction)"
+                "currently-inactive names are kept when usable as-of price bars exist, but non-retained ticker "
+                "actions end membership on their effective date (survivorship correction)"
             ),
             "missing_historical_feeds": "left null/availability-flagged by downstream feature builders; never forward-filled from future dates",
         },

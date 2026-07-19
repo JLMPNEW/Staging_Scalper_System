@@ -33,6 +33,7 @@ VALID_REPORTING_PROFILES = frozenset(
         # Override-driven lifecycle/stub profiles.
         "RECENT_IPO_DEVELOPMENT_STAGE",
         "RECENT_PUBLIC_STUB",
+        "SEC_XBRL_US_GAAP_DESPAC_BRIDGE",
         "FPI_HYBRID_STUB_LOADED",
         "FPI_HYBRID_LOADED",
         # Override-only structural handling profiles.

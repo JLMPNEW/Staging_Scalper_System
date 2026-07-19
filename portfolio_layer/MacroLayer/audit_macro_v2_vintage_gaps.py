@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from macro_http import HttpClient, RateLimiter, RequestSettings
-from macro_probability_v2 import MODEL_VERSION_DEFAULT, PROBABILITY_V2_SPECS, ProbabilityV2Spec
+from macro_probability_v2 import MODEL_VERSION_DEFAULT, ProbabilityV2Spec, variant_for
 from macro_raw_config import (
     cfg_get,
     configure_pipeline_logging,
@@ -48,6 +48,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--serving-db-path", type=Path, default=None)
     parser.add_argument("--end-date", type=str, default=None)
     parser.add_argument("--model-version", type=str, default=None)
+    parser.add_argument("--layer-block", type=str, default="probability_v2",
+                        help="Config block for this candidate (probability_v2 | probability_v2_1).")
     parser.add_argument("--preferred-history-start", type=str, default=None)
     parser.add_argument(
         "--probe-fred",
@@ -211,7 +213,7 @@ def _promotion_evidence(
         (model_version, end_date),
     ).fetchall()
     result = {str(row["probability_key"]): row for row in rows}
-    expected = {spec.probability_key for spec in PROBABILITY_V2_SPECS}
+    expected = {spec.probability_key for spec in variant_for(model_version).specs}
     if set(result) != expected:
         raise ValueError(f"Promotion evidence cells mismatch: actual={sorted(result)} expected={sorted(expected)}")
     return result
@@ -309,7 +311,7 @@ def _cell_rows(
     min_train_positive = int(cfg_get(layer_cfg, "minimum_positive_samples", default=8))
     min_train_negative = int(cfg_get(layer_cfg, "minimum_negative_samples", default=8))
     rows: list[dict[str, Any]] = []
-    for spec in PROBABILITY_V2_SPECS:
+    for spec in variant_for(model_version).specs:
         evidence = evidence_by_key[spec.probability_key]
         required_oos = _minimum_oos_samples(spec, layer_cfg)
         targets = _eligible_target_rows(conn, model_version=model_version, spec=spec, end_date=end_date)
@@ -639,6 +641,7 @@ def _input_rows(
     *,
     raw_conn: sqlite3.Connection,
     serving_conn: sqlite3.Connection,
+    model_version: str,
     cell_rows: list[dict[str, Any]],
     registry_rows: list[dict[str, str]],
     feature_rows: list[dict[str, str]],
@@ -654,7 +657,7 @@ def _input_rows(
     required_by_composite = _dependency_map(composite_rows)
     pending: list[dict[str, Any]] = []
     for cell in cell_rows:
-        spec = next(item for item in PROBABILITY_V2_SPECS if item.probability_key == cell["probability_key"])
+        spec = next(item for item in variant_for(model_version).specs if item.probability_key == cell["probability_key"])
         estimated = parse_iso_date(str(cell.get("estimated_complete_history_start_needed") or ""))
         complete_history_start = estimated or preferred_history_start
         for metric_key, feature_name, role, parent in _metric_dependencies(
@@ -885,7 +888,10 @@ def main() -> None:
     configure_pipeline_logging()
     args = parse_args()
     config_path, cfg = load_macro_raw_config(args.config)
-    layer_cfg = cfg_get(cfg, "probability_v2", default={}) or {}
+    layer_block = str(args.layer_block or "probability_v2").strip()
+    layer_cfg = cfg_get(cfg, layer_block, default={}) or {}
+    if not layer_cfg:
+        raise ValueError(f"Config block {layer_block!r} is missing or empty.")
     audit_cfg = cfg_get(layer_cfg, "vintage_audit", default={}) or {}
     model_version = str(args.model_version or cfg_get(layer_cfg, "model_version", default=MODEL_VERSION_DEFAULT)).strip()
     raw_db_path = resolve_db_path(cfg, config_path, override=args.raw_db_path)
@@ -914,6 +920,7 @@ def main() -> None:
         input_rows = _input_rows(
             raw_conn=raw_conn,
             serving_conn=serving_conn,
+            model_version=model_version,
             cell_rows=cell_rows,
             registry_rows=_read_csv(policy_paths["registry"]),
             feature_rows=_read_csv(policy_paths["feature"]),

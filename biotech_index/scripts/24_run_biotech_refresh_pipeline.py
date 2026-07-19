@@ -1042,6 +1042,32 @@ def snapshot_direct_output_files(
     }
 
 
+def historical_universe_requires_norgate(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+    asof: str,
+) -> bool:
+    """Return whether the dated PIT universe contains calibration-only members."""
+    output_root = resolve_path(
+        cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"),
+        base_dir=base_dir,
+    )
+    universe_path = output_root / asof.replace("-", "") / "ctgov_final_scoring_universe.csv"
+    if not universe_path.exists():
+        raise FileNotFoundError(
+            f"Historical scoring universe must exist before Norgate routing: {universe_path}"
+        )
+    with universe_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames or "calibration_only" not in reader.fieldnames:
+            raise ValueError(
+                "Historical scoring universe is missing required calibration_only column: "
+                f"{universe_path}"
+            )
+        return any(as_bool(row.get("calibration_only"), False) for row in reader)
+
+
 def build_step_command(
     step: Step,
     *,
@@ -2285,6 +2311,32 @@ def main() -> None:
                 timing_step = step
                 if args.history_restatement:
                     timing_step = Step(f"{step.name}@{run_asof}", step.script, step.args, step.supports_asof)
+                if (
+                    args.history_restatement
+                    and step.name == "norgate_market_features"
+                    and not historical_universe_requires_norgate(
+                        config,
+                        base_dir=base_dir,
+                        asof=run_asof,
+                    )
+                ):
+                    LOGGER.info(
+                        "Skipping %s: dated PIT universe contains no calibration-only/delisted members",
+                        timing_step.name,
+                    )
+                    timing_rows.append(
+                        {
+                            "run_started_at": run_started_at,
+                            "mode": effective_mode,
+                            "step": timing_step.name,
+                            "status": "success",
+                            "elapsed_sec": 0.0,
+                            "returncode": 0,
+                            "command": "skip Norgate market features: no calibration-only/delisted members",
+                        }
+                    )
+                    write_timing_csv(timing_csv, timing_rows)
+                    continue
                 command = build_step_command(command_step, config_path=config_path, db_path=db_path, asof=run_asof)
                 if args.history_restatement and step.name == "ctgov_audit":
                     historical_output_root = resolve_path(
