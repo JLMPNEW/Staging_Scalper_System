@@ -315,9 +315,10 @@ rotation:
 macro:
   enabled_in_production: false
   vendor_root: "MacroLayer"
-  regime_source: "v1"                       # v1 | v2; v2 is fail-closed on sealed PROMOTABLE evidence
-  candidate_regime_source: "v2"
+  regime_source: "v1"                       # v1 | v2 | h1; candidates are fail-closed on sealed PROMOTABLE evidence
+  candidate_regime_source: "h1"             # tracked candidate: H1 hybrid (H1_CANDIDATE_SPEC.md, prospective-only)
   regime_v2_model_version: "macro_regime_v2_independent_outcomes_v1"
+  regime_h1_model_version: "macro_regime_h1_hybrid_v1"
   freshness_tolerance_days:
     regime: 5
     country_fit: 30
@@ -406,10 +407,16 @@ black_litterman_fusion:
   macro_sector_shift_scale: 0.05            # macro_fit_z -> budget shift (pre-clip)
   macro_sector_cap_band: 0.03               # tier1 sector exposure band around macro-shifted benchmark weights
   regime_to_gross_scalar:                   # macro regime -> gross-exposure multiplier
-    EXPANSION: 1.00
-    RECOVERY: 1.00
+    # The live regime vocabulary (V1 decision layer and all v2-family/H1 candidates) is the
+    # four-quadrant set below — each entry EXPLICIT per H1_CANDIDATE_SPEC.md downstream
+    # preconditions (H1 surfaces HEATING_UP/EXPANSION_DISINFLATION far more often than V1 did).
+    EXPANSION_DISINFLATION: 1.00            # goldilocks quadrant: full gross (mirrors legacy EXPANSION)
+    HEATING_UP: 1.00                        # validated-supportive regime (research/71-72); full gross
     SLOW_GROWTH: 0.85
     STAGFLATION: 0.70
+    # Legacy labels retained for backward compatibility; no current regime source emits them.
+    EXPANSION: 1.00
+    RECOVERY: 1.00
     CONTRACTION: 0.50
     CRISIS: 0.40
     default: 0.85
@@ -450,6 +457,11 @@ sleeves:
   sleeve_risk_budgets:
     default: {long_core: 0.65, medium_rotation: 0.35, short_catalyst: 0.0}
     risk_off: {long_core: 0.80, medium_rotation: 0.20, short_catalyst: 0.0}   # STAGFLATION/CONTRACTION/CRISIS
+  # Explicit regime treatment (H1_CANDIDATE_SPEC.md audit): of the live four-quadrant
+  # vocabulary, only STAGFLATION is risk_off; HEATING_UP, EXPANSION_DISINFLATION, and
+  # SLOW_GROWTH INTENTIONALLY use the default budget (gross de-risking for SLOW_GROWTH is
+  # owned by black_litterman_fusion.regime_to_gross_scalar, not sleeve budgets).
+  # CONTRACTION/CRISIS are legacy labels no current regime source emits.
   risk_off_regimes: ["STAGFLATION", "CONTRACTION", "CRISIS"]
   sleeve_risk_budget_band: 0.05              # +/- tolerance on realized sleeve risk share
   # --- within-sleeve allocation ---

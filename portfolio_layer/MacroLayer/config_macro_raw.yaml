@@ -167,6 +167,30 @@ macro_raw:
       minimum_calibration_slope: 0.50
       maximum_calibration_slope: 1.50
 
+  # H1 hybrid candidate (frozen spec: MacroLayer/H1_CANDIDATE_SPEC.md): V1 growth + validated
+  # v2-family inflation cells composed by a PIT-safe adapter. New campaign; prospective-only
+  # promotion evidence (cutoff 2026-07-19).
+  probability_h1:
+    enabled: true
+    shadow_only: true
+    model_version: "macro_regime_h1_hybrid_v1"
+    history_start_date: "2001-01-01"
+    output_dir: "MacroLayer/out/regime_h1"
+    prospective_cutoff_date: "2026-07-19"
+    decision_min_top_probability: 0.50
+    decision_min_confidence: 0.10
+    evidence:
+      pi_now_min_prospective_outcomes: 12
+      pi_lead_min_prospective_outcomes: 4
+      min_coverage_fraction: 0.95
+
+  # Operational controls are intentionally outside the frozen probability_h1 block. They do
+  # not change model outputs or promotion statistics.
+  h1_operations:
+    enabled: true
+    checkpoint_dir: "output/h1_chain_checkpoints"
+    status_dir: "output/h1_operations"
+
   regime_layer:
     transition_bias_deadband: 0.05
     smoothing:

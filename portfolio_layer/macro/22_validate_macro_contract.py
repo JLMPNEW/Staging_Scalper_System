@@ -34,6 +34,7 @@ from portfolio_layer.macro.contract import (  # noqa: E402
     open_macro_serving_db,
     regime_table_for_source,
     regime_application_errors,
+    h1_promotion_status,
     v2_promotion_status,
     verify_v2_promotion_manifest,
 )
@@ -246,10 +247,31 @@ def main() -> int:  # noqa: C901
     configured_model_version = (
         str(cfg_get(config, "macro.regime_v2_model_version", "") or "").strip()
         if configured_regime_source == "v2"
-        else None
+        else (
+            str(cfg_get(config, "macro.regime_h1_model_version", "macro_regime_h1_hybrid_v1") or "").strip()
+            if configured_regime_source == "h1"
+            else None
+        )
     )
     if meta.get("regime_model_version") != configured_model_version:
         source_errors.append("meta_regime_model_version_mismatch")
+    if configured_regime_source == "h1":
+        _h1_path, h1_errors = h1_promotion_status(
+            output_root=PACKAGE_ROOT / "MacroLayer" / "out" / "regime_h1",
+            run_as_of=run_as_of,
+            model_version=str(configured_model_version or ""),
+        )
+        source_errors.extend(f"h1_{item}" for item in h1_errors)
+        # AMENDMENT 2 (A2.3): mirror the V2 evidence-date parity check for H1.
+        if _h1_path is not None and len(regime) == 1:
+            try:
+                h1_evidence = json.loads(Path(_h1_path).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                source_errors.append("h1_promotion_evidence_unreadable")
+            else:
+                regime_date = str(regime[0].get("macro_as_of_date") or "")
+                if str(h1_evidence.get("evidence_as_of_date") or "") != regime_date:
+                    source_errors.append("h1_promotion_decision_date_mismatch")
     if configured_regime_source == "v2":
         promotion_path_raw = str(meta.get("regime_promotion_manifest_path") or "").strip()
         if not promotion_path_raw:

@@ -114,6 +114,9 @@ MACRO_SERVING_CONTRACT_TABLES = [
 REGIME_SOURCE_TABLES = {
     "v1": "macro_regime_decision_daily",
     "v2": "macro_regime_v2_decision_daily",
+    # H1 hybrid decisions live in the v2-family decision table under the H1 model_version
+    # (H1_CANDIDATE_SPEC.md); promotion is gated on sealed H1 evidence, not the v2 summary.
+    "h1": "macro_regime_v2_decision_daily",
 }
 
 MACRO_REGIME_LABELS = {
@@ -432,3 +435,126 @@ def v2_promotion_status(
         """,
         (model_version, run_as_of),
     ).fetchone()
+
+
+def _verify_h1_manifest(manifest_path: Path, *, model_version: str, evidence_as_of_date: str) -> list[str]:
+    """Recompute and compare EVERY hash sealed in the H1 promotion manifest (A1.6). Fail-closed.
+
+    Anchors are rederived from the manifest's own location so nothing in the manifest can
+    redirect verification elsewhere. The layout is MacroLayer/out/regime_h1/<date>/manifest:
+      evidence_dir = manifest dir; output_root = regime_h1 (parent); macro_root = MacroLayer
+      (great-grandparent, i.e. output_root's grandparent).
+    A null sealed hash means the file was intentionally absent at seal time and must still be
+    absent; a non-null hash requires the file to exist and match byte-for-byte.
+    """
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"unreadable_h1_manifest:{type(exc).__name__}"]
+
+    errors: list[str] = []
+    if str(manifest.get("model_version") or "") != str(model_version):
+        errors.append("manifest_model_version_mismatch")
+    if str(manifest.get("evidence_as_of_date") or "") != str(evidence_as_of_date):
+        errors.append("manifest_evidence_date_mismatch")
+
+    evidence_dir = manifest_path.parent
+    output_root = evidence_dir.parent
+    macro_root = evidence_dir.parent.parent.parent
+    anchor_dirs = {
+        "evidence_dir": evidence_dir,
+        "output_root": output_root,
+        "macro_root": macro_root,
+        # AMENDMENT 2 (A2.4): portfolio-layer root (16d source + sealed A1.7 gate) sits one level
+        # above MacroLayer.
+        "portfolio_root": macro_root.parent,
+    }
+    anchors = manifest.get("anchors")
+    if not isinstance(anchors, dict):
+        return errors + ["manifest_missing_anchors"]
+    for anchor_name, base_dir in anchor_dirs.items():
+        entries = anchors.get(anchor_name)
+        if not isinstance(entries, dict):
+            errors.append(f"manifest_missing_anchor:{anchor_name}")
+            continue
+        for filename, expected in entries.items():
+            artifact = (base_dir / str(filename)).resolve()
+            try:
+                artifact.relative_to(base_dir.resolve())
+            except ValueError:
+                errors.append(f"manifest_path_escape:{anchor_name}/{filename}")
+                continue
+            if expected is None:
+                if artifact.exists():
+                    errors.append(f"manifest_unexpected_present:{anchor_name}/{filename}")
+                continue
+            if not artifact.is_file():
+                errors.append(f"manifest_missing_file:{anchor_name}/{filename}")
+                continue
+            if _file_sha256(artifact) != str(expected):
+                errors.append(f"manifest_hash_mismatch:{anchor_name}/{filename}")
+
+    # AMENDMENT 2 (A2.4/A2.8): cross-check the manifest's recorded canonical config-block sha
+    # against the (already hash-verified) drift baseline, so config-block drift cannot slip through
+    # even though the blocks are sealed transitively via config_macro_raw.yaml.
+    manifest_cfg_sha = manifest.get("config_block_sha256")
+    if manifest_cfg_sha is None:
+        errors.append("manifest_missing_config_block_sha256")
+    else:
+        baseline_path = output_root / "h1_prospective_baseline.json"
+        try:
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            errors.append("h1_baseline_unreadable_for_config_crosscheck")
+        else:
+            if str(baseline.get("config_blocks_sha256") or "") != str(manifest_cfg_sha):
+                errors.append("manifest_config_block_sha_mismatch")
+    return errors
+
+
+def h1_promotion_status(
+    *,
+    output_root: Path,
+    run_as_of: str,
+    model_version: str,
+) -> tuple[Path | None, list[str]]:
+    """Latest sealed H1 promotion evidence at or before run_as_of. Fail-closed.
+
+    Returns (evidence_path, errors); the h1 regime source is usable ONLY when errors is
+    empty, which requires (a) a sealed ``h1_promotion_manifest.json`` next to the evidence
+    JSON whose EVERY hash re-verifies (spec, config, ledger, baseline, builder sources, and
+    the evidence JSON itself), and (b) acceptance == PROMOTABLE under the frozen prospective
+    contract (H1_CANDIDATE_SPEC.md + AMENDMENT 1).
+    """
+    if not output_root.exists():
+        return None, ["missing_h1_output_root"]
+    candidates = sorted(
+        child for child in output_root.iterdir() if child.is_dir() and child.name <= run_as_of
+    )
+    for child in reversed(candidates):
+        path = child / "h1_promotion_evidence.json"
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return path, [f"unreadable_h1_evidence:{type(exc).__name__}"]
+        errors: list[str] = []
+        if str(payload.get("model_version") or "") != str(model_version):
+            errors.append("h1_model_version_mismatch")
+
+        evidence_as_of_date = str(payload.get("evidence_as_of_date") or child.name)
+        manifest_path = child / "h1_promotion_manifest.json"
+        if not manifest_path.is_file():
+            errors.append("missing_h1_promotion_manifest")
+        else:
+            errors.extend(
+                _verify_h1_manifest(
+                    manifest_path, model_version=model_version, evidence_as_of_date=evidence_as_of_date
+                )
+            )
+
+        if str(payload.get("acceptance") or "") != "PROMOTABLE":
+            errors.append(f"acceptance={payload.get('acceptance')}")
+        return path, errors
+    return None, ["missing_h1_promotion_evidence"]

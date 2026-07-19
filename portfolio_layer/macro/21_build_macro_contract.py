@@ -41,6 +41,7 @@ from portfolio_layer.macro.contract import (  # noqa: E402
     rows_at_latest,
     single_latest_regime_row,
     staleness_days,
+    h1_promotion_status,
     v2_promotion_status,
     verify_v2_promotion_manifest,
 )
@@ -408,14 +409,20 @@ def main() -> int:
     except ValueError as exc:
         LOGGER.error("%s", exc)
         return 1
-    regime_model_version = (
-        str(cfg_get(config, "macro.regime_v2_model_version", "") or "").strip()
-        if regime_source == "v2"
-        else None
-    )
-    if regime_source == "v2" and not regime_model_version:
-        LOGGER.error("macro.regime_v2_model_version is required when macro.regime_source=v2")
-        return 1
+    if regime_source == "v2":
+        regime_model_version = str(cfg_get(config, "macro.regime_v2_model_version", "") or "").strip()
+        if not regime_model_version:
+            LOGGER.error("macro.regime_v2_model_version is required when macro.regime_source=v2")
+            return 1
+    elif regime_source == "h1":
+        regime_model_version = str(
+            cfg_get(config, "macro.regime_h1_model_version", "macro_regime_h1_hybrid_v1") or ""
+        ).strip()
+        if not regime_model_version:
+            LOGGER.error("macro.regime_h1_model_version is required when macro.regime_source=h1")
+            return 1
+    else:
+        regime_model_version = None
     macro_dir = run_dir / "macro"
     paths_out = {
         "macro_regime.csv": macro_dir / "macro_regime.csv",
@@ -462,6 +469,15 @@ def main() -> int:
             if promotion_errors:
                 LOGGER.error("V2 regime source is not promotable/current: %s", promotion_errors[:8])
                 return 1
+        elif regime_source == "h1":
+            promotion_manifest_path, h1_errors = h1_promotion_status(
+                output_root=PACKAGE_ROOT / "MacroLayer" / "out" / "regime_h1",
+                run_as_of=run_as_of,
+                model_version=str(regime_model_version),
+            )
+            if h1_errors:
+                LOGGER.error("H1 regime source is not promotable/current: %s", h1_errors[:8])
+                return 1
         regime = _regime_row(
             run_as_of,
             single_latest_regime_row(
@@ -479,6 +495,23 @@ def main() -> int:
                 LOGGER.error(
                     "V2 promotion evidence is stale relative to the selected decision: evidence=%s regime=%s",
                     promotion_date,
+                    regime_date,
+                )
+                return 1
+        # AMENDMENT 2 (A2.3): mirror the V2 evidence-date parity check for H1 - the H1 evidence's
+        # evidence_as_of_date must equal the selected macro regime row's macro_as_of_date.
+        if regime_source == "h1" and promotion_manifest_path is not None:
+            try:
+                h1_evidence = json.loads(Path(promotion_manifest_path).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                LOGGER.error("Unable to read H1 promotion evidence for date parity: %s", exc)
+                return 1
+            evidence_date = str(h1_evidence.get("evidence_as_of_date") or "")
+            regime_date = str(regime.get("macro_as_of_date") or "")
+            if evidence_date != regime_date:
+                LOGGER.error(
+                    "H1 promotion evidence is stale relative to the selected decision: evidence=%s regime=%s",
+                    evidence_date,
                     regime_date,
                 )
                 return 1

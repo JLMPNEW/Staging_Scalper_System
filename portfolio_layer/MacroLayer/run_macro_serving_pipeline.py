@@ -65,6 +65,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the shadow V2.3 candidate build and validation (probability_v2_3 block).",
     )
+    parser.add_argument(
+        "--skip-probabilities-h1",
+        action="store_true",
+        help="Skip the H1 hybrid adapter, validation, decision, and promotion-evidence steps.",
+    )
     parser.add_argument("--skip-regime-raw", action="store_true", help="Skip rebuilding macro_regime_raw_daily.")
     parser.add_argument("--skip-regime-smoothed", action="store_true", help="Skip rebuilding macro_regime_smoothed_daily.")
     parser.add_argument("--skip-regime-decision", action="store_true", help="Skip rebuilding macro_regime_decision_daily.")
@@ -404,6 +409,39 @@ def main() -> None:
     probability_v2_3_enabled = parse_boolish(cfg_get(cfg, "probability_v2_3", "enabled", default=False), default=False)
     if probability_v2_3_enabled and not args.skip_probabilities_v2_3:
         _run_v2_family_group(layer_block="probability_v2_3", step_suffix="_v2_3")
+
+    # H1 hybrid (H1_CANDIDATE_SPEC.md) composes V1 + v2-family daily rows, so it must run
+    # AFTER the V1 probability layer and the v2-family groups above.
+    probability_h1_enabled = parse_boolish(cfg_get(cfg, "probability_h1", "enabled", default=False), default=False)
+    if probability_h1_enabled and not args.skip_probabilities_h1:
+        for script_name, step_name, extra in (
+            ("build_macro_h1_hybrid.py", "probability_h1_hybrid", ("--start-date", "--end-date")),
+            ("validate_macro_h1_hybrid.py", "probability_h1_validation", ("--end-date",)),
+            ("build_macro_regime_v2_decision.py", "regime_h1_decision", ("--start-date", "--end-date")),
+            ("validate_macro_h1_promotion.py", "regime_h1_promotion_evidence", ("--end-date",)),
+        ):
+            h1_cmd = [str(args.python_executable), str(SCRIPT_DIR / script_name), *common_cfg,
+                      "--layer-block", "probability_h1"]
+            _append_path_arg(h1_cmd, "--serving-db-path", args.serving_db_path)
+            if "--start-date" in extra:
+                _append_text_arg(h1_cmd, "--start-date", args.start_date)
+            _append_text_arg(h1_cmd, "--end-date", args.end_date)
+            _run_step(step_name=step_name, command=h1_cmd)
+
+        h1_operations_enabled = parse_boolish(
+            cfg_get(cfg, "h1_operations", "enabled", default=True), default=True
+        )
+        if h1_operations_enabled:
+            h1_operations_cmd = [
+                str(args.python_executable),
+                str(SCRIPT_DIR / "validate_macro_h1_operations.py"),
+                *common_cfg,
+                "--layer-block",
+                "probability_h1",
+            ]
+            _append_path_arg(h1_operations_cmd, "--serving-db-path", args.serving_db_path)
+            _append_text_arg(h1_operations_cmd, "--end-date", args.end_date)
+            _run_step(step_name="regime_h1_operations", command=h1_operations_cmd)
 
     if not args.skip_industry_macro:
         industry_macro_cmd = [str(args.python_executable), str(SCRIPT_DIR / "build_macro_industry_fit.py"), *common_cfg]
