@@ -170,6 +170,9 @@ def load_policy_subjects(conn: Any, *, model_family: str, asof: date, feature_so
         f"""
         SELECT c.ticker,
                t.development_stage,
+               ph.reporting_profile AS historical_reporting_profile,
+               ph.financial_confidence AS historical_financial_confidence,
+               ph.fallback_status AS historical_fallback_status,
                p.reporting_profile AS profile_reporting_profile,
                p.financial_confidence AS profile_financial_confidence,
                p.fallback_status AS profile_fallback_status,
@@ -185,6 +188,10 @@ def load_policy_subjects(conn: Any, *, model_family: str, asof: date, feature_so
           ON p.ticker = c.ticker
          AND p.model_family = t.model_family
          AND p.source_id IN ({profile_ph})
+        LEFT JOIN dim_issuer_reporting_profile_history ph
+          ON ph.ticker = c.ticker
+         AND ph.model_family = t.model_family
+         AND ph.profile_asof_date = ?
         LEFT JOIN feature_financial_statement f
           ON f.ticker = c.ticker
          AND f.model_family = t.model_family
@@ -200,7 +207,14 @@ def load_policy_subjects(conn: Any, *, model_family: str, asof: date, feature_so
         WHERE c.is_active = 1
         ORDER BY c.ticker
         """,
-        (model_family, *profile_source_ids, feature_source_id, feature_source_id, asof.isoformat()),
+        (
+            model_family,
+            *profile_source_ids,
+            asof.isoformat(),
+            feature_source_id,
+            feature_source_id,
+            asof.isoformat(),
+        ),
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -249,10 +263,15 @@ def main() -> int:
         ticker = normalize_ticker(subject.get("ticker"))
         development_stage = str(subject.get("development_stage") or "operating")
         profile_row_profile = str(subject.get("profile_reporting_profile") or "").strip()
+        historical_profile = str(subject.get("historical_reporting_profile") or "").strip()
         feature_row_profile = str(subject.get("feature_reporting_profile") or "").strip()
         # Single COALESCE precedence: profile AND confidence come from the same row,
         # never a profile from one source graded against the other source's confidence.
-        if profile_row_profile:
+        if model_family == "machinery" and historical_profile:
+            profile = historical_profile
+            confidence = as_float(subject.get("historical_financial_confidence"))
+            profile_source = "issuer_profile_history"
+        elif model_family != "machinery" and profile_row_profile:
             profile = profile_row_profile
             confidence = as_float(subject.get("profile_financial_confidence"))
             profile_source = "issuer_profile"
@@ -300,7 +319,14 @@ def main() -> int:
                 "profile_source": profile_source,
                 "financial_confidence": round(confidence, 4),
                 "data_quality_status": str(subject.get("feature_data_quality_status") or ""),
-                "fallback_status": str(subject.get("profile_fallback_status") or ""),
+                "fallback_status": str(
+                    (
+                        subject.get("historical_fallback_status")
+                        if profile_source == "issuer_profile_history"
+                        else subject.get("profile_fallback_status")
+                    )
+                    or ""
+                ),
                 "feature_asof_date": feature_asof.isoformat() if feature_asof is not None else "",
                 "rank_ready_policy": policy_text(policy, "rank_ready_policy"),
                 "calibration_policy": policy_text(policy, "calibration_policy"),

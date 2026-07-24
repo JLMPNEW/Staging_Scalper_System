@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import sys
 from contextlib import closing
 from dataclasses import dataclass
@@ -53,9 +54,12 @@ MACHINERY_SUPPLEMENTAL_METRICS = frozenset(
         "reported_backlog",
         "remaining_performance_obligation",
         "rpo_current",
+        "shares_outstanding",
     }
 )
-MACHINERY_SUPPLEMENTAL_TAXONOMIES = frozenset({"sec-footnote", "sec-text"})
+MACHINERY_SUPPLEMENTAL_TAXONOMIES = frozenset(
+    {"dei", "issuer-ir", "sec-footnote", "sec-text"}
+)
 REPORT_FIELDS = [
     "ticker",
     "asof_date",
@@ -231,11 +235,16 @@ FEATURE_COLUMNS = [
     "funded_backlog_usd",
     "reported_backlog",
     "reported_backlog_usd",
+    "contract_load_proxy",
+    "contract_load_proxy_usd",
+    "contract_load_proxy_source",
     "orders_yoy_growth",
     "backlog_yoy_growth",
     "backlog_to_revenue",
     "reported_backlog_yoy_growth",
     "reported_backlog_to_revenue",
+    "contract_load_proxy_yoy_growth",
+    "contract_load_proxy_to_revenue",
     "rpo_yoy_growth",
     "rpo_to_revenue",
     "rpo_implied_orders",
@@ -277,6 +286,7 @@ DURATION_METRICS = {
     "gross_profit",
     "operating_income",
     "net_income",
+    "eps_basic",
     "eps_diluted",
     "operating_cash_flow",
     "capex",
@@ -290,6 +300,7 @@ DURATION_METRICS = {
     "research_and_development",
     "selling_general_admin",
     "stock_based_compensation",
+    "basic_shares",
     "diluted_shares",
 }
 
@@ -304,6 +315,7 @@ METRIC_SELECTION_ORDER = (
     "operating_cash_flow",
     "gross_profit",
     "cost_of_sales",
+    "eps_basic",
     "eps_diluted",
     "liabilities",
     "equity",
@@ -321,7 +333,9 @@ METRIC_SELECTION_ORDER = (
     "orders",
     "research_and_development",
     "stock_based_compensation",
+    "basic_shares",
     "diluted_shares",
+    "shares_outstanding",
     "debt_current",
     "debt_noncurrent",
     "debt_total",
@@ -362,6 +376,37 @@ ORDER_BACKLOG_METRICS = {
     "backlog_yoy_growth",
 }
 
+# Funded backlog is a government-contracting disclosure. Its derived metrics
+# are equally inapplicable when the source disclosure is structurally absent;
+# classifying only the source metric as NOT_APPLICABLE made the derivatives
+# look like extraction failures.
+FUNDED_BACKLOG_METRICS = {
+    "funded_backlog",
+    "backlog_yoy_growth",
+    "backlog_to_revenue",
+}
+
+RPO_METRICS = {
+    "remaining_performance_obligation",
+    "rpo_current",
+    "rpo_yoy_growth",
+    "rpo_to_revenue",
+    "rpo_implied_orders",
+    "rpo_implied_book_to_bill",
+}
+
+CONTRACT_LOAD_PROXY_METRICS = {
+    "contract_load_proxy",
+    "contract_load_proxy_yoy_growth",
+    "contract_load_proxy_to_revenue",
+}
+
+# The reviewed short-cycle policy applies to the full order/contract-load
+# family. A direct value always wins before this applicability branch runs.
+STRUCTURAL_CONTRACT_LOAD_METRICS = (
+    ORDER_BACKLOG_METRICS | RPO_METRICS | CONTRACT_LOAD_PROXY_METRICS
+)
+
 
 @dataclass(frozen=True)
 class TtmResult:
@@ -394,7 +439,7 @@ CASE
     WHEN COALESCE(accepted_at, '') GLOB '????-??-??*' THEN SUBSTR(accepted_at, 1, 10)
     WHEN COALESCE(accepted_at, '') GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*'
         THEN SUBSTR(accepted_at, 1, 4) || '-' || SUBSTR(accepted_at, 5, 2) || '-' || SUBSTR(accepted_at, 7, 2)
-    ELSE filing_date
+    ELSE COALESCE(NULLIF(filing_date, ''), '9999-12-31')
 END
 """
 
@@ -474,6 +519,16 @@ def safe_div(num: float | None, den: float | None) -> float | None:
         return None
     value = num / den
     return value if math.isfinite(value) else None
+
+
+def sanitize_gross_proceeds_ttm(
+    metric_name: str,
+    value: float | None,
+) -> tuple[float | None, str]:
+    """Reject negative TTM values created by incompatible cumulative windows."""
+    if value is None or value >= 0:
+        return value, ""
+    return None, f"ttm_{metric_name}_negative_gross_proceeds_discarded"
 
 
 def growth(cur: float | None, prev: float | None) -> float | None:
@@ -587,25 +642,69 @@ def reporting_standard_from_taxonomy(taxonomy: str) -> str:
     return taxonomy
 
 
-def refresh_canonical_facts(conn: Any, *, source_id: str, model_family: str, tickers: list[str], asof: date) -> int:
+def refresh_canonical_facts(
+    conn: Any,
+    *,
+    source_id: str,
+    model_family: str,
+    tickers: list[str],
+    asof: date,
+    supplemental_source_ids: tuple[str, ...] = (),
+) -> int:
     if not tickers:
         return 0
     ph = placeholders(tickers)
+    input_source_ids = tuple(
+        dict.fromkeys(
+            source
+            for source in (source_id, *supplemental_source_ids)
+            if str(source).strip()
+        )
+    )
+    source_ph = placeholders(list(input_source_ids))
+    append_only = os.environ.get("INDUSTRIALS_HISTORICAL_APPEND", "").strip() == "1"
+    missing_only_sql = ""
+    query_params: tuple[Any, ...] = (
+        *input_source_ids,
+        *tickers,
+        asof.isoformat(),
+        asof.isoformat(),
+    )
+    if append_only:
+        missing_only_sql = """
+          AND NOT EXISTS (
+              SELECT 1
+              FROM fact_financial_statement_canonical existing
+              WHERE existing.ticker = f.ticker
+                AND existing.source_id = ?
+                AND existing.model_family = ?
+                AND existing.canonical_metric = f.canonical_metric
+                AND existing.period_end = f.period_end
+                AND existing.accession_number = COALESCE(f.accession_number, '')
+                AND existing.unit = COALESCE(f.unit, '')
+          )
+        """
+        query_params = (*query_params, source_id, model_family)
     rows = conn.execute(
         f"""
-        SELECT ticker, source_id, canonical_metric, period_end, period_start, filing_date,
-               accepted_at, accession_number, form_type, fiscal_year, fiscal_period,
-               taxonomy, concept_name, unit, value, source_priority
-        FROM fact_sec_xbrl_fact
-        WHERE source_id = ?
-          AND ticker IN ({ph})
-          AND period_end IS NOT NULL
+        SELECT f.ticker, f.source_id, f.canonical_metric, f.period_end, f.period_start,
+               f.filing_date, f.accepted_at, f.accession_number, f.form_type,
+               f.fiscal_year, f.fiscal_period, f.taxonomy, f.concept_name,
+               f.unit, f.value, f.source_priority
+        FROM fact_sec_xbrl_fact f
+        JOIN dim_company c
+          ON c.ticker = f.ticker
+         AND COALESCE(c.cik, '') = COALESCE(f.cik, '')
+        WHERE f.source_id IN ({source_ph})
+          AND f.ticker IN ({ph})
+          AND f.period_end IS NOT NULL
           AND ({ACCEPTED_DATE_SQL}) <= ?
-          AND period_end <= ?
-        ORDER BY ticker, period_end, accession_number, canonical_metric,
-                 source_priority DESC, concept_name DESC
+          AND f.period_end <= ?
+          {missing_only_sql}
+        ORDER BY f.ticker, f.period_end, f.accession_number, f.canonical_metric,
+                 f.source_priority DESC, f.concept_name DESC
         """,
-        (source_id, *tickers, asof.isoformat(), asof.isoformat()),
+        query_params,
     ).fetchall()
     now = utc_now()
     with conn:
@@ -614,17 +713,18 @@ def refresh_canonical_facts(conn: Any, *, source_id: str, model_family: str, tic
         # facts visible at that asof and never destroys later-accepted facts.
         # Rows accepted after asof are preserved; load_canonical_rows PIT-filters
         # them out at read time via the same predicate.
-        conn.execute(
-            f"""
-            DELETE FROM fact_financial_statement_canonical
-            WHERE source_id = ?
-              AND model_family = ?
-              AND ticker IN ({ph})
-              AND period_end <= ?
-              AND ({ACCEPTED_DATE_SQL}) <= ?
-            """,
-            (source_id, model_family, *tickers, asof.isoformat(), asof.isoformat()),
-        )
+        if not append_only:
+            conn.execute(
+                f"""
+                DELETE FROM fact_financial_statement_canonical
+                WHERE source_id = ?
+                  AND model_family = ?
+                  AND ticker IN ({ph})
+                  AND period_end <= ?
+                  AND ({ACCEPTED_DATE_SQL}) <= ?
+                """,
+                (source_id, model_family, *tickers, asof.isoformat(), asof.isoformat()),
+            )
         for row in rows:
             unit = str(row["unit"] or "")
             value = as_float(row["value"])
@@ -663,7 +763,7 @@ def refresh_canonical_facts(conn: Any, *, source_id: str, model_family: str, tic
                 """,
                 (
                     row["ticker"],
-                    row["source_id"],
+                    source_id,
                     model_family,
                     row["canonical_metric"],
                     row["period_end"],
@@ -688,15 +788,37 @@ def refresh_canonical_facts(conn: Any, *, source_id: str, model_family: str, tic
     return len(rows)
 
 
-def load_profile(conn: Any, *, ticker: str, model_family: str, company: dict[str, Any], source_id: str) -> dict[str, Any]:
-    row = conn.execute(
-        """
-        SELECT *
-        FROM dim_issuer_reporting_profile
-        WHERE ticker = ? AND model_family = ?
-        """,
-        (ticker, model_family),
-    ).fetchone()
+def load_profile(
+    conn: Any,
+    *,
+    ticker: str,
+    model_family: str,
+    company: dict[str, Any],
+    source_id: str,
+    asof: date,
+) -> dict[str, Any]:
+    if model_family in {"machinery", "transportation"}:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM dim_issuer_reporting_profile_history
+            WHERE ticker = ?
+              AND model_family = ?
+              AND profile_asof_date <= ?
+            ORDER BY profile_asof_date DESC
+            LIMIT 1
+            """,
+            (ticker, model_family, asof.isoformat()),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM dim_issuer_reporting_profile
+            WHERE ticker = ? AND model_family = ?
+            """,
+            (ticker, model_family),
+        ).fetchone()
     if row is not None:
         return dict(row)
 
@@ -711,36 +833,27 @@ def load_profile(conn: Any, *, ticker: str, model_family: str, company: dict[str
         standard = "unavailable"
         confidence = 0.0
         reason = "no_reporting_profile_loaded"
-    now = utc_now()
-    # XC-1: execute on the caller's transaction. A nested `with conn:` here
-    # committed the outer build transaction mid-loop, making the asof DELETEs
-    # and any partial feature upserts permanent on a mid-build crash.
-    conn.execute(
-        """
-        INSERT INTO dim_issuer_reporting_profile(
-            ticker, model_family, cik, country, reporting_profile, reporting_standard,
-            primary_taxonomy, fallback_status, financial_confidence, usable_xbrl_flag,
-            source_id, review_reason, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, '', 'neutral_low_confidence', ?, 0, ?, ?, ?, ?)
-        ON CONFLICT(ticker, model_family) DO NOTHING
-        """,
-        (
-            ticker,
-            model_family,
-            company.get("cik"),
-            country,
-            profile,
-            standard,
-            confidence,
-            source_id,
-            reason,
-            now,
-            now,
+    if model_family in {"machinery", "transportation"}:
+        reason = "reporting_profile_snapshot_missing_for_asof"
+    return {
+        "ticker": ticker,
+        "model_family": model_family,
+        "cik": company.get("cik"),
+        "country": country,
+        "reporting_profile": profile,
+        "reporting_standard": standard,
+        "primary_taxonomy": "",
+        "fallback_status": "neutral_low_confidence",
+        "financial_confidence": confidence,
+        "usable_xbrl_flag": 0,
+        "source_id": source_id,
+        "review_reason": reason,
+        "profile_asof_date": (
+            asof.isoformat()
+            if model_family in {"machinery", "transportation"}
+            else ""
         ),
-    )
-    row = conn.execute("SELECT * FROM dim_issuer_reporting_profile WHERE ticker = ? AND model_family = ?", (ticker, model_family)).fetchone()
-    return dict(row) if row is not None else {}
+    }
 
 
 def load_canonical_rows(conn: Any, *, ticker: str, source_id: str, model_family: str, asof: date) -> list[dict[str, Any]]:
@@ -808,27 +921,24 @@ def select_fact_at(rows: list[dict[str, Any]], metric: str, iso_period_end: str)
 def capital_at_instant(
     rows: list[dict[str, Any]],
     iso_end: str,
-    *,
-    assume_zero_debt: bool,
 ) -> float | None:
     equity_at = select_fact_at(rows, "equity", iso_end)
     cash_at = select_fact_at(rows, "cash_and_equivalents", iso_end)
     if equity_at is None or cash_at is None:
         return None
-    if assume_zero_debt:
-        debt_at: float | None = 0.0
+    total_at = select_fact_at(rows, "debt_total", iso_end)
+    if total_at is not None:
+        debt_at = as_float(total_at.get("value"))
     else:
-        total_at = select_fact_at(rows, "debt_total", iso_end)
-        if total_at is not None:
-            debt_at = as_float(total_at.get("value"))
-        else:
-            components = [
-                value
-                for metric in ("debt_current", "debt_noncurrent")
-                if (row := select_fact_at(rows, metric, iso_end)) is not None
-                and (value := as_float(row.get("value"))) is not None
-            ]
-            debt_at = sum(components) if components else None
+        current_at = select_fact_at(rows, "debt_current", iso_end)
+        noncurrent_at = select_fact_at(rows, "debt_noncurrent", iso_end)
+        current_value = as_float(current_at.get("value")) if current_at is not None else None
+        noncurrent_value = as_float(noncurrent_at.get("value")) if noncurrent_at is not None else None
+        debt_at = (
+            current_value + noncurrent_value
+            if current_value is not None and noncurrent_value is not None
+            else None
+        )
     if debt_at is None:
         return None
     equity_value = as_float(equity_at.get("value"))
@@ -882,6 +992,153 @@ def select_previous_comparable(
         )
     ]
     return max(candidates, key=row_sort_key) if candidates else None
+
+
+def select_latest_comparable_pair(
+    rows: list[dict[str, Any]],
+    metric: str,
+    *,
+    instant_metric: bool = False,
+    prefer_annual: bool = False,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    candidates = [
+        row
+        for row in rows
+        if str(row.get("canonical_metric") or "") == metric
+        and as_float(row.get("value")) is not None
+    ]
+    if prefer_annual:
+        annual = [row for row in candidates if is_annual_fact(row)]
+        if annual:
+            candidates = annual
+    candidates.sort(key=row_sort_key, reverse=True)
+    seen_periods: set[tuple[str, str]] = set()
+    for current in candidates:
+        period_key = (
+            str(current.get("period_start") or ""),
+            str(current.get("period_end") or ""),
+        )
+        if period_key in seen_periods:
+            continue
+        seen_periods.add(period_key)
+        previous = select_previous_comparable(
+            rows,
+            metric,
+            current,
+            instant_metric=instant_metric,
+        )
+        if previous is not None:
+            return current, previous
+    return None, None
+
+
+def select_aligned_inventory_revenue_growth(
+    rows: list[dict[str, Any]],
+) -> tuple[float | None, float | None, float | None]:
+    """Return inventory growth, revenue growth, and their spread from one
+    shared pair of fiscal period ends. This avoids combining quarterly
+    inventory growth with annual revenue growth."""
+    inventories = rows_for_metric(rows, "inventory")
+    inventories.sort(key=row_sort_key, reverse=True)
+    for current_inventory in inventories:
+        previous_inventory = select_previous_comparable(
+            rows,
+            "inventory",
+            current_inventory,
+            instant_metric=True,
+        )
+        if previous_inventory is None:
+            continue
+        current_end = str(current_inventory.get("period_end") or "")[:10]
+        previous_end = str(previous_inventory.get("period_end") or "")[:10]
+        current_revenues = [
+            row
+            for row in rows_for_metric(rows, "revenue")
+            if str(row.get("period_end") or "")[:10] == current_end
+        ]
+        current_revenues.sort(
+            key=lambda row: (is_annual_fact(row), row_sort_key(row)),
+            reverse=True,
+        )
+        for current_revenue in current_revenues:
+            previous_revenues = [
+                row
+                for row in rows_for_metric(rows, "revenue")
+                if str(row.get("period_end") or "")[:10] == previous_end
+                and periods_are_one_year_apart(current_revenue, row)
+            ]
+            if not previous_revenues:
+                continue
+            previous_revenue = max(previous_revenues, key=row_sort_key)
+            inventory_growth = growth(
+                as_float(current_inventory.get("value")),
+                as_float(previous_inventory.get("value")),
+            )
+            revenue_growth = growth(
+                as_float(current_revenue.get("value")),
+                as_float(previous_revenue.get("value")),
+            )
+            if inventory_growth is not None and revenue_growth is not None:
+                return inventory_growth, revenue_growth, inventory_growth - revenue_growth
+    return None, None, None
+
+
+def eps_basic_equals_diluted_for_share_period(
+    rows: list[dict[str, Any]],
+    share_row: dict[str, Any],
+) -> bool:
+    basic_eps_rows = [
+        row
+        for row in rows_for_metric(rows, "eps_basic")
+        if combined_periods_match(share_row, row)
+    ]
+    diluted_eps_rows = [
+        row
+        for row in rows_for_metric(rows, "eps_diluted")
+        if combined_periods_match(share_row, row)
+    ]
+    return any(
+        math.isclose(
+            as_float(basic.get("value")) or 0.0,
+            as_float(diluted.get("value")) or 0.0,
+            rel_tol=1e-9,
+            abs_tol=1e-12,
+        )
+        for basic in basic_eps_rows
+        for diluted in diluted_eps_rows
+        if combined_periods_match(basic, diluted)
+        and as_float(basic.get("value")) is not None
+        and as_float(diluted.get("value")) is not None
+    )
+
+
+def select_basic_share_pair_when_eps_equal(
+    rows: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    candidates = rows_for_metric(rows, "basic_shares")
+    candidates.sort(key=row_sort_key, reverse=True)
+    for current in candidates:
+        previous = select_previous_comparable(rows, "basic_shares", current)
+        if (
+            previous is not None
+            and eps_basic_equals_diluted_for_share_period(rows, current)
+            and eps_basic_equals_diluted_for_share_period(rows, previous)
+        ):
+            return current, previous
+    return None, None
+
+
+def is_recent_public_transition(
+    company: dict[str, Any],
+    *,
+    asof: date,
+    maximum_age_days: int = 550,
+) -> bool:
+    membership_start = parse_date(company.get("membership_start_date"))
+    if membership_start is None:
+        return False
+    age_days = (asof - membership_start).days
+    return 0 <= age_days <= maximum_age_days
 
 
 def is_quarterly_or_interim_fact(row: dict[str, Any]) -> bool:
@@ -1323,6 +1580,7 @@ def rows_for_reporting_profile(
     profile: dict[str, Any],
     *,
     model_family: str = "",
+    machinery_sec_text_core_metrics: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Keep promoted XBRL profiles on their declared accounting taxonomy.
 
@@ -1340,7 +1598,8 @@ def rows_for_reporting_profile(
                 row
                 for row in rows
                 if str(row.get("taxonomy") or "") in MACHINERY_SUPPLEMENTAL_TAXONOMIES
-                and str(row.get("canonical_metric") or "") in MACHINERY_SUPPLEMENTAL_METRICS
+                and str(row.get("canonical_metric") or "")
+                in MACHINERY_SUPPLEMENTAL_METRICS | machinery_sec_text_core_metrics
             )
         return filtered, "us-gaap+audited-predecessor"
     if model_family == "machinery" and reporting_profile in {
@@ -1357,7 +1616,8 @@ def rows_for_reporting_profile(
             row
             for row in rows
             if str(row.get("taxonomy") or "") in MACHINERY_SUPPLEMENTAL_TAXONOMIES
-            and str(row.get("canonical_metric") or "") in MACHINERY_SUPPLEMENTAL_METRICS
+            and str(row.get("canonical_metric") or "")
+            in MACHINERY_SUPPLEMENTAL_METRICS | machinery_sec_text_core_metrics
         )
     return filtered, target_taxonomy
 
@@ -1591,12 +1851,14 @@ def build_feature_from_facts(
     rows: list[dict[str, Any]],
     market_source_ids: list[str],
     fx_max_staleness_days: int,
+    machinery_sec_text_core_metrics: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     feature = base_feature(ticker=ticker, asof=asof, source_id=source_id, model_family=model_family, company=company, profile=profile)
     rows, profile_taxonomy_filter = rows_for_reporting_profile(
         rows,
         profile,
         model_family=model_family,
+        machinery_sec_text_core_metrics=machinery_sec_text_core_metrics,
     )
     # FN-3: resolve one reporting currency for the ticker slice and restrict
     # candidate facts to it. Facts available only in another currency are
@@ -1627,13 +1889,27 @@ def build_feature_from_facts(
     )
     anchor_period_end = parse_date(anchor_preview.get("period_end")) if anchor_preview is not None else None
     if anchor_period_end is not None:
+        stale_cutoff_iso = (anchor_period_end - timedelta(days=STALE_FACT_MAX_LAG_DAYS)).isoformat()
         for metric, fact in selected.items():
             if fact is None:
                 continue
             fact_end = parse_date(fact.get("period_end"))
             if fact_end is not None and (anchor_period_end - fact_end).days > STALE_FACT_MAX_LAG_DAYS:
-                selected[metric] = None
-                period_flags.append(f"stale_fact_discarded_{metric}")
+                # Before discarding outright, retry against recent facts only:
+                # an issuer that stopped annual tagging may still tag the metric
+                # quarterly, and prefer_annual would otherwise pin the stale FY.
+                fresh_candidates = [
+                    row
+                    for row in currency_rows
+                    if str(row.get("canonical_metric") or "") == metric
+                    and str(row.get("period_end") or "")[:10] >= stale_cutoff_iso
+                ]
+                replacement = select_fact(fresh_candidates, metric, prefer_annual=metric in DURATION_METRICS)
+                selected[metric] = replacement
+                if replacement is None:
+                    period_flags.append(f"stale_fact_discarded_{metric}")
+                else:
+                    period_flags.append(f"stale_fact_replaced_with_recent_{metric}")
 
     revenue = metric_value(selected, "revenue")
     cost_of_sales = metric_value(selected, "cost_of_sales")
@@ -1659,34 +1935,18 @@ def build_feature_from_facts(
     equity = metric_value(selected, "equity")
     cash = metric_value(selected, "cash_and_equivalents")
     debt_total = metric_value(selected, "debt_total")
-    if debt_total is None and (selected.get("debt_current") is not None or selected.get("debt_noncurrent") is not None):
+    if (
+        debt_total is None
+        and selected.get("debt_current") is not None
+        and selected.get("debt_noncurrent") is not None
+    ):
         if combined_periods_match(selected.get("debt_current"), selected.get("debt_noncurrent")):
-            debt_total = (metric_value(selected, "debt_current") or 0.0) + (metric_value(selected, "debt_noncurrent") or 0.0)
+            debt_current = metric_value(selected, "debt_current")
+            debt_noncurrent = metric_value(selected, "debt_noncurrent")
+            if debt_current is not None and debt_noncurrent is not None:
+                debt_total = debt_current + debt_noncurrent
         else:
             period_flags.append("period_mismatch_total_debt")
-    debt_assumed_zero = False
-    if debt_total is None and liabilities is not None:
-        # Verified pattern: many machinery names (tool makers, dev-stage) carry
-        # no borrowings at all, so no debt concept is ever tagged and every
-        # debt-dependent metric nulls. Assume zero ONLY when the last two years
-        # show neither a balance-sheet debt fact nor debt-issuance cash flow —
-        # the flow check excludes captive-finance filers (PCAR/CNH) whose debt
-        # lives under segment axes but who still tag issuance activity.
-        evidence_anchor = parse_date(
-            ((selected.get("assets") or selected.get("liabilities") or {}).get("period_end"))
-        )
-        if evidence_anchor is not None:
-            evidence_start = (evidence_anchor - timedelta(days=730)).isoformat()
-            has_recent_debt_evidence = any(
-                str(row.get("canonical_metric") or "")
-                in {"debt_total", "debt_current", "debt_noncurrent", "debt_issuance_proceeds"}
-                and as_float(row.get("value")) not in (None, 0.0)
-                and str(row.get("period_end") or "") >= evidence_start
-                for row in rows
-            )
-            if not has_recent_debt_evidence:
-                debt_total = 0.0
-                debt_assumed_zero = True
     inventory = metric_value(selected, "inventory")
     receivables = metric_value(selected, "accounts_receivable")
     payables = metric_value(selected, "accounts_payable")
@@ -1707,8 +1967,17 @@ def build_feature_from_facts(
         # gross-profit derivation above.
         if combined_periods_match(selected.get("revenue"), selected.get("costs_and_expenses")):
             derived_operating_income = revenue - costs_and_expenses
+            pretax_comparable = pretax_income is not None and combined_periods_match(
+                selected.get("revenue"), selected.get("pretax_income")
+            )
             collapse_tolerance = max(abs(pretax_income or 0.0) * 0.02, abs(revenue) * 0.001)
-            if pretax_income is not None and abs(derived_operating_income - pretax_income) <= collapse_tolerance:
+            if pretax_income is not None and not pretax_comparable:
+                # A different-period pretax cannot arbitrate the collapse test —
+                # neither accept nor reject on a coincidental match.
+                quality_flags_pending_operating_income = (
+                    "operating_income_derivation_skipped_collapse_guard_unavailable"
+                )
+            elif pretax_income is not None and abs(derived_operating_income - pretax_income) <= collapse_tolerance:
                 quality_flags_pending_operating_income = "operating_income_derivation_rejected_costs_include_nonoperating"
             else:
                 operating_income = derived_operating_income
@@ -1947,6 +2216,21 @@ def build_feature_from_facts(
             "research_and_development",
         ]
     }
+    # TTM analogue of the single-period staleness screen: without it, a
+    # years-old annual fact (issuer stopped tagging the metric) still resolves
+    # as "the TTM" and flows into EBITDA/ROIC/coverage under the current
+    # filing's metadata — and, being non-None, suppresses the derivation
+    # fallbacks that exist for exactly that situation.
+    if anchor_period_end is not None:
+        for ttm_metric, ttm_result in list(ttm_results.items()):
+            if (
+                ttm_result.value is not None
+                and ttm_result.window_end is not None
+                and (anchor_period_end - ttm_result.window_end).days > STALE_FACT_MAX_LAG_DAYS
+            ):
+                ttm_results[ttm_metric] = TtmResult(
+                    None, f"ttm_{ttm_metric}_stale_window_discarded"
+                )
     revenue_ttm_local = ttm_results["revenue"].value
     if revenue_ttm_local is None and zero_revenue_defaulted:
         revenue_ttm_local = 0.0
@@ -1960,14 +2244,36 @@ def build_feature_from_facts(
     equity_issuance_proceeds_ttm_local = ttm_results["equity_issuance_proceeds"].value
     debt_issuance_proceeds_ttm_local = ttm_results["debt_issuance_proceeds"].value
     orders_ttm_local = ttm_results["orders"].value
+    # FN-4 for TTM composites: OCF and capex TTMs can resolve from different
+    # windows (annual vs four-quarter) under mixed interim tagging.
+    fcf_ttm_window_mismatch = (
+        operating_cash_flow_ttm_local is not None
+        and capex_ttm_local is not None
+        and not ttm_windows_match(ttm_results["operating_cash_flow"], ttm_results["capex"])
+    )
     free_cash_flow_ttm_local = (
         operating_cash_flow_ttm_local - capex_ttm_local
-        if operating_cash_flow_ttm_local is not None and capex_ttm_local is not None
+        if operating_cash_flow_ttm_local is not None
+        and capex_ttm_local is not None
+        and not fcf_ttm_window_mismatch
         else None
     )
 
     reasons: list[str] = []
     quality_flags: list[str] = []
+    equity_issuance_proceeds_ttm_local, equity_proceeds_flag = sanitize_gross_proceeds_ttm(
+        "equity_issuance_proceeds",
+        equity_issuance_proceeds_ttm_local,
+    )
+    debt_issuance_proceeds_ttm_local, debt_proceeds_flag = sanitize_gross_proceeds_ttm(
+        "debt_issuance_proceeds",
+        debt_issuance_proceeds_ttm_local,
+    )
+    quality_flags.extend(
+        flag for flag in (equity_proceeds_flag, debt_proceeds_flag) if flag
+    )
+    if fcf_ttm_window_mismatch:
+        quality_flags.append("ttm_window_mismatch_free_cash_flow")
     if profile_taxonomy_filter is not None:
         quality_flags.append(f"profile_taxonomy_filter_{profile_taxonomy_filter}")
     if cost_of_sales_derived:
@@ -2024,45 +2330,118 @@ def build_feature_from_facts(
         selected.get("accounts_payable"),
         instant_metric=True,
     )
-    previous_backlog_row = select_previous_comparable(
-        currency_rows,
-        "funded_backlog",
-        selected.get("funded_backlog"),
-        instant_metric=True,
-    )
-    previous_reported_backlog_row = select_previous_comparable(
-        currency_rows,
-        "reported_backlog",
-        selected.get("reported_backlog"),
-        instant_metric=True,
-    )
     previous_rpo_row = select_previous_comparable(
         currency_rows,
         "remaining_performance_obligation",
         selected.get("remaining_performance_obligation"),
         instant_metric=True,
     )
-    previous_diluted_shares_row = select_previous_comparable(
+    orders_growth_current_row, orders_growth_previous_row = select_latest_comparable_pair(
         currency_rows,
-        "diluted_shares",
-        selected.get("diluted_shares"),
+        "orders",
+        prefer_annual=True,
     )
-    previous_orders_row = select_previous_comparable(currency_rows, "orders", selected.get("orders"))
+    backlog_growth_current_row, backlog_growth_previous_row = select_latest_comparable_pair(
+        currency_rows,
+        "funded_backlog",
+        instant_metric=True,
+    )
+    reported_backlog_growth_current_row, reported_backlog_growth_previous_row = (
+        select_latest_comparable_pair(
+            currency_rows,
+            "reported_backlog",
+            instant_metric=True,
+        )
+    )
+    rpo_growth_current_row, rpo_growth_previous_row = select_latest_comparable_pair(
+        currency_rows,
+        "remaining_performance_obligation",
+        instant_metric=True,
+    )
+    growth_pairs = (
+        (
+            "orders",
+            selected.get("orders"),
+            orders_growth_current_row,
+        ),
+        (
+            "funded_backlog",
+            selected.get("funded_backlog"),
+            backlog_growth_current_row,
+        ),
+        (
+            "reported_backlog",
+            selected.get("reported_backlog"),
+            reported_backlog_growth_current_row,
+        ),
+        (
+            "remaining_performance_obligation",
+            selected.get("remaining_performance_obligation"),
+            rpo_growth_current_row,
+        ),
+    )
+    invalid_growth_metrics = {
+        metric_name
+        for metric_name, selected_row, growth_row in growth_pairs
+        if growth_row is not None and selected_row is None
+    }
+    if "orders" in invalid_growth_metrics:
+        orders_growth_current_row = orders_growth_previous_row = None
+    if "funded_backlog" in invalid_growth_metrics:
+        backlog_growth_current_row = backlog_growth_previous_row = None
+    if "reported_backlog" in invalid_growth_metrics:
+        reported_backlog_growth_current_row = reported_backlog_growth_previous_row = None
+    if "remaining_performance_obligation" in invalid_growth_metrics:
+        rpo_growth_current_row = rpo_growth_previous_row = None
+    period_flags.extend(
+        f"growth_pair_without_current_source_{metric_name}"
+        for metric_name in sorted(invalid_growth_metrics)
+    )
     previous_assets = as_float(previous_assets_row.get("value")) if previous_assets_row is not None else None
     previous_equity = as_float(previous_equity_row.get("value")) if previous_equity_row is not None else None
     previous_cash = as_float(previous_cash_row.get("value")) if previous_cash_row is not None else None
     previous_inventory = as_float(previous_inventory_row.get("value")) if previous_inventory_row is not None else None
-    previous_backlog = as_float(previous_backlog_row.get("value")) if previous_backlog_row is not None else None
-    previous_reported_backlog = (
-        as_float(previous_reported_backlog_row.get("value"))
-        if previous_reported_backlog_row is not None
+    previous_rpo = as_float(previous_rpo_row.get("value")) if previous_rpo_row is not None else None
+    orders_growth_current = (
+        as_float(orders_growth_current_row.get("value"))
+        if orders_growth_current_row is not None
         else None
     )
-    previous_rpo = as_float(previous_rpo_row.get("value")) if previous_rpo_row is not None else None
-    previous_diluted_shares = (
-        as_float(previous_diluted_shares_row.get("value")) if previous_diluted_shares_row is not None else None
+    orders_growth_previous = (
+        as_float(orders_growth_previous_row.get("value"))
+        if orders_growth_previous_row is not None
+        else None
     )
-    previous_orders = as_float(previous_orders_row.get("value")) if previous_orders_row is not None else None
+    backlog_growth_current = (
+        as_float(backlog_growth_current_row.get("value"))
+        if backlog_growth_current_row is not None
+        else None
+    )
+    backlog_growth_previous = (
+        as_float(backlog_growth_previous_row.get("value"))
+        if backlog_growth_previous_row is not None
+        else None
+    )
+    reported_backlog_growth_current = (
+        as_float(reported_backlog_growth_current_row.get("value"))
+        if reported_backlog_growth_current_row is not None
+        else None
+    )
+    reported_backlog_growth_previous = (
+        as_float(reported_backlog_growth_previous_row.get("value"))
+        if reported_backlog_growth_previous_row is not None
+        else None
+    )
+    rpo_growth_current = (
+        as_float(rpo_growth_current_row.get("value"))
+        if rpo_growth_current_row is not None
+        else None
+    )
+    rpo_growth_previous = (
+        as_float(rpo_growth_previous_row.get("value"))
+        if rpo_growth_previous_row is not None
+        else None
+    )
 
     current_debt_rows = (
         [selected.get("debt_total")]
@@ -2071,10 +2450,6 @@ def build_feature_from_facts(
     )
     previous_debt_rows: list[dict[str, Any] | None] = [previous_debt_row]
     previous_debt = as_float(previous_debt_row.get("value")) if previous_debt_row is not None else None
-    if debt_assumed_zero:
-        quality_flags.append("debt_assumed_zero_no_debt_evidence_24m")
-        if previous_debt is None:
-            previous_debt = 0.0
     if model_family == "machinery" and previous_debt_row is None:
         current_component_rows: list[dict[str, Any]] = []
         for metric in ("debt_current", "debt_noncurrent"):
@@ -2091,7 +2466,8 @@ def build_feature_from_facts(
             for row in current_component_rows
         ]
         if (
-            current_component_rows
+            len(current_component_rows) == 2
+            and len(previous_component_rows) == 2
             and all(row is not None for row in previous_component_rows)
             and combined_periods_match(*current_component_rows, selected.get("debt_total"))
         ):
@@ -2152,7 +2528,7 @@ def build_feature_from_facts(
                 continue
             if balance_anchor_end is not None and (balance_anchor_end - end_date_parsed).days > STALE_FACT_MAX_LAG_DAYS:
                 break
-            capital = capital_at_instant(currency_rows, iso_end, assume_zero_debt=debt_assumed_zero)
+            capital = capital_at_instant(currency_rows, iso_end)
             if capital is not None:
                 invested_capital = capital
                 ic_instant_end = end_date_parsed
@@ -2173,7 +2549,7 @@ def build_feature_from_facts(
             reverse=True,
         )
         for iso_end in prior_candidates:
-            capital = capital_at_instant(currency_rows, iso_end, assume_zero_debt=debt_assumed_zero)
+            capital = capital_at_instant(currency_rows, iso_end)
             if capital is not None:
                 previous_invested_capital = capital
                 quality_flags.append("previous_invested_capital_realigned_common_instant")
@@ -2200,8 +2576,15 @@ def build_feature_from_facts(
             and ttm_windows_match(revenue_ttm_result, costs_ttm_result)
         ):
             derived_ttm = revenue_ttm_result.value - costs_ttm_result.value
+            pretax_ttm_comparable = pretax_ttm is not None and ttm_windows_match(
+                revenue_ttm_result, ttm_results["pretax_income"]
+            )
             ttm_collapse_tolerance = max(abs(pretax_ttm or 0.0) * 0.02, abs(revenue_ttm_result.value) * 0.001)
-            if pretax_ttm is not None and abs(derived_ttm - pretax_ttm) <= ttm_collapse_tolerance:
+            if pretax_ttm is not None and not pretax_ttm_comparable:
+                # A different-window pretax TTM cannot arbitrate the collapse
+                # test — neither accept nor reject on a coincidental match.
+                quality_flags.append("operating_income_ttm_derivation_skipped_collapse_guard_unavailable")
+            elif pretax_ttm is not None and abs(derived_ttm - pretax_ttm) <= ttm_collapse_tolerance:
                 quality_flags.append("operating_income_ttm_derivation_rejected_costs_include_nonoperating")
             else:
                 operating_income_ttm_local = derived_ttm
@@ -2259,7 +2642,23 @@ def build_feature_from_facts(
         if average_invested_capital is not None
         else None
     )
-    asset_turnover = safe_div(revenue_ttm_local, average_assets) if average_assets is not None and average_assets > 0 else None
+    asset_turnover = (
+        safe_div(revenue_ttm_local, average_assets)
+        if average_assets is not None and average_assets > 0
+        else None
+    )
+    if asset_turnover is None and assets is not None and assets > 0 and is_recent_public_transition(
+        company,
+        asof=asof,
+    ):
+        if revenue_ttm_local is not None and revenue_ttm_local > 0:
+            asset_turnover = safe_div(revenue_ttm_local, assets)
+            quality_flags.append("asset_turnover_proxy_ttm_revenue_over_ending_assets")
+        elif revenue_stub_annualized is not None and revenue_stub_annualized > 0:
+            asset_turnover = safe_div(revenue_stub_annualized, assets)
+            quality_flags.append(
+                "asset_turnover_proxy_annualized_stub_revenue_over_ending_assets"
+            )
     invested_capital_usd = usd_balance(invested_capital)
 
     previous_revenue_comparable_row = select_previous_comparable(
@@ -2301,12 +2700,11 @@ def build_feature_from_facts(
     ):
         incremental_operating_margin = operating_income_delta / revenue_delta
 
-    inventory_growth = growth(inventory, previous_inventory)
-    inventory_sales_growth_spread = (
-        inventory_growth - cur_revenue_growth
-        if inventory_growth is not None and cur_revenue_growth is not None
-        else None
+    inventory_growth, _, inventory_sales_growth_spread = (
+        select_aligned_inventory_revenue_growth(currency_rows)
     )
+    if inventory_sales_growth_spread is not None:
+        quality_flags.append("inventory_sales_growth_spread_aligned_historical_periods")
     previous_cost_row = select_previous_comparable(
         currency_rows,
         "cost_of_sales",
@@ -2355,25 +2753,23 @@ def build_feature_from_facts(
     revenue_ttm_usd = usd_ttm(revenue_ttm_local, ttm_results["revenue"])
     operating_cash_flow_ttm_usd = usd_ttm(operating_cash_flow_ttm_local, ttm_results["operating_cash_flow"])
     capex_ttm_usd = usd_ttm(capex_ttm_local, ttm_results["capex"])
-    # Absence-of-evidence: a company that raised no capital tags no issuance
-    # facts at all, so the TTM comes back None instead of zero and every
-    # issuance-dependent metric nulls. When the cash-flow statement itself is
-    # verifiably present (TTM operating cash flow exists), missing issuance
-    # components are explicit zeros.
-    if operating_cash_flow_ttm_usd is not None:
-        if equity_issuance_proceeds_ttm_usd is None:
-            equity_issuance_proceeds_ttm_local = equity_issuance_proceeds_ttm_local or 0.0
-            equity_issuance_proceeds_ttm_usd = 0.0
-            quality_flags.append("equity_issuance_proceeds_ttm_defaulted_zero_no_facts")
-        if debt_issuance_proceeds_ttm_usd is None:
-            debt_issuance_proceeds_ttm_local = debt_issuance_proceeds_ttm_local or 0.0
-            debt_issuance_proceeds_ttm_usd = 0.0
-            quality_flags.append("debt_issuance_proceeds_ttm_defaulted_zero_no_facts")
-    ebitda_ttm_usd = (
-        operating_income_ttm_usd + depreciation_and_amortization_ttm_usd
-        if operating_income_ttm_usd is not None and depreciation_and_amortization_ttm_usd is not None
-        else None
-    )
+    # FN-4 for TTM composites: only combine OI and D&A resolved over the same
+    # TTM window (mirrors book_to_bill's existing gate).
+    if (
+        operating_income_ttm_usd is not None
+        and depreciation_and_amortization_ttm_usd is not None
+        and not ttm_windows_match(
+            ttm_results["operating_income"], ttm_results["depreciation_and_amortization"]
+        )
+    ):
+        ebitda_ttm_usd = None
+        quality_flags.append("ttm_window_mismatch_ebitda")
+    else:
+        ebitda_ttm_usd = (
+            operating_income_ttm_usd + depreciation_and_amortization_ttm_usd
+            if operating_income_ttm_usd is not None and depreciation_and_amortization_ttm_usd is not None
+            else None
+        )
     net_debt_usd = debt_usd - cash_usd if debt_usd is not None and cash_usd is not None else None
     net_debt_to_ebitda = (
         net_debt_usd / ebitda_ttm_usd
@@ -2385,13 +2781,21 @@ def build_feature_from_facts(
         if ebitda_ttm_usd is not None
         else None
     )
-    interest_coverage = (
-        operating_income_ttm_usd / interest_expense_ttm_usd
-        if operating_income_ttm_usd is not None
+    if (
+        operating_income_ttm_usd is not None
         and interest_expense_ttm_usd is not None
-        and interest_expense_ttm_usd > 0
-        else None
-    )
+        and not ttm_windows_match(ttm_results["operating_income"], ttm_results["interest_expense"])
+    ):
+        interest_coverage = None
+        quality_flags.append("ttm_window_mismatch_interest_coverage")
+    else:
+        interest_coverage = (
+            operating_income_ttm_usd / interest_expense_ttm_usd
+            if operating_income_ttm_usd is not None
+            and interest_expense_ttm_usd is not None
+            and interest_expense_ttm_usd > 0
+            else None
+        )
     free_cash_flow_ttm_usd = usd_ttm(free_cash_flow_ttm_local, ttm_results["operating_cash_flow"])
     cash_burn_ttm_usd = max(-free_cash_flow_ttm_usd, 0.0) if free_cash_flow_ttm_usd is not None else None
     cash_runway_years = (
@@ -2410,18 +2814,69 @@ def build_feature_from_facts(
     # burn == 0 (cash-generative) means the company is not dependent on
     # raises regardless of gross proceeds (e.g. routine bond refinancing):
     # dependence is an explicit 0.0, not missing.
-    capital_raise_dependence = (
-        (gross_capital_raised_ttm_usd / cash_burn_ttm_usd if cash_burn_ttm_usd > 0 else 0.0)
-        if len(capital_raise_components) == 2
+    if cash_burn_ttm_usd is not None and cash_burn_ttm_usd <= 0:
+        capital_raise_dependence = 0.0
+    elif (
+        len(capital_raise_components) == 2
         and gross_capital_raised_ttm_usd is not None
         and cash_burn_ttm_usd is not None
-        else None
+    ):
+        capital_raise_dependence = gross_capital_raised_ttm_usd / cash_burn_ttm_usd
+    else:
+        capital_raise_dependence = None
+    diluted_share_current_row, diluted_share_previous_row = select_latest_comparable_pair(
+        currency_rows,
+        "diluted_shares",
+        prefer_annual=True,
     )
-    diluted_shares_yoy_growth = growth(diluted_shares, previous_diluted_shares)
-    orders_yoy_growth = growth(orders, previous_orders)
-    backlog_yoy_growth = growth(funded_backlog, previous_backlog)
-    reported_backlog_yoy_growth = growth(reported_backlog, previous_reported_backlog)
-    rpo_yoy_growth = growth(rpo, previous_rpo)
+    diluted_shares_yoy_growth = growth(
+        as_float(diluted_share_current_row.get("value"))
+        if diluted_share_current_row is not None
+        else None,
+        as_float(diluted_share_previous_row.get("value"))
+        if diluted_share_previous_row is not None
+        else None,
+    )
+    if diluted_shares_yoy_growth is None:
+        basic_share_current_row, basic_share_previous_row = select_basic_share_pair_when_eps_equal(
+            currency_rows
+        )
+        diluted_shares_yoy_growth = growth(
+            as_float(basic_share_current_row.get("value"))
+            if basic_share_current_row is not None
+            else None,
+            as_float(basic_share_previous_row.get("value"))
+            if basic_share_previous_row is not None
+            else None,
+        )
+        if diluted_shares_yoy_growth is not None:
+            quality_flags.append("diluted_shares_proxy_basic_when_eps_equal")
+    if (
+        diluted_shares_yoy_growth is None
+        and str(company.get("development_stage") or "").strip().lower() != "operating"
+    ):
+        outstanding_current_row, outstanding_previous_row = select_latest_comparable_pair(
+            currency_rows,
+            "shares_outstanding",
+            instant_metric=True,
+        )
+        diluted_shares_yoy_growth = growth(
+            as_float(outstanding_current_row.get("value"))
+            if outstanding_current_row is not None
+            else None,
+            as_float(outstanding_previous_row.get("value"))
+            if outstanding_previous_row is not None
+            else None,
+        )
+        if diluted_shares_yoy_growth is not None:
+            quality_flags.append("diluted_shares_yoy_proxy_outstanding_shares")
+    orders_yoy_growth = growth(orders_growth_current, orders_growth_previous)
+    backlog_yoy_growth = growth(backlog_growth_current, backlog_growth_previous)
+    reported_backlog_yoy_growth = growth(
+        reported_backlog_growth_current,
+        reported_backlog_growth_previous,
+    )
+    rpo_yoy_growth = growth(rpo_growth_current, rpo_growth_previous)
     book_to_bill = None
     if orders_ttm_local is not None and revenue_ttm_local is not None and revenue_ttm_local > 0:
         if ttm_windows_match(ttm_results["orders"], ttm_results["revenue"]):
@@ -2489,6 +2944,28 @@ def build_feature_from_facts(
     rpo_implied_orders_usd = usd_ttm(rpo_implied_orders, ttm_results["revenue"])
     if rpo_implied_orders is not None:
         quality_flags.append("rpo_implied_orders_proxy_unadjusted_for_fx_cancellations_and_contract_changes")
+
+    # Keep reported backlog and GAAP/IFRS RPO intact. This separate proxy gives
+    # calibration one contract-load series without treating the two disclosure
+    # labels as independent signals or mixing their histories in a growth rate.
+    if reported_backlog is not None:
+        contract_load_proxy = reported_backlog
+        contract_load_proxy_usd = reported_backlog_usd
+        contract_load_proxy_source = "reported_backlog"
+        contract_load_proxy_yoy_growth = reported_backlog_yoy_growth
+        contract_load_proxy_to_revenue = reported_backlog_to_revenue
+    elif rpo is not None:
+        contract_load_proxy = rpo
+        contract_load_proxy_usd = rpo_usd
+        contract_load_proxy_source = "remaining_performance_obligation"
+        contract_load_proxy_yoy_growth = rpo_yoy_growth
+        contract_load_proxy_to_revenue = rpo_to_revenue
+    else:
+        contract_load_proxy = None
+        contract_load_proxy_usd = None
+        contract_load_proxy_source = None
+        contract_load_proxy_yoy_growth = None
+        contract_load_proxy_to_revenue = None
 
     if revenue is None:
         reasons.append("missing_revenue")
@@ -2741,11 +3218,16 @@ def build_feature_from_facts(
             "funded_backlog_usd": funded_backlog_usd,
             "reported_backlog": reported_backlog,
             "reported_backlog_usd": reported_backlog_usd,
+            "contract_load_proxy": contract_load_proxy,
+            "contract_load_proxy_usd": contract_load_proxy_usd,
+            "contract_load_proxy_source": contract_load_proxy_source,
             "orders_yoy_growth": orders_yoy_growth,
             "backlog_yoy_growth": backlog_yoy_growth,
             "backlog_to_revenue": backlog_to_revenue,
             "reported_backlog_yoy_growth": reported_backlog_yoy_growth,
             "reported_backlog_to_revenue": reported_backlog_to_revenue,
+            "contract_load_proxy_yoy_growth": contract_load_proxy_yoy_growth,
+            "contract_load_proxy_to_revenue": contract_load_proxy_to_revenue,
             "rpo_yoy_growth": rpo_yoy_growth,
             "rpo_to_revenue": rpo_to_revenue,
             "rpo_implied_orders": rpo_implied_orders,
@@ -2846,6 +3328,7 @@ def has_sec_parser_failure(
     *,
     ticker: str,
     model_family: str,
+    asof: date,
 ) -> bool:
     row = conn.execute(
         """
@@ -2854,6 +3337,7 @@ def has_sec_parser_failure(
         WHERE ticker = ?
           AND model_family = ?
           AND resolution_status = 'open'
+          AND COALESCE(NULLIF(SUBSTR(detected_at, 1, 10), ''), '9999-12-31') <= ?
           AND issue_type IN (
                 'sec_sync_failed',
                 'sec_endpoint_not_available',
@@ -2862,17 +3346,77 @@ def has_sec_parser_failure(
           )
         LIMIT 1
         """,
-        (ticker, model_family),
+        (ticker, model_family, asof.isoformat()),
     ).fetchone()
     return row is not None
 
 
+DISCLOSURE_SOURCE_METRIC = {
+    "orders": "orders",
+    "orders_yoy_growth": "orders",
+    "book_to_bill": "orders",
+    "funded_backlog": "funded_backlog",
+    "backlog_yoy_growth": "funded_backlog",
+    "backlog_to_revenue": "funded_backlog",
+    "reported_backlog": "reported_backlog",
+    "reported_backlog_yoy_growth": "reported_backlog",
+    "reported_backlog_to_revenue": "reported_backlog",
+    "remaining_performance_obligation": "remaining_performance_obligation",
+    "rpo_current": "remaining_performance_obligation",
+    "rpo_yoy_growth": "remaining_performance_obligation",
+    "rpo_to_revenue": "remaining_performance_obligation",
+    "rpo_implied_orders": "remaining_performance_obligation",
+    "rpo_implied_book_to_bill": "remaining_performance_obligation",
+}
+
+
+def unresolved_disclosure_candidate(
+    conn: Any,
+    *,
+    ticker: str,
+    model_family: str,
+    metric_name: str,
+    asof: date,
+) -> dict[str, Any] | None:
+    source_metric = DISCLOSURE_SOURCE_METRIC.get(metric_name)
+    if not source_metric:
+        return None
+    row = conn.execute(
+        """
+        SELECT accession_number, document_name, candidate_status, status_reason,
+               confidence, period_end
+        FROM fact_sec_metric_disclosure_candidate
+        WHERE ticker = ?
+          AND model_family = ?
+          AND metric_name = ?
+          AND candidate_status IN ('ACCEPTED', 'REVIEW_REQUIRED')
+          AND CASE
+                WHEN COALESCE(accepted_at, '') GLOB '????-??-??*'
+                    THEN SUBSTR(accepted_at, 1, 10)
+                WHEN COALESCE(accepted_at, '') GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*'
+                    THEN SUBSTR(accepted_at, 1, 4) || '-' || SUBSTR(accepted_at, 5, 2) || '-' || SUBSTR(accepted_at, 7, 2)
+                ELSE COALESCE(NULLIF(filing_date, ''), '9999-12-31')
+              END <= ?
+        ORDER BY candidate_status = 'ACCEPTED' DESC, confidence DESC,
+                 period_end DESC, accession_number DESC
+        LIMIT 1
+        """,
+        (ticker, model_family, source_metric, asof.isoformat()),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
 def extraction_method_for_row(row: dict[str, Any] | None, *, derived: bool, proxy: bool) -> str:
     if proxy:
-        return "derived_rpo_proxy"
+        return "derived_proxy"
     if derived:
         return "derived_reported_operands"
     taxonomy = str((row or {}).get("taxonomy") or "")
+    source_detail = str((row or {}).get("source_detail") or "")
+    if source_detail == "sec_archive_prose_metric_mapped":
+        return "filing_html_prose"
+    if taxonomy == "issuer-ir":
+        return "issuer_ir_document"
     if taxonomy == "sec-footnote":
         return "inline_xbrl_footnote"
     if taxonomy == "sec-text":
@@ -2888,6 +3432,11 @@ def availability_confidence(row: dict[str, Any] | None, *, derived: bool, proxy:
     if derived:
         return 0.9
     taxonomy = str((row or {}).get("taxonomy") or "")
+    source_detail = str((row or {}).get("source_detail") or "")
+    if source_detail == "sec_archive_prose_metric_mapped":
+        return 0.85
+    if taxonomy == "issuer-ir":
+        return 0.80
     if taxonomy == "sec-footnote":
         return 0.85
     if taxonomy == "sec-text":
@@ -2918,19 +3467,36 @@ def classify_financial_metric_availability(
     structural_no_backlog_tickers = {
         normalize_ticker(item) for item in (policy.get("structural_no_backlog_tickers") or [])
     }
+    structural_policy_valid_from = parse_date(policy.get("structural_no_backlog_valid_from"))
+    if structural_policy_valid_from and asof < structural_policy_valid_from:
+        structural_no_backlog_tickers.clear()
+    structural_no_inventory_tickers = {
+        normalize_ticker(item) for item in (policy.get("structural_no_inventory_tickers") or [])
+    }
+    structural_no_inventory_valid_from = parse_date(
+        policy.get("structural_no_inventory_valid_from")
+    )
+    if structural_no_inventory_valid_from and asof < structural_no_inventory_valid_from:
+        structural_no_inventory_tickers.clear()
+    recent_public_share_basis_transition_tickers = {
+        normalize_ticker(item)
+        for item in (policy.get("recent_public_share_basis_transition_tickers") or [])
+    }
+    recent_public_share_basis_valid_from = parse_date(
+        policy.get("recent_public_share_basis_valid_from")
+    )
+    if recent_public_share_basis_valid_from and asof < recent_public_share_basis_valid_from:
+        recent_public_share_basis_transition_tickers.clear()
     ticker = normalize_ticker(company.get("ticker"))
     exemption = has_rpo_exemption_evidence(conn, ticker=ticker, source_id=source_id, asof=asof)
-    parser_failure = has_sec_parser_failure(conn, ticker=ticker, model_family=model_family)
+    parser_failure = has_sec_parser_failure(
+        conn,
+        ticker=ticker,
+        model_family=model_family,
+        asof=asof,
+    )
     development_stage = str(company.get("development_stage") or "").strip().lower()
     precommercial = development_stage != "operating" and as_float(feature.get("revenue")) in {None, 0.0}
-    rpo_metrics = {
-        "remaining_performance_obligation",
-        "rpo_current",
-        "rpo_yoy_growth",
-        "rpo_to_revenue",
-        "rpo_implied_orders",
-        "rpo_implied_book_to_bill",
-    }
     revenue_dependent = {
         "book_to_bill",
         "backlog_to_revenue",
@@ -2942,17 +3508,68 @@ def classify_financial_metric_availability(
         "cash_conversion_cycle_change",
         "asset_turnover",
         "incremental_operating_margin",
+        "contract_load_proxy_to_revenue",
     }
     output: list[dict[str, Any]] = []
+    canonical_quality = str(feature.get("canonical_quality") or "")
+    quality_tokens = {token for token in canonical_quality.split(";") if token}
     for metric_name, feature_field in REQUIRED_METRIC_FEATURES.items():
         value = as_float(feature.get(feature_field))
         source_metric = metric_name if metric_name in SOURCE_METRIC_FEATURES else ""
+        if metric_name in CONTRACT_LOAD_PROXY_METRICS:
+            source_metric = str(feature.get("contract_load_proxy_source") or "")
         source_row = metric_source_row(rows, source_metric) if source_metric else None
-        proxy = metric_name in PROXY_METRIC_FEATURES
+        dynamic_proxy_reason = ""
+        if metric_name == "asset_turnover":
+            dynamic_proxy_reason = next(
+                (
+                    token
+                    for token in quality_tokens
+                    if token.startswith("asset_turnover_proxy_")
+                ),
+                "",
+            )
+        elif metric_name == "diluted_shares_yoy_growth":
+            dynamic_proxy_reason = next(
+                (
+                    token
+                    for token in quality_tokens
+                    if token.startswith("diluted_shares_proxy_")
+                    or token.startswith("diluted_shares_yoy_proxy_")
+                ),
+                "",
+            )
+        proxy = metric_name in PROXY_METRIC_FEATURES or bool(dynamic_proxy_reason)
         derived = metric_name not in SOURCE_METRIC_FEATURES
+        disclosure_candidate = unresolved_disclosure_candidate(
+            conn,
+            ticker=ticker,
+            model_family=model_family,
+            metric_name=metric_name,
+            asof=asof,
+        )
+        disclosure_source_metric = DISCLOSURE_SOURCE_METRIC.get(metric_name, "")
+        disclosure_source_row = (
+            metric_source_row(rows, disclosure_source_metric) if disclosure_source_metric else None
+        )
+        unresolved_candidate = (
+            disclosure_candidate
+            if disclosure_candidate is not None
+            and (
+                str(disclosure_candidate.get("candidate_status") or "") != "ACCEPTED"
+                or disclosure_source_row is None
+            )
+            else None
+        )
         if value is not None:
             status = "PROXY" if proxy else "REPORTED"
-            reason = "reported_value" if not derived else "derived_from_validated_reported_operands"
+            if metric_name in CONTRACT_LOAD_PROXY_METRICS:
+                reason = f"canonical_contract_load_proxy_from_{source_metric}"
+            else:
+                reason = (
+                    dynamic_proxy_reason
+                    or ("reported_value" if not derived else "derived_from_validated_reported_operands")
+                )
         elif metric_name == "roic" and int(feature.get("roic_not_meaningful_flag") or 0) == 1:
             status = "NOT_APPLICABLE"
             reason = "average_invested_capital_nonpositive_roic_not_meaningful"
@@ -2961,25 +3578,45 @@ def classify_financial_metric_availability(
         ) == 1:
             status = "NOT_APPLICABLE"
             reason = "ebitda_nonpositive_leverage_multiple_not_meaningful"
-        elif metric_name in rpo_metrics and exemption:
+        elif unresolved_candidate is not None:
+            status = "DISCLOSED_UNPARSED"
+            reason = (
+                "sec_disclosure_candidate_not_projected:"
+                f"{unresolved_candidate['candidate_status']}:"
+                f"{unresolved_candidate['accession_number']}:"
+                f"{unresolved_candidate['document_name']}"
+            )
+        elif metric_name in RPO_METRICS and exemption:
             status = "EXEMPT"
             reason = "issuer_applied_asc_606_rpo_practical_expedient"
+        elif (
+            metric_name == "inventory_sales_growth_spread"
+            and ticker in structural_no_inventory_tickers
+        ):
+            status = "NOT_APPLICABLE"
+            reason = "reviewed_nonphysical_business_model_no_manufacturing_inventory"
+        elif (
+            metric_name == "diluted_shares_yoy_growth"
+            and ticker in recent_public_share_basis_transition_tickers
+        ):
+            status = "NOT_APPLICABLE"
+            reason = "recent_public_share_basis_transition_no_same_basis_prior_year"
         elif precommercial and metric_name in revenue_dependent:
             status = "NOT_APPLICABLE"
             reason = "precommercial_or_zero_revenue_metric_not_applicable"
-        elif metric_name in ORDER_BACKLOG_METRICS and ticker in cancelable_order_tickers:
+        elif metric_name in STRUCTURAL_CONTRACT_LOAD_METRICS and ticker in cancelable_order_tickers:
             # Cancelable order models (automotive-style truck orders) have no
             # binding backlog to disclose; the absence is structural, not a gap.
             status = "NOT_APPLICABLE"
             reason = "cancelable_order_model_no_binding_backlog_disclosure"
-        elif metric_name in ORDER_BACKLOG_METRICS and ticker in structural_no_backlog_tickers:
+        elif metric_name in STRUCTURAL_CONTRACT_LOAD_METRICS and ticker in structural_no_backlog_tickers:
             # Short-cycle book-and-ship issuers with no (or ceased, via the
             # ASC 606 short-cycle expedient) backlog/RPO disclosure history.
             # Reported values always win over this branch, so historical asofs
             # where the issuer still disclosed are unaffected.
             status = "NOT_APPLICABLE"
             reason = "short_cycle_issuer_no_or_ceased_backlog_disclosure"
-        elif metric_name == "funded_backlog" and ticker not in funded_backlog_applicable:
+        elif metric_name in FUNDED_BACKLOG_METRICS and ticker not in funded_backlog_applicable:
             # Funded backlog is a government-contracting disclosure; commercial
             # issuers structurally never report it.
             status = "NOT_APPLICABLE"
@@ -2991,6 +3628,21 @@ def classify_financial_metric_availability(
         ):
             status = "NOT_APPLICABLE"
             reason = "issuer_cash_generative_runway_not_meaningful"
+        elif (
+            metric_name == "capital_raise_dependence"
+            and (burn := as_float(feature.get("cash_burn_ttm_usd"))) is not None
+            and burn <= 0.0
+        ):
+            status = "NOT_APPLICABLE"
+            reason = "issuer_cash_generative_external_capital_dependence_not_meaningful"
+        elif (
+            metric_name == "interest_coverage"
+            and (debt := as_float(feature.get("total_debt_usd"))) is not None
+            and debt == 0.0
+            and as_float(feature.get("interest_expense_ttm_usd")) in {None, 0.0}
+        ):
+            status = "NOT_APPLICABLE"
+            reason = "issuer_has_explicit_zero_debt_and_no_interest_expense"
         elif parser_failure:
             status = "PARSER_FAILURE"
             reason = "open_sec_ingestion_or_archive_failure"
@@ -3004,14 +3656,27 @@ def classify_financial_metric_availability(
             )
         if status not in AVAILABILITY_STATUSES:
             raise ValueError(f"Unsupported availability status {status!r} for {ticker}:{metric_name}")
-        extraction_method = extraction_method_for_row(source_row, derived=derived, proxy=proxy)
-        confidence = availability_confidence(source_row, derived=derived, proxy=proxy) if value is not None else 0.0
+        extraction_method = (
+            "filing_html_prose_candidate"
+            if status == "DISCLOSED_UNPARSED"
+            else extraction_method_for_row(source_row, derived=derived, proxy=proxy)
+        )
+        confidence = (
+            float(unresolved_candidate["confidence"])
+            if status == "DISCLOSED_UNPARSED" and unresolved_candidate is not None
+            else availability_confidence(source_row, derived=derived, proxy=proxy)
+            if value is not None
+            else 0.0
+        )
         provenance = {
             "operands": list(METRIC_OPERANDS.get(metric_name, ())),
             "feature_field": feature_field,
             "reporting_profile": feature.get("reporting_profile"),
             "data_quality_status": feature.get("data_quality_status"),
+            "canonical_quality": canonical_quality,
+            "disclosure_candidate": unresolved_candidate,
         }
+        candidate_source = unresolved_candidate if status == "DISCLOSED_UNPARSED" else None
         output.append(
             {
                 "ticker": ticker,
@@ -3020,12 +3685,22 @@ def classify_financial_metric_availability(
                 "metric_name": metric_name,
                 "availability_status": status,
                 "metric_value": value,
-                "unit": (source_row or {}).get("unit") or ("ratio" if derived else feature.get("reported_currency")),
+                "unit": (source_row or {}).get("unit")
+                or (
+                    feature.get("reported_currency")
+                    if metric_name == "contract_load_proxy"
+                    else "ratio"
+                    if derived
+                    else feature.get("reported_currency")
+                ),
                 "source_id": source_id,
-                "accession_number": (source_row or {}).get("accession_number"),
+                "accession_number": (source_row or {}).get("accession_number")
+                or (candidate_source or {}).get("accession_number"),
                 "filing_date": (source_row or {}).get("filing_date"),
                 "period_start": (source_row or {}).get("period_start"),
-                "period_end": (source_row or {}).get("period_end") or feature.get("fiscal_period_end"),
+                "period_end": (source_row or {}).get("period_end")
+                or (candidate_source or {}).get("period_end")
+                or feature.get("fiscal_period_end"),
                 "taxonomy": (source_row or {}).get("taxonomy"),
                 "concept_name": (source_row or {}).get("concept_name"),
                 "extraction_method": extraction_method,
@@ -3086,12 +3761,29 @@ def main() -> None:
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     model_family = str(args.model_family or cfg_get(config, "industrials_universe.initial_subsector", "defense") or "defense").strip()
     source_id = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts") or "sec_companyfacts")
+    supplemental_disclosure_source_ids = tuple(
+        parse_source_list(
+            cfg_get(config, "sec_fundamentals.supplemental_disclosure_source_ids", [])
+        )
+        if model_family == "machinery"
+        else ()
+    )
     market_source_id = str(cfg_get(config, "market_data_policy.scoring_primary_source", "yahoo_finance_adjusted") or "yahoo_finance_adjusted")
     market_fallback_source_ids = parse_source_list(cfg_get(config, "market_data_policy.scoring_fallback_sources", []))
     market_source_ids = source_priority_list(market_source_id, market_fallback_source_ids)
     availability_enabled = model_family == "machinery"
     availability_policy_raw = cfg_get(config, "financial_validation.availability_policy", {}) or {}
     availability_policy = availability_policy_raw if isinstance(availability_policy_raw, dict) else {}
+    archive_core_metric_recovery_tickers = {
+        normalize_ticker(item)
+        for item in (cfg_get(config, "sec_archive.core_metric_recovery_tickers", []) or [])
+        if normalize_ticker(item)
+    }
+    archive_core_metric_recovery_metrics = frozenset(
+        str(item).strip()
+        for item in (cfg_get(config, "sec_archive.core_metric_recovery_metrics", []) or [])
+        if str(item).strip()
+    )
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(cfg_get(config, "sec_fundamentals.feature_output_csv"), base_dir=base_dir)
     availability_output_raw = cfg_get(config, "sec_fundamentals.metric_availability_output_csv", "")
     availability_output_csv = (
@@ -3127,7 +3819,14 @@ def main() -> None:
         tickers = [str(item["ticker"]) for item in universe]
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
-            canonical_rows = refresh_canonical_facts(conn, source_id=source_id, model_family=model_family, tickers=tickers, asof=effective_asof)
+            canonical_rows = refresh_canonical_facts(
+                conn,
+                source_id=source_id,
+                model_family=model_family,
+                tickers=tickers,
+                asof=effective_asof,
+                supplemental_source_ids=supplemental_disclosure_source_ids,
+            )
             report_rows: list[dict[str, Any]] = []
             availability_report_rows: list[dict[str, Any]] = []
             with conn:
@@ -3178,7 +3877,14 @@ def main() -> None:
                         )
                 for company in universe:
                     ticker = normalize_ticker(company.get("ticker"))
-                    profile = load_profile(conn, ticker=ticker, model_family=model_family, company=company, source_id=source_id)
+                    profile = load_profile(
+                        conn,
+                        ticker=ticker,
+                        model_family=model_family,
+                        company=company,
+                        source_id=source_id,
+                        asof=effective_asof,
+                    )
                     rows = load_canonical_rows(conn, ticker=ticker, source_id=source_id, model_family=model_family, asof=effective_asof)
                     if str(profile.get("reporting_profile") or "").strip().upper() == DESPAC_BRIDGE_PROFILE:
                         rows.extend(
@@ -3213,21 +3919,23 @@ def main() -> None:
                             rows=rows,
                             market_source_ids=market_source_ids,
                             fx_max_staleness_days=fx_max_staleness_days,
+                            machinery_sec_text_core_metrics=(
+                                archive_core_metric_recovery_metrics
+                                if ticker in archive_core_metric_recovery_tickers
+                                else frozenset()
+                            ),
                         )
-                    # EL-3 (consumer half): dim_issuer_reporting_profile is
-                    # latest-state, so profile/override effectiveness cannot be
-                    # selected by valid_from at a historical asof. Whenever the
-                    # profile row in force was authored/updated after the
-                    # evaluation asof — whether that asof came from an explicit
-                    # --asof or from the panel — flag the non-PIT provenance so
-                    # calibration panels can exclude or discount those rows.
-                    profile_updated = parse_date(profile.get("updated_at"))
-                    if profile_updated is not None and profile_updated > effective_asof:
-                        existing_quality = str(feature.get("canonical_quality") or "")
-                        provenance_flag = "reporting_profile_provenance_post_asof"
-                        feature["canonical_quality"] = (
-                            f"{existing_quality};{provenance_flag}" if existing_quality else provenance_flag
-                        )
+                    # Families with a dated reporting-profile contract use the
+                    # exact snapshot selected above. Other legacy families still
+                    # consume the latest-state profile dimension.
+                    if model_family not in {"machinery", "transportation"}:
+                        profile_updated = parse_date(profile.get("updated_at"))
+                        if profile_updated is not None and profile_updated > effective_asof:
+                            existing_quality = str(feature.get("canonical_quality") or "")
+                            provenance_flag = "reporting_profile_provenance_post_asof"
+                            feature["canonical_quality"] = (
+                                f"{existing_quality};{provenance_flag}" if existing_quality else provenance_flag
+                            )
                     metric_availability: list[dict[str, Any]] = []
                     if availability_enabled:
                         metric_availability = classify_financial_metric_availability(

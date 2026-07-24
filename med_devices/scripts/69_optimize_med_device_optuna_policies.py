@@ -166,6 +166,7 @@ FOLD_DIAGNOSTIC_FIELDS = [
     "loss_rate",
     "lcb_excess",
     "single_ticker_share",
+    "single_ticker_share_limit",
     "fold_horizon_status",
     "guardrail_reason",
     "selected_tickers",
@@ -246,8 +247,9 @@ def candidate_from_attr(raw: object) -> TrialCandidate | None:
         if not component or not direction:
             continue
         components.append((component, direction, float(item.get("weight") or 0.0), sleeve))
-    gates_raw = raw.get("gates") if isinstance(raw.get("gates"), dict) else {}
-    gates = {str(key): float(value or 0.0) for key, value in gates_raw.items()}
+    raw_gates = raw.get("gates")
+    gates_raw: dict[object, object] = raw_gates if isinstance(raw_gates, dict) else {}
+    gates = {str(key): to_float(value) or 0.0 for key, value in gates_raw.items()}
     cohort = str(raw.get("cohort") or "").strip()
     candidate_id = str(raw.get("candidate_id") or "").strip()
     if not cohort or not candidate_id:
@@ -842,11 +844,48 @@ def hit_rate_guardrail_reason(metric: dict[str, Any], settings: dict[str, Any]) 
         if p_value > settings["hit_rate_binomial_alpha"]:
             return f"hit_rate_p_{p_value:.3f}_above_alpha_{settings['hit_rate_binomial_alpha']:.2f}"
         return ""
+    if test_mode == "cross_horizon_average":
+        metric["excess_hit_p_value"] = None
+        return ""
     metric["excess_hit_p_value"] = None
     if hit_rate is None or hit_rate < settings["min_excess_hit_rate"]:
         hit_rate_value = 0.0 if hit_rate is None else hit_rate
         return f"hit_rate_{hit_rate_value:.2f}_below_{settings['min_excess_hit_rate']:.2f}"
     return ""
+
+
+def cross_horizon_hit_rate_guardrail_reason(
+    metrics: list[dict[str, Any]],
+    settings: dict[str, Any],
+) -> str:
+    if str(settings["hit_rate_test"]).strip().lower() != "cross_horizon_average":
+        return ""
+    rates = [
+        float(metric["excess_hit_rate"])
+        for metric in metrics
+        if metric.get("excess_hit_rate") is not None
+    ]
+    expected_count = len(settings["horizons"])
+    if len(rates) != expected_count:
+        return "cross_horizon_hit_rate_na"
+    average_rate = mean(rates)
+    if average_rate < settings["min_excess_hit_rate"]:
+        return (
+            f"cross_horizon_hit_rate_{average_rate:.2f}_below_"
+            f"{settings['min_excess_hit_rate']:.2f}"
+        )
+    return ""
+
+
+def effective_single_ticker_share_limit(
+    configured_limit: float,
+    selected_count: int,
+    sampling_tolerance_max: float,
+) -> float:
+    if selected_count <= 0:
+        return configured_limit
+    tolerance = min(1.0 / selected_count, max(0.0, sampling_tolerance_max))
+    return min(1.0, configured_limit + tolerance)
 
 
 def guardrail_reasons(
@@ -873,9 +912,12 @@ def guardrail_reasons(
     if metric["loss_rate"] is None or metric["loss_rate"] > settings["max_loss_rate"]:
         loss_rate = 1.0 if metric["loss_rate"] is None else metric["loss_rate"]
         reasons.append(f"loss_rate_{loss_rate:.2f}_above_{settings['max_loss_rate']:.2f}")
-    if metric["single_ticker_share"] > settings["max_single_ticker_share"]:
+    concentration_limit = float(
+        metric.get("single_ticker_share_limit", settings["max_single_ticker_share"])
+    )
+    if metric["single_ticker_share"] > concentration_limit:
         reasons.append(
-            f"single_ticker_share_{metric['single_ticker_share']:.2f}_above_{settings['max_single_ticker_share']:.2f}"
+            f"single_ticker_share_{metric['single_ticker_share']:.4f}_above_{concentration_limit:.4f}"
         )
     if horizon in settings["require_positive_lcb_horizons"]:
         lcb_value = metric["lcb_excess"]
@@ -917,6 +959,8 @@ def evaluate_candidate(
 
     for fold in folds:
         fold_pass = True
+        fold_metric_rows: list[dict[str, Any]] = []
+        fold_diagnostic_start = len(fold_diagnostics)
         count_fold = not (fold.is_incomplete and settings["exclude_incomplete_validation_folds"])
         train_rows = rows_in_period(cohort_rows, fold.train_start, fold.train_end)
         validation_rows = rows_in_period(cohort_rows, fold.validation_start, fold.validation_end)
@@ -951,6 +995,12 @@ def evaluate_candidate(
                 use_net=settings["use_net_excess"],
                 full_ticker_count=full_ticker_count,
             )
+            metric["single_ticker_share_limit"] = effective_single_ticker_share_limit(
+                effective_settings["max_single_ticker_share"],
+                int(metric["count"]),
+                effective_settings["single_ticker_share_sampling_tolerance_max"],
+            )
+            fold_metric_rows.append(metric)
             if count_fold:
                 reasons = guardrail_reasons(metric=metric, train_metric=train_metric, settings=effective_settings, horizon=horizon)
             else:
@@ -977,6 +1027,7 @@ def evaluate_candidate(
                     "loss_rate": metric["loss_rate"],
                     "lcb_excess": metric["lcb_excess"],
                     "single_ticker_share": metric["single_ticker_share"],
+                    "single_ticker_share_limit": metric["single_ticker_share_limit"],
                     "fold_horizon_status": "pass" if not reasons else ("incomplete_excluded" if not count_fold else "fail"),
                     "guardrail_reason": ";".join(dict.fromkeys(reasons)),
                     "selected_tickers": ",".join(metric["tickers"]),
@@ -992,6 +1043,20 @@ def evaluate_candidate(
             production_by_horizon[horizon].append(production_metric)
             validation_count += metric["count"]
             all_validation_tickers.update(metric["tickers"])
+        cross_horizon_reason = (
+            cross_horizon_hit_rate_guardrail_reason(fold_metric_rows, effective_settings)
+            if count_fold
+            else ""
+        )
+        if cross_horizon_reason:
+            fold_pass = False
+            fold_reasons[fold.fold_id].append(cross_horizon_reason)
+            for diagnostic in fold_diagnostics[fold_diagnostic_start:]:
+                existing_reason = str(diagnostic.get("guardrail_reason") or "")
+                diagnostic["guardrail_reason"] = ";".join(
+                    part for part in (existing_reason, cross_horizon_reason) if part
+                )
+                diagnostic["fold_horizon_status"] = "fail"
         if count_fold:
             fold_passes[fold.fold_id] = fold_pass
 
@@ -1003,6 +1068,25 @@ def evaluate_candidate(
     mean_excess_hit_rate = mean_clean([metric["excess_hit_rate"] for metric in all_metrics])
     mean_loss_rate = mean_clean([metric["loss_rate"] for metric in all_metrics])
     max_single_ticker_share = max((metric["single_ticker_share"] for metric in all_metrics), default=0.0)
+    limiting_concentration_metric = max(
+        all_metrics,
+        key=lambda metric: metric["single_ticker_share"] - metric["single_ticker_share_limit"],
+        default=None,
+    )
+    max_single_ticker_share_excess = (
+        max(
+            0.0,
+            limiting_concentration_metric["single_ticker_share"]
+            - limiting_concentration_metric["single_ticker_share_limit"],
+        )
+        if limiting_concentration_metric is not None
+        else 0.0
+    )
+    limiting_concentration_limit = (
+        limiting_concentration_metric["single_ticker_share_limit"]
+        if limiting_concentration_metric is not None
+        else effective_settings["max_single_ticker_share"]
+    )
 
     result: dict[str, Any] = {
         "calibration_cohort": candidate.cohort,
@@ -1016,7 +1100,8 @@ def evaluate_candidate(
         "mean_excess_hit_rate": mean_excess_hit_rate,
         "mean_loss_rate": mean_loss_rate,
         "max_single_ticker_share": max_single_ticker_share,
-        "max_single_ticker_share_limit": effective_settings["max_single_ticker_share"],
+        "max_single_ticker_share_limit": limiting_concentration_limit,
+        "max_single_ticker_share_excess": max_single_ticker_share_excess,
         "min_lcb_scope": settings["min_lcb_scope"],
         "candidate_reason": compact_reasons([reason for reasons in fold_reasons.values() for reason in reasons]),
         "fold_diagnostics": fold_diagnostics,
@@ -1063,9 +1148,9 @@ def evaluate_candidate(
     if mean_loss_rate is None or mean_loss_rate > effective_settings["max_loss_rate"]:
         loss_text = "na" if mean_loss_rate is None else f"{mean_loss_rate:.2f}"
         candidate_reasons.append(f"mean_loss_rate_{loss_text}_above_{effective_settings['max_loss_rate']:.2f}")
-    if max_single_ticker_share > effective_settings["max_single_ticker_share"]:
+    if max_single_ticker_share_excess > 1e-12:
         candidate_reasons.append(
-            f"max_single_ticker_share_{max_single_ticker_share:.2f}_above_{effective_settings['max_single_ticker_share']:.2f}"
+            f"max_single_ticker_share_excess_{max_single_ticker_share_excess:.4f}_above_0.0000"
         )
 
     sleeve_weights = sleeve_weight_map(candidate)
@@ -1124,13 +1209,12 @@ def objective_value(result: dict[str, Any], settings: dict[str, Any]) -> float:
     loss_rate = result["mean_loss_rate"] if result["mean_loss_rate"] is not None else 1.0
     pass_rate = result["pass_fold_rate"]
     coverage = result["validation_ticker_coverage"]
-    single_ticker_limit = result.get("max_single_ticker_share_limit", settings["max_single_ticker_share"])
     unique_deficit = max(0, settings["min_summary_unique_tickers"] - result["validation_unique_tickers"])
     fold_deficit = max(0, settings["min_pass_folds"] - result["pass_fold_count"])
     pass_rate_deficit = max(0.0, settings["min_pass_fold_rate"] - pass_rate)
     coverage_deficit = max(0.0, settings["min_selected_ticker_coverage"] - coverage)
     loss_excess = max(0.0, loss_rate - settings["max_loss_rate"])
-    concentration_penalty = max(0.0, result["max_single_ticker_share"] - single_ticker_limit)
+    concentration_penalty = max(0.0, result.get("max_single_ticker_share_excess", 0.0))
     guardrail_penalty = 0.0 if result["candidate_status"] == "promotion_review_candidate" else 100.0
     value = (
         130.0 * avg_lcb
@@ -1260,8 +1344,11 @@ def build_settings(config: dict[str, Any], horizons: list[int]) -> dict[str, Any
     hit_rate_test = str(
         cfg_get(config, "calibration.optuna_policy_optimizer.hit_rate_test", "binomial")
     ).strip().lower()
-    if hit_rate_test not in {"binomial", "threshold"}:
-        raise ValueError("calibration.optuna_policy_optimizer.hit_rate_test must be binomial or threshold")
+    if hit_rate_test not in {"binomial", "threshold", "cross_horizon_average"}:
+        raise ValueError(
+            "calibration.optuna_policy_optimizer.hit_rate_test must be binomial, threshold, "
+            "or cross_horizon_average"
+        )
     return {
         "horizons": horizons,
         "use_net_excess": cfg_bool(config, "calibration.optuna_policy_optimizer.use_net_excess", True),
@@ -1320,6 +1407,11 @@ def build_settings(config: dict[str, Any], horizons: list[int]) -> dict[str, Any
             config,
             "calibration.optuna_policy_optimizer.small_cohort_ticker_threshold",
             16,
+        ),
+        "single_ticker_share_sampling_tolerance_max": cfg_float(
+            config,
+            "calibration.optuna_policy_optimizer.single_ticker_share_sampling_tolerance_max",
+            0.0,
         ),
         "min_lcb_excess": cfg_float(
             config,
@@ -1987,6 +2079,7 @@ def main() -> None:
                         "loss_rate": fmt(detail["loss_rate"]),
                         "lcb_excess": fmt(detail["lcb_excess"]),
                         "single_ticker_share": fmt(detail["single_ticker_share"]),
+                        "single_ticker_share_limit": fmt(detail["single_ticker_share_limit"]),
                         "fold_horizon_status": detail["fold_horizon_status"],
                         "guardrail_reason": detail["guardrail_reason"],
                         "selected_tickers": detail["selected_tickers"],

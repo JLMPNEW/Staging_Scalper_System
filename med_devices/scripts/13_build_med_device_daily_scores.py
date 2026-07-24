@@ -3719,6 +3719,34 @@ def csv_set(raw: object) -> set[str]:
     return {part.strip() for part in str(raw or "").split(",") if part.strip()}
 
 
+def production_seed_is_effective(
+    *,
+    asof_raw: object,
+    cohort: str,
+    config: dict[str, Any],
+) -> bool:
+    raw_effective_dates = cfg_get(
+        config,
+        "calibration.calibrated_baseline.production_seed_effective_from",
+        {},
+    ) or {}
+    if not isinstance(raw_effective_dates, dict):
+        raise ValueError(
+            "calibration.calibrated_baseline.production_seed_effective_from must be a mapping"
+        )
+    effective_raw = raw_effective_dates.get(cohort)
+    if effective_raw in {None, ""}:
+        return True
+    effective_date = parse_date(effective_raw)
+    if effective_date is None:
+        raise ValueError(
+            "Invalid production seed effective date for "
+            f"{cohort}: {effective_raw!r}; expected YYYY-MM-DD"
+        )
+    asof_date = parse_date(asof_raw)
+    return asof_date is not None and asof_date >= effective_date
+
+
 def row_passes_min_gate(row: ScoreRow, field: str, threshold: float | None) -> bool:
     if threshold is None:
         return True
@@ -3742,7 +3770,12 @@ def calibrated_baseline_candidate_status(
     production_cohorts = csv_set(cfg_get(config, "calibration.calibrated_baseline.production_seed_cohorts", ""))
     watchlist_cohorts = csv_set(cfg_get(config, "calibration.calibrated_baseline.watchlist_seed_cohorts", ""))
     cohort = row.calibration_cohort.strip()
-    if cohort not in production_cohorts and cohort not in watchlist_cohorts:
+    production_seed_active = cohort in production_cohorts and production_seed_is_effective(
+        asof_raw=row.asof_date,
+        cohort=cohort,
+        config=config,
+    )
+    if not production_seed_active and cohort not in watchlist_cohorts:
         return None
     if row.classification in {"manual_review_regulatory_risk", "avoid_confirmed_regulatory_risk", "data_review_required", "avoid"}:
         return None
@@ -3764,7 +3797,7 @@ def calibrated_baseline_candidate_status(
             return None
     if not row_passes_max_gate(row, "value_trap_score", gates.get("value_trap_max")):
         return None
-    status = "calibrated_baseline" if cohort in production_cohorts else "calibrated_watchlist_baseline"
+    status = "calibrated_baseline" if production_seed_active else "calibrated_watchlist_baseline"
     reason = "final_investability_pass" if row.final_investability_gate else "baseline_gate_pass_not_tier1"
     return status, reason
 

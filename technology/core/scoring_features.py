@@ -998,6 +998,37 @@ def upsert_scoring_input(
     )
 
 
+def prune_stale_scoring_rows(
+    conn: Any,
+    *,
+    source_id: str,
+    model_family: str,
+    asof_date: str,
+    keep_tickers: list[str],
+    include_model_output: bool = False,
+) -> int:
+    """Remove same-date scoring rows for names no longer in a full universe build."""
+    if not keep_tickers:
+        raise ValueError("keep_tickers cannot be empty when pruning scoring rows")
+    tables = ["feature_scoring_input", "feature_scoring_component"]
+    if include_model_output:
+        tables.append("feature_scoring_model_output")
+    before = conn.total_changes
+    placeholders = qmarks(keep_tickers)
+    for table in tables:
+        conn.execute(
+            f"""
+            DELETE FROM {table}
+            WHERE source_id = ?
+              AND model_family = ?
+              AND asof_date = ?
+              AND ticker NOT IN ({placeholders})
+            """,
+            (source_id, model_family, asof_date, *keep_tickers),
+        )
+    return conn.total_changes - before
+
+
 def upsert_component_rows(
     conn: Any,
     rows: list[dict[str, Any]],
@@ -1199,6 +1230,19 @@ def run_scoring_feature_build(settings: ScoringFeatureSettings) -> None:
                 )
                 if preserved_overlays:
                     LOGGER.info("Preserving Stage 6B overlay state for %d tickers at asof=%s", len(preserved_overlays), effective_asof)
+                if not ticker_filter:
+                    pruned_rows = prune_stale_scoring_rows(
+                        conn,
+                        source_id=source_id,
+                        model_family=model_family,
+                        asof_date=effective_asof.isoformat(),
+                        keep_tickers=[str(row["ticker"]) for row in rows],
+                    )
+                    if pruned_rows:
+                        LOGGER.info(
+                            "Pruned %d stale same-date scoring rows for removed universe tickers.",
+                            pruned_rows,
+                        )
                 finalize_rows(
                     rows,
                     config=config,
@@ -1413,12 +1457,13 @@ def validate_scoring_feature_contract(settings: ScoringFeatureSettings) -> int:
         core_names = [component["component_name"] for component in CORE_COMPONENT_DEFS]
         for component_name in core_names:
             comp_rows = conn.execute(
-                """
+                f"""
                 SELECT component_score, component_quality
                 FROM feature_scoring_component
                 WHERE source_id = ? AND model_family = ? AND asof_date = ? AND component_name = ?
+                  AND ticker IN ({ph})
                 """,
-                (source_id, model_family, asof.isoformat(), component_name),
+                (source_id, model_family, asof.isoformat(), component_name, *universe),
             ).fetchall()
             if not comp_rows:
                 continue
@@ -1447,15 +1492,16 @@ def validate_scoring_feature_contract(settings: ScoringFeatureSettings) -> int:
 
         review_count = scalar(
             conn,
-            """
+            f"""
             SELECT COUNT(*)
             FROM feature_scoring_input
             WHERE source_id = ?
               AND model_family = ?
               AND asof_date = ?
               AND feature_status <> 'complete'
+              AND ticker IN ({ph})
             """,
-            (source_id, model_family, asof.isoformat()),
+            (source_id, model_family, asof.isoformat(), *universe),
         )
         issue_count = scalar(
             conn,

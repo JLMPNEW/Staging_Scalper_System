@@ -70,6 +70,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the H1 hybrid adapter, validation, decision, and promotion-evidence steps.",
     )
+    parser.add_argument(
+        "--allow-shadow-failures",
+        action="store_true",
+        help=(
+            "Continue mandatory V1 serving steps when a shadow V2/H1 build or validator fails. "
+            "The failing shadow artifact remains rejected; direct research runs stay strict by default."
+        ),
+    )
     parser.add_argument("--skip-regime-raw", action="store_true", help="Skip rebuilding macro_regime_raw_daily.")
     parser.add_argument("--skip-regime-smoothed", action="store_true", help="Skip rebuilding macro_regime_smoothed_daily.")
     parser.add_argument("--skip-regime-decision", action="store_true", help="Skip rebuilding macro_regime_decision_daily.")
@@ -100,12 +108,21 @@ def _append_multi_arg(cmd: list[str], flag: str, values: list[str] | None) -> No
         cmd.extend(items)
 
 
-def _run_step(*, step_name: str, command: list[str]) -> None:
+def _run_step(*, step_name: str, command: list[str], required: bool = True) -> bool:
     logger.info("Running serving step=%s command=%s", step_name, subprocess.list2cmdline(command))
     try:
         subprocess.run(command, check=True)
     except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"Serving step failed: {step_name} (exit_code={exc.returncode})") from exc
+        if required:
+            raise RuntimeError(f"Serving step failed: {step_name} (exit_code={exc.returncode})") from exc
+        logger.error(
+            "Shadow serving step failed closed but the mandatory V1 DAG will continue: "
+            "step=%s exit_code=%s",
+            step_name,
+            exc.returncode,
+        )
+        return False
+    return True
 
 
 def _resolve_configured_path(
@@ -226,6 +243,17 @@ def main() -> None:
     # Load once so the wrapper follows the same default-config resolution as the child scripts
     # and can use config-backed defaults for wrapper-level behavior.
     config_path, cfg = load_macro_raw_config(args.config)
+    shadow_failures: list[str] = []
+
+    def _run_shadow_step(*, step_name: str, command: list[str]) -> bool:
+        ok = _run_step(
+            step_name=step_name,
+            command=command,
+            required=not bool(args.allow_shadow_failures),
+        )
+        if not ok:
+            shadow_failures.append(step_name)
+        return ok
 
     if args.metric_keys:
         logger.info(
@@ -327,7 +355,7 @@ def main() -> None:
         _append_path_arg(probability_v2_cmd, "--serving-db-path", args.serving_db_path)
         _append_text_arg(probability_v2_cmd, "--start-date", args.start_date)
         _append_text_arg(probability_v2_cmd, "--end-date", args.end_date)
-        _run_step(step_name=f"probability_v2_research{step_suffix}", command=probability_v2_cmd)
+        _run_shadow_step(step_name=f"probability_v2_research{step_suffix}", command=probability_v2_cmd)
 
         probability_v2_validate_cmd = [
             str(args.python_executable),
@@ -337,7 +365,7 @@ def main() -> None:
         ]
         _append_path_arg(probability_v2_validate_cmd, "--serving-db-path", args.serving_db_path)
         _append_text_arg(probability_v2_validate_cmd, "--end-date", args.end_date)
-        _run_step(step_name=f"probability_v2_validation{step_suffix}", command=probability_v2_validate_cmd)
+        _run_shadow_step(step_name=f"probability_v2_validation{step_suffix}", command=probability_v2_validate_cmd)
 
         regime_v2_decision_cmd = [
             str(args.python_executable),
@@ -348,7 +376,7 @@ def main() -> None:
         _append_path_arg(regime_v2_decision_cmd, "--serving-db-path", args.serving_db_path)
         _append_text_arg(regime_v2_decision_cmd, "--start-date", args.start_date)
         _append_text_arg(regime_v2_decision_cmd, "--end-date", args.end_date)
-        _run_step(step_name=f"regime_v2_decision_research{step_suffix}", command=regime_v2_decision_cmd)
+        _run_shadow_step(step_name=f"regime_v2_decision_research{step_suffix}", command=regime_v2_decision_cmd)
 
         regime_v2_promotion_cmd = [
             str(args.python_executable),
@@ -358,7 +386,7 @@ def main() -> None:
         ]
         _append_path_arg(regime_v2_promotion_cmd, "--serving-db-path", args.serving_db_path)
         _append_text_arg(regime_v2_promotion_cmd, "--end-date", args.end_date)
-        _run_step(step_name=f"regime_v2_promotion_evidence{step_suffix}", command=regime_v2_promotion_cmd)
+        _run_shadow_step(step_name=f"regime_v2_promotion_evidence{step_suffix}", command=regime_v2_promotion_cmd)
 
         vintage_audit_cmd = [
             str(args.python_executable),
@@ -369,7 +397,7 @@ def main() -> None:
         _append_path_arg(vintage_audit_cmd, "--raw-db-path", args.raw_db_path)
         _append_path_arg(vintage_audit_cmd, "--serving-db-path", args.serving_db_path)
         _append_text_arg(vintage_audit_cmd, "--end-date", args.end_date)
-        _run_step(step_name=f"regime_v2_vintage_gap_audit{step_suffix}", command=vintage_audit_cmd)
+        _run_shadow_step(step_name=f"regime_v2_vintage_gap_audit{step_suffix}", command=vintage_audit_cmd)
 
     if not args.skip_regime_raw:
         regime_raw_cmd = [str(args.python_executable), str(SCRIPT_DIR / "build_macro_regime_raw.py"), *common_cfg]
@@ -426,7 +454,7 @@ def main() -> None:
             if "--start-date" in extra:
                 _append_text_arg(h1_cmd, "--start-date", args.start_date)
             _append_text_arg(h1_cmd, "--end-date", args.end_date)
-            _run_step(step_name=step_name, command=h1_cmd)
+            _run_shadow_step(step_name=step_name, command=h1_cmd)
 
         h1_operations_enabled = parse_boolish(
             cfg_get(cfg, "h1_operations", "enabled", default=True), default=True
@@ -441,7 +469,7 @@ def main() -> None:
             ]
             _append_path_arg(h1_operations_cmd, "--serving-db-path", args.serving_db_path)
             _append_text_arg(h1_operations_cmd, "--end-date", args.end_date)
-            _run_step(step_name="regime_h1_operations", command=h1_operations_cmd)
+            _run_shadow_step(step_name="regime_h1_operations", command=h1_operations_cmd)
 
     if not args.skip_industry_macro:
         industry_macro_cmd = [str(args.python_executable), str(SCRIPT_DIR / "build_macro_industry_fit.py"), *common_cfg]
@@ -494,7 +522,13 @@ def main() -> None:
     elif not optimizer_enabled:
         logger.info("Skipping optimizer_integration_layer because optimizer_integration_layer.enabled=false.")
 
-    logger.info("Macro serving pipeline completed successfully.")
+    if shadow_failures:
+        logger.warning(
+            "Macro serving pipeline completed mandatory V1 steps with rejected shadow steps: %s",
+            sorted(set(shadow_failures)),
+        )
+    else:
+        logger.info("Macro serving pipeline completed successfully.")
 
 
 if __name__ == "__main__":

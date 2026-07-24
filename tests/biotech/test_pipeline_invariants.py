@@ -298,3 +298,46 @@ def test_form4_preflight_rejects_stale_staging_copy(tmp_path: Path) -> None:
             run_started_at="2026-05-10T00:00:00+00:00",
             mode="daily_delta",
         )
+
+
+def test_form4_preflight_historical_run_ignores_future_database_rows(tmp_path: Path) -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_form4_preflight_pit")
+    form4_db = tmp_path / "sec_insider.sqlite"
+    conn = sqlite3.connect(form4_db)
+    try:
+        conn.execute("CREATE TABLE sec_form4_daily_state(last_index_date TEXT)")
+        conn.executemany(
+            "INSERT INTO sec_form4_daily_state(last_index_date) VALUES (?)",
+            [("2026-07-20",), ("2026-07-21",)],
+        )
+        conn.execute("CREATE TABLE sec_ownership_submission(filing_date TEXT)")
+        conn.executemany(
+            "INSERT INTO sec_ownership_submission(filing_date) VALUES (?)",
+            [("20-JUL-2026",), ("21-JUL-2026",)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    row = module.validate_form4_preflight(
+        {
+            "governance_events": {
+                "form4_db_path": str(form4_db),
+                "form4_snapshot_table": "sec_form4_daily_state",
+            },
+            "biotech_refresh": {
+                "form4_preflight": {
+                    "max_staleness_days": 2,
+                    "raw_filing_date_sources": ["sec_ownership_submission.filing_date"],
+                }
+            },
+        },
+        base_dir=tmp_path,
+        asof="2026-07-20",
+        run_started_at="2026-07-22T00:00:00+00:00",
+        mode="daily_delta",
+    )
+
+    assert row["status"] == "success"
+    assert "snapshot_date=2026-07-20" in row["command"]
+    assert "raw_filing_date=20-JUL-2026" in row["command"]

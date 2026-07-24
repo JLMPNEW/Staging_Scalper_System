@@ -1,0 +1,49 @@
+ticker,company,cohort,exit_type,terminal_type,acquirer,exit_year,cik,confidence,industry
+LCC,US Airways Group,air_transport_and_aviation_services,merger,acquisition,American Airlines Group (merger of equals),2013,701345,verified,Airlines
+NWA,Northwest Airlines Corp,air_transport_and_aviation_services,strategic,acquisition,Delta Air Lines,2008,1058033,verified,Airlines
+CAL,Continental Airlines,air_transport_and_aviation_services,merger,acquisition,United Airlines (UAL Corp),2010,319687,verified,Airlines
+AAI,AirTran Holdings,air_transport_and_aviation_services,strategic,acquisition,Southwest Airlines,2011,948846,verified,Airlines
+VA,Virgin America,air_transport_and_aviation_services,strategic,acquisition,Alaska Air Group,2016,1614436,verified,Airlines
+HA,Hawaiian Holdings,air_transport_and_aviation_services,strategic,acquisition,Alaska Air Group,2024,1172222,verified,Airlines
+SAVE,Spirit Airlines,air_transport_and_aviation_services,bankruptcy,wipeout,Chapter 11 (equity cancelled; emerged private 2025),2024,1498710,verified,Airlines
+AAWW,Atlas Air Worldwide Holdings,air_transport_and_aviation_services,pe_buyout,acquisition,Apollo Global Management,2023,1135185,verified,Airlines
+ATSG,Air Transport Services Group,air_transport_and_aviation_services,pe_buyout,acquisition,Stonepeak,2025,894081,verified,Airlines
+AYR,Aircastle,air_transport_and_aviation_services,pe_buyout,acquisition,Marubeni / Mizuho Leasing,2020,1362988,verified,Rental & Leasing Services
+FLY,Fly Leasing,air_transport_and_aviation_services,strategic,acquisition,Carlyle Aviation Partners,2021,1407298,verified,Rental & Leasing Services
+PNCL,Pinnacle Airlines,air_transport_and_aviation_services,bankruptcy,wipeout,Delta Air Lines (emerged as Endeavor Air),2013,1166291,high,Airlines
+RJET,Republic Airways Holdings,air_transport_and_aviation_services,bankruptcy,wipeout,Chapter 11 (creditors; emerged private 2017),2016,1159154,verified,Airlines
+GNRT,Gener8 Maritime,marine_shipping_and_maritime,strategic,acquisition,Euronav,2018,1443799,high,Marine Shipping
+NM,Navios Maritime Holdings,marine_shipping_and_maritime,strategic,acquisition,Navios Maritime Partners,2021,1333172,verified,Marine Shipping
+NNA,Navios Maritime Acquisition,marine_shipping_and_maritime,strategic,acquisition,Navios Maritime Partners,2021,1437260,verified,Marine Shipping
+DRYS,DryShips,marine_shipping_and_maritime,pe_buyout,acquisition,SPII Holdings (George Economou),2019,1308858,verified,Marine Shipping
+TGP,Teekay LNG Partners,marine_shipping_and_maritime,pe_buyout,acquisition,Stonepeak (renamed Seapeak),2022,1308106,verified,Marine Shipping
+GLOG,GasLog Ltd,marine_shipping_and_maritime,pe_buyout,acquisition,BlackRock-led consortium,2021,1534126,verified,Marine Shipping
+GLOP,GasLog Partners,marine_shipping_and_maritime,pe_buyout,acquisition,GasLog Ltd,2023,1598655,verified,Marine Shipping
+ATCO,Atlas Corp (Seaspan),marine_shipping_and_maritime,pe_buyout,acquisition,Poseidon Acquisition (Fairfax / Washington),2023,1794846,verified,Marine Shipping
+EGLE,Eagle Bulk Shipping,marine_shipping_and_maritime,strategic,acquisition,Star Bulk Carriers,2024,1322439,verified,Marine Shipping
+OSG,Overseas Shipholding Group,marine_shipping_and_maritime,pe_buyout,acquisition,Saltchuk Resources,2024,75208,verified,Marine Shipping
+GMLP,Golar LNG Partners,marine_shipping_and_maritime,strategic,acquisition,New Fortress Energy,2021,1415916,verified,Marine Shipping
+TOO,Teekay Offshore Partners,marine_shipping_and_maritime,pe_buyout,acquisition,Brookfield (renamed Altera Infrastructure),2019,1382298,verified,Marine Shipping
+HRZ,Horizon Lines,marine_shipping_and_maritime,strategic,acquisition,Matson,2015,1302707,verified,Marine Shipping
+EXM,Excel Maritime Carriers,marine_shipping_and_maritime,bankruptcy,wipeout,Chapter 11 (lenders / Ivanhoe),2013,842294,high,Marine Shipping
+KSU,Kansas City Southern,surface_freight_and_logistics,strategic,acquisition,Canadian Pacific (CPKC),2021,54480,verified,Railroads
+BNI,Burlington Northern Santa Fe,surface_freight_and_logistics,strategic,acquisition,Berkshire Hathaway,2010,934612,verified,Railroads
+GWR,Genesee & Wyoming,surface_freight_and_logistics,pe_buyout,acquisition,Brookfield Infrastructure / GIC,2019,1012620,verified,Railroads
+PWX,Providence & Worcester Railroad,surface_freight_and_logistics,strategic,acquisition,Genesee & Wyoming,2016,831968,verified,Railroads
+SWFT,Swift Transportation,surface_freight_and_logistics,pe_buyout,acquisition,Jerry Moyes / IEL,2007,863557,high,Trucking
+USX,U.S. Xpress Enterprises,surface_freight_and_logistics,strategic,acquisition,Knight-Swift Transportation,2023,923571,verified,Trucking
+CGI,Celadon Group,surface_freight_and_logistics,bankruptcy,wipeout,Chapter 11 liquidation (assets sold),2019,865941,verified,Trucking
+USAK,USA Truck,surface_freight_and_logistics,strategic,acquisition,DB Schenker,2022,883945,verified,Trucking
+CNW,Con-way,surface_freight_and_logistics,strategic,acquisition,XPO Logistics,2015,23675,verified,Trucking
+YELL,Yellow Corporation,surface_freight_and_logistics,bankruptcy,wipeout,Chapter 11 liquidation,2023,716006,verified,Trucking
+QLTY,Quality Distribution,surface_freight_and_logistics,pe_buyout,acquisition,Apax Partners,2015,922863,high,Trucking
+DSKE,Daseke,surface_freight_and_logistics,strategic,acquisition,TFI International,2024,1642453,verified,Trucking
+UTIW,UTi Worldwide,surface_freight_and_logistics,strategic,acquisition,DSV,2016,1124827,verified,Integrated Freight & Logistics
+PACR,Pacer International,surface_freight_and_logistics,strategic,acquisition,XPO Logistics,2014,1091735,verified,Integrated Freight & Logistics
+ECHO,Echo Global Logistics,surface_freight_and_logistics,pe_buyout,acquisition,The Jordan Company,2021,1426945,verified,Integrated Freight & Logistics
+RRTS,Roadrunner Transportation Systems,surface_freight_and_logistics,pe_buyout,distressed_nonzero,Elliott Management (recapitalization / going-private),2020,1440024,high,Trucking
+EGL,EGL Inc (Eagle Global Logistics),surface_freight_and_logistics,pe_buyout,acquisition,CEVA Logistics (Apollo Management),2007,1001718,high,Integrated Freight & Logistics
+STMP,Stamps.com,surface_freight_and_logistics,pe_buyout,acquisition,Thoma Bravo,2021,1082923,verified,Integrated Freight & Logistics
+ABF,Airborne Inc,surface_freight_and_logistics,strategic,acquisition,Deutsche Post (DHL),2003,3000,high,Integrated Freight & Logistics
+DDMX,Dynamex,surface_freight_and_logistics,strategic,acquisition,TransForce (TFI International),2011,1015483,high,Integrated Freight & Logistics
+FRTZ,Fritz Companies,surface_freight_and_logistics,strategic,acquisition,United Parcel Service (UPS),2001,890662,high,Integrated Freight & Logistics

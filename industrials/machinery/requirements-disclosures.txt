@@ -1,0 +1,7 @@
+pypdf>=5.0,<7
+
+# Optional OCR fallback for image-only investor presentations. The host must
+# also provide the Tesseract executable on PATH.
+pymupdf>=1.24,<2
+pytesseract>=0.3.13,<1
+Pillow>=10,<13

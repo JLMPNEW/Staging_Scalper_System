@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -19,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from industrials.core.refresh_lock import RefreshLock  # noqa: E402
 from industrials.core.reports import write_csv_atomic, write_text_atomic  # noqa: E402
 from industrials.machinery.scoring import parse_asof  # noqa: E402
 
@@ -36,29 +38,73 @@ class Step:
     pass_db: bool = True
 
 
-class RefreshLock:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.fd: int | None = None
+def _accepted_manifest_asof(path: Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if payload.get("acceptance") != "PASS" or payload.get("dry_run"):
+        return ""
+    try:
+        return parse_asof(str(payload.get("asof_date") or ""))
+    except ValueError:
+        return ""
 
-    def __enter__(self) -> RefreshLock:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+def latest_committed_asof(
+    *,
+    db_path: Path,
+    dashboard_root: Path,
+    orchestration_root: Path,
+) -> str:
+    candidates: list[str] = []
+    if db_path.exists():
+        connection = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
-            self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            detail = self.path.read_text(encoding="utf-8", errors="replace") if self.path.exists() else ""
-            raise RuntimeError(f"Another industrials refresh owns {self.path}: {detail.strip()}") from exc
-        os.write(
-            self.fd,
-            f"pid={os.getpid()} started_utc={datetime.now(timezone.utc).isoformat(timespec='seconds')}\n".encode(),
-        )
-        return self
+            table = connection.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name = 'feature_financial_metric_availability'
+                """
+            ).fetchone()
+            if table is not None:
+                row = connection.execute(
+                    """
+                    SELECT MAX(asof_date)
+                    FROM feature_financial_metric_availability
+                    WHERE model_family = 'machinery'
+                    """
+                ).fetchone()
+                if row is not None and row[0]:
+                    candidates.append(parse_asof(row[0]))
+        finally:
+            connection.close()
+    manifest_asof = _accepted_manifest_asof(
+        orchestration_root / "machinery_refresh_manifest.json"
+    )
+    if manifest_asof:
+        candidates.append(manifest_asof)
+    if dashboard_root.exists():
+        for manifest_path in dashboard_root.glob(
+            "*/machinery_final_rank_table_manifest.json"
+        ):
+            dashboard_asof = _accepted_manifest_asof(manifest_path)
+            if dashboard_asof:
+                candidates.append(dashboard_asof)
+    return max(candidates, default="")
 
-    def __exit__(self, *_args: object) -> None:
-        if self.fd is not None:
-            os.close(self.fd)
-            self.fd = None
-        self.path.unlink(missing_ok=True)
+
+def validate_non_regressive_asof(*, requested_asof: str, committed_asof: str) -> None:
+    if committed_asof and requested_asof < committed_asof:
+        raise ValueError(
+            "Refusing regressive machinery current refresh: "
+            f"requested_asof={requested_asof} latest_committed_asof={committed_asof}. "
+            "Use the historical backfill runner for older dates."
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -147,13 +193,38 @@ def build_steps(
         Step("05_build_market", "stage_3", "05_build_machinery_market_features.py", ["--asof", asof]),
         Step("06_validate_market", "stage_3", "06_validate_machinery_market_stage.py", ["--asof", asof]),
         Step("07_sync_sec", "stage_4", "07_sync_machinery_sec_fundamentals.py", sec_args, True),
+        Step(
+            "07b_sync_issuer_ir",
+            "stage_4",
+            "07b_sync_machinery_issuer_ir_disclosures.py",
+            ["--asof", asof, "--allow-partial", *force_args],
+            True,
+        ),
         Step("11_sync_fx", "stage_4", "11_sync_machinery_fx_rates.py", ["--end-date", asof, "--allow-partial", *force_args], True),
+        Step(
+            "08b_scan_disclosures",
+            "stage_4",
+            "08b_audit_machinery_disclosure_candidates.py",
+            ["--asof", asof, "--limit", "40", "--scan-cache", "--resume"],
+        ),
         Step("08_build_financial", "stage_4", "08_build_machinery_financial_features.py", ["--asof", asof]),
         Step("08_validate_financial", "stage_4", "08_validate_machinery_financial_stage.py", ["--asof", asof]),
         Step(
             "08a_audit_special_metrics",
             "stage_4",
             "08a_audit_machinery_financial_metrics.py",
+            ["--asof", asof],
+        ),
+        Step(
+            "08b_audit_disclosures",
+            "stage_4",
+            "08b_audit_machinery_disclosure_candidates.py",
+            ["--asof", asof, "--limit", "40"],
+        ),
+        Step(
+            "08c_classify_recoverable_coverage",
+            "stage_4",
+            "08c_audit_machinery_recoverable_coverage.py",
             ["--asof", asof],
         ),
         Step(
@@ -244,6 +315,15 @@ def build_steps(
 def select_steps(steps: list[Step], args: argparse.Namespace) -> list[Step]:
     selected = list(steps)
     positions = {step.step_id: index for index, step in enumerate(steps)}
+    skipped = {str(item).strip() for item in args.skip_step if str(item).strip()}
+    unknown_skips = sorted(skipped - set(positions))
+    if unknown_skips:
+        raise ValueError(f"Unknown --skip-step values={unknown_skips}")
+    if args.from_step and args.to_step and args.from_step in positions and args.to_step in positions:
+        if positions[args.from_step] > positions[args.to_step]:
+            raise ValueError(
+                f"--from-step={args.from_step} occurs after --to-step={args.to_step}"
+            )
     if args.from_step:
         if args.from_step not in positions:
             raise ValueError(f"Unknown --from-step={args.from_step}")
@@ -260,8 +340,81 @@ def select_steps(steps: list[Step], args: argparse.Namespace) -> list[Step]:
         if unknown:
             raise ValueError(f"Unknown --only steps={unknown}")
         selected = [step for step in steps if step.step_id in wanted]
-    skipped = {str(item).strip() for item in args.skip_step}
-    return [step for step in selected if step.step_id not in skipped and not (args.skip_network and step.network)]
+    selected = [
+        step
+        for step in selected
+        if step.step_id not in skipped and not (args.skip_network and step.network)
+    ]
+    if not selected:
+        raise ValueError("Step selection is empty; refusing to publish a successful zero-step run")
+    return selected
+
+
+def persist_orchestration_result(
+    *,
+    orchestration_root: Path,
+    run_id: str,
+    asof: str,
+    db_path: Path,
+    config_path: Path,
+    dry_run: bool,
+    latest_before_run: str,
+    planned_step_count: int,
+    report_rows: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+) -> dict[str, Any]:
+    fields = [
+        "run_id",
+        "step_number",
+        "step_id",
+        "stage",
+        "script",
+        "network_flag",
+        "command",
+        "log_path",
+        "status",
+        "return_code",
+        "elapsed_sec",
+    ]
+    summary = {
+        "acceptance": "PASS" if not failures else "FAIL",
+        "run_id": run_id,
+        "asof_date": asof,
+        "database_path": str(db_path),
+        "config_path": str(config_path),
+        "dry_run": dry_run,
+        "planned_step_count": planned_step_count,
+        "completed_step_count": len(report_rows),
+        "failed_step_count": len(failures),
+        "previous_committed_asof": latest_before_run,
+        "steps": report_rows,
+    }
+    runs_root = orchestration_root / "runs"
+    write_csv_atomic(
+        runs_root / f"{run_id}_steps.csv",
+        fields,
+        report_rows,
+    )
+    write_text_atomic(
+        runs_root / f"{run_id}_manifest.json",
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+    )
+    if not failures and not dry_run:
+        write_csv_atomic(
+            orchestration_root / "machinery_refresh_steps.csv",
+            fields,
+            report_rows,
+        )
+        write_text_atomic(
+            orchestration_root / "machinery_refresh_manifest.json",
+            json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        )
+    else:
+        write_text_atomic(
+            orchestration_root / "machinery_refresh_last_attempt.json",
+            json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        )
+    return summary
 
 
 def main() -> int:
@@ -298,7 +451,18 @@ def main() -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
     report_rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    latest_before_run = ""
     with RefreshLock(lock_path):
+        if not args.dry_run:
+            latest_before_run = latest_committed_asof(
+                db_path=db_path,
+                dashboard_root=dashboard_root,
+                orchestration_root=orchestration_root,
+            )
+            validate_non_regressive_asof(
+                requested_asof=asof,
+                committed_asof=latest_before_run,
+            )
         for index, step in enumerate(selected, start=1):
             script_path = PACKAGE_ROOT / "scripts" / step.script
             python_executable = (
@@ -331,6 +495,10 @@ def main() -> int:
                 result = subprocess.run(
                     command,
                     cwd=PROJECT_ROOT,
+                    env={
+                        **os.environ,
+                        "INDUSTRIALS_REFRESH_LOCK_HELD": "1",
+                    },
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -348,37 +516,18 @@ def main() -> int:
                 failures.append(row)
                 if not args.continue_on_error:
                     break
-    orchestration_root.mkdir(parents=True, exist_ok=True)
-    fields = [
-        "run_id",
-        "step_number",
-        "step_id",
-        "stage",
-        "script",
-        "network_flag",
-        "command",
-        "log_path",
-        "status",
-        "return_code",
-        "elapsed_sec",
-    ]
-    write_csv_atomic(orchestration_root / "machinery_refresh_steps.csv", fields, report_rows)
-    summary = {
-        "acceptance": "PASS" if not failures else "FAIL",
-        "run_id": run_id,
-        "asof_date": asof,
-        "database_path": str(db_path),
-        "config_path": str(config_path),
-        "dry_run": bool(args.dry_run),
-        "planned_step_count": len(selected),
-        "completed_step_count": len(report_rows),
-        "failed_step_count": len(failures),
-        "steps": report_rows,
-    }
-    write_text_atomic(
-        orchestration_root / "machinery_refresh_manifest.json",
-        json.dumps(summary, indent=2, sort_keys=True) + "\n",
-    )
+        summary = persist_orchestration_result(
+            orchestration_root=orchestration_root,
+            run_id=run_id,
+            asof=asof,
+            db_path=db_path,
+            config_path=config_path,
+            dry_run=bool(args.dry_run),
+            latest_before_run=latest_before_run,
+            planned_step_count=len(selected),
+            report_rows=report_rows,
+            failures=failures,
+        )
     print(json.dumps({key: summary[key] for key in ("acceptance", "run_id", "dry_run", "failed_step_count")}, indent=2))
     return 0 if not failures else 1
 

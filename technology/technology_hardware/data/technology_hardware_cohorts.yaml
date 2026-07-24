@@ -65,7 +65,6 @@ cohorts:
     cohort_name: Systems, Storage & Manufacturing
     calibration_use: core
     tickers:
-      - ALOT
       - BHE
       - CLS
       - CRSR

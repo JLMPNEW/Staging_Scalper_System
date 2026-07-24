@@ -454,7 +454,7 @@ def _digest_query(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -
     return digest.hexdigest()
 
 
-def _component_pre_cutoff_digests(conn: sqlite3.Connection, cutoff: str) -> dict[str, str]:
+def _component_pre_cutoff_digests(conn: sqlite3.Connection, component_end_date: str) -> dict[str, str]:
     return {
         "v1_growth": _digest_query(
             conn,
@@ -464,7 +464,7 @@ def _component_pre_cutoff_digests(conn: sqlite3.Connection, cutoff: str) -> dict
             WHERE probability_key IN ('P_G_NOW', 'P_G_LEAD') AND as_of_date <= ?
             ORDER BY as_of_date, probability_key
             """,
-            (cutoff,),
+            (component_end_date,),
         ),
         "pi_now": _digest_query(
             conn,
@@ -474,7 +474,7 @@ def _component_pre_cutoff_digests(conn: sqlite3.Connection, cutoff: str) -> dict
             WHERE model_version = ? AND probability_key = ? AND as_of_date <= ?
             ORDER BY as_of_date
             """,
-            (PI_NOW_SOURCE[0], PI_NOW_SOURCE[1], cutoff),
+            (PI_NOW_SOURCE[0], PI_NOW_SOURCE[1], component_end_date),
         ),
         "pi_lead": _digest_query(
             conn,
@@ -484,7 +484,7 @@ def _component_pre_cutoff_digests(conn: sqlite3.Connection, cutoff: str) -> dict
             WHERE model_version = ? AND probability_key = ? AND as_of_date <= ?
             ORDER BY as_of_date
             """,
-            (PI_LEAD_SOURCE[0], PI_LEAD_SOURCE[1], cutoff),
+            (PI_LEAD_SOURCE[0], PI_LEAD_SOURCE[1], component_end_date),
         ),
         "energy": _digest_query(
             conn,
@@ -494,7 +494,7 @@ def _component_pre_cutoff_digests(conn: sqlite3.Connection, cutoff: str) -> dict
             WHERE model_version = ? AND as_of_date <= ?
             ORDER BY as_of_date
             """,
-            (ENERGY_SOURCE_MODEL, cutoff),
+            (ENERGY_SOURCE_MODEL, component_end_date),
         ),
     }
 
@@ -508,16 +508,23 @@ def _config_blocks_sha256(cfg: dict[str, Any]) -> str:
 
 
 def _compute_baseline(
-    conn: sqlite3.Connection, *, macro_root: Path, portfolio_root: Path, cfg: dict[str, Any], cutoff: str
+    conn: sqlite3.Connection,
+    *,
+    macro_root: Path,
+    portfolio_root: Path,
+    cfg: dict[str, Any],
+    cutoff: str,
+    component_end_date: str,
 ) -> dict[str, Any]:
     builders = {name: _file_sha256(macro_root / name) for name in BUILDER_SOURCES}
     portfolio_builders = {name: _file_sha256(portfolio_root / name) for name in PORTFOLIO_BUILDER_SOURCES}
     return {
         "cutoff": cutoff,
+        "component_baseline_end_date": component_end_date,
         "builder_sha256": builders,
         "portfolio_builder_sha256": portfolio_builders,
         "config_blocks_sha256": _config_blocks_sha256(cfg),
-        "component_pre_cutoff_digests": _component_pre_cutoff_digests(conn, cutoff),
+        "component_pre_cutoff_digests": _component_pre_cutoff_digests(conn, component_end_date),
     }
 
 
@@ -527,6 +534,8 @@ def _baseline_drift(baseline: dict[str, Any], current: dict[str, Any]) -> list[s
     drift: list[str] = []
     if str(baseline.get("cutoff")) != str(current.get("cutoff")):
         drift.append("cutoff")
+    if str(baseline.get("component_baseline_end_date")) != str(current.get("component_baseline_end_date")):
+        drift.append("component_baseline_end_date")
     if baseline.get("config_blocks_sha256") != current.get("config_blocks_sha256"):
         drift.append("config_blocks")
     for field in ("builder_sha256", "portfolio_builder_sha256"):
@@ -809,8 +818,18 @@ def evaluate(
             reasons.append(f"decision_confidence={confidence:.4f}<{min_confidence}")
 
     # A1.5/A2.4 component drift guard + A2.2 monotonic chain-head advance against the baseline.
+    component_baseline_end_date = (
+        str(stored_baseline.get("component_baseline_end_date") or cutoff)
+        if stored_baseline is not None
+        else min(end, cutoff)
+    )
     current_baseline = _compute_baseline(
-        conn, macro_root=macro_root, portfolio_root=portfolio_root, cfg=cfg, cutoff=cutoff
+        conn,
+        macro_root=macro_root,
+        portfolio_root=portfolio_root,
+        cfg=cfg,
+        cutoff=cutoff,
+        component_end_date=component_baseline_end_date,
     )
     current_baseline["ledger_chain_heads"] = chain_heads
     current_baseline["ledger_row_counts"] = {"prospective": len(ledger_rows), "outcomes": len(outcomes_rows)}

@@ -7,6 +7,7 @@ import hashlib
 import html as html_lib
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -31,6 +32,21 @@ from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
 from industrials.core.text_norm import normalize_cik, normalize_ticker  # noqa: E402
+from industrials.machinery.disclosure_candidates import (  # noqa: E402
+    PROSE_SOURCE_DETAIL,
+    DisclosureCandidate,
+    accepted_candidates,
+    extract_machinery_prose_candidates,
+    reconcile_machinery_disclosure_facts,
+    resolve_machinery_disclosure_candidates,
+    upsert_disclosure_candidates,
+)
+from industrials.machinery.disclosure_documents import (  # noqa: E402
+    extract_document_text,
+    filing_summary_document_name,
+    filing_summary_report_documents,
+)
+from industrials.machinery.reporting_currency import apply_reporting_currencies  # noqa: E402
 
 
 LOGGER = logging.getLogger("sync_industrials_sec_fundamentals")
@@ -145,6 +161,96 @@ MACHINERY_EXTRA_CONCEPT_MAPPINGS = (
         "priority": 20,
     },
     {
+        "taxonomy": "us-gaap",
+        "concept_name": "PaymentsToAcquireOtherPropertyPlantAndEquipment",
+        "canonical_metric": "capex",
+        "financial_statement": "cash_flow",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 25,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "ProceedsFromIssuanceOfPrivatePlacement",
+        "canonical_metric": "equity_issuance_proceeds",
+        "financial_statement": "cash_flow",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 125,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "ProceedsFromIssuanceOfRedeemableConvertiblePreferredStock",
+        "canonical_metric": "equity_issuance_proceeds",
+        "financial_statement": "cash_flow",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 130,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "ProceedsFromIssuanceOfConvertiblePreferredStock",
+        "canonical_metric": "equity_issuance_proceeds",
+        "financial_statement": "cash_flow",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 135,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "ProceedsFromIssuanceOfPreferredStockPreferenceStockAndWarrants",
+        "canonical_metric": "equity_issuance_proceeds",
+        "financial_statement": "cash_flow",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 140,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "ProceedsFromIssuanceOfCommonLimitedPartnersUnits",
+        "canonical_metric": "equity_issuance_proceeds",
+        "financial_statement": "cash_flow",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 145,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "ProceedsFromIssuanceOfPreferredLimitedPartnersUnits",
+        "canonical_metric": "equity_issuance_proceeds",
+        "financial_statement": "cash_flow",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 150,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "ProceedsFromDebtMaturingInMoreThanThreeMonths",
+        "canonical_metric": "debt_issuance_proceeds",
+        "financial_statement": "cash_flow",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 185,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "ProceedsFromShortTermDebtMaturingInMoreThanThreeMonths",
+        "canonical_metric": "debt_issuance_proceeds",
+        "financial_statement": "cash_flow",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 190,
+    },
+    {
+        "taxonomy": "us-gaap",
+        "concept_name": "ProceedsFromIssuanceOfLongTermDebtAndCapitalSecuritiesNet",
+        "canonical_metric": "debt_issuance_proceeds",
+        "financial_statement": "cash_flow",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 195,
+    },
+    {
         "taxonomy": "sec-text",
         "concept_name": "PretaxIncome",
         "canonical_metric": "pretax_income",
@@ -160,6 +266,24 @@ MACHINERY_EXTRA_CONCEPT_MAPPINGS = (
         "financial_statement": "income_statement",
         "period_type": "duration",
         "sign_policy": "as_reported",
+        "priority": 200,
+    },
+    {
+        "taxonomy": "sec-text",
+        "concept_name": "Orders",
+        "canonical_metric": "orders",
+        "financial_statement": "orders",
+        "period_type": "duration",
+        "sign_policy": "positive_abs",
+        "priority": 200,
+    },
+    {
+        "taxonomy": "sec-text",
+        "concept_name": "FundedBacklog",
+        "canonical_metric": "funded_backlog",
+        "financial_statement": "backlog",
+        "period_type": "instant",
+        "sign_policy": "positive_abs",
         "priority": 200,
     },
     {
@@ -242,6 +366,15 @@ REPORT_FIELDS = [
     "review_reason",
 ]
 
+PROFILE_ACCEPTED_DATE_SQL = """
+CASE
+    WHEN COALESCE(accepted_at, '') GLOB '????-??-??*' THEN SUBSTR(accepted_at, 1, 10)
+    WHEN COALESCE(accepted_at, '') GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*'
+        THEN SUBSTR(accepted_at, 1, 4) || '-' || SUBSTR(accepted_at, 5, 2) || '-' || SUBSTR(accepted_at, 7, 2)
+    ELSE COALESCE(NULLIF(filing_date, ''), '9999-12-31')
+END
+"""
+
 XBRL_INSTANCE_NAMESPACE = "http://www.xbrl.org/2003/instance"
 INLINE_XBRL_LOCAL_NAMES = {"nonfraction", "nonnumeric"}
 ARCHIVE_EXCLUDED_SUFFIXES = (
@@ -256,6 +389,7 @@ ARCHIVE_EXCLUDED_SUFFIXES = (
     "-index.html",
 )
 ARCHIVE_ALLOWED_DOCUMENT_SUFFIXES = (".xml", ".xhtml", ".htm", ".html", ".txt")
+ARCHIVE_PDF_SUFFIXES = (".pdf",)
 TEXT_TABLE_SOURCE_DETAIL = "sec_archive_text_table"
 XBRL_ARCHIVE_SOURCE_DETAIL = "sec_archive_xbrl"
 FOOTNOTE_XBRL_SOURCE_DETAIL = "sec_archive_footnote_xbrl"
@@ -263,6 +397,7 @@ ARCHIVE_SOURCE_DETAILS = (
     XBRL_ARCHIVE_SOURCE_DETAIL,
     TEXT_TABLE_SOURCE_DETAIL,
     FOOTNOTE_XBRL_SOURCE_DETAIL,
+    PROSE_SOURCE_DETAIL,
 )
 
 
@@ -301,6 +436,31 @@ class ArchiveFact:
     decimals: str
     payload_json: str
     source_detail: str = XBRL_ARCHIVE_SOURCE_DETAIL
+
+
+def prose_candidate_facts(
+    candidates: list[DisclosureCandidate],
+    *,
+    document_name: str,
+) -> list[ArchiveFact]:
+    return [
+        ArchiveFact(
+            taxonomy="sec-text",
+            concept_name=candidate.concept_name,
+            unit=candidate.unit,
+            value=candidate.value,
+            period_start=candidate.period_start,
+            period_end=candidate.period_end,
+            frame=(
+                f"prose:{document_name}:{candidate.block_index}:"
+                f"{candidate.concept_name}:{candidate.period_end}"
+            ),
+            decimals="",
+            payload_json=candidate.payload_json(document_name=document_name),
+            source_detail=PROSE_SOURCE_DETAIL,
+        )
+        for candidate in accepted_candidates(candidates)
+    ]
 
 
 @dataclass(frozen=True)
@@ -343,6 +503,19 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Evaluation asof date (YYYY-MM-DD) used to select the effective reporting-override "
             "rows via their valid_from column; defaults to the current UTC date."
+        ),
+    )
+    parser.add_argument(
+        "--profiles-only",
+        action="store_true",
+        help="Rebuild dated reporting-profile snapshots from stored SEC filings/facts without network access.",
+    )
+    parser.add_argument(
+        "--profiles-all-members",
+        action="store_true",
+        help=(
+            "With --profiles-only --include-historical, rebuild stored-data coverage "
+            "for every family member instead of only members alive on --asof."
         ),
     )
     parser.add_argument("--output-csv", type=Path, default=None)
@@ -633,6 +806,41 @@ def request_text(url: str, *, user_agent: str, timeout_sec: float, max_retries: 
     raise SecRequestError(status_code=last_status, url=url, body=last_text)
 
 
+def request_bytes(
+    url: str,
+    *,
+    user_agent: str,
+    timeout_sec: float,
+    max_retries: int,
+    sleep_sec: float,
+) -> tuple[int, bytes]:
+    try:
+        import requests  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("Package 'requests' is required for SEC archive sync.") from exc
+
+    headers = {
+        "User-Agent": user_agent,
+        "Accept-Encoding": "gzip, deflate",
+    }
+    last_status = 0
+    last_payload = b""
+    for attempt in range(max(1, max_retries)):
+        response = requests.get(url, headers=headers, timeout=timeout_sec)
+        last_status = int(response.status_code)
+        last_payload = bytes(response.content)
+        if response.status_code == 200:
+            return last_status, last_payload
+        if response.status_code not in {429, 500, 502, 503, 504}:
+            break
+        time.sleep(sleep_sec * (attempt + 1))
+    raise SecRequestError(
+        status_code=last_status,
+        url=url,
+        body=last_payload[:1000].decode("utf-8", errors="replace"),
+    )
+
+
 def write_cache_atomic(cache_file: Path, text: str) -> None:
     """Write an HTTP cache file via tmp + os.replace so readers never see a truncated file (MK-10)."""
     cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -663,6 +871,21 @@ def write_cache_atomic(cache_file: Path, text: str) -> None:
             tmp_file.unlink(missing_ok=True)
         except OSError:
             LOGGER.warning("Unable to remove SEC cache temp file: %s", tmp_file)
+
+
+def write_binary_cache_atomic(cache_file: Path, payload: bytes) -> None:
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_file = cache_file.with_name(
+        f"{cache_file.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    tmp_file.write_bytes(payload)
+    try:
+        os.replace(tmp_file, cache_file)
+    finally:
+        try:
+            tmp_file.unlink(missing_ok=True)
+        except OSError:
+            LOGGER.warning("Unable to remove SEC binary cache temp file: %s", tmp_file)
 
 
 def load_or_fetch_json(
@@ -705,6 +928,29 @@ def load_or_fetch_text(
     status, text = request_text(url, user_agent=user_agent, timeout_sec=timeout_sec, max_retries=max_retries, sleep_sec=sleep_sec)
     write_cache_atomic(cache_file, text)
     return status, text, "network"
+
+
+def load_or_fetch_bytes(
+    url: str,
+    *,
+    cache_file: Path,
+    force: bool,
+    user_agent: str,
+    timeout_sec: float,
+    max_retries: int,
+    sleep_sec: float,
+) -> tuple[int, bytes, str]:
+    if cache_file.exists() and not force:
+        return 200, cache_file.read_bytes(), "cache"
+    status, payload = request_bytes(
+        url,
+        user_agent=user_agent,
+        timeout_sec=timeout_sec,
+        max_retries=max_retries,
+        sleep_sec=sleep_sec,
+    )
+    write_binary_cache_atomic(cache_file, payload)
+    return status, payload, "network"
 
 
 def resolve_sec_user_agent(config: dict[str, Any]) -> str:
@@ -833,9 +1079,24 @@ def resolve_successful_sync_issues(
     return int(result.rowcount or 0)
 
 
-def load_universe(conn: Any, *, model_family: str, ticker_filter: list[str], include_historical: bool) -> list[dict[str, Any]]:
+def load_universe(
+    conn: Any,
+    *,
+    model_family: str,
+    ticker_filter: list[str],
+    include_historical: bool,
+    membership_asof: str = "",
+    currency_asof: str = "",
+) -> list[dict[str, Any]]:
     filter_sql = ""
     params: list[Any] = [model_family]
+    membership_sql = ""
+    if include_historical and membership_asof:
+        membership_sql = (
+            "AND m.start_date <= ? "
+            "AND COALESCE(NULLIF(m.end_date, ''), '9999-12-31') >= ?"
+        )
+        params.extend([membership_asof, membership_asof])
     if ticker_filter:
         filter_sql = f"AND c.ticker IN ({','.join('?' for _ in ticker_filter)})"
         params.extend(ticker_filter)
@@ -848,6 +1109,7 @@ def load_universe(conn: Any, *, model_family: str, ticker_filter: list[str], inc
               ON m.company_id = c.company_id
              AND m.model_family = ?
             WHERE 1 = 1
+              {membership_sql}
               {filter_sql}
             ORDER BY c.ticker
             """,
@@ -867,7 +1129,17 @@ def load_universe(conn: Any, *, model_family: str, ticker_filter: list[str], inc
             """,
             tuple(params),
         ).fetchall()
-    return [dict(row) for row in rows]
+    output = [dict(row) for row in rows]
+    return (
+        apply_reporting_currencies(
+            conn,
+            output,
+            model_family=model_family,
+            asof=currency_asof,
+        )
+        if model_family == "machinery" and currency_asof
+        else output
+    )
 
 
 def filing_keys(conn: Any, *, ticker: str, source_id: str) -> set[tuple[str, str, str]]:
@@ -1397,14 +1669,76 @@ def add_family_concept_mappings(
     concept_map: dict[tuple[str, str], list[dict[str, Any]]],
     *,
     model_family: str,
+    config: dict[str, Any] | None = None,
+    base_dir: Path | None = None,
 ) -> None:
-    if model_family != "machinery":
+    if model_family == "machinery":
+        for mapping in MACHINERY_EXTRA_CONCEPT_MAPPINGS:
+            key = (str(mapping["taxonomy"]), str(mapping["concept_name"]))
+            family_mapping = dict(mapping)
+            if family_mapping not in concept_map.setdefault(key, []):
+                concept_map[key].append(family_mapping)
+    if config is None or base_dir is None:
         return
-    for mapping in MACHINERY_EXTRA_CONCEPT_MAPPINGS:
-        key = (str(mapping["taxonomy"]), str(mapping["concept_name"]))
-        family_mapping = dict(mapping)
-        if family_mapping not in concept_map.setdefault(key, []):
-            concept_map[key].append(family_mapping)
+    raw_path = str(
+        cfg_get(
+            config,
+            f"model_families.{model_family}.financial.concept_aliases_csv",
+            "",
+        )
+        or ""
+    ).strip()
+    if not raw_path:
+        return
+    path = resolve_path(raw_path, base_dir=base_dir)
+    if not path.exists():
+        raise FileNotFoundError(f"Family concept-alias CSV not found: {path}")
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        required = {
+            "taxonomy",
+            "concept_name",
+            "canonical_metric",
+            "financial_statement",
+            "period_type",
+            "sign_policy",
+            "priority",
+            "review_status",
+        }
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"Family concept-alias CSV missing columns={sorted(missing)}")
+        for line_number, row in enumerate(reader, start=2):
+            if str(row.get("review_status") or "").strip().lower() != "reviewed":
+                raise ValueError(
+                    f"{path}:{line_number} concept alias must be reviewed"
+                )
+            mapping = {
+                "taxonomy": str(row.get("taxonomy") or "").strip(),
+                "concept_name": str(row.get("concept_name") or "").strip(),
+                "canonical_metric": str(row.get("canonical_metric") or "").strip(),
+                "financial_statement": str(
+                    row.get("financial_statement") or ""
+                ).strip(),
+                "period_type": str(row.get("period_type") or "").strip(),
+                "sign_policy": str(row.get("sign_policy") or "").strip(),
+                "priority": int(str(row.get("priority") or "")),
+            }
+            if not all(
+                mapping[key]
+                for key in (
+                    "taxonomy",
+                    "concept_name",
+                    "canonical_metric",
+                    "financial_statement",
+                    "period_type",
+                    "sign_policy",
+                )
+            ):
+                raise ValueError(f"{path}:{line_number} concept alias has blank fields")
+            key = (str(mapping["taxonomy"]), str(mapping["concept_name"]))
+            if mapping not in concept_map.setdefault(key, []):
+                concept_map[key].append(mapping)
 
 
 def make_fact_key(*parts: object) -> str:
@@ -1596,15 +1930,45 @@ def classify_machinery_footnote_concept(
     if period_type == "instant" and "backlog" in semantic:
         if any(token in semantic for token in ("unfunded", "potential", "growth", "cancellation")):
             return ""
-        if "funded backlog" in semantic or "firm backlog" in semantic:
+        if any(
+            label in semantic
+            for label in ("funded backlog", "authorized backlog", "appropriated backlog")
+        ):
             return "FundedBacklog"
         if re.search(r"\b(?:total\s+)?(?:order\s+)?backlog\b", semantic):
             return "ReportedBacklog"
-    if period_type == "duration" and any(
-        token in semantic
-        for token in ("new orders", "orders received", "order intake", "bookings received", "customer bookings")
-    ):
-        if not any(token in semantic for token in ("backlog", "cancellation", "purchase order obligation")):
+    order_disclosure = bool(
+        re.fullmatch(
+            r"(?:(?:total|new|net|customer)\s+)?(?:orders|bookings)(?:\s+(?:booked|received))?",
+            semantic,
+        )
+        or any(
+            token in semantic
+            for token in (
+                "total orders",
+                "new orders",
+                "net orders",
+                "orders booked",
+                "orders received",
+                "order intake",
+                "order bookings",
+                "bookings received",
+                "customer bookings",
+            )
+        )
+    )
+    if period_type == "duration" and order_disclosure:
+        if not any(
+            token in semantic
+            for token in (
+                "backlog",
+                "cancellation",
+                "purchase order obligation",
+                "purchase orders",
+                "percentage",
+                "growth",
+            )
+        ):
             return "Orders"
     return ""
 
@@ -1617,6 +1981,28 @@ def rpo_dimensions_only(dimensions: tuple[tuple[str, str], ...]) -> bool:
         or "rangeaxis" in re.sub(r"[^a-z]", "", axis.lower())
         for axis, _ in dimensions
     )
+
+
+def consolidated_order_dimensions_only(dimensions: tuple[tuple[str, str], ...]) -> bool:
+    """Accept only dimensions whose member explicitly denotes the whole issuer."""
+    if not dimensions:
+        return True
+    total_member_markers = (
+        "allsegments",
+        "companywide",
+        "consolidated",
+        "totalcompany",
+        "totaloperations",
+    )
+    allowed_axis_markers = ("business", "consolidation", "entity", "segment")
+    for axis, member in dimensions:
+        compact_axis = re.sub(r"[^a-z]", "", axis.lower())
+        compact_member = re.sub(r"[^a-z]", "", member.lower())
+        if not any(marker in compact_axis for marker in allowed_axis_markers):
+            return False
+        if not any(marker in compact_member for marker in total_member_markers):
+            return False
+    return True
 
 
 def practical_expedient_evidence(document_text: str) -> str:
@@ -1688,17 +2074,78 @@ def rpo_timing_start(context: ContextInfo) -> date | None:
 
 def rpo_timing_percentage_from_text(document_text: str) -> float | None:
     plain = normalize_table_label(strip_html_cell(document_text))
-    for match in re.finditer(r"remaining performance obligations?", plain, re.IGNORECASE):
-        segment = plain[match.start() : match.start() + 900]
-        percentage = re.search(
-            r"(\d{1,3}(?:\.\d+)?)\s*%.{0,180}?(?:next|following|within)\s+(?:the\s+)?(?:12|twelve)\s+months",
-            segment,
+    percentages: set[float] = set()
+    anchors = list(re.finditer(r"remaining performance obligations?", plain, re.IGNORECASE))
+    horizon = (
+        r"(?:next|following|within)\s+(?:the\s+)?(?:12|twelve)\s+months"
+        r"|(?:within|during|over)\s+(?:the\s+)?next\s+year"
+    )
+    for index, match in enumerate(anchors):
+        prefix = plain[max(0, match.start() - 240) : match.start()]
+        suffix_end = anchors[index + 1].start() if index + 1 < len(anchors) else match.end() + 600
+        suffix = plain[match.end() : min(len(plain), suffix_end)]
+        before = re.search(
+            r"(?:expect(?:s|ed)?|anticipat(?:e|es|ed))\s+(?:to\s+)?recognize.{0,140}?"
+            r"(\d{1,3}(?:\.\d+)?)\s*%\s+(?:of\s+(?:(?:our|the)\s+)?)?$",
+            prefix,
             re.IGNORECASE,
         )
-        if percentage:
-            value = float(percentage.group(1)) / 100.0
-            return value if 0.0 <= value <= 1.0 else None
-    return None
+        if before and re.search(rf"^.{{0,220}}?(?:{horizon})", suffix, re.IGNORECASE):
+            percentages.add(round(float(before.group(1)) / 100.0, 10))
+        for after in re.finditer(
+            rf"(\d{{1,3}}(?:\.\d+)?)\s*%.{{0,180}}?(?:{horizon})",
+            suffix,
+            re.IGNORECASE,
+        ):
+            percentages.add(round(float(after.group(1)) / 100.0, 10))
+    percentages = {value for value in percentages if 0.0 <= value <= 1.0}
+    if len(percentages) != 1:
+        return None
+    return percentages.pop()
+
+
+def rpo_current_amount_from_text(document_text: str) -> float | None:
+    """Return one explicitly disclosed next-12-month RPO amount, in base units.
+
+    This lane deliberately requires an RPO anchor, recognition language, an
+    explicit magnitude word, and a 12-month horizon in the same short passage.
+    Conflicting amounts fail closed instead of selecting one heuristically.
+    """
+    plain = normalize_table_label(strip_html_cell(document_text))
+    money = (
+        r"(?<![\d.])"
+        r"(?:\$|usd\s*)?"
+        r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*"
+        r"(thousand|million|billion)"
+    )
+    horizon = (
+        r"(?:next|following|within)\s+(?:the\s+)?(?:12|twelve)\s+months"
+        r"|(?:within|during|over)\s+(?:the\s+)?next\s+year"
+    )
+    recognize = (
+        r"(?:expect(?:s|ed)?|anticipat(?:e|es|ed))\s+(?:approximately\s+|about\s+)?"
+        r"(?:to\s+)?recognize"
+    )
+    expected = (
+        r"(?:is|are|will\s+be)\s+(?:expected|anticipated)\s+to\s+be\s+recognized"
+    )
+    patterns = (
+        rf"{recognize}.{{0,80}}?{money}.{{0,160}}?(?:{horizon})",
+        rf"{money}\s*{expected}.{{0,160}}?(?:{horizon})",
+        rf"(?:{horizon}).{{0,160}}?{recognize}.{{0,80}}?{money}",
+    )
+    scale = {"thousand": 1_000.0, "million": 1_000_000.0, "billion": 1_000_000_000.0}
+    amounts: set[float] = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, plain, re.IGNORECASE):
+            context = plain[max(0, match.start() - 260) : min(len(plain), match.end() + 260)]
+            if not re.search(r"remaining performance obligations?", context, re.IGNORECASE):
+                continue
+            raw_value = float(match.group(1).replace(",", ""))
+            amounts.add(round(raw_value * scale[match.group(2).lower()], 6))
+    if len(amounts) != 1:
+        return None
+    return amounts.pop()
 
 
 def rpo_bucket_is_current(
@@ -1745,12 +2192,94 @@ def derived_rpo_current_fact(
     )
 
 
+def derive_cross_source_rpo_current_facts(
+    facts: list[ArchiveFact],
+    *,
+    document_text: str,
+    document_name: str,
+    filing: dict[str, Any],
+    ticker: str,
+) -> list[ArchiveFact]:
+    """Derive current RPO from one explicit amount or percentage and a report-date total."""
+    if str(ticker or "").strip().upper() == "OTIS":
+        return facts
+    percentage = rpo_timing_percentage_from_text(document_text)
+    disclosed_amount = rpo_current_amount_from_text(document_text)
+    report_end = parse_date(filing.get("report_date")) or parse_date(filing.get("filing_date"))
+    if (percentage is None and disclosed_amount is None) or not report_end:
+        return facts
+
+    direct_current = {
+        (fact.period_end, fact.unit.lower())
+        for fact in facts
+        if fact.concept_name == "RemainingPerformanceObligationCurrent"
+    }
+    totals: dict[tuple[str, str], list[ArchiveFact]] = {}
+    for fact in facts:
+        if (
+            fact.concept_name == "RemainingPerformanceObligation"
+            and fact.period_end == report_end
+            and fact.value >= 0
+        ):
+            totals.setdefault((fact.period_end, fact.unit.lower()), []).append(fact)
+
+    derived: list[ArchiveFact] = []
+    for (period_end, normalized_unit), candidates in totals.items():
+        if (period_end, normalized_unit) in direct_current:
+            continue
+        unique_totals = {round(candidate.value, 6) for candidate in candidates}
+        if len(unique_totals) != 1:
+            continue
+        total = min(candidates, key=lambda candidate: (candidate.source_detail, candidate.frame))
+        percentage_value = total.value * percentage if percentage is not None else None
+        if (
+            disclosed_amount is not None
+            and percentage_value is not None
+            and not math.isclose(
+                disclosed_amount,
+                percentage_value,
+                rel_tol=0.02,
+                abs_tol=1.0,
+            )
+        ):
+            continue
+        current_value = disclosed_amount if disclosed_amount is not None else percentage_value
+        if current_value is None:
+            continue
+        if current_value < 0 or current_value > total.value * 1.000001:
+            continue
+        method = (
+            "cross_source_text_disclosed_12_month_amount"
+            if disclosed_amount is not None
+            else "cross_source_text_disclosed_12_month_percentage"
+        )
+        derived.append(
+            derived_rpo_current_fact(
+                document_name=document_name,
+                period_end=period_end,
+                unit=total.unit,
+                value=current_value,
+                method=method,
+                evidence={
+                    "percentage": percentage,
+                    "disclosed_amount": disclosed_amount,
+                    "total_rpo": total.value,
+                    "total_taxonomy": total.taxonomy,
+                    "total_concept": total.concept_name,
+                    "total_source_detail": total.source_detail,
+                },
+            )
+        )
+    return [*facts, *derived]
+
+
 def parse_machinery_footnote_facts(
     document_text: str,
     *,
     document_name: str,
     filing: dict[str, Any],
     concept_labels: dict[str, list[str]] | None = None,
+    ticker: str = "",
 ) -> list[ArchiveFact]:
     """Extract conservative machinery disclosures from standard/custom Inline XBRL."""
     labels_by_concept = concept_labels or {}
@@ -1867,9 +2396,13 @@ def parse_machinery_footnote_facts(
         if not synthetic_concept:
             continue
         if context.dimensions:
-            if not synthetic_concept.startswith("RemainingPerformanceObligation"):
-                continue
-            if not rpo_dimensions_only(context.dimensions):
+            if synthetic_concept.startswith("RemainingPerformanceObligation"):
+                if not rpo_dimensions_only(context.dimensions):
+                    continue
+            elif synthetic_concept == "Orders":
+                if not consolidated_order_dimensions_only(context.dimensions):
+                    continue
+            else:
                 continue
         payload = {
             "document": document_name,
@@ -1993,10 +2526,37 @@ def parse_machinery_footnote_facts(
                     "percentage": sum(current_percentages),
                     "total_rpo": total.value,
                 }
-        if current_value is None and total is not None:
+        if (
+            current_value is None
+            and total is not None
+            and filing_period_end
+            and period_end == filing_period_end
+        ):
             text_percentage = rpo_timing_percentage_from_text(document_text)
-            if text_percentage is not None:
-                current_value = total.value * text_percentage
+            disclosed_amount = rpo_current_amount_from_text(document_text)
+            percentage_value = (
+                total.value * text_percentage if text_percentage is not None else None
+            )
+            amount_percentage_conflict = (
+                disclosed_amount is not None
+                and percentage_value is not None
+                and not math.isclose(
+                    disclosed_amount,
+                    percentage_value,
+                    rel_tol=0.02,
+                    abs_tol=1.0,
+                )
+            )
+            if disclosed_amount is not None and not amount_percentage_conflict:
+                current_value = disclosed_amount
+                method = "text_disclosed_12_month_amount"
+                derivation_evidence = {
+                    "disclosed_amount": disclosed_amount,
+                    "percentage": text_percentage,
+                    "total_rpo": total.value,
+                }
+            elif percentage_value is not None and not amount_percentage_conflict:
+                current_value = percentage_value
                 method = "text_disclosed_12_month_percentage"
                 derivation_evidence = {
                     "percentage": text_percentage,
@@ -2016,6 +2576,15 @@ def parse_machinery_footnote_facts(
                 evidence=derivation_evidence,
             )
         )
+    if str(ticker or "").strip().upper() == "OTIS":
+        facts = [
+            fact
+            for fact in facts
+            if not (
+                fact.concept_name == "RemainingPerformanceObligationCurrent"
+                and fact.frame.startswith("footnote_derived:")
+            )
+        ]
     return facts
 
 
@@ -2187,12 +2756,28 @@ TEXT_TABLE_LABELS: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = [
     ),
     ("DepreciationAndAmortization", "duration", (r"^(?:depreciation\s+and\s+amortization|depreciation\s*&\s*amortization)\b",), (r"accumulated", r"%")),
     ("InterestExpense", "duration", (r"^interest\s+expense\b",), (r"income", r"%")),
-    ("Orders", "duration", (r"^(?:new\s+)?(?:orders|bookings)(?:\s+received)?\b",), (r"backlog", r"cancell", r"%")),
-    ("FundedBacklog", "instant", (r"^(?:funded|firm)\s+(?:order\s+)?backlog\b",), (r"unfunded", r"potential", r"remaining\s+performance", r"%")),
+    (
+        "Orders",
+        "duration",
+        (
+            r"^(?:(?:total|new|net|customer)\s+)?(?:orders|bookings)(?:\s+(?:booked|received))?\b",
+            r"^(?:total\s+)?order\s+intake\b",
+        ),
+        (r"backlog", r"cancell", r"growth", r"purchase", r"%"),
+    ),
+    (
+        "FundedBacklog",
+        "instant",
+        (r"^(?:funded|authorized|appropriated)\s+(?:order\s+)?backlog\b",),
+        (r"unfunded", r"potential", r"remaining\s+performance", r"%"),
+    ),
     (
         "ReportedBacklog",
         "instant",
-        (r"^(?:total\s+)?(?:order\s+)?backlog(?:\s+at\s+(?:period|year)\s+end)?$",),
+        (
+            r"^(?:(?:total|firm)\s+)?(?:order\s+)?backlog"
+            r"(?:\s+at\s+(?:period|year)\s+end)?$",
+        ),
         (r"funded", r"unfunded", r"potential", r"remaining\s+performance", r"growth", r"%"),
     ),
     (
@@ -2275,7 +2860,12 @@ REGISTRATION_TEXT_TABLE_LABELS: list[tuple[str, str, tuple[str, ...], tuple[str,
         (r"^cash\s+and\s+cash\s+equivalents$",),
         (r"restricted", r"cash\s+flows?"),
     ),
-    ("Inventory", "instant", (r"^inventor(?:y|ies)$",), ()),
+    (
+        "Inventory",
+        "instant",
+        (r"^inventor(?:y|ies)(?:\s*\(?notes?\s+\d+\)?)?$",),
+        (),
+    ),
     (
         "AccountsReceivable",
         "instant",
@@ -2333,10 +2923,10 @@ REGISTRATION_TEXT_TABLE_LABELS: list[tuple[str, str, tuple[str, ...], tuple[str,
         "Orders",
         "duration",
         (
-            r"^(?:new\s+)?(?:orders|bookings)(?:\s+received)?$",
-            r"^(?:equipment\s+)?order\s+intake$",
+            r"^(?:(?:total|new|net|customer)\s+)?(?:orders|bookings)(?:\s+(?:booked|received))?$",
+            r"^(?:(?:total|equipment)\s+)?order\s+intake$",
         ),
-        (r"backlog", r"cancell"),
+        (r"backlog", r"cancell", r"growth", r"purchase"),
     ),
     (
         "FundedBacklog",
@@ -2405,6 +2995,18 @@ REGISTRATION_STATEMENT_TYPES: dict[str, set[str]] = {
     "AmortizationComponent": {"cash_flow"},
 }
 
+# The statement-semantic guard may only reject a concept when the table carries
+# a POSITIVELY recognized statement heading that conflicts with the concept's
+# home statement. "financial_summary" is the default returned by
+# text_table_statement_provenance when NO formal heading is detected (e.g. IFRS
+# foreign private issuers whose income statement is titled "Statement of
+# Comprehensive Income"/"Statement of Earnings"). Treating that default as a
+# conflict silently dropped every income-statement concept for those filers, so
+# it must never trigger the guard.
+RECOGNIZED_STATEMENT_TYPES: frozenset[str] = frozenset(
+    {"income_statement", "balance_sheet", "cash_flow"}
+)
+
 
 def strip_html_cell(raw: str) -> str:
     text = re.sub(r"(?is)<script.*?</script>|<style.*?</style>", " ", raw)
@@ -2415,8 +3017,8 @@ def strip_html_cell(raw: str) -> str:
     return text.strip()
 
 
-def html_table_rows(table_html: str) -> list[list[str]]:
-    rows: list[list[str]] = []
+def html_table_row_items(table_html: str) -> list[tuple[list[str], str]]:
+    rows: list[tuple[list[str], str]] = []
     row_matches = list(re.finditer(r"(?is)<tr\b[^>]*>(.*?)</tr>", table_html))
     if not row_matches:
         return rows
@@ -2424,8 +3026,43 @@ def html_table_rows(table_html: str) -> list[list[str]]:
         cells = [strip_html_cell(match.group(1)) for match in re.finditer(r"(?is)<t[dh]\b[^>]*>(.*?)</t[dh]>", row_match.group(1))]
         cells = [cell for cell in cells if cell]
         if cells:
-            rows.append(cells)
+            rows.append((cells, row_match.group(0)))
     return rows
+
+
+def html_table_rows(table_html: str) -> list[list[str]]:
+    return [cells for cells, _ in html_table_row_items(table_html)]
+
+
+def special_metric_row_has_conflicting_xbrl_concept(
+    row_html: str,
+    concept_name: str,
+) -> bool:
+    tagged_concepts = re.findall(
+        r"\bname\s*=\s*[\"']([^\"']+)[\"']",
+        row_html,
+        re.IGNORECASE,
+    )
+    if not tagged_concepts:
+        return False
+    expected_fragments = {
+        "Orders": ("order", "booking"),
+        "FundedBacklog": ("fundedbacklog", "authorizedbacklog", "appropriatedbacklog"),
+        "ReportedBacklog": ("backlog",),
+        "RemainingPerformanceObligation": (
+            "remainingperformanceobligation",
+            "transactionpriceallocatedtoremainingperformanceobligation",
+        ),
+    }.get(concept_name, ())
+    normalized = [
+        re.sub(r"[^a-z0-9]", "", tagged.split(":")[-1].lower())
+        for tagged in tagged_concepts
+    ]
+    return bool(expected_fragments) and not any(
+        fragment in tagged
+        for tagged in normalized
+        for fragment in expected_fragments
+    )
 
 
 BACKLOG_ORDER_TEXT_CONCEPTS = {
@@ -2456,6 +3093,34 @@ def table_scale_info(text: str) -> tuple[float, str, str]:
         if match:
             return scale, match.group(0), "high"
     return 1.0, "not_detected_default_units", "low"
+
+
+def document_default_scale_info(document_text: str) -> tuple[float, str, str]:
+    """Read only explicit document-wide amount conventions, not narrative magnitudes."""
+    normalized = re.sub(
+        r"\s+",
+        " ",
+        strip_html_cell(document_text[:1_000_000]).lower(),
+    )
+    scale_patterns: tuple[tuple[float, str], ...] = (
+        (
+            1_000_000_000.0,
+            r"\b(?:dollar(?:\s+and\s+share)?\s+amounts?|amounts?)\s+(?:are\s+)?in\s+billions\b",
+        ),
+        (
+            1_000_000.0,
+            r"\b(?:dollar(?:\s+and\s+share)?\s+amounts?|amounts?)\s+(?:are\s+)?in\s+millions\b",
+        ),
+        (
+            1_000.0,
+            r"\b(?:dollar(?:\s+and\s+share)?\s+amounts?|amounts?)\s+(?:are\s+)?in\s+thousands\b",
+        ),
+    )
+    for scale, pattern in scale_patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            return scale, f"document_default:{match.group(0)}", "high"
+    return 1.0, "document_default_not_detected", "low"
 
 
 def detect_text_currency(text: str, *, allow_symbol_only: bool) -> str:
@@ -2669,7 +3334,7 @@ def text_table_statement_provenance(context_text: str, table_text: str) -> tuple
     )
     formal_statement = bool(
         re.search(
-            r"\b(?:condensed\s+)?(?:co\s*nso\s*l\s*idated|combined)\s+"
+            r"\b(?:condensed\s+)?(?:c\s*o\s*n\s*s\s*o\s*l\s*i\s*d\s*a\s*t\s*e\s*d|onsolidated|combined)\s+"
             r"(?:balance\s+sheets?|sta\s*tements?\s+of\s+(?:operations|income(?:\s+loss)?|cash\s+flows?|financial\s+position))\b",
             normalized,
         )
@@ -2748,7 +3413,10 @@ def standalone_years(text: str) -> list[int]:
 
 def duration_days_from_table_context(text: str) -> int:
     normalized = re.sub(r"\s+", " ", text.lower())
-    if "three months ended" in normalized or "quarter ended" in normalized:
+    if re.search(
+        r"\bthree[- ]months?(?:\s+period)?\s+ended\b|\bquarter(?:ly)?\s+ended\b",
+        normalized,
+    ):
         return 90
     if "six months ended" in normalized:
         return 181
@@ -2762,7 +3430,10 @@ def duration_days_for_period_evidence(*, month: int | None, day: int | None, com
     form = str(form_type or "").upper()
     if month == 12 and day in {30, 31} and re.search(r"\byears?\s+ended\b|\bfiscal\s+years?\b", normalized):
         return 364
-    if re.search(r"\bthree\s+months?\s+ended\b|\bquarter\s+ended\b", normalized) and not (month == 12 and day in {30, 31}):
+    if re.search(
+        r"\bthree[- ]months?(?:\s+period)?\s+ended\b|\bquarter(?:ly)?\s+ended\b",
+        normalized,
+    ) and not (month == 12 and day in {30, 31}):
         return 90
     if re.search(r"\bsix\s+months?\s+ended\b", normalized):
         return 181
@@ -2938,6 +3609,45 @@ def align_registration_table_values(cells: list[str], header_rows: list[list[str
     return values if len(values) == expected else []
 
 
+def align_operating_table_values(
+    cells: list[str],
+    header_rows: list[list[str]],
+) -> list[float]:
+    """Keep dated monetary columns and discard adjacent percent/change columns."""
+    expected = text_table_period_count(header_rows)
+    if expected <= 0:
+        return row_values(cells)
+    currency_markers = {"$", "US$", "USD", "C$", "CAD", "GBP", "EUR"}
+    marked_values: list[float] = []
+    value_cells = cells[1:]
+    for index, cell in enumerate(value_cells[:-1]):
+        if cell.strip() not in currency_markers:
+            continue
+        for candidate in value_cells[index + 1 :]:
+            if candidate.strip() in currency_markers:
+                break
+            value = parse_table_number(candidate)
+            if value is not None:
+                marked_values.append(value)
+                break
+    if len(marked_values) >= expected:
+        return marked_values[:expected]
+    values = row_values(cells)
+    return values[:expected] if len(values) > expected else values
+
+
+def consolidated_dimension_column_index(rows: list[list[str]]) -> int | None:
+    """Return the numeric value index for an explicit consolidated matrix column."""
+    if not rows or len(rows[0]) < 3 or text_table_period_count([rows[0]]) > 0:
+        return None
+    headers = [normalize_table_label(cell) for cell in rows[0][1:]]
+    if headers[-1] not in {"consolidated", "total company", "company total"}:
+        return None
+    if not any("segment" in header for header in headers[:-1]):
+        return None
+    return len(headers) - 1
+
+
 def period_start_for_text_fact(period_end: str, period_type: str, duration_days: int) -> str:
     if period_type == "instant":
         return ""
@@ -2946,6 +3656,37 @@ def period_start_for_text_fact(period_end: str, period_type: str, duration_days:
         return ""
     end = datetime.strptime(parsed, "%Y-%m-%d").date()
     return (end - timedelta(days=duration_days)).isoformat()
+
+
+def prefer_explicit_total_order_facts(facts: list[ArchiveFact]) -> list[ArchiveFact]:
+    """Discard segment order rows when the same document reports an explicit total."""
+    groups: dict[tuple[str, str, str], list[ArchiveFact]] = {}
+    for fact in facts:
+        if fact.concept_name != "Orders":
+            continue
+        groups.setdefault((fact.period_start, fact.period_end, fact.unit), []).append(fact)
+
+    preferred_ids: set[int] = set()
+    suppressed_ids: set[int] = set()
+    for grouped in groups.values():
+        explicit_totals: list[ArchiveFact] = []
+        for fact in grouped:
+            try:
+                label = normalize_table_label(json.loads(fact.payload_json).get("label", ""))
+            except (json.JSONDecodeError, TypeError):
+                label = ""
+            if re.match(r"^(?:total|consolidated|companywide|company wide)\s+(?:orders|bookings)\b", label):
+                explicit_totals.append(fact)
+        if not explicit_totals:
+            continue
+        preferred_ids.update(id(fact) for fact in explicit_totals)
+        suppressed_ids.update(id(fact) for fact in grouped if fact not in explicit_totals)
+
+    return [
+        fact
+        for fact in facts
+        if id(fact) not in suppressed_ids or id(fact) in preferred_ids
+    ]
 
 
 def parse_archive_text_table_facts(
@@ -2964,6 +3705,7 @@ def parse_archive_text_table_facts(
     form_type = str(filing.get("form_type") or "").strip().upper()
     if not period_end:
         return []
+    document_default_scale = document_default_scale_info(document_text)
     facts: list[ArchiveFact] = []
     seen: set[tuple[str, str, str, float]] = set()
     for table_index, match in enumerate(re.finditer(r"(?is)<table\b[^>]*>.*?</table>", document_text), start=1):
@@ -2973,7 +3715,8 @@ def parse_archive_text_table_facts(
             table_html,
         ):
             continue
-        rows = html_table_rows(table_html)
+        row_items = html_table_row_items(table_html)
+        rows = [cells for cells, _ in row_items]
         label_resolver = (
             registration_text_table_label_concept
             if strict_registration_statements
@@ -3012,7 +3755,11 @@ def parse_archive_text_table_facts(
             continue
         table_text = strip_html_cell(table_html)
         scale_context = document_text[max(0, match.start() - 2500) : min(len(document_text), match.end() + 500)]
-        provenance_context = document_text[max(0, match.start() - 1200) : match.start()]
+        # Registration statements often place the formal "Consolidated ..."
+        # heading more than 1,200 characters before a table. Keep the context
+        # window aligned with scale detection so historical statement tables
+        # are not mistaken for unaudited prospectus summaries.
+        provenance_context = document_text[max(0, match.start() - 2500) : match.start()]
         statement_type, projection_flag, historical_statement_flag = text_table_statement_provenance(
             strip_html_cell(provenance_context),
             table_text,
@@ -3068,12 +3815,15 @@ def parse_archive_text_table_facts(
         if not financial_table and not operating_table:
             continue
         scale, scale_source, scale_confidence = table_scale_info(f"{scale_context} {table_text[:1000]}")
+        if scale_confidence == "low" and document_default_scale[2] == "high":
+            scale, scale_source, scale_confidence = document_default_scale
         if currency_confidence == "low":
             # FN-5: currency not positively identified for a non-US filer;
             # the scale evidence cannot be trusted more than the currency.
             scale_confidence = "low"
         first_concept_idx = next((idx for idx, flag in enumerate(concept_row_flags) if flag), 0)
         table_header_rows = rows[:first_concept_idx]
+        consolidated_value_index = consolidated_dimension_column_index(rows)
         component_facts: dict[tuple[str, str], dict[str, ArchiveFact]] = {}
         for row_index, cells in enumerate(rows):
             if len(cells) < 2:
@@ -3084,17 +3834,48 @@ def parse_archive_text_table_facts(
             concept_name, period_type = label_result
             if special_metrics_only and concept_name not in BACKLOG_ORDER_TEXT_CONCEPTS:
                 continue
-            local_header_rows = [
+            if (
+                concept_name in BACKLOG_ORDER_TEXT_CONCEPTS
+                and special_metric_row_has_conflicting_xbrl_concept(
+                    row_items[row_index][1],
+                    concept_name,
+                )
+            ):
+                continue
+            allowed_statement_types = REGISTRATION_STATEMENT_TYPES.get(concept_name)
+            if (
+                not strict_registration_statements
+                and allowed_statement_types is not None
+                and statement_type in RECOGNIZED_STATEMENT_TYPES
+                and statement_type not in allowed_statement_types
+            ):
+                # A row named "Inventories" on the cash-flow statement is a
+                # working-capital change, not an inventory balance. Apply the
+                # same statement-semantic guard used for prospectuses whenever
+                # a normal filing table has a POSITIVELY recognized statement
+                # heading. When the heading is unrecognized (financial_summary),
+                # there is no conflicting statement context, so the concept must
+                # be kept — otherwise IFRS foreign private issuers ("Statement of
+                # Comprehensive Income"/"Earnings") lose every income-statement
+                # concept and fail the FPI-hybrid completeness gate.
+                continue
+            nearby_header_rows = [
                 row
                 for row in rows[max(0, row_index - 8) : row_index]
                 if not (row and label_resolver(row[0]))
-            ] or table_header_rows
+            ]
+            # Long KPI tables can place an Orders row more than eight rows
+            # below its date heading. Always retain the table-level header,
+            # then add any local subheader rows without duplicating it.
+            local_header_rows = [
+                *table_header_rows,
+                *(row for row in nearby_header_rows if row not in table_header_rows),
+            ] or nearby_header_rows
             if strict_registration_statements:
                 # Formal statement headers define the dated columns for the
                 # entire table. Nearby component rows can otherwise push a
                 # multi-row header outside the local lookback window.
                 local_header_rows = table_header_rows
-                allowed_statement_types = REGISTRATION_STATEMENT_TYPES.get(concept_name)
                 if allowed_statement_types is not None and statement_type not in allowed_statement_types:
                     continue
                 preceding_labels = normalize_table_label(
@@ -3107,18 +3888,46 @@ def parse_archive_text_table_facts(
                     local_header_rows = table_header_rows
                     values = align_registration_table_values(cells, local_header_rows)
             else:
-                values = row_values(cells)
+                if (
+                    concept_name in BACKLOG_ORDER_TEXT_CONCEPTS
+                    and consolidated_value_index is not None
+                ):
+                    dimension_values = row_values(cells)
+                    values = (
+                        [dimension_values[consolidated_value_index]]
+                        if len(dimension_values) > consolidated_value_index
+                        else []
+                    )
+                else:
+                    values = (
+                        align_operating_table_values(cells, local_header_rows)
+                        if concept_name in BACKLOG_ORDER_TEXT_CONCEPTS
+                        else row_values(cells)
+                    )
             if not values:
                 continue
             period_context = provenance_context if strict_registration_statements else scale_context
-            periods = infer_text_table_periods(
-                local_header_rows,
-                value_count=len(values),
-                fallback_period_end=period_end,
-                context_text=period_context,
-                form_type=form_type,
-                strict_mixed_periods=strict_registration_statements,
-            )
+            if consolidated_value_index is not None:
+                duration_days = duration_days_from_table_context(
+                    f"{period_context} {table_text[:1200]}"
+                )
+                periods = [
+                    (
+                        period_end,
+                        duration_days,
+                        "explicit_consolidated_dimension_column",
+                        rows[0][-1],
+                    )
+                ]
+            else:
+                periods = infer_text_table_periods(
+                    local_header_rows,
+                    value_count=len(values),
+                    fallback_period_end=period_end,
+                    context_text=period_context,
+                    form_type=form_type,
+                    strict_mixed_periods=strict_registration_statements,
+                )
             if table_header_rows and all(item[2] == "fallback_filing_or_report_date" for item in periods):
                 periods = infer_text_table_periods(
                     table_header_rows,
@@ -3135,13 +3944,19 @@ def parse_archive_text_table_facts(
                 value = raw_value * scale
                 if concept_name in BACKLOG_ORDER_TEXT_CONCEPTS and (
                     period_confidence == "fallback_filing_or_report_date"
-                    or scale_confidence == "low"
                     or abs(value) < BACKLOG_ORDER_MIN_PLAUSIBLE_USD
+                    or (
+                        scale_confidence == "low"
+                        and abs(value) < BACKLOG_ORDER_MIN_PLAUSIBLE_USD * 1000.0
+                    )
                 ):
                     # Prose/table backlog captures have produced mass mis-scaled
-                    # junk (1,443 sub-$1M facts). These aggregates are only
-                    # trustworthy with a resolved period date, a confidently
-                    # detected scale, and a plausible magnitude.
+                    # junk (1,443 sub-$1M facts). These aggregates need a
+                    # resolved period date and a plausible magnitude; when the
+                    # table scale was NOT confidently detected, additionally
+                    # require the value to already be in full-dollar range
+                    # (>= $1B) — a full-dollar table needs no scaling, while a
+                    # mis-scaled millions capture lands far below that.
                     continue
                 key = (concept_name, fact_period_end, unit, value)
                 if key in seen:
@@ -3253,7 +4068,7 @@ def parse_archive_text_table_facts(
                             )
                         )
     if not strict_registration_statements:
-        return facts
+        return prefer_explicit_total_order_facts(facts)
 
     # Registration statements can contain the issuer, acquired subsidiaries,
     # and repeated summaries under one accession. The canonical table's key is
@@ -3294,20 +4109,212 @@ def parse_archive_text_table_facts(
     return list(best_facts.values())
 
 
+LEGACY_ASCII_TABLE_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9.])(?:\$\s*)?(\(?-?\d[\d,]*(?:\.\d+)?\)?)(?![A-Za-z0-9.])"
+)
+
+
+def parse_archive_legacy_ascii_table_facts(
+    document_text: str,
+    *,
+    document_name: str,
+    filing: dict[str, Any],
+    company_currency: str,
+) -> list[ArchiveFact]:
+    """Parse pre-XBRL SEC ``<TABLE>`` blocks that contain fixed-width text.
+
+    Older complete-submission files use SGML table wrappers but no HTML
+    ``<TR>/<TD>`` cells. The normal HTML parser therefore sees no rows. This
+    parser is deliberately limited to formal consolidated statement blocks,
+    reviewed labels, explicit column dates, and explicit scale declarations.
+    """
+    facts: list[ArchiveFact] = []
+    seen: set[tuple[str, str, str, float]] = set()
+    fallback_period_end = parse_date(
+        filing.get("report_date") or filing.get("filing_date")
+    )
+    form_type = str(filing.get("form_type") or "").strip().upper()
+    for table_index, match in enumerate(
+        re.finditer(r"(?is)<table\b[^>]*>(.*?)</table>", document_text),
+        start=1,
+    ):
+        table_html = match.group(1)
+        if re.search(r"(?is)<tr\b", table_html):
+            continue
+        plain = html_lib.unescape(table_html)
+        plain = re.sub(r"(?is)<(?:caption|s|c)\b[^>]*>", "\n", plain)
+        plain = re.sub(r"(?is)</?(?:text|page)\b[^>]*>", "\n", plain)
+        plain = re.sub(r"(?is)<[^>]+>", " ", plain)
+        lines = [
+            re.sub(r"[ \t]+", " ", line).strip()
+            for line in plain.replace("\r", "\n").split("\n")
+        ]
+        lines = [line for line in lines if line]
+        if not lines:
+            continue
+        table_text = "\n".join(lines)
+        statement_type, projection_flag, historical_statement_flag = (
+            text_table_statement_provenance(table_text[:2000], table_text)
+        )
+        if (
+            statement_type not in RECOGNIZED_STATEMENT_TYPES
+            or projection_flag
+            or not historical_statement_flag
+        ):
+            continue
+        first_data_index: int | None = None
+        for line_index, line in enumerate(lines):
+            numeric_matches = list(LEGACY_ASCII_TABLE_NUMBER_RE.finditer(line))
+            if not numeric_matches:
+                continue
+            label = line[: numeric_matches[0].start()].strip(" $:-")
+            if (
+                re.search(r"[A-Za-z]{3}", label)
+                and not month_day_pairs(line)
+                and not full_text_dates(line)
+            ):
+                first_data_index = line_index
+                break
+        if first_data_index is None:
+            continue
+        header_rows = [[line] for line in lines[:first_data_index]]
+        period_count = text_table_period_count(header_rows)
+        if period_count <= 0 or period_count > 8:
+            continue
+        scale, scale_source, scale_confidence = table_scale_info(
+            " ".join(lines[: min(first_data_index + 1, 25)])
+        )
+        if scale_confidence != "high":
+            continue
+        unit, currency_confidence = text_table_unit(
+            document_text,
+            table_text[:2000],
+            company_currency=company_currency,
+        )
+        has_broader_revenue_row = any(
+            normalize_table_label(
+                line[: matches[0].start()].strip(" $:-")
+            )
+            in {"revenue", "revenues", "total revenue", "total revenues"}
+            for line in lines[first_data_index:]
+            if (matches := list(LEGACY_ASCII_TABLE_NUMBER_RE.finditer(line)))
+        )
+        for row_index, line in enumerate(lines[first_data_index:], start=first_data_index):
+            numeric_matches = list(LEGACY_ASCII_TABLE_NUMBER_RE.finditer(line))
+            if len(numeric_matches) < period_count:
+                continue
+            selected = numeric_matches[-period_count:]
+            label = line[: selected[0].start()].strip(" $:-")
+            label_result = text_table_label_concept(label)
+            if label_result is None:
+                continue
+            concept_name, period_type = label_result
+            if (
+                concept_name == "Revenue"
+                and normalize_table_label(label).startswith("net revenue")
+                and has_broader_revenue_row
+            ):
+                continue
+            if statement_type == "balance_sheet" and period_type != "instant":
+                continue
+            if statement_type == "income_statement" and period_type != "duration":
+                continue
+            if statement_type == "cash_flow" and concept_name not in {
+                "OperatingCashFlow",
+                "Capex",
+                "DepreciationAndAmortization",
+            }:
+                continue
+            values = [
+                parse_table_number(number_match.group(1))
+                for number_match in selected
+            ]
+            if any(value is None for value in values):
+                continue
+            periods = infer_text_table_periods(
+                header_rows,
+                value_count=period_count,
+                fallback_period_end=fallback_period_end,
+                context_text=table_text[:2000],
+                form_type=form_type,
+            )
+            for value_index, parsed_value in enumerate(values):
+                if parsed_value is None:
+                    continue
+                period_end, duration_days, period_confidence, period_evidence = periods[
+                    min(value_index, len(periods) - 1)
+                ]
+                if not period_end or (
+                    period_type == "duration"
+                    and period_confidence == "fallback_filing_or_report_date"
+                ):
+                    continue
+                value = parsed_value * scale
+                key = (concept_name, period_end, unit, value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                facts.append(
+                    ArchiveFact(
+                        taxonomy="sec-text",
+                        concept_name=concept_name,
+                        unit=unit,
+                        value=value,
+                        period_start=period_start_for_text_fact(
+                            period_end,
+                            period_type,
+                            duration_days,
+                        ),
+                        period_end=period_end,
+                        frame=(
+                            f"legacy_ascii:{document_name}:{table_index}:"
+                            f"{row_index}:{value_index}"
+                        ),
+                        decimals="",
+                        payload_json=compact_json(
+                            {
+                                "document": document_name,
+                                "label": label,
+                                "source": "sec_archive_legacy_ascii_table",
+                                "scale": scale,
+                                "scale_source": scale_source,
+                                "scale_confidence": scale_confidence,
+                                "currency_confidence": currency_confidence,
+                                "period_confidence": period_confidence,
+                                "period_evidence": period_evidence,
+                                "statement_type": statement_type,
+                                "projection_flag": projection_flag,
+                                "historical_statement_flag": historical_statement_flag,
+                            }
+                        ),
+                        source_detail=TEXT_TABLE_SOURCE_DETAIL,
+                    )
+                )
+    return facts
+
+
 def archive_document_candidates(
     index_payload: dict[str, Any],
     *,
     primary_document: str,
     max_documents: int,
     text_tables_only: bool = False,
+    include_pdf: bool = False,
+    targeted_report_documents: set[str] | None = None,
+    machinery_targeted: bool = False,
+    event_filing: bool = False,
 ) -> list[str]:
     raw_items = ((index_payload.get("directory") or {}).get("item") or [])
     candidates: list[str] = []
     primary = str(primary_document or "").strip()
     text_table_suffixes = (".xhtml", ".htm", ".html")
-    if primary and primary.lower().endswith(
-        text_table_suffixes if text_tables_only else ARCHIVE_ALLOWED_DOCUMENT_SUFFIXES
-    ):
+    allowed_suffixes = (
+        text_table_suffixes + (ARCHIVE_PDF_SUFFIXES if include_pdf else ())
+        if text_tables_only
+        else ARCHIVE_ALLOWED_DOCUMENT_SUFFIXES
+        + (ARCHIVE_PDF_SUFFIXES if include_pdf else ())
+    )
+    if primary and primary.lower().endswith(allowed_suffixes):
         candidates.append(primary)
     for item in raw_items:
         if not isinstance(item, dict):
@@ -3316,12 +4323,27 @@ def archive_document_candidates(
         lower = name.lower()
         if not name or name in candidates:
             continue
-        if not lower.endswith(ARCHIVE_ALLOWED_DOCUMENT_SUFFIXES):
-            continue
-        if text_tables_only and not lower.endswith(text_table_suffixes):
+        if not lower.endswith(allowed_suffixes):
             continue
         if any(lower.endswith(suffix) for suffix in ARCHIVE_EXCLUDED_SUFFIXES):
             continue
+        if machinery_targeted and name != primary:
+            is_targeted_report = name in (targeted_report_documents or set())
+            is_instance_xml = lower.endswith(".xml")
+            is_event_exhibit = event_filing and bool(
+                re.search(
+                    r"(?:ex(?:hibit)?[-_ ]?99|earnings|presentation|release)",
+                    lower,
+                )
+            )
+            is_event_pdf = event_filing and lower.endswith(ARCHIVE_PDF_SUFFIXES)
+            if not (
+                is_targeted_report
+                or is_instance_xml
+                or is_event_exhibit
+                or is_event_pdf
+            ):
+                continue
         candidates.append(name)
     candidates.sort(
         key=lambda name: (
@@ -3333,6 +4355,37 @@ def archive_document_candidates(
     if max_documents > 0:
         return candidates[:max_documents]
     return candidates
+
+
+def archive_raw_submission_document_name(accession_number: object) -> str:
+    """Return EDGAR's canonical complete-submission text filename.
+
+    Legacy filing indexes can list split document names that now return 404
+    even though the complete submission remains available at
+    ``{accession-number}.txt`` in the same accession directory.
+    """
+    accession = str(accession_number or "").strip()
+    if not re.fullmatch(r"\d{10}-\d{2}-\d{6}", accession):
+        return ""
+    return f"{accession}.txt"
+
+
+def should_stop_archive_document_scan(
+    *,
+    model_family: str,
+    form_type: str,
+    mapped_estimate: int,
+    special_metric_count: int,
+    parse_all_documents: bool,
+) -> bool:
+    """Keep scanning machinery event filings until an operating exhibit is found."""
+    if parse_all_documents or mapped_estimate <= 0:
+        return False
+    if model_family == "machinery" and form_type.strip().upper() in {"8-K", "8-K/A"}:
+        # Separate EX-99 exhibits often contain different metrics. Parse all
+        # eligible event-filing documents and deduplicate after ticker staging.
+        return False
+    return True
 
 
 def archive_label_linkbase_candidates(index_payload: dict[str, Any]) -> list[str]:
@@ -3502,13 +4555,13 @@ def purge_archive_xbrl_facts(conn: Any, *, ticker: str, source_id: str, model_fa
                   AND COALESCE(f.accession_number, '') = COALESCE(fact_financial_statement_canonical.accession_number, '')
                   AND COALESCE(f.unit, '') = COALESCE(fact_financial_statement_canonical.unit, '')
                   AND (
-                        f.source_detail IN ('sec_archive_xbrl_mapped', 'sec_archive_text_table_mapped', 'sec_archive_footnote_xbrl_mapped')
+                        f.source_detail IN ('sec_archive_xbrl_mapped', 'sec_archive_text_table_mapped', 'sec_archive_footnote_xbrl_mapped', 'sec_archive_prose_metric_mapped')
                      OR f.raw_fact_id IN (
                             SELECT raw_fact_id
                             FROM fact_sec_xbrl_fact_raw r
                             WHERE r.ticker = ?
                               AND r.source_id = ?
-                              AND r.source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl')
+                              AND r.source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl', 'sec_archive_prose_metric')
                         )
                   )
           )
@@ -3521,13 +4574,13 @@ def purge_archive_xbrl_facts(conn: Any, *, ticker: str, source_id: str, model_fa
         WHERE ticker = ?
           AND source_id = ?
           AND (
-                source_detail IN ('sec_archive_xbrl_mapped', 'sec_archive_text_table_mapped', 'sec_archive_footnote_xbrl_mapped')
+                source_detail IN ('sec_archive_xbrl_mapped', 'sec_archive_text_table_mapped', 'sec_archive_footnote_xbrl_mapped', 'sec_archive_prose_metric_mapped')
              OR raw_fact_id IN (
                     SELECT raw_fact_id
                     FROM fact_sec_xbrl_fact_raw
                     WHERE ticker = ?
                       AND source_id = ?
-                      AND source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl')
+                      AND source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl', 'sec_archive_prose_metric')
                 )
           )
         """,
@@ -3538,7 +4591,7 @@ def purge_archive_xbrl_facts(conn: Any, *, ticker: str, source_id: str, model_fa
         DELETE FROM fact_sec_xbrl_fact_raw
         WHERE ticker = ?
           AND source_id = ?
-          AND source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl')
+          AND source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl', 'sec_archive_prose_metric')
         """,
         (ticker, source_id),
     )
@@ -3560,7 +4613,7 @@ def purge_archive_text_table_facts(conn: Any, *, ticker: str, source_id: str, mo
                   AND f.period_end = fact_financial_statement_canonical.period_end
                   AND COALESCE(f.accession_number, '') = COALESCE(fact_financial_statement_canonical.accession_number, '')
                   AND COALESCE(f.unit, '') = COALESCE(fact_financial_statement_canonical.unit, '')
-                  AND f.source_detail IN ('sec_archive_text_table_mapped', 'sec_archive_footnote_xbrl_mapped')
+                  AND f.source_detail IN ('sec_archive_text_table_mapped', 'sec_archive_footnote_xbrl_mapped', 'sec_archive_prose_metric_mapped')
           )
         """,
         (ticker, source_id, model_family),
@@ -3571,13 +4624,13 @@ def purge_archive_text_table_facts(conn: Any, *, ticker: str, source_id: str, mo
         WHERE ticker = ?
           AND source_id = ?
           AND (
-                source_detail IN ('sec_archive_text_table_mapped', 'sec_archive_footnote_xbrl_mapped')
+                source_detail IN ('sec_archive_text_table_mapped', 'sec_archive_footnote_xbrl_mapped', 'sec_archive_prose_metric_mapped')
              OR raw_fact_id IN (
                     SELECT raw_fact_id
                     FROM fact_sec_xbrl_fact_raw
                     WHERE ticker = ?
                       AND source_id = ?
-                      AND source_detail IN ('sec_archive_text_table', 'sec_archive_footnote_xbrl')
+                      AND source_detail IN ('sec_archive_text_table', 'sec_archive_footnote_xbrl', 'sec_archive_prose_metric')
                 )
           )
         """,
@@ -3588,7 +4641,7 @@ def purge_archive_text_table_facts(conn: Any, *, ticker: str, source_id: str, mo
         DELETE FROM fact_sec_xbrl_fact_raw
         WHERE ticker = ?
           AND source_id = ?
-          AND source_detail IN ('sec_archive_text_table', 'sec_archive_footnote_xbrl')
+          AND source_detail IN ('sec_archive_text_table', 'sec_archive_footnote_xbrl', 'sec_archive_prose_metric')
         """,
         (ticker, source_id),
     )
@@ -3657,6 +4710,11 @@ def sync_archive_xbrl(
     supplemental_forms: set[str],
     max_supplemental_filings: int,
     max_documents: int,
+    include_pdf_documents: bool = False,
+    pdf_ocr_enabled: bool = False,
+    max_pdf_pages: int = 250,
+    max_pdf_bytes: int = 25_000_000,
+    pdf_extraction_timeout_sec: float = 30.0,
     parse_all_documents: bool = False,
     text_tables_only: bool = False,
     strict_registration_statements: bool = False,
@@ -3694,8 +4752,11 @@ def sync_archive_xbrl(
     )
 
     # Phase 1: network fetch + parse, staging facts in memory.
-    staged: list[tuple[dict[str, Any], str, list[ArchiveFact]]] = []
+    staged: list[
+        tuple[dict[str, Any], str, list[ArchiveFact], list[DisclosureCandidate]]
+    ] = []
     raw_responses: list[tuple[str, int, str]] = []
+    document_parse_warnings: list[str] = []
     fetch_failures = 0
     requests = 0
     for row in filing_rows:
@@ -3769,25 +4830,130 @@ def sync_archive_xbrl(
                 if label_fetch_mode == "network":
                     raw_responses.append((label_url, label_status, label_text))
                     time.sleep(sleep_sec)
-        for document_name in archive_document_candidates(
+        form_type = str(filing.get("form_type") or "").strip().upper()
+        event_filing = form_type in {"8-K", "8-K/A", "6-K", "6-K/A"}
+        targeted_report_documents: set[str] = set()
+        if model_family == "machinery" and not event_filing:
+            summary_document = filing_summary_document_name(index_payload)
+            if summary_document:
+                summary_url = document_url_template.format(
+                    cik_int=cik_int,
+                    accession_nodash=accession_nodash,
+                    document_name=summary_document,
+                )
+                summary_cache = archive_cache_file(
+                    cache_dir,
+                    cik=cik,
+                    accession=accession,
+                    document_name=summary_document,
+                )
+                requests += 1
+                try:
+                    summary_status, summary_text, summary_fetch_mode = load_or_fetch_text(
+                        summary_url,
+                        cache_file=summary_cache,
+                        force=force,
+                        user_agent=user_agent,
+                        timeout_sec=timeout_sec,
+                        max_retries=max_retries,
+                        sleep_sec=sleep_sec,
+                    )
+                except SecRequestError as exc:
+                    raw_responses.append((exc.url, exc.status_code, exc.body))
+                    fetch_failures += 1
+                    LOGGER.warning(
+                        "Unavailable SEC FilingSummary ticker=%s accession=%s status=%s",
+                        ticker,
+                        accession,
+                        exc.status_code,
+                    )
+                else:
+                    targeted_report_documents = filing_summary_report_documents(summary_text)
+                    if summary_fetch_mode == "network":
+                        raw_responses.append((summary_url, summary_status, summary_text))
+                        time.sleep(sleep_sec)
+        document_candidates = archive_document_candidates(
             index_payload,
             primary_document=str(filing.get("primary_document") or ""),
             max_documents=max_documents,
             text_tables_only=text_tables_only,
+            include_pdf=(
+                include_pdf_documents and model_family == "machinery" and event_filing
+            ),
+            targeted_report_documents=targeted_report_documents,
+            machinery_targeted=model_family == "machinery",
+            event_filing=event_filing,
+        )
+        # SEC's complete-submission text file is the authoritative fallback
+        # for pre-XBRL filings whose legacy split-document links return 404.
+        # Keep it last so a working primary/instance document wins, and do not
+        # add it to FPI "parse every document" runs where it would duplicate
+        # hundreds of already-parsed exhibits.
+        raw_submission_name = archive_raw_submission_document_name(accession)
+        if (
+            raw_submission_name
+            and not parse_all_documents
+            and raw_submission_name not in document_candidates
         ):
+            document_candidates.append(raw_submission_name)
+        for document_name in document_candidates:
             document_url = document_url_template.format(cik_int=cik_int, accession_nodash=accession_nodash, document_name=document_name)
             document_cache = archive_cache_file(cache_dir, cik=cik, accession=accession, document_name=document_name)
             requests += 1
             try:
-                _, document_text, document_fetch_mode = load_or_fetch_text(
-                    document_url,
-                    cache_file=document_cache,
-                    force=force,
-                    user_agent=user_agent,
-                    timeout_sec=timeout_sec,
-                    max_retries=max_retries,
-                    sleep_sec=sleep_sec,
-                )
+                if document_name.lower().endswith(ARCHIVE_PDF_SUFFIXES):
+                    document_status, document_payload, document_fetch_mode = load_or_fetch_bytes(
+                        document_url,
+                        cache_file=document_cache,
+                        force=force,
+                        user_agent=user_agent,
+                        timeout_sec=timeout_sec,
+                        max_retries=max_retries,
+                        sleep_sec=sleep_sec,
+                    )
+                    extracted = extract_document_text(
+                        document_payload,
+                        document_name=document_name,
+                        content_type="application/pdf",
+                        enable_pdf_ocr=pdf_ocr_enabled,
+                        max_pdf_pages=max_pdf_pages,
+                        max_pdf_bytes=max_pdf_bytes,
+                        pdf_extraction_timeout_sec=pdf_extraction_timeout_sec,
+                    )
+                    document_text = extracted.text
+                    if extracted.warning:
+                        document_parse_warnings.append(
+                            f"{accession}:{document_name}:{extracted.warning}"
+                        )
+                    if document_fetch_mode == "network":
+                        raw_responses.append(
+                            (
+                                document_url,
+                                document_status,
+                                json.dumps(
+                                    {
+                                        "content_sha256": hashlib.sha256(document_payload).hexdigest(),
+                                        "document_name": document_name,
+                                        "extraction_method": extracted.extraction_method,
+                                        "page_count": extracted.page_count,
+                                        "ocr_used": extracted.ocr_used,
+                                    },
+                                    sort_keys=True,
+                                ),
+                            )
+                        )
+                    if not document_text.strip():
+                        continue
+                else:
+                    _, document_text, document_fetch_mode = load_or_fetch_text(
+                        document_url,
+                        cache_file=document_cache,
+                        force=force,
+                        user_agent=user_agent,
+                        timeout_sec=timeout_sec,
+                        max_retries=max_retries,
+                        sleep_sec=sleep_sec,
+                    )
             except SecRequestError as exc:
                 raw_responses.append((exc.url, exc.status_code, exc.body))
                 fetch_failures += 1
@@ -3801,14 +4967,40 @@ def sync_archive_xbrl(
                 special_metrics_only=text_tables_only,
                 strict_registration_statements=strict_registration_statements,
             )
-            if model_family == "machinery":
+            if document_name.lower().endswith(".txt"):
                 facts = [
                     *facts,
+                    *parse_archive_legacy_ascii_table_facts(
+                        document_text,
+                        document_name=document_name,
+                        filing=filing,
+                        company_currency=company_currency,
+                    ),
+                ]
+            prose_candidates: list[DisclosureCandidate] = []
+            if model_family == "machinery":
+                prose_candidates = extract_machinery_prose_candidates(
+                    document_text,
+                    filing=filing,
+                    company_currency=company_currency,
+                )
+                prose_candidates = resolve_machinery_disclosure_candidates(
+                    prose_candidates,
+                    ticker=ticker,
+                    filing=filing,
+                )
+                facts = [
+                    *facts,
+                    *prose_candidate_facts(
+                        prose_candidates,
+                        document_name=document_name,
+                    ),
                     *parse_machinery_footnote_facts(
                         document_text,
                         document_name=document_name,
                         filing=filing,
                         concept_labels=concept_labels,
+                        ticker=ticker,
                     ),
                 ]
             if not text_tables_only:
@@ -3816,20 +5008,37 @@ def sync_archive_xbrl(
                     *parse_archive_facts(document_text, document_name=document_name, concept_map=concept_map),
                     *facts,
                 ]
-            staged.append((filing, document_name, facts))
+            if model_family == "machinery":
+                facts = derive_cross_source_rpo_current_facts(
+                    facts,
+                    document_text=document_text,
+                    document_name=document_name,
+                    filing=filing,
+                    ticker=ticker,
+                )
+            staged.append((filing, document_name, facts, prose_candidates))
             mapped_estimate = sum(len(concept_map.get((fact.taxonomy, fact.concept_name), [])) for fact in facts)
-            if mapped_estimate > 0 and not parse_all_documents:
+            special_metric_count = sum(
+                fact.concept_name in BACKLOG_ORDER_TEXT_CONCEPTS for fact in facts
+            )
+            if should_stop_archive_document_scan(
+                model_family=model_family,
+                form_type=str(filing.get("form_type") or ""),
+                mapped_estimate=mapped_estimate,
+                special_metric_count=special_metric_count,
+                parse_all_documents=parse_all_documents,
+            ):
                 break
             if document_fetch_mode == "network":
                 time.sleep(sleep_sec)
         if index_fetch_mode == "network":
             time.sleep(sleep_sec)
 
-    staged_fact_count = sum(len(facts) for _, _, facts in staged)
+    staged_fact_count = sum(len(facts) for _, _, facts, _ in staged)
     low_currency_documents = sorted(
         {
             document_name
-            for _, document_name, facts in staged
+            for _, document_name, facts, _ in staged
             for fact in facts
             if fact.source_detail == TEXT_TABLE_SOURCE_DETAIL
             and json.loads(fact.payload_json).get("currency_confidence") == "low"
@@ -3850,8 +5059,8 @@ def sync_archive_xbrl(
                 asof_date=datetime.now(timezone.utc).date().isoformat(),
                 ingestion_run_id=ingestion_run_id,
             )
-        source_filter = "source_detail IN ('sec_archive_text_table', 'sec_archive_footnote_xbrl')" if text_tables_only else (
-            "source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl')"
+        source_filter = "source_detail IN ('sec_archive_text_table', 'sec_archive_footnote_xbrl', 'sec_archive_prose_metric')" if text_tables_only else (
+            "source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl', 'sec_archive_prose_metric')"
         )
         prior_row = conn.execute(
             f"""
@@ -3878,7 +5087,25 @@ def sync_archive_xbrl(
             purge_archive_text_table_facts(conn, ticker=ticker, source_id=source_id, model_family=model_family)
         else:
             purge_archive_xbrl_facts(conn, ticker=ticker, source_id=source_id, model_family=model_family)
-        for filing, document_name, facts in staged:
+        conn.execute(
+            """
+            DELETE FROM fact_sec_metric_disclosure_candidate
+            WHERE ticker = ? AND source_id = ? AND model_family = ?
+            """,
+            (ticker, source_id, model_family),
+        )
+        for filing, document_name, facts, prose_candidates in staged:
+            upsert_disclosure_candidates(
+                conn,
+                ticker=ticker,
+                cik=cik,
+                source_id=source_id,
+                model_family=model_family,
+                filing=filing,
+                document_name=document_name,
+                candidates=prose_candidates,
+                now=utc_now(),
+            )
             raw_count, mapped_count = upsert_archive_facts(
                 conn,
                 ticker=ticker,
@@ -3906,6 +5133,26 @@ def sync_archive_xbrl(
                     f"documents={','.join(low_currency_documents[:5])}"
                 ),
             )
+        if document_parse_warnings:
+            add_issue(
+                conn,
+                severity="warning",
+                ticker=ticker,
+                model_family=model_family,
+                source_id=source_id,
+                issue_type="sec_archive_pdf_extraction_warning",
+                detail=";".join(document_parse_warnings[:10]),
+            )
+        if model_family == "machinery":
+            reconciliation = reconcile_machinery_disclosure_facts(
+                conn,
+                ticker=ticker,
+                source_id=source_id,
+                model_family=model_family,
+                now=utc_now(),
+            )
+            raw_total -= reconciliation["raw_facts_deleted"]
+            mapped_total -= reconciliation["mapped_facts_deleted"]
     return raw_total, mapped_total, requests
 
 
@@ -4065,35 +5312,45 @@ def classify_reporting_profile(
     country: str,
     model_family: str,
     source_id: str,
+    asof: str,
     override: ReportingOverride | None = None,
 ) -> dict[str, Any]:
+    profile_asof = parse_date(asof)
+    if not profile_asof:
+        raise ValueError(f"Invalid reporting-profile asof={asof!r}; expected YYYY-MM-DD")
     latest = conn.execute(
-        """
+        f"""
         SELECT accession_number, filing_date, form_type
         FROM fact_sec_filing
         WHERE ticker = ?
-        ORDER BY filing_date DESC, accession_number DESC
+          AND (? = '' OR cik = ?)
+          AND ({PROFILE_ACCEPTED_DATE_SQL}) <= ?
+        ORDER BY ({PROFILE_ACCEPTED_DATE_SQL}) DESC, filing_date DESC, accession_number DESC
         LIMIT 1
         """,
-        (ticker,),
+        (ticker, cik, cik, profile_asof),
     ).fetchone()
     tax_rows = conn.execute(
-        """
-        SELECT taxonomy, COUNT(*) AS n
+        f"""
+        SELECT taxonomy, COUNT(*) AS n, MAX(COALESCE(period_end, '')) AS latest_period_end
         FROM fact_sec_xbrl_fact
         WHERE ticker = ?
+          AND (? = '' OR cik = ?)
+          AND ({PROFILE_ACCEPTED_DATE_SQL}) <= ?
         GROUP BY taxonomy
         """,
-        (ticker,),
+        (ticker, cik, cik, profile_asof),
     ).fetchall()
     taxonomy_metric_rows = conn.execute(
-        """
+        f"""
         SELECT taxonomy, canonical_metric
         FROM fact_sec_xbrl_fact
         WHERE ticker = ?
+          AND (? = '' OR cik = ?)
+          AND ({PROFILE_ACCEPTED_DATE_SQL}) <= ?
         GROUP BY taxonomy, canonical_metric
         """,
-        (ticker,),
+        (ticker, cik, cik, profile_asof),
     ).fetchall()
     metrics_by_taxonomy: dict[str, set[str]] = {}
     for row in taxonomy_metric_rows:
@@ -4101,11 +5358,69 @@ def classify_reporting_profile(
     metrics = {
         str(row["canonical_metric"])
         for row in conn.execute(
-            "SELECT DISTINCT canonical_metric FROM fact_sec_xbrl_fact WHERE ticker = ?",
-            (ticker,),
+            f"""
+            SELECT DISTINCT canonical_metric
+            FROM fact_sec_xbrl_fact
+            WHERE ticker = ?
+              AND (? = '' OR cik = ?)
+              AND ({PROFILE_ACCEPTED_DATE_SQL}) <= ?
+            """,
+            (ticker, cik, cik, profile_asof),
         ).fetchall()
     }
     taxonomies = {str(row["taxonomy"]): int(row["n"] or 0) for row in tax_rows}
+    taxonomy_latest_period = {
+        str(row["taxonomy"]): str(row["latest_period_end"] or "")
+        for row in tax_rows
+    }
+    core_metrics = {"revenue", "assets"}
+
+    def primary_xbrl_taxonomy(*, require_core: bool) -> str:
+        candidates: list[str] = []
+        for taxonomy in ("us-gaap", "ifrs-full"):
+            taxonomy_metrics = metrics_by_taxonomy.get(taxonomy, set())
+            has_taxonomy_core = core_metrics <= taxonomy_metrics
+            has_taxonomy_partial = (
+                "assets" in taxonomy_metrics
+                and bool(
+                    taxonomy_metrics.intersection(
+                        {
+                            "cash_and_equivalents",
+                            "liabilities",
+                            "equity",
+                        }
+                    )
+                )
+            ) or bool(
+                taxonomy_metrics.intersection(
+                    {
+                        "operating_income",
+                        "net_income",
+                        "operating_cash_flow",
+                        "capex",
+                        "research_and_development",
+                    }
+                )
+            )
+            if has_taxonomy_core if require_core else has_taxonomy_partial:
+                candidates.append(taxonomy)
+        if not candidates:
+            return ""
+        # Mixed-taxonomy issuers can retain a handful of stale facts from an
+        # earlier reporting basis. Prefer the taxonomy with the most recent
+        # mapped period, then the largest mapped-fact population. The final
+        # name tie-break preserves the historic us-gaap precedence.
+        return max(
+            candidates,
+            key=lambda taxonomy: (
+                taxonomy_latest_period.get(taxonomy, ""),
+                taxonomies.get(taxonomy, 0),
+                taxonomy,
+            ),
+        )
+
+    primary_core_taxonomy = primary_xbrl_taxonomy(require_core=True)
+    primary_partial_taxonomy = primary_xbrl_taxonomy(require_core=False)
     has_core = {"revenue", "assets"} <= metrics
     has_core_sec_text = {"revenue", "assets"} <= metrics_by_taxonomy.get("sec-text", set())
     has_balance_sheet = "assets" in metrics and bool(metrics.intersection({"cash_and_equivalents", "liabilities", "equity"}))
@@ -4168,8 +5483,7 @@ def classify_reporting_profile(
         confidence = max(override.financial_confidence, 0.55 if has_core else 0.35)
         usable_xbrl = 1
     elif (
-        model_family == "machinery"
-        and override is not None
+        override is not None
         and override.handling_type in FULL_STATEMENT_ARCHIVE_HANDLING_TYPES
         and has_core_sec_text
     ):
@@ -4180,7 +5494,7 @@ def classify_reporting_profile(
         confidence = 0.55
         usable_xbrl = 1
         reason = ""
-    elif has_core and taxonomies.get("us-gaap", 0) > 0:
+    elif primary_core_taxonomy == "us-gaap":
         profile = "SEC_XBRL_US_GAAP"
         standard = "US_GAAP"
         primary_taxonomy = "us-gaap"
@@ -4188,7 +5502,7 @@ def classify_reporting_profile(
         confidence = 0.9
         usable_xbrl = 1
         reason = ""
-    elif has_core and taxonomies.get("ifrs-full", 0) > 0:
+    elif primary_core_taxonomy == "ifrs-full":
         profile = "SEC_XBRL_IFRS"
         standard = "IFRS"
         primary_taxonomy = "ifrs-full"
@@ -4212,7 +5526,7 @@ def classify_reporting_profile(
         confidence = 0.55
         usable_xbrl = 1
         reason = ""
-    elif has_partial_xbrl and taxonomies.get("us-gaap", 0) > 0:
+    elif primary_partial_taxonomy == "us-gaap":
         profile = "SEC_XBRL_US_GAAP_PARTIAL"
         standard = "US_GAAP_PARTIAL"
         primary_taxonomy = "us-gaap"
@@ -4220,7 +5534,7 @@ def classify_reporting_profile(
         confidence = 0.55
         usable_xbrl = 1
         reason = "partial_xbrl_missing_core_revenue_or_assets"
-    elif has_partial_xbrl and taxonomies.get("ifrs-full", 0) > 0:
+    elif primary_partial_taxonomy == "ifrs-full":
         profile = "SEC_XBRL_IFRS_PARTIAL"
         standard = "IFRS_PARTIAL"
         primary_taxonomy = "ifrs-full"
@@ -4292,10 +5606,58 @@ def classify_reporting_profile(
             ticker, model_family, cik, country, reporting_profile, reporting_standard,
             primary_taxonomy, latest_filing_date, latest_form_type, latest_accession_number,
             fallback_status, financial_confidence, usable_xbrl_flag, source_id,
-            review_reason, created_at, updated_at
+            review_reason, profile_asof_date, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, model_family) DO UPDATE SET
+            cik = excluded.cik,
+            country = excluded.country,
+            reporting_profile = excluded.reporting_profile,
+            reporting_standard = excluded.reporting_standard,
+            primary_taxonomy = excluded.primary_taxonomy,
+            latest_filing_date = excluded.latest_filing_date,
+            latest_form_type = excluded.latest_form_type,
+            latest_accession_number = excluded.latest_accession_number,
+            fallback_status = excluded.fallback_status,
+            financial_confidence = excluded.financial_confidence,
+            usable_xbrl_flag = excluded.usable_xbrl_flag,
+            source_id = excluded.source_id,
+            review_reason = excluded.review_reason,
+            profile_asof_date = excluded.profile_asof_date,
+            updated_at = excluded.updated_at
+        WHERE COALESCE(dim_issuer_reporting_profile.profile_asof_date, '') <= excluded.profile_asof_date
+        """,
+        (
+            ticker,
+            model_family,
+            cik,
+            country_text,
+            profile,
+            standard,
+            primary_taxonomy,
+            latest_filing,
+            latest_form,
+            latest_accession,
+            fallback,
+            confidence,
+            usable_xbrl,
+            source_id,
+            reason,
+            profile_asof,
+            now,
+            now,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO dim_issuer_reporting_profile_history(
+            ticker, model_family, profile_asof_date, cik, country, reporting_profile,
+            reporting_standard, primary_taxonomy, latest_filing_date, latest_form_type,
+            latest_accession_number, fallback_status, financial_confidence,
+            usable_xbrl_flag, source_id, review_reason, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ticker, model_family, profile_asof_date) DO UPDATE SET
             cik = excluded.cik,
             country = excluded.country,
             reporting_profile = excluded.reporting_profile,
@@ -4314,6 +5676,7 @@ def classify_reporting_profile(
         (
             ticker,
             model_family,
+            profile_asof,
             cik,
             country_text,
             profile,
@@ -4338,6 +5701,7 @@ def classify_reporting_profile(
         "latest_form_type": latest_form,
         "financial_confidence": confidence,
         "review_reason": reason,
+        "profile_asof_date": profile_asof,
     }
 
 
@@ -4400,6 +5764,46 @@ def purge_stale_cik_artifacts(
 ) -> None:
     if not cik:
         return
+    stale_cik_found = any(
+        conn.execute(sql, params).fetchone() is not None
+        for sql, params in (
+            (
+                "SELECT 1 FROM fact_sec_xbrl_fact WHERE ticker = ? AND source_id = ? AND COALESCE(cik, '') <> ? LIMIT 1",
+                (ticker, companyfacts_source_id, cik),
+            ),
+            (
+                "SELECT 1 FROM fact_sec_xbrl_fact_raw WHERE ticker = ? AND source_id = ? AND COALESCE(cik, '') <> ? LIMIT 1",
+                (ticker, companyfacts_source_id, cik),
+            ),
+            (
+                "SELECT 1 FROM fact_sec_filing WHERE ticker = ? AND source_id IN (?, ?) AND COALESCE(cik, '') <> ? LIMIT 1",
+                (ticker, submissions_source_id, companyfacts_source_id, cik),
+            ),
+            (
+                "SELECT 1 FROM dim_issuer_reporting_profile WHERE ticker = ? AND model_family = ? AND COALESCE(cik, '') NOT IN ('', ?) LIMIT 1",
+                (ticker, model_family, cik),
+            ),
+        )
+    )
+    if stale_cik_found:
+        conn.execute(
+            """
+            DELETE FROM fact_financial_statement_canonical
+            WHERE ticker = ? AND source_id = ? AND model_family = ?
+            """,
+            (ticker, companyfacts_source_id, model_family),
+        )
+        conn.execute(
+            """
+            DELETE FROM feature_financial_statement
+            WHERE ticker = ? AND source_id = ? AND model_family = ?
+            """,
+            (ticker, companyfacts_source_id, model_family),
+        )
+        conn.execute(
+            "DELETE FROM feature_financial_metric_availability WHERE ticker = ? AND model_family = ?",
+            (ticker, model_family),
+        )
     conn.execute(
         """
         DELETE FROM fact_sec_xbrl_fact
@@ -4436,6 +5840,15 @@ def purge_stale_cik_artifacts(
         """,
         (ticker, model_family, cik),
     )
+    conn.execute(
+        """
+        DELETE FROM dim_issuer_reporting_profile_history
+        WHERE ticker = ?
+          AND model_family = ?
+          AND COALESCE(cik, '') NOT IN ('', ?)
+        """,
+        (ticker, model_family, cik),
+    )
 
 
 def main() -> None:
@@ -4454,7 +5867,7 @@ def main() -> None:
     # expanded value is empty or carries no contact address — SEC fair-access
     # policy requires a contact in every User-Agent, and a literal "${...}"
     # template must never be sent upstream.
-    user_agent = resolve_sec_user_agent(config)
+    user_agent = "" if args.profiles_only else resolve_sec_user_agent(config)
     timeout_sec = float(cfg_get(config, "sec_fundamentals.timeout_sec", 30.0))
     max_retries = int(cfg_get(config, "sec_fundamentals.max_retries", 3))
     sleep_sec = float(cfg_get(config, "sec_fundamentals.request_sleep_sec", 0.12))
@@ -4463,6 +5876,11 @@ def main() -> None:
     cache_dir = resolve_path(cfg_get(config, "sec_fundamentals.cache_dir"), base_dir=base_dir)
     archive_enabled = as_bool(cfg_get(config, "sec_archive.enabled", True))
     archive_all_family_members = as_bool(cfg_get(config, "sec_archive.all_family_members", False))
+    archive_core_metric_recovery_tickers = {
+        normalize_ticker(item)
+        for item in (cfg_get(config, "sec_archive.core_metric_recovery_tickers", []) or [])
+        if normalize_ticker(item)
+    }
     archive_index_template = str(
         cfg_get(config, "sec_archive.index_url_template")
         or "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/index.json"
@@ -4491,6 +5909,17 @@ def main() -> None:
     )
     archive_max_documents_raw = cfg_get(config, "sec_archive.max_documents_per_filing", 5)
     archive_max_documents = int(archive_max_documents_raw) if archive_max_documents_raw is not None else 5
+    archive_include_pdf_documents = bool(
+        cfg_get(config, "sec_archive.include_pdf_documents", False)
+    )
+    archive_pdf_ocr_enabled = bool(cfg_get(config, "sec_archive.pdf_ocr_enabled", False))
+    archive_max_pdf_pages = int(cfg_get(config, "sec_archive.max_pdf_pages", 250) or 250)
+    archive_max_pdf_bytes = int(
+        cfg_get(config, "sec_archive.max_pdf_bytes", 25_000_000) or 25_000_000
+    )
+    archive_pdf_extraction_timeout_sec = float(
+        cfg_get(config, "sec_archive.pdf_extraction_timeout_sec", 30.0) or 30.0
+    )
     # FN-2: minimum fraction of previously stored archive facts a refetch must
     # reproduce before the purge-and-swap is allowed to destroy existing state.
     archive_min_refetch_fraction = float(cfg_get(config, "sec_archive.min_refetch_fact_fraction", 0.5))
@@ -4517,6 +5946,21 @@ def main() -> None:
         asof=evaluation_asof,
     )
     ticker_filter = parse_ticker_list(args.tickers)
+    if args.profiles_only and any(
+        (
+            args.incremental,
+            args.force,
+            args.force_submissions,
+            args.force_companyfacts,
+            args.force_archive,
+            args.archive_bootstrap,
+        )
+    ):
+        raise ValueError("--profiles-only cannot be combined with SEC fetch/force options")
+    if args.profiles_all_members and not (args.profiles_only and args.include_historical):
+        raise ValueError(
+            "--profiles-all-members requires --profiles-only --include-historical"
+        )
     if args.incremental and args.force:
         raise ValueError("--incremental cannot be combined with --force; use --force-submissions, --force-companyfacts, or --force-archive.")
     force_submissions = bool(args.force or args.force_submissions or args.incremental)
@@ -4538,7 +5982,18 @@ def main() -> None:
         if source_status(conn, companyfacts_source_id) != "active":
             raise ValueError(f"Source {companyfacts_source_id} must be active in source_registry.")
 
-        tickers = load_universe(conn, model_family=model_family, ticker_filter=ticker_filter, include_historical=include_historical)
+        tickers = load_universe(
+            conn,
+            model_family=model_family,
+            ticker_filter=ticker_filter,
+            include_historical=include_historical,
+            membership_asof=(
+                evaluation_asof
+                if args.profiles_only and not args.profiles_all_members
+                else ""
+            ),
+            currency_asof=evaluation_asof,
+        )
         if args.max_tickers > 0:
             tickers = tickers[: args.max_tickers]
         if not tickers:
@@ -4555,7 +6010,79 @@ def main() -> None:
         )
 
         concept_map = load_concept_map(conn)
-        add_family_concept_mappings(concept_map, model_family=model_family)
+        add_family_concept_mappings(
+            concept_map,
+            model_family=model_family,
+            config=config,
+            base_dir=base_dir,
+        )
+        if args.profiles_only:
+            report_rows: list[dict[str, Any]] = []
+            with conn:
+                for item in tickers:
+                    ticker = normalize_ticker(item.get("ticker"))
+                    if not ticker:
+                        continue
+                    cik = normalize_cik(item.get("cik"))
+                    purge_stale_cik_artifacts(
+                        conn,
+                        ticker=ticker,
+                        cik=cik,
+                        submissions_source_id=submissions_source_id,
+                        companyfacts_source_id=companyfacts_source_id,
+                        model_family=model_family,
+                    )
+                    profile = classify_reporting_profile(
+                        conn,
+                        ticker=ticker,
+                        cik=cik,
+                        country=str(item.get("country") or ""),
+                        model_family=model_family,
+                        source_id=companyfacts_source_id,
+                        asof=evaluation_asof,
+                        override=reporting_overrides.get(ticker),
+                    )
+                    raw_fact_count, mapped_fact_count = sec_fact_counts(
+                        conn,
+                        ticker=ticker,
+                        source_id=companyfacts_source_id,
+                    )
+                    report_rows.append(
+                        {
+                            "ticker": ticker,
+                            "cik": cik,
+                            "company_name": str(item.get("company_name") or ""),
+                            "country": str(item.get("country") or ""),
+                            "status": "review" if profile["review_reason"] else "success",
+                            "reporting_profile": profile["reporting_profile"],
+                            "reporting_standard": profile["reporting_standard"],
+                            "latest_filing_date": profile["latest_filing_date"],
+                            "latest_form_type": profile["latest_form_type"],
+                            "filing_count": len(
+                                filing_keys(
+                                    conn,
+                                    ticker=ticker,
+                                    source_id=submissions_source_id,
+                                )
+                            ),
+                            "raw_fact_count": raw_fact_count,
+                            "mapped_fact_count": mapped_fact_count,
+                            "review_reason": profile["review_reason"],
+                        }
+                    )
+            write_report(
+                output_csv,
+                report_rows,
+                preserve_existing_tickers=bool(ticker_filter),
+            )
+            LOGGER.info(
+                "Rebuilt reporting-profile snapshots: model_family=%s asof=%s rows=%d output=%s",
+                model_family,
+                evaluation_asof,
+                len(report_rows),
+                output_csv,
+            )
+            return
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         submissions_run_id = start_ingestion_run(conn, source_id=submissions_source_id)
         companyfacts_run_id = start_ingestion_run(conn, source_id=companyfacts_source_id)
@@ -4640,6 +6167,7 @@ def main() -> None:
                                 country=country,
                                 model_family=model_family,
                                 source_id=companyfacts_source_id,
+                                asof=evaluation_asof,
                                 override=reporting_override,
                             )
                     elif not cik:
@@ -4647,7 +6175,7 @@ def main() -> None:
                         review_reason = "missing_cik"
                         with conn:
                             add_issue(conn, severity="error", ticker=ticker, model_family=model_family, source_id=submissions_source_id, issue_type="missing_cik", detail="Ticker has no CIK; SEC financial sync skipped.")
-                            profile = classify_reporting_profile(conn, ticker=ticker, cik="", country=country, model_family=model_family, source_id=submissions_source_id, override=reporting_override)
+                            profile = classify_reporting_profile(conn, ticker=ticker, cik="", country=country, model_family=model_family, source_id=submissions_source_id, asof=evaluation_asof, override=reporting_override)
                     else:
                         existing_filing_keys = filing_keys(conn, ticker=ticker, source_id=submissions_source_id) if args.incremental else set()
                         existing_archive_metadata = has_filing_metadata(conn, ticker=ticker, source_id=submissions_source_id)
@@ -4699,6 +6227,7 @@ def main() -> None:
                                     country=country,
                                     model_family=model_family,
                                     source_id=submissions_source_id,
+                                    asof=evaluation_asof,
                                     override=reporting_override,
                                 )
                             else:
@@ -4804,6 +6333,7 @@ def main() -> None:
                                     country=country,
                                     model_family=model_family,
                                     source_id=companyfacts_source_id,
+                                    asof=evaluation_asof,
                                     override=reporting_override,
                                 )
                                 if profile.get("review_reason"):
@@ -4896,8 +6426,7 @@ def main() -> None:
                             # stage-then-swap purge protection inside the helper.
                             archive_attempted = True
                             strict_registration_statements = bool(
-                                model_family == "machinery"
-                                and reporting_override is not None
+                                reporting_override is not None
                                 and reporting_override.handling_type in FULL_STATEMENT_ARCHIVE_HANDLING_TYPES
                             )
                             archive_raw_count, archive_mapped_count, archive_requests = sync_archive_xbrl(
@@ -4921,12 +6450,18 @@ def main() -> None:
                                 supplemental_forms=archive_supplemental_forms,
                                 max_supplemental_filings=archive_max_supplemental_filings,
                                 max_documents=archive_max_documents,
+                                include_pdf_documents=archive_include_pdf_documents,
+                                pdf_ocr_enabled=archive_pdf_ocr_enabled,
+                                max_pdf_pages=archive_max_pdf_pages,
+                                max_pdf_bytes=archive_max_pdf_bytes,
+                                pdf_extraction_timeout_sec=archive_pdf_extraction_timeout_sec,
                                 parse_all_documents=(
                                     reporting_override is not None
                                     and reporting_override.reporting_profile in FPI_HYBRID_PROFILES
                                 ),
                                 text_tables_only=(
                                     archive_all_family_members and not should_attempt_archive(reporting_override)
+                                    and ticker not in archive_core_metric_recovery_tickers
                                 ),
                                 strict_registration_statements=strict_registration_statements,
                                 company_currency=company_currency,
@@ -4957,7 +6492,7 @@ def main() -> None:
                                     issue_type="sec_archive_xbrl_no_mapped_facts",
                                     detail="Archive index/documents fetched but no mapped XBRL facts were extracted.",
                                 )
-                            profile = classify_reporting_profile(conn, ticker=ticker, cik=cik, country=country, model_family=model_family, source_id=companyfacts_source_id, override=reporting_override)
+                            profile = classify_reporting_profile(conn, ticker=ticker, cik=cik, country=country, model_family=model_family, source_id=companyfacts_source_id, asof=evaluation_asof, override=reporting_override)
                             if profile["review_reason"]:
                                 add_issue(
                                     conn,
@@ -5009,8 +6544,7 @@ def main() -> None:
                             # refetch is implausibly small.
                             try:
                                 strict_registration_statements = bool(
-                                    model_family == "machinery"
-                                    and reporting_override is not None
+                                    reporting_override is not None
                                     and reporting_override.handling_type in FULL_STATEMENT_ARCHIVE_HANDLING_TYPES
                                 )
                                 archive_raw_count, archive_mapped_count, archive_requests = sync_archive_xbrl(
@@ -5034,12 +6568,18 @@ def main() -> None:
                                     supplemental_forms=archive_supplemental_forms,
                                     max_supplemental_filings=archive_max_supplemental_filings,
                                     max_documents=archive_max_documents,
+                                    include_pdf_documents=archive_include_pdf_documents,
+                                    pdf_ocr_enabled=archive_pdf_ocr_enabled,
+                                    max_pdf_pages=archive_max_pdf_pages,
+                                    max_pdf_bytes=archive_max_pdf_bytes,
+                                    pdf_extraction_timeout_sec=archive_pdf_extraction_timeout_sec,
                                     parse_all_documents=(
                                         reporting_override is not None
                                         and reporting_override.reporting_profile in FPI_HYBRID_PROFILES
                                     ),
                                     text_tables_only=(
                                         archive_all_family_members and not should_attempt_archive(reporting_override)
+                                        and ticker not in archive_core_metric_recovery_tickers
                                     ),
                                     strict_registration_statements=strict_registration_statements,
                                     company_currency=company_currency,
@@ -5100,6 +6640,7 @@ def main() -> None:
                                 country=country,
                                 model_family=model_family,
                                 source_id=endpoint_source_id,
+                                asof=evaluation_asof,
                                 override=reporting_override,
                             )
                     else:
@@ -5108,7 +6649,7 @@ def main() -> None:
                         failures.append(f"{ticker}: {review_reason}")
                         with conn:
                             add_issue(conn, severity="error", ticker=ticker, model_family=model_family, source_id=companyfacts_source_id, issue_type="sec_sync_failed", detail=review_reason)
-                            profile = classify_reporting_profile(conn, ticker=ticker, cik=cik, country=country, model_family=model_family, source_id=companyfacts_source_id, override=reporting_override)
+                            profile = classify_reporting_profile(conn, ticker=ticker, cik=cik, country=country, model_family=model_family, source_id=companyfacts_source_id, asof=evaluation_asof, override=reporting_override)
                         if not args.allow_partial:
                             raise
                 except Exception as exc:
@@ -5117,7 +6658,7 @@ def main() -> None:
                     failures.append(f"{ticker}: {review_reason}")
                     with conn:
                         add_issue(conn, severity="error", ticker=ticker, model_family=model_family, source_id=companyfacts_source_id, issue_type="sec_sync_failed", detail=review_reason)
-                        profile = classify_reporting_profile(conn, ticker=ticker, cik=cik, country=country, model_family=model_family, source_id=companyfacts_source_id, override=reporting_override)
+                        profile = classify_reporting_profile(conn, ticker=ticker, cik=cik, country=country, model_family=model_family, source_id=companyfacts_source_id, asof=evaluation_asof, override=reporting_override)
                     if not args.allow_partial:
                         raise
 

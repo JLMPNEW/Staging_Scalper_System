@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import sqlite3
 import importlib.util
+import json
+import sqlite3
 import sys
 from datetime import date
 from pathlib import Path
@@ -9,7 +10,15 @@ from types import ModuleType
 
 import pytest
 
+from med_devices.core.analyst_review import effective_decision, load_analyst_review_decisions
 from med_devices.core.db import connect, init_db
+from med_devices.core.fda_product_family_review import (
+    load_product_family_exposures,
+    load_product_family_mappings,
+    mapping_for,
+    structured_mdr_metadata,
+)
+from med_devices.core.fda_states import FDA_REVIEW_KNOWN_STATES, MANUAL_FDA_REVIEW_STATES
 from med_devices.core.market_policy import is_adjusted_price_row
 from med_devices.core.source_registry import load_source_registry, upsert_source_registry
 
@@ -17,11 +26,191 @@ from med_devices.core.source_registry import load_source_registry, upsert_source
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_REGISTRY = REPO_ROOT / "med_devices" / "data" / "free_source_registry.yaml"
 SCRIPT_DIR = REPO_ROOT / "med_devices" / "scripts"
+FDA_PRODUCT_FAMILY_MAPPING = REPO_ROOT / "med_devices" / "data" / "fda_product_family_mapping.csv"
+FDA_PRODUCT_FAMILY_EXPOSURE = REPO_ROOT / "med_devices" / "data" / "fda_product_family_exposure.csv"
 
 
 def table_names(conn: sqlite3.Connection) -> set[str]:
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
     return {str(row["name"]) for row in rows}
+
+
+def test_reviewed_ldt_clia_footprint_is_known_and_not_a_manual_blocker() -> None:
+    state = "reviewed_fda_footprint_ldt_clia"
+
+    assert state in FDA_REVIEW_KNOWN_STATES
+    assert state not in MANUAL_FDA_REVIEW_STATES
+
+
+def test_reviewed_ldt_clia_footprints_are_effective_dated() -> None:
+    module = load_script_module(
+        "10_build_med_device_fda_features.py",
+        "med_device_reviewed_ldt_clia_footprint_test",
+    )
+    path = REPO_ROOT / "med_devices" / "data" / "fda_company_footprints.csv"
+
+    before = module.load_footprint_overrides(path, asof=date(2026, 7, 23))
+    effective = module.load_footprint_overrides(path, asof=date(2026, 7, 24))
+
+    assert "BDSX" not in before
+    assert effective["BDSX"]["review_adjusted_fda_state"] == "reviewed_fda_footprint_ldt_clia"
+    assert effective["BDSX"]["expected_cdrh_records"] == "no"
+    assert effective["ADPT"]["review_adjusted_fda_state"] == "manual_fda_footprint_device"
+    assert effective["ADPT"]["premarket_numbers"] == "K200009"
+    assert effective["ADPT"]["product_codes"] == "QDC"
+    assert effective["MDAI"]["premarket_numbers"] == "DEN250028"
+    assert effective["MDAI"]["product_codes"] == "SHY"
+
+
+def test_july_analyst_decision_replacements_preserve_point_in_time_history() -> None:
+    path = REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    decisions, issues = load_analyst_review_decisions(path)
+    assert not [issue for issue in issues if issue["severity"] == "CRITICAL"]
+
+    expected = {
+        "ABT": ("implantable_interventional_devices_direct_payment", "approve", "data_fix_needed"),
+        "BSX": ("implantable_interventional_devices_direct_payment", "approve", "watchlist"),
+        "GEHC": ("capital_equipment_procedure_platforms", "approve", "watchlist"),
+        "ICUI": ("hospital_supplies_surgical_consumables_oem", "approve", "watchlist"),
+        "ISRG": ("capital_equipment_procedure_platforms", "approve", "watchlist"),
+        "RXST": ("elective_vision_dental_aesthetic_devices", "approve", "data_fix_needed"),
+        "TCMD": ("home_chronic_care_devices_dme_drug_delivery", "defer", "defer"),
+        "XRAY": ("elective_vision_dental_aesthetic_devices", "approve", "data_fix_needed"),
+    }
+    for ticker, (cohort, before_value, after_value) in expected.items():
+        before = effective_decision(
+            decisions,
+            ticker=ticker,
+            cohort=cohort,
+            asof=date(2026, 7, 23),
+        )
+        after = effective_decision(
+            decisions,
+            ticker=ticker,
+            cohort=cohort,
+            asof=date(2026, 7, 24),
+        )
+        assert before is not None and before.decision == before_value
+        assert after is not None and after.decision == after_value
+
+
+def test_abt_product_family_governance_is_effective_dated_and_complete() -> None:
+    before, before_issues = load_product_family_mappings(
+        FDA_PRODUCT_FAMILY_MAPPING,
+        asof=date(2026, 7, 23),
+    )
+    effective, effective_issues = load_product_family_mappings(
+        FDA_PRODUCT_FAMILY_MAPPING,
+        asof=date(2026, 7, 24),
+    )
+    exposures, exposure_issues = load_product_family_exposures(
+        FDA_PRODUCT_FAMILY_EXPOSURE,
+        asof=date(2026, 7, 24),
+    )
+
+    assert not before
+    assert not [issue for issue in before_issues if issue.severity == "CRITICAL"]
+    assert not [issue for issue in effective_issues if issue.severity == "CRITICAL"]
+    assert not [issue for issue in exposure_issues if issue.severity == "CRITICAL"]
+    assert {
+        mapping.product_code
+        for mapping in effective
+        if mapping.ticker == "ABT"
+    }.issuperset({"DSQ", "QBJ", "QLG", "NGV", "NKM", "OAE", "DQK"})
+    assert {
+        exposure.product_family
+        for exposure in exposures
+        if exposure.ticker == "ABT"
+    }.issuperset(
+        {
+            "diabetes_cgm",
+            "lvad_circulatory_support",
+            "structural_heart",
+            "cardiac_rhythm_management",
+            "neuromodulation_pain",
+            "electrophysiology_ablation",
+            "vascular_intervention",
+            "diagnostics_laboratory",
+        }
+    )
+    available = {
+        exposure.product_family: exposure
+        for exposure in exposures
+        if exposure.exposure_status == "available"
+    }
+    assert len(available) == 8
+    assert available["diabetes_cgm"].exposure_value == 7600.0
+    assert available["diabetes_cgm"].exposure_scope == "product_family"
+    assert available["lvad_circulatory_support"].exposure_scope == (
+        "business_subsegment_fallback"
+    )
+    assert available["lvad_circulatory_support"].exposure_confidence == 75.0
+    assert {
+        exposure.product_family
+        for exposure in exposures
+        if exposure.exposure_status == "unavailable"
+    } == {"cardiopulmonary_surgical_support"}
+
+
+def test_product_family_mapping_prefers_manufacturer_specific_row(tmp_path: Path) -> None:
+    path = tmp_path / "mapping.csv"
+    path.write_text(
+        "\n".join(
+            [
+                (
+                    "ticker,product_code,fda_manufacturer_id,product_family,"
+                    "mapping_confidence,mapping_method,source_reference,valid_from,"
+                    "valid_to,reviewed_at,active,notes"
+                ),
+                "ABT,DSQ,,generic_family,95,manual,test,2026-07-24,,2026-07-24,true,",
+                "ABT,DSQ,10680,exact_family,99,manual,test,2026-07-24,,2026-07-24,true,",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    mappings, issues = load_product_family_mappings(
+        path,
+        asof=date(2026, 7, 24),
+    )
+
+    assert not [issue for issue in issues if issue.severity == "CRITICAL"]
+    exact = mapping_for(
+        mappings,
+        ticker="ABT",
+        product_code="DSQ",
+        manufacturer_id=10680,
+    )
+    generic = mapping_for(
+        mappings,
+        ticker="ABT",
+        product_code="DSQ",
+        manufacturer_id=99999,
+    )
+    assert exact is not None and exact.product_family == "exact_family"
+    assert generic is not None and generic.product_family == "generic_family"
+
+
+def test_structured_mdr_metadata_does_not_infer_from_narrative() -> None:
+    metadata = structured_mdr_metadata(
+        json.dumps(
+            {
+                "mdr_report_key": "123",
+                "report_number": "ABC-1",
+                "summary_report_flag": "Y",
+                "noe_summarized": "10",
+                "type_of_report": ["Initial submission"],
+                "suppl_dates_fda_received": ["2026-07-01"],
+                "patient": [{"sequence_number_outcome": ["Hospitalization"]}],
+                "mdr_text": [{"text": "The patient died after an unrelated event."}],
+            }
+        )
+    )
+
+    assert metadata["summary_report_flag"] == 1
+    assert metadata["number_events_summarized"] == 10
+    assert metadata["supplement_count"] == 1
+    assert metadata["structured_death_outcome_flag"] == 0
 
 
 def load_script_module(filename: str, module_name: str) -> ModuleType:
@@ -504,6 +693,20 @@ def test_fda_core_parser_populates_canonical_tables(tmp_path: Path) -> None:
             endpoint_name="approvals_510k",
             source_id="openfda_device",
         )
+        module.upsert_approval(
+            conn,
+            {
+                "k_number": "DEN250028",
+                "applicant": "Spectralmd, Inc.",
+                "decision_date": "20260521",
+                "date_received": "20260306",
+                "decision_description": "De Novo Granted",
+                "device_name": "DeepView AI System",
+                "product_code": "SHY",
+            },
+            endpoint_name="approvals_510k",
+            source_id="openfda_device",
+        )
         module.upsert_recall(
             conn,
             {
@@ -536,16 +739,108 @@ def test_fda_core_parser_populates_canonical_tables(tmp_path: Path) -> None:
         )
         product_row = conn.execute("SELECT product_code FROM dim_fda_product_code WHERE product_code = 'ABC'").fetchone()
         approval_row = conn.execute("SELECT decision_date FROM fact_fda_approval WHERE submission_number = 'K260001'").fetchone()
+        denovo_row = conn.execute(
+            "SELECT submission_type, product_code FROM fact_fda_approval WHERE submission_number = 'DEN250028'"
+        ).fetchone()
         recall_row = conn.execute("SELECT severity_weight FROM fact_fda_recall WHERE recall_number = 'Z-0001-2026'").fetchone()
         event_row = conn.execute("SELECT injury_count FROM fact_fda_adverse_event WHERE adverse_event_id = '123'").fetchone()
 
     assert product_row is not None
     assert approval_row is not None
     assert approval_row["decision_date"] == "2026-05-01"
+    assert denovo_row is not None
+    assert denovo_row["submission_type"] == "DENOVO"
+    assert denovo_row["product_code"] == "SHY"
     assert recall_row is not None
     assert recall_row["severity_weight"] == 5.0
     assert event_row is not None
     assert event_row["injury_count"] == 1
+
+
+def test_fda_adverse_event_counts_use_structured_fields_not_narrative_substrings() -> None:
+    module = load_script_module("08_sync_med_device_fda_core.py", "med_device_fda_structured_severity_test")
+
+    assert module.event_counts(
+        {
+            "event_type": "Injury",
+            "mdr_text": [{"text": "This failure mode has been adequately studied in the past."}],
+        }
+    ) == (0, 1, 0)
+    assert module.event_counts(
+        {
+            "event_type": "Malfunction",
+            "patient": [{"sequence_number_outcome": ["Other", " D", " H"]}],
+        }
+    ) == (1, 0, 1)
+    assert module.event_counts(
+        {
+            "event_type": "Death",
+            "mdr_text": [{"text": "The patient died later from an unrelated condition."}],
+        }
+    ) == (1, 0, 0)
+    assert module.event_counts(
+        {
+            "event_type": "Malfunction",
+            "mdr_text": [{"text": "The patient died later from an unrelated condition."}],
+        }
+    ) == (0, 0, 1)
+
+
+def test_recompute_adverse_event_counts_repairs_stored_heuristic_values(tmp_path: Path) -> None:
+    module = load_script_module("08_sync_med_device_fda_core.py", "med_device_fda_recompute_severity_test")
+    db_path = tmp_path / "med_devices.sqlite"
+    payload = {
+        "mdr_report_key": "PALTOP-1",
+        "event_type": "Injury",
+        "mdr_text": [{"text": "This failure mode has been adequately studied in the past."}],
+    }
+    with connect(db_path) as conn:
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO fact_fda_adverse_event(
+                adverse_event_id, death_count, injury_count, malfunction_count,
+                event_type, payload_json, created_at, updated_at
+            )
+            VALUES ('PALTOP-1', 1, 1, 1, 'Injury', ?, '2026-07-21', '2026-07-21')
+            """,
+            (json.dumps(payload),),
+        )
+
+        updated, invalid = module.recompute_adverse_event_counts(conn)
+        row = conn.execute(
+            """
+            SELECT death_count, injury_count, malfunction_count
+            FROM fact_fda_adverse_event
+            WHERE adverse_event_id = 'PALTOP-1'
+            """
+        ).fetchone()
+
+    assert updated == 1
+    assert invalid == 0
+    assert row is not None
+    assert tuple(row) == (0, 1, 0)
+
+
+def test_init_db_repairs_legacy_denovo_submission_type(tmp_path: Path) -> None:
+    db_path = tmp_path / "med_devices.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO fact_fda_approval(
+                submission_number, submission_type, created_at, updated_at
+            )
+            VALUES ('DEN250028', '510k', '2026-05-21', '2026-05-21')
+            """
+        )
+        init_db(conn)
+        row = conn.execute(
+            "SELECT submission_type FROM fact_fda_approval WHERE submission_number = 'DEN250028'"
+        ).fetchone()
+
+    assert row is not None
+    assert row["submission_type"] == "DENOVO"
 
 
 def test_raw_api_responses_are_run_scoped_after_legacy_migration(tmp_path: Path) -> None:
@@ -736,6 +1031,90 @@ def test_fda_linker_and_feature_builder_scores_mapped_records(tmp_path: Path) ->
     assert rows[0].fda_product_score is not None
 
 
+def test_fda_canonical_recalls_collapse_product_rows_by_event_family(tmp_path: Path) -> None:
+    fda_module = load_script_module("08_sync_med_device_fda_core.py", "med_device_fda_event_family_core_test")
+    feature_module = load_script_module(
+        "10_build_med_device_fda_features.py",
+        "med_device_fda_event_family_features_test",
+    )
+    db_path = tmp_path / "med_devices.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        upsert_source_registry(conn, load_source_registry(SOURCE_REGISTRY))
+        conn.execute(
+            """
+            INSERT INTO dim_company(
+                company_id, ticker, cik, company_name, exchange, subsector, country, currency,
+                universe_status, is_active, first_seen_at, updated_at
+            )
+            VALUES (1, 'EXMD', '0000000001', 'Example Devices Inc.', 'NYSE', 'monitoring',
+                    'United States', 'USD', 'active', 1, '2026-01-01', '2026-01-01')
+            """
+        )
+        fda_module.upsert_recall(
+            conn,
+            {
+                "res_event_number": "96063",
+                "firm_name": "Example Devices Inc.",
+                "classification": "Class II",
+                "event_date_initiated": "20250103",
+                "product_code": "AAA",
+            },
+            endpoint_name="recalls",
+            source_id="openfda_device",
+        )
+        fda_module.upsert_recall(
+            conn,
+            {
+                "recall_number": "Z-1067-2025",
+                "event_id": "96063",
+                "recalling_firm": "Example Devices Inc.",
+                "classification": "Class II",
+                "recall_initiation_date": "20250103",
+                "product_code": "AAA",
+            },
+            endpoint_name="enforcement",
+            source_id="openfda_device",
+        )
+        fda_module.upsert_recall(
+            conn,
+            {
+                "recall_number": "Z-1068-2025",
+                "event_id": "96063",
+                "recalling_firm": "Example Devices Inc.",
+                "classification": "Class I",
+                "recall_initiation_date": "20250103",
+                "product_code": "AAB",
+            },
+            endpoint_name="enforcement",
+            source_id="openfda_device",
+        )
+        conn.execute(
+            """
+            UPDATE dim_fda_manufacturer
+            SET parent_company_id = 1, mapping_confidence = 100.0, mapping_method = 'test'
+            """
+        )
+        conn.execute("UPDATE fact_fda_recall SET company_id = 1")
+
+        canonical_count = feature_module.refresh_canonical_recalls(conn)
+        canonical = conn.execute(
+            """
+            SELECT canonical_recall_key, classification, max_severity_weight, source_count, payload_json
+            FROM fact_fda_recall_canonical
+            """
+        ).fetchone()
+
+    assert canonical_count == 1
+    assert canonical is not None
+    assert canonical["canonical_recall_key"] == "event_id:96063"
+    assert canonical["classification"] == "Class I"
+    assert float(canonical["max_severity_weight"]) == 5.0
+    assert int(canonical["source_count"]) == 3
+    payload = json.loads(str(canonical["payload_json"]))
+    assert len(payload["source_fda_recall_ids"]) == 3
+
+
 def test_reimbursement_feature_builder_is_conservative_without_cms_data(tmp_path: Path) -> None:
     module = load_script_module("11_build_med_device_reimbursement_features.py", "med_device_reimbursement_features_test")
     db_path = tmp_path / "med_devices.sqlite"
@@ -835,6 +1214,196 @@ def test_cohort_neutral_backtest_loads_fda_mapping_confidence_alias(tmp_path: Pa
         scores = module.load_scores(conn, asofs={"2026-06-01"})
 
     assert scores[("2026-06-01", "AAA")]["avg_fda_mapping_confidence"] == 91.5
+
+
+def test_score_backtest_exports_stage11_metadata_and_point_in_time_cohort() -> None:
+    module = load_script_module(
+        "17_backtest_med_device_scores.py",
+        "med_device_score_backtest_stage11_test",
+    )
+    rows = module.build_backtest_rows(
+        [
+            {
+                "ticker": "AAA",
+                "company_name": "AAA Medical",
+                "subsector": "medical_devices",
+                "calibration_cohort": "historical_cohort",
+                "calibration_eligible_flag": 1,
+                "research_calibration_input_eligible_flag": 1,
+                "research_calibration_status": "eligible",
+                "research_calibration_reason": "ok",
+                "calibration_sample_role": "research_calibration_input",
+                "stage11_calibration_input_eligible_flag": 1,
+                "stage11_calibration_input_reason": "ok",
+                "stage11_calibration_panel_source": "test_survivorship_panel",
+                "survivorship_corrected_panel_flag": 1,
+                "composite_score": 60.0,
+                "raw_composite_score": 60.0,
+                "composite_percentile": 50.0,
+                "rank": 1,
+                "final_investability_gate": 1,
+                "portfolio_candidate_gate": 1,
+            }
+        ],
+        {
+            "AAA": (
+                "yahoo_finance_backup",
+                [(date(2024, 1, 2), 100.0), (date(2024, 1, 3), 101.0)],
+            )
+        },
+        asof="2024-01-02",
+        horizons=[1],
+        position_usd=50_000.0,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["calibration_cohort"] == "historical_cohort"
+    assert rows[0]["final_investability_gate"] == 1
+    assert rows[0]["portfolio_candidate_gate"] == 1
+    assert rows[0]["calibration_eligible_flag"] == 1
+    assert rows[0]["stage11_calibration_input_eligible_flag"] == 1
+    assert rows[0]["stage11_calibration_panel_source"] == "test_survivorship_panel"
+    assert rows[0]["survivorship_corrected_panel_flag"] == 1
+    assert module.flag_is_one(1)
+    assert module.flag_is_one("1")
+    assert not module.flag_is_one(0)
+    assert not module.flag_is_one(None)
+
+
+def test_stage11_filter_can_exclude_an_all_ineligible_asof_without_dropping_valid_dates() -> None:
+    module = load_script_module(
+        "17_backtest_med_device_scores.py",
+        "med_device_score_backtest_stage11_filter_test",
+    )
+    score_rows_by_asof = {
+        "2024-01-02": [{"stage11_calibration_input_eligible_flag": 1}],
+        "2024-01-03": [{"stage11_calibration_input_eligible_flag": 0}],
+    }
+
+    filtered, empty_asofs = module.filter_stage11_eligible_rows(score_rows_by_asof)
+
+    assert list(filtered) == ["2024-01-02"]
+    assert empty_asofs == ["2024-01-03"]
+
+
+def test_cohort_neutral_backtest_prefers_saved_point_in_time_cohort() -> None:
+    module = load_script_module(
+        "23_backtest_med_device_cohort_neutral_scores.py",
+        "med_device_cohort_neutral_pit_cohort_test",
+    )
+    rows = [{"asof_date": "2024-01-02", "ticker": "AAA"}]
+    taxonomy = {"AAA": {"calibration_cohort": "current_cohort"}}
+    scores = {
+        ("2024-01-02", "AAA"): {
+            "calibration_cohort": "historical_cohort",
+            "scoring_model_version": "test",
+        }
+    }
+
+    module.add_taxonomy_and_scores(rows, taxonomy, scores)
+
+    assert rows[0]["calibration_cohort"] == "historical_cohort"
+
+
+def test_optuna_cross_horizon_hit_rate_and_sampling_tolerance() -> None:
+    module = load_script_module(
+        "69_optimize_med_device_optuna_policies.py",
+        "med_device_optuna_guardrail_test",
+    )
+    settings = {
+        "hit_rate_test": "cross_horizon_average",
+        "horizons": [60, 120],
+        "min_excess_hit_rate": 0.52,
+    }
+
+    assert (
+        module.cross_horizon_hit_rate_guardrail_reason(
+            [{"excess_hit_rate": 0.4915}, {"excess_hit_rate": 0.6780}],
+            settings,
+        )
+        == ""
+    )
+    assert module.cross_horizon_hit_rate_guardrail_reason(
+        [{"excess_hit_rate": 0.49}, {"excess_hit_rate": 0.50}],
+        settings,
+    ).startswith("cross_horizon_hit_rate_0.49_below_0.52")
+
+    effective_limit = module.effective_single_ticker_share_limit(0.35, 136, 0.01)
+    assert effective_limit == pytest.approx(0.35 + (1.0 / 136.0))
+    assert 0.352941 < effective_limit
+    assert module.effective_single_ticker_share_limit(0.35, 0, 0.01) == 0.35
+
+
+def test_hospital_baseline_promotion_is_effective_dated_and_uses_aliased_gates() -> None:
+    scoring_module = load_script_module(
+        "13_build_med_device_daily_scores.py",
+        "med_device_effective_dated_baseline_test",
+    )
+    publishing_module = load_script_module(
+        "16_publish_med_device_score_review_pack.py",
+        "med_device_effective_dated_baseline_publish_test",
+    )
+    cohort = "hospital_supplies_surgical_consumables_oem"
+    config = {
+        "scoring": {
+            "gates": {"composite_min": 75.0},
+            "cohort_profile_aliases": {cohort: "hospital_supplies_consumables_dme"},
+            "cohort_profiles": {
+                "hospital_supplies_consumables_dme": {
+                    "gates": {"composite_min": 50.0},
+                }
+            },
+        },
+        "calibration": {
+            "calibrated_baseline": {
+                "production_seed_cohorts": cohort,
+                "watchlist_seed_cohorts": "",
+                "production_seed_effective_from": {cohort: "2026-07-17"},
+            }
+        },
+    }
+    row = scoring_module.ScoreRow(
+        asof_date="2026-07-16",
+        scoring_model_version="test",
+        rank=1,
+        company_id=1,
+        ticker="AAA",
+        company_name="AAA Medical",
+        subsector="medical_devices",
+        calibration_cohort=cohort,
+        passed_fda_manual_review_gate=1,
+        composite_score=55.0,
+    )
+    gates = {"composite_min": 50.0}
+
+    assert scoring_module.calibrated_baseline_candidate_status(row, config=config, gates=gates) is None
+    row.asof_date = "2026-07-17"
+    assert scoring_module.calibrated_baseline_candidate_status(
+        row,
+        config=config,
+        gates=gates,
+    ) == ("calibrated_baseline", "baseline_gate_pass_not_tier1")
+
+    publish_row = {
+        "asof_date": "2026-07-17",
+        "calibration_cohort": cohort,
+        "classification": "unclassified",
+        "passed_fda_manual_review_gate": 1,
+        "hard_red_flag": 0,
+        "raw_composite_score": 55.0,
+    }
+    assert publishing_module.configured_gate_value(config, cohort, "composite_min") == 50.0
+    assert publishing_module.calibrated_baseline_candidate_status(
+        publish_row,
+        config,
+    ) == ("production_baseline_candidate", "baseline_gate_pass_not_tier1")
+
+    row.passed_data_quality_gate = 1
+    row.passed_liquidity_gate = 1
+    row.hard_red_flag = 1
+    scoring_module.apply_portfolio_candidate_policy(row, config=config, gates=gates)
+    assert row.portfolio_candidate_gate == 0
+    assert row.portfolio_candidate_reason.startswith("fda_manual_review_or_hard_red")
 
 
 def test_daily_score_template_tier1_metadata_is_explicit() -> None:

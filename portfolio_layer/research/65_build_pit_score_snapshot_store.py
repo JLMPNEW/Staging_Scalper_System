@@ -521,10 +521,16 @@ def _cmd_validate(*, config: dict[str, Any], runs_root: Path, store_dir: Path, c
         checks.append({"check": name, "status": status, "detail": detail})
 
     rows = [dict(r) for r in conn.execute("SELECT * FROM score_snapshots ORDER BY as_of_date").fetchall()]
-    expected = sorted(
-        str(s.get("model_family")) for s in cfg_get(config, "score_contract.sectors", [])
+    enabled_sectors = [
+        s for s in cfg_get(config, "score_contract.sectors", [])
         if bool(s.get("enabled", True))
-    )
+    ]
+    expected = sorted(str(s.get("model_family")) for s in enabled_sectors)
+    required = {
+        str(s.get("model_family")) for s in enabled_sectors
+        if bool(s.get("required", True))
+    }
+    optional = set(expected) - required
     rec("lockbox_config_protocol_consistent", "PASS",
         f"protocol sha={lockbox['protocol_sha256'][:12]} sealed_start={lockbox['sealed_start']} "
         f"opened={lockbox['lockbox_opened']}")
@@ -537,7 +543,7 @@ def _cmd_validate(*, config: dict[str, Any], runs_root: Path, store_dir: Path, c
         return 0
 
     tamper, run_diverged, bad_accept, bad_sectors, bad_fields, bad_sources, bad_dates = [], [], [], [], [], [], []
-    legacy, drifted_sectors = [], []
+    legacy, drifted_sectors, optional_sector_gaps = [], [], []
     for r in rows:
         as_of = str(r["as_of_date"])
         if not RUN_DATE_RE.match(as_of):
@@ -560,14 +566,22 @@ def _cmd_validate(*, config: dict[str, Any], runs_root: Path, store_dir: Path, c
         if str(r["hard_gate_acceptance"]) != "PASS" or str(r["acceptance"]) not in {"PASS", "PASS_WITH_DEFERRED"}:
             bad_accept.append(f"{as_of}:{r['acceptance']}/{r['hard_gate_acceptance']}")
         stats = json.loads(str(r["sector_stats_json"]))
-        if sorted(stats) != expected:
-            # a reconstruction is built NOW from the current config, so a missing sector is an
-            # integrity failure; a LIVE capture predating a later-added sector is honest history
-            # (retro-demanding the new sector would be anachronistic) -> drift warning instead
-            if str(r["provenance"]) == "live" and set(stats).issubset(expected):
-                drifted_sectors.append(f"{as_of}:missing={sorted(set(expected) - set(stats))}")
+        stats_set = set(stats)
+        unknown = stats_set - set(expected)
+        missing_required = required - stats_set
+        missing_optional = optional - stats_set
+        if unknown or missing_required:
+            # A reconstruction is built NOW from the current config, so a missing required
+            # sector is an integrity failure. A live capture predating a later-added required
+            # sector is honest history; retro-demanding that sector would be anachronistic.
+            if str(r["provenance"]) == "live" and not unknown:
+                drifted_sectors.append(f"{as_of}:missing_required={sorted(missing_required)}")
             else:
-                bad_sectors.append(f"{as_of}:{sorted(stats)}")
+                bad_sectors.append(
+                    f"{as_of}:missing_required={sorted(missing_required)},unknown={sorted(unknown)}"
+                )
+        if missing_optional:
+            optional_sector_gaps.append(f"{as_of}:missing_optional={sorted(missing_optional)}")
         for pipe, s in stats.items():
             src = str(s.get("source_asof") or "")
             if src and src > as_of:
@@ -593,10 +607,13 @@ def _cmd_validate(*, config: dict[str, Any], runs_root: Path, store_dir: Path, c
     rec("snapshots_accepted", "PASS" if not bad_accept else "FAIL",
         "all snapshots sealed PASS" if not bad_accept else f"{bad_accept[:8]}")
     rec("sector_coverage_complete", "PASS" if not bad_sectors else "FAIL",
-        f"every snapshot covers {expected}" if not bad_sectors else f"{bad_sectors[:8]}")
+        f"required sectors covered: {sorted(required)}" if not bad_sectors else f"{bad_sectors[:8]}")
     rec("sector_set_drift_live_captures", "PASS" if not drifted_sectors else "WARN",
         "none" if not drifted_sectors else
         f"{len(drifted_sectors)} live captures predate a later-added sector: {drifted_sectors[:8]}")
+    rec("optional_sector_coverage", "PASS" if not optional_sector_gaps else "WARN",
+        "all optional sectors present" if not optional_sector_gaps else
+        f"{len(optional_sector_gaps)} snapshots omit optional sectors: {optional_sector_gaps[:8]}")
     rec("no_future_source_dates", "PASS" if not bad_sources else "FAIL",
         "sector source dates PIT-consistent" if not bad_sources else f"{bad_sources[:8]}")
     rec("valid_snapshot_dates", "PASS" if not bad_dates else "FAIL",

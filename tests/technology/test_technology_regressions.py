@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from technology.core.db import init_db
 from technology.core.oos_provenance import build_oos_provenance
 from technology.core.portfolio_candidate_fields import (
     add_portfolio_candidate_fields,
@@ -21,6 +22,7 @@ from technology.core.signal_diagnostics import (
     financial_subfeatures as shared_financial_subfeatures,
 )
 from technology.core.signal_diagnostics import load_prices
+from technology.core.universe_loader import prune_removed_current_universe_rows
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -164,6 +166,80 @@ def test_diagnostics_price_loader_selects_one_continuous_source() -> None:
     assert series.available_source_ids == ["source_a", "source_b"]
     assert series.dates == [date(2024, 1, 4), date(2024, 1, 5)]
     assert series.adj == [100.0, 101.0]
+
+
+def test_current_universe_prune_retires_company_unless_another_family_owns_it() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    now = "2026-07-20T00:00:00+00:00"
+    conn.executemany(
+        """
+        INSERT INTO dim_company(
+            ticker, company_name, universe_status, is_active,
+            data_quality_status, first_seen_at, updated_at
+        )
+        VALUES (?, ?, 'keep', 1, 'complete', ?, ?)
+        """,
+        [
+            ("RETIRED", "Retired Hardware", now, now),
+            ("SHARED", "Shared Company", now, now),
+        ],
+    )
+    company_ids = {
+        str(row["ticker"]): int(row["company_id"])
+        for row in conn.execute("SELECT company_id, ticker FROM dim_company")
+    }
+    conn.executemany(
+        """
+        INSERT INTO dim_universe_membership(
+            company_id, ticker, model_family, membership_basis, start_date,
+            membership_status, is_current_member, point_in_time_flag,
+            created_at, updated_at
+        )
+        VALUES (?, ?, ?, 'current_source_of_truth', '2010-01-01',
+                'active', 1, 0, ?, ?)
+        """,
+        [
+            (company_ids["RETIRED"], "RETIRED", "technology_hardware", now, now),
+            (company_ids["SHARED"], "SHARED", "technology_hardware", now, now),
+            (company_ids["SHARED"], "SHARED", "software_infrastructure", now, now),
+        ],
+    )
+
+    prune_removed_current_universe_rows(
+        conn,
+        model_family="technology_hardware",
+        keep_tickers={"KEPT"},
+        cohort_source_id="technology_hardware_cohort_policy",
+    )
+
+    retired = conn.execute(
+        "SELECT is_active, universe_status, data_quality_status FROM dim_company WHERE ticker = 'RETIRED'"
+    ).fetchone()
+    shared = conn.execute(
+        "SELECT is_active, universe_status FROM dim_company WHERE ticker = 'SHARED'"
+    ).fetchone()
+    assert retired is not None
+    assert tuple(retired) == (0, "historical", "retired_from_current_universe")
+    assert shared is not None
+    assert tuple(shared) == (1, "keep")
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM dim_universe_membership
+        WHERE ticker = 'RETIRED' AND is_current_member = 1
+        """
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM dim_universe_membership
+        WHERE ticker = 'SHARED'
+          AND model_family = 'software_infrastructure'
+          AND is_current_member = 1
+        """
+    ).fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("implementation", ["shared", "semiconductor"])
@@ -335,6 +411,15 @@ def test_refresh_orchestrators_use_recoverable_financial_batches(
         "--batch-timeout-sec",
         "900.0",
     ]
+    positioning = next(item for item in steps if item.step_id == "13_sync_positioning_upstream")
+    assert "--allow-stale-ibkr-borrow-on-error" not in positioning.args
+
+    kwargs["allow_stale_ibkr_borrow_on_error"] = True
+    fallback_steps = module.build_steps(**kwargs)
+    fallback_positioning = next(
+        item for item in fallback_steps if item.step_id == "13_sync_positioning_upstream"
+    )
+    assert "--allow-stale-ibkr-borrow-on-error" in fallback_positioning.args
 
 
 def test_historical_refresh_rejects_latest_only_governance_steps() -> None:

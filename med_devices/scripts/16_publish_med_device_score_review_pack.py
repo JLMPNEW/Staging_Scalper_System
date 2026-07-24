@@ -663,11 +663,60 @@ def parse_csv_set(raw: object) -> set[str]:
     return {item.strip() for item in str(raw or "").split(",") if item.strip()}
 
 
+def cohort_profile_key(config: dict[str, Any], cohort: str) -> str:
+    raw_profiles = cfg_get(config, "scoring.cohort_profiles", {}) or {}
+    if not isinstance(raw_profiles, dict):
+        raise ValueError("scoring.cohort_profiles must be a mapping")
+    if cohort in raw_profiles:
+        return cohort
+    raw_aliases = cfg_get(config, "scoring.cohort_profile_aliases", {}) or {}
+    if not isinstance(raw_aliases, dict):
+        raise ValueError("scoring.cohort_profile_aliases must be a mapping")
+    current = cohort
+    seen = {current}
+    for _ in range(8):
+        current = str(raw_aliases.get(current) or "").strip()
+        if not current or current in seen:
+            return cohort
+        if current in raw_profiles:
+            return current
+        seen.add(current)
+    return cohort
+
+
 def configured_gate_value(config: dict[str, Any], cohort: str, key: str) -> float | None:
-    raw = cfg_get(config, f"scoring.cohort_profiles.{cohort}.gates.{key}", None)
+    profile_key = cohort_profile_key(config, cohort)
+    raw = cfg_get(config, f"scoring.cohort_profiles.{profile_key}.gates.{key}", None)
     if raw is None:
         raw = cfg_get(config, f"scoring.gates.{key}", None)
     return to_float(raw)
+
+
+def production_seed_is_effective(row: dict[str, Any], config: dict[str, Any], cohort: str) -> bool:
+    raw_effective_dates = cfg_get(
+        config,
+        "calibration.calibrated_baseline.production_seed_effective_from",
+        {},
+    ) or {}
+    if not isinstance(raw_effective_dates, dict):
+        raise ValueError(
+            "calibration.calibrated_baseline.production_seed_effective_from must be a mapping"
+        )
+    effective_raw = raw_effective_dates.get(cohort)
+    if effective_raw in {None, ""}:
+        return True
+    try:
+        effective_date = datetime.strptime(str(effective_raw)[:10], "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(
+            "Invalid production seed effective date for "
+            f"{cohort}: {effective_raw!r}; expected YYYY-MM-DD"
+        ) from exc
+    try:
+        asof_date = datetime.strptime(str(row.get("asof_date") or "")[:10], "%Y-%m-%d")
+    except ValueError:
+        return False
+    return asof_date >= effective_date
 
 
 def passes_min_gate(row: dict[str, Any], field: str, threshold: float | None) -> bool:
@@ -688,7 +737,12 @@ def calibrated_baseline_candidate_status(row: dict[str, Any], config: dict[str, 
     cohort = str(row.get("calibration_cohort") or "")
     production_cohorts = parse_csv_set(cfg_get(config, "calibration.calibrated_baseline.production_seed_cohorts", ""))
     watchlist_cohorts = parse_csv_set(cfg_get(config, "calibration.calibrated_baseline.watchlist_seed_cohorts", ""))
-    if cohort not in production_cohorts and cohort not in watchlist_cohorts:
+    production_seed_active = cohort in production_cohorts and production_seed_is_effective(
+        row,
+        config,
+        cohort,
+    )
+    if not production_seed_active and cohort not in watchlist_cohorts:
         return None
     if str(row.get("classification") or "") in {"manual_review_regulatory_risk", "avoid_confirmed_regulatory_risk", "data_review_required"}:
         return None
@@ -710,7 +764,7 @@ def calibrated_baseline_candidate_status(row: dict[str, Any], config: dict[str, 
             return None
     if not passes_max_gate(row, "value_trap_score", configured_gate_value(config, cohort, "value_trap_max")):
         return None
-    status = "production_baseline_candidate" if cohort in production_cohorts else "watchlist_baseline_candidate"
+    status = "production_baseline_candidate" if production_seed_active else "watchlist_baseline_candidate"
     reason = "final_investability_pass" if int(row.get("final_investability_gate") or 0) == 1 else "baseline_gate_pass_not_tier1"
     return status, reason
 

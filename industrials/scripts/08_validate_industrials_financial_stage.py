@@ -15,7 +15,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from industrials.core.config import cfg_get, family_config, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import connect, init_db  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.policy_loader import load_eligibility_policy  # noqa: E402
@@ -40,6 +40,8 @@ TTM_USD_COLUMN_PAIRS = [
         ("equity_issuance_proceeds_ttm", "equity_issuance_proceeds_ttm_usd"),
         ("debt_issuance_proceeds_ttm", "debt_issuance_proceeds_ttm_usd"),
         ("orders_ttm", "orders_ttm_usd"),
+    ("operating_cash_flow_ttm", "operating_cash_flow_ttm_usd"),
+    ("capex_ttm", "capex_ttm_usd"),
     ("net_cash", "net_cash_usd"),
 ]
 ACCEPTED_DATE_SQL = """
@@ -47,7 +49,7 @@ CASE
     WHEN COALESCE(accepted_at, '') GLOB '????-??-??*' THEN SUBSTR(accepted_at, 1, 10)
     WHEN COALESCE(accepted_at, '') GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*'
         THEN SUBSTR(accepted_at, 1, 4) || '-' || SUBSTR(accepted_at, 5, 2) || '-' || SUBSTR(accepted_at, 7, 2)
-    ELSE filing_date
+    ELSE COALESCE(NULLIF(filing_date, ''), '9999-12-31')
 END
 """
 
@@ -202,7 +204,15 @@ def validate() -> int:
     # CF-4: expected_ticker_count lives ONLY in the universe policy YAML; the
     # config-level copy was removed as a duplicated source of truth. Fall back
     # to the legacy config key only when no policy file is wired.
-    policy_raw = str(cfg_get(config, "industrials_universe.policy_path", "") or "").strip()
+    try:
+        scoped_universe = family_config(config, model_family).get("universe")
+    except KeyError:
+        scoped_universe = None
+    policy_raw = str(
+        (scoped_universe.get("policy_path") if isinstance(scoped_universe, dict) else "")
+        or cfg_get(config, "industrials_universe.policy_path", "")
+        or ""
+    ).strip()
     if policy_raw:
         policy = load_yaml(resolve_path(policy_raw, base_dir=base_dir))
         expected_count = int(policy.get("expected_ticker_count") or 0)
@@ -269,17 +279,31 @@ def validate() -> int:
         # the row in force at this asof instead of raising on load.
         check_policy_profile_coverage(config, base_dir=base_dir, model_family=model_family, asof=audit_asof, errors=errors)
 
-        profile_rows = conn.execute(
-            f"""
-            SELECT ticker, reporting_profile, reporting_standard, usable_xbrl_flag,
-                   financial_confidence, review_reason
-            FROM dim_issuer_reporting_profile
-            WHERE model_family = ?
-              AND ticker IN ({ph})
-            ORDER BY ticker
-            """,
-            (model_family, *universe),
-        ).fetchall()
+        if model_family == "machinery":
+            profile_rows = conn.execute(
+                f"""
+                SELECT ticker, reporting_profile, reporting_standard, usable_xbrl_flag,
+                       financial_confidence, review_reason
+                FROM dim_issuer_reporting_profile_history
+                WHERE model_family = ?
+                  AND profile_asof_date = ?
+                  AND ticker IN ({ph})
+                ORDER BY ticker
+                """,
+                (model_family, audit_asof.isoformat(), *universe),
+            ).fetchall()
+        else:
+            profile_rows = conn.execute(
+                f"""
+                SELECT ticker, reporting_profile, reporting_standard, usable_xbrl_flag,
+                       financial_confidence, review_reason
+                FROM dim_issuer_reporting_profile
+                WHERE model_family = ?
+                  AND ticker IN ({ph})
+                ORDER BY ticker
+                """,
+                (model_family, *universe),
+            ).fetchall()
         profile_by_ticker = {str(row["ticker"]): row for row in profile_rows}
         missing_profiles = [ticker for ticker in universe if ticker not in profile_by_ticker]
         if missing_profiles:
@@ -553,7 +577,7 @@ def validate() -> int:
                             WHEN COALESCE(c.accepted_at, '') GLOB '????-??-??*' THEN SUBSTR(c.accepted_at, 1, 10)
                             WHEN COALESCE(c.accepted_at, '') GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*'
                                 THEN SUBSTR(c.accepted_at, 1, 4) || '-' || SUBSTR(c.accepted_at, 5, 2) || '-' || SUBSTR(c.accepted_at, 7, 2)
-                            ELSE c.filing_date
+                            ELSE COALESCE(NULLIF(c.filing_date, ''), '9999-12-31')
                         END
                   ) <= ?
                   AND f.source_detail = 'sec_archive_text_table_mapped'
@@ -643,17 +667,31 @@ def validate() -> int:
                 f"{audit_asof.isoformat()}; data_quality_issues stores the latest build state, not an immutable as-of ledger."
             )
 
-        profile_counts = conn.execute(
-            f"""
-            SELECT reporting_profile, COUNT(*) AS n
-            FROM dim_issuer_reporting_profile
-            WHERE model_family = ?
-              AND ticker IN ({ph})
-            GROUP BY reporting_profile
-            ORDER BY reporting_profile
-            """,
-            (model_family, *universe),
-        ).fetchall()
+        if model_family == "machinery":
+            profile_counts = conn.execute(
+                f"""
+                SELECT reporting_profile, COUNT(*) AS n
+                FROM dim_issuer_reporting_profile_history
+                WHERE model_family = ?
+                  AND profile_asof_date = ?
+                  AND ticker IN ({ph})
+                GROUP BY reporting_profile
+                ORDER BY reporting_profile
+                """,
+                (model_family, audit_asof.isoformat(), *universe),
+            ).fetchall()
+        else:
+            profile_counts = conn.execute(
+                f"""
+                SELECT reporting_profile, COUNT(*) AS n
+                FROM dim_issuer_reporting_profile
+                WHERE model_family = ?
+                  AND ticker IN ({ph})
+                GROUP BY reporting_profile
+                ORDER BY reporting_profile
+                """,
+                (model_family, *universe),
+            ).fetchall()
         warnings.append(f"Universe tickers={len(universe)}")
         warnings.append(f"Financial feature asof={audit_asof.isoformat()} rows={len(feature_rows)} review={len(review_rows)} fallback={len(fallback_rows)}")
         warnings.append("Reporting profile counts=" + ", ".join(f"{row['reporting_profile']}:{row['n']}" for row in profile_counts))

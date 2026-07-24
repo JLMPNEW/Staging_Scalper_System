@@ -1,0 +1,39 @@
+model_family: transportation
+contract_version: transportation_final_rank_table_v1_shadow
+portfolio_adapter: industrial_family
+required_columns:
+  - asof_date
+  - ticker
+  - company_name
+  - sector
+  - industry
+  - calibration_cohort
+  - final_score
+  - final_rank
+  - rank_ready_flag
+  - model_status
+  - score_confidence
+  - score_model_version
+  - model_version
+  - scoring_contract_version
+  - portfolio_candidate_gate
+  - portfolio_candidate_score
+  - portfolio_candidate_status
+  - portfolio_candidate_reason
+  - calibration_eligible_flag
+  - research_calibration_input_eligible_flag
+  - research_calibration_reason
+  - calibration_sample_role
+  - stage11_calibration_panel_source
+  - stage11_calibration_input_eligible_flag
+  - stage11_calibration_input_reason
+  - survivorship_corrected_panel_flag
+  - oos_score_valid_flag
+  - oos_score_asof_date
+  - oos_invalid_reason
+  - calibration_lock_date
+shadow_invariants:
+  portfolio_candidate_gate: "0"
+  portfolio_candidate_status: shadow_only
+  oos_score_valid_flag: "0"
+  survivorship_corrected_panel_flag: "0"

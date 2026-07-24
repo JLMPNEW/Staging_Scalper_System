@@ -87,21 +87,27 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     asof = parse_asof(args.asof)
-    result = run_adapter(
-        {
-            "model_family": "machinery",
-            "adapter": "industrial_family",
-            "file_mode": "dated",
-            "file_path": "industrials/machinery/dashboard/{yyyy-mm-dd}/machinery_final_rank_table.csv",
-            "sector": "Industrials",
-            "industry": "Machinery",
-            "industry_aggregate": "Machinery",
-            "require_oos_score_valid": True,
-        },
-        args.sector_output_root.expanduser().resolve(),
-        asof,
-    )
     errors: list[str] = []
+    result = None
+    try:
+        result = run_adapter(
+            {
+                "model_family": "machinery",
+                "adapter": "industrial_family",
+                "file_mode": "dated",
+                "file_path": "industrials/machinery/dashboard/{yyyy-mm-dd}/machinery_final_rank_table.csv",
+                "sector": "Industrials",
+                "industry": "Machinery",
+                "industry_aggregate": "Machinery",
+                "require_oos_score_valid": True,
+            },
+            args.sector_output_root.expanduser().resolve(),
+            asof,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        # First-ever runs against an empty dashboard should produce the
+        # structured FAIL summary, not a traceback.
+        errors.append(f"portfolio adapter failed: {type(exc).__name__}: {exc}")
     rank_path = (
         args.sector_output_root.expanduser().resolve()
         / f"industrials/machinery/dashboard/{asof}/machinery_final_rank_table.csv"
@@ -126,26 +132,28 @@ def main() -> int:
             )
         else:
             errors.extend(validate_metric_availability_contract(rank_rows, asof=asof))
-    if not result.rows:
-        errors.append("portfolio adapter returned no machinery rows")
-    if result.source_asof_date != asof:
-        errors.append(f"source_asof_date={result.source_asof_date} expected={asof}")
-    if any(row.investable_eligible for row in result.rows):
+    adapter_rows = result.rows if result is not None else []
+    if result is not None:
+        if not adapter_rows:
+            errors.append("portfolio adapter returned no machinery rows")
+        if result.source_asof_date != asof:
+            errors.append(f"source_asof_date={result.source_asof_date} expected={asof}")
+    if any(row.investable_eligible for row in adapter_rows):
         errors.append("shadow machinery rows must not be investable")
-    if any(row.oos_score_valid_flag for row in result.rows):
+    if any(row.oos_score_valid_flag for row in adapter_rows):
         errors.append("shadow machinery rows must not be OOS valid")
-    research_eligible = sum(row.calibration_research_eligible for row in result.rows)
+    research_eligible = sum(row.calibration_research_eligible for row in adapter_rows)
     if args.expect_research_eligible and research_eligible == 0:
         errors.append("expected survivorship-corrected research rows but adapter returned zero")
     if not args.expect_research_eligible and research_eligible:
         errors.append("live shadow dashboard unexpectedly exposed research calibration rows")
     summary = {
         "acceptance": "PASS" if not errors else "FAIL",
-        "adapter": result.adapter,
-        "source_pipeline": result.source_pipeline,
-        "source_asof_date": result.source_asof_date,
-        "rows": len(result.rows),
-        "investable_rows": sum(row.investable_eligible for row in result.rows),
+        "adapter": result.adapter if result is not None else "",
+        "source_pipeline": result.source_pipeline if result is not None else "",
+        "source_asof_date": result.source_asof_date if result is not None else "",
+        "rows": len(adapter_rows),
+        "investable_rows": sum(row.investable_eligible for row in adapter_rows),
         "research_eligible_rows": research_eligible,
         "calibration_financial_field_count": len(CALIBRATION_FINANCIAL_FIELDS & rank_fields),
         "errors": errors,

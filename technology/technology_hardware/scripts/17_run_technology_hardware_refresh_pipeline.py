@@ -66,6 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--only", default="", help="Comma-separated step ids to run.")
     parser.add_argument("--skip-step", action="append", default=[], help="Step id to skip. Can be repeated.")
     parser.add_argument("--skip-ibkr-borrow", action="store_true", help="Pass through to the upstream positioning sync.")
+    parser.add_argument("--allow-stale-ibkr-borrow-on-error", action="store_true")
     parser.add_argument("--force-refresh", action="store_true", help="Force refresh for loaders that support it.")
     return parser.parse_args()
 
@@ -81,6 +82,7 @@ def build_steps(
     force_refresh: bool,
     financial_batch_size: int,
     financial_batch_timeout_sec: float,
+    allow_stale_ibkr_borrow_on_error: bool = False,
 ) -> list[Step]:
     asof_args = ["--asof", asof] if asof else []
     end_date_args = ["--end-date", asof] if asof else []
@@ -88,6 +90,8 @@ def build_steps(
     positioning_args = [*end_date_args]
     if skip_ibkr_borrow:
         positioning_args.append("--skip-ibkr-borrow")
+    if allow_stale_ibkr_borrow_on_error:
+        positioning_args.append("--allow-stale-ibkr-borrow-on-error")
 
     return [
         Step("00_init_db", "stage_1", "Initialize technology DB/schema/source registry", py_script("technology/scripts/00_init_technology_db.py")),
@@ -255,6 +259,7 @@ def main() -> int:
     steps = build_steps(
         asof=str(args.asof or "").strip(),
         skip_ibkr_borrow=bool(args.skip_ibkr_borrow),
+        allow_stale_ibkr_borrow_on_error=bool(args.allow_stale_ibkr_borrow_on_error),
         force_refresh=bool(args.force_refresh),
         financial_batch_size=int(cfg_get(config, f"{CONFIG_KEY}.financial_feature_batch_size", 8)),
         financial_batch_timeout_sec=float(

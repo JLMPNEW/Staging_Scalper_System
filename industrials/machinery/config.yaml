@@ -103,12 +103,30 @@ sec_fundamentals:
   sync_output_csv: "../../output/industrials/machinery/stage4/sec_fundamentals_coverage.csv"
   feature_output_csv: "../../output/industrials/machinery/stage4/financial_feature_coverage.csv"
   metric_availability_output_csv: "../../output/industrials/machinery/stage4/financial_metric_availability.csv"
+  disclosure_candidate_output_csv: "../../output/industrials/machinery/stage4/disclosure_candidate_audit.csv"
+  disclosure_review_output_csv: "../../output/industrials/machinery/stage4/disclosure_candidate_review_required.csv"
+  supplemental_disclosure_source_ids: [machinery_issuer_ir]
+
+issuer_ir:
+  source_id: machinery_issuer_ir
+  manifest_csv: "system_csvs/machinery_issuer_ir_documents.csv"
+  cache_dir: "../../output/industrials_cache/machinery/issuer_ir"
+  output_csv: "../../output/industrials/machinery/stage4/issuer_ir_sync.csv"
+  user_agent: "${INDUSTRIALS_IR_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  timeout_sec: 30.0
+  max_document_bytes: 50000000
+  pdf_ocr_enabled: true
+  max_pdf_pages: 250
+  pdf_extraction_timeout_sec: 30.0
 
 financial_validation:
   availability_policy:
-    # Funded backlog is a government-contracting disclosure; only these
-    # nuclear/government-exposed issuers can structurally report it.
-    funded_backlog_applicable_tickers: [BW, SMR, XE, NNE, OKLO, FISN]
+    # Applicability requires an explicit issuer definition of funded,
+    # authorized, or appropriated backlog. Government exposure alone is not
+    # sufficient. The reviewed machinery universe currently has no issuer that
+    # meets this contract; a directly reported value still wins classification.
+    funded_backlog_applicable_tickers: []
+    funded_backlog_reviewed_not_applicable_tickers: [BW, SMR, XE, NNE, OKLO, FISN]
     # Cancelable (automotive-style) order models publish no binding backlog;
     # their orders/backlog absences are structural, not ingestion gaps.
     cancelable_order_model_tickers: [PCAR]
@@ -122,8 +140,21 @@ financial_validation:
     # transition year and then ceased (expedient adopter). BE and TWIN are
     # deliberately EXCLUDED: both disclose genuine backlog in filing prose
     # (thin-tagging, not structural absence).
+    # This reviewed policy is a current-model classification. Do not leak it
+    # into historical availability snapshots before the policy lock date.
+    structural_no_backlog_valid_from: "2026-07-09"
     structural_no_backlog_tickers: [AOS, MLI, TT, CSW, HLIO, ALSN, ATKR, OUST, SNA, CARR,
                                     AIT, AYI, DCI, ENOV, ITW, TWI, PKOH, AGCO]
+    # SMR and XE are reviewed design/licensing-stage issuers without physical
+    # manufacturing inventory. Inventory growth is not set to zero because
+    # zero would create a synthetic negative sales-growth spread.
+    structural_no_inventory_valid_from: "2026-07-20"
+    structural_no_inventory_tickers: [SMR, XE]
+    # A YoY diluted-share comparison is not meaningful until the post-listing
+    # public share basis has a same-basis prior-year observation. Prospectus
+    # post-offering shares must not be backdated as a synthetic t-4 baseline.
+    recent_public_share_basis_valid_from: "2026-07-20"
+    recent_public_share_basis_transition_tickers: [INIO, MAIR, XE]
 
 fx_rates:
   source_id: yahoo_fx_rates
@@ -166,7 +197,9 @@ positioning_import:
   institutional_13f_data_gate: {required_period_of_report: "", anchor_tickers: [], min_anchor_tickers_with_period: 0}
 
 positioning_validation:
-  min_form4_covered_fraction: 0.0
+  # Current machinery coverage is about 97%; a 90% floor detects a broken or
+  # misrouted Form 4 feed without requiring perfect coverage for new issuers.
+  min_form4_covered_fraction: 0.90
 
 upstream_databases:
   form4:
@@ -184,8 +217,8 @@ scoring_policy:
       eligibility_audit_csv: "../../output/industrials/machinery/stage6/scoring_eligibility_validation.csv"
 
 machinery_scoring:
-  contract_version: industrial_family_final_rank_table_v1_shadow
-  score_model_version: machinery_shadow_v0.1.0
+  contract_version: industrial_family_final_rank_table_v2_shadow
+  score_model_version: machinery_shadow_v0.2.0
   model_version: machinery_shadow_2026_07
   min_score_confidence: 0.40
   component_weights:
@@ -202,10 +235,16 @@ machinery_scoring:
   score_output_root: "../../output/industrials/machinery/scores"
   dashboard_root: "../../output/industrials/machinery/dashboard"
   history_start_date: "2019-01-02"
+  historical_policy_lock_date: "2026-07-09"
 
 sec_archive:
   enabled: true
   all_family_members: true
+  # CompanyFacts stopped carrying PCAR's inventory after 2021 even though its
+  # primary inline filings still tag us-gaap:InventoryNet. Parse mapped inline
+  # XBRL, not only machinery disclosure text tables, for this reviewed gap.
+  core_metric_recovery_tickers: [PCAR]
+  core_metric_recovery_metrics: [inventory]
   index_url_template: "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/index.json"
   document_url_template: "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/{document_name}"
   submission_file_url_template: "https://data.sec.gov/submissions/{file_name}"
@@ -213,6 +252,15 @@ sec_archive:
   max_submission_history_files: 0
   max_filings_per_ticker: 32
   supplemental_forms: [8-K, 8-K/A]
-  max_supplemental_filings_per_ticker: 12
-  max_documents_per_filing: 3
+  # Scan all event filings retained since sec_fundamentals.start_date. A fixed
+  # latest-N cap removed historical earnings releases needed for PIT orders.
+  max_supplemental_filings_per_ticker: -1
+  # Zero means all eligible documents. Machinery 8-Ks may carry separate
+  # earnings-release and presentation exhibits with different metrics.
+  max_documents_per_filing: 0
+  include_pdf_documents: true
+  pdf_ocr_enabled: true
+  max_pdf_pages: 250
+  max_pdf_bytes: 25000000
+  pdf_extraction_timeout_sec: 30.0
   min_refetch_fact_fraction: 0.5

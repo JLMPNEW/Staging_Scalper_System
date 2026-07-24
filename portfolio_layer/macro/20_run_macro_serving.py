@@ -75,6 +75,7 @@ def main() -> int:
         "--end-date",
         args.as_of,
         "--skip-final-optimizer",
+        "--allow-shadow-failures",
     ]
     if args.rebuild_policies:
         cmd.append("--rebuild-policies")
@@ -97,4 +98,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -7,6 +7,8 @@ import types
 import zipfile
 from datetime import date
 
+import pytest
+
 from market_positioning import api_collectors
 from market_positioning.api_collectors import (
     filter_ibkr_tickers_for_asof,
@@ -19,6 +21,7 @@ from market_positioning.api_collectors import (
     sync_sec_13f_data_sets,
 )
 from market_positioning.core import aggregate_13f_ownership_for_tickers, connect, init_db
+from market_positioning.ibkr_capacity import bounded_streaming_batch_size
 
 
 def write_csv(path, fieldnames: list[str], rows: list[dict[str, object]]) -> None:
@@ -126,9 +129,87 @@ def test_ibkr_shortable_generic_tick_uses_streaming_request(monkeypatch, tmp_pat
     assert len(fake_ib.market_data_requests) == 101
     assert fake_ib.market_data_requests[0]["genericTickList"] == "236"
     assert fake_ib.market_data_requests[0]["snapshot"] is False
-    assert fake_ib.max_active_market_data_lines == 100
+    # Reserve 10% of the 100-line account allowance for TWS/manual subscriptions.
+    assert fake_ib.max_active_market_data_lines == 90
     assert fake_ib.active_market_data_lines == 0
     assert len(fake_ib.cancelled) == 101
+
+
+def test_ibkr_streaming_batch_limit_and_failure_cleanup(monkeypatch, tmp_path) -> None:
+    assert bounded_streaming_batch_size(0) == 1
+    assert bounded_streaming_batch_size(50) == 50
+    assert bounded_streaming_batch_size(100) == 90
+    assert bounded_streaming_batch_size(500) == 90
+
+    class FakeContract:
+        conId = 123
+
+    class FakeBar:
+        date = date(2026, 7, 17)
+        close = 0.01
+
+    class FakeIB:
+        instances: list[FakeIB] = []
+
+        def __init__(self) -> None:
+            self.connected = False
+            self.active_market_data_lines = 0
+            self.cancelled = 0
+            self.__class__.instances.append(self)
+
+        def connect(self, *_args, **_kwargs) -> None:
+            self.connected = True
+
+        def disconnect(self) -> None:
+            self.connected = False
+
+        def isConnected(self) -> bool:  # noqa: N802
+            return self.connected
+
+        def reqMarketDataType(self, _market_data_type: int) -> None:  # noqa: N802
+            return None
+
+        def qualifyContracts(self, _contract) -> list[FakeContract]:  # noqa: N802
+            return [FakeContract()]
+
+        def reqHistoricalData(self, *_args, **_kwargs) -> list[object]:  # noqa: N802
+            return [FakeBar()]
+
+        def reqMktData(self, *_args, **_kwargs) -> object:  # noqa: N802
+            self.active_market_data_lines += 1
+            return object()
+
+        def cancelMktData(self, _contract) -> None:  # noqa: N802
+            self.cancelled += 1
+            self.active_market_data_lines -= 1
+
+        def sleep(self, _seconds: float) -> None:
+            if self.active_market_data_lines:
+                raise RuntimeError("simulated wait failure")
+
+    class FakeStock:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+    monkeypatch.setitem(sys.modules, "ib_insync", types.SimpleNamespace(IB=FakeIB, Stock=FakeStock))
+    universe = tmp_path / "tickers.csv"
+    universe.write_text("ticker,exchange\nTEST,NASDAQ\n", encoding="utf-8")
+
+    with connect(tmp_path / "market_positioning.sqlite") as conn:
+        init_db(conn)
+        with pytest.raises(RuntimeError, match="simulated wait failure"):
+            sync_ibkr_borrow_availability(
+                conn,
+                tickers_csv=universe,
+                history_start_date=date(2026, 7, 10),
+                end_date=date(2026, 7, 17),
+                snapshot_wait_sec=0.0,
+                sleep_sec=0.0,
+            )
+
+    fake_ib = FakeIB.instances[-1]
+    assert fake_ib.cancelled == 1
+    assert fake_ib.active_market_data_lines == 0
 
 
 def test_ibkr_historical_catchup_can_skip_current_shortable_snapshot(monkeypatch, tmp_path) -> None:

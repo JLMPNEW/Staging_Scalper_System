@@ -1,0 +1,161 @@
+internal_ticker,actual_ticker,norgate_symbol,source_database,company_name,norgate_security_name,first_quoted_date,last_quoted_date,mapping_status,mapping_reason,name_similarity,exit_year,calibration_usable_flag,review_status,notes
+ASR,ASR,ASR,US Equities,"Grupo Aeroportuario del Sureste, S. A. B. de C. V.",Grupo Aeroportuario del Sureste SAB de CV Class B ADR,2000-09-28,,verified_exact_active,exact_active_symbol_and_name_match,0.881720,,1,auto_verified,
+JOBY,JOBY,JOBY,US Equities,"Joby Aviation, Inc.",Joby Aviation Inc Common,2020-11-09,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+CAAP,CAAP,CAAP,US Equities,Corporación América Airports S.A.,Corporacion America Airports SA Common,2018-02-01,,verified_exact_active,exact_active_symbol_and_name_match,0.920635,,1,auto_verified,
+ASLE,ASLE,ASLE,US Equities,AerSale Corporation,AerSale Corp Common,2019-02-28,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+UP,UP,UP,US Equities,Wheels Up Experience Inc.,Wheels Up Experience Inc Class A Common,2020-11-13,,verified_exact_active,exact_active_symbol_and_name_match,0.833333,,1,auto_verified,
+SOAR,SOAR,SOAR,US Equities,"Volato Group, Inc.",Volato Group Inc Class A Common,2022-01-21,,verified_exact_active,exact_active_symbol_and_name_match,0.600000,,1,auto_verified,
+OMAB,OMAB,OMAB,US Equities,"Grupo Aeroportuario del Centro Norte, S.A.B. de C.V.",Grupo Aeroportuario del Centro Norte SAB de CV Class B ADR,2006-11-29,,verified_exact_active,exact_active_symbol_and_name_match,0.893204,,1,auto_verified,
+PAC,PAC,PAC,US Equities,"Grupo Aeroportuario del Pacifico, S.A.B. de C.V.",Grupo Aeroportuario del Pacifico SAB de CV Class B ADR,2006-02-24,,verified_exact_active,exact_active_symbol_and_name_match,0.884211,,1,auto_verified,
+DAL,DAL,DAL,US Equities,"Delta Air Lines, Inc.",Delta Air Lines Inc Common,2007-04-26,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+UAL,UAL,UAL,US Equities,"United Airlines Holdings, Inc.",United Airlines Holdings Inc Common,2006-01-25,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+AAL,AAL,AAL,US Equities,American Airlines Group Inc.,American Airlines Group Inc Common,2013-12-09,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+LUV,LUV,LUV,US Equities,Southwest Airlines Co.,Southwest Airlines Co Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+ALK,ALK,ALK,US Equities,"Alaska Air Group, Inc.",Alaska Air Group Inc Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+JBLU,JBLU,JBLU,US Equities,JetBlue Airways Corporation,JetBlue Airways Corp Common,2002-04-12,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+ALGT,ALGT,ALGT,US Equities,Allegiant Travel Company,Allegiant Travel Co Common,2006-12-08,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+SKYW,SKYW,SKYW,US Equities,"SkyWest, Inc.",SkyWest Inc Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+ULCC,ULCC,ULCC,US Equities,"Frontier Group Holdings, Inc.",Frontier Group Holdings Inc Common,2021-04-01,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+CPA,CPA,CPA,US Equities,"Copa Holdings, S.A.",Copa Holdings SA Class A Common,2005-12-15,,verified_exact_active,exact_active_symbol_and_name_match,0.695652,,1,auto_verified,
+VLRS,VLRS,VLRS,US Equities,"Controladora Vuela Compania de Aviacion, S.A.B. de C.V.",Controladora Vuela Compania de Aviacion SAB de CV Class A ADR,2013-09-18,,verified_exact_active,exact_active_symbol_and_name_match,0.899083,,1,auto_verified,
+AZUL,AZUL,AZUL,US Equities,Azul S.A.,Azul SA ADR,2026-02-02,,verified_exact_active,exact_active_symbol_and_name_match,0.933333,,1,auto_verified,continuity_policy=STRUCTURAL_BREAK_NO_STITCH; history_treatment=separate_regime_no_return_stitch
+RYAAY,RYAAY,RYAAY,US Equities,Ryanair Holdings plc,Ryanair Holdings PLC ADR,1997-05-29,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+LTM,LTM,LTM,US Equities,LATAM Airlines Group S.A.,LATAM Airlines Group SA ADR,1997-11-07,,verified_exact_active,exact_active_symbol_and_name_match,0.971429,,1,auto_verified,continuity_policy=STRUCTURAL_BREAK_NO_STITCH; history_treatment=separate_regime_no_return_stitch
+AER,AER,AER,US Equities,AerCap Holdings N.V.,AerCap Holdings NV Common,2006-11-21,,verified_exact_active,exact_active_symbol_and_name_match,0.947368,,1,auto_verified,
+FTAI,FTAI,FTAI,US Equities,FTAI Aviation Ltd.,FTAI Aviation Ltd Common,2015-05-15,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+WLFC,WLFC,WLFC,US Equities,Willis Lease Finance Corporation,Willis Lease Finance Corp Common,1996-09-18,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+UPS,UPS,UPS,US Equities,"United Parcel Service, Inc.",United Parcel Service Inc Class B Common,1999-11-10,,verified_exact_active,exact_active_symbol_and_name_match,0.840000,,1,auto_verified,
+FDX,FDX,FDX,US Equities,FedEx Corporation,FedEx Corp Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+JBHT,JBHT,JBHT,US Equities,"J.B. Hunt Transport Services, Inc.",J.B. Hunt Transport Services Inc Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+CHRW,CHRW,CHRW,US Equities,"C.H. Robinson Worldwide, Inc.",C.H. Robinson Worldwide Inc Common,1997-10-15,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+EXPD,EXPD,EXPD,US Equities,"Expeditors International of Washington, Inc.",Expeditors International of Washington Inc Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+FDXF,FDXF,FDXF,US Equities,"FedEx Freight Holding Company, Inc.",FedEx Freight Holding Company Inc Common,2026-05-27,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+LSTR,LSTR,LSTR,US Equities,"Landstar System, Inc.",Landstar System Inc Common,1993-03-05,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+GXO,GXO,GXO,US Equities,"GXO Logistics, Inc.",GXO Logistics Inc Common,2021-07-22,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+PBI,PBI,PBI,US Equities,Pitney Bowes Inc.,Pitney Bowes Inc Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+CYRX,CYRX,CYRX,US Equities,"Cryoport, Inc.",CryoPort Inc Common,2005-01-31,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+FWRD,FWRD,FWRD,US Equities,Forward Air Corporation,Forward Air Corp Common,1993-11-16,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+RLGT,RLGT,RLGT,US Equities,"Radiant Logistics, Inc.",Radiant Logistics Inc Common,2005-12-30,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+PAL,PAL,PAL,US Equities,"Proficient Auto Logistics, Inc.",Proficient Auto Logistics Inc Common,2024-05-09,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+CRGO,CRGO,CRGO,US Equities,Freightos Limited,Freightos Ltd Common,2021-11-17,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+SFWL,SFWL,SFWL,US Equities,Shengfeng Development Limited,Shengfeng Development Ltd Class A Common,2023-03-31,,verified_exact_active,exact_active_symbol_and_name_match,0.840000,,1,auto_verified,
+NCEW,NCEW,NCEW,US Equities,New Century Logistics (BVI) Limited,New Century Logistics (BVI) Ltd Common,2024-12-18,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+PSIG,PSIG,PSIG,US Equities,PS International Group Ltd.,PS International Group Ltd Common,2022-02-23,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,continuity_policy=SPAC_RECAPITALIZATION_NO_PRICE_STITCH; history_treatment=hard_boundary_no_spac_price_stitch
+ELOG,ELOG,ELOG,US Equities,Eastern International Ltd.,Eastern International Ltd Common,2025-08-28,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+JYD,JYD,JYD,US Equities,Jayud Global Logistics Limited,Jayud Global Logistics Ltd Class A Common,2023-04-21,,verified_exact_active,exact_active_symbol_and_name_match,0.846154,,1,auto_verified,
+CTNT,CTNT,CTNT,US Equities,Cheetah Net Supply Chain Service Inc.,Cheetah Net Supply Chain Service Inc Class A Common,2023-08-01,,verified_exact_active,exact_active_symbol_and_name_match,0.888889,,1,auto_verified,
+ATXG,ATXG,ATXG,US Equities,Addentax Group Corp.,Addentax Group Corp Common,2016-12-12,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+CIIT,CIIT,CIIT,US Equities,"Tianci International, Inc.",Tianci International Inc Common,2013-10-10,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+HUBG,HUBG,HUBG,US Equities,"Hub Group, Inc.",Hub Group Inc Class A Common,1996-03-13,,verified_exact_active,exact_active_symbol_and_name_match,0.428571,,1,auto_verified,
+ZTO,ZTO,ZTO,US Equities,ZTO Express (Cayman) Inc.,ZTO Express (Cayman) Inc Class A ADR,2016-10-27,,verified_exact_active,exact_active_symbol_and_name_match,0.818182,,1,auto_verified,
+KEX,KEX,KEX,US Equities,Kirby Corporation,Kirby Corp Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+MATX,MATX,MATX,US Equities,"Matson, Inc.",Matson Inc Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+HAFN,HAFN,HAFN,US Equities,Hafnia Limited,Hafnia Ltd Common,2020-06-18,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,continuity_policy=CROSS_LISTING_SEPARATE_SECURITY; history_treatment=separate_listing_optional_issuer_proxy
+ZIM,ZIM,ZIM,US Equities,ZIM Integrated Shipping Services Ltd.,ZIM Integrated Shipping Services Ltd Common,2021-01-28,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+SBLK,SBLK,SBLK,US Equities,Star Bulk Carriers Corp.,Star Bulk Carriers Corp Common,2006-02-27,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+DAC,DAC,DAC,US Equities,Danaos Corporation,Danaos Corp Common,2006-10-06,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+ECO,ECO,ECO,US Equities,Okeanis Eco Tankers Corp.,Okeanis Eco Tankers Corp Common,2020-03-30,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,continuity_policy=CROSS_LISTING_SEPARATE_SECURITY; history_treatment=separate_listing_optional_issuer_proxy
+CMRE,CMRE,CMRE,US Equities,Costamare Inc.,Costamare Inc Common,2010-11-04,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+GSL,GSL,GSL,US Equities,"Global Ship Lease, Inc.",Global Ship Lease Inc Class A Common,2006-09-29,,verified_exact_active,exact_active_symbol_and_name_match,0.809524,,1,auto_verified,
+CCEC,CCEC,CCEC,US Equities,Capital Clean Energy Carriers Corp.,Capital Clean Energy Carriers Corp Common,2007-03-30,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+GNK,GNK,GNK,US Equities,Genco Shipping & Trading Limited,Genco Shipping & Trading Ltd Common,2014-07-15,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+SB,SB,SB,US Equities,"Safe Bulkers, Inc.",Safe Bulkers Inc Common,2008-05-29,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+HSHP,HSHP,HSHP,US Equities,Himalaya Shipping Ltd.,Himalaya Shipping Ltd Common,2022-10-25,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,continuity_policy=CROSS_LISTING_SEPARATE_SECURITY; history_treatment=separate_listing_optional_issuer_proxy
+ASC,ASC,ASC,US Equities,Ardmore Shipping Corporation,Ardmore Shipping Corp Common,2013-08-01,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+ESEA,ESEA,ESEA,US Equities,Euroseas Ltd.,Euroseas Ltd Common,2006-05-05,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+PANL,PANL,PANL,US Equities,Pangaea Logistics Solutions Ltd.,Pangaea Logistics Solutions Ltd Common,2013-12-19,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+CMDB,CMDB,CMDB,US Equities,Costamare Bulkers Holdings Limited,Costamare Bulkers Holdings Ltd Common,2025-05-01,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+GASS,GASS,GASS,US Equities,StealthGas Inc.,StealthGas Inc Common,2005-10-06,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+SHIP,SHIP,SHIP,US Equities,Seanergy Maritime Holdings Corp,Seanergy Maritime Holdings Corp Common,2007-10-26,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+DSX,DSX,DSX,US Equities,Diana Shipping Inc.,Diana Shipping Inc Common,2005-03-18,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+SMHI,SMHI,SMHI,US Equities,SEACOR Marine Holdings Inc.,SEACOR Marine Holdings Inc Common,2017-06-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+EDRY,EDRY,EDRY,US Equities,EuroDry Ltd.,Eurodry Ltd Common,2018-05-31,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+HMR,HMR,HMR,US Equities,Heidmar Maritime Holdings Corp.,Heidmar Maritime Holdings Corp Common,2025-02-20,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+GLBS,GLBS,GLBS,US Equities,Globus Maritime Limited,Globus Maritime Ltd Common,2008-03-11,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+NCT,NCT,NCT,US Equities,Intercont (Cayman) Limited,Intercont (Cayman) Ltd Class A Common,2025-03-28,,verified_exact_active,exact_active_symbol_and_name_match,0.800000,,1,auto_verified,
+HTCO,HTCO,HTCO,US Equities,High-Trend International Group,High-Trend International Group Class A Common,2021-09-27,,verified_exact_active,exact_active_symbol_and_name_match,0.857143,,1,auto_verified,
+USEA,USEA,USEA,US Equities,United Maritime Corporation,United Maritime Corp Common,2022-07-06,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+UFG,UFG,UFG,US Equities,Uni-Fuels Holdings Limited,Uni-Fuels Holdings Ltd Class A Common,2025-01-14,,verified_exact_active,exact_active_symbol_and_name_match,0.692308,,1,auto_verified,
+EHLD,EHLD,EHLD,US Equities,Euroholdings Ltd.,Euroholdings Ltd Common,2025-03-11,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+VNTG,VNTG,VNTG,US Equities,Vantage Corp,Vantage Corp Class A Common,2025-06-12,,verified_exact_active,exact_active_symbol_and_name_match,0.636364,,1,auto_verified,
+PSHG,PSHG,PSHG,US Equities,Performance Shipping Inc.,Performance Shipping Inc Common,2011-01-03,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+CTRM,CTRM,CTRM,US Equities,Castor Maritime Inc.,Castor Maritime Inc Common,2019-02-11,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+ICON,ICON,ICON,US Equities,Icon Energy Corp.,Icon Energy Corp Common,2024-07-12,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+CISS,CISS,CISS,US Equities,C3is Inc.,C3is Inc Common,2023-06-14,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+RUBI,RUBI,RUBI,US Equities,Rubico Inc.,Rubico Inc Common,2025-08-04,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+UNP,UNP,UNP,US Equities,Union Pacific Corporation,Union Pacific Corp Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+CSX,CSX,CSX,US Equities,CSX Corporation,CSX Corp Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+CP,CP,CP,US Equities,Canadian Pacific Kansas City Limited,Canadian Pacific Kansas City Ltd Common,2001-08-21,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+CNI,CNI,CNI,US Equities,Canadian National Railway Company,Canadian National Railway Co Common,1996-11-26,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+NSC,NSC,NSC,US Equities,Norfolk Southern Corporation,Norfolk Southern Corp Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+TRN,TRN,TRN,US Equities,"Trinity Industries, Inc.",Trinity Industries Inc Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+GBX,GBX,GBX,US Equities,"The Greenbrier Companies, Inc.",Greenbrier Companies Inc Common,1994-07-14,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+FSTR,FSTR,FSTR,US Equities,L.B. Foster Company,L. B. Foster Co Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+RAIL,RAIL,RAIL,US Equities,"FreightCar America, Inc.",FreightCar America Inc Common,2005-04-06,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+SWVL,SWVL,SWVL,US Equities,Swvl Holdings Corp.,SWVL Holdings Corp Class A Common,2021-03-15,,verified_exact_active,exact_active_symbol_and_name_match,0.500000,,1,auto_verified,
+RVSN,RVSN,RVSN,US Equities,Rail Vision Ltd.,Rail Vision Ltd Common,2022-03-31,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+GATX,GATX,GATX,US Equities,GATX Corporation,GATX Corp Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+ODFL,ODFL,ODFL,US Equities,"Old Dominion Freight Line, Inc.",Old Dominion Freight Line Inc Common,1991-10-24,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+XPO,XPO,XPO,US Equities,"XPO, Inc.",XPO Inc Common,2002-07-26,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+TFII,TFII,TFII,US Equities,TFI International Inc.,TFI International Inc Common,2005-11-15,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+SAIA,SAIA,SAIA,US Equities,"Saia, Inc.",Saia Inc Common,2002-09-11,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+SNDR,SNDR,SNDR,US Equities,"Schneider National, Inc.",Schneider National Inc Class B Common,2017-04-06,,verified_exact_active,exact_active_symbol_and_name_match,0.818182,,1,auto_verified,
+RXO,RXO,RXO,US Equities,"RXO, Inc.",RXO Inc Common,2022-10-27,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+ARCB,ARCB,ARCB,US Equities,ArcBest Corporation,ArcBest Corp Common,1992-05-13,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+WERN,WERN,WERN,US Equities,"Werner Enterprises, Inc.",Werner Enterprises Inc Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+MRTN,MRTN,MRTN,US Equities,"Marten Transport, Ltd.",Marten Transport Ltd Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+CVLG,CVLG,CVLG,US Equities,"Covenant Logistics Group, Inc.",Covenant Logistics Group Inc Class A Common,1994-10-28,,verified_exact_active,exact_active_symbol_and_name_match,0.818182,,1,auto_verified,
+HTLD,HTLD,HTLD,US Equities,"Heartland Express, Inc.",Heartland Express Inc Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+ULH,ULH,ULH,US Equities,"Universal Logistics Holdings, Inc.",Universal Logistics Holdings Inc Common,2005-02-11,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+PAMT,PAMT,PAMT,US Equities,PAMT CORP,PAMT Corp Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+TOPP,TOPP,TOPP,US Equities,Toppoint Holdings Inc.,Toppoint Holdings Inc Common,2025-01-22,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+KNX,KNX,KNX,US Equities,Knight-Swift Transportation Holdings Inc.,Knight-Swift Transportation Holdings Inc Class A Common,2010-12-16,,verified_exact_active,exact_active_symbol_and_name_match,0.870968,,1,auto_verified,
+R,R,R,US Equities,"Ryder System, Inc.",Ryder System Inc Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+LCC,LCC,LCC-201312,US Equities Delisted,US Airways Group,US Airways Group Inc Common,1994-08-26,2013-12-06,verified_auto,symbol_name_exit_year_match,1.000000,2013,1,auto_verified,composite_match_score=1.000000
+NWA,NWA,NWA-200810,US Equities Delisted,Northwest Airlines Corp,Northwest Airlines Corp Common,2007-05-18,2008-10-29,verified_auto,symbol_name_exit_year_match,1.000000,2008,1,auto_verified,composite_match_score=1.000000
+CAL,CAL,CAL-201009,US Equities Delisted,Continental Airlines,Continental Airlines Inc Class B Common,1993-07-14,2010-09-30,verified_auto,symbol_name_exit_year_match,0.833333,2010,1,auto_verified,composite_match_score=0.891667
+AAI,AAI,AAI-201105,US Equities Delisted,AirTran Holdings,AirTran Holdings Inc Common,1994-06-28,2011-05-02,verified_auto,symbol_name_exit_year_match,1.000000,2011,1,auto_verified,composite_match_score=1.000000
+VA,VA,VA-201612,US Equities Delisted,Virgin America,Virgin America Inc Common,2014-11-14,2016-12-13,verified_auto,symbol_name_exit_year_match,1.000000,2016,1,auto_verified,composite_match_score=1.000000
+HA,HA,HA-202409,US Equities Delisted,Hawaiian Holdings,Hawaiian Holdings Inc Common,1995-06-21,2024-09-17,verified_auto,symbol_name_exit_year_match,1.000000,2024,1,auto_verified,composite_match_score=1.000000
+SAVE,SAVE,SAVEQ-202503,US Equities Delisted,Spirit Airlines,Spirit Airlines Inc Common,2011-05-26,2025-03-12,verified_auto,symbol_name_exit_year_match,1.000000,2024,1,auto_verified,composite_match_score=0.860000
+AAWW,AAWW,AAWW-202303,US Equities Delisted,Atlas Air Worldwide Holdings,Atlas Air Worldwide Holdings Inc Common,2004-07-21,2023-03-17,verified_auto,symbol_name_exit_year_match,1.000000,2023,1,auto_verified,composite_match_score=1.000000
+ATSG,ATSG,ATSG-202504,US Equities Delisted,Air Transport Services Group,Air Transport Services Group Inc Common,2003-07-23,2025-04-10,verified_auto,symbol_name_exit_year_match,1.000000,2025,1,auto_verified,composite_match_score=1.000000
+AYR,AYR,AYR-202003,US Equities Delisted,Aircastle,Aircastle Ltd Common,2006-08-08,2020-03-27,verified_auto,symbol_name_exit_year_match,1.000000,2020,1,auto_verified,composite_match_score=1.000000
+FLY,FLY,FLY-202108,US Equities Delisted,Fly Leasing,FLY Leasing Ltd ADR,2007-09-27,2021-08-02,verified_auto,symbol_name_exit_year_match,1.000000,2021,1,auto_verified,composite_match_score=1.000000
+PNCL,PNCL,PNCLQ-201305,US Equities Delisted,Pinnacle Airlines,Pinnacle Airlines Corp Common,2003-11-25,2013-05-01,verified_auto,symbol_name_exit_year_match,1.000000,2013,1,auto_verified,composite_match_score=1.000000
+RJET,RJET,RJETQ-201704,US Equities Delisted,Republic Airways Holdings,Republic Airways Holdings Inc Common,2004-05-27,2017-04-28,verified_auto,symbol_name_exit_year_match,1.000000,2016,1,auto_verified,composite_match_score=0.860000
+GNRT,GNRT,GNRT-201806,US Equities Delisted,Gener8 Maritime,Gener8 Maritime Inc Common,2015-06-25,2018-06-11,verified_auto,symbol_name_exit_year_match,1.000000,2018,1,auto_verified,composite_match_score=1.000000
+NM,NM,NM-202312,US Equities Delisted,Navios Maritime Holdings,Navios Maritime Holdings Inc Common,2005-01-06,2023-12-13,verified_override,reviewed_company_identity_provider_exit_date_differs_from_seed_year,1.000000,2021,1,reviewed,Provider identifies Navios Maritime Holdings and supplies the final quoted date.
+NNA,NNA,NNA-202110,US Equities Delisted,Navios Maritime Acquisition,Navios Maritime Acquisition Corp Common,2008-07-07,2021-10-14,verified_auto,symbol_name_exit_year_match,1.000000,2021,1,auto_verified,composite_match_score=1.000000
+DRYS,DRYS,DRYS-201910,US Equities Delisted,DryShips,DryShips Inc Common,2005-02-03,2019-10-10,verified_auto,symbol_name_exit_year_match,1.000000,2019,1,auto_verified,composite_match_score=1.000000
+TGP,TGP,TGP-202201,US Equities Delisted,Teekay LNG Partners,Teekay LNG Partners LP Unit,2005-05-05,2022-01-12,verified_auto,symbol_name_exit_year_match,0.883721,2022,1,auto_verified,composite_match_score=0.924419
+GLOG,GLOG,GLOG-202106,US Equities Delisted,GasLog Ltd,GasLog Ltd Common,2012-03-30,2021-06-08,verified_auto,symbol_name_exit_year_match,1.000000,2021,1,auto_verified,composite_match_score=1.000000
+GLOP,GLOP,GLOP-202307,US Equities Delisted,GasLog Partners,GasLog Partners LP Unit,2014-05-07,2023-07-12,verified_auto,symbol_name_exit_year_match,0.857143,2023,1,auto_verified,composite_match_score=0.907143
+ATCO,ATCO,ATCO-202303,US Equities Delisted,Atlas Corp (Seaspan),Atlas Corp Common,2005-08-09,2023-03-27,verified_auto,symbol_name_exit_year_match,0.555556,2023,1,auto_verified,composite_match_score=0.711111
+EGLE,EGLE,EGLE-202404,US Equities Delisted,Eagle Bulk Shipping,Eagle Bulk Shipping Inc Common,2005-06-23,2024-04-08,verified_auto,symbol_name_exit_year_match,1.000000,2024,1,auto_verified,composite_match_score=1.000000
+OSG,OSG,OSG-202407,US Equities Delisted,Overseas Shipholding Group,Overseas Shipholding Group Inc Class A Common,2015-12-01,2024-07-09,verified_auto,symbol_name_exit_year_match,0.833333,2024,1,auto_verified,composite_match_score=0.891667
+GMLP,GMLP,GMLP-202104,US Equities Delisted,Golar LNG Partners,Golar LNG Partners LP Unit,2011-04-08,2021-04-15,verified_auto,symbol_name_exit_year_match,0.878049,2021,1,auto_verified,composite_match_score=0.920732
+TOO,TOO,TOO-202001,US Equities Delisted,Teekay Offshore Partners,Teekay Offshore Partners LP Unit,2006-12-14,2020-01-22,verified_auto,symbol_name_exit_year_match,0.905660,2019,1,auto_verified,composite_match_score=0.798679
+HRZ,HRZ,HRZL-201506,US Equities Delisted,Horizon Lines,Matson Alaska Inc Common,2005-09-27,2015-06-01,verified_override,reviewed_former_symbol_alias,0.384615,2015,1,reviewed,HRZ collides with historical Hertz; HRZL is the Horizon Lines history.
+EXM,EXM,EXMCQ-201402,US Equities Delisted,Excel Maritime Carriers,Excel Maritime Carriers Ltd Common,1990-01-02,2014-02-14,verified_override,reviewed_bankruptcy_symbol_alias,1.000000,2013,1,reviewed,Post-bankruptcy Q suffix identifies Excel Maritime Carriers history.
+KSU,KSU,KSU-202112,US Equities Delisted,Kansas City Southern,Kansas City Southern Common,1990-01-02,2021-12-13,verified_auto,symbol_name_exit_year_match,1.000000,2021,1,auto_verified,composite_match_score=1.000000
+BNI,BNI,BNI-201002,US Equities Delisted,Burlington Northern Santa Fe,Burlington Northern Santa Fe Corp Common,1990-01-02,2010-02-12,verified_auto,symbol_name_exit_year_match,1.000000,2010,1,auto_verified,composite_match_score=1.000000
+GWR,GWR,GWR-201912,US Equities Delisted,Genesee & Wyoming,Genesee & Wyoming Inc Class A Common,1996-06-25,2019-12-27,verified_auto,symbol_name_exit_year_match,0.826087,2019,1,auto_verified,composite_match_score=0.886957
+PWX,PWX,PWX-201611,US Equities Delisted,Providence & Worcester Railroad,Providence and Worcester Railroad Co Common,1990-01-02,2016-11-01,verified_auto,symbol_name_exit_year_match,1.000000,2016,1,auto_verified,composite_match_score=1.000000
+SWFT,SWFT,SWFT-200705,US Equities Delisted,Swift Transportation,Swift Transportation Co Common,1990-06-29,2007-05-10,verified_auto,symbol_name_exit_year_match,1.000000,2007,1,auto_verified,composite_match_score=1.000000
+USX,USX,USX-202306,US Equities Delisted,U.S. Xpress Enterprises,US Xpress Enterprises Inc Class A Common,2018-06-14,2023-06-30,verified_auto,symbol_name_exit_year_match,0.823529,2023,1,auto_verified,composite_match_score=0.885294
+CGI,CGI,CGIP,US Equities,Celadon Group,Celadon Group Inc Common,1994-01-21,,verified_excluded,current_otc_security_conflicts_with_delisted_seed,1.000000,2019,0,reviewed,Excluded from delisted calibration until a provider terminal date and terminal value are verified.
+USAK,USAK,USAK-202209,US Equities Delisted,USA Truck,USA Truck Inc Common,1992-03-19,2022-09-14,verified_auto,symbol_name_exit_year_match,1.000000,2022,1,auto_verified,composite_match_score=1.000000
+CNW,CNW,CNW-201510,US Equities Delisted,Con-way,Con-way Inc Common,1990-01-02,2015-10-29,verified_auto,symbol_name_exit_year_match,1.000000,2015,1,auto_verified,composite_match_score=1.000000
+YELL,YELL,YELLQ-202607,US Equities Delisted,Yellow Corporation,Yellow Corp Common,1990-01-02,2026-07-01,verified_override,reviewed_bankruptcy_symbol_alias_provider_exit_after_seed_event,1.000000,2023,1,reviewed,Provider final quoted date is used even though the corporate bankruptcy event began in 2023.
+QLTY,QLTY,QLTY-201508,US Equities Delisted,Quality Distribution,Quality Distribution Inc Common,2003-11-07,2015-08-17,verified_auto,symbol_name_exit_year_match,1.000000,2015,1,auto_verified,composite_match_score=1.000000
+DSKE,DSKE,DSKE-202404,US Equities Delisted,Daseke,Daseke Inc Common,2015-10-12,2024-04-01,verified_auto,symbol_name_exit_year_match,1.000000,2024,1,auto_verified,composite_match_score=1.000000
+UTIW,UTIW,UTIW-201601,US Equities Delisted,UTi Worldwide,UTi Worldwide Inc Common,2000-11-02,2016-01-21,verified_auto,symbol_name_exit_year_match,1.000000,2016,1,auto_verified,composite_match_score=1.000000
+PACR,PACR,PACR-201403,US Equities Delisted,Pacer International,Pacer International Inc Common,2002-06-13,2014-03-31,verified_auto,symbol_name_exit_year_match,1.000000,2014,1,auto_verified,composite_match_score=1.000000
+ECHO,ECHO,ECHO-202111,US Equities Delisted,Echo Global Logistics,Echo Global Logistics Inc Common,2009-10-02,2021-11-22,verified_auto,symbol_name_exit_year_match,1.000000,2021,1,auto_verified,composite_match_score=1.000000
+RRTS,RRTS,RRTS,US Equities,Roadrunner Transportation Systems,Roadrunner Transportation Systems Inc Common,2010-05-13,,verified_excluded,current_otc_security_conflicts_with_delisted_seed,1.000000,2020,0,reviewed,Excluded from delisted calibration because Norgate still classifies the symbol as current and no terminal date exists.
+EGL,EGL,EAGL-200708,US Equities Delisted,EGL Inc (Eagle Global Logistics),EGL Inc Common,1995-12-01,2007-08-02,verified_override,reviewed_former_symbol_alias,0.206897,2007,1,reviewed,EAGL is the historical Norgate symbol for EGL Inc.
+STMP,STMP,STMP-202110,US Equities Delisted,Stamps.com,Stamps.Com Inc Common,1999-06-25,2021-10-04,verified_auto,symbol_name_exit_year_match,1.000000,2021,1,auto_verified,composite_match_score=1.000000
+ABF,ABF,ABF-200308,US Equities Delisted,Airborne Inc,Airborne Inc Common,1990-01-02,2003-08-15,verified_auto,symbol_name_exit_year_match,1.000000,2003,1,auto_verified,composite_match_score=1.000000
+DDMX,DDMX,DDMX-201102,US Equities Delisted,Dynamex,Dynamex Inc Common,1996-08-13,2011-02-22,verified_auto,symbol_name_exit_year_match,1.000000,2011,1,auto_verified,composite_match_score=1.000000
+FRTZ,FRTZ,FRTZ-200105,US Equities Delisted,Fritz Companies,Fritz Companies Inc Common,1992-10-16,2001-05-24,verified_auto,symbol_name_exit_year_match,1.000000,2001,1,auto_verified,composite_match_score=1.000000

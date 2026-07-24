@@ -274,3 +274,42 @@ anchor and its 16d/A1.7-gate files, the outcomes ledger, the expanded builder/co
 and the recorded config-block sha cross-check against the baseline). All additions are
 fail-closed: any missing, extra, or mismatched artifact is a hard error and the H1 regime source
 stays locked.
+
+---
+
+# AMENDMENT 3 - 2026-07-19 (issued while prospective ledgers and outcomes = 0)
+
+Issued before any post-cutoff capture or resolved outcome exists. Two execution defects found
+during the final 2026-07-17 dry run are corrected without changing any predictor, coefficient,
+threshold, gate, cutoff, or promotion requirement:
+
+1. V2.2/V2.3 trailing recalibration now copies the temporary NumPy probability vector before
+   mutation. This only restores compatibility with pandas copy-on-write; recalibration math is
+   unchanged.
+2. The A1.5 component baseline now records `component_baseline_end_date`, equal to the evidence
+   date on which the baseline is created (bounded by the prospective cutoff). Later drift checks
+   recompute historical-row digests only through that fixed boundary. The former implementation
+   hashed through the future cutoff, so ordinary rows arriving between baseline creation and the
+   cutoff falsely appeared as component drift. Builder/config hashes and all rows that actually
+   existed at baseline creation remain frozen and fail-closed.
+
+The pre-Amendment-3 baseline is archived before replacement. Re-baselining is permitted once for
+this amendment only after verifying both prospective ledgers have zero rows and no post-cutoff
+outcome exists.
+
+---
+
+# AMENDMENT 4 - 2026-07-19 (issued while prospective ledgers and outcomes = 0)
+
+Issued before the first post-cutoff business-day capture. The complete four-provider raw-data
+refresh for the 2026-07-17 evidence boundary finished after the Amendment-3 dry run. It advanced
+the EIA energy series from 2026-07-06 to 2026-07-13 and rebuilt all PIT component histories from
+one consistent FRED/ALFRED, EIA, OECD, and Philadelphia Fed snapshot. The drift guard correctly
+reported changed historical-row digests for all four H1 components.
+
+This amendment permits one final baseline replacement against that complete raw snapshot. It does
+not change any H1 predictor, coefficient, component source, gate, threshold, cutoff, bootstrap,
+minimum sample, or promotion requirement. Before replacement, both hash-chained ledgers must be
+verified at `H1-GENESIS` with zero rows and no post-cutoff outcome. The Amendment-3 baseline must
+be archived with its SHA-256 identity. After replacement, all component and code/config drift
+checks remain fail-closed; no further re-baseline is permitted once prospective capture begins.

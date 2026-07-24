@@ -76,7 +76,14 @@ PILLAR_BLOCKLIST = {
     "discovery_opportunity_score", "opportunity_score", "allocation_opportunity_score",
     "investment_score", "discovery_investment_score", "liquidity_score",
 }
-DEFAULT_PIPELINES = ["semiconductors", "software_infrastructure", "technology_hardware", "defense"]
+DEFAULT_PIPELINES = [
+    "semiconductors",
+    "software_infrastructure",
+    "technology_hardware",
+    "biotech",
+    "med_devices",
+    "defense",
+]
 HORIZONS = [21, 63, 126, 252]
 COMPOSITE = "composite"
 
@@ -186,8 +193,9 @@ def _load_pillar_frame(
     root: Path,
     wanted_dates: set[str],
     used_sha256: dict[str, str] | None = None,
+    requested_pillars: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Long pillar frame (as_of_date, ticker, <pillars>) for one sector, restricted to wanted_dates."""
+    """Long pillar frame, using a frozen list when supplied or heuristic discovery otherwise."""
     candidates: list[tuple[str, Path, list[str]]] = []
     pillar_union: set[str] = set()
     for datestr, path in dated_candidates(sector_cfg, root):
@@ -201,12 +209,23 @@ def _load_pillar_frame(
         columns = list(head.columns)
         if "ticker" not in columns:
             raise ValueError(f"Pillar source {path} has no ticker column")
-        detected = _detect_pillars(columns)
+        detected = (
+            [pillar for pillar in requested_pillars if pillar in columns]
+            if requested_pillars
+            else _detect_pillars(columns)
+        )
         pillar_union.update(detected)
         candidates.append((as_of, path, columns))
     pillars = sorted(pillar_union)
     if not candidates or not pillars:
         return pd.DataFrame()
+    if requested_pillars:
+        missing_requested = sorted(set(requested_pillars) - set(pillars))
+        if missing_requested:
+            raise ValueError(
+                f"Configured pillars are absent from every source for "
+                f"{sector_cfg.get('model_family')}: {missing_requested}"
+            )
     frames: list[pd.DataFrame] = []
     for as_of, path, columns in candidates:
         available = [c for c in pillars if c in columns]
@@ -332,8 +351,13 @@ def main() -> int:  # noqa: C901
         if sub.empty or pipe not in sectors_cfg:
             continue
         wanted_dates = set(sub["as_of_date"].unique())
+        configured = cfg_get(config, f"component_ic.pillars_by_pipeline.{pipe}", []) or []
         pillar_frame = _load_pillar_frame(
-            sectors_cfg[pipe], root, wanted_dates, used_sha256=pillar_sources_sha256,
+            sectors_cfg[pipe],
+            root,
+            wanted_dates,
+            used_sha256=pillar_sources_sha256,
+            requested_pillars=[str(value) for value in configured] if configured else None,
         )
         if pillar_frame.empty:
             LOGGER.warning("No pillar columns ingested for %s; skipping", pipe)
@@ -467,6 +491,8 @@ def main() -> int:  # noqa: C901
         "pipelines": pipelines,
         "pillar_sets": pillar_sets,
         "inputs_sha256": {
+            "config.yaml": sha256_file(config_path),
+            "research/72_component_ic_by_regime.py": sha256_file(Path(__file__).resolve()),
             "calibration_panel_manifest.json": sha256_file(panel_dir / "calibration_panel_manifest.json"),
             "calibration_panel.csv": sha256_file(panel_path),
             **{f"pillar_source:{path}": sha for path, sha in sorted(pillar_sources_sha256.items())},

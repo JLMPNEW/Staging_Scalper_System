@@ -1,0 +1,348 @@
+# Master orchestration registry for the multi-sector scalper staging system.
+#
+# One entry per sector plus the Tier-1 portfolio layer. run_all.py reads this
+# file to schedule daily refreshes, catch-up runs, historical/PIT backfills,
+# targeted repairs, and health checks. Every flag/path here was derived from the
+# real parse_args() / publish paths of each sector runner (do not guess-edit).
+#
+# Path conventions:
+#   * entry_script / backfill.script / weekly_pre[].script : relative to PROJECT_ROOT (repo root).
+#   * publish_glob / health.manifest                       : relative to PROJECT_ROOT.
+#   * {date} in args_template                              : always substituted with ISO YYYY-MM-DD.
+#   * {date} in publish_glob                               : substituted with the dated FOLDER name,
+#                                                            formatted with publish_date_format.
+#   * {from}/{to} in backfill.args_template                : ISO YYYY-MM-DD range bounds.
+#
+# db_group: sectors sharing a SQLite file are serialized within one group so two
+# refreshes never mutate the same DB concurrently. Within-group execution order
+# is the order sectors appear under `group_order`.
+
+defaults:
+  timeout_sec: 21600            # 6h per-sector subprocess ceiling
+  retries: 1                    # attempts AFTER the first (so 2 total)
+  max_concurrent_network_lanes: 2   # global cap on simultaneous network-heavy lanes (SEC/Yahoo rate limits)
+  catch_up_gap_backfill_threshold: 10   # gap (trading days) above which catch-up uses the native backfill entry
+  catch_up_window_days: 45      # calendar-day lookback catch-up scans for INTERNAL gaps (not just dates after the last publish)
+  repair_days: 5                # default trailing dates a --repair pass re-runs (>=1)
+  calendar_reference_sectors:   # sectors whose dated publish dirs seed the trading calendar
+    - semiconductors
+    - defense
+    - machinery
+    - med_devices
+
+# Within-group serialization order. industrials MUST be defense -> machinery
+# (defense publishes the oos-valid table machinery-adjacent stages depend on the
+# shared DB being consistent); technology order is stable but independent.
+group_order:
+  industrials: [defense, machinery]
+  technology: [semiconductors, software_infrastructure, technology_hardware]
+  biotech: [biotech]
+  med_devices: [med_devices]
+
+sectors:
+  # ---------------------------------------------------------------- biotech
+  - name: biotech
+    db_group: biotech
+    dependency_tier: 0
+    required: true
+    network: true
+    entry_script: biotech_index/scripts/24_run_biotech_refresh_pipeline.py
+    date_flag: "--asof"
+    args_template: ["--asof", "{date}"]
+    force_args: []                      # runner has no --force flag
+    publish_glob: "output/biotech_index_reports/{date}/biotech_daily_scores.csv"
+    publish_date_format: "%Y%m%d"       # biotech dated folder is compact YYYYMMDD
+    # The published biotech_daily_scores.csv carries oos_score_valid_flag; the portfolio
+    # adapter requires it (require_oos_score_valid: true). Keep parity here so the health
+    # check fails closed on a table with no oos-valid rows. (Flag values are "1.0"/"0.0".)
+    oos_column: "oos_score_valid_flag"
+    require_oos_valid: true
+    staleness_tolerance_days: 3
+    health:                             # no acceptance/status manifest -> artifact presence + rc==0
+      manifest: null
+      status_keys: []
+    backfill:
+      script: biotech_index/scripts/24_run_biotech_refresh_pipeline.py
+      args_template: ["--history-restatement", "--history-start-asof", "{from}", "--history-end-asof", "{to}"]
+      per_date: false
+    # Two-stage repair: re-run IB market + shared positioning sources, then rebuild the
+    # dependent feature/score/report chain so the published scores reflect the repair.
+    repair:
+      date_flag: "--asof"
+      selection_flag: "--steps"         # biotech selects steps by name via --steps a,b
+      steps: ["ib_market", "market_positioning"]
+      rebuild_steps: ["biotech_features", "biotech_scores", "biotech_reports"]
+      extra_args: []
+
+  # ------------------------------------------------------------- med_devices
+  - name: med_devices
+    db_group: med_devices
+    dependency_tier: 0
+    required: true
+    network: true
+    entry_script: med_devices/scripts/71_run_med_device_refresh_pipeline.py
+    date_flag: "--asof"
+    # --oos-score-valid makes 71 forward the flag to 13_build_daily_scores so replay-window
+    # rows (asof within scoring.oos_replay_window_days, default 5 -- the "technology pattern"
+    # for live dates) self-certify oos_score_valid_flag=1. Without it 71 publishes flag=0 and
+    # the portfolio adapter (require_oos_score_valid) + this registry's health gate cannot pass.
+    # 71 itself drops the flag for any asof outside the replay window, so it is self-bounding.
+    # A daily_post_step then runs script 76 (sole strict-OOS promoter) to record the evidence /
+    # provenance-ledger row and reconcile the flag against the database (finding 1).
+    args_template: ["--asof", "{date}", "--oos-score-valid"]
+    force_args: ["--force-refresh"]
+    publish_glob: "output/med_devices_reports/score_review_pack/{date}/med_device_daily_composite_scores.csv"
+    publish_date_format: "%Y-%m-%d"
+    # med_device_daily_composite_scores.csv carries both oos_score_valid_flag and
+    # portfolio_candidate_gate; the portfolio adapter requires oos_score_valid, so gate the
+    # health check on it (values are "1"/"0"). gate_column kept for diagnostics.
+    oos_column: "oos_score_valid_flag"
+    gate_column: "portfolio_candidate_gate"
+    require_oos_valid: true
+    staleness_tolerance_days: 3
+    health:
+      manifest: "output/med_devices_reports/orchestration/med_devices_refresh_manifest.json"
+      status_keys: ["status"]
+    # Post-publish provenance step (finding 1). 71 publishes the review pack with
+    # oos_score_valid_flag=1 on replay-window rows (via --oos-score-valid above); script 76 --
+    # the SOLE strict-OOS promoter per the med-devices PIT policy -- then records the evidence /
+    # provenance-summary ledger row and reconciles the flag against the database. For a live
+    # as-of it records rather than promotes (no historical PIT-backfill manifest / script-75
+    # validation exists yet) and demotes any pre-lock date; historical (beyond-window) dates
+    # remain 76's exclusive path via the backfill pipeline. run_all executes daily_post_steps
+    # sequentially after the publish and fails the sector on any non-zero rc.
+    daily_post_steps:
+      - script: med_devices/scripts/76_mark_med_device_oos_provenance.py
+        args_template: ["--asof", "{date}"]
+    backfill:
+      script: med_devices/scripts/21b_run_med_device_daily_snapshot_chunks.py
+      args_template: ["--start-asof", "{from}", "--end-asof", "{to}"]
+      per_date: false
+    # Two-stage repair: re-run borrow/13F/positioning sources, then rebuild the positioning
+    # feature builders -> daily scores -> published review pack (runtime: ~sources + a full
+    # stage-7/8 rebuild per date; keep --repair-days small).
+    repair:
+      date_flag: "--asof"
+      selection_flag: "--only"          # med_devices selects steps by id via --only a,b
+      steps: ["53_sync_ibkr_borrow", "62_update_sec13f_positioning", "61_import_positioning"]
+      # 63_rebuild_sec13f_common_shares rebuilds the PIT SEC 13F common-share facts from the
+      # freshly synced/imported 13F positioning (steps 62 -> 61) and MUST run before the
+      # institutional-flow feature rebuild (58) that consumes them. It leads the rebuild chain,
+      # matching 71's canonical order (63 immediately after 61, before 54/56/58/60) -- finding 7.
+      rebuild_steps: ["63_rebuild_sec13f_common_shares", "54_build_borrow_features", "56_build_short_interest_features", "58_build_institutional_flow_features", "60_build_insider_activity_features", "13_build_daily_scores", "16_publish_review_pack"]
+      extra_args: []
+
+  # --------------------------------------------------------- semiconductors
+  - name: semiconductors
+    db_group: technology
+    dependency_tier: 0
+    required: true
+    network: true
+    entry_script: technology/semiconductors/scripts/17_run_semiconductor_refresh_pipeline.py
+    date_flag: "--asof"
+    # The tech refresh pipeline (17) fail-closes when --asof is combined with the
+    # latest-only governance steps (technology.core.refresh_orchestration
+    # .asof_governance_conflict, added 2026-07-10): the lockbox-ledger publisher
+    # does not accept --asof and would stamp historical scores as "latest". The
+    # orchestrator drives every sector by date (per-date determinism is required
+    # for catch-up), so we keep --asof for the feature/score/dashboard steps and
+    # skip the governance publish here. Governance/lockbox is NOT part of the
+    # tier-0 gate and the pipeline audit only requires the governance outputs to
+    # exist (existence-only, not freshness), so a periodic no-asof "latest" run
+    # refreshes the ledger. Semiconductors has only 16_publish_governance.
+    # Attempt IBKR borrow collection, but if TWS is unavailable retain the latest
+    # sealed borrow observations; Stage 5's configured staleness gate remains
+    # authoritative and will fail the sector once those observations are too old.
+    args_template: ["--asof", "{date}", "--allow-stale-ibkr-borrow-on-error", "--skip-step", "16_publish_governance"]
+    force_args: ["--force-refresh"]
+    publish_glob: "output/technology_reports/semi_dashboard/{date}/semiconductor_final_rank_table.csv"
+    publish_date_format: "%Y-%m-%d"
+    oos_column: "oos_score_valid_flag"
+    require_oos_valid: true
+    staleness_tolerance_days: 3
+    health:
+      manifest: "output/technology_reports/orchestration/semiconductor_refresh_manifest.json"
+      status_keys: ["status"]
+    # --frequency daily + --include-stage11-survivorship-panel: without them 18_backfill
+    # defaults to panel21 (every ~21st date) and skips the survivorship sidecar, leaving a
+    # sparse calibration panel. Verified against 18_backfill's parse_args.
+    backfill:
+      script: technology/scripts/18_backfill_technology_historical_dashboard_reports.py
+      args_template: ["--family", "semiconductors", "--start-date", "{from}", "--end-date", "{to}", "--frequency", "daily", "--include-stage11-survivorship-panel"]
+      per_date: false
+    # Two-stage repair: re-sync upstream positioning + import, then rebuild the scoring
+    # contract -> stage-7 scores -> dashboard publish/validate.
+    repair:
+      date_flag: "--asof"
+      selection_flag: "--only"
+      steps: ["13_sync_positioning_upstream", "09_import_positioning"]
+      rebuild_steps: ["06a_build_scoring_contract", "06a_validate_scoring_contract", "10_build_stage7_scores", "10_validate_stage7_scores", "10b_publish_dashboard", "10b_validate_dashboard"]
+      extra_args: []
+
+  # ------------------------------------------------- software_infrastructure
+  - name: software_infrastructure
+    db_group: technology
+    dependency_tier: 0
+    required: true
+    network: true
+    entry_script: technology/software_infrastructure/scripts/17_run_software_infrastructure_refresh_pipeline.py
+    date_flag: "--asof"
+    # See semiconductors: skip latest-only governance steps under --asof. This
+    # pipeline has both a publish and a validate governance step.
+    # Same staleness-gated IBKR fallback policy as semiconductors.
+    args_template: ["--asof", "{date}", "--allow-stale-ibkr-borrow-on-error", "--skip-step", "16_publish_governance", "--skip-step", "16_validate_governance"]
+    force_args: ["--force-refresh"]
+    publish_glob: "output/technology_reports/software_infrastructure/dashboard/{date}/software_infrastructure_final_rank_table.csv"
+    publish_date_format: "%Y-%m-%d"
+    oos_column: "oos_score_valid_flag"
+    require_oos_valid: true
+    staleness_tolerance_days: 3
+    health:
+      manifest: "output/technology_reports/software_infrastructure/orchestration/software_infrastructure_refresh_manifest.json"
+      status_keys: ["status"]
+    backfill:
+      script: technology/scripts/18_backfill_technology_historical_dashboard_reports.py
+      args_template: ["--family", "software_infrastructure", "--start-date", "{from}", "--end-date", "{to}", "--frequency", "daily", "--include-stage11-survivorship-panel"]
+      per_date: false
+    repair:
+      date_flag: "--asof"
+      selection_flag: "--only"
+      steps: ["13_sync_positioning_upstream", "09_import_positioning"]
+      rebuild_steps: ["06a_build_scoring_contract", "06a_validate_scoring_contract", "10_build_stage7_scores", "10_validate_stage7_scores", "10b_publish_dashboard", "10b_validate_dashboard"]
+      extra_args: []
+
+  # ---------------------------------------------------- technology_hardware
+  - name: technology_hardware
+    db_group: technology
+    dependency_tier: 0
+    required: true
+    network: true
+    entry_script: technology/technology_hardware/scripts/17_run_technology_hardware_refresh_pipeline.py
+    date_flag: "--asof"
+    # See semiconductors: skip latest-only governance steps under --asof. This
+    # pipeline has both a publish and a validate governance step.
+    # Same staleness-gated IBKR fallback policy as semiconductors.
+    args_template: ["--asof", "{date}", "--allow-stale-ibkr-borrow-on-error", "--skip-step", "16_publish_governance", "--skip-step", "16_validate_governance"]
+    force_args: ["--force-refresh"]
+    publish_glob: "output/technology_reports/technology_hardware/dashboard/{date}/technology_hardware_final_rank_table.csv"
+    publish_date_format: "%Y-%m-%d"
+    oos_column: "oos_score_valid_flag"
+    require_oos_valid: true
+    staleness_tolerance_days: 3
+    health:
+      manifest: "output/technology_reports/technology_hardware/orchestration/technology_hardware_refresh_manifest.json"
+      status_keys: ["status"]
+    backfill:
+      script: technology/scripts/18_backfill_technology_historical_dashboard_reports.py
+      args_template: ["--family", "technology_hardware", "--start-date", "{from}", "--end-date", "{to}", "--frequency", "daily", "--include-stage11-survivorship-panel"]
+      per_date: false
+    repair:
+      date_flag: "--asof"
+      selection_flag: "--only"
+      steps: ["13_sync_positioning_upstream", "09_import_positioning"]
+      rebuild_steps: ["06a_build_scoring_contract", "06a_validate_scoring_contract", "10_build_stage7_scores", "10_validate_stage7_scores", "10b_publish_dashboard", "10b_validate_dashboard"]
+      extra_args: []
+
+  # ---------------------------------------------------------------- defense
+  - name: defense
+    db_group: industrials
+    dependency_tier: 0
+    required: true
+    network: true
+    entry_script: industrials/defense/scripts/16_run_defense_daily_refresh.py
+    date_flag: "--asof"
+    args_template: ["--asof", "{date}"]
+    force_args: []                      # runner has no --force flag
+    publish_glob: "output/industrials/defense/dashboard/{date}/defense_final_rank_table.csv"
+    publish_date_format: "%Y-%m-%d"
+    oos_column: "oos_score_valid_flag"
+    require_oos_valid: true
+    staleness_tolerance_days: 3
+    health:
+      manifest: "output/industrials/defense/orchestration/defense_refresh_manifest.json"
+      status_keys: ["acceptance"]
+    # Weekly cadence decision: NOTHING beyond the daily publish.
+    #   * Defense production OOS was promoted ONCE and sealed. The rank table was pinned at
+    #     production_start=2026-07-02 by 27_promote_defense_oos_production.py (a one-time
+    #     promotion). Re-running 27 weekly with --asof <current> fails (its rank table /
+    #     panel is pinned to 2026-07-02) and is conceptually wrong post-lock (re-promotion is
+    #     a look-ahead risk). Promotion scripts must NEVER be auto-run -- removed 26 + 27.
+    #   * 26_run_defense_weekly_calibration_research.py is a heavy Optuna/backtest research
+    #     chain (the research half of the promotion pipeline); it is operator-driven when a
+    #     re-calibration is intended, not part of the automated operational rail.
+    #   * The daily 16_run_defense_daily_refresh publish already stamps oos_score_valid rows
+    #     post-promotion, so weekly needs no extra pre-step.
+    weekly_pre_steps: []
+    # Defense PIT history driver (survivorship-corrected snapshots).
+    backfill:
+      script: industrials/defense/scripts/19_build_defense_shadow_snapshot_history.py
+      args_template: ["--start-date", "{from}", "--end-date", "{to}", "--membership-mode", "pit"]
+      per_date: false
+    # Defense runner has no --only/--steps; --positioning-through-publish-only already
+    # rebuilds positioning->eligibility->scores->publish->validate in one command, so the
+    # repair is inherently single-stage (source + dependents together). No rebuild_steps.
+    repair:
+      date_flag: "--asof"
+      selection_flag: ""
+      steps: ["13_sync_positioning", "14_validate_positioning", "10_validate_eligibility", "17_publish"]
+      rebuild_steps: []
+      extra_args: ["--positioning-through-publish-only"]
+
+  # -------------------------------------------------------------- machinery
+  - name: machinery
+    db_group: industrials
+    dependency_tier: 0
+    required: false                     # portfolio adapter marks machinery optional (shadow)
+    network: true
+    entry_script: industrials/machinery/scripts/17_run_machinery_refresh_pipeline.py
+    date_flag: "--asof"
+    args_template: ["--asof", "{date}"]
+    force_args: ["--force"]
+    publish_glob: "output/industrials/machinery/dashboard/{date}/machinery_final_rank_table.csv"
+    publish_date_format: "%Y-%m-%d"
+    oos_column: "oos_score_valid_flag"
+    require_oos_valid: true              # optional sector, but the shadow table still carries the flag
+    staleness_tolerance_days: 3
+    health:
+      manifest: "output/industrials/machinery/orchestration/machinery_refresh_manifest.json"
+      status_keys: ["acceptance"]
+    # Machinery builds its own dashboard history via the daily runner's flag.
+    backfill:
+      script: industrials/machinery/scripts/17_run_machinery_refresh_pipeline.py
+      args_template: ["--asof", "{to}", "--include-historical-backfill", "--history-start-date", "{from}"]
+      per_date: false
+    # Two-stage repair: re-sync SEC ownership + positioning, then rebuild
+    # import->positioning validate->eligibility->scoring->scores->publish->validate.
+    repair:
+      date_flag: "--asof"
+      selection_flag: "--only"
+      steps: ["12_sync_sec_ownership", "13_sync_positioning"]
+      rebuild_steps: ["09_import_positioning", "14_validate_positioning", "10_validate_eligibility", "06a_build_scoring", "06a_validate_scoring", "10_build_scores", "10b_publish", "10b_validate", "20_validate_portfolio"]
+      extra_args: []
+
+  # ------------------------------------------------------- portfolio_layer
+  - name: portfolio_layer
+    db_group: portfolio
+    dependency_tier: 1                  # runs only after the Tier-0 gate passes
+    required: true
+    network: true
+    entry_script: portfolio_layer/orchestration/18_run_portfolio_pipeline.py
+    date_flag: "--as-of"                # NOTE: hyphenated, unlike sectors' --asof
+    args_template: ["--as-of", "{date}"]
+    force_args: ["--force"]
+    publish_glob: "portfolio_layer/output/runs/{date}/stocks_scores.csv"
+    publish_date_format: "%Y-%m-%d"
+    oos_column: null
+    staleness_tolerance_days: 10
+    health:
+      manifest: "portfolio_layer/output/runs/{date}/manifest.json"
+      status_keys: ["hard_gate_acceptance"]
+    # Portfolio has no native per-date backfill entry. In --mode backfill the
+    # orchestrator records a NOTE that research/65 snapshot capture is the
+    # intended path and does NOT auto-run the stage11 chain.
+    backfill:
+      script: ""
+      args_template: []
+      per_date: false
+      note: "portfolio_layer stage11/research chain is NOT auto-run; capture snapshots via portfolio_layer research/65 manually."
+    repair: null

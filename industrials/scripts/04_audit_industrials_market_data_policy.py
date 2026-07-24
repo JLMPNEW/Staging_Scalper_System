@@ -139,7 +139,13 @@ def parse_ticker_list(raw: object) -> list[str]:
     return out
 
 
-def load_jobs(conn: Any, *, model_family: str, benchmark_tickers: list[str]) -> list[dict[str, Any]]:
+def load_jobs(
+    conn: Any,
+    *,
+    model_family: str,
+    benchmark_tickers: list[str],
+    asof: date,
+) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT DISTINCT c.ticker, c.company_name
@@ -147,10 +153,17 @@ def load_jobs(conn: Any, *, model_family: str, benchmark_tickers: list[str]) -> 
         JOIN dim_industrials_taxonomy t
           ON t.ticker = c.ticker
          AND t.model_family = ?
-        WHERE c.is_active = 1
+        JOIN dim_universe_membership m
+          ON m.company_id = c.company_id
+         AND m.ticker = c.ticker
+         AND m.model_family = t.model_family
+        WHERE m.membership_status = 'active'
+          AND m.is_current_member = 1
+          AND m.start_date <= ?
+          AND COALESCE(NULLIF(m.end_date, ''), '9999-12-31') >= ?
         ORDER BY c.ticker
         """,
-        (model_family,),
+        (model_family, asof.isoformat(), asof.isoformat()),
     ).fetchall()
     out = [
         {
@@ -288,17 +301,20 @@ def main() -> None:
     require_adjusted = coerce_bool(require_cfg(config, "market_data_policy.require_adjusted_for_scoring"))
     severity_map = resolve_severity_map(config, require_adjusted=require_adjusted)
     benchmark_tickers = parse_ticker_list(args.benchmark_tickers) or parse_ticker_list(cfg_get(config, "industrials_universe.benchmark_tickers", []))
+    asof = requested_asof or last_expected_trading_day(date.today())
 
     with closing(connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0)))) as conn:
         init_db(conn)
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
-            jobs = load_jobs(conn, model_family=model_family, benchmark_tickers=benchmark_tickers)
+            jobs = load_jobs(
+                conn,
+                model_family=model_family,
+                benchmark_tickers=benchmark_tickers,
+                asof=asof,
+            )
             panel_error = ""
-            if requested_asof is not None:
-                asof = requested_asof
-            else:
-                asof = last_expected_trading_day(date.today())
+            if requested_asof is None:
                 LOGGER.info("No --asof supplied; anchoring staleness to last expected trading day: %s", asof.isoformat())
                 panel_max = panel_max_bar_date(conn, jobs, source_id=source_id)
                 if panel_max is None:

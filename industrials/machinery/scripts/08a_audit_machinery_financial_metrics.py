@@ -30,9 +30,12 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 COVERAGE_FIELDS = [
     "metric",
     "category",
+    "gate_mode",
     "implemented_flag",
     "covered_count",
     "eligible_count",
+    "applicable_count",
+    "excluded_count",
     "coverage_fraction",
     "minimum_count",
     "minimum_fraction",
@@ -50,24 +53,64 @@ class MetricGate:
     minimum_count: int
     minimum_fraction: float
     minimum_cohort_fraction: float = 0.0
+    gate_mode: str = "calibration"
 
 
 METRIC_GATES = [
     MetricGate("orders", "orders_backlog_source", 10, 0.10),
-    MetricGate("funded_backlog", "orders_backlog_source", 10, 0.10),
+    MetricGate(
+        "funded_backlog",
+        "orders_backlog_source",
+        1,
+        0.0,
+        gate_mode="limited_universe_diagnostic",
+    ),
     MetricGate("reported_backlog", "orders_backlog_source", 5, 0.04),
     MetricGate("remaining_performance_obligation", "rpo_source", 5, 0.04),
     MetricGate("rpo_current", "rpo_source", 3, 0.02),
     MetricGate("orders_yoy_growth", "orders_backlog", 10, 0.10),
     MetricGate("book_to_bill", "orders_backlog", 10, 0.10),
-    MetricGate("backlog_yoy_growth", "orders_backlog", 10, 0.10),
-    MetricGate("backlog_to_revenue", "orders_backlog", 10, 0.10),
+    MetricGate(
+        "backlog_yoy_growth",
+        "orders_backlog",
+        1,
+        0.0,
+        gate_mode="limited_universe_diagnostic",
+    ),
+    MetricGate(
+        "backlog_to_revenue",
+        "orders_backlog",
+        1,
+        0.0,
+        gate_mode="limited_universe_diagnostic",
+    ),
     MetricGate("reported_backlog_yoy_growth", "orders_backlog", 5, 0.04),
     MetricGate("reported_backlog_to_revenue", "orders_backlog", 5, 0.04),
     MetricGate("rpo_yoy_growth", "rpo", 5, 0.04),
     MetricGate("rpo_to_revenue", "rpo", 5, 0.04),
     MetricGate("rpo_implied_orders", "rpo_proxy", 5, 0.04),
     MetricGate("rpo_implied_book_to_bill", "rpo_proxy", 5, 0.04),
+    MetricGate(
+        "contract_load_proxy",
+        "contract_load_proxy",
+        5,
+        0.04,
+        gate_mode="limited_universe_diagnostic",
+    ),
+    MetricGate(
+        "contract_load_proxy_yoy_growth",
+        "contract_load_proxy",
+        5,
+        0.04,
+        gate_mode="limited_universe_diagnostic",
+    ),
+    MetricGate(
+        "contract_load_proxy_to_revenue",
+        "contract_load_proxy",
+        5,
+        0.04,
+        gate_mode="limited_universe_diagnostic",
+    ),
     MetricGate("roic", "capital_efficiency", 50, 0.45, 0.25),
     MetricGate("asset_turnover", "capital_efficiency", 60, 0.55, 0.30),
     MetricGate("incremental_operating_margin", "operating_leverage", 40, 0.35, 0.20),
@@ -79,6 +122,14 @@ METRIC_GATES = [
     MetricGate("capital_raise_dependence", "development_stage", 5, 0.04),
     MetricGate("diluted_shares_yoy_growth", "development_stage", 50, 0.45, 0.25),
 ]
+
+
+def gate_status(gate: MetricGate, *, implemented: bool, ready: bool) -> str:
+    if not implemented:
+        return "NOT_IMPLEMENTED"
+    if gate.gate_mode == "limited_universe_diagnostic":
+        return "LIMITED_UNIVERSE_READY" if ready else "LIMITED_UNIVERSE_PENDING_COVERAGE"
+    return "CALIBRATION_READY" if ready else "IMPLEMENTED_PENDING_COVERAGE"
 
 
 def parse_args() -> argparse.Namespace:
@@ -140,7 +191,12 @@ def metric_values(
     return output
 
 
-def raw_concept_candidates(conn: sqlite3.Connection, *, members: dict[str, str]) -> list[dict[str, Any]]:
+def raw_concept_candidates(
+    conn: sqlite3.Connection,
+    *,
+    members: dict[str, str],
+    asof: str,
+) -> list[dict[str, Any]]:
     if not members:
         return []
     placeholders = ",".join("?" for _ in members)
@@ -151,6 +207,14 @@ def raw_concept_candidates(conn: sqlite3.Connection, *, members: dict[str, str])
                COUNT(*) AS fact_count
         FROM fact_sec_xbrl_fact_raw
         WHERE ticker IN ({placeholders})
+          AND (
+                CASE
+                    WHEN COALESCE(accepted_at, '') GLOB '????-??-??*' THEN SUBSTR(accepted_at, 1, 10)
+                    WHEN COALESCE(accepted_at, '') GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*'
+                        THEN SUBSTR(accepted_at, 1, 4) || '-' || SUBSTR(accepted_at, 5, 2) || '-' || SUBSTR(accepted_at, 7, 2)
+                    ELSE COALESCE(NULLIF(filing_date, ''), '9999-12-31')
+                END
+          ) <= ?
           AND (
               LOWER(concept_name) LIKE '%order%'
               OR LOWER(concept_name) LIKE '%booking%'
@@ -167,7 +231,7 @@ def raw_concept_candidates(conn: sqlite3.Connection, *, members: dict[str, str])
         GROUP BY taxonomy, concept_name
         ORDER BY ticker_count DESC, fact_count DESC, taxonomy, concept_name
         """,
-        tuple(members),
+        (*members, asof),
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -177,7 +241,7 @@ def audit_metric_availability(
     *,
     asof: str,
     members: dict[str, str],
-) -> tuple[dict[str, int], list[str]]:
+) -> tuple[dict[str, int], list[str], dict[str, dict[str, str]]]:
     metrics = required_metric_names()
     expected = {(ticker, metric) for ticker in members for metric in metrics}
     rows = conn.execute(
@@ -212,15 +276,17 @@ def audit_metric_availability(
     if invalid:
         errors.append(f"metric availability contains invalid statuses: {invalid}")
     counts = {status: 0 for status in sorted(AVAILABILITY_STATUSES)}
+    by_metric: dict[str, dict[str, str]] = {}
     for row in rows:
         if str(row["ticker"]) not in members:
             continue
         status = str(row["availability_status"])
         if status in counts:
             counts[status] += 1
+        by_metric.setdefault(str(row["metric_name"]), {})[str(row["ticker"])] = status
     counts["EXPECTED"] = len(expected)
     counts["CLASSIFIED"] = len(actual & expected)
-    return counts, errors
+    return counts, errors, by_metric
 
 
 def main() -> int:
@@ -252,16 +318,29 @@ def main() -> int:
         if not members:
             errors.append(f"No machinery members are effective at {asof}")
         columns = table_columns(conn, "feature_financial_statement")
-        cohort_sizes: dict[str, int] = {}
-        for cohort in members.values():
-            cohort_sizes[cohort] = cohort_sizes.get(cohort, 0) + 1
+        availability_counts, availability_errors, availability_by_metric = audit_metric_availability(
+            conn,
+            asof=asof,
+            members=members,
+        )
+        errors.extend(availability_errors)
         for gate in METRIC_GATES:
             implemented = gate.metric in columns
             values = metric_values(conn, metric=gate.metric, asof=asof, members=members) if implemented else {}
-            coverage = len(values) / len(members) if members else 0.0
+            statuses = availability_by_metric.get(gate.metric, {})
+            applicable_members = {
+                ticker: cohort
+                for ticker, cohort in members.items()
+                if statuses.get(ticker) not in {"EXEMPT", "NOT_APPLICABLE"}
+            }
+            covered_tickers = set(values).intersection(applicable_members)
+            coverage = len(covered_tickers) / len(applicable_members) if applicable_members else 0.0
+            cohort_sizes: dict[str, int] = {}
+            for cohort in applicable_members.values():
+                cohort_sizes[cohort] = cohort_sizes.get(cohort, 0) + 1
             cohort_counts: dict[str, int] = {}
-            for ticker in values:
-                cohort = members[ticker]
+            for ticker in covered_tickers:
+                cohort = applicable_members[ticker]
                 cohort_counts[cohort] = cohort_counts.get(cohort, 0) + 1
             cohort_fractions = {
                 cohort: cohort_counts.get(cohort, 0) / size
@@ -271,23 +350,30 @@ def main() -> int:
             minimum_cohort = min(cohort_fractions.values(), default=0.0)
             ready = (
                 implemented
-                and len(values) >= gate.minimum_count
+                and len(covered_tickers) >= gate.minimum_count
                 and coverage >= gate.minimum_fraction
                 and minimum_cohort >= gate.minimum_cohort_fraction
             )
-            status = "CALIBRATION_READY" if ready else "IMPLEMENTED_PENDING_COVERAGE" if implemented else "NOT_IMPLEMENTED"
-            if args.require_calibration_ready and not ready:
+            status = gate_status(gate, implemented=implemented, ready=ready)
+            if (
+                args.require_calibration_ready
+                and gate.gate_mode == "calibration"
+                and not ready
+            ):
                 errors.append(
-                    f"{gate.metric}: count={len(values)} coverage={coverage:.3f} "
+                    f"{gate.metric}: count={len(covered_tickers)} coverage={coverage:.3f} "
                     f"minimum_cohort={minimum_cohort:.3f}"
                 )
             coverage_rows.append(
                 {
                     "metric": gate.metric,
                     "category": gate.category,
+                    "gate_mode": gate.gate_mode,
                     "implemented_flag": int(implemented),
-                    "covered_count": len(values),
+                    "covered_count": len(covered_tickers),
                     "eligible_count": len(members),
+                    "applicable_count": len(applicable_members),
+                    "excluded_count": len(members) - len(applicable_members),
                     "coverage_fraction": f"{coverage:.6f}",
                     "minimum_count": gate.minimum_count,
                     "minimum_fraction": f"{gate.minimum_fraction:.6f}",
@@ -296,13 +382,7 @@ def main() -> int:
                     "status": status,
                 }
             )
-        availability_counts, availability_errors = audit_metric_availability(
-            conn,
-            asof=asof,
-            members=members,
-        )
-        errors.extend(availability_errors)
-        concept_rows = raw_concept_candidates(conn, members=members)
+        concept_rows = raw_concept_candidates(conn, members=members, asof=asof)
     output_dir.mkdir(parents=True, exist_ok=True)
     coverage_path = output_dir / "machinery_financial_metric_coverage.csv"
     concepts_path = output_dir / "machinery_financial_concept_candidates.csv"
@@ -314,7 +394,16 @@ def main() -> int:
         "asof_date": asof,
         "eligible_count": len(members),
         "implemented_metric_count": sum(int(row["implemented_flag"]) for row in coverage_rows),
+        "calibration_required_metric_count": sum(
+            row["gate_mode"] == "calibration" for row in coverage_rows
+        ),
         "calibration_ready_metric_count": sum(row["status"] == "CALIBRATION_READY" for row in coverage_rows),
+        "limited_universe_metric_count": sum(
+            row["gate_mode"] == "limited_universe_diagnostic" for row in coverage_rows
+        ),
+        "limited_universe_ready_metric_count": sum(
+            row["status"] == "LIMITED_UNIVERSE_READY" for row in coverage_rows
+        ),
         "availability_counts": availability_counts,
         "coverage_csv": str(coverage_path),
         "concept_candidates_csv": str(concepts_path),

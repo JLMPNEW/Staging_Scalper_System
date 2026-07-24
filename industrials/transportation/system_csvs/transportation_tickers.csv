@@ -1,0 +1,113 @@
+ticker,investability_status,company_name,cik,exchange,sector,industry,subsector,country,currency,security_type,listing_status,is_primary_listing,calibration_cohort
+ASR,investable,"Grupo Aeroportuario del Sureste, S. A. B. de C. V.",1123452,NYSE,Industrials,Airports & Air Services,Transportation,United States,USD,Common Stock,active,TRUE,air_transport_and_aviation_services
+JOBY,investable,"Joby Aviation, Inc.",1819848,NYSE,Industrials,Airports & Air Services,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+CAAP,investable,Corporación América Airports S.A.,1717393,NYSE,Industrials,Airports & Air Services,Transportation,United States,USD,Common Stock,active,TRUE,air_transport_and_aviation_services
+ASLE,investable,AerSale Corporation,1754170,Nasdaq,Industrials,Airports & Air Services,Transportation,United States,USD,Common Stock,active,TRUE,air_transport_and_aviation_services
+UP,investable,Wheels Up Experience Inc.,1819516,NYSE,Industrials,Airports & Air Services,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+SOAR,investable,"Volato Group, Inc.",1853070,NYSE,Industrials,Airports & Air Services,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+OMAB,investable,"Grupo Aeroportuario del Centro Norte, S.A.B. de C.V.",1378239,Nasdaq,Industrials,Airports & Air Services,Transportation,Mexico,USD,Ordinary Shares,active,TRUE,air_transport_and_aviation_services
+PAC,investable,"Grupo Aeroportuario del Pacifico, S.A.B. de C.V.",1347557,NYSE,Industrials,Airports & Air Services,Transportation,Mexico,USD,Ordinary Shares,active,TRUE,air_transport_and_aviation_services
+DAL,investable,"Delta Air Lines, Inc.",27904,NYSE,Industrials,Airlines,Transportation,United States,USD,Common Stock,active,TRUE,air_transport_and_aviation_services
+UAL,investable,"United Airlines Holdings, Inc.",100517,Nasdaq,Industrials,Airlines,Transportation,United States,USD,Common Stock,active,TRUE,air_transport_and_aviation_services
+AAL,investable,American Airlines Group Inc.,6201,Nasdaq,Industrials,Airlines,Transportation,United States,USD,Common Stock,active,TRUE,air_transport_and_aviation_services
+LUV,investable,Southwest Airlines Co.,92380,NYSE,Industrials,Airlines,Transportation,United States,USD,Common Stock,active,TRUE,air_transport_and_aviation_services
+ALK,investable,"Alaska Air Group, Inc.",766421,NYSE,Industrials,Airlines,Transportation,United States,USD,Common Stock,active,TRUE,air_transport_and_aviation_services
+JBLU,investable,JetBlue Airways Corporation,1158463,Nasdaq,Industrials,Airlines,Transportation,United States,USD,Common Stock,active,TRUE,air_transport_and_aviation_services
+ALGT,investable,Allegiant Travel Company,1362468,Nasdaq,Industrials,Airlines,Transportation,United States,USD,Common Stock,active,TRUE,air_transport_and_aviation_services
+SKYW,investable,"SkyWest, Inc.",793733,Nasdaq,Industrials,Airlines,Transportation,United States,USD,Common Stock,active,TRUE,air_transport_and_aviation_services
+ULCC,investable,"Frontier Group Holdings, Inc.",1670076,Nasdaq,Industrials,Airlines,Transportation,United States,USD,Common Stock,active,TRUE,air_transport_and_aviation_services
+CPA,investable,"Copa Holdings, S.A.",1345105,NYSE,Industrials,Airlines,Transportation,Panama,USD,Ordinary Shares,active,TRUE,air_transport_and_aviation_services
+VLRS,investable,"Controladora Vuela Compania de Aviacion, S.A.B. de C.V.",1520504,NYSE,Industrials,Airlines,Transportation,Mexico,USD,Ordinary Shares,active,TRUE,air_transport_and_aviation_services
+AZUL,investable,Azul S.A.,1432364,NYSE,Industrials,Airlines,Transportation,Brazil,USD,Ordinary Shares,active,TRUE,air_transport_and_aviation_services
+RYAAY,investable,Ryanair Holdings plc,1038683,Nasdaq,Industrials,Airlines,Transportation,Ireland,USD,Ordinary Shares,active,TRUE,air_transport_and_aviation_services
+LTM,investable,LATAM Airlines Group S.A.,1047716,NYSE,Industrials,Airlines,Transportation,Chile,USD,Ordinary Shares,active,TRUE,air_transport_and_aviation_services
+AER,investable,AerCap Holdings N.V.,1378789,NYSE,Industrials,Rental & Leasing Services,Transportation,Ireland,USD,Ordinary Shares,active,TRUE,air_transport_and_aviation_services
+FTAI,investable,FTAI Aviation Ltd.,1590364,Nasdaq,Industrials,Rental & Leasing Services,Transportation,United States,USD,Ordinary Shares,active,TRUE,air_transport_and_aviation_services
+WLFC,investable,Willis Lease Finance Corporation,1018164,Nasdaq,Industrials,Rental & Leasing Services,Transportation,United States,USD,Common Stock,active,TRUE,air_transport_and_aviation_services
+UPS,investable,"United Parcel Service, Inc.",1090727,NYSE,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+FDX,investable,FedEx Corporation,1048911,NYSE,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+JBHT,investable,"J.B. Hunt Transport Services, Inc.",728535,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+CHRW,investable,"C.H. Robinson Worldwide, Inc.",1043277,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+EXPD,investable,"Expeditors International of Washington, Inc.",746515,NYSE,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+FDXF,investable,"FedEx Freight Holding Company, Inc.",2082247,NYSE,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+LSTR,investable,"Landstar System, Inc.",853816,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+GXO,investable,"GXO Logistics, Inc.",1852244,NYSE,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+PBI,investable,Pitney Bowes Inc.,78814,NYSE,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+CYRX,investable,"Cryoport, Inc.",1124524,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+FWRD,investable,Forward Air Corporation,912728,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+RLGT,investable,"Radiant Logistics, Inc.",1171155,NYSE,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+PAL,investable,"Proficient Auto Logistics, Inc.",1998768,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+CRGO,investable,Freightos Limited,1927719,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Ordinary Shares,active,TRUE,development_stage_and_speculative_transport
+SFWL,investable,Shengfeng Development Limited,1863218,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Ordinary Shares,active,TRUE,development_stage_and_speculative_transport
+NCEW,investable,New Century Logistics (BVI) Limited,1968043,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Ordinary Shares,active,TRUE,development_stage_and_speculative_transport
+PSIG,investable,PS International Group Ltd.,1997201,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Ordinary Shares,active,TRUE,development_stage_and_speculative_transport
+ELOG,investable,Eastern International Ltd.,2013320,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Ordinary Shares,active,TRUE,development_stage_and_speculative_transport
+JYD,investable,Jayud Global Logistics Limited,1938186,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Ordinary Shares,active,TRUE,development_stage_and_speculative_transport
+CTNT,investable,Cheetah Net Supply Chain Service Inc.,1951667,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+ATXG,investable,Addentax Group Corp.,1650101,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+CIIT,investable,"Tianci International, Inc.",1557798,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+HUBG,investable,"Hub Group, Inc.",940942,Nasdaq,Industrials,Integrated Freight & Logistics,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+ZTO,investable,ZTO Express (Cayman) Inc.,1677250,NYSE,Industrials,Integrated Freight & Logistics,Transportation,China,USD,Ordinary Shares,active,TRUE,surface_freight_and_logistics
+KEX,investable,Kirby Corporation,56047,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+MATX,investable,"Matson, Inc.",3453,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+HAFN,investable,Hafnia Limited,1815779,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+ZIM,investable,ZIM Integrated Shipping Services Ltd.,1654126,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Ordinary Shares,active,TRUE,marine_shipping_and_maritime
+SBLK,investable,Star Bulk Carriers Corp.,1386716,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+DAC,investable,Danaos Corporation,1369241,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+ECO,investable,Okeanis Eco Tankers Corp.,1964954,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+CMRE,investable,Costamare Inc.,1503584,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+GSL,investable,"Global Ship Lease, Inc.",1430725,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+CCEC,investable,Capital Clean Energy Carriers Corp.,1392326,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+GNK,investable,Genco Shipping & Trading Limited,1326200,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Ordinary Shares,active,TRUE,marine_shipping_and_maritime
+SB,investable,"Safe Bulkers, Inc.",1434754,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+HSHP,investable,Himalaya Shipping Ltd.,1959455,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+ASC,investable,Ardmore Shipping Corporation,1577437,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+ESEA,investable,Euroseas Ltd.,1341170,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+PANL,investable,Pangaea Logistics Solutions Ltd.,1606909,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+CMDB,investable,Costamare Bulkers Holdings Limited,2033535,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+GASS,investable,StealthGas Inc.,1328919,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+SHIP,investable,Seanergy Maritime Holdings Corp,1448397,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+DSX,investable,Diana Shipping Inc.,1318885,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+SMHI,investable,SEACOR Marine Holdings Inc.,1690334,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,marine_shipping_and_maritime
+EDRY,investable,EuroDry Ltd.,1731388,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+HMR,investable,Heidmar Maritime Holdings Corp.,2029471,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+GLBS,investable,Globus Maritime Limited,1499780,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+NCT,investable,Intercont (Cayman) Limited,2018529,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Ordinary Shares,active,TRUE,development_stage_and_speculative_transport
+HTCO,investable,High-Trend International Group,1928948,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Ordinary Shares,active,TRUE,development_stage_and_speculative_transport
+USEA,investable,United Maritime Corporation,1912847,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+UFG,investable,Uni-Fuels Holdings Limited,2021688,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Ordinary Shares,active,TRUE,development_stage_and_speculative_transport
+EHLD,investable,Euroholdings Ltd.,2032779,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+VNTG,investable,Vantage Corp,2027160,NYSE,Industrials,Marine Shipping,Transportation,United States,USD,Ordinary Shares,active,TRUE,development_stage_and_speculative_transport
+PSHG,investable,Performance Shipping Inc.,1481241,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+CTRM,investable,Castor Maritime Inc.,1720161,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+ICON,investable,Icon Energy Corp.,1995574,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+CISS,investable,C3is Inc.,1951067,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+RUBI,investable,Rubico Inc.,1943421,Nasdaq,Industrials,Marine Shipping,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+UNP,investable,Union Pacific Corporation,100885,NYSE,Industrials,Railroads,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+CSX,investable,CSX Corporation,277948,Nasdaq,Industrials,Railroads,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+CP,investable,Canadian Pacific Kansas City Limited,16875,NYSE,Industrials,Railroads,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+CNI,investable,Canadian National Railway Company,16868,NYSE,Industrials,Railroads,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+NSC,investable,Norfolk Southern Corporation,702165,NYSE,Industrials,Railroads,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+TRN,investable,"Trinity Industries, Inc.",99780,NYSE,Industrials,Railroads,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+GBX,investable,"The Greenbrier Companies, Inc.",923120,NYSE,Industrials,Railroads,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+FSTR,investable,L.B. Foster Company,352825,Nasdaq,Industrials,Railroads,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+RAIL,investable,"FreightCar America, Inc.",1320854,Nasdaq,Industrials,Railroads,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+SWVL,investable,Swvl Holdings Corp.,1875609,Nasdaq,Industrials,Railroads,Transportation,United States,USD,Ordinary Shares,active,TRUE,development_stage_and_speculative_transport
+RVSN,investable,Rail Vision Ltd.,1743905,Nasdaq,Industrials,Railroads,Transportation,United States,USD,Ordinary Shares,active,TRUE,development_stage_and_speculative_transport
+GATX,investable,GATX Corporation,40211,NYSE,Industrials,Rental & Leasing Services,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+ODFL,investable,"Old Dominion Freight Line, Inc.",878927,Nasdaq,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+XPO,investable,"XPO, Inc.",1166003,NYSE,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+TFII,investable,TFI International Inc.,1588823,NYSE,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+SAIA,investable,"Saia, Inc.",1177702,Nasdaq,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+SNDR,investable,"Schneider National, Inc.",1692063,NYSE,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+RXO,investable,"RXO, Inc.",1929561,NYSE,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+ARCB,investable,ArcBest Corporation,894405,Nasdaq,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+WERN,investable,"Werner Enterprises, Inc.",793074,Nasdaq,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+MRTN,investable,"Marten Transport, Ltd.",799167,Nasdaq,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+CVLG,investable,"Covenant Logistics Group, Inc.",928658,NYSE,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+HTLD,investable,"Heartland Express, Inc.",799233,Nasdaq,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+ULH,investable,"Universal Logistics Holdings, Inc.",1308208,Nasdaq,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+PAMT,investable,PAMT CORP,798287,Nasdaq,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+TOPP,investable,Toppoint Holdings Inc.,1960847,NYSE,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,development_stage_and_speculative_transport
+KNX,investable,Knight-Swift Transportation Holdings Inc.,1492691,NYSE,Industrials,Trucking,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics
+R,investable,"Ryder System, Inc.",85961,NYSE,Industrials,Rental & Leasing Services,Transportation,United States,USD,Common Stock,active,TRUE,surface_freight_and_logistics

@@ -272,10 +272,17 @@ def load_universe_jobs(
         JOIN dim_industrials_taxonomy t
           ON t.ticker = c.ticker
          AND t.model_family = ?
-        WHERE c.is_active = 1
+        JOIN dim_universe_membership m
+          ON m.company_id = c.company_id
+         AND m.ticker = c.ticker
+         AND m.model_family = t.model_family
+        WHERE m.membership_status = 'active'
+          AND m.is_current_member = 1
+          AND m.start_date <= ?
+          AND COALESCE(NULLIF(m.end_date, ''), '9999-12-31') >= ?
         ORDER BY c.ticker
         """,
-        (model_family,),
+        (model_family, asof.isoformat(), asof.isoformat()),
     ).fetchall()
     out: list[PriceJob] = []
     seen: set[str] = set()

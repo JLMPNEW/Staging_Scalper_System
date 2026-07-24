@@ -853,7 +853,7 @@ sealed dates without `--lockbox-open`; manifests record the protocol file's sha2
 | Benchmarks / factors | 15b/66 validate and consume the configured broad/sleeve ETF history; missing market-instrument coverage is a hard panel failure. | Maintain full historical coverage whenever a sector or benchmark mapping is added. |
 | Macro regime | Stage 6 is independent and sealed; research/67 joins PIT macro regime/sector/stock/foreign state with vintage checks and hashes the serving DB. | Continue point-in-time raw/serving refreshes; resolve missing historical vintages rather than backfilling with latest revised values. |
 | Rotation state | Research/67 recomputes historical rotation from the matching accepted survivorship panel and distinguishes real states from missing-panel placeholders. | No engine build is pending; maintain ETF warm-up coverage and rerun 67 whenever 15b changes. |
-| Risk / liquidity state | Stages 2, 2.5, and 4 build current risk eligibility, covariance, liquidity snapshots, and transaction-cost overlays. | Store historical risk eligibility, coverage reason, spread/cost assumptions, ADV/capacity, and cost estimates by snapshot date. Liquidity can use historical IB spread samples when available, then latest-prior fallback, then documented default spread. |
+| Risk / liquidity state | Stages 2, 2.5, and 4 build current risk eligibility, covariance, liquidity snapshots, and transaction-cost overlays. Stage 16c now consumes sealed same-date IB spreads plus backward-only IB borrow fees/shortable-share observations, seals every resolved input, and applies conservative missing-data stress. | Exact IB spread history starts in June 2026 and shortable-share history remains sparse. Continue prospective capture; acquire a specialized historical lending source if exact historical availability is required. Never apply a current quote backward. |
 | BL / sleeves / exits | Stages 7–9 are sealed shadow layers. Stage 16 replays AQR, rotation, macro/BL, sleeves, regime-gate and regime-lever arms; 16c tests sector-neutral active weights. | Historical exits still require replayed holdings/lot state. Keep exits current-book diagnostic until that state exists; promote no overlay without net-of-cost lockbox evidence. |
 | Calibration model | Research/67 standardizes the joined panel; 68 fits ridge/Fama-MacBeth slopes; 69 performs purged OOS validation; 71 validates regime cells; 72 runs component IC with global FDR; 70 emits feedback only from approved evidence. | Accumulate independent windows and lockbox evidence. Add elastic-net/Bayesian hierarchy only after ridge cells are stable; apply no Stage 1/7 slope until 69/71/70 and protocol gates approve it. |
 | Optional modules | Forecasting (6.7) and hedging (7.5) are intentionally deferred. | Test ML forecasting and hedging only inside Stage 11 after the rule-based stack has a valid OOS baseline. They remain shadow-only unless they beat the simpler stack OOS net of cost. |
@@ -881,6 +881,10 @@ proper sampling cadence without losing information.
 **Implemented Stage 11 evidence sequence (run in this order):**
 - `research/65_build_pit_score_snapshot_store.py` - immutable PIT score archive/replay.
 - `backtest/15b_build_survivorship_panel.py` - survivorship panel with published delisted exports/events.
+- `backtest/15c_build_execution_ohlcv_panel.py` - sealed adjusted-OHLC execution companion to
+  15b. The 15b adjusted close remains authoritative; Yahoo OHLC is normalized to it, close
+  disagreements are quarantined, and missing opens are never replaced by closes. Delisted exports
+  require optional adjusted OHLC fields for promotion-grade short execution coverage.
 - `research/66_define_calibration_targets.py` - 21d/63d/126d/252d forward, excess/residual and risk labels.
 - `research/67_join_calibration_panel.py` - PIT macro/rotation/sidecar joins and within-date/sector features.
 - `research/68_fit_ridge_alpha_slopes.py` - ridge/Fama-MacBeth slope evidence.
@@ -889,7 +893,34 @@ proper sampling cadence without losing information.
 - `research/72_component_ic_by_regime.py` - component-level IC with global multiplicity control.
 - `research/70_apply_calibration_feedback.py` - sealed proposal only for cells that passed the evidence gates.
 - `backtest/16_run_ablation_walkforward.py`, `16b_run_regime_parameter_sweep.py`, and
-  `16c_sector_neutral_active_arm.py` - net-of-cost overlay, parameter-grid, and active-weight tests.
+  `16c_sector_neutral_active_arm.py` - net-of-cost overlay, parameter-grid, and six-sector
+  single-name active-weight tests. `16c` uses ticker-level PIT spread/commission/borrow costs,
+  observed-or-fee-proxy availability, cost stress, short-selection alpha versus an equal-weight
+  sector short, and sector-breadth/coverage gates. It emits evidence only and cannot create a
+  production long/short target.
+- `backtest/16e_tactical_short_replay.py` - dedicated single-name short strategy. A score observed
+  after D close enters at the D+1 adjusted open and is first evaluated at the D+1 close. The profit
+  target is net of entry/estimated-exit spread, both commissions, and accrued borrow; a same-session
+  exit pays no overnight borrow. Positions also cover on the net stop, signal invalidation, borrow
+  failure/fee ceiling, or calibrated time stop. Missing execution OHLC never falls back to close.
+- `backtest/16f_calibrate_tactical_short.py` - nested, purged walk-forward selection of the net
+  profit target, stop, and maximum holding sessions. It invokes 16e's exact engine in
+  calibration-only mode, selects only inside outer training windows, evaluates untouched outer
+  blocks, requires neighboring-parameter stability and all existing cost/coverage gates, and emits
+  a sealed parameter artifact. This remains separate from `16c`; `16d` remains the H1/V1 regime arm.
+- `backtest/16g_tactical_long_replay.py` - dedicated highest-ranked-name long strategy. A signal
+  observed after D close enters at the D+1 adjusted open. Every close is evaluated; the first
+  missing/neutral-or-worse signal or calibrated time stop schedules an exit at the following
+  adjusted open. It reports net selection alpha versus the matching sector ETF and never substitutes
+  a close for a missing execution open.
+- `backtest/16h_calibrate_tactical_long.py` - expanding, purged calibration over
+  15/30/63/126/252 trading-session maximum holds. All candidates use the same first-breach signal
+  exit. Adjacent OOS blocks are trimmed so realized holding windows cannot overlap, and the final
+  252 sessions are excluded from signal formation so every candidate uses the same outcome-complete
+  sample. Long and short share the core promotion bar: positive net OOS selection alpha, active
+  t-stat >= 2, profit factor >= 1.10, positive stress return, at least four positive sectors, and
+  promotion-grade execution coverage. Borrow/availability gates remain short-only feasibility
+  requirements.
 - `backtest/17_publish_lockbox_ledger.py` - one-time sealed OOS publication after the Open Event.
 
 Only after those pass should optional modules be tested: `forecast/67_train_models.py` /

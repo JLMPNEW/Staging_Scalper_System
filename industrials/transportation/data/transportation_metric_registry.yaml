@@ -1,0 +1,56 @@
+model_family: transportation
+registry_version: transportation_metrics_v2_shadow
+availability_statuses:
+  - REPORTED
+  - DERIVED
+  - PROXY
+  - NOT_APPLICABLE
+  - NOT_DISCLOSED
+  - DISCLOSED_UNPARSED
+  - PARSER_FAILURE
+defaults:
+  minimum_history_days: 0
+  winsor_lower: 0.05
+  winsor_upper: 0.95
+  birthdate: "2019-01-02"
+  production_status: shadow
+metrics:
+  - {metric_id: ret_3m, component: market_trend, source: market, source_field: ret_3m, direction: 1, cohorts: ["*"], required_for_rank: true, minimum_history_days: 63, unit: ratio}
+  - {metric_id: ret_6m, component: market_trend, source: market, source_field: ret_6m, direction: 1, cohorts: ["*"], required_for_rank: true, minimum_history_days: 126, unit: ratio}
+  - {metric_id: ret_12m_ex_1m, component: market_trend, source: market, source_field: ret_12m_ex_1m, direction: 1, cohorts: ["*"], required_for_rank: false, minimum_history_days: 252, unit: ratio}
+  - {metric_id: relative_strength_3m, component: market_trend, source: market, source_field: rel_strength_bench_3m, direction: 1, cohorts: ["*"], required_for_rank: true, minimum_history_days: 63, unit: ratio}
+  - {metric_id: realized_volatility_60d, component: capital_risk, source: market, source_field: realized_vol_60d, direction: -1, cohorts: ["*"], required_for_rank: true, minimum_history_days: 60, unit: ratio}
+  - {metric_id: maximum_drawdown_12m, component: capital_risk, source: market, source_field: max_drawdown_12m, direction: 1, cohorts: ["*"], required_for_rank: true, minimum_history_days: 252, unit: ratio}
+  - {metric_id: average_dollar_volume_60d, component: capital_risk, source: market, source_field: avg_dollar_volume_60d, direction: 1, cohorts: ["*"], required_for_rank: true, minimum_history_days: 60, unit: USD}
+  - {metric_id: operating_margin, component: quality, source: financial, source_field: operating_margin, direction: 1, cohorts: [surface_freight_and_logistics, air_transport_and_aviation_services, marine_shipping_and_maritime], required_for_rank: true, unit: ratio}
+  - {metric_id: fcf_margin, component: quality, source: financial, source_field: fcf_margin, direction: 1, cohorts: [surface_freight_and_logistics, air_transport_and_aviation_services, marine_shipping_and_maritime], required_for_rank: true, unit: ratio}
+  - {metric_id: asset_turnover, component: operating_efficiency, source: financial, source_field: asset_turnover, direction: 1, cohorts: [surface_freight_and_logistics, air_transport_and_aviation_services, marine_shipping_and_maritime], required_for_rank: false, unit: ratio}
+  - {metric_id: revenue_growth, component: growth, source: financial, source_field: revenue_yoy_growth, direction: 1, cohorts: ["*"], required_for_rank: false, unit: ratio}
+  - {metric_id: operating_income_growth, component: growth, source: financial, source_field: operating_income_yoy_growth, direction: 1, cohorts: [surface_freight_and_logistics, air_transport_and_aviation_services, marine_shipping_and_maritime], required_for_rank: false, unit: ratio}
+  - {metric_id: fcf_yield, component: valuation, source: financial, source_field: fcf_yield, direction: 1, cohorts: [surface_freight_and_logistics, air_transport_and_aviation_services, marine_shipping_and_maritime], required_for_rank: false, unit: ratio}
+  - {metric_id: ev_operating_income, component: valuation, source: financial, source_field: ev_operating_income, direction: -1, cohorts: [surface_freight_and_logistics, air_transport_and_aviation_services, marine_shipping_and_maritime], required_for_rank: false, unit: multiple}
+  - {metric_id: capex_to_revenue, component: capital_risk, source: derived, formula: abs(capex_ttm_usd)/revenue_ttm_usd, direction: -1, cohorts: [surface_freight_and_logistics, air_transport_and_aviation_services, marine_shipping_and_maritime], required_for_rank: true, unit: ratio}
+  - {metric_id: net_debt_to_ebitda, component: capital_risk, source: financial, source_field: net_debt_to_ebitda, direction: -1, cohorts: [surface_freight_and_logistics, air_transport_and_aviation_services, marine_shipping_and_maritime], required_for_rank: false, unit: multiple}
+  - {metric_id: interest_coverage, component: capital_risk, source: financial, source_field: interest_coverage, direction: 1, cohorts: [surface_freight_and_logistics, air_transport_and_aviation_services, marine_shipping_and_maritime], required_for_rank: false, unit: multiple}
+  - {metric_id: fcf_conversion, component: quality, source: financial, source_field: fcf_to_net_income, direction: 1, cohorts: [surface_freight_and_logistics, air_transport_and_aviation_services, marine_shipping_and_maritime], required_for_rank: false, unit: ratio}
+  - {metric_id: transport_volume_growth, component: growth, source: disclosure_candidate, candidate_metric: transport_volume_growth, direction: 1, cohorts: [surface_freight_and_logistics], required_for_rank: false, specialized: true, unit: ratio}
+  - {metric_id: pricing_or_yield_growth, component: operating_efficiency, source: disclosure_candidate, candidate_metric: pricing_or_yield_growth, direction: 1, cohorts: [surface_freight_and_logistics], required_for_rank: false, specialized: true, unit: ratio}
+  - {metric_id: operating_ratio, component: operating_efficiency, source: disclosure_candidate, candidate_metric: operating_ratio, direction: -1, cohorts: [surface_freight_and_logistics], industries: [Railroads, Trucking], required_for_rank: false, specialized: true, unit: ratio}
+  - {metric_id: asset_utilization, component: operating_efficiency, source: disclosure_candidate, candidate_metric: asset_utilization, direction: 1, cohorts: [surface_freight_and_logistics], required_for_rank: false, specialized: true, unit: ratio}
+  - {metric_id: purchased_transportation_ratio, component: operating_efficiency, source: disclosure_candidate, candidate_metric: purchased_transportation_ratio, direction: -1, cohorts: [surface_freight_and_logistics], industries: [Integrated Freight & Logistics, Trucking], required_for_rank: false, specialized: true, unit: ratio}
+  - {metric_id: traffic_growth, component: growth, source: disclosure_candidate, candidate_metric: traffic_growth, direction: 1, cohorts: [air_transport_and_aviation_services], required_for_rank: false, specialized: true, unit: ratio}
+  - {metric_id: capacity_growth, component: growth, source: disclosure_candidate, candidate_metric: capacity_growth, direction: 1, cohorts: [air_transport_and_aviation_services], required_for_rank: false, specialized: true, unit: ratio}
+  - {metric_id: load_factor_or_utilization, component: operating_efficiency, source: disclosure_candidate, candidate_metric: load_factor_or_utilization, direction: 1, cohorts: [air_transport_and_aviation_services], required_for_rank: false, specialized: true, unit: ratio}
+  - {metric_id: passenger_or_lease_yield, component: operating_efficiency, source: disclosure_candidate, candidate_metric: passenger_or_lease_yield, direction: 1, cohorts: [air_transport_and_aviation_services], required_for_rank: false, specialized: true, unit: provider_native}
+  - {metric_id: fuel_or_maintenance_intensity, component: capital_risk, source: disclosure_candidate, candidate_metric: fuel_or_maintenance_intensity, direction: -1, cohorts: [air_transport_and_aviation_services], required_for_rank: false, specialized: true, unit: ratio}
+  - {metric_id: fleet_capacity, component: growth, source: disclosure_candidate, candidate_metric: fleet_capacity, direction: 1, cohorts: [marine_shipping_and_maritime], required_for_rank: false, specialized: true, unit: provider_native}
+  - {metric_id: tce_or_day_rate, component: operating_efficiency, source: disclosure_candidate, candidate_metric: tce_or_day_rate, direction: 1, cohorts: [marine_shipping_and_maritime], required_for_rank: false, specialized: true, unit: USD_per_day}
+  - {metric_id: charter_coverage, component: quality, source: disclosure_candidate, candidate_metric: charter_coverage, direction: 1, cohorts: [marine_shipping_and_maritime], required_for_rank: false, specialized: true, unit: ratio}
+  - {metric_id: fleet_utilization, component: operating_efficiency, source: disclosure_candidate, candidate_metric: fleet_utilization, direction: 1, cohorts: [marine_shipping_and_maritime], required_for_rank: false, specialized: true, unit: ratio}
+  - {metric_id: fleet_age, component: capital_risk, source: disclosure_candidate, candidate_metric: fleet_age, direction: -1, cohorts: [marine_shipping_and_maritime], required_for_rank: false, specialized: true, unit: years}
+  - {metric_id: cash_runway_years, component: development_stage_risk, source: financial, source_field: cash_runway_years, direction: 1, cohorts: [development_stage_and_speculative_transport], required_for_rank: true, specialized: true, unit: years}
+  - {metric_id: capital_raise_dependence, component: development_stage_risk, source: financial, source_field: capital_raise_dependence, direction: -1, cohorts: [development_stage_and_speculative_transport], required_for_rank: true, specialized: true, unit: ratio}
+  - {metric_id: diluted_share_growth, component: development_stage_risk, source: financial, source_field: diluted_shares_yoy_growth, direction: -1, cohorts: [development_stage_and_speculative_transport], required_for_rank: false, specialized: true, unit: ratio}
+  - {metric_id: stock_compensation_to_revenue, component: development_stage_risk, source: financial, source_field: sbc_pct_revenue, direction: -1, cohorts: [development_stage_and_speculative_transport], required_for_rank: false, specialized: true, unit: ratio}
+  - {metric_id: going_concern_flag, component: development_stage_risk, source: disclosure_candidate, candidate_metric: going_concern_flag, direction: -1, cohorts: [development_stage_and_speculative_transport], required_for_rank: false, specialized: true, unit: boolean}
+  - {metric_id: commercialization_progress, component: growth, source: disclosure_candidate, candidate_metric: commercialization_progress, direction: 1, cohorts: [development_stage_and_speculative_transport], required_for_rank: false, specialized: true, unit: normalized_score}

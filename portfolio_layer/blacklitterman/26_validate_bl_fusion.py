@@ -404,11 +404,23 @@ def main() -> int:  # noqa: C901
     }
     target_sectors = set(sector_targets)
     sector_bad = []
+    raw_us_total = sum(w for t, w in raw_weights.items() if sector_by_ticker.get(t) in target_sectors)
+    adjusted_us_total = sum(w for t, w in adjusted_weights.items() if sector_by_ticker.get(t) in target_sectors)
+    # Stage 25 only removes uneconomic positions and routes their weight to cash. Relative sector
+    # shares can therefore move beyond the raw optimizer band even though no sector risk was added.
+    # Bound that extra movement by the total US risky weight actually removed; the strategic band
+    # itself remains hard on the raw book.
+    cost_deleveraging_drift = (
+        max(0.0, raw_us_total - adjusted_us_total) / adjusted_us_total
+        if adjusted_us_total > 0.0
+        else 0.0
+    )
     for label, weights in (("raw", raw_weights), ("cost_adjusted", adjusted_weights)):
-        us_total = sum(w for t, w in weights.items() if sector_by_ticker.get(t) in target_sectors)
+        us_total = raw_us_total if label == "raw" else adjusted_us_total
         if us_total <= 0:
             sector_bad.append(f"{label}:us_total<=0")
             continue
+        allowed_band = sector_band + (cost_deleveraging_drift if label == "cost_adjusted" else 0.0)
         exposure: dict[str, float] = {}
         for ticker, weight in weights.items():
             sector = sector_by_ticker.get(ticker, "")
@@ -417,10 +429,17 @@ def main() -> int:  # noqa: C901
             exposure[sector] = exposure.get(sector, 0.0) + weight / us_total
         for sector, target in sector_targets.items():
             actual = exposure.get(sector, 0.0)
-            if actual < target - sector_band - 1e-3 or actual > target + sector_band + 1e-3:
-                sector_bad.append(f"{label}:{sector} actual={actual:.4f} target={target:.4f} band={sector_band:.4f}")
+            if actual < target - allowed_band - 1e-6 or actual > target + allowed_band + 1e-6:
+                sector_bad.append(
+                    f"{label}:{sector} actual={actual:.4f} target={target:.4f} "
+                    f"band={allowed_band:.4f}"
+                )
     rec("sector_exposures_within_macro_bands", "PASS" if not sector_bad else "FAIL",
-        f"{len(sector_targets)} sectors within +/-{sector_band}" if not sector_bad else f"{sector_bad[:8]}")
+        (
+            f"{len(sector_targets)} sectors within raw +/-{sector_band:.4f}; "
+            f"cost_deleveraging_drift={cost_deleveraging_drift:.4f}"
+        )
+        if not sector_bad else f"{sector_bad[:8]}")
 
     foreign_cfg = (meta24.get("foreign") or {})
     fmin = _f_default(foreign_cfg.get("min_budget"), 0.0)

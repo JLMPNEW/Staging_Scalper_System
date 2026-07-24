@@ -25,6 +25,7 @@ from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
+from portfolio_layer.risk.liquidity import load_spread_snapshot  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
 
@@ -62,6 +63,23 @@ def finite_float(value: object) -> float | None:
 
 def manifest_hash(manifest: dict, rel_path: str) -> str | None:
     return ((manifest.get("files") or {}).get(rel_path) or {}).get("sha256")
+
+
+def median_half_spread_bps(row: dict[str, str] | None) -> float | None:
+    """Parse median_half_spread_bps from a spread_snapshot row; None when absent/blank/non-finite.
+
+    Mirrors the optimizer (09) helper so this validator independently reproduces the liquidity floor.
+    """
+    if not row:
+        return None
+    raw = row.get("median_half_spread_bps")
+    if raw in (None, ""):
+        return None
+    try:
+        parsed = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if np.isfinite(parsed) else None
 
 
 def main() -> int:  # noqa: C901
@@ -108,6 +126,16 @@ def main() -> int:  # noqa: C901
     gross = float(oc.get("gross_exposure", 1.0))
     max_weight = float(oc.get("max_weight_per_name", 0.05))
     min_hold = float(oc.get("min_weight_to_hold", 0.0005))
+    # Reproduce the pre-solve liquidity floor so universe/exclusion checks stay exact (fail-open).
+    max_half_spread = finite_float(oc.get("max_half_spread_bps", 0.0)) or 0.0
+    spread_rows = load_spread_snapshot(risk_dir / "spread_snapshot.csv") if max_half_spread > 0 else {}
+
+    def liquidity_excluded(ticker: str) -> bool:
+        if max_half_spread <= 0:
+            return False
+        spread_bps = median_half_spread_bps(spread_rows.get(ticker))
+        return spread_bps is not None and spread_bps > max_half_spread
+
     weight_tol = 1e-6
     cap_tol = 1e-8
     band_tol = 1e-8
@@ -147,6 +175,7 @@ def main() -> int:  # noqa: C901
         and str(coverage.get(t, {}).get("risk_eligible", "")).strip() == "1"
         and str(coverage.get(t, {}).get("role", "")).strip() == "scored"
         and t in cov_tickers
+        and not liquidity_excluded(t)
     }
     missing_book = sorted(expected_universe - book_set)
     extra_book = sorted(book_set - expected_universe)
@@ -175,6 +204,37 @@ def main() -> int:  # noqa: C901
             else f"missing={missing_exclusions[:10]} extra={extra_exclusions[:10]}"
         ),
     )
+
+    # 2b. liquidity floor: every name above the half-spread ceiling is excluded with the right reason,
+    # and the optimizer_meta liquidity_floor block agrees with the reproduced exclusion count.
+    if max_half_spread > 0:
+        reason_by_ticker = {
+            str(r.get("ticker", "")).strip(): str(r.get("exclusion_reason", "")).strip()
+            for r in excluded_rows
+        }
+        expected_liquidity = {t for t in expected_excluded if liquidity_excluded(t)} | {
+            t for t in excluded if liquidity_excluded(t)
+        }
+        liq_bad = []
+        for t in sorted(expected_liquidity):
+            if reason_by_ticker.get(t) != "liquidity_spread":
+                liq_bad.append(f"{t}:reason={reason_by_ticker.get(t)!r}")
+        wrong_reason = sorted(
+            t for t, reason in reason_by_ticker.items()
+            if reason == "liquidity_spread" and not liquidity_excluded(t)
+        )
+        if wrong_reason:
+            liq_bad.append(f"reason_liquidity_but_not_over_ceiling={wrong_reason[:10]}")
+        meta_liq = meta.get("liquidity_floor", {}) if isinstance(meta.get("liquidity_floor"), dict) else {}
+        n_excluded_liq = sum(1 for r in excluded_rows if str(r.get("exclusion_reason", "")).strip() == "liquidity_spread")
+        if int(meta_liq.get("n_excluded", -1)) != n_excluded_liq:
+            liq_bad.append(f"meta.n_excluded={meta_liq.get('n_excluded')}!={n_excluded_liq}")
+        rec(
+            "liquidity_floor_exclusions_reasoned",
+            "PASS" if not liq_bad else "FAIL",
+            f"{n_excluded_liq} names excluded>{max_half_spread}bps, reasons + meta agree"
+            if not liq_bad else f"{liq_bad[:10]}",
+        )
 
     # 3. numeric fields are finite. NaN/Inf here would corrupt optimizer handoff.
     numeric_fields = ["final_score", "score_confidence", "mu_raw", "mu_used",

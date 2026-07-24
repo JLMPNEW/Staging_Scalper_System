@@ -120,6 +120,20 @@ score_contract:
       file_path: "industrials/machinery/dashboard/{yyyy-mm-dd}/machinery_final_rank_table.csv"
       require_oos_score_valid: true
       calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
+    # Transportation is connected as an optional shadow source. It remains
+    # allocation-ineligible until its dated ranks carry a valid sealed OOS score.
+    - model_family: transportation
+      adapter: industrial_family
+      enabled: true
+      required: false
+      staleness_tolerance_days: 3
+      sector: "Industrials"
+      industry: "Transportation"
+      industry_aggregate: "Transportation"
+      file_mode: dated
+      file_path: "industrials/transportation/dashboard/{yyyy-mm-dd}/transportation_final_rank_table.csv"
+      require_oos_score_valid: true
+      calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
 
 # Stage 2 - live/current-book cross-sector risk panel (self-sourced, NOT survivorship history).
 risk_panel:
@@ -252,10 +266,23 @@ optimizer:
     # a larger live budget is earned through Stage 7/BL fusion + Stage 11 calibration evidence.
     defense: 0.05
     machinery: 0.00
+    # deployable-book concentration/cash/liquidity policy 2026-07-20: cap the tech sleeves so the LIVE
+    # book cannot over-concentrate in Information Technology (consumed ONLY by optimizer 09/10).
+    software_infrastructure: 0.25
+    semiconductors: 0.15
+    technology_hardware: 0.12
+  # deployable-book concentration/cash/liquidity policy 2026-07-20: pre-solve liquidity floor — names
+  # whose run-dir risk/spread_snapshot.csv median_half_spread_bps exceeds this are excluded from sizing
+  # (fail-open: a missing snapshot or missing/blank row never excludes). Optimizer 09 only.
+  max_half_spread_bps: 50
 
 # Stage 4 - transaction-cost & turnover overlay (flat per-order commission, AUM-aware). Stage 3 unchanged.
 transaction_costs:
   aum_usd: 300000                          # REQUIRED (CLI --aum overrides); flat commission is AUM-dependent
+  # deployable-book concentration/cash/liquidity policy 2026-07-20: hold a fixed CASH buffer in the
+  # deployable book. Stage 4 (14_apply_no_trade_bands) scales the asset block by (1 - fraction) and
+  # routes the freed weight to CASH so assets+cash still close to gross=1.0. Optimizer gross stays 1.0.
+  cash_target_fraction: 0.05
   commission_per_order:                    # one name . one side = one order (buy=1, sell=1)
     low: 1.00
     base: 1.125                            # reported/sealed assumption
@@ -549,6 +576,28 @@ stage11_lockbox:
   lockbox_opened: false
   training_label_end_max: "2025-12-31"  # purge rule: promoted models train only on labels ending <= this
 
+# Earnings-date calendar feed (earnings_dates/37,38). Advisory data only: nothing downstream
+# consumes it yet; the history CSV accrues a PIT record of scheduled dates from the day it turns on.
+earnings_dates:
+  include_non_investable: true            # bulk fetch covers all scored names at no extra API cost
+  alpha_vantage:
+    horizon: "12month"
+    api_key_env: ["ALPHAVANTAGE_API_KEY", "ALPHA_VANTAGE_API_KEY"]
+    timeout_sec: 120.0
+  yahoo:
+    enabled: true
+    max_calls_per_run: 400                # fallback only fires for names the bulk calendar misses
+    request_pause_sec: 1.0
+  gemini:
+    enabled: true                         # free tier only: hard cap + pacing below, never bulk usage
+    model: "gemini-2.5-flash"
+    api_key_env: ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+    max_calls_per_run: 15
+    request_pause_sec: 6.5                # ~9 requests/minute stays under free-tier RPM
+  validation:
+    min_coverage_fraction_investable: 0.60  # WARN below this; reports >90d out are often unpublished
+    max_days_until: 400
+
 # Stage 11 - PIT snapshot store (research/65). Immutable append-only archive of sealed Stage 1 runs.
 snapshot_store:
   dir: "snapshot_store"                 # under paths.output_dir
@@ -573,6 +622,14 @@ survivorship_panel:
     - "../output/*_reports/market_data/*delisting_events.csv"
   delisting_hint_report_globs:             # existing Norgate import REPORTS (delist-date hints only, no prices)
     - "../output/*_reports/market_data/norgate_delisted*price_import.csv"
+
+# Stage 11 - adjusted-OHLC execution panel (backtest/15c). The sealed 15b close remains
+# authoritative. Yahoo raw OHLC is adjusted and normalized to that close; missing opens
+# are never replaced with closes. Delisted exports may add adj_open/adj_high/adj_low.
+execution_ohlcv_panel:
+  dir: "execution_ohlcv_panel"
+  close_disagreement_tolerance: 0.02
+  ticker_complete_fraction: 0.95
 
 # Stage 11 - forward-return calibration targets (research/66). Lockbox-enforced.
 calibration_targets:
@@ -621,9 +678,11 @@ calibration_feedback:
 # The governor emits a SHADOW directive only; nothing applies it until Stage 11 promotes it.
 orchestration:
   step_timeout_sec: 1800
+  macro_step_timeout_sec: 7200             # raw + full serving fits can legitimately exceed 30 minutes
   cadences:
-    tactical: [scores, risk, optimizer, costs, rotation, governor, final]
-    strategic: [scores, risk, optimizer, costs, rotation, macro, bl, sleeves, ledger, exits, payout, governor, final]
+    # earnings runs last: advisory-only (WARN on failure) and must never delay trading-critical stages
+    tactical: [scores, risk, optimizer, costs, rotation, governor, final, earnings]
+    strategic: [scores, risk, optimizer, costs, rotation, macro, bl, sleeves, ledger, exits, payout, governor, final, earnings]
 
 # Stage 10 - payout / liability planner (SHADOW-ONLY; the +payout walk-forward arm is UNREGISTERED
 # for the first Open Event per docs/LOCKBOX_PROTOCOL.md). Emits a per-run distribution PROPOSAL:
@@ -707,3 +766,155 @@ regime_calibration:
 # and whether any pillar beats the diluting composite. EVIDENCE ONLY -- never edits scoring.
 component_ic:
   dir: "component_ic"                      # under paths.output_dir; one subdir per panel build
+  # Frozen, directionally consistent raw pillars used by research/72 and the 16c conversion test.
+  # Every field is "higher is better"; risk/penalty/output scores are intentionally excluded.
+  pillars_by_pipeline:
+    semiconductors: [valuation_score, quality_score, risk_control_score, positioning_score, market_behavior_score, growth_score, sector_cycle_score]
+    software_infrastructure: [valuation_score, quality_score, risk_control_score, positioning_score, market_behavior_score, growth_score]
+    technology_hardware: [valuation_score, quality_score, risk_control_score, positioning_score, market_behavior_score, growth_score]
+    defense: [valuation_score, quality_score, risk_control_score, positioning_score, market_behavior_score, growth_score, sector_cycle_score]
+    biotech: [clinical_opportunity_score, commercial_value_score, commercial_quality_score, forward_catalyst_score, financial_quality_score, financial_survival_score, momentum_score, institutional_accumulation_score]
+    med_devices: [fundamental_quality_score, durable_growth_alpha_score, fda_alpha_score, reimbursement_score, valuation_score, technical_alpha_score, institutional_accumulation_score, sentiment_catalyst_score]
+
+# Stage 11 - six-sector single-name long/short conversion and promotion evidence (backtest/16c).
+# This does not create a production target. It must first prove that both the spread and its short
+# leg survive PIT execution, borrow, availability, commission, and conservative missing-data stress.
+sector_neutral_arm:
+  dir: "sector_neutral_arm"
+  short_costs:
+    mode: "pit"                            # pit | fixed; only pit can earn promotion
+    market_positioning_db_path: "${MARKET_POSITIONING_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite}"
+    research_aum_usd: 300000
+    commission_per_order_usd: 1.25
+    fixed_one_way_cost_bps: 5.0            # compatibility/self-test only; fixed mode is not promotable
+    historical_half_spread_fallback_bps: 15.0
+    missing_borrow_fee_annual: 0.10        # annual decimal; deliberately conservative
+    max_borrow_fee_age_days: 7
+    max_shortable_age_days: 7
+    allow_fee_proxy_availability: true     # a same/prior-week IB fee observation is borrow evidence
+    allow_unknown_availability: true       # allowed for research, but excluded from promotion coverage
+    stress_half_spread_fallback_bps: 30.0
+    stress_observed_spread_multiplier: 1.5
+    stress_missing_borrow_fee_annual: 0.25
+    stress_observed_borrow_multiplier: 1.5
+  promotion:
+    min_holding_days: 504
+    min_independent_windows: 12            # feasible floor for a 126d horizon over the 2019-2025 dev window
+    min_active_ir: 0.25
+    min_active_t: 2.0
+    min_short_net_ann: 0.0                  # short-name selection alpha vs equal-weight sector short
+    min_stress_net_active_ann: 0.0
+    min_positive_sectors: 4
+    min_actual_borrow_weight_fraction: 0.90
+    min_observed_or_fee_proxy_availability_weight_fraction: 0.90
+
+# Stage 11 - dedicated EOD tactical single-name short replay (backtest/16e).
+# Signal at D close, enter at the next session open, and return covered capital to CASH. This is a
+# separate strategy from 16c and can never produce a target book unless every promotion gate passes.
+tactical_short:
+  dir: "tactical_short"
+  tail_fraction: 0.10
+  min_names_per_sector: 2
+  max_names_per_sector: 10
+  signal_every_n_snapshots: 5
+  # Provisional only until 16f emits a sealed parameter artifact. This is a NET
+  # return threshold after estimated round-trip execution and accrued borrow.
+  net_profit_target: 0.03
+  stop_loss: 0.05
+  max_holding_days: 5
+  invalidation_score_z: 0.0
+  cooldown_days: 3
+  target_short_gross: 0.30
+  max_position_weight: 0.015
+  max_borrow_fee_annual: 0.25
+  short_costs:
+    market_positioning_db_path: "${MARKET_POSITIONING_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite}"
+    research_aum_usd: 300000
+    commission_per_order_usd: 1.25
+    historical_half_spread_fallback_bps: 15.0
+    missing_borrow_fee_annual: 0.10
+    max_borrow_fee_age_days: 7
+    max_shortable_age_days: 7
+    allow_fee_proxy_availability: true
+    allow_unknown_availability: true
+    stress_half_spread_fallback_bps: 30.0
+    stress_observed_spread_multiplier: 1.5
+    stress_missing_borrow_fee_annual: 0.25
+    stress_observed_borrow_multiplier: 1.5
+  promotion:
+    min_trades: 500
+    min_selection_alpha_ann: 0.0
+    min_active_t: 2.0
+    min_profit_factor: 1.10
+    min_positive_sectors: 4
+    min_stress_net_ann: 0.0
+    min_actual_borrow_weight_fraction: 0.90
+    min_observed_or_fee_proxy_availability_weight_fraction: 0.90
+    min_candidate_execution_ohlcv_fraction: 0.95
+
+# Stage 11 - nested, purged calibration of the tactical-short exit policy (16f).
+# The grid is intentionally limited to economically interpretable neighboring
+# values. Outer folds are untouched by parameter selection.
+tactical_short_calibration:
+  dir: "tactical_short_calibration"
+  max_holding_days: [1, 2, 3, 5, 7]
+  net_profit_targets: [0.005, 0.01, 0.02, 0.03]
+  stop_losses: [0.03, 0.05]
+  outer_folds: 4
+  outer_initial_fraction: 0.50
+  minimum_outer_train_dates: 252
+  minimum_valid_outer_folds: 3
+  inner_folds: 3
+  inner_initial_fraction: 0.50
+  minimum_inner_train_dates: 126
+  embargo_trading_days: 2
+  stability_penalty: 0.50
+  min_parameter_fold_consistency: 0.50
+
+# Stage 11 - dedicated long-only execution replay (backtest/16g). This does not replace the
+# Stage 3/4 baseline. It tests whether the highest-ranked names add net selection alpha using
+# executable D+1-open entries and first-threshold signal exits at the following open.
+tactical_long:
+  dir: "tactical_long"
+  tail_fraction: 0.10
+  min_names_per_sector: 2
+  max_names_per_sector: 10
+  signal_every_n_snapshots: 5
+  max_holding_days: 30                  # provisional; 16h calibrates the sealed value
+  invalidation_score_z: 0.0             # first close at/below neutral schedules next-open exit
+  target_long_gross: 0.95
+  max_position_weight: 0.05
+  long_costs:
+    market_positioning_db_path: "${MARKET_POSITIONING_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite}"
+    research_aum_usd: 300000
+    commission_per_order_usd: 1.25
+    historical_half_spread_fallback_bps: 15.0
+    stress_half_spread_fallback_bps: 30.0
+    stress_observed_spread_multiplier: 1.5
+  # Core gates deliberately match tactical_short.promotion. Borrow and availability
+  # gates are side-specific and therefore remain short-only.
+  promotion:
+    min_trades: 500
+    min_selection_alpha_ann: 0.0
+    min_active_t: 2.0
+    min_profit_factor: 1.10
+    min_positive_sectors: 4
+    min_stress_net_ann: 0.0
+    min_candidate_execution_ohlcv_fraction: 0.95
+
+# Stage 11 - nested, purged calibration of the long-only holding horizon (backtest/16h).
+# No profit target or price stop is fitted; a position exits on the first signal
+# invalidation or at the selected maximum horizon.
+tactical_long_calibration:
+  dir: "tactical_long_calibration"
+  max_holding_days: [15, 30, 63, 126, 252]
+  outer_folds: 4
+  outer_initial_fraction: 0.50
+  minimum_outer_train_dates: 126
+  minimum_valid_outer_folds: 3
+  inner_folds: 3
+  inner_initial_fraction: 0.50
+  minimum_inner_train_dates: 126
+  embargo_signal_dates: 2
+  stability_penalty: 0.50
+  min_parameter_fold_consistency: 0.50

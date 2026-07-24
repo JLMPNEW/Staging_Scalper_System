@@ -78,7 +78,7 @@ IDENTITY_TO_LOCAL_COLUMNS = {
 }
 
 HEADER_ALIASES = {
-    "ticker": ("ticker", "tickers", "symbol", "symbols"),
+    "ticker": ("ticker", "tickers", "symbol", "symbols", "name"),
     "company_name": ("companyname", "company", "name", "securityname", "issuer", "issuername"),
     "cik": ("cik",),
     "exchange": ("exchange", "primaryexchange", "listingexchange"),

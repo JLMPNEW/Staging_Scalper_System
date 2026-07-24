@@ -63,9 +63,51 @@ def cfg_get(config: dict[str, Any], dotted_key: str, default: Any = None) -> Any
     return cur
 
 
+def family_config(config: dict[str, Any], model_family: str) -> dict[str, Any]:
+    """Return one explicitly configured industrials model family.
+
+    Family resolution is deliberately fail-closed: a non-defense family must
+    never inherit the legacy ``industrials_universe`` defense paths.  Legacy
+    readers can continue using ``cfg_get`` while family-aware code migrates to
+    this resolver.
+    """
+
+    family = str(model_family or "").strip()
+    if not family:
+        raise ValueError("model_family is required")
+    families = config.get("model_families")
+    if not isinstance(families, dict):
+        raise KeyError("Config must define a model_families mapping")
+    payload = families.get(family)
+    if not isinstance(payload, dict):
+        configured = sorted(str(key) for key in families)
+        raise KeyError(f"Unknown industrials model_family={family!r}; configured={configured}")
+    declared = str(payload.get("model_family") or family).strip()
+    if declared != family:
+        raise ValueError(
+            f"model_families.{family}.model_family={declared!r} does not match {family!r}"
+        )
+    return payload
+
+
+def family_cfg_get(
+    config: dict[str, Any],
+    model_family: str,
+    dotted_key: str,
+    default: Any = None,
+    *,
+    required: bool = False,
+) -> Any:
+    """Read a key from ``model_families.<family>`` without cross-family fallback."""
+
+    value = cfg_get(family_config(config, model_family), dotted_key, default)
+    if required and (value is None or str(value).strip() == ""):
+        raise KeyError(f"Missing required config key model_families.{model_family}.{dotted_key}")
+    return value
+
+
 def resolve_path(raw: Any, *, base_dir: Path) -> Path:
     if raw is None or str(raw).strip() == "":
         raise ValueError("Path config value is empty")
     path = Path(expand_env_vars(raw)).expanduser()
     return path if path.is_absolute() else (base_dir / path).resolve()
-

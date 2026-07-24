@@ -8,6 +8,7 @@ AVAILABILITY_STATUSES = frozenset(
         "EXEMPT",
         "NOT_APPLICABLE",
         "NOT_DISCLOSED",
+        "DISCLOSED_UNPARSED",
         "PARSER_FAILURE",
     }
 )
@@ -44,6 +45,9 @@ DERIVED_METRIC_FEATURES: dict[str, str] = {
 PROXY_METRIC_FEATURES: dict[str, str] = {
     "rpo_implied_orders": "rpo_implied_orders",
     "rpo_implied_book_to_bill": "rpo_implied_book_to_bill",
+    "contract_load_proxy": "contract_load_proxy",
+    "contract_load_proxy_yoy_growth": "contract_load_proxy_yoy_growth",
+    "contract_load_proxy_to_revenue": "contract_load_proxy_to_revenue",
 }
 
 REQUIRED_METRIC_FEATURES: dict[str, str] = {
@@ -63,6 +67,12 @@ METRIC_OPERANDS: dict[str, tuple[str, ...]] = {
     "rpo_to_revenue": ("remaining_performance_obligation", "revenue_ttm"),
     "rpo_implied_orders": ("remaining_performance_obligation", "prior_comparable_rpo", "revenue_ttm"),
     "rpo_implied_book_to_bill": ("rpo_implied_orders", "revenue_ttm"),
+    "contract_load_proxy": ("reported_backlog", "remaining_performance_obligation"),
+    "contract_load_proxy_yoy_growth": (
+        "contract_load_proxy",
+        "prior_comparable_same_source_contract_load",
+    ),
+    "contract_load_proxy_to_revenue": ("contract_load_proxy", "revenue_ttm"),
     "roic": ("operating_income_ttm", "average_invested_capital"),
     "asset_turnover": ("revenue_ttm", "average_assets"),
     "incremental_operating_margin": ("operating_income_change", "revenue_change"),

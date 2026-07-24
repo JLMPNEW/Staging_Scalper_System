@@ -14,6 +14,149 @@ runtime:
 source_registry:
   path: "data/free_source_registry.yaml"
 
+# Family-aware readers must resolve paths from this mapping and fail when a
+# family/key is absent. The legacy industrials_universe block remains below for
+# defense compatibility while existing shared stages are migrated.
+model_families:
+  defense:
+    model_family: defense
+    universe:
+      seed_csv: "defense/system_csvs/defense_tickers.csv"
+      seed_source_id: defense_ticker_seed
+      policy_path: "defense/data/defense_universe_policy.yaml"
+      cohort_path: "defense/data/defense_cohorts.yaml"
+      cohort_source_id: defense_cohort_policy
+      historical_membership_csv: "defense/system_csvs/defense_historical_membership.csv"
+      historical_membership_source_id: defense_historical_membership_seed
+      delisted_seed_csv: "defense/system_csvs/aerospace_defense_delisted.csv"
+      delisted_source_id: defense_delisted_calibration_seed
+      ticker_aliases_csv: "defense/system_csvs/defense_ticker_aliases.csv"
+      ticker_aliases_source_id: defense_ticker_alias_seed
+      listing_dates_csv: "defense/system_csvs/defense_listing_dates.csv"
+  machinery:
+    model_family: machinery
+    universe:
+      seed_csv: "machinery/system_csvs/machinery_tickers.csv"
+      seed_source_id: machinery_ticker_seed
+      policy_path: "machinery/data/machinery_universe_policy.yaml"
+      cohort_path: "machinery/data/machinery_cohorts.yaml"
+      cohort_source_id: machinery_cohort_policy
+      historical_membership_csv: "machinery/system_csvs/machinery_historical_membership.csv"
+      historical_membership_source_id: machinery_historical_membership_seed
+      delisted_seed_csv: "machinery/system_csvs/machinery_delisted.csv"
+      delisted_source_id: machinery_delisted_calibration_seed
+      ticker_aliases_csv: "machinery/system_csvs/machinery_ticker_aliases.csv"
+      ticker_aliases_source_id: machinery_ticker_alias_seed
+      listing_dates_csv: "machinery/system_csvs/machinery_listing_dates.csv"
+  transportation:
+    model_family: transportation
+    universe:
+      seed_csv: "transportation/system_csvs/transportation_tickers.csv"
+      seed_source_id: transportation_ticker_seed
+      policy_path: "transportation/data/transportation_universe_policy.yaml"
+      cohort_path: "transportation/data/transportation_cohorts.yaml"
+      cohort_source_id: transportation_cohort_policy
+      historical_membership_csv: "transportation/system_csvs/transportation_historical_membership.csv"
+      historical_membership_source_id: transportation_historical_membership_seed
+      delisted_seed_csv: "transportation/system_csvs/transportation_delisted.csv"
+      delisted_source_id: transportation_delisted_calibration_seed
+      ticker_aliases_csv: "transportation/system_csvs/transportation_ticker_aliases.csv"
+      ticker_aliases_source_id: transportation_ticker_alias_seed
+      listing_dates_csv: "transportation/system_csvs/transportation_listing_dates.csv"
+      cik_ticker_overrides_csv: "transportation/system_csvs/transportation_cik_ticker_overrides.csv"
+      norgate_symbol_map_csv: "transportation/system_csvs/transportation_norgate_symbol_map.csv"
+      norgate_symbol_overrides_csv: "transportation/system_csvs/transportation_norgate_symbol_overrides.csv"
+      security_continuity_overrides_csv: "transportation/system_csvs/transportation_security_continuity_overrides.csv"
+      security_continuity_source_id: transportation_security_continuity_policy
+      optimization_start_date: "2019-01-02"
+      delisted_default_start_date: "2000-01-01"
+      sector: Industrials
+      industry: Transportation
+      subsector: Transportation
+      benchmark_ticker: IYT
+      benchmark_tickers: [IYT, XTN, SPY]
+    market:
+      primary_benchmark: IYT
+      benchmark_tickers: [IYT, XTN, SPY]
+      stage3_output_dir: "../output/industrials/transportation/stage3"
+      delisted_export_dir: "../output/industrials_reports/market_data"
+    norgate_delisted_import:
+      source_id: norgate_us_equities_total_return
+      output_csv: "../output/industrials/transportation/stage3/norgate_delisted_price_import.csv"
+      price_adjustment_mode: CAPITAL
+      purge_existing_range: true
+    historical_load:
+      start_date: "2019-01-02"
+      active_price_source_id: yahoo_finance_adjusted
+      delisted_price_source_id: norgate_us_equities_total_return
+      benchmark_tickers: [IYT, XTN, SPY]
+      required_fx_pairs: [BRLUSD, CADUSD, CLPUSD, CNYUSD, COPUSD, EURUSD, GBPUSD, MXNUSD, NOKUSD]
+      approved_price_exclusions: [CGI, RRTS]
+      output_dir: "../output/industrials/transportation/historical_load"
+    financial:
+      metric_registry: "transportation/data/transportation_metric_registry.yaml"
+      concept_aliases_csv: "transportation/system_csvs/transportation_xbrl_concept_aliases.csv"
+      sec_sync_output_csv: "../output/industrials/transportation/stage4/sec_fundamentals_sync.csv"
+      feature_output_csv: "../output/industrials/transportation/stage4/financial_feature_coverage.csv"
+      metric_availability_output_csv: "../output/industrials/transportation/stage4/transportation_metric_availability.csv"
+      metric_validation_output_json: "../output/industrials/transportation/stage4/transportation_metric_validation.json"
+    specialized_disclosures:
+      # Item-6 coverage pass: one latest annual and one latest interim filing
+      # per issuer. This bounded sample measures parser coverage before any
+      # full historical disclosure backfill is authorized.
+      include_historical: true
+      annual_filings_per_ticker: 1
+      interim_filings_per_ticker: 1
+      # Historical feature production begins on 2019-01-02. Load the preceding
+      # 400-day disclosure window so the first PIT snapshot can use only facts
+      # that were actually available by that date.
+      historical_backfill_start_date: "2017-11-28"
+      historical_max_filings_per_ticker: 0
+      max_candidate_staleness_days: 400
+      download_workers: 4
+      parallel_request_spacing_sec: 0.5
+      minimum_active_document_coverage: 0.95
+      minimum_all_document_coverage: 0.90
+      minimum_accepted_ticker_coverage_for_historical_scale: 0.25
+      sync_output_csv: "../output/industrials/transportation/stage4/transportation_specialized_disclosure_sync.csv"
+      sync_output_json: "../output/industrials/transportation/stage4/transportation_specialized_disclosure_sync.json"
+      review_output_csv: "../output/industrials/transportation/stage4/transportation_specialized_disclosure_review.csv"
+      validation_output_json: "../output/industrials/transportation/stage4/transportation_specialized_disclosure_validation.json"
+      historical_sync_output_csv: "../output/industrials/transportation/historical_load/transportation_historical_specialized_disclosure_sync.csv"
+      historical_sync_output_json: "../output/industrials/transportation/historical_load/transportation_historical_specialized_disclosure_sync.json"
+      historical_validation_output_json: "../output/industrials/transportation/historical_load/transportation_historical_specialized_disclosure_validation.json"
+    historical_features:
+      # Month-end is an observation/coverage cadence for building the research
+      # feature panel. It is not a portfolio rebalance policy.
+      start_date: "2019-01-02"
+      observation_cadence: month_end
+      benchmark_ticker: IYT
+      output_root: "../output/industrials/transportation/historical_features"
+      build_report_csv: "../output/industrials/transportation/historical_features/transportation_pit_feature_history_build.csv"
+      build_manifest_json: "../output/industrials/transportation/historical_features/transportation_pit_feature_history_build.json"
+      validation_output_json: "../output/industrials/transportation/historical_features/transportation_pit_feature_history_validation.json"
+    scoring:
+      feature_output_csv: "../output/industrials/transportation/stage6/transportation_scoring_features.csv"
+      validation_output_json: "../output/industrials/transportation/stage6/transportation_scoring_validation.json"
+      dashboard_root: "../output/industrials/transportation/dashboard"
+      output_column_map: "transportation/data/transportation_output_column_map.yaml"
+      max_staleness_days: 7
+      minimum_avg_dollar_volume_60d: 1000000
+      minimum_score_confidence: 0.35
+      minimum_specialized_coverage: 0.15
+      score_model_version: transportation_shadow_score_v1
+      model_version: transportation_model_v1_shadow
+      scoring_contract_version: transportation_final_rank_table_v1_shadow
+      component_weights:
+        market_trend: 0.25
+        quality: 0.15
+        growth: 0.10
+        valuation: 0.10
+        operating_efficiency: 0.15
+        capital_risk: 0.20
+        development_stage_risk: 0.05
+        positioning: 0.00
+
 industrials_universe:
   initial_subsector: "defense"
   # CF-4: expected_ticker_count lives ONLY in the universe policy YAML
@@ -145,6 +288,8 @@ sec_fundamentals:
     - "10-K/A"
     - "10-Q"
     - "10-Q/A"
+    - "10-12B"
+    - "10-12B/A"
     - "20-F"
     - "20-F/A"
     - "40-F"
@@ -249,9 +394,9 @@ positioning_import:
 
 positioning_validation:
   # PS-5: minimum fraction of the gated universe that must have Form 4 coverage for
-  # validator 14 to pass. 0.0 preserves prior behavior (no floor); raise deliberately
-  # once baseline coverage is known.
-  min_form4_covered_fraction: 0.0
+  # validator 14 to pass. Current defense coverage is 100%; retain operational
+  # headroom while failing closed if the insider feed is missing or misrouted.
+  min_form4_covered_fraction: 0.90
 
 # NEW-5: removed dead key market_positioning.finra_api_publication_lag_days (no reader) — the FINRA dissemination-lag default lives in market_positioning/api_collectors.py.
 
@@ -282,6 +427,15 @@ scoring_policy:
       # source overrides makes every profile graduation dated and reviewable.
       reporting_profile_graduations_csv: "defense/system_csvs/defense_reporting_profile_graduations.csv"
       reporting_profile_graduation_audit_csv: "../output/industrials/defense/stage4/reporting_profile_graduation_audit.csv"
+      profile_graduation:
+        max_annual_age_days: 550
+        min_periodic_filings: 2
+    transportation:
+      eligibility_policy_csv: "transportation/system_csvs/transportation_scoring_eligibility_policy.csv"
+      eligibility_audit_csv: "../output/industrials/transportation/stage6/scoring_eligibility_policy_audit.csv"
+      reporting_overrides_csv: "transportation/system_csvs/transportation_sec_reporting_overrides.csv"
+      reporting_profile_graduations_csv: "transportation/system_csvs/transportation_reporting_profile_graduations.csv"
+      reporting_profile_graduation_audit_csv: "../output/industrials/transportation/stage4/reporting_profile_graduation_audit.csv"
       profile_graduation:
         max_annual_age_days: 550
         min_periodic_filings: 2

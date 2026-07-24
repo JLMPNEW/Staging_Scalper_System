@@ -33,6 +33,7 @@ from portfolio_layer.optimizer.optimizer_core import (  # noqa: E402
     finalize_long_only_weights, finalize_with_group_caps, snap_rounded_weights, solve_long_only_mv,
     weight_sensitivity_band,
 )
+from portfolio_layer.risk.liquidity import load_spread_snapshot  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
 
@@ -73,6 +74,23 @@ def _f(value: object, default: float = 0.0) -> float:
 
 def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def median_half_spread_bps(row: dict[str, str] | None) -> float | None:
+    """Parse median_half_spread_bps from a spread_snapshot row; None when absent/blank/non-finite.
+
+    A None result means the liquidity floor cannot judge the name and must fail open (never exclude).
+    """
+    if not row:
+        return None
+    raw = row.get("median_half_spread_bps")
+    if raw in (None, ""):
+        return None
+    try:
+        value = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) else None
 
 
 def stage3_readiness(run_dir: Path, risk_dir: Path) -> list[dict[str, str]]:
@@ -198,6 +216,10 @@ def main() -> int:  # noqa: C901
     if not any(abs(g - risk_aversion) < 1e-12 for g in band_gammas):
         band_gammas.append(risk_aversion)
     band_gammas = sorted(set(band_gammas))
+    # deployable-book liquidity floor: exclude names whose median half-spread exceeds this ceiling
+    # (<=0 or missing disables the floor). Fail-open on a missing snapshot / missing ticker row.
+    max_half_spread = _f(oc.get("max_half_spread_bps"), 0.0)
+    spread_rows = load_spread_snapshot(risk_dir / "spread_snapshot.csv") if max_half_spread > 0 else {}
 
     scores = {r["ticker"]: r for r in read_csv(scores_path)}
     coverage = {r["ticker"]: r for r in read_csv(coverage_path)}
@@ -207,8 +229,12 @@ def main() -> int:  # noqa: C901
     cov_tickers = set(covariance.index)
 
     # Locked universe: scored equities only, eligible by both gates, with a covariance row.
+    # A pre-solve liquidity floor then drops names whose median half-spread breaches the config ceiling
+    # (fail-open: a missing snapshot / missing row / blank median never excludes — coverage wins).
     universe: list[str] = []
     excluded: list[dict] = []
+    n_liquidity_excluded = 0
+    n_liquidity_no_spread = 0
     for ticker, srow in scores.items():
         if str(srow.get("investable_eligible", "")).strip() != "1":
             continue
@@ -217,6 +243,18 @@ def main() -> int:  # noqa: C901
         role = str(crow.get("role", "")).strip()
         in_cov = ticker in cov_tickers
         if risk_eligible and role == "scored" and in_cov:
+            spread_bps = median_half_spread_bps(spread_rows.get(ticker)) if max_half_spread > 0 else None
+            if max_half_spread > 0 and spread_bps is not None and spread_bps > max_half_spread:
+                excluded.append({
+                    "ticker": ticker, "source_pipeline": srow.get("source_pipeline", ""),
+                    "investable_eligible": 1, "risk_eligible": 1,
+                    "role": role, "risk_status": crow.get("risk_status", "missing"),
+                    "exclusion_reason": "liquidity_spread",
+                })
+                n_liquidity_excluded += 1
+                continue
+            if max_half_spread > 0 and spread_bps is None:
+                n_liquidity_no_spread += 1  # fail-open: sized normally, only counted for the log
             universe.append(ticker)
         else:
             reason = (
@@ -230,6 +268,11 @@ def main() -> int:  # noqa: C901
                 "role": role, "risk_status": crow.get("risk_status", "missing"),
                 "exclusion_reason": reason,
             })
+    if max_half_spread > 0:
+        LOGGER.info(
+            "Liquidity floor (max_half_spread_bps=%.4g): excluded=%d, fail_open_no_spread=%d, snapshot_rows=%d",
+            max_half_spread, n_liquidity_excluded, n_liquidity_no_spread, len(spread_rows),
+        )
     universe = sorted(universe)
     if not universe:
         LOGGER.error("Optimizer universe is empty after the locked eligibility filter")
@@ -313,6 +356,12 @@ def main() -> int:  # noqa: C901
         "max_weight_per_name": max_weight,
         "min_weight_to_hold": min_hold,
         "sector_weight_caps": sector_cap_summary,
+        "liquidity_floor": {
+            "max_half_spread_bps": max_half_spread,
+            "snapshot_present": bool(spread_rows),
+            "n_excluded": n_liquidity_excluded,
+            "n_fail_open_no_spread": n_liquidity_no_spread,
+        },
         "sensitivity_band_gammas": band_gammas,
         "covariance_source": "stage2_risk_covariance_csv",
         "covariance_sha256": sha256_file(cov_path),

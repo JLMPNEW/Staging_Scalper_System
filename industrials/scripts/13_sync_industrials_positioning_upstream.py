@@ -601,12 +601,19 @@ def ingest_industrials_diluted_share_proxies(
     return len(rows_to_upsert)
 
 
-def run_industrials_import(config_path: Path, *, asof: date | None = None) -> None:
+def run_industrials_import(
+    config_path: Path,
+    *,
+    model_family: str,
+    asof: date | None = None,
+) -> None:
     cmd = [
         sys.executable,
         str(PACKAGE_ROOT / "scripts" / "09_import_industrials_positioning.py"),
         "--config",
         str(config_path),
+        "--model-family",
+        model_family,
     ]
     if asof is not None:
         cmd.extend(["--asof", asof.isoformat()])
@@ -989,7 +996,11 @@ def main() -> None:
                 backfilled = backfill_short_interest_float_shares(conn)
                 LOGGER.info("Loaded diluted-share float proxies rows=%d backfilled_short_interest_rows=%d", proxy_rows, backfilled)
             if not args.skip_industrials_import:
-                run_industrials_import(config_path, asof=end_date)
+                run_industrials_import(
+                    config_path,
+                    model_family=model_family,
+                    asof=end_date,
+                )
             return
         if args.float_proxy_only:
             proxy_rows = ingest_industrials_diluted_share_proxies(
@@ -1003,7 +1014,11 @@ def main() -> None:
             backfilled = backfill_short_interest_float_shares(conn)
             LOGGER.info("Loaded diluted-share float proxies rows=%d backfilled_short_interest_rows=%d", proxy_rows, backfilled)
             if not args.skip_industrials_import:
-                run_industrials_import(config_path, asof=end_date)
+                run_industrials_import(
+                    config_path,
+                    model_family=model_family,
+                    asof=end_date,
+                )
             return
         if args.reaggregate_13f_only:
             tickers = load_universe_tickers(tickers_csv)
@@ -1022,7 +1037,11 @@ def main() -> None:
                 backfilled = backfill_short_interest_float_shares(conn)
                 LOGGER.info("Loaded diluted-share float proxies rows=%d backfilled_short_interest_rows=%d", proxy_rows, backfilled)
             if not args.skip_industrials_import:
-                run_industrials_import(config_path, asof=end_date)
+                run_industrials_import(
+                    config_path,
+                    model_family=model_family,
+                    asof=end_date,
+                )
             return
         if not args.skip_finra_short_interest:
             result = sync_finra_equity_short_interest_files(
@@ -1081,7 +1100,11 @@ def main() -> None:
             LOGGER.info("Loaded diluted-share float proxies rows=%d backfilled_short_interest_rows=%d", proxy_rows, backfilled)
 
     if not args.skip_industrials_import:
-        run_industrials_import(config_path, asof=end_date)
+        run_industrials_import(
+            config_path,
+            model_family=model_family,
+            asof=end_date,
+        )
 
 
 if __name__ == "__main__":

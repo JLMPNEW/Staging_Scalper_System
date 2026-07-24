@@ -71,6 +71,181 @@ def test_sec_user_agent_rejects_unresolved_template_with_email_tripwire() -> Non
         sec_sync.resolve_sec_user_agent(config)
 
 
+def test_transportation_reviewed_concept_alias_is_loaded() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    config_path = project_root / "industrials" / "config.yaml"
+    config = sec_sync.load_yaml(config_path)
+    concept_map: dict[tuple[str, str], list[dict[str, object]]] = {}
+
+    sec_sync.add_family_concept_mappings(
+        concept_map,
+        model_family="transportation",
+        config=config,
+        base_dir=config_path.parent,
+    )
+
+    key = ("ifrs-full", "RevenueFromRenderingOfTransportServices")
+    assert key in concept_map
+    assert concept_map[key] == [
+        {
+            "taxonomy": "ifrs-full",
+            "concept_name": "RevenueFromRenderingOfTransportServices",
+            "canonical_metric": "revenue",
+            "financial_statement": "income_statement",
+            "period_type": "duration",
+            "sign_policy": "as_reported",
+            "priority": 20,
+        }
+    ]
+    expected_capex_aliases = {
+        ("us-gaap", "PaymentsToAcquireProductiveAssets"),
+        ("us-gaap", "PaymentsToAcquireOtherProductiveAssets"),
+        ("us-gaap", "PaymentsToAcquireOtherPropertyPlantAndEquipment"),
+        ("us-gaap", "PaymentsForFlightEquipment"),
+        (
+            "ifrs-full",
+            "PurchaseOfPropertyPlantAndEquipmentIntangibleAssetsOtherThanGoodwillInvestmentPropertyAndOtherNoncurrentAssets",
+        ),
+        ("us-gaap", "PaymentsToAcquireEquipmentOnLease"),
+        ("us-gaap", "PaymentsToAcquireMachineryAndEquipment"),
+    }
+    for capex_key in expected_capex_aliases:
+        assert capex_key in concept_map
+        assert concept_map[capex_key][0]["canonical_metric"] == "capex"
+        assert concept_map[capex_key][0]["period_type"] == "duration"
+        assert concept_map[capex_key][0]["sign_policy"] == "positive_abs"
+    debt_key = ("ifrs-full", "ProceedsFromCurrentBorrowings")
+    assert debt_key in concept_map
+    assert concept_map[debt_key][0]["canonical_metric"] == "debt_issuance_proceeds"
+    assert concept_map[debt_key][0]["period_type"] == "duration"
+    assert concept_map[debt_key][0]["sign_policy"] == "positive_abs"
+
+
+def test_legacy_archive_uses_canonical_complete_submission_filename() -> None:
+    assert (
+        sec_sync.archive_raw_submission_document_name("0000890662-00-000017")
+        == "0000890662-00-000017.txt"
+    )
+    assert sec_sync.archive_raw_submission_document_name("000089066200000017") == ""
+
+
+def test_legacy_ascii_statement_parser_recovers_scaled_core_facts() -> None:
+    facts = sec_sync.parse_archive_legacy_ascii_table_facts(
+        """
+        <TABLE>
+        <CAPTION>
+        CONDENSED CONSOLIDATED BALANCE SHEETS
+        (In thousands)
+        August 31,
+        2000 1999
+        <S> <C> <C>
+        TOTAL ASSETS  $ 906,188  $ 825,232
+        </TABLE>
+        <TABLE>
+        <CAPTION>
+        CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS
+        (In thousands)
+        Three Months Ended August 31,
+        2000 1999
+        <S> <C> <C>
+        REVENUE  $ 412,950  $ 391,651
+        NET REVENUE $ 153,112 $ 150,650
+        NET INCOME $ 5,847 $ 5,979
+        </TABLE>
+        """,
+        document_name="0000890662-00-000017.txt",
+        filing={
+            "form_type": "10-Q",
+            "report_date": "2000-08-31",
+            "filing_date": "2000-10-11",
+        },
+        company_currency="USD",
+    )
+    values = {
+        (fact.concept_name, fact.period_end): fact.value
+        for fact in facts
+    }
+    assert values[("Assets", "2000-08-31")] == 906_188_000
+    assert values[("Assets", "1999-08-31")] == 825_232_000
+    assert values[("Revenue", "2000-08-31")] == 412_950_000
+    assert values[("Revenue", "1999-08-31")] == 391_651_000
+    assert not any(
+        fact.concept_name == "Revenue" and fact.value == 153_112_000
+        for fact in facts
+    )
+    assert all(fact.source_detail == sec_sync.TEXT_TABLE_SOURCE_DETAIL for fact in facts)
+
+
+def test_text_table_statement_guard_keeps_ifrs_income_statement() -> None:
+    """Regression: the statement-semantic guard must not drop income-statement
+    concepts when the table heading is unrecognized (financial_summary).
+
+    CAD IFRS foreign private issuers (e.g. MDA Space) title their income
+    statement "Statement of Comprehensive Income"/"Statement of Earnings", which
+    the classifier reports as financial_summary. Treating that default as a
+    statement conflict silently dropped Revenue/OperatingIncome/NetIncome and
+    failed the FPI-hybrid completeness gate.
+    """
+    # The IFRS heading is genuinely unrecognized -> financial_summary default.
+    assert (
+        sec_sync.text_table_statement_provenance(
+            "Condensed Consolidated Statement of Comprehensive Income", ""
+        )[0]
+        == "financial_summary"
+    )
+    assert "financial_summary" not in sec_sync.RECOGNIZED_STATEMENT_TYPES
+
+    facts = sec_sync.parse_archive_text_table_facts(
+        """
+        <p>Condensed Consolidated Statement of Comprehensive Income (in millions of Canadian dollars)</p>
+        <table>
+          <tr><th>Three months ended March 31</th></tr>
+          <tr><th></th><th>2026</th><th>2025</th></tr>
+          <tr><td>Revenue</td><td>464.1</td><td>351.0</td></tr>
+          <tr><td>Gross profit</td><td>115.0</td><td>90.0</td></tr>
+          <tr><td>Income from operations</td><td>40.1</td><td>35.3</td></tr>
+          <tr><td>Net income</td><td>29.6</td><td>32.9</td></tr>
+        </table>
+        """,
+        document_name="ex99-2.htm",
+        filing={"report_date": "2026-03-31", "filing_date": "2026-05-01", "form_type": "6-K"},
+        company_currency="CAD",
+    )
+    values_by_concept = {
+        (fact.concept_name, fact.period_end): round(fact.value)
+        for fact in facts
+    }
+    assert values_by_concept[("Revenue", "2026-03-31")] == 464_100_000
+    assert values_by_concept[("Revenue", "2025-03-31")] == 351_000_000
+    assert values_by_concept[("OperatingIncomeLoss", "2026-03-31")] == 40_100_000
+    assert values_by_concept[("NetIncomeLoss", "2026-03-31")] == 29_600_000
+
+
+def test_text_table_statement_guard_still_rejects_conflicting_statement() -> None:
+    """The guard must remain active for POSITIVELY recognized statement headings:
+    a balance-sheet concept appearing as a working-capital line on the cash-flow
+    statement is not a balance and must be rejected.
+    """
+    facts = sec_sync.parse_archive_text_table_facts(
+        """
+        <p>Consolidated Statements of Cash Flows (in thousands)</p>
+        <table>
+          <tr><th>Year ended December 31</th></tr>
+          <tr><th></th><th>2025</th><th>2024</th></tr>
+          <tr><td>Net income</td><td>10,000</td><td>9,000</td></tr>
+          <tr><td>Inventories</td><td>(5,000)</td><td>(3,000)</td></tr>
+          <tr><td>Accounts payable</td><td>2,000</td><td>1,000</td></tr>
+        </table>
+        """,
+        document_name="cash-flows.htm",
+        filing={"report_date": "2025-12-31", "filing_date": "2026-02-15", "form_type": "10-K"},
+        company_currency="USD",
+    )
+    concepts = {fact.concept_name for fact in facts}
+    assert "Inventory" not in concepts
+    assert "AccountsPayable" not in concepts
+
+
 def test_targeted_sec_report_preserves_unselected_tickers(tmp_path: Path) -> None:
     path = tmp_path / "coverage.csv"
     original = [
@@ -87,6 +262,18 @@ def test_targeted_sec_report_preserves_unselected_tickers(tmp_path: Path) -> Non
         rows = list(csv.DictReader(handle))
     assert [row["ticker"] for row in rows] == ["AAA", "BBB"]
     assert {row["ticker"]: row["status"] for row in rows} == {"AAA": "success", "BBB": "success"}
+
+
+def test_profiles_all_members_requires_local_historical_profile_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        ["sec_sync.py", "--profiles-all-members"],
+    )
+    args = sec_sync.parse_args()
+    assert args.profiles_all_members
+    assert not args.profiles_only
 
 
 def test_sec_cache_atomic_write_retries_transient_file_lock(

@@ -473,7 +473,33 @@ def prune_removed_current_universe_rows(
     tickers = sorted(keep_tickers)
     placeholders = ",".join("?" for _ in tickers)
     today_iso = date.today().isoformat()
+    now = utc_now()
     before = conn.total_changes
+    conn.execute(
+        f"""
+        UPDATE dim_company AS c
+        SET is_active = 0,
+            universe_status = 'historical',
+            data_quality_status = 'retired_from_current_universe',
+            updated_at = ?
+        WHERE c.ticker NOT IN ({placeholders})
+          AND EXISTS (
+              SELECT 1
+              FROM dim_universe_membership m
+              WHERE m.company_id = c.company_id
+                AND m.model_family = ?
+                AND m.is_current_member = 1
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM dim_universe_membership other
+              WHERE other.company_id = c.company_id
+                AND other.model_family <> ?
+                AND other.is_current_member = 1
+          )
+        """,
+        (now, *tickers, model_family, model_family),
+    )
     conn.execute(
         f"""
         UPDATE dim_universe_membership

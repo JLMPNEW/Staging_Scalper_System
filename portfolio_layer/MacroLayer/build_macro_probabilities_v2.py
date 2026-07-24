@@ -487,7 +487,12 @@ def _apply_trailing_recalibration(
         intercept, slope = calibration_line(y, eligible["raw_probability"].to_numpy(dtype=float))
         if intercept is None or slope is None or slope <= 0.0:
             continue
-        raw = pd.to_numeric(out.loc[window, "probability_value"], errors="coerce").to_numpy(dtype=float)
+        # pandas may expose a read-only view (notably with copy-on-write enabled). Recalibration
+        # mutates this temporary vector before assigning it back, so require an owned buffer.
+        raw = pd.to_numeric(out.loc[window, "probability_value"], errors="coerce").to_numpy(
+            dtype=float,
+            copy=True,
+        )
         finite = np.isfinite(raw)
         if not finite.any():
             continue

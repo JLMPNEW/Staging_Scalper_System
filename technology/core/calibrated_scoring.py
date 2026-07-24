@@ -21,6 +21,7 @@ from technology.core.scoring_features import (
     cfg_ticker_set,
     overlay_component_defs,
     percentile_scores,
+    prune_stale_scoring_rows,
     qmarks,
     safe_float,
     upsert_component_defs,
@@ -567,6 +568,19 @@ def build_calibrated_scores(settings: CalibratedScoringSettings) -> None:
             with conn:
                 conn.execute("DELETE FROM data_quality_issues WHERE stage = ?", (settings.build_run_type,))
                 upsert_component_defs(conn, model_family=model_family, component_defs=component_defs, neutral_score=neutral_score, overlay_default_quality=0.0)
+                pruned_rows = prune_stale_scoring_rows(
+                    conn,
+                    source_id=source_id,
+                    model_family=model_family,
+                    asof_date=asof_text,
+                    keep_tickers=[str(output["ticker"]) for output in outputs],
+                    include_model_output=True,
+                )
+                if pruned_rows:
+                    LOGGER.info(
+                        "Pruned %d stale same-date calibrated rows for removed universe tickers.",
+                        pruned_rows,
+                    )
                 for output in outputs:
                     row = output["_row"]
                     row["source_id"] = source_id

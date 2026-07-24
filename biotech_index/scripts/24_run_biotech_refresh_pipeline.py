@@ -1330,7 +1330,12 @@ def connect_form4_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def read_form4_snapshot_date(conn: sqlite3.Connection, snapshot_table: str) -> tuple[str, str]:
+def read_form4_snapshot_date(
+    conn: sqlite3.Connection,
+    snapshot_table: str,
+    *,
+    on_or_before: date | None = None,
+) -> tuple[str, str]:
     sources: list[tuple[str, str]] = []
     if snapshot_table:
         sources.append((snapshot_table, "last_index_date"))
@@ -1350,14 +1355,21 @@ def read_form4_snapshot_date(conn: sqlite3.Connection, snapshot_table: str) -> t
         try:
             table_sql = quote_identifier(table)
             field_sql = quote_identifier(field)
-            row = conn.execute(f"SELECT MAX({field_sql}) AS snapshot_date FROM {table_sql}").fetchone()
+            rows = conn.execute(
+                f"SELECT DISTINCT {field_sql} AS snapshot_date FROM {table_sql} "
+                f"WHERE {field_sql} IS NOT NULL AND {field_sql} <> ''"
+            ).fetchall()
         except (sqlite3.Error, ValueError) as exc:
             LOGGER.debug("Form 4 snapshot probe skipped source=%s.%s error=%s", table, field, exc)
             continue
-        if row and row["snapshot_date"]:
-            raw = str(row["snapshot_date"])
+        for row in rows:
+            raw = str(row["snapshot_date"] or "").strip()
             parsed = parse_db_date(raw)
-            if parsed is not None and (best_date is None or parsed > best_date):
+            if (
+                parsed is not None
+                and (on_or_before is None or parsed <= on_or_before)
+                and (best_date is None or parsed > best_date)
+            ):
                 best_raw = raw
                 best_source = f"{table}.{field}"
                 best_date = parsed
@@ -1381,6 +1393,8 @@ def form4_raw_filing_tables_present(
 def read_form4_raw_filing_date(
     conn: sqlite3.Connection,
     sources: list[tuple[str, str]],
+    *,
+    on_or_before: date | None = None,
 ) -> tuple[str, str]:
     best_raw = ""
     best_source = ""
@@ -1399,7 +1413,11 @@ def read_form4_raw_filing_date(
         for row in rows:
             raw = str(row["filing_date"] or "").strip()
             parsed = parse_db_date(raw)
-            if parsed is not None and (best_date is None or parsed > best_date):
+            if (
+                parsed is not None
+                and (on_or_before is None or parsed <= on_or_before)
+                and (best_date is None or parsed > best_date)
+            ):
                 best_raw = raw
                 best_source = f"{table}.{field}"
                 best_date = parsed
@@ -1488,9 +1506,17 @@ def validate_form4_preflight(
     else:
         try:
             with closing(connect_form4_readonly(form4_db_path)) as conn:
-                snapshot_raw, snapshot_source = read_form4_snapshot_date(conn, snapshot_table)
+                snapshot_raw, snapshot_source = read_form4_snapshot_date(
+                    conn,
+                    snapshot_table,
+                    on_or_before=target_date,
+                )
                 if raw_filing_check_enabled:
-                    raw_filing_raw, raw_filing_source = read_form4_raw_filing_date(conn, raw_filing_sources)
+                    raw_filing_raw, raw_filing_source = read_form4_raw_filing_date(
+                        conn,
+                        raw_filing_sources,
+                        on_or_before=target_date,
+                    )
                     raw_filing_tables_exist = form4_raw_filing_tables_present(conn, raw_filing_sources)
         except sqlite3.Error as exc:
             failures.append(f"Form 4 database cannot be opened read-only: {form4_db_path} ({type(exc).__name__}: {exc})")

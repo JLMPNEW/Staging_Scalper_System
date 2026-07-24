@@ -511,6 +511,7 @@ def _holding_state(run_as_of: str, source_sha: str, open_positions: list[dict[st
 def _additional_reconciliations(
     *,
     run_as_of: str,
+    prior_ledger_as_of: str | None,
     open_positions: list[dict[str, str]],
     net_stock_positions: list[dict[str, str]],
     trades: list[dict[str, str]],
@@ -526,7 +527,16 @@ def _additional_reconciliations(
     stock_pos = [r for r in open_positions if r.get("asset_category") == "Stocks"]
     option_pos = [r for r in open_positions if r.get("asset_category") == "Equity and Index Options"]
     rec("open_positions_present", "PASS" if stock_pos else "FAIL", f"stocks={len(stock_pos)} options={len(option_pos)}")
-    rec("trade_history_present", "PASS" if trades else "FAIL", f"trade_rows={len(trades)}")
+    if trades:
+        rec("trade_history_present", "PASS", f"trade_rows={len(trades)}")
+    elif prior_ledger_as_of:
+        rec(
+            "trade_history_present",
+            "PASS",
+            f"trade_rows=0; valid no-trade statement rolled from sealed prior ledger {prior_ledger_as_of}",
+        )
+    else:
+        rec("trade_history_present", "FAIL", "trade_rows=0 and no sealed prior ledger is available")
     rec("instrument_metadata_present", "PASS" if instruments else "FAIL", f"instrument_rows={len(instruments)}")
     rec("cash_report_present", "PASS" if cash_report else "FAIL", f"cash_report_rows={len(cash_report)}")
 
@@ -700,6 +710,7 @@ def main() -> int:
     })
     recs.extend(_additional_reconciliations(
         run_as_of=run_as_of,
+        prior_ledger_as_of=prior_as_of,
         open_positions=open_positions,
         net_stock_positions=net_stock_positions,
         trades=trades,

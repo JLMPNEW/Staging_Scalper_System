@@ -61,6 +61,8 @@ tmpomvpuh6h/
 !med_devices/data/fda_company_footprints.csv
 !med_devices/data/fda_manual_footprint_evidence.csv
 !med_devices/data/fda_manufacturer_overrides.csv
+!med_devices/data/fda_product_family_exposure.csv
+!med_devices/data/fda_product_family_mapping.csv
 !med_devices/data/fda_regulatory_review_overrides.csv
 !portfolio_layer/data/*.csv
 !portfolio_layer/MacroLayer/*.csv

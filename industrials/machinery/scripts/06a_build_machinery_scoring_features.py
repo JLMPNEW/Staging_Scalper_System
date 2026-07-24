@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import connect  # noqa: E402
+from industrials.core.policy_loader import load_eligibility_policy  # noqa: E402
 from industrials.machinery.scoring import (  # noqa: E402
     build_scoring_feature_rows,
     dated_path,
@@ -54,10 +55,37 @@ def main() -> int:
     weights = cfg_get(config, "machinery_scoring.component_weights", {}) or {}
     if not isinstance(weights, dict):
         raise ValueError("machinery_scoring.component_weights must be a mapping")
+    policy_path = resolve_path(
+        cfg_get(config, "scoring_policy.families.machinery.eligibility_policy_csv"),
+        base_dir=base_dir,
+    )
+    eligibility_policies = load_eligibility_policy(policy_path, asof=asof)
+    if not eligibility_policies:
+        raise ValueError(f"No machinery scoring eligibility policies are effective at {asof}")
+    market_sources = tuple(
+        dict.fromkeys(
+            [
+                str(cfg_get(config, "market_data_policy.scoring_primary_source", "") or "").strip(),
+                *[
+                    str(value or "").strip()
+                    for value in (cfg_get(config, "market_data_policy.scoring_fallback_sources", []) or [])
+                ],
+            ]
+        )
+    )
+    market_sources = tuple(source for source in market_sources if source)
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 120.0))) as conn:
         rows = build_scoring_feature_rows(
             conn,
             asof=asof,
+            eligibility_policies=eligibility_policies,
+            market_source_priority=market_sources,
+            financial_source_priority=(
+                str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts")),
+            ),
+            positioning_source_priority=(
+                str(cfg_get(config, "positioning_import.source_id", "industrials_positioning_composite")),
+            ),
             component_weights=weights,
             min_score_confidence=float(cfg_get(config, "machinery_scoring.min_score_confidence", 0.40)),
             max_staleness_days=int(cfg_get(config, "market_data_policy.max_staleness_days", 7)),

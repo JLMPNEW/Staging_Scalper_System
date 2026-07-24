@@ -47,7 +47,18 @@ BASE_FIELDS = [
     "classification",
     "decision_bucket",
     "entry_status",
+    "final_investability_gate",
+    "portfolio_candidate_gate",
+    "calibration_cohort",
     "calibration_eligible_flag",
+    "research_calibration_input_eligible_flag",
+    "research_calibration_status",
+    "research_calibration_reason",
+    "calibration_sample_role",
+    "stage11_calibration_input_eligible_flag",
+    "stage11_calibration_input_reason",
+    "stage11_calibration_panel_source",
+    "survivorship_corrected_panel_flag",
     "composite_score",
     "raw_composite_score",
     "ic_tilted_composite_score",
@@ -162,6 +173,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof-start", type=str, default="", help="Inclusive start date for multi-as-of backtests.")
     parser.add_argument("--asof-end", type=str, default="", help="Inclusive end date for multi-as-of backtests.")
     parser.add_argument("--all-asofs", action="store_true", help="Backtest every saved med_device_daily_scores as-of date.")
+    parser.add_argument(
+        "--stage11-eligible-only",
+        action="store_true",
+        help=(
+            "Fail closed to score rows explicitly marked stage11_calibration_input_eligible_flag=1. "
+            "Use this for lockbox calibration panels."
+        ),
+    )
     parser.add_argument("--horizons", type=str, default="30,60,120", help="Comma-separated trading-day forward horizons.")
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
@@ -208,6 +227,29 @@ def first_float_or_none(*raw_values: object) -> float | None:
 def value_or_blank(row: dict[str, Any], key: str) -> object:
     value = row.get(key)
     return "" if value is None else value
+
+
+def flag_is_one(raw: object) -> bool:
+    value = to_float(raw)
+    return value is not None and value == 1.0
+
+
+def filter_stage11_eligible_rows(
+    score_rows_by_asof: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+    filtered = {
+        asof: [
+            row
+            for row in rows_for_asof
+            if flag_is_one(row.get("stage11_calibration_input_eligible_flag"))
+        ]
+        for asof, rows_for_asof in score_rows_by_asof.items()
+    }
+    empty_asofs = [asof for asof, rows_for_asof in filtered.items() if not rows_for_asof]
+    return (
+        {asof: rows_for_asof for asof, rows_for_asof in filtered.items() if rows_for_asof},
+        empty_asofs,
+    )
 
 
 def latest_score_asof(conn: Any) -> str:
@@ -378,6 +420,22 @@ def build_backtest_rows(
             "classification": row.get("classification") or "",
             "decision_bucket": row.get("decision_bucket") or "",
             "entry_status": row.get("entry_status") or "",
+            "final_investability_gate": value_or_blank(row, "final_investability_gate"),
+            "portfolio_candidate_gate": value_or_blank(row, "portfolio_candidate_gate"),
+            "calibration_cohort": row.get("calibration_cohort") or "",
+            "calibration_eligible_flag": value_or_blank(row, "calibration_eligible_flag"),
+            "research_calibration_input_eligible_flag": value_or_blank(
+                row, "research_calibration_input_eligible_flag"
+            ),
+            "research_calibration_status": row.get("research_calibration_status") or "",
+            "research_calibration_reason": row.get("research_calibration_reason") or "",
+            "calibration_sample_role": row.get("calibration_sample_role") or "",
+            "stage11_calibration_input_eligible_flag": value_or_blank(
+                row, "stage11_calibration_input_eligible_flag"
+            ),
+            "stage11_calibration_input_reason": row.get("stage11_calibration_input_reason") or "",
+            "stage11_calibration_panel_source": row.get("stage11_calibration_panel_source") or "",
+            "survivorship_corrected_panel_flag": value_or_blank(row, "survivorship_corrected_panel_flag"),
             "composite_score": composite_score,
             "raw_composite_score": raw_composite_score,
             "ic_tilted_composite_score": value_or_blank(row, "ic_tilted_composite_score"),
@@ -594,6 +652,21 @@ def main() -> None:
         empty_asofs = [asof for asof, rows_for_asof in score_rows_by_asof.items() if not rows_for_asof]
         if empty_asofs:
             raise RuntimeError(f"No score rows found for requested as-of dates: {','.join(empty_asofs)}")
+        if args.stage11_eligible_only:
+            requested_asof_count = len(score_rows_by_asof)
+            score_rows_by_asof, empty_eligible_asofs = filter_stage11_eligible_rows(score_rows_by_asof)
+            if len(empty_eligible_asofs) == requested_asof_count:
+                raise RuntimeError(
+                    "No Stage 11 eligible score rows found for any requested as-of date: "
+                    + ",".join(empty_eligible_asofs)
+                )
+            if empty_eligible_asofs:
+                LOGGER.warning(
+                    "Excluded %d as-of dates with zero Stage 11 eligible rows: %s",
+                    len(empty_eligible_asofs),
+                    ",".join(empty_eligible_asofs),
+                )
+                asofs = [asof for asof in asofs if asof in score_rows_by_asof]
         source_priority = calibration_market_sources(config)
         tickers = sorted(
             {

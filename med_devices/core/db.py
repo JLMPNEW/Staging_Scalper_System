@@ -1465,6 +1465,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
     conn.execute("PRAGMA foreign_keys = ON")
     _migrate_raw_api_responses_unique(conn)
+    _normalize_denovo_approval_types(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_api_responses_source ON raw_api_responses(source_id, request_time_utc)")
     conn.execute(
         """
@@ -2056,6 +2057,33 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     # No user_version gate: migrations above are idempotent and run unconditionally.
     conn.commit()
+
+
+def _normalize_denovo_approval_types(conn: sqlite3.Connection) -> None:
+    # Some De Novo records arrive through the 510(k) endpoint and were
+    # historically labeled as 510k solely from their endpoint. Submission
+    # number is authoritative; collapse any legacy duplicate before relabeling.
+    conn.execute(
+        """
+        DELETE FROM fact_fda_approval AS legacy
+        WHERE UPPER(COALESCE(legacy.submission_number, '')) LIKE 'DEN%'
+          AND legacy.submission_type = '510k'
+          AND EXISTS (
+              SELECT 1
+              FROM fact_fda_approval AS canonical
+              WHERE canonical.submission_number = legacy.submission_number
+                AND canonical.submission_type = 'DENOVO'
+          )
+        """
+    )
+    conn.execute(
+        """
+        UPDATE fact_fda_approval
+        SET submission_type = 'DENOVO'
+        WHERE UPPER(COALESCE(submission_number, '')) LIKE 'DEN%'
+          AND submission_type = '510k'
+        """
+    )
 
 
 def _migrate_raw_api_responses_unique(conn: sqlite3.Connection) -> None:

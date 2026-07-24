@@ -201,12 +201,47 @@ def _upsert_membership(
 
 def load_listing_dates(path: Path) -> dict[str, dict[str, str]]:
     if not path.exists():
-        return {}
-    return {
-        normalize_ticker(row.get("ticker")): row
-        for row in read_csv_rows(path)
-        if normalize_ticker(row.get("ticker"))
+        raise FileNotFoundError(f"Listing-date contract not found: {path}")
+    rows = read_csv_rows(path)
+    required = {
+        "ticker",
+        "first_eligible_date",
+        "last_eligible_date",
+        "eligibility_basis",
+        "source",
+        "confidence",
     }
+    if not rows:
+        raise ValueError(f"Listing-date contract is empty: {path}")
+    missing = sorted(required - set(rows[0]))
+    if missing:
+        raise ValueError(f"Listing-date contract missing columns={missing}: {path}")
+    output: dict[str, dict[str, str]] = {}
+    for row in rows:
+        ticker = normalize_ticker(row.get("ticker"))
+        if not ticker:
+            raise ValueError(f"Listing-date contract has a blank ticker: {path}")
+        if ticker in output:
+            raise ValueError(f"Listing-date contract has duplicate ticker={ticker}: {path}")
+        first_date = _parse_date(row.get("first_eligible_date"), field="first_eligible_date", ticker=ticker)
+        last_date = _parse_date(
+            row.get("last_eligible_date"),
+            field="last_eligible_date",
+            ticker=ticker,
+            allow_blank=True,
+        )
+        if last_date and last_date < first_date:
+            raise ValueError(
+                f"{ticker}: last_eligible_date={last_date} precedes first_eligible_date={first_date}"
+            )
+        try:
+            confidence = float(str(row.get("confidence") or "").strip())
+        except ValueError as exc:
+            raise ValueError(f"{ticker}: invalid listing confidence={row.get('confidence')!r}") from exc
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError(f"{ticker}: listing confidence must be in [0, 1]")
+        output[ticker] = row
+    return output
 
 
 def load_active_universe(
@@ -236,6 +271,11 @@ def load_active_universe(
         raise ValueError("; ".join(errors[:20]))
     listing_dates = load_listing_dates(listing_path)
     active_tickers = {normalize_ticker(row.get("ticker")) for row in active_rows}
+    missing_listing_dates = sorted(active_tickers - set(listing_dates))
+    if missing_listing_dates:
+        raise ValueError(
+            f"Active machinery tickers missing listing-date contracts={missing_listing_dates[:20]}"
+        )
     stale_rows = conn.execute(
         "SELECT ticker FROM dim_industrials_taxonomy WHERE model_family = ?",
         (MODEL_FAMILY,),
@@ -246,6 +286,9 @@ def load_active_universe(
         "DELETE FROM dim_universe_membership WHERE model_family = ? AND membership_source_id = ?",
         (MODEL_FAMILY, seed_source_id),
     )
+    # Source-scoped identifier refresh: a corrected CIK would otherwise leave
+    # the stale identifier row in place forever (UNIQUE includes the value).
+    conn.execute("DELETE FROM dim_identifier WHERE source_id = ?", (seed_source_id,))
     for row in active_rows:
         ticker = normalize_ticker(row.get("ticker"))
         cik = normalize_cik(row.get("cik"))
@@ -436,11 +479,50 @@ def load_historical_membership(
     if not all(incoming) or len(set(incoming)) != len(incoming):
         raise ValueError("Historical membership internal_ticker values must be nonblank and unique")
 
+    for row in memberships:
+        ticker = normalize_ticker(row.get("internal_ticker"))
+        exchange_ticker = normalize_ticker(row.get("exchange_ticker"))
+        if exchange_ticker != ticker:
+            raise ValueError(
+                f"{ticker}: exchange_ticker={exchange_ticker!r} must match the canonical internal ticker"
+            )
+        if not str(row.get("price_source_symbol") or "").strip():
+            raise ValueError(f"{ticker}: price_source_symbol must not be blank")
+        start_date = _parse_date(row.get("start_date"), field="start_date", ticker=ticker)
+        end_date = _parse_date(row.get("end_date"), field="end_date", ticker=ticker, allow_blank=True)
+        if end_date and end_date < start_date:
+            raise ValueError(f"{ticker}: end_date={end_date} precedes start_date={start_date}")
+        status = str(row.get("membership_status") or "").strip()
+        expected_status = "historical_delisted" if end_date else "active"
+        if status != expected_status:
+            raise ValueError(
+                f"{ticker}: membership_status={status!r} expected={expected_status!r} from the date interval"
+            )
+        cohort_id = str(row.get("calibration_cohort_id") or "").strip()
+        if cohort_id not in cohorts:
+            raise ValueError(f"{ticker}: unknown historical cohort={cohort_id}")
+        expected_cohort = str(cohorts[cohort_id].get("cohort_name") or "").strip()
+        actual_cohort = str(row.get("calibration_cohort") or "").strip()
+        if actual_cohort != expected_cohort:
+            raise ValueError(
+                f"{ticker}: calibration_cohort={actual_cohort!r} expected={expected_cohort!r}"
+            )
+        try:
+            confidence = float(str(row.get("confidence") or "").strip())
+        except ValueError as exc:
+            raise ValueError(f"{ticker}: invalid membership confidence={row.get('confidence')!r}") from exc
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError(f"{ticker}: membership confidence must be in [0, 1]")
+
     conn.execute(
         "DELETE FROM dim_universe_membership WHERE model_family = ? AND membership_source_id = ?",
         (MODEL_FAMILY, membership_source_id),
     )
     conn.execute("DELETE FROM dim_delisted_calibration_seed WHERE model_family = ?", (MODEL_FAMILY,))
+    # Source-scoped identifier refresh: CIK/Norgate-symbol corrections would
+    # otherwise accumulate stale rows forever (UNIQUE includes the value).
+    conn.execute("DELETE FROM dim_identifier WHERE source_id = ?", (membership_source_id,))
+    conn.execute("DELETE FROM dim_identifier WHERE source_id = ?", (norgate_source_id,))
 
     active_tickers = {
         normalize_ticker(row["ticker"])
@@ -460,6 +542,10 @@ def load_historical_membership(
         cik = normalize_cik(row["cik"])
         end_date = _parse_date(row.get("end_date"), field="end_date", ticker=ticker, allow_blank=True)
         is_current = not end_date
+        if is_current != (ticker in active_tickers):
+            raise ValueError(
+                f"{ticker}: historical membership current flag conflicts with the active seed"
+            )
         now = utc_now()
         conn.execute(
             """
@@ -505,6 +591,32 @@ def load_historical_membership(
                 """,
                 (company_id, ticker, row["exchange"], row["security_type"], row["currency"], now, now),
             )
+        if not is_current:
+            current_elsewhere = conn.execute(
+                """
+                SELECT 1 FROM dim_universe_membership
+                WHERE ticker = ? AND is_current_member = 1 AND model_family <> ?
+                LIMIT 1
+                """,
+                (ticker, MODEL_FAMILY),
+            ).fetchone()
+            if current_elsewhere is None:
+                # The company upsert's ON CONFLICT branch never touches status on
+                # an existing row, and the script-01 stale loop deliberately skips
+                # tickers with machinery history — this is the only writer that
+                # deactivates a company on an active -> delisted transition.
+                conn.execute(
+                    "UPDATE dim_company SET is_active = 0, universe_status = 'historical_delisted', updated_at = ? WHERE ticker = ?",
+                    (now, ticker),
+                )
+                conn.execute(
+                    """
+                    UPDATE dim_security
+                    SET listing_status = 'historical_delisted', is_primary_listing = 0, updated_at = ?
+                    WHERE ticker = ? AND exchange <> ?
+                    """,
+                    (now, ticker, row["exchange"]),
+                )
         _insert_identifier(
             conn,
             company_id=company_id,
@@ -524,6 +636,19 @@ def load_historical_membership(
         cohort_id = row["calibration_cohort_id"]
         if cohort_id not in cohorts:
             raise ValueError(f"{ticker}: unknown historical cohort={cohort_id}")
+        if ticker in active_tickers:
+            # The seed taxonomy stays authoritative for active tickers, so a
+            # hand-edited historical cohort that diverges from it would be
+            # silently ignored — fail loudly instead.
+            seed_cohort_row = conn.execute(
+                "SELECT calibration_cohort_id FROM dim_industrials_taxonomy WHERE ticker = ? AND model_family = ?",
+                (ticker, MODEL_FAMILY),
+            ).fetchone()
+            if seed_cohort_row is not None and str(seed_cohort_row["calibration_cohort_id"]) != cohort_id:
+                raise ValueError(
+                    f"{ticker}: historical cohort={cohort_id} diverges from seed taxonomy "
+                    f"cohort={seed_cohort_row['calibration_cohort_id']}"
+                )
         if ticker not in active_tickers:
             # Active-seed tickers keep the granular taxonomy loaded from the seed CSV
             # (script 01); upserting here would overwrite industry/subsector/source
@@ -605,6 +730,23 @@ def load_historical_membership(
                 now,
             ),
         )
+    # Mirror of script 01's cleanup: historical-CSV removals delete membership
+    # rows here, so orphaned machinery taxonomy must also be cleaned here or a
+    # removed ticker leaves a permanent orphan (and 01 -> 01b -> 02 fails on
+    # the first pass after an active-ticker removal).
+    conn.execute(
+        """
+        DELETE FROM dim_industrials_taxonomy
+        WHERE model_family = ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM dim_universe_membership m
+              WHERE m.model_family = dim_industrials_taxonomy.model_family
+                AND m.ticker = dim_industrials_taxonomy.ticker
+          )
+        """,
+        (MODEL_FAMILY,),
+    )
     return len(memberships), len(delisted_rows)
 
 
@@ -616,12 +758,19 @@ def load_ticker_aliases(conn: sqlite3.Connection, *, path: Path, source_id: str)
         (source_id,),
     )
     count = 0
+    seen_alias_keys: set[tuple[str, str]] = set()
     for row in rows:
         contract = normalize_ticker(row.get("contract_ticker"))
         active = normalize_ticker(row.get("active_ticker"))
-        effective = _parse_date(row.get("effective_date"), field="effective_date", ticker=contract)
         if not contract or not active or not as_bool(row.get("verified_flag"), default=False):
             raise ValueError(f"Alias row must have verified contract/active tickers: {row}")
+        effective = _parse_date(row.get("effective_date"), field="effective_date", ticker=contract)
+        alias_key = (contract, effective)
+        if alias_key in seen_alias_keys:
+            # Duplicate (contract, effective_date) rows would silently last-win
+            # in dim_ticker_alias while double-inserting corporate actions.
+            raise ValueError(f"Duplicate alias key contract={contract} effective_date={effective}")
+        seen_alias_keys.add(alias_key)
         now = utc_now()
         conn.execute(
             """
@@ -755,4 +904,56 @@ def validate_database_contract(
     )
     if bad_model_family:
         errors.append(f"cross-family membership/taxonomy rows={bad_model_family}")
+    orphan_taxonomy = int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM dim_industrials_taxonomy t
+            WHERE t.model_family = ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM dim_universe_membership m
+                  WHERE m.ticker = t.ticker AND m.model_family = t.model_family
+              )
+            """,
+            (MODEL_FAMILY,),
+        ).fetchone()[0]
+        or 0
+    )
+    if orphan_taxonomy:
+        errors.append(f"machinery taxonomy rows without membership={orphan_taxonomy}")
+    invalid_intervals = int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM dim_universe_membership
+            WHERE model_family = ?
+              AND (
+                    COALESCE(start_date, '') = ''
+                 OR (COALESCE(end_date, '') <> '' AND end_date < start_date)
+                 OR (is_current_member = 1 AND COALESCE(end_date, '') <> '')
+                 OR (is_current_member = 0 AND COALESCE(end_date, '') = '')
+              )
+            """,
+            (MODEL_FAMILY,),
+        ).fetchone()[0]
+        or 0
+    )
+    if invalid_intervals:
+        errors.append(f"invalid machinery membership intervals/current flags={invalid_intervals}")
+    duplicate_memberships = conn.execute(
+        """
+        SELECT ticker, membership_source_id, COUNT(*) AS n
+        FROM dim_universe_membership
+        WHERE model_family = ?
+        GROUP BY ticker, membership_source_id
+        HAVING COUNT(*) > 1
+        """,
+        (MODEL_FAMILY,),
+    ).fetchall()
+    if duplicate_memberships:
+        errors.append(
+            "duplicate machinery source memberships="
+            f"{[(row['ticker'], row['membership_source_id']) for row in duplicate_memberships[:20]]}"
+        )
     return errors

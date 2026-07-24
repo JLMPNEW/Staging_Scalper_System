@@ -132,6 +132,114 @@ sources:
     status: active
     notes: Manual reviewed exceptions for ticker/CIK/company reconciliation.
 
+  - source_id: transportation_ticker_seed
+    stage: security_master
+    source_name: Transportation active ticker seed
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/transportation/system_csvs/transportation_tickers.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema: [transportation_tickers_csv]
+    canonical_tables: [dim_company, dim_security, dim_identifier, dim_universe_membership]
+    feature_stages: [security_master]
+    subsector_scope: transportation
+    priority: 10
+    status: active
+    notes: Canonical active transportation universe.
+
+  - source_id: transportation_cohort_policy
+    stage: security_master
+    source_name: Transportation cohort policy
+    source_owner: internal
+    source_type: yaml
+    base_url: industrials/transportation/data/transportation_cohorts.yaml
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema: [transportation_cohorts_yaml]
+    canonical_tables: [dim_industrials_taxonomy]
+    feature_stages: [security_master]
+    subsector_scope: transportation
+    priority: 20
+    status: active
+    notes: Four reviewed transportation calibration cohorts.
+
+  - source_id: transportation_historical_membership_seed
+    stage: security_master
+    source_name: Transportation PIT membership seed
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/transportation/system_csvs/transportation_historical_membership.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema: [transportation_historical_membership_csv]
+    canonical_tables: [dim_universe_membership]
+    feature_stages: [calibration_research]
+    subsector_scope: transportation
+    priority: 30
+    status: active
+    notes: Optional additional PIT transportation intervals.
+
+  - source_id: transportation_delisted_calibration_seed
+    stage: security_master
+    source_name: Transportation delisted calibration seed
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/transportation/system_csvs/transportation_delisted.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema: [transportation_delisted_csv]
+    canonical_tables: [dim_company, dim_universe_membership, dim_delisted_calibration_seed]
+    feature_stages: [calibration_research]
+    subsector_scope: transportation
+    priority: 35
+    status: active
+    notes: Forty-eight curated delisted transportation securities.
+
+  - source_id: transportation_ticker_alias_seed
+    stage: security_master
+    source_name: Transportation ticker aliases
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/transportation/system_csvs/transportation_ticker_aliases.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema: [transportation_ticker_aliases_csv]
+    canonical_tables: [dim_ticker_alias, fact_corporate_action]
+    feature_stages: [security_master, portfolio_layer_handoff]
+    subsector_scope: transportation
+    priority: 40
+    status: active
+    notes: Verified transportation ticker lineage.
+
+  - source_id: transportation_security_continuity_policy
+    stage: security_master
+    source_name: Transportation security continuity policy
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/transportation/system_csvs/transportation_security_continuity_overrides.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema: [transportation_security_continuity_overrides_csv]
+    canonical_tables: [dim_security_continuity_policy, dim_universe_membership]
+    feature_stages: [security_master, calibration_research, portfolio_layer_handoff]
+    subsector_scope: transportation
+    priority: 45
+    status: active
+    notes: Primary-source-verified U.S. listing boundaries and no-stitch structural-break policy.
+
   - source_id: machinery_ticker_seed
     stage: security_master
     source_name: Machinery active ticker seed
@@ -293,6 +401,31 @@ sources:
     priority: 56
     status: active
     notes: Raw and mapped SEC XBRL facts for PIT financial features.
+
+  - source_id: machinery_issuer_ir
+    stage: financials
+    source_name: Reviewed machinery issuer investor-relations documents
+    source_owner: Issuers
+    source_type: reviewed_web_document
+    base_url: manifest://machinery-issuer-ir
+    documentation_url: ""
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: quarterly
+    data_owner: Issuers
+    raw_schema:
+      - issuer_ir_html_pdf
+    canonical_tables:
+      - fact_machinery_issuer_ir_document
+      - fact_sec_metric_disclosure_candidate
+      - fact_sec_xbrl_fact_raw
+      - fact_sec_xbrl_fact
+    feature_stages:
+      - financials
+    subsector_scope: machinery
+    priority: 57
+    status: active
+    notes: Reviewed HTTPS issuer releases and presentations; transcripts remain review-only evidence.
 
   - source_id: yahoo_finance_adjusted
     stage: market_data

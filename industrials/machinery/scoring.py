@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from industrials.core.policy_loader import PolicyKey, PolicyRow, resolve_policy
 from industrials.core.reports import write_csv_atomic, write_text_atomic
 from industrials.machinery.financial_contract import AVAILABILITY_STATUSES, required_metric_names
 
@@ -70,6 +71,8 @@ RAW_FEATURE_FIELDS = [
     "reported_backlog",
     "remaining_performance_obligation",
     "rpo_current",
+    "contract_load_proxy",
+    "contract_load_proxy_source",
     "operating_cash_flow_ttm_usd",
     "capex_usd",
     "capex_ttm_usd",
@@ -78,9 +81,11 @@ RAW_FEATURE_FIELDS = [
     "reported_backlog_usd",
     "remaining_performance_obligation_usd",
     "rpo_current_usd",
+    "contract_load_proxy_usd",
     "orders_yoy_growth",
     "backlog_yoy_growth",
     "reported_backlog_yoy_growth",
+    "contract_load_proxy_yoy_growth",
     "roic",
     "roic_not_meaningful_flag",
     "asset_turnover",
@@ -108,6 +113,7 @@ RAW_FEATURE_FIELDS = [
     "positioning_quality",
     "backlog_to_revenue",
     "reported_backlog_to_revenue",
+    "contract_load_proxy_to_revenue",
     "rpo_to_revenue",
     "rpo_yoy_growth",
     "rpo_implied_orders_usd",
@@ -128,6 +134,7 @@ RAW_TEXT_FIELDS = {
     "fiscal_year",
     "fiscal_period",
     "reporting_standard",
+    "contract_load_proxy_source",
     "reporting_profile",
     "financial_frequency",
     "reported_currency",
@@ -183,6 +190,10 @@ SCORING_FEATURE_FIELDS = [
     *RAW_FEATURE_FIELDS,
     "financial_metric_availability_asof_date",
     *AVAILABILITY_STATUS_FIELDS,
+    "rank_ready_policy",
+    "minimum_financial_confidence",
+    "policy_valid_from",
+    "policy_gate_status",
     "market_cap_source",
     "liquidity_capacity_reason",
     *COMPONENT_FIELDS,
@@ -404,7 +415,14 @@ def _latest_rows(
     table: str,
     *,
     asof: str,
+    source_priority: tuple[str, ...] = (),
 ) -> dict[str, dict[str, Any]]:
+    priority_sql = "source_id ASC"
+    priority_params: tuple[str, ...] = ()
+    if source_priority:
+        cases = " ".join(f"WHEN ? THEN {index}" for index, _ in enumerate(source_priority))
+        priority_sql = f"CASE source_id {cases} ELSE {len(source_priority)} END, source_id ASC"
+        priority_params = source_priority
     rows = conn.execute(
         f"""
         SELECT *
@@ -412,14 +430,14 @@ def _latest_rows(
             SELECT source_rows.*,
                    ROW_NUMBER() OVER (
                        PARTITION BY ticker
-                       ORDER BY asof_date DESC, source_id ASC
+                       ORDER BY asof_date DESC, {priority_sql}
                    ) AS source_row_number
             FROM {table} source_rows
             WHERE model_family = ? AND asof_date <= ?
         )
         WHERE source_row_number = 1
         """,
-        (MODEL_FAMILY, asof),
+        (*priority_params, MODEL_FAMILY, asof),
     ).fetchall()
     return {
         str(row["ticker"]): {key: row[key] for key in row.keys() if key != "source_row_number"}
@@ -547,7 +565,7 @@ def _score_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
 def _is_development_row(row: dict[str, Any]) -> bool:
     cohort = str(row.get("calibration_cohort") or "")
     stage = str(row.get("development_stage") or "").lower()
-    return cohort == "development_stage_emerging_machinery" or stage in {"development", "development_stage"}
+    return cohort == "development_stage_emerging_machinery" or stage == "development_stage"
 
 
 def _development_score(row: dict[str, Any]) -> float:
@@ -607,6 +625,10 @@ def build_scoring_feature_rows(
     conn: sqlite3.Connection,
     *,
     asof: str,
+    eligibility_policies: dict[PolicyKey, PolicyRow],
+    market_source_priority: tuple[str, ...] = (),
+    financial_source_priority: tuple[str, ...] = (),
+    positioning_source_priority: tuple[str, ...] = (),
     component_weights: dict[str, Any],
     min_score_confidence: float,
     max_staleness_days: int,
@@ -616,10 +638,25 @@ def build_scoring_feature_rows(
     memberships = _membership_rows(conn, asof=asof)
     if not memberships:
         raise ValueError(f"No machinery membership rows are effective at {asof}")
-    market = _latest_rows(conn, "feature_market_technical", asof=asof)
-    financial = _latest_rows(conn, "feature_financial_statement", asof=asof)
+    market = _latest_rows(
+        conn,
+        "feature_market_technical",
+        asof=asof,
+        source_priority=market_source_priority,
+    )
+    financial = _latest_rows(
+        conn,
+        "feature_financial_statement",
+        asof=asof,
+        source_priority=financial_source_priority,
+    )
     availability = _latest_metric_availability(conn, asof=asof)
-    positioning = _latest_rows(conn, "feature_positioning", asof=asof)
+    positioning = _latest_rows(
+        conn,
+        "feature_positioning",
+        asof=asof,
+        source_priority=positioning_source_priority,
+    )
     weights = _validate_weights(component_weights)
     combined: list[dict[str, Any]] = []
     for membership in memberships:
@@ -639,7 +676,13 @@ def build_scoring_feature_rows(
             "calibration_cohort": membership["calibration_cohort_id"],
             "calibration_cohort_name": membership["calibration_cohort"],
             "calibration_use": membership["calibration_use"],
-            "development_stage": membership["development_stage"],
+            # Normalize the legacy "development" alias so the dev-row check and
+            # resolve_policy (whose CSV only defines development_stage) agree.
+            "development_stage": (
+                "development_stage"
+                if str(membership["development_stage"] or "").strip().lower() == "development"
+                else membership["development_stage"]
+            ),
             "membership_source_id": membership["membership_source_id"],
             "membership_basis": membership["membership_basis"],
             "membership_start_date": membership["membership_start_date"],
@@ -686,6 +729,15 @@ def build_scoring_feature_rows(
             financial_row.get("revenue_ttm_usd"),
             absolute_numerator=True,
         )
+        latest_bar_date = str(row.get("latest_bar_date") or "").strip()
+        if latest_bar_date:
+            try:
+                row["stale_days"] = (
+                    datetime.strptime(asof, "%Y-%m-%d").date()
+                    - datetime.strptime(latest_bar_date, "%Y-%m-%d").date()
+                ).days
+            except ValueError:
+                row["stale_days"] = ""
         row["market_cap_source"] = str(financial_row.get("source_id") or "") if _float(row.get("market_cap")) is not None else ""
         combined.append(row)
 
@@ -694,6 +746,21 @@ def build_scoring_feature_rows(
     output: list[dict[str, str]] = []
     for row in combined:
         ticker = str(row["ticker"])
+        reporting_profile = str(row.get("reporting_profile") or "NO_FINANCIALS_REVIEW").strip()
+        development_stage = str(row.get("development_stage") or "operating").strip()
+        policy = resolve_policy(eligibility_policies, reporting_profile, development_stage)
+        if policy is None:
+            raise ValueError(
+                "Missing machinery scoring eligibility policy for "
+                f"ticker={ticker} reporting_profile={reporting_profile} "
+                f"development_stage={development_stage} asof={asof}"
+            )
+        rank_ready_policy = str(policy.get("rank_ready_policy") or "").strip()
+        policy_minimum_confidence = _float(policy.get("minimum_financial_confidence"))
+        if policy_minimum_confidence is None or not 0.0 <= policy_minimum_confidence <= 1.0:
+            raise ValueError(
+                f"Invalid minimum_financial_confidence for {reporting_profile}:{development_stage}"
+            )
         scores = metric_scores[ticker]
         for component, metrics in COMPONENT_METRICS.items():
             available = [scores[metric] for metric in metrics if metric in scores]
@@ -722,11 +789,34 @@ def build_scoring_feature_rows(
             reasons.append("missing_market_features")
         if stale_days is None or stale_days > max_staleness_days:
             reasons.append("stale_market_features")
+        # A negative stale_days (future market bar) is treated as a fatal
+        # per-row contract error by validate_scoring_feature_rows — corrupt
+        # upstream data crashes the publish rather than being quarantined, so
+        # no row-level gate reason exists for it.
         if adv is None or adv < min_avg_dollar_volume:
             reasons.append("insufficient_liquidity")
         if confidence < min_score_confidence:
             reasons.append("low_score_confidence")
+        financial_data_quality = str(row.get("data_quality_status") or "").strip()
+        if financial_data_quality != "complete":
+            reasons.append("financial_data_quality_not_complete")
+        if financial_confidence is None:
+            reasons.append("missing_financial_confidence")
+        elif financial_confidence < policy_minimum_confidence:
+            reasons.append("financial_confidence_below_policy_minimum")
+        if not rank_ready_policy.startswith("eligible"):
+            reasons.append("financial_policy_not_rank_ready")
+        policy_gate_pass = (
+            rank_ready_policy.startswith("eligible")
+            and financial_data_quality == "complete"
+            and financial_confidence is not None
+            and financial_confidence >= policy_minimum_confidence
+        )
         rank_ready = not reasons
+        row["rank_ready_policy"] = rank_ready_policy
+        row["minimum_financial_confidence"] = policy_minimum_confidence
+        row["policy_valid_from"] = str(policy.get("valid_from") or "")
+        row["policy_gate_status"] = "pass" if policy_gate_pass else "blocked"
         row["score_input_available_count"] = available_count
         row["score_input_total_count"] = total_signal_count
         row["score_confidence"] = confidence
@@ -746,6 +836,7 @@ def build_scoring_feature_rows(
             value = row.get(field, "")
             if (field in RAW_FEATURE_FIELDS and field not in RAW_TEXT_FIELDS) or field in COMPONENT_FIELDS or field in {
                 "membership_confidence",
+                "minimum_financial_confidence",
                 "score_confidence",
                 "final_score",
             }:
@@ -837,6 +928,7 @@ def validate_rank_rows(rows: list[dict[str, str]], *, asof: str) -> list[str]:
     errors: list[str] = []
     if not rows:
         return ["rank table is empty"]
+    errors.extend(validate_scoring_feature_rows(rows, asof=asof))
     missing = sorted(set(PORTFOLIO_REQUIRED_FIELDS).difference(rows[0]))
     if missing:
         errors.append(f"missing portfolio/calibration columns={missing}")
@@ -868,7 +960,6 @@ def validate_rank_rows(rows: list[dict[str, str]], *, asof: str) -> list[str]:
             errors.append(f"{ticker}: invalid final_rank={row.get('final_rank')!r}")
     if sorted(ranks) != list(range(1, len(rows) + 1)):
         errors.append("final_rank must be contiguous from 1 through row count")
-    errors.extend(validate_metric_availability_contract(rows, asof=asof))
     return errors
 
 
@@ -899,6 +990,22 @@ def validate_metric_availability_contract(
             status = str(row.get(field) or "")
             if status not in AVAILABILITY_STATUSES:
                 errors.append(f"{ticker}: invalid {field}={status!r}")
+        statuses = [str(row.get(field) or "") for field in AVAILABILITY_STATUS_FIELDS]
+        expected_counts = {
+            "financial_metric_reported_count": sum(status == "REPORTED" for status in statuses),
+            "financial_metric_proxy_count": sum(status == "PROXY" for status in statuses),
+            "financial_metric_unavailable_count": sum(
+                status not in {"REPORTED", "PROXY"} for status in statuses
+            ),
+        }
+        for field, expected in expected_counts.items():
+            try:
+                actual = int(str(row.get(field) or ""))
+            except ValueError:
+                errors.append(f"{ticker}: invalid {field}={row.get(field)!r}")
+                continue
+            if actual != expected:
+                errors.append(f"{ticker}: {field}={actual} expected={expected}")
     return errors
 
 
@@ -955,6 +1062,26 @@ def validate_scoring_feature_rows(rows: list[dict[str, str]], *, asof: str) -> l
             errors.append(f"{ticker}: rank-ready row must have reason=ok and model_status=complete")
         elif rank_ready == "0" and (not reason or model_status != "incomplete"):
             errors.append(f"{ticker}: non-rank-ready row must have a reason and model_status=incomplete")
+        policy_gate_status = str(row.get("policy_gate_status") or "")
+        rank_ready_policy = str(row.get("rank_ready_policy") or "")
+        if policy_gate_status not in {"pass", "blocked"}:
+            errors.append(f"{ticker}: invalid policy_gate_status={policy_gate_status!r}")
+        else:
+            policy_minimum = _float(row.get("minimum_financial_confidence"))
+            financial_confidence = _float(row.get("financial_confidence"))
+            expected_policy_pass = (
+                rank_ready_policy.startswith("eligible")
+                and str(row.get("data_quality_status") or "") == "complete"
+                and policy_minimum is not None
+                and financial_confidence is not None
+                and financial_confidence >= policy_minimum
+            )
+            if (policy_gate_status == "pass") != expected_policy_pass:
+                errors.append(
+                    f"{ticker}: policy_gate_status={policy_gate_status!r} is inconsistent with policy inputs"
+                )
+            if rank_ready == "1" and policy_gate_status != "pass":
+                errors.append(f"{ticker}: rank-ready row must pass the financial policy gate")
         for field in date_fields:
             value = str(row.get(field) or "").strip()
             if value and value > asof:
@@ -965,6 +1092,7 @@ def validate_scoring_feature_rows(rows: list[dict[str, str]], *, asof: str) -> l
             errors.append(
                 f"{ticker}: membership interval start={start_date!r} end={end_date!r} does not cover {asof}"
             )
+    errors.extend(validate_metric_availability_contract(rows, asof=asof))
     return errors
 
 

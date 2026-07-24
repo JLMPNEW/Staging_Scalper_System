@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import time
@@ -51,6 +52,7 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("us-gaap", "OperatingIncomeLoss", "operating_income", "income_statement", "duration", priority=10),
     _xbrl_concept("us-gaap", "NetIncomeLoss", "net_income", "income_statement", "duration", priority=10),
     _xbrl_concept("us-gaap", "ProfitLoss", "net_income", "income_statement", "duration", priority=20),
+    _xbrl_concept("us-gaap", "EarningsPerShareBasic", "eps_basic", "income_statement", "duration", priority=10),
     _xbrl_concept("us-gaap", "EarningsPerShareDiluted", "eps_diluted", "income_statement", "duration", priority=10),
     _xbrl_concept("us-gaap", "Assets", "assets", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "Liabilities", "liabilities", "balance_sheet", "instant", priority=10),
@@ -80,13 +82,40 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfCommonStock", "equity_issuance_proceeds", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfCommonStockIncludingAdditionalCapitalContribution", "equity_issuance_proceeds", "cash_flow", "duration", priority=20, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfCommonAndPreferredStock", "equity_issuance_proceeds", "cash_flow", "duration", priority=30, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOrSaleOfEquity", "equity_issuance_proceeds", "cash_flow", "duration", priority=40, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceInitialPublicOffering", "equity_issuance_proceeds", "cash_flow", "duration", priority=50, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromWarrantExercises", "equity_issuance_proceeds", "cash_flow", "duration", priority=60, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfWarrants", "equity_issuance_proceeds", "cash_flow", "duration", priority=70, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfPreferredStockAndPreferenceStock", "equity_issuance_proceeds", "cash_flow", "duration", priority=80, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromStockOptionsExercised", "equity_issuance_proceeds", "cash_flow", "duration", priority=90, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfSharesUnderIncentiveAndShareBasedCompensationPlans", "equity_issuance_proceeds", "cash_flow", "duration", priority=100, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromStockPlans", "equity_issuance_proceeds", "cash_flow", "duration", priority=110, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfSharesUnderIncentiveAndShareBasedCompensationPlansIncludingStockOptions", "equity_issuance_proceeds", "cash_flow", "duration", priority=120, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfLongTermDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfShortTermDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=20, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=30, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromNotesPayable", "debt_issuance_proceeds", "cash_flow", "duration", priority=40, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromLinesOfCredit", "debt_issuance_proceeds", "cash_flow", "duration", priority=50, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromLongTermLinesOfCredit", "debt_issuance_proceeds", "cash_flow", "duration", priority=60, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromShortTermDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=70, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromConvertibleDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=80, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfSeniorLongTermDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=90, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfSecuredDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=100, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfOtherLongTermDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=110, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromDebtNetOfIssuanceCosts", "debt_issuance_proceeds", "cash_flow", "duration", priority=120, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromRelatedPartyDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=130, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromOtherDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=140, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromBankDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=150, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfUnsecuredDebt", "debt_issuance_proceeds", "cash_flow", "duration", priority=160, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfCommercialPaper", "debt_issuance_proceeds", "cash_flow", "duration", priority=170, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfMandatoryRedeemableCapitalSecurities", "debt_issuance_proceeds", "cash_flow", "duration", priority=180, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "ResearchAndDevelopmentExpense", "research_and_development", "income_statement", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "SellingGeneralAndAdministrativeExpense", "selling_general_admin", "income_statement", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "ShareBasedCompensation", "stock_based_compensation", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "WeightedAverageNumberOfSharesOutstandingBasic", "basic_shares", "income_statement", "duration", priority=10),
     _xbrl_concept("us-gaap", "WeightedAverageNumberOfDilutedSharesOutstanding", "diluted_shares", "income_statement", "duration", priority=10),
+    _xbrl_concept("us-gaap", "CommonStockSharesOutstanding", "shares_outstanding", "balance_sheet", "instant", priority=20),
+    _xbrl_concept("dei", "EntityCommonStockSharesOutstanding", "shares_outstanding", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "DebtCurrent", "debt_current", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "LongTermDebtCurrent", "debt_current", "balance_sheet", "instant", priority=20),
     _xbrl_concept("us-gaap", "LongTermDebtNoncurrent", "debt_noncurrent", "balance_sheet", "instant", priority=10),
@@ -105,6 +134,7 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("ifrs-full", "ProfitLossFromOperatingActivities", "operating_income", "income_statement", "duration", priority=10),
     _xbrl_concept("ifrs-full", "OperatingProfitLoss", "operating_income", "income_statement", "duration", priority=20),
     _xbrl_concept("ifrs-full", "ProfitLoss", "net_income", "income_statement", "duration", priority=10),
+    _xbrl_concept("ifrs-full", "BasicEarningsLossPerShare", "eps_basic", "income_statement", "duration", priority=10),
     _xbrl_concept("ifrs-full", "DilutedEarningsLossPerShare", "eps_diluted", "income_statement", "duration", priority=10),
     _xbrl_concept("ifrs-full", "Assets", "assets", "balance_sheet", "instant", priority=10),
     _xbrl_concept("ifrs-full", "Liabilities", "liabilities", "balance_sheet", "instant", priority=10),
@@ -123,10 +153,17 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("ifrs-full", "IncomeTaxExpenseContinuingOperations", "income_tax_expense", "income_statement", "duration", priority=10),
     _xbrl_concept("ifrs-full", "ProfitLossBeforeTax", "pretax_income", "income_statement", "duration", priority=10),
     _xbrl_concept("ifrs-full", "ProceedsFromIssuingShares", "equity_issuance_proceeds", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("ifrs-full", "ProceedsFromExerciseOfOptions", "equity_issuance_proceeds", "cash_flow", "duration", priority=20, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "ProceedsFromBorrowings", "debt_issuance_proceeds", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("ifrs-full", "ProceedsFromNoncurrentBorrowings", "debt_issuance_proceeds", "cash_flow", "duration", priority=20, sign_policy="positive_abs"),
+    _xbrl_concept("ifrs-full", "ProceedsFromBorrowingsClassifiedAsFinancingActivities", "debt_issuance_proceeds", "cash_flow", "duration", priority=30, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "ResearchAndDevelopmentExpense", "research_and_development", "income_statement", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "SharebasedPaymentArrangementExpense", "stock_based_compensation", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("ifrs-full", "AdjustedWeightedAverageShares", "diluted_shares", "income_statement", "duration", priority=10),
     _xbrl_concept("ifrs-full", "WeightedAverageNumberOfDilutedSharesOutstanding", "diluted_shares", "income_statement", "duration", priority=10),
+    _xbrl_concept("ifrs-full", "WeightedAverageShares", "basic_shares", "income_statement", "duration", priority=10),
+    _xbrl_concept("ifrs-full", "WeightedAverageNumberOfOrdinarySharesOutstandingBasic", "basic_shares", "income_statement", "duration", priority=20),
+    _xbrl_concept("ifrs-full", "NumberOfSharesOutstanding", "shares_outstanding", "balance_sheet", "instant", priority=10),
     _xbrl_concept("ifrs-full", "CurrentBorrowings", "debt_current", "balance_sheet", "instant", priority=10),
     _xbrl_concept("ifrs-full", "NoncurrentBorrowings", "debt_noncurrent", "balance_sheet", "instant", priority=10),
     _xbrl_concept("ifrs-full", "Borrowings", "debt_total", "balance_sheet", "instant", priority=10),
@@ -305,6 +342,31 @@ CREATE TABLE IF NOT EXISTS dim_ticker_alias (
     updated_at TEXT NOT NULL,
     FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL,
     UNIQUE(contract_ticker, effective_date)
+);
+
+CREATE TABLE IF NOT EXISTS dim_security_continuity_policy (
+    ticker TEXT NOT NULL,
+    model_family TEXT NOT NULL,
+    current_exchange TEXT NOT NULL,
+    current_security_start_date TEXT NOT NULL,
+    continuity_policy TEXT NOT NULL,
+    structural_break_date TEXT,
+    related_price_symbols TEXT,
+    related_exchanges TEXT,
+    related_currencies TEXT,
+    history_treatment TEXT NOT NULL,
+    required_fx_pair TEXT,
+    primary_source_url TEXT NOT NULL,
+    secondary_source_url TEXT,
+    evidence_label TEXT NOT NULL,
+    review_status TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    notes TEXT,
+    source_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, model_family),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS fact_corporate_action (
@@ -496,6 +558,59 @@ CREATE TABLE IF NOT EXISTS fact_sec_filing (
     FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
 );
 
+CREATE TABLE IF NOT EXISTS fact_sec_metric_disclosure_candidate (
+    candidate_key TEXT PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    cik TEXT,
+    source_id TEXT NOT NULL,
+    model_family TEXT NOT NULL,
+    accession_number TEXT NOT NULL,
+    form_type TEXT,
+    filing_date TEXT,
+    accepted_at TEXT,
+    document_name TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    concept_name TEXT NOT NULL,
+    candidate_value REAL,
+    unit TEXT,
+    period_start TEXT,
+    period_end TEXT,
+    scope TEXT NOT NULL,
+    extraction_method TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    candidate_status TEXT NOT NULL,
+    status_reason TEXT,
+    evidence_text TEXT,
+    provenance_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_sec_metric_disclosure_document_scan (
+    model_family TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    accession_number TEXT NOT NULL,
+    document_name TEXT NOT NULL,
+    form_type TEXT,
+    filing_date TEXT,
+    accepted_at TEXT,
+    source_url TEXT,
+    content_sha256 TEXT NOT NULL,
+    extraction_method TEXT NOT NULL,
+    scan_status TEXT NOT NULL,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    accepted_candidate_count INTEGER NOT NULL DEFAULT 0,
+    review_candidate_count INTEGER NOT NULL DEFAULT 0,
+    scanned_at TEXT NOT NULL,
+    PRIMARY KEY(
+        model_family, ticker, source_id, accession_number,
+        document_name, extraction_method
+    ),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
 CREATE TABLE IF NOT EXISTS dim_issuer_reporting_profile (
     ticker TEXT NOT NULL,
     model_family TEXT NOT NULL DEFAULT 'defense',
@@ -514,11 +629,38 @@ CREATE TABLE IF NOT EXISTS dim_issuer_reporting_profile (
     usable_xbrl_flag INTEGER NOT NULL DEFAULT 0,
     source_id TEXT,
     review_reason TEXT,
+    profile_asof_date TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY(ticker, model_family),
     FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
 );
+
+CREATE TABLE IF NOT EXISTS dim_issuer_reporting_profile_history (
+    ticker TEXT NOT NULL,
+    model_family TEXT NOT NULL,
+    profile_asof_date TEXT NOT NULL,
+    cik TEXT,
+    country TEXT,
+    reporting_profile TEXT NOT NULL,
+    reporting_standard TEXT,
+    primary_taxonomy TEXT,
+    latest_filing_date TEXT,
+    latest_form_type TEXT,
+    latest_accession_number TEXT,
+    fallback_status TEXT,
+    financial_confidence REAL,
+    usable_xbrl_flag INTEGER NOT NULL DEFAULT 0,
+    source_id TEXT,
+    review_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, model_family, profile_asof_date),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_issuer_reporting_profile_history_lookup
+ON dim_issuer_reporting_profile_history(model_family, ticker, profile_asof_date);
 
 CREATE TABLE IF NOT EXISTS dim_xbrl_concept_map (
     taxonomy TEXT NOT NULL,
@@ -769,11 +911,16 @@ CREATE TABLE IF NOT EXISTS feature_financial_statement (
     funded_backlog_usd REAL,
     reported_backlog REAL,
     reported_backlog_usd REAL,
+    contract_load_proxy REAL,
+    contract_load_proxy_usd REAL,
+    contract_load_proxy_source TEXT,
     orders_yoy_growth REAL,
     backlog_yoy_growth REAL,
     backlog_to_revenue REAL,
     reported_backlog_yoy_growth REAL,
     reported_backlog_to_revenue REAL,
+    contract_load_proxy_yoy_growth REAL,
+    contract_load_proxy_to_revenue REAL,
     rpo_yoy_growth REAL,
     rpo_to_revenue REAL,
     rpo_implied_orders REAL,
@@ -1016,6 +1163,17 @@ CREATE INDEX IF NOT EXISTS idx_feature_market_technical_asof
 CREATE INDEX IF NOT EXISTS idx_fact_sec_filing_ticker_date
     ON fact_sec_filing(ticker, filing_date);
 
+CREATE INDEX IF NOT EXISTS idx_fact_sec_metric_disclosure_candidate_lookup
+    ON fact_sec_metric_disclosure_candidate(model_family, ticker, metric_name, accepted_at, candidate_status);
+
+CREATE INDEX IF NOT EXISTS idx_fact_sec_metric_disclosure_candidate_document
+    ON fact_sec_metric_disclosure_candidate(model_family, ticker, source_id, accession_number, document_name);
+
+CREATE INDEX IF NOT EXISTS idx_fact_sec_metric_disclosure_document_scan_lookup
+    ON fact_sec_metric_disclosure_document_scan(
+        model_family, ticker, extraction_method, filing_date, scan_status
+    );
+
 CREATE INDEX IF NOT EXISTS idx_dim_issuer_reporting_profile_status
     ON dim_issuer_reporting_profile(model_family, reporting_profile, usable_xbrl_flag);
 
@@ -1025,8 +1183,14 @@ CREATE INDEX IF NOT EXISTS idx_dim_xbrl_concept_map_lookup
 CREATE INDEX IF NOT EXISTS idx_fact_sec_xbrl_fact_raw_ticker_taxonomy
     ON fact_sec_xbrl_fact_raw(ticker, taxonomy, concept_name);
 
+CREATE INDEX IF NOT EXISTS idx_fact_sec_xbrl_fact_raw_document
+    ON fact_sec_xbrl_fact_raw(ticker, source_id, accession_number, source_detail, frame);
+
 CREATE INDEX IF NOT EXISTS idx_fact_sec_xbrl_fact_ticker_metric_end
     ON fact_sec_xbrl_fact(ticker, canonical_metric, period_end, filing_date);
+
+CREATE INDEX IF NOT EXISTS idx_fact_sec_xbrl_fact_raw_id
+    ON fact_sec_xbrl_fact(raw_fact_id);
 
 CREATE INDEX IF NOT EXISTS idx_fact_financial_statement_canonical_ticker_metric
     ON fact_financial_statement_canonical(model_family, ticker, canonical_metric, period_end, filing_date);
@@ -1106,6 +1270,15 @@ def apply_schema(conn: sqlite3.Connection) -> list[str]:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
+    if os.environ.get("INDUSTRIALS_FAST_INIT", "").strip() == "1":
+        try:
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if version == DB_USER_VERSION and xbrl_concept_seed_is_current(conn):
+                return
+        except (sqlite3.Error, TypeError, ValueError):
+            # Fall through to the complete schema/migration path if any part of
+            # the initialized-database contract cannot be proven.
+            pass
     for attempt in range(3):
         try:
             with conn:
@@ -1357,6 +1530,7 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     # SC-10: nullable REAL — migrated legacy rows must read NULL ("unknown"),
     # not 0.0 ("worst"). Writers always supply explicit values.
     ensure_column(conn, "dim_issuer_reporting_profile", "financial_confidence", "REAL")
+    ensure_column(conn, "dim_issuer_reporting_profile", "profile_asof_date", "TEXT")
     ensure_column(conn, "fact_financial_statement_canonical", "concept_name", "TEXT")
     ensure_column(conn, "fact_13f_positioning", "period_of_report", "TEXT")
     ensure_column(conn, "feature_financial_statement", "cost_of_sales", "REAL")
@@ -1366,6 +1540,9 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "feature_financial_statement", "funded_backlog", "REAL")
     ensure_column(conn, "feature_financial_statement", "reported_backlog", "REAL")
     ensure_column(conn, "feature_financial_statement", "reported_backlog_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "contract_load_proxy", "REAL")
+    ensure_column(conn, "feature_financial_statement", "contract_load_proxy_usd", "REAL")
+    ensure_column(conn, "feature_financial_statement", "contract_load_proxy_source", "TEXT")
     ensure_column(conn, "feature_financial_statement", "remaining_performance_obligation_usd", "REAL")
     ensure_column(conn, "feature_financial_statement", "rpo_current", "REAL")
     ensure_column(conn, "feature_financial_statement", "rpo_current_usd", "REAL")
@@ -1401,6 +1578,8 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "feature_financial_statement", "backlog_to_revenue", "REAL")
     ensure_column(conn, "feature_financial_statement", "reported_backlog_yoy_growth", "REAL")
     ensure_column(conn, "feature_financial_statement", "reported_backlog_to_revenue", "REAL")
+    ensure_column(conn, "feature_financial_statement", "contract_load_proxy_yoy_growth", "REAL")
+    ensure_column(conn, "feature_financial_statement", "contract_load_proxy_to_revenue", "REAL")
     ensure_column(conn, "feature_financial_statement", "rpo_yoy_growth", "REAL")
     ensure_column(conn, "feature_financial_statement", "rpo_to_revenue", "REAL")
     ensure_column(conn, "feature_financial_statement", "rpo_implied_orders", "REAL")
@@ -1483,7 +1662,52 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(f"PRAGMA user_version = {int(DB_USER_VERSION)}")
 
 
+XBRL_CONCEPT_SEED_NOTE = "seeded by industrials.core.db"
+
+
+def xbrl_concept_seed_is_current(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute(
+        """
+        SELECT taxonomy, concept_name, canonical_metric, financial_statement,
+               period_type, sign_policy, priority, active_flag, notes
+        FROM dim_xbrl_concept_map
+        """
+    ).fetchall()
+    actual = {
+        (str(row["taxonomy"]), str(row["concept_name"]), str(row["canonical_metric"])): row
+        for row in rows
+    }
+    expected_keys: set[tuple[str, str, str]] = set()
+    for expected in XBRL_CONCEPT_MAP_SEED:
+        key = (
+            str(expected["taxonomy"]),
+            str(expected["concept_name"]),
+            str(expected["canonical_metric"]),
+        )
+        expected_keys.add(key)
+        row = actual.get(key)
+        if row is None:
+            return False
+        if (
+            str(row["financial_statement"]) != str(expected["financial_statement"])
+            or str(row["period_type"]) != str(expected["period_type"])
+            or str(row["sign_policy"]) != str(expected["sign_policy"])
+            or int(row["priority"]) != int(str(expected["priority"]))
+            or int(row["active_flag"]) != 1
+            or str(row["notes"] or "") != XBRL_CONCEPT_SEED_NOTE
+        ):
+            return False
+    return not any(
+        int(row["active_flag"]) == 1
+        and str(row["notes"] or "") == XBRL_CONCEPT_SEED_NOTE
+        and key not in expected_keys
+        for key, row in actual.items()
+    )
+
+
 def seed_xbrl_concept_map(conn: sqlite3.Connection) -> None:
+    if xbrl_concept_seed_is_current(conn):
+        return
     now = utc_now()
     conn.executemany(
         """
@@ -1491,7 +1715,7 @@ def seed_xbrl_concept_map(conn: sqlite3.Connection) -> None:
             taxonomy, concept_name, canonical_metric, financial_statement, period_type,
             sign_policy, priority, active_flag, notes, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'seeded by industrials.core.db', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
         ON CONFLICT(taxonomy, concept_name, canonical_metric) DO UPDATE SET
             financial_statement = excluded.financial_statement,
             period_type = excluded.period_type,
@@ -1510,6 +1734,7 @@ def seed_xbrl_concept_map(conn: sqlite3.Connection) -> None:
                 row["period_type"],
                 row["sign_policy"],
                 row["priority"],
+                XBRL_CONCEPT_SEED_NOTE,
                 now,
                 now,
             )
@@ -1529,8 +1754,9 @@ def seed_xbrl_concept_map(conn: sqlite3.Connection) -> None:
         SELECT taxonomy, concept_name, canonical_metric
         FROM dim_xbrl_concept_map
         WHERE active_flag = 1
-          AND notes = 'seeded by industrials.core.db'
-        """
+          AND notes = ?
+        """,
+        (XBRL_CONCEPT_SEED_NOTE,),
     ).fetchall()
     for row in stale_rows:
         key = (str(row["taxonomy"]), str(row["concept_name"]), str(row["canonical_metric"]))

@@ -358,13 +358,12 @@ def load_universe(
         return members
     rows = conn.execute(
         """
-        SELECT DISTINCT c.ticker
-        FROM dim_company c
-        JOIN dim_industrials_taxonomy t
-          ON t.ticker = c.ticker
-         AND t.model_family = ?
-        WHERE c.is_active = 1
-        ORDER BY c.ticker
+        SELECT DISTINCT m.ticker
+        FROM dim_universe_membership m
+        WHERE m.model_family = ?
+          AND m.membership_status = 'active'
+          AND m.is_current_member = 1
+        ORDER BY m.ticker
         """,
         (model_family,),
     ).fetchall()

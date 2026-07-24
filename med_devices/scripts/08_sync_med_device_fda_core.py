@@ -119,6 +119,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--targeted-only", action="store_true", help="Only run targeted footprint fetches, not the broad endpoint sync.")
     parser.add_argument("--footprint-csv", type=Path, default=None, help="Optional FDA footprint CSV override.")
     parser.add_argument("--target-limit", type=int, default=100, help="Max records per targeted footprint query.")
+    parser.add_argument(
+        "--recompute-adverse-event-counts-only",
+        action="store_true",
+        help="Recompute canonical adverse-event severity counts from stored structured FDA payloads without fetching.",
+    )
     parser.add_argument("--allow-partial", action="store_true")
     return parser.parse_args()
 
@@ -612,7 +617,7 @@ def upsert_approval(conn: Any, payload: dict[str, Any], *, endpoint_name: str, s
         or endpoint_name.startswith("target_entity_510k_")
     ):
         submission_number = field(payload, "k_number")
-        submission_type = "510k"
+        submission_type = "DENOVO" if submission_number.upper().startswith("DEN") else "510k"
         applicant = field(payload, "applicant")
         device_name = field(payload, "device_name")
         decision = field(payload, "decision_description", "decision_code")
@@ -779,25 +784,6 @@ def upsert_recall(conn: Any, payload: dict[str, Any], *, endpoint_name: str, sou
     return 1
 
 
-def flattened_text(raw: Any) -> str:
-    parts: list[str] = []
-
-    def visit(value: Any) -> None:
-        if isinstance(value, dict):
-            for child in value.values():
-                visit(child)
-        elif isinstance(value, list):
-            for child in value:
-                visit(child)
-        elif value is not None:
-            text = str(value).strip()
-            if text:
-                parts.append(text)
-
-    visit(raw)
-    return " ".join(parts).lower()
-
-
 def representative_device(payload: dict[str, Any]) -> dict[str, Any]:
     devices = [json_dict(device) for device in json_list(payload.get("device"))]
     if not devices:
@@ -817,30 +803,71 @@ def first_device(payload: dict[str, Any]) -> dict[str, Any]:
     return representative_device(payload)
 
 
+def structured_patient_outcomes(payload: dict[str, Any]) -> set[str]:
+    outcomes: set[str] = set()
+    for raw_patient in json_list(payload.get("patient")):
+        patient = json_dict(raw_patient)
+        for key in ("sequence_number_outcome", "patient_outcome", "outcome"):
+            raw_outcomes = patient.get(key)
+            values = raw_outcomes if isinstance(raw_outcomes, list) else [raw_outcomes]
+            for raw_value in values:
+                value = re.sub(r"^\s*\d+\s*[.)-]?\s*", "", str(raw_value or "")).strip().lower()
+                if value:
+                    outcomes.add(value)
+    return outcomes
+
+
 def event_counts(payload: dict[str, Any]) -> tuple[int, int, int]:
-    event_type = field(payload, "event_type", "type_of_report").lower()
-    all_text = flattened_text(
-        {
-            "event_type": event_type,
-            "patient": payload.get("patient"),
-            "device": payload.get("device"),
-            "mdr_text": payload.get("mdr_text"),
-        }
-    )
-    death_terms = {"death", "fatal", "fatality", "deceased", "mortality", "died"}
-    injury_terms = {"injury", "serious injury", "hospitalization", "disability", "intervention", "life threatening"}
-    malfunction_terms = {"malfunction", "failure", "device malfunction", "failed", "broke", "breakage"}
+    event_type = re.sub(r"[^a-z]+", "_", field(payload, "event_type").lower()).strip("_")
+    patient_outcomes = structured_patient_outcomes(payload)
+    death_outcomes = {"d", "death", "deceased", "fatal", "fatality"}
 
-    def has_term(text: str, terms: set[str]) -> bool:
-        tokens = set(re.findall(r"[a-z]+", text))
-        return any(term in text or term in tokens for term in terms)
-
-    death = 1 if has_term(event_type, death_terms) or has_term(all_text, death_terms) else 0
-    injury = 1 if has_term(event_type, injury_terms) or has_term(all_text, injury_terms) else 0
-    malfunction = 1 if has_term(event_type, malfunction_terms) or has_term(all_text, malfunction_terms) else 0
-    if death:
-        injury = max(injury, 1)
+    # FDA event_type and structured patient outcomes are authoritative. Free-text
+    # narratives are intentionally excluded: substring matching previously
+    # classified words such as "studied" as containing the death term "died".
+    death = int(event_type == "death" or bool(patient_outcomes.intersection(death_outcomes)))
+    injury = int(event_type in {"injury", "serious_injury"})
+    malfunction = int(event_type == "malfunction")
     return death, injury, malfunction
+
+
+def recompute_adverse_event_counts(conn: Any) -> tuple[int, int]:
+    rows = conn.execute(
+        """
+        SELECT adverse_event_id, death_count, injury_count, malfunction_count, payload_json
+        FROM fact_fda_adverse_event
+        """
+    ).fetchall()
+    updates: list[tuple[int, int, int, str, str]] = []
+    invalid_payloads = 0
+    now = utc_now()
+    for row in rows:
+        try:
+            payload = json_dict(json.loads(str(row["payload_json"] or "{}")))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            invalid_payloads += 1
+            continue
+        counts = event_counts(payload)
+        existing = (
+            int(row["death_count"] or 0),
+            int(row["injury_count"] or 0),
+            int(row["malfunction_count"] or 0),
+        )
+        if counts != existing:
+            updates.append((*counts, now, str(row["adverse_event_id"])))
+    if updates:
+        conn.executemany(
+            """
+            UPDATE fact_fda_adverse_event
+            SET death_count = ?,
+                injury_count = ?,
+                malfunction_count = ?,
+                updated_at = ?
+            WHERE adverse_event_id = ?
+            """,
+            updates,
+        )
+    return len(updates), invalid_payloads
 
 
 def extract_problem_codes(raw: Any) -> list[str]:
@@ -1044,6 +1071,13 @@ def main() -> None:
                 or ("entity_pma" in endpoint_filter and endpoint.name.startswith("target_entity_pma_"))
             ]
         endpoints.extend(targeted_endpoints)
+    if args.recompute_adverse_event_counts_only:
+        with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
+            init_db(conn)
+            updated, invalid_payloads = recompute_adverse_event_counts(conn)
+            conn.commit()
+        print(f"adverse_event_counts_updated={updated} invalid_payloads={invalid_payloads} db={db_path}")
+        return
     if not endpoints:
         raise ValueError("No FDA endpoints selected")
     api_key = resolve_api_key(config, policy=policy, base_dir=base_dir)
@@ -1060,6 +1094,13 @@ def main() -> None:
     LOGGER.info("FDA core sync starting: db=%s endpoints=%d output=%s", db_path, len(endpoints), output_csv)
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
+        severity_rows_updated, invalid_severity_payloads = recompute_adverse_event_counts(conn)
+        conn.commit()
+        LOGGER.info(
+            "Recomputed stored FDA adverse-event severity counts: updated=%d invalid_payloads=%d",
+            severity_rows_updated,
+            invalid_severity_payloads,
+        )
         ensure_source_registry(conn, config, base_dir, policy.source_id)
         run_id = start_run(conn, run_type="sync_med_device_fda_core", input_path=config_path)
         ingestion_run_id = start_ingestion_run(conn, policy.source_id)

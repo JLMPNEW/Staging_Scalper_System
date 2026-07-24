@@ -170,6 +170,8 @@ def main() -> int:  # noqa: C901
                                 name="transaction_costs.min_position_commission_fraction")
         buffer = finite_float(cfg_get(config, "transaction_costs.no_trade_buffer_drag", 0.0),
                               name="transaction_costs.no_trade_buffer_drag")
+        cash_target_fraction = finite_float(cfg_get(config, "transaction_costs.cash_target_fraction", 0.0),
+                                            name="transaction_costs.cash_target_fraction")
         enable_mu_gate = bool(cfg_get(config, "transaction_costs.enable_provisional_mu_no_trade", False))
         comm_dec = decision_commission(config)
         prior = load_prior(prior_path)
@@ -178,6 +180,9 @@ def main() -> int:  # noqa: C901
         return 1
     if gross <= 0 or horizon <= 0 or min_frac < 0:
         LOGGER.error("Invalid no-trade config: gross=%s horizon=%s min_frac=%s", gross, horizon, min_frac)
+        return 1
+    if not 0.0 <= cash_target_fraction < 1.0:
+        LOGGER.error("transaction_costs.cash_target_fraction must be in [0,1), got %s", cash_target_fraction)
         return 1
     k = horizon / 252.0
     is_first_build = not prior
@@ -321,6 +326,21 @@ def main() -> int:  # noqa: C901
                 d["reason"] = f"{d['reason']};budget_rescale={scale:.8f}"
         asset_sum = sum(final.values())
         cash_weight = gross - asset_sum
+
+    # deployable-book cash policy 2026-07-20: hold a fixed CASH buffer. Scale the whole asset block by
+    # (1 - cash_target_fraction) and route the freed weight (the target buffer plus rounding dust) to
+    # CASH. The scale is folded into budget_scale so the Stage-4 decision gate
+    # (applied_weight == pre_scale * budget_scale) and the assets+cash == gross conservation gate both
+    # still hold exactly. Optimizer gross stays 1.0; only the deployable book carries the buffer.
+    if cash_target_fraction > 0.0:
+        keep = 1.0 - cash_target_fraction
+        final = {t: w * keep for t, w in final.items()}
+        budget_scale *= keep
+        for d in decisions:
+            if final.get(str(d["ticker"]), 0.0) > 0.0:
+                d["reason"] = f"{d['reason']};cash_buffer={cash_target_fraction:.8f}"
+        asset_sum = sum(final.values())
+        cash_weight = gross - asset_sum
     if abs(cash_weight) <= 1e-10:
         cash_weight = 0.0
 
@@ -328,8 +348,11 @@ def main() -> int:  # noqa: C901
         decision["applied_weight"] = round(final.get(str(decision["ticker"]), 0.0), 10)
         decision["budget_scale"] = round(budget_scale, 10)
 
-    rows = [{"ticker": t, "weight": round(w, 10)} for t, w in sorted(final.items()) if w > 0]
-    rows.append({"ticker": "CASH", "weight": round(cash_weight, 10)})
+    # CASH closes the book to EXACTLY gross against the PUBLISHED (rounded) asset weights, so the
+    # downstream conservation gates (costs/15, orchestration/20) see assets+cash == gross with no dust.
+    asset_rows = [{"ticker": t, "weight": round(w, 10)} for t, w in sorted(final.items()) if w > 0]
+    cash_weight = round(gross - sum(r["weight"] for r in asset_rows), 10)
+    rows = asset_rows + [{"ticker": "CASH", "weight": cash_weight}]
     write_csv(adjusted_path, ["ticker", "weight"], rows)
     write_csv(decisions_path, DECISION_FIELDS, sorted(decisions, key=lambda r: r["ticker"]))
 

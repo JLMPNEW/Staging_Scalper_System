@@ -31,6 +31,11 @@ from market_positioning.core import (
     update_feed_state,
     utc_now,
 )
+from market_positioning.ibkr_capacity import (
+    DEFAULT_IBKR_LOCK_TIMEOUT_SEC,
+    IBKRMarketDataLock,
+    bounded_streaming_batch_size,
+)
 
 
 DEFAULT_USER_AGENT = "JL Independent Research jm.357@hotmail.com"
@@ -1123,7 +1128,7 @@ def prune_ibkr_rows_after_membership_end(
     return fee_rows_deleted, shortable_rows_deleted
 
 
-def sync_ibkr_borrow_availability(
+def _sync_ibkr_borrow_availability(
     conn: sqlite3.Connection,
     *,
     tickers_csv: Path | None,
@@ -1246,59 +1251,61 @@ def sync_ibkr_borrow_availability(
             if sleep_sec > 0:
                 ib.sleep(float(sleep_sec))
 
-        shortable_batch_size = min(100, max(1, int(batch_size)))
+        shortable_batch_size = bounded_streaming_batch_size(batch_size)
         if shortable_snapshot:
             qualified_items = list(qualified.items())
             for start in range(0, len(qualified_items), shortable_batch_size):
                 batch = qualified_items[start : start + shortable_batch_size]
                 subscriptions: list[tuple[str, Any, Any]] = []
-                for ticker, contract in batch:
-                    try:
-                        if not ib.isConnected():
-                            raise RuntimeError("IBKR connection lost during shortable-share snapshot sync")
-                        ticker_obj = ib.reqMktData(
-                            contract,
-                            genericTickList="236",
-                            # Generic ticks are invalid in IBKR snapshot requests.
-                            # Stream briefly, sample shortableShares, then cancel.
-                            snapshot=False,
-                            regulatorySnapshot=False,
+                try:
+                    for ticker, contract in batch:
+                        try:
+                            if not ib.isConnected():
+                                raise RuntimeError("IBKR connection lost during shortable-share snapshot sync")
+                            ticker_obj = ib.reqMktData(
+                                contract,
+                                genericTickList="236",
+                                # Generic ticks are invalid in IBKR snapshot requests.
+                                # Stream briefly, sample shortableShares, then cancel.
+                                snapshot=False,
+                                regulatorySnapshot=False,
+                            )
+                            subscriptions.append((ticker, contract, ticker_obj))
+                        except KeyboardInterrupt:
+                            raise
+                        except Exception as exc:
+                            if not ib.isConnected():
+                                raise RuntimeError("IBKR connection lost during shortable-share snapshot sync") from exc
+                            failed_tickers.append(ticker)
+                    ib.sleep(max(0.1, float(snapshot_wait_sec)))
+                    now = utc_now()
+                    snapshot_rows: list[tuple[Any, ...]] = []
+                    for ticker, contract, ticker_obj in subscriptions:
+                        raw_shortable = getattr(ticker_obj, "shortableShares", None)
+                        shortable = to_float(raw_shortable)
+                        if shortable is None or not math.isfinite(shortable) or shortable < 0.0:
+                            continue
+                        snapshot_rows.append(
+                            (
+                                ticker,
+                                end_date.isoformat(),
+                                now,
+                                int(getattr(contract, "conId", 0) or 0),
+                                shortable,
+                                int(market_data_type),
+                                "interactive_brokers",
+                                now,
+                                now,
+                            )
                         )
-                        subscriptions.append((ticker, contract, ticker_obj))
-                    except KeyboardInterrupt:
-                        raise
-                    except Exception as exc:
-                        if not ib.isConnected():
-                            raise RuntimeError("IBKR connection lost during shortable-share snapshot sync") from exc
-                        failed_tickers.append(ticker)
-                ib.sleep(max(0.1, float(snapshot_wait_sec)))
-                now = utc_now()
-                snapshot_rows: list[tuple[Any, ...]] = []
-                for ticker, contract, ticker_obj in subscriptions:
-                    raw_shortable = getattr(ticker_obj, "shortableShares", None)
-                    shortable = to_float(raw_shortable)
-                    if shortable is None or not math.isfinite(shortable) or shortable < 0.0:
-                        continue
-                    snapshot_rows.append(
-                        (
-                            ticker,
-                            end_date.isoformat(),
-                            now,
-                            int(getattr(contract, "conId", 0) or 0),
-                            shortable,
-                            int(market_data_type),
-                            "interactive_brokers",
-                            now,
-                            now,
-                        )
-                    )
-                upsert_ibkr_shortable_rows(conn, snapshot_rows)
-                shortable_rows_written += len(snapshot_rows)
-                for _ticker, contract, _ticker_obj in subscriptions:
-                    try:
-                        ib.cancelMktData(contract)
-                    except Exception:
-                        pass
+                    upsert_ibkr_shortable_rows(conn, snapshot_rows)
+                    shortable_rows_written += len(snapshot_rows)
+                finally:
+                    for _ticker, contract, _ticker_obj in subscriptions:
+                        try:
+                            ib.cancelMktData(contract)
+                        except Exception:
+                            pass
                 if sleep_sec > 0:
                     ib.sleep(float(sleep_sec))
     finally:
@@ -1339,3 +1346,47 @@ def sync_ibkr_borrow_availability(
         message=message,
     )
     return SyncResult("ibkr_borrow_availability", total_fee_rows + total_shortable_rows, message)
+
+
+def sync_ibkr_borrow_availability(
+    conn: sqlite3.Connection,
+    *,
+    tickers_csv: Path | None,
+    history_start_date: date,
+    end_date: date,
+    host: str = "127.0.0.1",
+    port: int = 7497,
+    client_id: int = 7822,
+    market_data_type: int = 1,
+    fee_rate_unit: str = "decimal",
+    fee_rate_initial_duration: str = "7 Y",
+    fee_rate_incremental_duration: str = "45 D",
+    snapshot_wait_sec: float = 4.0,
+    shortable_snapshot: bool = True,
+    shortable_coverage_warn_min: float = 50.0,
+    batch_size: int = 50,
+    sleep_sec: float = 0.2,
+    max_tickers: int = 0,
+    market_data_lock_timeout_sec: float = DEFAULT_IBKR_LOCK_TIMEOUT_SEC,
+) -> SyncResult:
+    """Serialize shared IB access and keep streaming requests below account capacity."""
+    with IBKRMarketDataLock(timeout_sec=market_data_lock_timeout_sec):
+        return _sync_ibkr_borrow_availability(
+            conn,
+            tickers_csv=tickers_csv,
+            history_start_date=history_start_date,
+            end_date=end_date,
+            host=host,
+            port=port,
+            client_id=client_id,
+            market_data_type=market_data_type,
+            fee_rate_unit=fee_rate_unit,
+            fee_rate_initial_duration=fee_rate_initial_duration,
+            fee_rate_incremental_duration=fee_rate_incremental_duration,
+            snapshot_wait_sec=snapshot_wait_sec,
+            shortable_snapshot=shortable_snapshot,
+            shortable_coverage_warn_min=shortable_coverage_warn_min,
+            batch_size=batch_size,
+            sleep_sec=sleep_sec,
+            max_tickers=max_tickers,
+        )

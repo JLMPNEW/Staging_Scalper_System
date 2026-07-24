@@ -912,13 +912,22 @@ def normalize_recall_key_text(raw: object) -> str:
     return re.sub(r"[^A-Z0-9]+", "", str(raw or "").upper()).strip()
 
 
-def canonical_recall_key_from_row(item: Any) -> str:
-    recall_number = normalize_recall_key_text(item["recall_number"])
-    if recall_number:
-        return f"recall_number:{recall_number}"
+def canonical_recall_key_from_row(
+    item: Any,
+    *,
+    known_event_ids: set[str] | None = None,
+) -> str:
     event_id = normalize_recall_key_text(item["event_id"])
     if event_id:
         return f"event_id:{event_id}"
+    recall_number = normalize_recall_key_text(item["recall_number"])
+    if recall_number:
+        # The FDA recall endpoint exposes the event number as res_event_number,
+        # which is stored in recall_number, while enforcement rows expose the
+        # same value in event_id alongside product-level Z numbers.
+        if known_event_ids is not None and recall_number in known_event_ids:
+            return f"event_id:{recall_number}"
+        return f"recall_number:{recall_number}"
     payload = safe_json_loads(item["payload_json"])
     material = json.dumps(
         {
@@ -1029,12 +1038,22 @@ def refresh_canonical_recalls(conn: Any, *, excluded_manufacturer_ids: set[int] 
           ON m.fda_manufacturer_id = r.fda_manufacturer_id
         """
     ).fetchall()
-    grouped: dict[str, list[Any]] = {}
+    eligible_rows: list[Any] = []
     for item in raw_rows:
         manufacturer_id = item["fda_manufacturer_id"]
         if manufacturer_id is not None and int(manufacturer_id) in excluded_manufacturer_ids:
             continue
-        grouped.setdefault(canonical_recall_key_from_row(item), []).append(item)
+        eligible_rows.append(item)
+
+    known_event_ids = {
+        event_id
+        for item in eligible_rows
+        if (event_id := normalize_recall_key_text(item["event_id"]))
+    }
+    grouped: dict[str, list[Any]] = {}
+    for item in eligible_rows:
+        canonical_key = canonical_recall_key_from_row(item, known_event_ids=known_event_ids)
+        grouped.setdefault(canonical_key, []).append(item)
 
     now = utc_now()
     payload_rows: list[tuple[Any, ...]] = []

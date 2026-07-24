@@ -1,7 +1,7 @@
 model_family: technology_hardware
 source_csv: "../../../ticker_mapping/technology_hardware_cleaned.csv"
 source_of_truth: true
-expected_ticker_count: 73
+expected_ticker_count: 72
 allow_missing_cik_for_foreign_otc: false
 default_industry: Technology Hardware
 default_unassigned_calibration_use: review

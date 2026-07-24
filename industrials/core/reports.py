@@ -13,9 +13,26 @@ from __future__ import annotations
 import csv
 import os
 import tempfile
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, TextIO
+
+
+ATOMIC_REPLACE_ATTEMPTS = 8
+TRANSIENT_WINDOWS_REPLACE_ERRORS = frozenset({5, 32, 33})
+
+
+def _replace_with_retry(source: Path, destination: Path) -> None:
+    for attempt in range(ATOMIC_REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as exc:
+            transient = isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in TRANSIENT_WINDOWS_REPLACE_ERRORS
+            if not transient or attempt + 1 >= ATOMIC_REPLACE_ATTEMPTS:
+                raise
+            time.sleep(min(0.05 * (2**attempt), 1.0))
 
 
 def _write_atomic(
@@ -34,7 +51,7 @@ def _write_atomic(
             write_body(handle)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
+        _replace_with_retry(tmp_path, path)
     except BaseException:
         try:
             tmp_path.unlink(missing_ok=True)

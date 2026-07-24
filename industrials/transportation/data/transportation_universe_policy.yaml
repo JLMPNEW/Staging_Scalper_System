@@ -1,0 +1,37 @@
+model_family: transportation
+source_of_truth: true
+expected_ticker_count: 112
+expected_delisted_count: 48
+history_start_date: "2019-01-02"
+default_sector: Industrials
+default_industry: Transportation
+default_subsector: Transportation
+benchmark_tickers: [IYT, XTN, SPY]
+investable_security_types:
+  - common stock
+  - ordinary shares
+  - adr/ads
+active_listing_statuses:
+  - active
+allowed_terminal_types:
+  - acquisition
+  - wipeout
+  - distressed_nonzero
+required_columns:
+  - ticker
+  - investability_status
+  - company_name
+  - cik
+  - exchange
+  - sector
+  - industry
+  - subsector
+  - country
+  - currency
+  - security_type
+  - listing_status
+  - is_primary_listing
+  - calibration_cohort
+known_research_gaps:
+  - No curated delisted rows yet for development_stage_and_speculative_transport.
+  - Delisted final trading dates and terminal consideration require Stage 2 reconciliation.

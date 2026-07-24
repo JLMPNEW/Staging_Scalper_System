@@ -9,7 +9,7 @@ before continuing:
   optimizer 09 -> 10                             (Stage 3 AQR baseline)
   costs     12 -> 13 -> 14 -> 15                 (Stage 4)
   rotation  17 -> 18                             (Stage 5, shadow)
-  macro     21 -> 22                             (Stage 6, shadow)
+  macro     20a raw -> 20 serving -> 21 -> 22    (Stage 6, shadow)
   bl        23 -> 24 -> 25 -> 26                 (Stage 7, shadow)
   sleeves   27 -> 28 -> 29                       (Stage 8, shadow)
   ledger    31 -> 32                             (Stage 8.5; skipped unless broker imports exist)
@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -55,6 +57,96 @@ from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
 LOGGER = logging.getLogger("run_portfolio_pipeline")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+GLOBAL_ORCHESTRATION_LOCK = PROJECT_ROOT / "orchestration" / ".orchestrator.lock"
+MASTER_PID_ENV = "STAGING_ORCHESTRATOR_PID"
+
+
+class GlobalOrchestrationCoordination:
+    """Share the master lock or acquire it for a direct Tier-1 invocation.
+
+    The cross-sector master owns this lock while it updates sector artifacts and
+    passes its PID through ``MASTER_PID_ENV`` to children. A direct portfolio run
+    atomically creates the same lock, preventing a master from starting midway
+    through portfolio construction. Stale-lock recovery remains centralized in
+    ``orchestration/run_all.py``; this lower-level runner fails closed instead of
+    guessing that an existing lock is stale.
+    """
+
+    def __init__(self, path: Path = GLOBAL_ORCHESTRATION_LOCK) -> None:
+        self.path = path
+        self.owned = False
+
+    @staticmethod
+    def _recorded_pid(path: Path) -> int | None:
+        lines: list[str] | None = None
+        # The master rewrites child-PID metadata while lanes advance. On Windows
+        # and OneDrive that replace can briefly deny readers; retry before treating
+        # the owner as unknown or rejecting a legitimate master-launched child.
+        for attempt in range(10):
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+                break
+            except OSError:
+                if attempt == 9:
+                    return None
+                time.sleep(0.05)
+        assert lines is not None
+        for line in lines:
+            if line.startswith("pid="):
+                try:
+                    return int(line.split("=", 1)[1].strip().split()[0])
+                except ValueError:
+                    return None
+        return None
+
+    def __enter__(self) -> GlobalOrchestrationCoordination:
+        owner_text = os.environ.get(MASTER_PID_ENV, "").strip()
+        if owner_text:
+            try:
+                expected_owner = int(owner_text)
+            except ValueError as exc:
+                raise RuntimeError(f"invalid {MASTER_PID_ENV}={owner_text!r}") from exc
+            recorded_owner = self._recorded_pid(self.path)
+            if recorded_owner != expected_owner:
+                raise RuntimeError(
+                    f"master lock ownership mismatch: env pid={expected_owner}, "
+                    f"lock pid={recorded_owner}, path={self.path}"
+                )
+            return self
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        try:
+            fd = os.open(self.path, flags, 0o600)
+        except FileExistsError as exc:
+            owner = self._recorded_pid(self.path)
+            raise RuntimeError(
+                f"global orchestration lock is already held by pid={owner}: {self.path}; "
+                "run through orchestration/run_all.py or wait for the active master"
+            ) from exc
+        try:
+            payload = f"pid={os.getpid()} started_utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+            os.write(fd, payload.encode("utf-8"))
+            os.fsync(fd)
+            self.owned = True
+        except BaseException:
+            # We created the path exclusively, so no other owner can legitimately
+            # replace it before this cleanup. Do not strand a malformed lock when
+            # metadata persistence fails.
+            self.path.unlink(missing_ok=True)
+            raise
+        finally:
+            os.close(fd)
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if not self.owned:
+            return
+        try:
+            if self._recorded_pid(self.path) == os.getpid():
+                self.path.unlink(missing_ok=True)
+        finally:
+            self.owned = False
 
 # group -> ordered (subdir, script, acceptance manifest relative to the run dir | None)
 GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
@@ -86,6 +178,8 @@ GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
         ("rotation", "18_validate_rotation_signals.py", "rotation/rotation_manifest.json"),
     ],
     "macro": [
+        ("macro", "20a_run_macro_raw.py", None),
+        ("macro", "20_run_macro_serving.py", None),
         ("macro", "21_build_macro_contract.py", None),
         ("macro", "22_validate_macro_contract.py", "macro/macro_manifest.json"),
     ],
@@ -120,14 +214,76 @@ GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
     "final": [
         ("orchestration", "20_compose_final_target_book.py", "final/final_manifest.json"),
     ],
+    "earnings": [
+        ("earnings_dates", "37_sync_earnings_dates.py", None),
+        ("earnings_dates", "38_validate_earnings_dates.py",
+         "earnings_dates/validation/earnings_validation_summary.json"),
+    ],
 }
-# read-only checks take no --force (nothing to overwrite)
-NO_FORCE_SCRIPTS = {"04_check_risk_readiness.py"}
+# Advisory data feeds: a failure here is WARN-only and never blocks or fails the pipeline.
+SOFT_GROUPS = {"earnings"}
+# Scripts in this set do not expose a --force flag. The macro wrappers are
+# deterministic refresh entry points, while readiness is read-only.
+NO_FORCE_SCRIPTS = {
+    "04_check_risk_readiness.py",
+    "20a_run_macro_raw.py",
+    "20_run_macro_serving.py",
+    "38_validate_earnings_dates.py",
+}
 DEFAULT_CADENCES = {
-    "tactical": ["scores", "risk", "optimizer", "costs", "rotation", "governor", "final"],
+    "tactical": ["scores", "risk", "optimizer", "costs", "rotation", "governor", "final", "earnings"],
     "strategic": ["scores", "risk", "optimizer", "costs", "rotation", "macro", "bl", "sleeves",
-                  "ledger", "exits", "payout", "governor", "final"],
+                  "ledger", "exits", "payout", "governor", "final", "earnings"],
 }
+MACRO_REFRESH_SCRIPTS = {"20a_run_macro_raw.py", "20_run_macro_serving.py"}
+
+
+def terminate_process_tree(proc: subprocess.Popen[str]) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if completed.returncode != 0 and proc.poll() is None:
+            proc.kill()
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def run_command(cmd: list[str], *, timeout: float) -> tuple[int, str, str]:
+    """Run one stage and guarantee that timeout/interruption cannot orphan descendants."""
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(PROJECT_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=creationflags,
+        start_new_session=os.name != "nt",
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        terminate_process_tree(proc)
+        stdout, stderr = proc.communicate()
+        return -1, stdout, f"{stderr}\ntimeout after {timeout:.0f}s".strip()
+    except BaseException:
+        terminate_process_tree(proc)
+        raise
+    return int(proc.returncode or 0), stdout, stderr
 
 
 def parse_args() -> argparse.Namespace:
@@ -166,6 +322,8 @@ def script_args(args: argparse.Namespace, script: str) -> list[str]:
         flags.append("--reuse-sealed-run-raw")
     if args.reuse_risk_price_data and script == "05_build_return_panel.py":
         flags.extend(("--reuse-existing-panel", "--reuse-price-cache"))
+    if script == "20_run_macro_serving.py":
+        flags.append("--refresh-industry-stock-foreign")
     return flags
 
 
@@ -230,17 +388,32 @@ def plan_groups(args: argparse.Namespace, config: dict[str, Any], run_dir: Path)
     return planned
 
 
-def main() -> int:  # noqa: C901
+def run_pipeline() -> int:  # noqa: C901
     configure_utc_logging()
     args = parse_args()
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
+    source_path = Path(__file__).resolve()
+    startup_source_sha256 = sha256_file(source_path)
+    startup_config_sha256 = sha256_file(config_path)
     paths = resolve_runtime_paths(config, config_path)
     runs_root = paths.output_dir / "runs"
     run_as_of = args.as_of or latest_run_with(runs_root, "stocks_scores.csv") or date.today().isoformat()
+    try:
+        parsed_as_of = date.fromisoformat(run_as_of)
+    except ValueError:
+        LOGGER.error("--as-of must be an ISO date (YYYY-MM-DD), got %r", run_as_of)
+        return 1
+    if parsed_as_of.isoformat() != run_as_of:
+        LOGGER.error("--as-of must use canonical YYYY-MM-DD form, got %r", run_as_of)
+        return 1
     run_dir = runs_root / run_as_of
     orch = cfg_get(config, "orchestration", {}) or {}
     step_timeout = float(orch.get("step_timeout_sec", 1800))
+    macro_step_timeout = float(orch.get("macro_step_timeout_sec", 7200))
+    if step_timeout <= 0 or macro_step_timeout <= 0:
+        LOGGER.error("orchestration timeouts must be positive: step=%s macro=%s", step_timeout, macro_step_timeout)
+        return 1
     try:
         planned = plan_groups(args, config, run_dir)
     except ValueError as exc:
@@ -270,7 +443,36 @@ def main() -> int:  # noqa: C901
 
     steps: list[dict[str, Any]] = []
     failed_groups: list[str] = []
+    soft_failed_groups: list[str] = []
     completed_groups: list[str] = []
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    def persist(acceptance: str, *, active_group: str = "") -> None:
+        write_manifest(
+            run_dir / "orchestration_meta.json",
+            {
+                "stage": "stage12_orchestration",
+                "acceptance": acceptance,
+                "run_as_of": run_as_of,
+                "cadence": args.cadence,
+                "groups_planned": planned,
+                "groups_completed": completed_groups,
+                "groups_failed": failed_groups,
+                "groups_soft_failed": soft_failed_groups,
+                "active_group": active_group,
+                "force": bool(args.force),
+                "reuse_risk_price_data": bool(args.reuse_risk_price_data),
+                "steps": steps,
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                # Freeze provenance at process start. Re-reading these files for every
+                # progress write can falsely attribute newly edited source/config to an
+                # already-running interpreter that loaded the previous contents.
+                "inputs_sha256": {"config.yaml": startup_config_sha256},
+                "source_sha256": {"18_run_portfolio_pipeline.py": startup_source_sha256},
+            },
+        )
+
+    persist("RUNNING")
     for group in planned:
         group_failed = False
         for subdir, script, manifest_rel in GROUPS[group]:
@@ -291,15 +493,14 @@ def main() -> int:  # noqa: C901
             cmd = [sys.executable, str(PACKAGE_ROOT / subdir / script), "--as-of", run_as_of,
                    "--config", str(config_path)]
             cmd.extend(script_args(args, script))
+            # Persist the step's group before launch. Long-running refreshes (notably
+            # MacroLayer raw/serving) must not leave active_group pointing at the prior
+            # completed group for their entire runtime.
+            persist("RUNNING", active_group=group)
             started = time.monotonic()
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT),
-                                      timeout=step_timeout)
-                rc = proc.returncode
-                tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-2:]
-            except subprocess.TimeoutExpired:
-                rc = -1
-                tail = [f"timeout after {step_timeout:.0f}s"]
+            timeout = macro_step_timeout if script in MACRO_REFRESH_SCRIPTS else step_timeout
+            rc, stdout, stderr = run_command(cmd, timeout=timeout)
+            tail = (stderr or stdout or "").strip().splitlines()[-2:]
             elapsed = round(time.monotonic() - started, 1)
             acceptance = manifest_acceptance(run_dir, manifest_rel) if manifest_rel else ""
             stage_manifest_sha = (
@@ -311,6 +512,7 @@ def main() -> int:  # noqa: C901
                           "acceptance": acceptance, "manifest": manifest_rel or "",
                           "manifest_sha256": stage_manifest_sha, "command": cmd,
                           "tail": " | ".join(tail) if rc != 0 else ""})
+            persist("RUNNING", active_group=group)
             status = "OK" if rc == 0 else "FAIL"
             LOGGER.info("[%s] %-45s rc=%d %5.1fs %s", status, f"{subdir}/{script}", rc, elapsed,
                         acceptance or "")
@@ -321,34 +523,66 @@ def main() -> int:  # noqa: C901
                     LOGGER.error("group %s: %s acceptance=%s", group, manifest_rel, acceptance)
                 break
         if group_failed:
-            failed_groups.append(group)
-            if not args.continue_on_fail:
-                LOGGER.error("Stopping after failed group %s (use --continue-on-fail to proceed)", group)
-                break
+            if group in SOFT_GROUPS:
+                soft_failed_groups.append(group)
+                LOGGER.warning("Advisory group %s failed; WARN-only, pipeline continues", group)
+            else:
+                failed_groups.append(group)
+                if not args.continue_on_fail:
+                    LOGGER.error("Stopping after failed group %s (use --continue-on-fail to proceed)", group)
+                    break
         else:
             completed_groups.append(group)
 
-    meta = {
-        "stage": "stage12_orchestration",
-        "acceptance": "PASS" if not failed_groups else "FAIL",
-        "run_as_of": run_as_of,
-        "cadence": args.cadence,
-        "groups_planned": planned,
-        "groups_completed": completed_groups,
-        "groups_failed": failed_groups,
-        "force": bool(args.force),
-        "reuse_risk_price_data": bool(args.reuse_risk_price_data),
-        "steps": steps,
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "inputs_sha256": {"config.yaml": sha256_file(config_path)},
-        "source_sha256": {"18_run_portfolio_pipeline.py": sha256_file(Path(__file__).resolve())},
-    }
-    run_dir.mkdir(parents=True, exist_ok=True)
-    write_manifest(run_dir / "orchestration_meta.json", meta)
+    provenance_drift: list[str] = []
+    try:
+        if sha256_file(source_path) != startup_source_sha256:
+            provenance_drift.append("18_run_portfolio_pipeline.py changed during execution")
+    except OSError as exc:
+        provenance_drift.append(f"18_run_portfolio_pipeline.py unavailable at completion: {exc}")
+    try:
+        if sha256_file(config_path) != startup_config_sha256:
+            provenance_drift.append("config.yaml changed during execution")
+    except OSError as exc:
+        provenance_drift.append(f"config.yaml unavailable at completion: {exc}")
+    if provenance_drift:
+        failed_groups.append("orchestration_integrity")
+        steps.append(
+            {
+                "group": "orchestration_integrity",
+                "script": source_path.name,
+                "rc": 1,
+                "seconds": 0.0,
+                "acceptance": "FAIL_SOURCE_OR_CONFIG_DRIFT",
+                "manifest": "",
+                "manifest_sha256": "",
+                "command": [],
+                "tail": " | ".join(provenance_drift),
+            }
+        )
+        LOGGER.error("Orchestration provenance drift: %s", "; ".join(provenance_drift))
+
+    if failed_groups:
+        overall = "FAIL"
+    elif soft_failed_groups:
+        overall = "PASS_WITH_ADVISORY_WARNINGS"
+    else:
+        overall = "PASS"
+    persist(overall)
     LOGGER.info("PIPELINE %s: %d/%d groups clean -> %s",
-                "PASS" if not failed_groups else "FAIL", len(completed_groups),
+                overall, len(completed_groups),
                 len(planned), run_dir / "orchestration_meta.json")
     return 0 if not failed_groups else 1
+
+
+def main() -> int:
+    try:
+        with GlobalOrchestrationCoordination():
+            return run_pipeline()
+    except (OSError, RuntimeError) as exc:
+        configure_utc_logging()
+        LOGGER.error("Portfolio orchestration lock failure: %s", exc)
+        return 1
 
 
 if __name__ == "__main__":

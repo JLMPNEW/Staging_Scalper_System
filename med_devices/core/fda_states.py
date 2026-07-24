@@ -26,6 +26,15 @@ MANUAL_FDA_FOOTPRINT_STATES = frozenset(
     }
 )
 
+# Reviewed centralized laboratory/LDT footprints are not an FDA manual-review
+# blocker by themselves. Any mapped hard-red, recall, warning-letter, or
+# adverse-event evidence continues through the normal risk gates.
+REVIEWED_FDA_FOOTPRINT_STATES = frozenset(
+    {
+        "reviewed_fda_footprint_ldt_clia",
+    }
+)
+
 # Broader reporting set: manual blockers plus analyst watch states.
 REGULATORY_RISK_STATES = frozenset({*MANUAL_FDA_REVIEW_STATES, "regulatory_watch"})
 
@@ -43,6 +52,7 @@ FDA_REVIEW_KNOWN_STATES = frozenset(
         "regulatory_watch",
         *MANUAL_FDA_REVIEW_STATES,
         *MANUAL_FDA_FOOTPRINT_STATES,
+        *REVIEWED_FDA_FOOTPRINT_STATES,
     }
 )
 

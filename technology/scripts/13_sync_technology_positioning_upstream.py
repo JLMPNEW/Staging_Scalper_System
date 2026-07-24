@@ -83,6 +83,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-finra-short-interest", action="store_true")
     parser.add_argument("--skip-13f", action="store_true")
     parser.add_argument("--skip-ibkr-borrow", action="store_true")
+    parser.add_argument(
+        "--allow-stale-ibkr-borrow-on-error",
+        action="store_true",
+        help=(
+            "On IB connection/timeout errors, retain prior borrow observations and let "
+            "the downstream staleness gate decide acceptance. Data/logic errors still fail."
+        ),
+    )
     parser.add_argument("--skip-technology-import", action="store_true")
     parser.add_argument(
         "--reaggregate-13f-only",
@@ -551,19 +559,29 @@ def main() -> None:
             )
             LOGGER.info("%s rows=%d message=%s", result.feed_name, result.rows, result.message)
         if not args.skip_ibkr_borrow:
-            result = sync_ibkr_borrow_availability(
-                conn,
-                tickers_csv=tickers_csv,
-                history_start_date=history_start,
-                end_date=end_date,
-                host=args.ibkr_host,
-                port=args.ibkr_port,
-                client_id=args.ibkr_client_id,
-                market_data_type=args.ibkr_market_data_type,
-                snapshot_wait_sec=args.ibkr_snapshot_wait_sec,
-                max_tickers=args.ibkr_max_tickers,
-            )
-            LOGGER.info("%s rows=%d message=%s", result.feed_name, result.rows, result.message)
+            try:
+                result = sync_ibkr_borrow_availability(
+                    conn,
+                    tickers_csv=tickers_csv,
+                    history_start_date=history_start,
+                    end_date=end_date,
+                    host=args.ibkr_host,
+                    port=args.ibkr_port,
+                    client_id=args.ibkr_client_id,
+                    market_data_type=args.ibkr_market_data_type,
+                    snapshot_wait_sec=args.ibkr_snapshot_wait_sec,
+                    max_tickers=args.ibkr_max_tickers,
+                )
+                LOGGER.info("%s rows=%d message=%s", result.feed_name, result.rows, result.message)
+            except (ConnectionError, TimeoutError, OSError) as exc:
+                if not args.allow_stale_ibkr_borrow_on_error:
+                    raise
+                LOGGER.warning(
+                    "IBKR borrow refresh unavailable (%s: %s); retaining prior sealed observations. "
+                    "The positioning validator will fail if they exceed its staleness tolerance.",
+                    type(exc).__name__,
+                    exc,
+                )
 
     if not args.skip_technology_import:
         run_technology_import(config_path)

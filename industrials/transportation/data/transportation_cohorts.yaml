@@ -1,0 +1,18 @@
+model_family: transportation
+cohorts:
+  - cohort_id: surface_freight_and_logistics
+    cohort_name: Surface Freight & Logistics
+    calibration_use: core
+    development_stage: operating
+  - cohort_id: air_transport_and_aviation_services
+    cohort_name: Air Transport & Aviation Services
+    calibration_use: core
+    development_stage: operating
+  - cohort_id: marine_shipping_and_maritime
+    cohort_name: Marine Shipping & Maritime
+    calibration_use: core
+    development_stage: operating
+  - cohort_id: development_stage_and_speculative_transport
+    cohort_name: Development-stage & Speculative Transport
+    calibration_use: development_stage
+    development_stage: development_stage

@@ -225,10 +225,28 @@ def upsert_prices(
     return inserted
 
 
-def purge_existing_range(conn: Any, *, ticker: str, source_id: str, first_bar: str, last_bar: str) -> None:
-    # Remove previously imported bars outside the certified membership interval
-    # (e.g. after a shrunk end_date or a corrected symbol mapping); the upsert
-    # alone can never delete stale rows.
+def purge_existing_range(
+    conn: Any,
+    *,
+    ticker: str,
+    source_id: str,
+    first_bar: str,
+    last_bar: str,
+    full_refresh: bool,
+) -> None:
+    # The upsert alone can never delete stale rows. On a full-interval run the
+    # freshly fetched history is authoritative, so purge everything for the
+    # ticker/source — this also removes wrong-symbol bars INSIDE the certified
+    # interval on dates where the corrected symbol has no bar (different
+    # calendar/halts), which an outside-interval purge would miss. When the
+    # operator narrowed the fetch window (--start-date/--end-date), only purge
+    # outside the certified interval so untouched valid history survives.
+    if full_refresh:
+        conn.execute(
+            "DELETE FROM fact_price_ohlcv WHERE ticker = ? AND source_id = ?",
+            (ticker, source_id),
+        )
+        return
     conn.execute(
         """
         DELETE FROM fact_price_ohlcv
@@ -346,6 +364,7 @@ def main() -> int:
                                     source_id=source_id,
                                     first_bar=member.start_date,
                                     last_bar=member.end_date,
+                                    full_refresh=not requested_start and not requested_end,
                                 )
                             row["loaded_rows"] = upsert_prices(
                                 conn,

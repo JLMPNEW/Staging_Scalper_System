@@ -37,6 +37,7 @@ def init_db_read_tolerant(conn: Any) -> None:
 
 
 SCORE_FIELDS = [
+    "calibration_cohort",
     "scoring_model_version",
     "rank",
     "classification",
@@ -338,11 +339,11 @@ def add_taxonomy_and_scores(rows: list[dict[str, Any]], taxonomy: dict[str, dict
         score = scores.get((asof, ticker), {})
         for field in TAXONOMY_FIELDS:
             row[field] = tax.get(field, "")
-        if not row.get("calibration_cohort"):
-            row["calibration_cohort"] = "unknown"
         for field in SCORE_FIELDS:
             if field in score:
                 row[field] = score.get(field, "")
+        if not row.get("calibration_cohort"):
+            row["calibration_cohort"] = "unknown"
 
 
 def add_cohort_percentiles(rows: list[dict[str, Any]]) -> None:

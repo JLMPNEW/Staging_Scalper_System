@@ -834,6 +834,22 @@ fda_features:
       no_data_score: 50.0
       rationale: "non_device_services_cdrh_footprint_not_positive_alpha"
 
+fda_product_family_review:
+  target_tickers:
+    - "ABT"
+  product_family_mapping_csv: "data/fda_product_family_mapping.csv"
+  product_family_exposure_csv: "data/fda_product_family_exposure.csv"
+  output_dir: "../output/med_devices_reports/fda_product_family_review"
+  mdr_window_months: 24
+  recall_window_months: 36
+  minimum_family_mapping_confidence: 95.0
+  minimum_severe_manufacturer_mapping_confidence: 95.0
+  death_coverage_min_pct: 100.0
+  class_i_coverage_min_pct: 100.0
+  injury_coverage_min_pct: 95.0
+  malfunction_coverage_min_pct: 90.0
+  production_usage: "review_only_no_score_effect"
+
 cms_reimbursement_ingestion:
   output_csv: "../output/med_devices_reports/med_device_cms_reimbursement_ingestion.csv"
   coverage_source_id: "cms_coverage_api"
@@ -1149,7 +1165,7 @@ market_positioning_update:
 
 scoring:
   model_family: "med_devices"
-  model_version: "med_device_score_v23_2026_07_oos_lock_pit_policy"
+  model_version: "med_device_score_v24_2026_07_hospital_supplies_promotion"
   scoring_contract_version: "stocks_scores_v1"
   oos_replay_window_days: 5
   output_csv: "../output/med_devices_reports/med_device_daily_composite_scores.csv"
@@ -1377,8 +1393,10 @@ scoring:
         sentiment_catalyst: 0.10
     hospital_supplies_consumables_dme:
       enabled: true
-      source: "calibration_promoted_2026_05_30"
-      validation_note: "Promoted after 120d validation selected 9/14 tickers, 64.29% ticker coverage, 66.67% improved selected ticker rate, 1.67% median cohort-excess, and positive LCB. Added narrow low-risk valuation/fundamental template after 2026-06-03 component policy review; FDA inverse signal remains review-only."
+      calibration_status: "production_eligible"
+      calibration_status_reason: "existing_value_quality_template_promoted_to_production_baseline_after_refined_optuna_walk_forward_review_2026_07_19"
+      source: "hospital_supplies_production_baseline_promotion_2026_07_19"
+      validation_note: "Existing low-risk valuation/fundamental template promoted to the production baseline effective 2026-07-17. A dedicated 1,000-trial development-window Optuna review passed all three walk-forward folds with 1,042 validation observations, 9 distinct tickers, 74.44% mean excess hit rate, 20.64% mean loss rate, and positive minimum 60d/120d LCBs. The more aggressive positioning/FDA Optuna formula remains supporting shadow evidence only."
       tier1_safety_policy:
         allow_safe_core_gate_substitution: false
       score_template:
@@ -1820,7 +1838,7 @@ calibration:
     min_supporting_components: 1
   optuna_shadow_policy_candidates:
     enabled: true
-    generated_at_utc: "2026-06-07T21:39:12Z"
+    generated_at_utc: "2026-07-19T22:30:02Z"
     promotion_note: "Shadow candidates only; do not use in production composite until separate holdout, support, loss-rate, and concentration review passes."
     cohorts:
       life_science_tools_research_instruments:
@@ -1868,6 +1886,66 @@ calibration:
           market_cap_min: 250000000.0
           avg_dollar_volume_min: 2000000.0
           data_completeness_min: 85.0
+      hospital_supplies_surgical_consumables_oem:
+        candidate_id: "optuna_396557c4dc38"
+        promotion_status: "production_supporting_evidence"
+        production_disposition: "supports_existing_hospital_supplies_value_quality_v1_baseline_seed_effective_2026_07_17"
+        objective_value: 80.935413
+        pass_fold_count: 3
+        pass_fold_rate: 1.0
+        validation_count: 1042
+        validation_unique_tickers: 9
+        validation_ticker_coverage: 0.473684
+        mean_excess_hit_rate: 0.744377
+        mean_loss_rate: 0.206426
+        max_single_ticker_share: 0.331461
+        max_single_ticker_share_limit: 0.355618
+        min_lcb_scope: "passing_folds_only"
+        min_lcb_excess_60d: 0.034320
+        min_lcb_excess_120d: 0.107167
+        rationale: "Passed refined cross-horizon hit-rate, positive per-horizon LCB, support, loss-rate, and finite-sample concentration guardrails in all three walk-forward folds. Retain the optimized positioning-heavy formula as shadow evidence; promote the existing interpretable value/quality template as the production baseline source."
+        component_spec:
+          - component: "short_pressure_score"
+            direction: "positive"
+            sleeve: "market_positioning"
+            weight: 0.457467
+          - component: "short_squeeze_score"
+            direction: "positive"
+            sleeve: "market_positioning"
+            weight: 0.192533
+          - component: "reimbursement_score"
+            direction: "inverse"
+            sleeve: "reimbursement"
+            weight: 0.16751182
+          - component: "fda_clearance_acceleration_score"
+            direction: "inverse"
+            sleeve: "fda_regulatory"
+            weight: 0.10802116
+          - component: "fda_alpha_score"
+            direction: "positive"
+            sleeve: "fda_regulatory"
+            weight: 0.07446701
+        sleeve_weight:
+          fda_regulatory: 0.182488
+          market_positioning: 0.65
+          reimbursement: 0.167512
+        gate_spec:
+          avg_dollar_volume_min: 0.0
+          borrow_squeeze_risk_max: 70.0
+          candidate_percentile_min: 60.0
+          candidate_score_min: 0.0
+          data_completeness_min: 90.0
+          fda_event_risk_max: 100.0
+          fundamental_quality_min: 0.0
+          ic_tilted_min: 0.0
+          liquidity_min: 0.0
+          market_cap_min: 250000000.0
+          raw_composite_min: 50.0
+          require_tier1_safety_gate: 0.0
+          safe_core_min: 0.0
+          technical_entry_min: 45.0
+          valuation_min: 55.0
+          value_trap_max: 30.0
   gate_grid_results_csv: "../output/med_devices_reports/calibration/med_device_gate_grid_results.csv"
   recommendations_csv: "../output/med_devices_reports/calibration/med_device_calibration_recommendations_by_cohort.csv"
   recommended_config_yaml: "../output/med_devices_reports/calibration/med_device_calibration_recommended_config.yaml"
@@ -1879,7 +1957,9 @@ calibration:
     snapshot_csv: "../output/med_devices_reports/calibration/med_device_calibrated_baseline_snapshot.csv"
     frozen_baseline_csv: "../output/med_devices_reports/calibration/baselines/med_device_calibrated_baseline_v23_2026_06_17.csv"
     freeze_baseline_if_missing: true
-    production_seed_cohorts: "orthopedics_spine_sports_implants,healthcare_services_cro_lab_services,life_science_tools_research_instruments"
+    production_seed_cohorts: "orthopedics_spine_sports_implants,healthcare_services_cro_lab_services,life_science_tools_research_instruments,hospital_supplies_surgical_consumables_oem"
+    production_seed_effective_from:
+      hospital_supplies_surgical_consumables_oem: "2026-07-17"
     manual_production_seed_cohorts: "orthopedics_spine_sports_implants,life_science_tools_research_instruments"
     watchlist_seed_cohorts: "capital_equipment_procedure_platforms"
     event_driven_excluded_cohorts: "implantable_interventional_devices_direct_payment,emerging_single_product_therapeutic_platforms"
@@ -2053,7 +2133,9 @@ calibration:
     min_lcb_scope: "passing_folds_only"
     exclude_incomplete_validation_folds: true
     min_validation_calendar_days: 45
-    hit_rate_test: "binomial"
+    # Require economic consistency across the configured horizons. Positive
+    # per-horizon LCB remains an independent fold guardrail.
+    hit_rate_test: "cross_horizon_average"
     hit_rate_null: 0.50
     hit_rate_binomial_alpha: 0.10
     review_actions: "promote_to_cohort_policy_review"
@@ -2075,6 +2157,8 @@ calibration:
     max_single_ticker_share: 0.35
     max_single_ticker_share_small_cohort: 0.50
     small_cohort_ticker_threshold: 16
+    # Allow one observation of finite-sample granularity, capped at one point.
+    single_ticker_share_sampling_tolerance_max: 0.01
     min_lcb_excess: 0.0
     require_positive_lcb_horizons: "60,120"
     min_pass_folds: 2

@@ -288,6 +288,16 @@ def load_norgate_overrides(path: Path) -> dict[str, dict[str, str]]:
         review_status = str(row.get("review_status") or "").strip().lower()
         if review_status not in {"reviewed", "approved"}:
             raise ValueError(f"{path}: {ticker} review_status must be reviewed or approved")
+        override_start = str(row.get("override_start_date") or "").strip()
+        override_end = str(row.get("override_end_date") or "").strip()
+        normalized_start = _date_text(override_start)
+        normalized_end = _date_text(override_end)
+        if override_start and not normalized_start:
+            raise ValueError(f"{path}: {ticker} has invalid override_start_date={override_start!r}")
+        if override_end and not normalized_end:
+            raise ValueError(f"{path}: {ticker} has invalid override_end_date={override_end!r}")
+        if normalized_start and normalized_end and normalized_end < normalized_start:
+            raise ValueError(f"{path}: {ticker} override_end_date precedes override_start_date")
         if ticker in overrides:
             raise ValueError(f"{path}: duplicate ticker override={ticker}")
         overrides[ticker] = row
@@ -350,6 +360,28 @@ def resolve_norgate_mappings(
     for row in sorted(active_rows, key=lambda item: normalize_ticker(item.get("ticker"))):
         ticker = normalize_ticker(row.get("ticker"))
         company_name = str(row.get("company_name") or ticker).strip()
+        override = overrides.get(ticker)
+        if override is not None:
+            symbol = str(override.get("norgate_symbol") or "").strip().upper()
+            expected_database = str(override.get("source_database") or "").strip()
+            valid = symbol in current_symbols and expected_database in {"", "US Equities"}
+            mappings.append(
+                _mapping(
+                    ticker=ticker,
+                    company_name=company_name,
+                    symbol=symbol,
+                    source_database="US Equities" if valid else expected_database,
+                    provider=provider,
+                    status="verified_override" if valid else "invalid_override",
+                    reason=str(override.get("mapping_reason") or "reviewed_active_override").strip(),
+                    usable=valid,
+                    review_status=str(override.get("review_status") or "").strip().lower(),
+                    notes=str(override.get("notes") or "").strip(),
+                    first_override=str(override.get("override_start_date") or ""),
+                    last_override=str(override.get("override_end_date") or ""),
+                )
+            )
+            continue
         if ticker not in current_symbols:
             mappings.append(
                 _mapping(
@@ -544,7 +576,10 @@ def build_membership_rows(
                 "event_type": "active_at_contract_build",
                 "confidence": "0.95",
                 "source_url": "norgate_local_metadata",
-                "notes": "Exact active ticker and issuer-name match in Norgate US Equities.",
+                "notes": (
+                    f"norgate_symbol={mapping.norgate_symbol}; "
+                    f"mapping_status={mapping.mapping_status}; {mapping.mapping_reason}"
+                ),
             }
         )
         listing_rows.append(
