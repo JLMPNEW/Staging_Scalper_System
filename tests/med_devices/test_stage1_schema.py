@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import importlib.util
 import json
 import sqlite3
@@ -13,6 +14,7 @@ import pytest
 from med_devices.core.analyst_review import effective_decision, load_analyst_review_decisions
 from med_devices.core.db import connect, init_db
 from med_devices.core.fda_product_family_review import (
+    build_product_family_shadow_score,
     load_product_family_exposures,
     load_product_family_mappings,
     mapping_for,
@@ -20,6 +22,7 @@ from med_devices.core.fda_product_family_review import (
 )
 from med_devices.core.fda_states import FDA_REVIEW_KNOWN_STATES, MANUAL_FDA_REVIEW_STATES
 from med_devices.core.market_policy import is_adjusted_price_row
+from med_devices.core.point_in_time import row_is_effective_asof
 from med_devices.core.source_registry import load_source_registry, upsert_source_registry
 
 
@@ -33,6 +36,29 @@ FDA_PRODUCT_FAMILY_EXPOSURE = REPO_ROOT / "med_devices" / "data" / "fda_product_
 def table_names(conn: sqlite3.Connection) -> set[str]:
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
     return {str(row["name"]) for row in rows}
+
+
+def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {str(row["name"]) for row in rows}
+
+
+# The 10 governed FDA product-family shadow columns added to both
+# feature_fda_product_risk and med_device_daily_scores. Production databases
+# received them via _ensure_table_optional_columns (ALTER TABLE ADD COLUMN on
+# pre-existing old-schema tables), not via the fresh CREATE TABLE path.
+FDA_PRODUCT_FAMILY_SHADOW_COLUMNS = (
+    "fda_event_risk_product_family_adjusted_score",
+    "fda_safety_product_family_adjusted_score",
+    "fda_product_family_shadow_available_flag",
+    "fda_product_family_shadow_oos_valid_flag",
+    "fda_product_family_adjustment_applied_flag",
+    "fda_product_family_exposure_available_count",
+    "fda_product_family_exposure_waived_count",
+    "fda_product_family_exposure_missing_count",
+    "fda_product_family_shadow_status",
+    "fda_product_family_shadow_reason",
+)
 
 
 def test_reviewed_ldt_clia_footprint_is_known_and_not_a_manual_blocker() -> None:
@@ -56,10 +82,232 @@ def test_reviewed_ldt_clia_footprints_are_effective_dated() -> None:
     assert effective["BDSX"]["review_adjusted_fda_state"] == "reviewed_fda_footprint_ldt_clia"
     assert effective["BDSX"]["expected_cdrh_records"] == "no"
     assert effective["ADPT"]["review_adjusted_fda_state"] == "manual_fda_footprint_device"
-    assert effective["ADPT"]["premarket_numbers"] == "K200009"
+    assert effective["ADPT"]["premarket_numbers"] == "DEN170080;K200009"
     assert effective["ADPT"]["product_codes"] == "QDC"
     assert effective["MDAI"]["premarket_numbers"] == "DEN250028"
     assert effective["MDAI"]["product_codes"] == "SHY"
+    assert effective["VCYT"]["footprint_category"] == (
+        "centralized_ldt_clia_with_dormant_legacy_clearance"
+    )
+    assert effective["VCYT"]["premarket_numbers"] == "K130010"
+    assert effective["VCYT"]["product_codes"] == "NYI;NSU"
+    assert effective["VCYT"]["expected_cdrh_records"] == "legacy_only"
+
+
+def test_vnrx_incorrect_cpt_expires_before_structural_lab_routing() -> None:
+    reimbursement_module = load_script_module(
+        "11_build_med_device_reimbursement_features.py",
+        "med_device_vnrx_reimbursement_classification_test",
+    )
+    classification_path = (
+        REPO_ROOT / "med_devices" / "data" / "reimbursement_company_classifications.csv"
+    )
+    override_path = (
+        REPO_ROOT / "med_devices" / "data" / "reimbursement_mapping_overrides.csv"
+    )
+
+    before = reimbursement_module.load_company_classifications(
+        classification_path,
+        asof=date(2026, 7, 23),
+    )
+    effective = reimbursement_module.load_company_classifications(
+        classification_path,
+        asof=date(2026, 7, 24),
+    )
+    with override_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    vnrx_code = next(row for row in rows if row["ticker"] == "VNRX")
+
+    assert "VNRX" not in before
+    assert effective["VNRX"].billing_category == (
+        "veterinary_commercial_and_precommercial_human"
+    )
+    assert effective["VNRX"].payment_rate_status == "veterinary_no_cms"
+    assert effective["VNRX"].primary_payment_file == "none"
+    assert row_is_effective_asof(vnrx_code, date(2026, 7, 23))
+    assert not row_is_effective_asof(vnrx_code, date(2026, 7, 24))
+
+
+def test_wgs_reimbursement_anchor_transitions_to_exome_genome_code_set() -> None:
+    path = REPO_ROOT / "med_devices" / "data" / "reimbursement_mapping_overrides.csv"
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = [row for row in csv.DictReader(handle) if row["ticker"] == "WGS"]
+
+    before = {
+        row["reimbursement_code"]
+        for row in rows
+        if row_is_effective_asof(row, date(2026, 7, 23))
+    }
+    effective = {
+        row["reimbursement_code"]
+        for row in rows
+        if row_is_effective_asof(row, date(2026, 7, 24))
+    }
+
+    assert before == {"81425"}
+    assert effective == {"81415", "81416", "81425", "81426"}
+
+
+def test_assay_specific_reimbursement_codes_replace_generic_81479_proxies() -> None:
+    path = REPO_ROOT / "med_devices" / "data" / "reimbursement_mapping_overrides.csv"
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    expected = {
+        "BDSX": "0080U",
+        "BIAF": "0406U",
+        "CSTL": "81529",
+        "XGN": "0312U",
+    }
+    for ticker, code in expected.items():
+        current_codes = {
+            row["reimbursement_code"]
+            for row in rows
+            if row["ticker"] == ticker
+            and row_is_effective_asof(row, date(2026, 7, 24))
+        }
+        assert current_codes == {code}
+
+    gral_codes = {
+        row["reimbursement_code"]
+        for row in rows
+        if row["ticker"] == "GRAL"
+        and row_is_effective_asof(row, date(2026, 7, 24))
+    }
+    assert not gral_codes
+
+
+def test_generic_81479_has_no_ticker_agnostic_manual_flat_rate() -> None:
+    path = REPO_ROOT / "med_devices" / "data" / "reimbursement_manual_payment_rates.csv"
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    assert not [
+        row
+        for row in rows
+        if row["code"] == "81479" and str(row["payment_rate"] or "").strip()
+    ]
+
+
+def test_updated_lab_reimbursement_classifications_are_effective() -> None:
+    module = load_script_module(
+        "11_build_med_device_reimbursement_features.py",
+        "med_device_updated_lab_reimbursement_classification_test",
+    )
+    path = (
+        REPO_ROOT / "med_devices" / "data" / "reimbursement_company_classifications.csv"
+    )
+    classifications = module.load_company_classifications(
+        path,
+        asof=date(2026, 7, 24),
+    )
+
+    assert classifications["NEO"].billing_category == "laboratory_services"
+    assert classifications["NEO"].payment_rate_status == "large_lab_clfs_array"
+    assert classifications["PSNL"].primary_payment_file == "cms_moldx_mrd"
+    assert classifications["GRAL"].payment_rate_status == "cash_pay_or_out_of_pocket"
+    assert classifications["XGN"].primary_payment_file == "cms_clfs_pla_0312u"
+
+
+def test_reimbursement_linker_replaces_stale_links_for_active_taxonomy_company(
+    tmp_path: Path,
+) -> None:
+    module = load_script_module(
+        "15_link_med_device_reimbursement_to_companies.py",
+        "med_device_reimbursement_linker_company_scope_test",
+    )
+    db_path = tmp_path / "med_devices.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        upsert_source_registry(
+            conn,
+            [
+                {
+                    "source_id": "cms_payment_files",
+                    "stage": "reimbursement",
+                    "source_name": "CMS payment files",
+                    "source_type": "file",
+                    "base_url": "https://www.cms.gov/",
+                    "authentication_required": 0,
+                    "free_key_required": 0,
+                    "priority": 10,
+                    "status": "active",
+                }
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO dim_company(
+                company_id, ticker, company_name, universe_status, is_active,
+                first_seen_at, updated_at
+            )
+            VALUES (1, 'VNRX', 'VolitionRx Limited', 'active', 1, '2020-01-01', '2026-07-23')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO dim_company_model_taxonomy(
+                company_id, model_family, ticker, company_name, calibration_cohort,
+                valid_from, reviewed_at, updated_at
+            )
+            VALUES (
+                1, 'med_devices', 'VNRX', 'VolitionRx Limited', 'diagnostics_clinical_tests',
+                '2020-01-01', '2026-07-23', '2026-07-23'
+            )
+            """
+        )
+        reimbursement_code_id = int(
+            conn.execute(
+                """
+                INSERT INTO dim_reimbursement_code(
+                    code_type, code, source_id, created_at, updated_at
+                )
+                VALUES ('CPT', '87631', 'cms_payment_files', '2026-06-26', '2026-06-26')
+                RETURNING reimbursement_code_id
+                """
+            ).fetchone()["reimbursement_code_id"]
+        )
+        conn.execute(
+            """
+            INSERT INTO map_company_reimbursement_code(
+                company_id, reimbursement_code_id, confidence, mapping_method,
+                source_id, created_at, updated_at
+            )
+            VALUES (1, ?, 95.0, 'direct_molecular_match', 'cms_payment_files',
+                    '2026-06-26', '2026-06-26')
+            """,
+            (reimbursement_code_id,),
+        )
+        policy = module.LinkPolicy(
+            source_ids=["cms_coverage_api"],
+            code_source_ids=["cms_coverage_api", "cms_payment_files"],
+            min_auto_confidence=65.0,
+            exact_alias_confidence=92.0,
+            core_alias_confidence=82.0,
+            ticker_confidence=60.0,
+            min_term_length=5,
+            max_policy_rows=0,
+        )
+
+        company_meta = module.load_company_meta(
+            conn,
+            ticker_filter={"VNRX"},
+            asof="2026-07-24",
+        )
+        aliases = module.build_aliases(
+            conn,
+            ticker_filter={"VNRX"},
+            policy=policy,
+            asof="2026-07-24",
+        )
+        module.clear_existing_mappings(conn, sorted(company_meta), policy=policy)
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS n FROM map_company_reimbursement_code WHERE company_id = 1"
+        ).fetchone()
+
+    assert company_meta == {1: ("VNRX", "VolitionRx Limited")}
+    assert any(alias.company_id == 1 for alias in aliases)
+    assert int(remaining["n"]) == 0
 
 
 def test_july_analyst_decision_replacements_preserve_point_in_time_history() -> None:
@@ -94,6 +342,36 @@ def test_july_analyst_decision_replacements_preserve_point_in_time_history() -> 
         assert after is not None and after.decision == after_value
 
 
+def test_diagnostics_research_review_decisions_are_same_day_exclusive() -> None:
+    path = REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    decisions, issues = load_analyst_review_decisions(path)
+    assert not [issue for issue in issues if issue["severity"] == "CRITICAL"]
+
+    expected = {
+        "VCYT": "watchlist",
+        "WGS": "watchlist",
+        "VNRX": "defer",
+    }
+    for ticker, decision_value in expected.items():
+        same_day = effective_decision(
+            decisions,
+            ticker=ticker,
+            cohort="diagnostics_clinical_tests",
+            asof=date(2026, 7, 24),
+        )
+        effective = effective_decision(
+            decisions,
+            ticker=ticker,
+            cohort="diagnostics_clinical_tests",
+            asof=date(2026, 7, 25),
+        )
+
+        assert same_day is None
+        assert effective is not None
+        assert effective.decision == decision_value
+        assert effective.allow_portfolio_candidate_override is False
+
+
 def test_abt_product_family_governance_is_effective_dated_and_complete() -> None:
     before, before_issues = load_product_family_mappings(
         FDA_PRODUCT_FAMILY_MAPPING,
@@ -117,11 +395,12 @@ def test_abt_product_family_governance_is_effective_dated_and_complete() -> None
         for mapping in effective
         if mapping.ticker == "ABT"
     }.issuperset({"DSQ", "QBJ", "QLG", "NGV", "NKM", "OAE", "DQK"})
-    assert {
+    governed_families = {
         exposure.product_family
         for exposure in exposures
         if exposure.ticker == "ABT"
-    }.issuperset(
+    }
+    assert governed_families.issuperset(
         {
             "diabetes_cgm",
             "lvad_circulatory_support",
@@ -131,6 +410,7 @@ def test_abt_product_family_governance_is_effective_dated_and_complete() -> None
             "electrophysiology_ablation",
             "vascular_intervention",
             "diagnostics_laboratory",
+            "cardiopulmonary_surgical_support",
         }
     )
     available = {
@@ -145,11 +425,68 @@ def test_abt_product_family_governance_is_effective_dated_and_complete() -> None
         "business_subsegment_fallback"
     )
     assert available["lvad_circulatory_support"].exposure_confidence == 75.0
-    assert {
+    waived = {
         exposure.product_family
         for exposure in exposures
-        if exposure.exposure_status == "unavailable"
-    } == {"cardiopulmonary_surgical_support"}
+        if exposure.exposure_status == "waived_no_specific_exposure"
+    }
+    assert waived == {"cardiopulmonary_surgical_support"}
+
+
+def test_product_family_shadow_uses_governed_waiver_floor() -> None:
+    exposures, issues = load_product_family_exposures(
+        FDA_PRODUCT_FAMILY_EXPOSURE,
+        asof=date(2026, 7, 24),
+    )
+    assert not [issue for issue in issues if issue.severity == "CRITICAL"]
+
+    shadow = build_product_family_shadow_score(
+        ticker="ABT",
+        mdr_rows=[
+            {
+                "product_family": "diabetes_cgm",
+                "death_designated_flag": 0,
+                "injury_flag": 1,
+                "malfunction_flag": 3,
+            },
+            {
+                "product_family": "cardiopulmonary_surgical_support",
+                "death_designated_flag": 0,
+                "injury_flag": 0,
+                "malfunction_flag": 2,
+            },
+        ],
+        recall_rows=[
+            {
+                "product_family": "cardiopulmonary_surgical_support",
+            }
+        ],
+        exposures=exposures,
+        exposure_floor_usd_millions=500.0,
+        class_i_recall_severity=5.0,
+        recall_severity_rate_weight=4.0,
+        class_i_recall_count_weight=20.0,
+        death_rate_weight=5.0,
+        injury_rate_weight=0.5,
+        malfunction_rate_weight=0.1,
+    )
+
+    assert shadow.available_flag == 1
+    assert shadow.adjustment_applied_flag == 1
+    assert shadow.exposure_waived_count == 1
+    assert shadow.exposure_missing_count == 0
+    assert shadow.status == "ready_with_waiver"
+    assert shadow.event_risk_score is not None
+    waived_detail = next(
+        item
+        for item in shadow.family_details
+        if item["product_family"] == "cardiopulmonary_surgical_support"
+    )
+    assert waived_detail["denominator_usd_millions"] == 500.0
+    assert (
+        waived_detail["denominator_source"]
+        == "governed_waiver_conservative_floor"
+    )
 
 
 def test_product_family_mapping_prefers_manufacturer_specific_row(tmp_path: Path) -> None:
@@ -242,6 +579,18 @@ def test_stage1_schema_creates_independent_med_device_tables(tmp_path: Path) -> 
             str(row["name"])
             for row in conn.execute("PRAGMA table_info(fact_price_ohlcv)").fetchall()
         }
+        fda_columns = {
+            str(row["name"])
+            for row in conn.execute(
+                "PRAGMA table_info(feature_fda_product_risk)"
+            ).fetchall()
+        }
+        score_columns = {
+            str(row["name"])
+            for row in conn.execute(
+                "PRAGMA table_info(med_device_daily_scores)"
+            ).fetchall()
+        }
 
     assert "source_registry" in names
     assert "raw_api_responses" in names
@@ -252,6 +601,67 @@ def test_stage1_schema_creates_independent_med_device_tables(tmp_path: Path) -> 
     assert "daily_scores" not in names
     assert "trials" not in names
     assert "price_adjustment" in price_columns
+    assert "fda_event_risk_product_family_adjusted_score" in fda_columns
+    assert "fda_safety_product_family_adjusted_score" in fda_columns
+    assert "fda_product_family_shadow_status" in fda_columns
+    assert "fda_product_family_shadow_oos_valid_flag" in fda_columns
+    assert "fda_event_risk_product_family_adjusted_score" in score_columns
+    assert "fda_safety_product_family_adjusted_score" in score_columns
+    assert "fda_product_family_shadow_oos_valid_flag" in score_columns
+
+
+def test_stage1_schema_migrates_shadow_columns_onto_pre_migration_tables(tmp_path: Path) -> None:
+    # SC-3: the fresh CREATE TABLE path above never exercises the ALTER-based
+    # migration the live DB actually used (_ensure_table_optional_columns on an
+    # existing old-schema table). Simulate that path by dropping the 10 shadow
+    # columns from a fully-initialized DB and re-running init_db: CREATE TABLE
+    # IF NOT EXISTS is a no-op on existing tables, so only the migration dicts
+    # can restore them. A future edit that adds a shadow column to the CREATE
+    # TABLE text but omits the migration dict entry fails here instead of on
+    # the first insert against a migrated production DB.
+    assert sqlite3.sqlite_version_info >= (3, 35, 0), (
+        "ALTER TABLE DROP COLUMN requires SQLite >= 3.35.0; the migration-path "
+        f"test cannot run on sqlite {sqlite3.sqlite_version}"
+    )
+    db_path = tmp_path / "med_devices.sqlite"
+    tables = ("feature_fda_product_risk", "med_device_daily_scores")
+    with connect(db_path) as conn:
+        init_db(conn)
+        fresh_columns = {table: table_columns(conn, table) for table in tables}
+        for table in tables:
+            missing_from_create = [
+                column
+                for column in FDA_PRODUCT_FAMILY_SHADOW_COLUMNS
+                if column not in fresh_columns[table]
+            ]
+            assert not missing_from_create, (
+                f"{table} CREATE TABLE is missing shadow columns: {missing_from_create}"
+            )
+            for column in FDA_PRODUCT_FAMILY_SHADOW_COLUMNS:
+                conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+            pre_migration = table_columns(conn, table)
+            assert not pre_migration.intersection(FDA_PRODUCT_FAMILY_SHADOW_COLUMNS)
+
+        init_db(conn)
+
+        for table in tables:
+            migrated = table_columns(conn, table)
+            not_migrated = [
+                column
+                for column in FDA_PRODUCT_FAMILY_SHADOW_COLUMNS
+                if column not in migrated
+            ]
+            assert not not_migrated, (
+                f"init_db did not migrate shadow columns onto pre-migration {table} "
+                f"(missing from _ensure_table_optional_columns dict?): {not_migrated}"
+            )
+            # CREATE-vs-migration parity: a migrated old-schema table must end
+            # up with exactly the same column surface as a fresh CREATE.
+            assert migrated == fresh_columns[table], (
+                f"{table} migrated column set diverges from fresh CREATE TABLE: "
+                f"only_in_create={sorted(fresh_columns[table] - migrated)} "
+                f"only_in_migrated={sorted(migrated - fresh_columns[table])}"
+            )
 
 
 def test_free_source_registry_loads_core_free_sources(tmp_path: Path) -> None:

@@ -138,6 +138,16 @@ SCORE_FIELDS = [
     "fda_event_risk_score",
     "fda_event_risk_breadth_adjusted_score",
     "fda_safety_breadth_adjusted_score",
+    "fda_event_risk_product_family_adjusted_score",
+    "fda_safety_product_family_adjusted_score",
+    "fda_product_family_shadow_available_flag",
+    "fda_product_family_shadow_oos_valid_flag",
+    "fda_product_family_adjustment_applied_flag",
+    "fda_product_family_exposure_available_count",
+    "fda_product_family_exposure_waived_count",
+    "fda_product_family_exposure_missing_count",
+    "fda_product_family_shadow_status",
+    "fda_product_family_shadow_reason",
     "fda_distinct_device_category_count",
     "fda_recall_count_raw",
     "fda_recall_count_per_category",
@@ -357,7 +367,9 @@ PACK_ONLY_COMPOSITE_FIELDS = [
 # Stamped into the per-pack manifest so sealed packs published by older script
 # revisions are self-describing. Bump whenever the pack's file set, any CSV header,
 # or the markdown layout changes.
-REVIEW_PACK_SCHEMA_VERSION = "med_device_review_pack_v2"
+# v3: SCORE_FIELDS gained 10 fda_product_family_* columns (shadow-only FDA product
+# family adjustment), changing every pack CSV header and both daily composite CSVs.
+REVIEW_PACK_SCHEMA_VERSION = "med_device_review_pack_v3"
 
 
 def _script13_composite_fieldnames() -> list[str]:

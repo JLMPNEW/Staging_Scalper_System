@@ -186,17 +186,18 @@ def count_fda_mapping_critical(path: Path) -> int:
 def qa_artifact_age_days(path: Path, *, reference: date) -> tuple[int | None, str]:
     """Return (age_days, basis) for a QA publisher artifact, or (None, "missing").
 
-    Prefers the artifact's own max asof_date column (publish-time as-of) and falls back
-    to the file's UTC mtime when no asof is parseable. Age is measured against the
-    validated asof so historical re-validation stays meaningful; an artifact newer than
-    the validated asof yields a negative age and passes any non-negative threshold.
+    Prefers the artifact's own max asof_date column (publish-time as-of; script 79's
+    validation CSV names it generated_asof) and falls back to the file's UTC mtime when
+    no asof is parseable. Age is measured against the validated asof so historical
+    re-validation stays meaningful; an artifact newer than the validated asof yields a
+    negative age and passes any non-negative threshold.
     """
     if not path.exists():
         return None, "missing"
     _, rows = read_csv_rows(path)
     asof_dates: list[date] = []
     for row in rows:
-        parsed = parse_iso_date(str(row.get("asof_date") or ""))
+        parsed = parse_iso_date(str(row.get("asof_date") or row.get("generated_asof") or ""))
         if parsed is not None:
             asof_dates.append(parsed)
     if asof_dates:
@@ -1059,6 +1060,73 @@ def main() -> int:
             expected=f"exists and within {max_qa_artifact_age_days} days of {asof}",
             details=f"QA publisher artifact must exist and stay current with the refresh cadence: {qa_path}",
         )
+
+    # --- FDA product-family shadow artifacts (scripts 78 and 79) ---
+    # WARNING severity, same rationale as the QA publisher block above: a missing/stale
+    # artifact means the shadow-feature publisher silently fell off the refresh cadence,
+    # not that the score surface is wrong. Script 78 is a PROTECTED_CRITICAL stage_5
+    # step whose dated review pack must exist for the validated asof; script 79 is an
+    # optional stage_9 step (it runs AFTER this gate), and its rolling validation CSV is
+    # the sole artifact gating any future promotion (promotion_min_oos_observations), so
+    # a silently failing/stale 79 would otherwise go unnoticed indefinitely. Because 79
+    # runs after 72 in the same refresh, the freshness threshold is satisfied by the
+    # previous refresh's output; only a 79 that stopped running for more than
+    # max_qa_artifact_age_days trips this check.
+    product_family_review_dir = resolve_path(
+        cfg_get(
+            config,
+            "fda_product_family_review.output_dir",
+            "../output/med_devices_reports/fda_product_family_review",
+        ),
+        base_dir=base_dir,
+    )
+    product_family_dated_dir = product_family_review_dir / asof
+    product_family_summary_csv = product_family_dated_dir / "med_device_fda_product_family_review_summary.csv"
+    product_family_validation_csv = resolve_path(
+        cfg_get(
+            config,
+            "fda_product_family_review.shadow_score.validation_output_csv",
+            "../output/med_devices_reports/calibration/med_device_abt_fda_product_family_oos_validation.csv",
+        ),
+        base_dir=base_dir,
+    )
+    for check_id, artifact_path in {
+        "fda_product_family_review_summary_fresh": product_family_summary_csv,
+        "fda_product_family_oos_validation_fresh": product_family_validation_csv,
+    }.items():
+        age_days, age_basis = qa_artifact_age_days(artifact_path, reference=asof_date)
+        add_check(
+            checks,
+            check_id=check_id,
+            severity="WARNING",
+            passed=age_days is not None and age_days <= max_qa_artifact_age_days,
+            observed="missing" if age_days is None else f"{age_basis}_age_days={age_days}",
+            expected=f"exists and within {max_qa_artifact_age_days} days of {asof}",
+            details=f"FDA product-family shadow artifact must exist and stay current with the refresh cadence: {artifact_path}",
+        )
+    # the dated review pack is published file-by-file (atomic per file, summary is not
+    # last), so a fresh summary alone does not prove the pack completed; the expected
+    # filename set mirrors what script 78 writes
+    product_family_expected_files = [
+        "med_device_fda_mdr_review.csv",
+        "med_device_fda_class_i_recall_review.csv",
+        "med_device_fda_product_family_qa.csv",
+        "med_device_fda_product_family_exceptions.csv",
+        "med_device_fda_product_family_review_summary.csv",
+        "med_device_fda_product_family_governance_issues.csv",
+    ]
+    product_family_missing_files = [
+        name for name in product_family_expected_files if not (product_family_dated_dir / name).exists()
+    ]
+    add_check(
+        checks,
+        check_id="fda_product_family_review_pack_complete",
+        severity="WARNING",
+        passed=not product_family_missing_files,
+        observed=",".join(product_family_missing_files),
+        expected="all script-78 review pack files present",
+        details=f"Dated FDA product-family review pack must contain every published file: {product_family_dated_dir}",
+    )
 
     fda_queue = report_dir / "fda_mapping_review_queue.csv"
     critical_fda = count_fda_mapping_critical(fda_queue) if fda_queue.exists() else 0

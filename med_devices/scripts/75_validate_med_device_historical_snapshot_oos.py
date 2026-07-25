@@ -91,6 +91,22 @@ POST_MIGRATION_DAILY_COLUMNS = {
     "avg_dollar_volume_60d_available_flag",
 }
 REQUIRED_DAILY_COLUMNS = CORE_REQUIRED_DAILY_COLUMNS | POST_MIGRATION_DAILY_COLUMNS
+# FDA product-family shadow columns (scripts 78 -> 13 -> 16 DAILY_COMPOSITE_CONTRACT).
+# Gated by their own cutover anchor (historical_backfill.product_family_shadow_columns_required_from)
+# rather than new_daily_columns_required_from: the 2019-01-04 post-migration anchor predates the
+# shadow feature, so promoting these under that anchor would fail every pre-shadow snapshot.
+PRODUCT_FAMILY_SHADOW_DAILY_COLUMNS = {
+    "fda_event_risk_product_family_adjusted_score",
+    "fda_safety_product_family_adjusted_score",
+    "fda_product_family_shadow_available_flag",
+    "fda_product_family_shadow_oos_valid_flag",
+    "fda_product_family_adjustment_applied_flag",
+    "fda_product_family_exposure_available_count",
+    "fda_product_family_exposure_waived_count",
+    "fda_product_family_exposure_missing_count",
+    "fda_product_family_shadow_status",
+    "fda_product_family_shadow_reason",
+}
 RESEARCH_ELIGIBLE_SAMPLE_ROLES = {"research_calibration_input", "strict_oos"}
 
 
@@ -109,6 +125,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Promote missing post-migration daily columns to CRITICAL for snapshots on/after this as-of date. "
             "Before this date, missing post-migration columns are WARNINGs so legacy snapshots do not block calibration."
+        ),
+    )
+    parser.add_argument(
+        "--product-family-shadow-columns-required-from",
+        default="",
+        help=(
+            "Promote missing FDA product-family shadow daily columns to CRITICAL for snapshots on/after this "
+            "as-of date. Before this date, missing shadow columns are WARNINGs so pre-shadow snapshots do not "
+            "block calibration. Defaults to historical_backfill.product_family_shadow_columns_required_from."
         ),
     )
     parser.add_argument(
@@ -202,6 +227,7 @@ def validate_daily_csv(
     asof: str,
     checks: list[dict[str, Any]],
     new_daily_columns_required_from: date | None,
+    product_family_shadow_columns_required_from: date | None,
 ) -> dict[str, Any]:
     artifact = str(path)
     summary: dict[str, Any] = {"row_count": None, "score_model_versions": set()}
@@ -262,6 +288,27 @@ def validate_daily_csv(
         ),
     )
     post_migration_severity = "CRITICAL" if enforce_post_migration else "WARNING"
+    shadow_missing = sorted(PRODUCT_FAMILY_SHADOW_DAILY_COLUMNS - field_set)
+    enforce_shadow_columns = (
+        product_family_shadow_columns_required_from is not None
+        and snapshot_date is not None
+        and snapshot_date >= product_family_shadow_columns_required_from
+    )
+    add_check(
+        checks,
+        asof=asof,
+        artifact=artifact,
+        check_id="daily_product_family_shadow_columns",
+        severity="CRITICAL" if enforce_shadow_columns else "WARNING",
+        passed=not shadow_missing,
+        observed=",".join(shadow_missing),
+        expected="all FDA product-family shadow columns",
+        details=(
+            "FDA product-family shadow columns are required only on/after "
+            f"{product_family_shadow_columns_required_from.isoformat() if product_family_shadow_columns_required_from else 'an unset shadow cutover date'}; "
+            "before that cutover, missing shadow columns are diagnostic warnings for pre-shadow snapshots."
+        ),
+    )
     research_fields = {
         "score_scale_min",
         "score_scale_max",
@@ -671,6 +718,8 @@ def static_source_paths(config: dict[str, Any], *, base_dir: Path) -> list[tuple
         ("analyst_review_decisions", "med_devices_analyst_review.decisions_csv"),
         ("historical_membership", "med_devices_universe.historical_membership_csv"),
         ("share_count_overrides", "financial_features.share_count_override_csv"),
+        ("fda_product_family_mapping", "fda_product_family_review.product_family_mapping_csv"),
+        ("fda_product_family_exposure", "fda_product_family_review.product_family_exposure_csv"),
     ]
     by_path: dict[Path, list[str]] = {}
     order: list[Path] = []
@@ -1005,6 +1054,7 @@ def build_checks(
     asofs: list[str],
     start_asof: str,
     new_daily_columns_required_from: date | None,
+    product_family_shadow_columns_required_from: date | None,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     static_paths = static_source_paths(config, base_dir=base_dir)
@@ -1024,6 +1074,7 @@ def build_checks(
                 asof=asof,
                 checks=checks,
                 new_daily_columns_required_from=new_daily_columns_required_from,
+                product_family_shadow_columns_required_from=product_family_shadow_columns_required_from,
             )
             score_model_versions |= daily_summary["score_model_versions"]
             if daily_summary["row_count"] is not None:
@@ -1112,6 +1163,17 @@ def main() -> int:
             "Invalid historical_backfill.new_daily_columns_required_from date: "
             f"{new_daily_columns_raw!r}. Use YYYY-MM-DD or leave blank."
         )
+    shadow_columns_raw = str(
+        args.product_family_shadow_columns_required_from
+        or cfg_get(config, "historical_backfill.product_family_shadow_columns_required_from", "")
+        or ""
+    ).strip()
+    product_family_shadow_columns_required_from = parse_date(shadow_columns_raw)
+    if shadow_columns_raw and product_family_shadow_columns_required_from is None:
+        raise RuntimeError(
+            "Invalid historical_backfill.product_family_shadow_columns_required_from date: "
+            f"{shadow_columns_raw!r}. Use YYYY-MM-DD or leave blank."
+        )
     config_start_asof = str(cfg_get(config, "historical_backfill.start_asof", "") or "").strip()
     if config_start_asof and parse_date(config_start_asof) is None:
         raise RuntimeError(
@@ -1126,6 +1188,7 @@ def main() -> int:
         asofs=asofs,
         start_asof=detector_start_asof,
         new_daily_columns_required_from=new_daily_columns_required_from,
+        product_family_shadow_columns_required_from=product_family_shadow_columns_required_from,
     )
     write_checks(output_csv, checks)
     diagnostic_checks = diagnostic_checks_from_strict(checks)

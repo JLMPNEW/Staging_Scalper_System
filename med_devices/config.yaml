@@ -45,6 +45,11 @@ med_devices_refresh_pipeline:
     - analyst_reviewed_at
     - analyst_review_expires_at
     - analyst_portfolio_override_applied
+    - fda_event_risk_product_family_adjusted_score
+    - fda_safety_product_family_adjusted_score
+    - fda_product_family_shadow_available_flag
+    - fda_product_family_shadow_oos_valid_flag
+    - fda_product_family_shadow_status
 
 med_devices_production_qa:
   output_dir: "../output/med_devices_reports/production_qa"
@@ -848,7 +853,19 @@ fda_product_family_review:
   class_i_coverage_min_pct: 100.0
   injury_coverage_min_pct: 95.0
   malfunction_coverage_min_pct: 90.0
-  production_usage: "review_only_no_score_effect"
+  production_usage: "shadow_only_until_oos_validation"
+  shadow_score:
+    exposure_floor_usd_millions: 500.0
+    # No production_weight key: the shadow score is never blended into the daily
+    # composite (script 13 does not read it). production_usage above is the
+    # single source of truth for the frozen shadow-only state; promotion goes
+    # through script 79's OOS validation gate, not a config weight.
+    promotion_min_oos_observations: 20
+    promotion_min_unique_score_values: 3
+    validation_horizons_days:
+      - 60
+      - 120
+    validation_output_csv: "../output/med_devices_reports/calibration/med_device_abt_fda_product_family_oos_validation.csv"
 
 cms_reimbursement_ingestion:
   output_csv: "../output/med_devices_reports/med_device_cms_reimbursement_ingestion.csv"
@@ -1785,7 +1802,11 @@ historical_backfill:
   weekday: "friday"
   run_setup: true
   setup_stages: "init_db,historical_membership,taxonomy"
-  stages: "financial,fda,reimbursement,technical,borrow,short_interest,institutional_flow,insider_activity,scores,review_pack"
+  # Keep in sync with DEFAULT_STAGES in scripts/21 (this string overrides it).
+  # fda_product_family_shadow runs script 78 per as-of: mapping/exposure CSVs are
+  # valid_from-gated and oos_valid=0 outside the live replay window, so it is
+  # safe historically and keeps the shadow columns populated across the panel.
+  stages: "financial,fda,fda_product_family_shadow,reimbursement,technical,borrow,short_interest,institutional_flow,insider_activity,scores,review_pack"
   horizons: "30,60,120"
   include_historical_members: true
   skip_existing: false

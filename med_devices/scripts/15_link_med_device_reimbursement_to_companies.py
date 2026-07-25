@@ -296,33 +296,9 @@ def alias_confidence_score(raw: object) -> float:
     return value
 
 
-def build_aliases(
-    conn: Any,
-    *,
-    ticker_filter: set[str],
-    policy: LinkPolicy,
-    asof: str | None = None,
-) -> list[CompanyAlias]:
-    if asof:
-        rows = conn.execute(
-            """
-            SELECT c.company_id, c.ticker, c.company_name
-            FROM dim_company c
-            WHERE EXISTS (
-                SELECT 1
-                FROM dim_universe_membership m
-                WHERE m.company_id = c.company_id
-                  AND m.model_family = 'med_devices'
-                  AND m.point_in_time_flag = 1
-                  AND m.start_date <= ?
-                  AND (m.end_date IS NULL OR m.end_date >= ?)
-            )
-            ORDER BY c.ticker
-            """,
-            (asof, asof),
-        ).fetchall()
-    else:
-        rows = conn.execute(
+def load_linkable_company_rows(conn: Any, *, asof: str | None = None) -> list[Any]:
+    if not asof:
+        return conn.execute(
             """
             SELECT company_id, ticker, company_name
             FROM dim_company
@@ -330,6 +306,45 @@ def build_aliases(
             ORDER BY ticker
             """
         ).fetchall()
+    return conn.execute(
+        """
+        SELECT c.company_id, c.ticker, c.company_name
+        FROM dim_company c
+        WHERE (
+                c.is_active = 1
+                AND EXISTS (
+                    SELECT 1
+                    FROM dim_company_model_taxonomy t
+                    WHERE t.company_id = c.company_id
+                      AND t.model_family = 'med_devices'
+                      AND (NULLIF(t.valid_from, '') IS NULL OR SUBSTR(t.valid_from, 1, 10) <= ?)
+                      AND (NULLIF(t.reviewed_at, '') IS NULL OR SUBSTR(t.reviewed_at, 1, 10) < ?)
+                      AND (NULLIF(t.valid_to, '') IS NULL OR SUBSTR(t.valid_to, 1, 10) >= ?)
+                )
+              )
+           OR EXISTS (
+                SELECT 1
+                FROM dim_universe_membership m
+                WHERE m.company_id = c.company_id
+                  AND m.model_family = 'med_devices'
+                  AND m.point_in_time_flag = 1
+                  AND m.start_date <= ?
+                  AND (m.end_date IS NULL OR m.end_date >= ?)
+              )
+        ORDER BY c.ticker
+        """,
+        (asof, asof, asof, asof, asof),
+    ).fetchall()
+
+
+def build_aliases(
+    conn: Any,
+    *,
+    ticker_filter: set[str],
+    policy: LinkPolicy,
+    asof: str | None = None,
+) -> list[CompanyAlias]:
+    rows = load_linkable_company_rows(conn, asof=asof)
     aliases: dict[tuple[int, str], CompanyAlias] = {}
     company_ids: list[int] = []
     meta: dict[int, tuple[str, str]] = {}
@@ -735,6 +750,11 @@ def load_manual_rate_rows(
             )
             payment_rate = to_float(row_get(raw_row, "payment_rate", "rate", "payment_amount"))
             status_indicator = row_get(raw_row, "status_indicator", "status")
+            if code == "81479" and payment_rate is not None:
+                raise ValueError(
+                    "Ticker-agnostic manual payment rates are not permitted for unlisted "
+                    "molecular-pathology code 81479; use assay-specific coverage evidence."
+                )
             if payment_rate is None and not status_indicator:
                 continue
             validation = official_rate_validation(
@@ -884,33 +904,7 @@ def build_matches(
 
 
 def load_company_meta(conn: Any, *, ticker_filter: set[str], asof: str | None = None) -> dict[int, tuple[str, str]]:
-    if asof:
-        rows = conn.execute(
-            """
-            SELECT c.company_id, c.ticker, c.company_name
-            FROM dim_company c
-            WHERE EXISTS (
-                SELECT 1
-                FROM dim_universe_membership m
-                WHERE m.company_id = c.company_id
-                  AND m.model_family = 'med_devices'
-                  AND m.point_in_time_flag = 1
-                  AND m.start_date <= ?
-                  AND (m.end_date IS NULL OR m.end_date >= ?)
-            )
-            ORDER BY c.ticker
-            """,
-            (asof, asof),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """
-            SELECT company_id, ticker, company_name
-            FROM dim_company
-            WHERE is_active = 1
-            ORDER BY ticker
-            """
-        ).fetchall()
+    rows = load_linkable_company_rows(conn, asof=asof)
     out: dict[int, tuple[str, str]] = {}
     for row in rows:
         ticker = normalize_ticker(row["ticker"])

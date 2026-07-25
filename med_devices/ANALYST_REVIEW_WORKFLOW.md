@@ -36,15 +36,32 @@ Allowed decisions:
 
 Use `review_category = all` when a decision applies to every open review category for a ticker/cohort. Otherwise use the exact category shown in the queue, such as `high_score_blocked`, `manual_review_regulatory_risk`, `unknown_reimbursement`, `single_product_risk`, or `hard_red_flag`.
 
-## Phase 1 Policy
+### Category And Disposition Semantics
 
-Phase 1 is governance-only.
+`review_category` records the condition that triggered review. It does not determine
+the analyst disposition. Decisions are independent, evidence-based judgments about
+severity, persistence, and portfolio impact.
+
+- `tier1_safety_failed` is an umbrella trigger containing heterogeneous failures. A
+  valuation miss, a fundamental-quality miss, and a confirmed regulatory event do
+  not require the same disposition.
+- The same review category may therefore produce different decisions when the
+  underlying evidence differs. The decision reason must identify that evidence.
+- A category change invalidates a category-scoped decision until it is reviewed
+  again. Do not silently preserve a legacy disposition by merely replacing its
+  category.
+- Use `review_category = all` only for an explicitly ticker-wide decision. Do not
+  use it as a convenience to suppress category drift.
+
+## Production Policy
 
 - The scorer reads active, non-expired decisions and writes the audit fields.
 - The analyst review queue shows `open`, `decided`, or `expired_decision_needs_review`.
 - The production QA gate validates the decision file and score audit columns.
-- Portfolio candidate gates are not changed by analyst decisions.
-- `med_devices_analyst_review.enable_portfolio_overrides` remains `false`.
+- `reject` and `data_fix_needed` are fail-closed and force the portfolio-candidate
+  gate to zero while the matching decision is effective.
+- `approve`, `watchlist`, and `defer` do not widen the portfolio-candidate gate.
+- Analyst approvals cannot override model hard gates.
 
 Audit fields written to daily scores:
 

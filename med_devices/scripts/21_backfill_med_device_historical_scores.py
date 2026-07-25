@@ -76,6 +76,7 @@ WEEKDAY_INDEX = {
 DEFAULT_STAGES = (
     "financial",
     "fda",
+    "fda_product_family_shadow",
     "reimbursement",
     "technical",
     "borrow",
@@ -92,6 +93,7 @@ DEFAULT_SETUP_STAGES = (
 STAGE_SCRIPTS = {
     "financial": "06_build_med_device_financial_features.py",
     "fda": "10_build_med_device_fda_features.py",
+    "fda_product_family_shadow": "78_build_med_device_fda_product_family_review.py",
     "reimbursement": "11_build_med_device_reimbursement_features.py",
     "technical": "12_build_med_device_technical_features.py",
     "borrow": "54_build_med_device_borrow_features.py",

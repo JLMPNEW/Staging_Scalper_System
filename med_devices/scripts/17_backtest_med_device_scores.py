@@ -100,6 +100,7 @@ BASE_FIELDS = [
     "fda_clearance_acceleration_score",
     "fda_evidence_quality_score",
     "fda_safety_breadth_adjusted_score",
+    "fda_safety_product_family_adjusted_score",
     "reimbursement_score",
     "valuation_score",
     "technical_entry_score",
@@ -477,6 +478,9 @@ def build_backtest_rows(
             "fda_clearance_acceleration_score": value_or_blank(row, "fda_clearance_acceleration_score"),
             "fda_evidence_quality_score": value_or_blank(row, "fda_evidence_quality_score"),
             "fda_safety_breadth_adjusted_score": value_or_blank(row, "fda_safety_breadth_adjusted_score"),
+            "fda_safety_product_family_adjusted_score": value_or_blank(
+                row, "fda_safety_product_family_adjusted_score"
+            ),
             "reimbursement_score": value_or_blank(row, "reimbursement_score"),
             "valuation_score": value_or_blank(row, "valuation_score"),
             "technical_entry_score": value_or_blank(row, "technical_entry_score"),

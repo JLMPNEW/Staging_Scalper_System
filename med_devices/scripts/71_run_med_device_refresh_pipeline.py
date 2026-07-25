@@ -44,6 +44,11 @@ PROTECTED_CRITICAL_STEPS = {
     "09_link_fda",
     "70_audit_fda_mapping",
     "10_build_fda_features",
+    # 78_build_fda_product_family_shadow is deliberately NOT protected-critical
+    # (WR-2): it is an unpromoted shadow-only signal and script 13 degrades
+    # gracefully when its columns are absent/NULL, so it is registered
+    # optional=True below. Promotion to critical status must ride the same
+    # explicit promotion event that would move the shadow into the composite.
     "15_link_reimbursement",
     "11_build_reimbursement_features",
     "12_build_technical_features",
@@ -162,6 +167,22 @@ def build_steps(
         Step("09_link_fda", "stage_5", "Link FDA manufacturers to companies", py_script("med_devices/scripts/09_link_med_device_fda_to_companies.py"), asof_args),
         Step("70_audit_fda_mapping", "stage_5", "Audit FDA mapping governance", py_script("med_devices/scripts/70_audit_med_device_fda_mapping_governance.py")),
         Step("10_build_fda_features", "stage_5", "Build FDA product-risk features", py_script("med_devices/scripts/10_build_med_device_fda_features.py"), asof_args),
+        # Shadow-only discipline (WR-2): 78 stays fail-loud internally (no
+        # --warn-only) but optional=True here — mirroring its validator 79 — so
+        # exposure-CSV drift or a coverage-threshold regression records
+        # OPTIONAL_FAIL in the manifest instead of aborting production scoring
+        # (13), the review pack (16), and the QA gate (72), none of which have
+        # a hard dependency on this unpromoted shadow output.
+        Step(
+            "78_build_fda_product_family_shadow",
+            "stage_5",
+            "Build governed FDA product-family shadow risk",
+            py_script(
+                "med_devices/scripts/78_build_med_device_fda_product_family_review.py"
+            ),
+            asof_args,
+            optional=True,
+        ),
         Step("14_sync_cms_reimbursement", "stage_5", "Sync CMS/reimbursement source facts", py_script("med_devices/scripts/14_sync_med_device_cms_reimbursement.py"), ["--allow-partial"], network=True),
         Step("15_link_reimbursement", "stage_5", "Link reimbursement evidence to companies", py_script("med_devices/scripts/15_link_med_device_reimbursement_to_companies.py"), asof_args),
         Step("11_build_reimbursement_features", "stage_5", "Build reimbursement features", py_script("med_devices/scripts/11_build_med_device_reimbursement_features.py"), asof_args),
@@ -239,6 +260,16 @@ def build_steps(
             Step("74_build_analyst_review", "stage_8", "Build analyst review queue", py_script("med_devices/scripts/74_build_med_device_analyst_review_queue.py"), asof_args),
             Step("72_validate_production_outputs", "stage_8", "Run final production QA gate", py_script("med_devices/scripts/72_validate_med_device_production_outputs.py"), asof_args),
             Step("73_audit_calibration_governance", "stage_9", "Audit calibration refresh cadence", py_script("med_devices/scripts/73_audit_med_device_calibration_governance.py"), asof_args, optional=True),
+            Step(
+                "79_validate_fda_product_family_shadow",
+                "stage_9",
+                "Validate FDA product-family shadow signal",
+                py_script(
+                    "med_devices/scripts/79_validate_med_device_fda_product_family_shadow.py"
+                ),
+                asof_args,
+                optional=True,
+            ),
         ]
     )
     return steps

@@ -288,6 +288,16 @@ FIELDNAMES = [
     "fda_event_risk_score",
     "fda_event_risk_breadth_adjusted_score",
     "fda_safety_breadth_adjusted_score",
+    "fda_event_risk_product_family_adjusted_score",
+    "fda_safety_product_family_adjusted_score",
+    "fda_product_family_shadow_available_flag",
+    "fda_product_family_shadow_oos_valid_flag",
+    "fda_product_family_adjustment_applied_flag",
+    "fda_product_family_exposure_available_count",
+    "fda_product_family_exposure_waived_count",
+    "fda_product_family_exposure_missing_count",
+    "fda_product_family_shadow_status",
+    "fda_product_family_shadow_reason",
     "fda_distinct_device_category_count",
     "fda_recall_count_raw",
     "fda_recall_count_per_category",
@@ -548,6 +558,16 @@ class ScoreRow:
     fda_event_risk_score: float = 0.0
     fda_event_risk_breadth_adjusted_score: float = 0.0
     fda_safety_breadth_adjusted_score: float = 50.0
+    fda_event_risk_product_family_adjusted_score: float | None = None
+    fda_safety_product_family_adjusted_score: float | None = None
+    fda_product_family_shadow_available_flag: int = 0
+    fda_product_family_shadow_oos_valid_flag: int = 0
+    fda_product_family_adjustment_applied_flag: int = 0
+    fda_product_family_exposure_available_count: int = 0
+    fda_product_family_exposure_waived_count: int = 0
+    fda_product_family_exposure_missing_count: int = 0
+    fda_product_family_shadow_status: str = ""
+    fda_product_family_shadow_reason: str = ""
     fda_distinct_device_category_count: int = 0
     fda_recall_count_raw: int = 0
     fda_recall_count_per_category: float = 0.0
@@ -2827,6 +2847,18 @@ SCORE_TEMPLATE_FIELD_TO_COMPONENT = {
     "sentiment_catalyst_score": "sentiment_catalyst",
     "value_trap_score": "valuation",
 }
+# SCORE_TEMPLATE_FIELD_TO_ATTR and SCORE_TEMPLATE_FIELD_TO_COMPONENT are hand-synced
+# parallel maps: template validation checks the ATTR map while active-template
+# completeness subscripts the COMPONENT map unguarded, so a field promoted into only
+# one map would pass validation and then KeyError mid-scoring. Fail loudly at import
+# instead of mid-run.
+_SCORE_TEMPLATE_MAP_DRIFT = set(SCORE_TEMPLATE_FIELD_TO_ATTR).symmetric_difference(SCORE_TEMPLATE_FIELD_TO_COMPONENT)
+if _SCORE_TEMPLATE_MAP_DRIFT:
+    raise RuntimeError(
+        "SCORE_TEMPLATE_FIELD_TO_ATTR and SCORE_TEMPLATE_FIELD_TO_COMPONENT must declare identical "
+        f"field sets; drifted fields: {sorted(_SCORE_TEMPLATE_MAP_DRIFT)}. Promote a template field "
+        "into both maps (and score_field_available) in the same change."
+    )
 SCORE_TEMPLATE_DIRECTIONS = {"positive", "inverse"}
 
 
@@ -4726,6 +4758,16 @@ def build_rows(
             and to_float(fda_item.get("fda_event_risk_breadth_adjusted_score")) is not None,
             "fda_safety_breadth_adjusted_score": bool(fda_item)
             and to_float(fda_item.get("fda_safety_breadth_adjusted_score")) is not None,
+            "fda_event_risk_product_family_adjusted_score": bool(fda_item)
+            and to_float(
+                fda_item.get("fda_event_risk_product_family_adjusted_score")
+            )
+            is not None,
+            "fda_safety_product_family_adjusted_score": bool(fda_item)
+            and to_float(
+                fda_item.get("fda_safety_product_family_adjusted_score")
+            )
+            is not None,
             "reimbursement_score": component_available["reimbursement"],
             "valuation_score": component_available["valuation"],
             "technical_entry_score": component_available["technical_entry"],
@@ -4745,6 +4787,18 @@ def build_rows(
             "sentiment_catalyst_score": component_available["sentiment_catalyst"],
             "value_trap_score": to_float(item.get("value_trap_score")) is not None,
         }
+        # score_field_available may carry extra shadow-only keys (e.g. the product-family
+        # adjusted fields) ahead of template promotion — those stay unreachable until the
+        # field enters both template maps above. The reverse drift is the hazard: a
+        # template field missing here would be silently treated as unavailable by the
+        # .get(..., False) consumers (completeness and score_template_value), so fail loudly.
+        missing_score_template_fields = set(SCORE_TEMPLATE_FIELD_TO_ATTR) - set(score_field_available)
+        if missing_score_template_fields:
+            raise RuntimeError(
+                "score_field_available is missing availability entries for score template fields "
+                f"{sorted(missing_score_template_fields)}; without an entry the field would be "
+                "silently skipped in data_completeness and template scoring."
+            )
         if active_score_template is not None:
             active_template_fields = [
                 component.field
@@ -4871,6 +4925,102 @@ def build_rows(
             ),
             fda_safety_breadth_adjusted_score=(
                 score_or(fda_item.get("fda_safety_breadth_adjusted_score"), 50.0) if fda_item else 50.0
+            ),
+            fda_event_risk_product_family_adjusted_score=(
+                to_float(
+                    fda_item.get(
+                        "fda_event_risk_product_family_adjusted_score"
+                    )
+                )
+                if fda_item
+                else None
+            ),
+            fda_safety_product_family_adjusted_score=(
+                to_float(
+                    fda_item.get("fda_safety_product_family_adjusted_score")
+                )
+                if fda_item
+                else None
+            ),
+            fda_product_family_shadow_available_flag=(
+                int(
+                    to_float(
+                        fda_item.get("fda_product_family_shadow_available_flag")
+                    )
+                    or 0
+                )
+                if fda_item
+                else 0
+            ),
+            fda_product_family_shadow_oos_valid_flag=(
+                int(
+                    to_float(
+                        fda_item.get(
+                            "fda_product_family_shadow_oos_valid_flag"
+                        )
+                    )
+                    or 0
+                )
+                if fda_item
+                else 0
+            ),
+            fda_product_family_adjustment_applied_flag=(
+                int(
+                    to_float(
+                        fda_item.get(
+                            "fda_product_family_adjustment_applied_flag"
+                        )
+                    )
+                    or 0
+                )
+                if fda_item
+                else 0
+            ),
+            fda_product_family_exposure_available_count=(
+                int(
+                    to_float(
+                        fda_item.get(
+                            "fda_product_family_exposure_available_count"
+                        )
+                    )
+                    or 0
+                )
+                if fda_item
+                else 0
+            ),
+            fda_product_family_exposure_waived_count=(
+                int(
+                    to_float(
+                        fda_item.get(
+                            "fda_product_family_exposure_waived_count"
+                        )
+                    )
+                    or 0
+                )
+                if fda_item
+                else 0
+            ),
+            fda_product_family_exposure_missing_count=(
+                int(
+                    to_float(
+                        fda_item.get(
+                            "fda_product_family_exposure_missing_count"
+                        )
+                    )
+                    or 0
+                )
+                if fda_item
+                else 0
+            ),
+            fda_product_family_shadow_status=(
+                str(fda_item.get("fda_product_family_shadow_status") or "")
+                if fda_item
+                else ""
+            ),
+            fda_product_family_shadow_reason=(
+                str(fda_item.get("fda_product_family_shadow_reason") or "")
+                if fda_item
+                else ""
             ),
             fda_distinct_device_category_count=int(to_float(fda_item.get("fda_distinct_device_category_count")) or 0)
             if fda_item
@@ -5349,6 +5499,16 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "fda_event_risk_score",
         "fda_event_risk_breadth_adjusted_score",
         "fda_safety_breadth_adjusted_score",
+        "fda_event_risk_product_family_adjusted_score",
+        "fda_safety_product_family_adjusted_score",
+        "fda_product_family_shadow_available_flag",
+        "fda_product_family_shadow_oos_valid_flag",
+        "fda_product_family_adjustment_applied_flag",
+        "fda_product_family_exposure_available_count",
+        "fda_product_family_exposure_waived_count",
+        "fda_product_family_exposure_missing_count",
+        "fda_product_family_shadow_status",
+        "fda_product_family_shadow_reason",
         "fda_distinct_device_category_count",
         "fda_recall_count_raw",
         "fda_recall_count_per_category",
@@ -5620,6 +5780,16 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.fda_event_risk_score,
                 row.fda_event_risk_breadth_adjusted_score,
                 row.fda_safety_breadth_adjusted_score,
+                row.fda_event_risk_product_family_adjusted_score,
+                row.fda_safety_product_family_adjusted_score,
+                row.fda_product_family_shadow_available_flag,
+                row.fda_product_family_shadow_oos_valid_flag,
+                row.fda_product_family_adjustment_applied_flag,
+                row.fda_product_family_exposure_available_count,
+                row.fda_product_family_exposure_waived_count,
+                row.fda_product_family_exposure_missing_count,
+                row.fda_product_family_shadow_status,
+                row.fda_product_family_shadow_reason,
                 row.fda_distinct_device_category_count,
                 row.fda_recall_count_raw,
                 row.fda_recall_count_per_category,

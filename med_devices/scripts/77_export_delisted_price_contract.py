@@ -10,7 +10,7 @@ through this export.
 
 Outputs (globbed by portfolio_layer survivorship_panel config):
   output/med_devices_reports/market_data/med_devices_delisted_price_export.csv
-      ticker, date, adjclose, close, volume, source_symbol
+      ticker, date, adj_open, adj_high, adj_low, adjclose, close, volume, source_symbol
   output/med_devices_reports/market_data/med_devices_delisting_events.csv
       ticker, delist_date, delist_reason, terminal_value
 
@@ -37,7 +37,17 @@ from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 
 LOGGER = logging.getLogger("export_med_delisted_price_contract")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-PRICE_FIELDS = ["ticker", "date", "adjclose", "close", "volume", "source_symbol"]
+PRICE_FIELDS = [
+    "ticker",
+    "date",
+    "adj_open",
+    "adj_high",
+    "adj_low",
+    "adjclose",
+    "close",
+    "volume",
+    "source_symbol",
+]
 EVENT_FIELDS = ["ticker", "delist_date", "delist_reason", "terminal_value"]
 MEMBERSHIP_BASIS = "calibration_only_historical_delisted"
 
@@ -117,7 +127,7 @@ def main() -> int:
                 params.append(args.min_date)
             bars = conn.execute(
                 f"""
-                SELECT bar_date, adj_close, close, volume
+                SELECT bar_date, open, high, low, adj_close, close, volume
                 FROM fact_price_ohlcv
                 WHERE UPPER(ticker) = ? AND adj_close IS NOT NULL AND adj_close > 0
                 {date_sql}
@@ -129,9 +139,26 @@ def main() -> int:
                 missing_bars.append(ticker)
                 continue
             for b in bars:
+                close_px = float(b["close"]) if b["close"] is not None else 0.0
+                factor = float(b["adj_close"]) / close_px if close_px > 0 else 0.0
                 price_rows.append({
                     "ticker": ticker,
                     "date": str(b["bar_date"])[:10],
+                    "adj_open": (
+                        round(float(b["open"]) * factor, 6)
+                        if b["open"] is not None and factor > 0
+                        else ""
+                    ),
+                    "adj_high": (
+                        round(float(b["high"]) * factor, 6)
+                        if b["high"] is not None and factor > 0
+                        else ""
+                    ),
+                    "adj_low": (
+                        round(float(b["low"]) * factor, 6)
+                        if b["low"] is not None and factor > 0
+                        else ""
+                    ),
                     "adjclose": round(float(b["adj_close"]), 6),
                     "close": round(float(b["close"]), 6) if b["close"] is not None else "",
                     "volume": int(b["volume"]) if b["volume"] is not None else "",
