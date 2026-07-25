@@ -242,7 +242,8 @@ def _cache_path(cache_dir: Path, ticker: str) -> Path:
 
 
 def load_cached(cache_dir: Path, ticker: str, *, start: date, end: date,
-                delist_date: str | None) -> tuple[list[tuple[str, float]], str, str] | None:
+                delist_date: str | None,
+                max_active_cache_age_days: int) -> tuple[list[tuple[str, float]], str, str] | None:
     path = _cache_path(cache_dir, ticker)
     if not path.exists():
         return None
@@ -250,6 +251,14 @@ def load_cached(cache_dir: Path, ticker: str, *, start: date, end: date,
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    if delist_date is None:
+        cached_at = str(payload.get("cached_at", ""))[:10]
+        try:
+            cache_age_days = (date.today() - date.fromisoformat(cached_at)).days
+        except ValueError:
+            return None
+        if cache_age_days > max_active_cache_age_days:
+            return None
     raw_bars = payload.get("bars", [])
     dates = [
         str(r.get("date", ""))
@@ -319,6 +328,10 @@ def main() -> int:  # noqa: C901
     delist_match = int(sp.get("delist_match_trading_days", 10))
     overlap_warn_rel = float(sp.get("overlap_disagreement_warn_rel", 0.02))
     min_complete_warn = float(sp.get("min_complete_fraction_warn", 0.95))
+    max_active_cache_age_days = int(sp.get("active_cache_max_age_days", 7))
+    if max_active_cache_age_days < 0:
+        LOGGER.error("survivorship_panel.active_cache_max_age_days must be non-negative")
+        return 1
 
     try:
         universe, snap_dates, snapshot_inputs = snapshot_universe(store_dir)
@@ -423,7 +436,14 @@ def main() -> int:  # noqa: C901
 
     def fetch_one(ticker: str) -> tuple[str, list[tuple[str, float]], str, str, str, bool]:
         delist = events.get(ticker, {}).get("delist_date")
-        cached = load_cached(cache_dir, ticker, start=start, end=end, delist_date=delist)
+        cached = load_cached(
+            cache_dir,
+            ticker,
+            start=start,
+            end=end,
+            delist_date=delist,
+            max_active_cache_age_days=max_active_cache_age_days,
+        )
         if cached:
             bars, provider, source_symbol = cached
             return ticker, bars, "ok", f"cache:{provider}", source_symbol, True
@@ -661,8 +681,28 @@ def main() -> int:  # noqa: C901
             **{f"ticker_lineage:{path}": sha256_file(path) for path in sorted(set(lineage_files))},
         },
         "checks": checks,
-        "files": {name: {"sha256": sha256_file(path)} for name, path in artifacts.items()
-                  if name != "survivorship_manifest.json" and path.exists()},
+        "files": {
+            "prices_adjclose.csv": {
+                "sha256": sha256_file(artifacts["prices_adjclose.csv"]),
+                "rows": len(out_prices),
+            },
+            "returns_daily.csv": {
+                "sha256": sha256_file(artifacts["returns_daily.csv"]),
+                "rows": len(out_returns),
+            },
+            "ticker_coverage.csv": {
+                "sha256": sha256_file(artifacts["ticker_coverage.csv"]),
+                "rows": len(coverage_rows),
+            },
+            "delisting_events.csv": {
+                "sha256": sha256_file(artifacts["delisting_events.csv"]),
+                "rows": len(events),
+            },
+            "fetch_results.csv": {
+                "sha256": sha256_file(artifacts["fetch_results.csv"]),
+                "rows": len(fetch_rows),
+            },
+        },
     }
     write_manifest(artifacts["survivorship_manifest.json"], manifest)
 

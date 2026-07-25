@@ -66,7 +66,8 @@ COVERAGE_FIELDS = [
     "required_close_rows",
     "execution_rows",
     "coverage_fraction",
-    "close_disagreements",
+    "source_close_disagreements",
+    "unresolved_close_disagreements",
     "status",
     "sources",
 ]
@@ -227,6 +228,31 @@ def _normalize_row(
     return (adjusted if valid else None), False
 
 
+def _select_normalized_row(
+    candidates: list[tuple[str, dict[str, Any]]],
+    sealed_close: float,
+    *,
+    disagreement_tolerance: float,
+) -> tuple[dict[str, Any] | None, str, int, int]:
+    """Choose the first valid source, allowing a rejected primary to fall through."""
+    disagreements = 0
+    invalid_shapes = 0
+    for source, row in candidates:
+        normalized, disagreed = _normalize_row(
+            row,
+            sealed_close,
+            disagreement_tolerance=disagreement_tolerance,
+        )
+        if disagreed:
+            disagreements += 1
+            continue
+        if normalized is None:
+            invalid_shapes += 1
+            continue
+        return normalized, source, disagreements, invalid_shapes
+    return None, "", disagreements, invalid_shapes
+
+
 def _selftest() -> None:
     row = {
         "adj_open": 9.0,
@@ -240,6 +266,20 @@ def _selftest() -> None:
     assert abs(float(normalized["adj_close"]) - 10.1) < 1e-12
     rejected, disagreed = _normalize_row(row, 12.0, disagreement_tolerance=0.02)
     assert rejected is None and disagreed
+    fallback = {
+        "adj_open": 10.0,
+        "adj_high": 10.5,
+        "adj_low": 9.5,
+        "adj_close": 10.1,
+        "volume": 50,
+    }
+    selected, source, source_disagreements, invalid_shapes = _select_normalized_row(
+        [("bad_primary", row), ("audited_export", fallback)],
+        10.1,
+        disagreement_tolerance=0.005,
+    )
+    assert selected is not None and source == "audited_export"
+    assert source_disagreements == 1 and invalid_shapes == 0
     print("execution-OHLCV panel self-test: PASS")
 
 
@@ -277,6 +317,7 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
     if prices.empty or prices.index.has_duplicates:
         LOGGER.error("Sealed adjusted-close panel is empty or has duplicate dates")
         return 1
+    price_days: list[str] = [str(day) for day in prices.index.tolist()]
     coverage = pd.read_csv(coverage_path).fillna("")
     pipeline_by_ticker = {
         str(row["ticker"]).strip().upper(): str(row["source_pipeline"])
@@ -316,14 +357,20 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
 
     def fetch_one(
         ticker: str,
+        *,
+        use_cache: bool = True,
     ) -> tuple[str, list[dict[str, Any]], str, str, str, bool]:
         symbol = query_symbols[ticker]
-        cached = _load_cache(
-            cache_dir,
-            ticker,
-            start=start,
-            end=end,
-            expected_source_symbol=symbol,
+        cached = (
+            _load_cache(
+                cache_dir,
+                ticker,
+                start=start,
+                end=end,
+                expected_source_symbol=symbol,
+            )
+            if use_cache
+            else None
         )
         if cached:
             rows, provider, symbol = cached
@@ -351,15 +398,66 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
         return ticker, rows, status, provider, source_symbol, False
 
     fetched: dict[str, dict[str, dict[str, Any]]] = {}
-    fetch_rows: list[dict[str, Any]] = []
+    fetch_rows_by_ticker: dict[str, dict[str, Any]] = {}
     LOGGER.info("Fetching adjusted OHLCV for %d tickers with %d workers", len(tickers), workers)
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(fetch_one, ticker): ticker for ticker in tickers}
         for future in as_completed(futures):
             ticker, rows, status, provider, symbol, cache_hit = future.result()
             fetched[ticker] = {str(row["date"]): row for row in rows}
-            fetch_rows.append(
-                {
+            fetch_rows_by_ticker[ticker] = {
+                "ticker": ticker,
+                "status": status,
+                "provider": provider,
+                "source_symbol": symbol,
+                "rows": len(rows),
+                "cache_hit": int(cache_hit),
+            }
+
+    refresh_tickers: list[str] = []
+    for ticker in tickers:
+        fetch_meta = fetch_rows_by_ticker[ticker]
+        if int(fetch_meta["cache_hit"]) != 1:
+            continue
+        for day in price_days:
+            if pd.isna(prices.at[day, ticker]):
+                continue
+            cached_row = fetched.get(ticker, {}).get(day)
+            if cached_row is None:
+                continue
+            _normalized, disagreed = _normalize_row(
+                cached_row,
+                float(prices.at[day, ticker]),
+                disagreement_tolerance=close_tolerance,
+            )
+            if not disagreed:
+                continue
+            export_row = export_rows.get((ticker, day))
+            if export_row is not None:
+                export_normalized, export_disagreed = _normalize_row(
+                    export_row,
+                    float(prices.at[day, ticker]),
+                    disagreement_tolerance=close_tolerance,
+                )
+                if export_normalized is not None and not export_disagreed:
+                    continue
+            refresh_tickers.append(ticker)
+            break
+    if refresh_tickers:
+        LOGGER.warning(
+            "Refreshing %d cached ticker(s) whose adjusted closes disagree with "
+            "the sealed panel",
+            len(refresh_tickers),
+        )
+        with ThreadPoolExecutor(max_workers=min(workers, len(refresh_tickers))) as executor:
+            futures = {
+                executor.submit(fetch_one, ticker, use_cache=False): ticker
+                for ticker in refresh_tickers
+            }
+            for future in as_completed(futures):
+                ticker, rows, status, provider, symbol, cache_hit = future.result()
+                fetched[ticker] = {str(row["date"]): row for row in rows}
+                fetch_rows_by_ticker[ticker] = {
                     "ticker": ticker,
                     "status": status,
                     "provider": provider,
@@ -367,38 +465,49 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
                     "rows": len(rows),
                     "cache_hit": int(cache_hit),
                 }
-            )
 
     output_rows: list[dict[str, Any]] = []
     coverage_rows: list[dict[str, Any]] = []
     invalid_shape = 0
-    total_disagreements = 0
+    total_source_disagreements = 0
+    total_unresolved_disagreements = 0
     provider_by_ticker = {
-        str(row["ticker"]): str(row["provider"]) for row in fetch_rows
+        str(row["ticker"]): str(row["provider"])
+        for row in fetch_rows_by_ticker.values()
     }
     for ticker in tickers:
         required_dates = [
-            day for day in prices.index if pd.notna(prices.at[day, ticker])
+            day for day in price_days if pd.notna(prices.at[day, ticker])
         ]
         execution_rows = 0
-        disagreements = 0
+        source_disagreements = 0
+        unresolved_disagreements = 0
         sources: set[str] = set()
         for day in required_dates:
-            raw = fetched.get(ticker, {}).get(day) or export_rows.get((ticker, day))
-            if raw is None:
+            candidates: list[tuple[str, dict[str, Any]]] = []
+            fetched_row = fetched.get(ticker, {}).get(day)
+            if fetched_row is not None:
+                candidates.append(
+                    (provider_by_ticker.get(ticker, "unknown"), fetched_row)
+                )
+            export_row = export_rows.get((ticker, day))
+            if export_row is not None:
+                candidates.append((str(export_row["source"]), export_row))
+            if not candidates:
                 continue
-            normalized, disagreed = _normalize_row(
-                raw,
-                float(prices.at[day, ticker]),
-                disagreement_tolerance=close_tolerance,
+            normalized, source, disagreed_count, invalid_count = (
+                _select_normalized_row(
+                    candidates,
+                    float(prices.at[day, ticker]),
+                    disagreement_tolerance=close_tolerance,
+                )
             )
-            if disagreed:
-                disagreements += 1
-                continue
+            source_disagreements += disagreed_count
+            invalid_shape += invalid_count
             if normalized is None:
-                invalid_shape += 1
+                if disagreed_count:
+                    unresolved_disagreements += 1
                 continue
-            source = str(raw.get("source") or provider_by_ticker.get(ticker, "unknown"))
             sources.add(source)
             output_rows.append(
                 {
@@ -409,11 +518,16 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
                 }
             )
             execution_rows += 1
-        total_disagreements += disagreements
+        total_source_disagreements += source_disagreements
+        total_unresolved_disagreements += unresolved_disagreements
         fraction = execution_rows / len(required_dates) if required_dates else 0.0
         status = (
             "complete"
-            if required_dates and fraction >= complete_fraction and disagreements == 0
+            if (
+                required_dates
+                and fraction >= complete_fraction
+                and unresolved_disagreements == 0
+            )
             else "incomplete"
         )
         coverage_rows.append(
@@ -423,7 +537,8 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
                 "required_close_rows": len(required_dates),
                 "execution_rows": execution_rows,
                 "coverage_fraction": round(fraction, 8),
-                "close_disagreements": disagreements,
+                "source_close_disagreements": source_disagreements,
+                "unresolved_close_disagreements": unresolved_disagreements,
                 "status": status,
                 "sources": ";".join(sorted(sources)),
             }
@@ -447,8 +562,17 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
         },
         {
             "check": "sealed_close_consistency",
-            "status": "PASS" if total_disagreements == 0 else "WARN",
-            "detail": f"disagreements_over_tolerance={total_disagreements}",
+            "status": (
+                "PASS"
+                if total_source_disagreements == 0
+                else "WARN"
+                if total_unresolved_disagreements == 0
+                else "FAIL"
+            ),
+            "detail": (
+                f"source_disagreements={total_source_disagreements} "
+                f"unresolved={total_unresolved_disagreements}"
+            ),
         },
         {
             "check": "master_calendar_execution_coverage",
@@ -485,7 +609,10 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
         ),
     )
     write_csv(out_coverage, COVERAGE_FIELDS, coverage_rows)
-    write_csv(out_fetch, FETCH_FIELDS, sorted(fetch_rows, key=lambda row: str(row["ticker"])))
+    fetch_rows = sorted(
+        fetch_rows_by_ticker.values(), key=lambda row: str(row["ticker"])
+    )
+    write_csv(out_fetch, FETCH_FIELDS, fetch_rows)
     write_manifest(
         manifest_path,
         {

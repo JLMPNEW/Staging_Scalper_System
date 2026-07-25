@@ -139,6 +139,17 @@ def parse_args() -> argparse.Namespace:
         help="Populate the resumable SEC archive cache used by machinery-specific financial metrics.",
     )
     parser.add_argument(
+        "--include-dedicated-parser-shadow",
+        action="store_true",
+        help="Run the independent SEC parser after machinery financial coverage classification.",
+    )
+    parser.add_argument(
+        "--dedicated-parser-python",
+        type=Path,
+        default=None,
+        help="Python executable containing EdgarTools and Arelle for the optional shadow parser.",
+    )
+    parser.add_argument(
         "--norgate-python",
         type=Path,
         default=None,
@@ -161,6 +172,7 @@ def build_steps(
     refresh_sec_insider: bool = True,
     full_positioning_refresh: bool = False,
     bootstrap_sec_archives: bool = False,
+    include_dedicated_parser_shadow: bool = False,
     include_historical_backfill: bool = False,
     history_start_date: str = "2019-01-02",
     history_frequency: str = "daily",
@@ -269,6 +281,21 @@ def build_steps(
             pass_db=False,
         ),
     ]
+    if include_dedicated_parser_shadow:
+        insert_at = next(
+            index
+            for index, step in enumerate(steps)
+            if step.step_id == "13_sync_positioning"
+        )
+        steps.insert(
+            insert_at,
+            Step(
+                "08d_dedicated_parser_shadow",
+                "stage_4",
+                "08d_run_machinery_dedicated_parser_shadow.py",
+                ["--asof", asof],
+            ),
+        )
     if refresh_sec_insider:
         insert_at = next(index for index, step in enumerate(steps) if step.step_id == "13_sync_positioning")
         steps.insert(
@@ -434,6 +461,7 @@ def main() -> int:
         refresh_sec_insider=not args.skip_sec_insider_refresh,
         full_positioning_refresh=args.full_positioning_refresh,
         bootstrap_sec_archives=args.bootstrap_sec_archives,
+        include_dedicated_parser_shadow=args.include_dedicated_parser_shadow,
         include_historical_backfill=args.include_historical_backfill,
         history_start_date=parse_asof(
             args.history_start_date
@@ -468,6 +496,9 @@ def main() -> int:
             python_executable = (
                 str(args.norgate_python.expanduser().resolve())
                 if step.step_id == "15_norgate_backfill" and args.norgate_python is not None
+                else str(args.dedicated_parser_python.expanduser().resolve())
+                if step.step_id == "08d_dedicated_parser_shadow"
+                and args.dedicated_parser_python is not None
                 else sys.executable
             )
             command = [python_executable, str(script_path), "--config", str(config_path)]

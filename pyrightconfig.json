@@ -1,5 +1,11 @@
 {
-  "include": ["portfolio_layer", "technology"],
+  "include": [
+    "portfolio_layer",
+    "technology",
+    "dedicated_parser",
+    "industrials/machinery/dedicated_parser_adapter.py",
+    "industrials/machinery/scripts/08d_run_machinery_dedicated_parser_shadow.py"
+  ],
   "exclude": ["portfolio_layer/MacroLayer"],
   "ignore": ["portfolio_layer/optimizer/tier1_portfolio_optimizer.py"],
   "venvPath": "C:/Users/josel/miniconda3/envs",

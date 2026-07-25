@@ -88,6 +88,7 @@ class LinkPolicy:
     max_policy_rows: int
     code_source_ids: list[str] | None = None
     override_csv: str = ""
+    policy_override_csv: str = ""
     resolved_classification_csv: str = ""
     manual_rate_csv: str = ""
     manual_rate_audit_csv: str = ""
@@ -221,6 +222,9 @@ def link_policy(config: dict[str, Any]) -> LinkPolicy:
         max_policy_rows=max(0, int(cfg_get(config, "reimbursement_entity_linking.max_policy_rows", 0))),
         code_source_ids=[source_id for source_id in code_source_ids if source_id],
         override_csv=str(cfg_get(config, "reimbursement_entity_linking.override_csv", "") or "").strip(),
+        policy_override_csv=str(
+            cfg_get(config, "reimbursement_entity_linking.policy_override_csv", "") or ""
+        ).strip(),
         resolved_classification_csv=str(
             cfg_get(
                 config,
@@ -594,6 +598,94 @@ def ensure_manual_reimbursement_code(
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (normalized_type, code, short_description or None, long_description or None, source_id or None, now, now),
+    )
+    return int(cursor.lastrowid)
+
+
+def ensure_manual_reimbursement_policy(
+    conn: Any,
+    *,
+    policy_id: str,
+    policy_type: str,
+    title: str,
+    contractor_name: str,
+    jurisdiction: str,
+    effective_date: str,
+    retirement_date: str,
+    status: str,
+    related_codes: str,
+    source_id: str,
+    payload: dict[str, Any],
+) -> int:
+    """Idempotently persist a reviewed policy that the CMS bulk feed omitted."""
+    now = utc_now()
+    existing = conn.execute(
+        """
+        SELECT reimbursement_policy_id
+        FROM fact_reimbursement_policy
+        WHERE policy_id = ?
+          AND source_id = ?
+        ORDER BY reimbursement_policy_id
+        LIMIT 1
+        """,
+        (policy_id, source_id),
+    ).fetchone()
+    values = (
+        policy_type,
+        title or None,
+        contractor_name or None,
+        jurisdiction or None,
+        effective_date or None,
+        retirement_date or None,
+        status or None,
+        related_codes or None,
+        json.dumps(payload, sort_keys=True),
+        now,
+    )
+    if existing is not None:
+        reimbursement_policy_id = int(existing["reimbursement_policy_id"])
+        conn.execute(
+            """
+            UPDATE fact_reimbursement_policy
+            SET policy_type = ?,
+                title = ?,
+                contractor_name = ?,
+                jurisdiction = ?,
+                effective_date = ?,
+                retirement_date = ?,
+                status = ?,
+                related_codes = ?,
+                payload_json = ?,
+                updated_at = ?
+            WHERE reimbursement_policy_id = ?
+            """,
+            (*values, reimbursement_policy_id),
+        )
+        return reimbursement_policy_id
+    cursor = conn.execute(
+        """
+        INSERT INTO fact_reimbursement_policy(
+            policy_id, policy_type, title, contractor_name, jurisdiction,
+            effective_date, retirement_date, status, related_codes, source_id,
+            payload_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            policy_id,
+            policy_type,
+            title or None,
+            contractor_name or None,
+            jurisdiction or None,
+            effective_date or None,
+            retirement_date or None,
+            status or None,
+            related_codes or None,
+            source_id,
+            json.dumps(payload, sort_keys=True),
+            now,
+            now,
+        ),
     )
     return int(cursor.lastrowid)
 
@@ -1233,6 +1325,110 @@ def load_override_matches(
     return matches
 
 
+def load_policy_override_matches(
+    conn: Any,
+    path: Path,
+    company_meta: dict[int, tuple[str, str]],
+    *,
+    policy: LinkPolicy,
+    min_confidence: float,
+    asof: str | None = None,
+    include_missing_pit_metadata: bool = True,
+) -> list[MatchRow]:
+    """Load reviewed company-to-policy links with explicit PIT provenance."""
+    if not path.exists():
+        return []
+    ticker_to_company = {
+        ticker: (company_id, company_name)
+        for company_id, (ticker, company_name) in company_meta.items()
+    }
+    matches: list[MatchRow] = []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for raw_row in reader:
+            if not row_is_effective_asof(
+                raw_row,
+                asof,
+                include_missing=include_missing_pit_metadata,
+            ):
+                continue
+            active = row_get(raw_row, "active", "enabled")
+            if active and active.lower() in {"0", "false", "no", "n"}:
+                continue
+            ticker = normalize_ticker(row_get(raw_row, "ticker", "symbol"))
+            company = ticker_to_company.get(ticker)
+            if company is None:
+                continue
+            policy_id = row_get(raw_row, "policy_id", "document_id")
+            policy_type = row_get(raw_row, "policy_type", "document_type") or "policy"
+            code = normalize_code(
+                row_get(raw_row, "reimbursement_code", "hcpcs", "hcpcs_code", "code")
+            )
+            if not policy_id or not code:
+                raise ValueError(
+                    f"Policy override requires policy_id and reimbursement_code: ticker={ticker or '<missing>'}"
+                )
+            confidence = to_float(row_get(raw_row, "confidence")) or 99.0
+            if confidence < min_confidence:
+                continue
+            source_id = row_get(raw_row, "source_id") or (
+                (policy.source_ids or ["cms_coverage_api"])[0]
+            )
+            code_type = row_get(raw_row, "code_type", "code_system") or "HCPCS"
+            title = row_get(raw_row, "title", "policy_title")
+            related_codes = row_get(raw_row, "related_codes") or code
+            policy_url = row_get(raw_row, "url", "policy_url")
+            reviewed_at = row_get(raw_row, "reviewed_at")
+            policy_payload = {
+                "manual_policy_override": True,
+                "url": policy_url,
+                "reviewed_at": reviewed_at,
+                "notes": row_get(raw_row, "notes"),
+            }
+            reimbursement_policy_id = ensure_manual_reimbursement_policy(
+                conn,
+                policy_id=policy_id,
+                policy_type=policy_type,
+                title=title,
+                contractor_name=row_get(raw_row, "contractor_name", "agency"),
+                jurisdiction=row_get(raw_row, "jurisdiction"),
+                effective_date=row_get(raw_row, "effective_date"),
+                retirement_date=row_get(raw_row, "retirement_date"),
+                status=row_get(raw_row, "status") or "active",
+                related_codes=related_codes,
+                source_id=source_id,
+                payload=policy_payload,
+            )
+            reimbursement_code_id = ensure_manual_reimbursement_code(
+                conn,
+                code=code,
+                code_type=code_type,
+                source_id=source_id,
+                short_description=row_get(raw_row, "short_description", "description"),
+                long_description=row_get(raw_row, "long_description", "notes"),
+            )
+            company_id, company_name = company
+            matches.append(
+                MatchRow(
+                    company_id=company_id,
+                    ticker=ticker,
+                    company_name=company_name,
+                    reimbursement_policy_id=reimbursement_policy_id,
+                    policy_type=policy_type,
+                    policy_id=policy_id,
+                    reimbursement_code_id=reimbursement_code_id,
+                    reimbursement_code=code,
+                    confidence=confidence,
+                    mapping_method=row_get(raw_row, "mapping_method")
+                    or "manual_policy_override",
+                    matched_term=row_get(raw_row, "matched_term") or code,
+                    title=title,
+                    source_id=source_id,
+                )
+            )
+    return matches
+
+
 RESOLVED_NO_CODE_PAYMENT_STATUSES = {
     "bundled_ipps",
     "bundled_opps",
@@ -1607,7 +1803,19 @@ def main() -> None:
                         asof=asof,
                         include_missing_pit_metadata=include_missing_pit_metadata,
                     )
-            )
+                )
+            if policy.policy_override_csv:
+                matches.extend(
+                    load_policy_override_matches(
+                        conn,
+                        resolve_path(policy.policy_override_csv, base_dir=base_dir),
+                        company_meta,
+                        policy=policy,
+                        min_confidence=min_confidence,
+                        asof=asof,
+                        include_missing_pit_metadata=include_missing_pit_metadata,
+                    )
+                )
             manual_rate_count = 0
             manual_rate_audit_rows: list[dict[str, Any]] = []
             if policy.manual_rate_csv:

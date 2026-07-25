@@ -616,6 +616,7 @@ survivorship_panel:
   delist_match_trading_days: 10            # last bar within ~N trading days of delist date => delisted_covered
   overlap_disagreement_warn_rel: 0.02      # Yahoo-vs-export adjclose relative diff to flag (adjustment mismatch)
   min_complete_fraction_warn: 0.95         # WARN when a sector's survivorship-complete share is below this
+  active_cache_max_age_days: 7             # refresh live names so later splits cannot stale-adjust cached history
   delisted_price_export_globs:             # published sector price exports (docs/delisted_price_export_contract.md)
     - "../output/*_reports/market_data/*delisted_price_export.csv"
   delisting_events_globs:
@@ -918,3 +919,52 @@ tactical_long_calibration:
   embargo_signal_dates: 2
   stability_penalty: 0.50
   min_parameter_fold_consistency: 0.50
+
+# Stage 11 - rank-reconstitution long research (16i/16j). This is deliberately
+# separate from the fixed-entry 16g/16h baseline. Incumbents enter inside the
+# configured percentile and leave only after breaching a 10-point wider rank
+# buffer, becoming ineligible, hitting the time stop, or losing execution data.
+rank_reconstitution_long:
+  dir: "rank_reconstitution_long"
+  entry_fraction: 0.10
+  exit_fraction: 0.20
+  max_holding_days: 126
+  regime_mode: "unconditional"            # unconditional | v1_gate | h1_gate
+  supportive_regimes: [HEATING_UP]
+  signal_every_n_snapshots: 5
+  minimum_names_per_sector: 2
+  absolute_max_names_per_sector: 200       # safety only; economic count is tighter when commissions bind
+  target_long_gross: 0.95
+  max_position_weight: 0.05
+  long_costs:
+    research_aum_usd: 300000
+    commission_per_order_usd: 1.25
+    historical_half_spread_fallback_bps: 15.0
+    stress_half_spread_fallback_bps: 30.0
+    stress_observed_spread_multiplier: 1.5
+
+# Factorized nested comparison: select the holding horizon separately for the
+# top-10% and top-20% structures using unconditional training data, then test
+# each structure under all three pre-registered regime treatments on the same
+# untouched outer dates. Raw trade count is diagnostic, not a promotion gate.
+rank_reconstitution_calibration:
+  dir: "rank_reconstitution_calibration"
+  entry_fractions: [0.10, 0.20]
+  max_holding_days: [15, 30, 63, 126, 252]
+  regime_modes: [unconditional, v1_gate, h1_gate]
+  outer_folds: 4
+  outer_initial_fraction: 0.50
+  minimum_outer_train_dates: 126
+  minimum_valid_outer_folds: 3
+  inner_folds: 3
+  inner_initial_fraction: 0.50
+  minimum_inner_train_dates: 126
+  embargo_signal_dates: 2
+  stability_penalty: 0.50
+  bootstrap_confidence: 0.90
+  bootstrap_replications: 1000
+  bootstrap_seed: 1729
+  minimum_oos_years: 3.0
+  minimum_positive_sectors: 4
+  minimum_execution_coverage: 0.95
+  parallel_replays: 2                    # bounded I/O/memory concurrency; results are reordered deterministically

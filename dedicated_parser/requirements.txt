@@ -1,0 +1,9 @@
+arelle-release==2.42.1
+edgartools==5.28.5
+pypdf>=5.0,<7
+
+# Optional image-only filing fallback. The host must also provide the native
+# Tesseract executable on PATH; missing OCR support is classified explicitly.
+pymupdf>=1.24,<2
+pytesseract>=0.3.13,<1
+Pillow>=10,<13

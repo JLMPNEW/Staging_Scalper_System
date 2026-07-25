@@ -119,6 +119,20 @@ issuer_ir:
   max_pdf_pages: 250
   pdf_extraction_timeout_sec: 30.0
 
+dedicated_parser:
+  # Shadow-only until the golden corpus and full portfolio acceptance gates pass.
+  output_root: "../../output/industrials/machinery/dedicated_parser"
+  provider_state_dir: "../../tmp/edgartools"
+  workers: 4
+  # Forty filings covers eight recent quarters, event filings, registration
+  # statements, and reviewed historical policy anchors such as ITW 2022.
+  max_filings_per_ticker: 40
+  max_documents_per_filing: 32
+  pdf_ocr_enabled: true
+  max_pdf_pages: 250
+  max_pdf_bytes: 25000000
+  pdf_extraction_timeout_seconds: 30.0
+
 financial_validation:
   availability_policy:
     # Applicability requires an explicit issuer definition of funded,
@@ -250,7 +264,9 @@ sec_archive:
   submission_file_url_template: "https://data.sec.gov/submissions/{file_name}"
   browse_edgar_atom_url_template: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form_type}&owner=exclude&count=100&output=atom"
   max_submission_history_files: 0
-  max_filings_per_ticker: 32
+  # Must be zero/unlimited or at least dedicated_parser.max_filings_per_ticker
+  # so cache hydration can satisfy the parser's selected filing window.
+  max_filings_per_ticker: 40
   supplemental_forms: [8-K, 8-K/A]
   # Scan all event filings retained since sec_fundamentals.start_date. A fixed
   # latest-N cap removed historical earnings releases needed for PIT orders.

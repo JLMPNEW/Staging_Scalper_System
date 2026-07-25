@@ -92,6 +92,25 @@ and includes ended/delisted point-in-time members:
 C:\Users\josel\miniconda3\python.exe industrials\machinery\scripts\08b_audit_machinery_disclosure_candidates.py --asof 2026-07-21 --scan-cache --scan-start-date 2018-01-01 --include-historical --limit 0 --max-filings-per-ticker 0 --resume
 ```
 
+## Independent Parser Pilot
+
+The repository-level `dedicated_parser` package now supports a machinery
+shadow pilot. It reads the existing industrials database and SEC archive cache,
+uses EdgarTools for local submission structure and Arelle for dimensional
+XBRL, and writes only additive `sec_parser_*` shadow tables. Enable it with
+`--include-dedicated-parser-shadow` and pass the Python environment containing
+the pinned dependencies through `--dedicated-parser-python`. The stage is
+opt-in and does not alter financial features, scoring, dashboard files, or
+historical snapshots. See `dedicated_parser/README.md` for acceptance gates.
+Release `0.3.0` also provides an assessment-only command, exact versioned
+review policies, extraction-funnel artifacts, a fast complete-cache gate, and
+explicit ticker-bounded hydration through the existing machinery SEC sync.
+The initial full active-universe audit identified 33 missing accessions across
+ATS, BLDP, KRNT, SHMD, and SSYS. The 50-ticker benchmark hydrated all 27 gaps
+for ATS, BLDP, KRNT, and SHMD; six SSYS accessions remain outside that frozen
+cohort. Parser execution can be blocked until its selected source window is
+complete.
+
 The 2018 lower bound intentionally retains prior-year evidence needed for the
 2019-01-02 calibration boundary. The per-ticker scan ledger keys completion by
 as-of date, scan bounds, and parser version; rerunning the same command after an

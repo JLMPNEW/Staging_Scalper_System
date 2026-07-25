@@ -21,6 +21,7 @@ ticker_mapping/_identity_enrichment_cache/
 ticker_mapping/_semiconductor_sec_cache/
 ticker_mapping/_semiconductor_identity_cache/
 ticker_mapping/_semiconductor_yahoo_profile_cache/
+tmp/edgartools/
 
 # --- Local secrets ---
 med_devices/secrets.local.yaml

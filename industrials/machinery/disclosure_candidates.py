@@ -713,6 +713,16 @@ def resolve_machinery_disclosure_candidates(
     resolved = list(candidates)
 
     if symbol == "BLDP":
+        largest_total_by_period: dict[str, float] = {}
+        for candidate in resolved:
+            if (
+                candidate.concept_name == "ReportedBacklog"
+                and "order backlog" in candidate.evidence_text.lower()
+            ):
+                largest_total_by_period[candidate.period_end] = max(
+                    largest_total_by_period.get(candidate.period_end, 0.0),
+                    candidate.value,
+                )
         filtered: list[DisclosureCandidate] = []
         for candidate in resolved:
             evidence = candidate.evidence_text.lower()
@@ -724,20 +734,17 @@ def resolve_machinery_disclosure_candidates(
             )
             approved_total = (
                 candidate.concept_name == "ReportedBacklog"
-                and candidate.period_end == "2026-03-31"
-                and abs(candidate.value - 112_900_000.0) <= 1.0
                 and "order backlog" in evidence
-                and not short_horizon
-            )
-            if short_horizon:
-                filtered.append(
-                    _resolved(
-                        candidate,
-                        status="REJECTED_POLICY",
-                        reason="twelve_month_operating_backlog_separate_from_total",
+                and abs(
+                    candidate.value
+                    - largest_total_by_period.get(
+                        candidate.period_end,
+                        candidate.value,
                     )
                 )
-            elif approved_total:
+                <= 1.0
+            )
+            if approved_total:
                 filtered.append(
                     _resolved(
                         candidate,
@@ -745,6 +752,14 @@ def resolve_machinery_disclosure_candidates(
                         reason="reviewed_total_order_backlog_usd",
                         scope="consolidated",
                         confidence=min(candidate.confidence, 0.90),
+                    )
+                )
+            elif short_horizon:
+                filtered.append(
+                    _resolved(
+                        candidate,
+                        status="REJECTED_POLICY",
+                        reason="twelve_month_operating_backlog_separate_from_total",
                     )
                 )
             else:
@@ -1133,8 +1148,23 @@ def resolve_machinery_disclosure_candidates(
                     is not None
                 )
             ]
-            if len(direct_totals) == 1:
-                selected = direct_totals[0]
+            unique_direct_totals = {
+                round(candidate.value, 6): candidate
+                for candidate in direct_totals
+            }
+            reviewed_segment_components = {
+                round(candidate.value, 6): candidate
+                for candidate in components
+                if candidate.scope == "segment"
+                or re.search(
+                    r"\b(?:aerospace\s*(?:&|and)|"
+                    r"process\s+flow\s+technologies)\b",
+                    candidate.evidence_text,
+                    re.IGNORECASE,
+                )
+            }
+            if len(unique_direct_totals) == 1:
+                selected = next(iter(unique_direct_totals.values()))
                 resolved.append(
                     _resolved(
                         selected,
@@ -1153,12 +1183,35 @@ def resolve_machinery_disclosure_candidates(
                     for candidate in components
                     if candidate is not selected
                 )
-            else:
+            elif len(reviewed_segment_components) == 2:
+                selected_components = list(
+                    reviewed_segment_components.values()
+                )
                 resolved.extend(
                     _aggregate_components(
-                        components,
+                        selected_components,
                         reason="reviewed_exhaustive_operating_segment_sum",
                     )
+                )
+                selected_ids = {id(candidate) for candidate in selected_components}
+                resolved.extend(
+                    _resolved(
+                        candidate,
+                        status="REJECTED_POLICY",
+                        reason="non_operating_or_unreviewed_backlog_table",
+                    )
+                    for candidate in components
+                    if id(candidate) not in selected_ids
+                )
+            else:
+                resolved.extend(
+                    _resolved(
+                        candidate,
+                        status="REVIEW_REQUIRED",
+                        reason="cr_backlog_scope_not_exhaustive",
+                        confidence=min(candidate.confidence, 0.65),
+                    )
+                    for candidate in components
                 )
     elif symbol == "MIDD":
         grouped: dict[tuple[str, str, str], list[DisclosureCandidate]] = {}
@@ -1521,7 +1574,16 @@ def resolve_machinery_disclosure_candidates(
             elif candidate.concept_name in {
                 "ReportedBacklog",
                 "RemainingPerformanceObligation",
-            }:
+            } and (
+                candidate.candidate_status == "ACCEPTED"
+                and candidate.scope != "segment"
+                and not re.search(
+                    r"\b(?:change|increase|decrease|grew|declined)\s+"
+                    r"(?:in|to)?\s*(?:total\s+)?backlog\b"
+                    r"|\bbacklog\s+(?:change|increase|decrease)\b",
+                    evidence,
+                )
+            ):
                 normalized.append(
                     _resolved(
                         candidate,
@@ -1530,6 +1592,22 @@ def resolve_machinery_disclosure_candidates(
                         concept_name="RemainingPerformanceObligation",
                         scope="consolidated",
                         confidence=min(candidate.confidence, 0.90),
+                    )
+                )
+            elif candidate.concept_name in {
+                "ReportedBacklog",
+                "RemainingPerformanceObligation",
+            } and re.search(
+                r"\b(?:change|increase|decrease|grew|declined)\s+"
+                r"(?:in|to)?\s*(?:total\s+)?backlog\b"
+                r"|\bbacklog\s+(?:change|increase|decrease)\b",
+                evidence,
+            ):
+                normalized.append(
+                    _resolved(
+                        candidate,
+                        status="REJECTED_POLICY",
+                        reason="backlog_change_is_not_period_end_total",
                     )
                 )
             else:

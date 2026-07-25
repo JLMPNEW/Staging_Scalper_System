@@ -1733,6 +1733,14 @@ def test_reviewed_machinery_disclosure_semantics_are_deterministic() -> None:
                 evidence="The 12-month backlog was $1.05 billion",
                 block_index=3,
             ),
+            candidate(
+                "ReportedBacklog",
+                3_400_000_000.0,
+                scope="consolidated",
+                status="ACCEPTED",
+                evidence="The increase in backlog was $3.4 billion",
+                block_index=4,
+            ),
         ],
         ticker="WAB",
         filing={"form_type": "10-K"},
@@ -1741,7 +1749,7 @@ def test_reviewed_machinery_disclosure_semantics_are_deterministic() -> None:
         "RemainingPerformanceObligation"
     ]
     assert sum(item.candidate_status == "SUPPRESSED_SEMANTIC_DUPLICATE" for item in wab) == 1
-    assert sum(item.candidate_status == "REJECTED_POLICY" for item in wab) == 1
+    assert sum(item.candidate_status == "REJECTED_POLICY" for item in wab) == 2
 
     crane = resolve_machinery_disclosure_candidates(
         [
@@ -1751,6 +1759,12 @@ def test_reviewed_machinery_disclosure_semantics_are_deterministic() -> None:
                 359_900_000.0,
                 scope="segment",
                 block_index=2,
+            ),
+            candidate(
+                "ReportedBacklog",
+                58_000_000.0,
+                evidence="Estimated fair value of backlog intangible assets",
+                block_index=3,
             ),
         ],
         ticker="CR",

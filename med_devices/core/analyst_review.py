@@ -38,6 +38,7 @@ DECISION_FIELDNAMES = [
     "allow_portfolio_candidate_override",
     "max_position_weight_override",
     "source_reference",
+    "next_review_at",
 ]
 DECISION_STATUS_FIELDNAMES = [
     "asof_date",
@@ -50,11 +51,14 @@ DECISION_STATUS_FIELDNAMES = [
     "review_owner",
     "reviewed_at",
     "expires_at",
+    "next_review_at",
     "active",
     "allow_portfolio_candidate_override",
     "source_reference",
     "expiration_status",
     "days_to_expiration",
+    "review_cadence_status",
+    "days_to_review",
     "needs_review",
     "decision_key",
     "decision_fingerprint",
@@ -76,6 +80,7 @@ DECISION_LOG_FIELDNAMES = [
     "review_owner",
     "reviewed_at",
     "expires_at",
+    "next_review_at",
     "active",
     "allow_portfolio_candidate_override",
     "max_position_weight_override",
@@ -113,6 +118,7 @@ class AnalystReviewDecision:
     review_owner: str
     reviewed_at: str
     expires_at: str
+    next_review_at: str
     active: bool
     allow_portfolio_candidate_override: bool
     max_position_weight_override: float | None
@@ -326,6 +332,31 @@ def load_analyst_review_decisions(
                         "details": "Active analyst-review decisions require a parseable reviewed_at date.",
                     }
                 )
+            next_review_at_raw = str(row.get("next_review_at") or "").strip()
+            next_review_at = parse_date(next_review_at_raw)
+            if next_review_at_raw and next_review_at is None:
+                issues.append(
+                    {
+                        "severity": "CRITICAL",
+                        "issue_type": "invalid_next_review_at",
+                        "row_number": str(row_number),
+                        "ticker": ticker,
+                        "decision": decision,
+                        "details": "next_review_at must be blank or a parseable date.",
+                    }
+                )
+            reviewed_at = parse_date(reviewed_at_raw)
+            if reviewed_at is not None and next_review_at is not None and next_review_at <= reviewed_at:
+                issues.append(
+                    {
+                        "severity": "CRITICAL",
+                        "issue_type": "next_review_not_after_reviewed_at",
+                        "row_number": str(row_number),
+                        "ticker": ticker,
+                        "decision": decision,
+                        "details": "next_review_at must be after reviewed_at.",
+                    }
+                )
         if allow_override and decision != DECISION_APPROVE:
             issues.append(
                 {
@@ -347,6 +378,7 @@ def load_analyst_review_decisions(
                 review_owner=str(row.get("review_owner") or "").strip(),
                 reviewed_at=str(row.get("reviewed_at") or "").strip(),
                 expires_at=str(row.get("expires_at") or "").strip(),
+                next_review_at=str(row.get("next_review_at") or "").strip(),
                 active=active,
                 allow_portfolio_candidate_override=allow_override,
                 max_position_weight_override=parse_float(row.get("max_position_weight_override")),
@@ -482,6 +514,7 @@ def decision_fingerprint(decision: AnalystReviewDecision) -> str:
         "review_owner": decision.review_owner,
         "reviewed_at": decision.reviewed_at,
         "expires_at": decision.expires_at,
+        "next_review_at": decision.next_review_at,
         "active": decision.active,
         "allow_portfolio_candidate_override": decision.allow_portfolio_candidate_override,
         "max_position_weight_override": decision.max_position_weight_override,
@@ -510,6 +543,25 @@ def decision_expiration_status(
     return "current", days_to_expiration, 0
 
 
+def decision_review_cadence_status(
+    decision: AnalystReviewDecision,
+    *,
+    asof: date,
+    warning_days: int,
+) -> tuple[str, int | None, int]:
+    if not decision.active or not decision.decision:
+        return "inactive", None, 0
+    next_review_at = parse_date(decision.next_review_at)
+    if next_review_at is None:
+        return "not_scheduled", None, 0
+    days_to_review = (next_review_at - asof).days
+    if days_to_review < 0:
+        return "review_overdue", days_to_review, 1
+    if days_to_review <= warning_days:
+        return "review_due_soon", days_to_review, 1
+    return "scheduled", days_to_review, 0
+
+
 def decision_lifecycle_rows(
     decisions: list[AnalystReviewDecision],
     *,
@@ -518,7 +570,12 @@ def decision_lifecycle_rows(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for decision in decisions:
-        expiration_status, days_to_expiration, needs_review = decision_expiration_status(
+        expiration_status, days_to_expiration, expiration_needs_review = decision_expiration_status(
+            decision,
+            asof=asof,
+            warning_days=warning_days,
+        )
+        review_cadence_status, days_to_review, cadence_needs_review = decision_review_cadence_status(
             decision,
             asof=asof,
             warning_days=warning_days,
@@ -535,12 +592,15 @@ def decision_lifecycle_rows(
                 "review_owner": decision.review_owner,
                 "reviewed_at": decision.reviewed_at,
                 "expires_at": decision.expires_at,
+                "next_review_at": decision.next_review_at,
                 "active": int(decision.active),
                 "allow_portfolio_candidate_override": int(decision.allow_portfolio_candidate_override),
                 "source_reference": decision.source_reference,
                 "expiration_status": expiration_status,
                 "days_to_expiration": "" if days_to_expiration is None else days_to_expiration,
-                "needs_review": needs_review,
+                "review_cadence_status": review_cadence_status,
+                "days_to_review": "" if days_to_review is None else days_to_review,
+                "needs_review": max(expiration_needs_review, cadence_needs_review),
                 "decision_key": decision_key(decision),
                 "decision_fingerprint": decision_fingerprint(decision),
             }
@@ -692,6 +752,7 @@ def append_decision_change_log(
                 "review_owner": decision.review_owner,
                 "reviewed_at": decision.reviewed_at,
                 "expires_at": decision.expires_at,
+                "next_review_at": decision.next_review_at,
                 "active": int(decision.active),
                 "allow_portfolio_candidate_override": int(decision.allow_portfolio_candidate_override),
                 "max_position_weight_override": (

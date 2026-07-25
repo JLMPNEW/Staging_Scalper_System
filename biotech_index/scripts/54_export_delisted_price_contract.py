@@ -10,7 +10,7 @@ survivorship panel.
 
 Outputs (globbed by portfolio_layer survivorship_panel config):
   output/biotech_index_reports/market_data/biotech_delisted_price_export.csv
-      ticker, date, adjclose, close, volume, source_symbol
+      ticker, date, adj_open, adj_high, adj_low, adjclose, close, volume, source_symbol
   output/biotech_index_reports/market_data/biotech_delisting_events.csv
       ticker, delist_date, delist_reason, terminal_value
 
@@ -37,7 +37,17 @@ from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: 
 
 LOGGER = logging.getLogger("export_delisted_price_contract")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-PRICE_FIELDS = ["ticker", "date", "adjclose", "close", "volume", "source_symbol"]
+PRICE_FIELDS = [
+    "ticker",
+    "date",
+    "adj_open",
+    "adj_high",
+    "adj_low",
+    "adjclose",
+    "close",
+    "volume",
+    "source_symbol",
+]
 EVENT_FIELDS = ["ticker", "delist_date", "delist_reason", "terminal_value"]
 NORGATE_SOURCE = "norgate_us_equities_total_return"
 
@@ -114,7 +124,12 @@ def main() -> int:
                 params.append(end_date)
             bars = conn.execute(
                 f"""
-                SELECT bar_date, adj_close, COALESCE(raw_close, close) AS close_px, volume
+                SELECT bar_date, adj_close,
+                       COALESCE(raw_open, open) AS open_px,
+                       COALESCE(raw_high, high) AS high_px,
+                       COALESCE(raw_low, low) AS low_px,
+                       COALESCE(raw_close, close) AS close_px,
+                       volume
                 FROM market_bars_daily
                 WHERE ticker = ? AND source = ? AND adj_close IS NOT NULL AND adj_close > 0
                 {date_sql}
@@ -126,9 +141,28 @@ def main() -> int:
                 missing_bars.append(contract_ticker)
                 continue
             for b in bars:
+                close_px = (
+                    float(b["close_px"]) if b["close_px"] is not None else 0.0
+                )
+                factor = float(b["adj_close"]) / close_px if close_px > 0 else 0.0
                 price_rows.append({
                     "ticker": contract_ticker,
                     "date": str(b["bar_date"])[:10],
+                    "adj_open": (
+                        round(float(b["open_px"]) * factor, 6)
+                        if b["open_px"] is not None and factor > 0
+                        else ""
+                    ),
+                    "adj_high": (
+                        round(float(b["high_px"]) * factor, 6)
+                        if b["high_px"] is not None and factor > 0
+                        else ""
+                    ),
+                    "adj_low": (
+                        round(float(b["low_px"]) * factor, 6)
+                        if b["low_px"] is not None and factor > 0
+                        else ""
+                    ),
                     "adjclose": round(float(b["adj_close"]), 6),
                     "close": round(float(b["close_px"]), 6) if b["close_px"] is not None else "",
                     "volume": int(b["volume"]) if b["volume"] is not None else "",

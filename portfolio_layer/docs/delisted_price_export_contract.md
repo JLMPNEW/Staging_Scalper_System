@@ -11,14 +11,17 @@ incomplete names are marked, never silently survivor-biased.
 **Path pattern (globbed):** `output/<sector>_reports/market_data/*delisted_price_export.csv`
 (e.g. `output/biotech_index_reports/market_data/biotech_delisted_price_export.csv`)
 
-One row per ticker-day, covering each delisted name from at least the Stage 11 dev-window start
-(2024-01-02, or its listing date if later) through its final trading day:
+One row per ticker-day, covering each delisted name from at least the configured Stage 11
+development-window start (or its listing date if later) through its final trading day:
 
 | column | required | meaning |
 |---|---|---|
 | `ticker` | yes | contract ticker as it appeared in `stocks_scores` (uppercase) |
 | `date` | yes | trading day, YYYY-MM-DD |
 | `adjclose` | yes | split- AND dividend-adjusted close (total-return-consistent with Norgate/Yahoo adjusted) |
+| `adj_open` | yes for execution tests | open adjusted by `adjclose / close`; never synthesized from a close |
+| `adj_high` | yes for execution tests | high adjusted by `adjclose / close` |
+| `adj_low` | yes for execution tests | low adjusted by `adjclose / close` |
 | `close` | no | unadjusted close (audit) |
 | `volume` | no | audit |
 | `source_symbol` | no | provider symbol (e.g. `ANAC-201606`) |
@@ -26,6 +29,10 @@ One row per ticker-day, covering each delisted name from at least the Stage 11 d
 Names also fetchable from Yahoo may overlap; the panel uses Yahoo as primary and fills gaps from the
 export, warning when overlapping `adjclose` values disagree by more than the configured tolerance
 (adjustment-policy mismatch).
+
+The Stage 11 execution panel requires the adjusted OHLC extension. A close-only export remains
+valid for survivorship and forward-close labels, but it is explicitly incomplete for `D+1`-open
+execution and must not be used to infer an entry price.
 
 ## 2. Delisting events (required for the `survivorship_complete=1` flag on ended names)
 

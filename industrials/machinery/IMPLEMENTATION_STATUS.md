@@ -1,6 +1,6 @@
 # Machinery Implementation Status
 
-Status date: 2026-07-23
+Status date: 2026-07-24
 
 This document is the authoritative implementation sequence and acceptance
 checklist for the machinery model family. `README.md` remains the operating
@@ -300,3 +300,119 @@ sequence is:
   orders. Funded backlog has a zero applicable denominator by reviewed policy.
 - Final verification: SQLite `PRAGMA quick_check` returned `ok`; 119 industrial
   tests passed; Ruff passed; pyright reported zero errors and zero warnings.
+
+## Independent Parser Pilot - 2026-07-24
+
+The repository-level `dedicated_parser` package is implemented in shadow mode.
+It reuses the existing SQLite facts and 20.6 GB SEC archive rather than
+creating another filing store. EdgarTools reads local SGML attachment
+structure, Arelle supplies XBRL contexts and dimensions, and the machinery
+adapter retains issuer-specific acceptance and rejection policy. Release
+`0.2.3` added semantic HTML tables, XBRL concept metadata, current-RPO explicit
+amount/percentage recovery, timing-dimension aggregation, PDF failure
+classification, source-window completeness, and exhaustive recovery classes.
+Release `0.3.0` adds exact versioned review policies to work hashes,
+policy-generated golden expectations, assessment-only execution, an extraction
+funnel, a fast complete-cache gate, and explicit cache hydration through the
+existing machinery SEC synchronizer. All 17 present reviewed decisions from
+the manual corpus are registered; seven rejections also generate explicit
+prohibited-acceptance checks, producing 24 generated expectations.
+
+The final ten-ticker production-cache pilot processed 353 accessions and 803
+documents with four workers: 353 completed and zero failed. All 19 positive
+and prohibited-row golden expectations passed. The reviewed 13-accession
+subset produced exactly 98 evidence keys with both one and four workers; the
+parallel run took 15.3 seconds versus 49.3 seconds serially.
+
+Current source-metric coverage before and after shadow policy is:
+
+| Source metric | Baseline | Corrected shadow | Interpretation |
+|---|---:|---:|---|
+| Orders | 3/9 | 2/9 | FLS baseline orders is a rejected segment/adjustment value |
+| Total RPO | 6/9 | 6/9 | No current-cell gain |
+| Reported backlog | 7/9 | 7/9 | No current-cell gain |
+| Current RPO | 4/8 | 5/8 | POWL recovered from explicit 12-month amounts |
+| Funded backlog | 0/0 | 0/0 | Structural N/A for this pilot |
+
+Across all 50 ticker/source-metric cells, the final run classified 16 as
+confirmed reported, one as newly recovered, 15 as structural N/A, four as
+ambiguous, six as not found in searched documents, three as source-document
+incomplete, three as baseline reported but unconfirmed, one as policy-rejected,
+and one as a baseline policy correction. The 12 missing cache accessions are
+all BLDP (eight) or SHMD (four) within the ten-ticker pilot; no cell for those
+incomplete source windows is treated as conclusive issuer non-disclosure. The
+The initial full-active-universe cache audit found 33 missing accessions across ATS,
+BLDP, KRNT, SHMD, and SSYS. This is a scope difference, not a regression in the
+pilot count.
+
+The pilot proves the shared parser architecture and accuracy controls, but it
+does not show a broad automatic coverage uplift. Net current coverage is flat:
+one legitimate POWL recovery is offset by removal of the invalid FLS orders
+baseline. The broader hydration and 50-ticker benchmark described below
+completed the next evaluation gate. Repeated full-history parsing without new
+source documents or reviewed policies is not justified.
+
+The `0.3.0` assessment-only smoke test reassessed run 12 in 1.3 seconds,
+preserved its 353 completed/zero-failed work counts, and reproduced all 50
+recovery classifications. Its funnel contains 986 evidence rows: 200 XBRL
+mapping, 512 semantic-table, 33 semantic-text-derivation, and 241 prose-text
+rows. A full 114-ticker cache audit completed without parsing or run
+allocation and identified the initial 33 source gaps above.
+
+The broad parser benchmark is complete. A deterministic cohort selected the
+50 active tickers with the most unresolved parser-supported metrics as of
+`2026-07-22`, totaling 155 unresolved source-metric cells. Its initial cache
+audit found 27 missing accessions across `ATS`, `BLDP`, `KRNT`, and `SHMD`.
+The existing machinery SEC synchronizer hydrated all 27 after the archive
+window was aligned with the parser's 40-filing window. The complete run
+processed 1,915 accessions and 5,277 documents with zero failures. The six
+remaining full-universe cache gaps belong to `SSYS`, which was outside the
+frozen 50-ticker benchmark.
+
+The run produced 1,009 evidence rows and classified all 250 ticker/source-
+metric pairs. Real-filing validation found one false total-RPO promotion:
+VRT's `$107.6M` represented only noncurrent deferred revenue timing buckets.
+Machinery adapter `v2.4` now leaves future-only or otherwise incomplete timing
+schedules in `REVIEW_REQUIRED`. A fail-fast runtime gate also prevents Arelle
+or EdgarTools from being silently omitted when enabled.
+
+Corrected current coverage across the benchmark's 200 applicable
+non-funded-backlog cells improves from 38/200 to 39/200. TTC total RPO is the
+only new current recovery, five metric chains have historical-only evidence,
+19 cells remain ambiguous, and six baseline-reported cells are unconfirmed.
+This is a 0.65% automatic current recovery rate across the 155 initially
+unresolved cells. The shared parser remains useful for accurate
+classification, provenance, and targeted recovery, but this result does not
+support broad automatic parser expansion as a coverage strategy. The next
+bounded action is review of those 25 priority cells, not another unchanged
+historical parse.
+
+The machinery orchestrator exposes this as the opt-in
+`08d_dedicated_parser_shadow` step. It does not update production financial
+features, scoring, dashboard files, portfolio inputs, or historical snapshots.
+Promotion remains blocked until the source gaps and ambiguous cells are
+resolved, shadow additions/corrections are approved, and the full current-date
+machinery and portfolio-layer smoke passes with the shared backend enabled.
+
+### Fifty-Ticker Priority Review - 2026-07-24
+
+The bounded review of all 25 ambiguous or baseline-unconfirmed benchmark cells
+is complete. Adapter `machinery_specialized_metrics_v2.7` and 41 reviewed
+policies now classify every priority cell. Targeted runs 18 and 19 processed
+27 affected accessions and 168 documents with zero failures; the 1,915-
+accession benchmark was not rerun.
+
+Accuracy-adjusted coverage is 42/200 applicable source-metric cells (21.0%),
+versus 38/200 (19.0%) before the dedicated parser. Six current observations
+were recovered, while two invalid baseline observations were identified:
+`AEBI` reported backlog is acquisition purchase-accounting fair value and
+`ASTE` orders covers only the subset recognized over time. Total RPO improved
+from 17/50 to 22/50; reported backlog remains 11/50 after one recovery and one
+removal; orders declines from 4/50 to 3/50 because the ASTE value is invalid;
+current RPO remains 6/50.
+
+The reviewed output remains shadow-only. The next gate is a controlled,
+auditable promotion path that applies accepted additions and explicit
+corrections, regenerates only affected ticker/date partitions by filing
+acceptance date, and runs the complete machinery and portfolio-layer smoke
+without modifying defense data.

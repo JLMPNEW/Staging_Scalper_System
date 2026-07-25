@@ -11,7 +11,12 @@ from types import ModuleType
 
 import pytest
 
-from med_devices.core.analyst_review import effective_decision, load_analyst_review_decisions
+from med_devices.core.analyst_review import (
+    decision_expiration_status,
+    decision_review_cadence_status,
+    effective_decision,
+    load_analyst_review_decisions,
+)
 from med_devices.core.db import connect, init_db
 from med_devices.core.fda_product_family_review import (
     build_product_family_shadow_score,
@@ -209,6 +214,98 @@ def test_updated_lab_reimbursement_classifications_are_effective() -> None:
     assert classifications["XGN"].primary_payment_file == "cms_clfs_pla_0312u"
 
 
+def test_tcmd_ncd_policy_override_is_reviewed_and_point_in_time() -> None:
+    path = REPO_ROOT / "med_devices" / "data" / "reimbursement_policy_overrides.csv"
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    tcmd = next(row for row in rows if row["ticker"] == "TCMD")
+    assert tcmd["policy_id"] == "NCD_280.6"
+    assert tcmd["reimbursement_code"] == "E0652"
+    assert tcmd["source_id"] == "cms_coverage_api"
+    assert not row_is_effective_asof(tcmd, date(2026, 7, 23))
+    assert row_is_effective_asof(tcmd, date(2026, 7, 24))
+
+
+def test_company_risk_event_sync_is_pit_filtered_and_idempotent(tmp_path: Path) -> None:
+    module = load_script_module(
+        "80_sync_med_device_company_risk_events.py",
+        "med_device_company_risk_event_sync_test",
+    )
+    path = REPO_ROOT / "med_devices" / "data" / "company_risk_events.csv"
+
+    assert not [
+        row
+        for row in module.load_rows(path, asof="2026-07-13")
+        if row["ticker"] == "TCMD"
+    ]
+    rows = [
+        row
+        for row in module.load_rows(path, asof="2026-07-14")
+        if row["ticker"] == "TCMD"
+    ]
+    assert len(rows) == 1
+
+    db_path = tmp_path / "med_devices.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO dim_company(
+                company_id, ticker, company_name, universe_status, is_active,
+                first_seen_at, updated_at
+            )
+            VALUES (
+                1, 'TCMD', 'Tactile Systems Technology, Inc.', 'active', 1,
+                '2016-07-28', '2026-07-24'
+            )
+            """
+        )
+        module.upsert_event(conn, rows[0])
+        module.upsert_event(conn, rows[0])
+        stored = conn.execute(
+            """
+            SELECT ticker, url, event_tags, payload_json
+            FROM fact_news_event
+            WHERE ticker = 'TCMD'
+            """
+        ).fetchall()
+
+    assert len(stored) == 1
+    assert "false_claims_act" in str(stored[0]["event_tags"])
+    payload = json.loads(str(stored[0]["payload_json"]))
+    assert payload["event_id"] == "doj_usao_ma_2026_07_14_tcmd_fca"
+    assert payload["amount_usd"] == 550959.0
+
+
+def test_postmarket_event_evidence_distinguishes_confirmed_from_raw_signals() -> None:
+    module = load_script_module(
+        "80_sync_med_device_company_risk_events.py",
+        "med_device_postmarket_evidence_test",
+    )
+    path = REPO_ROOT / "med_devices" / "data" / "company_risk_events.csv"
+    rows = module.load_rows(path, asof="2026-07-24")
+    by_id = {row["event_id"]: row for row in rows}
+
+    dxcm = by_id["fda_dxcm_class_i_96743_2025_07_17"]
+    assert dxcm["recall_event_id"] == "96743"
+    assert dxcm["confirmed_injuries"] == "56"
+    assert dxcm["confirmed_deaths"] == "0"
+    assert dxcm["raw_mdr_signal_count"] == "129"
+    assert dxcm["raw_mdr_signal_status"] == "unverified_raw_mdr_signal"
+
+    rmd_second_family = by_id["fda_rmd_class_i_93122_2023_10_23"]
+    assert rmd_second_family["recall_event_id"] == "93122"
+    assert rmd_second_family["recall_numbers"] == "Z-0111-2024"
+    assert rmd_second_family["remediation_status"] == "open_field_correction"
+
+    rmd_early_alert = by_id["fda_rmd_astral_early_alert_2026_07_15"]
+    assert rmd_early_alert["event_type"] == "fda_early_alert"
+    assert rmd_early_alert["recall_event_id"] == ""
+    assert rmd_early_alert["confirmed_injuries"] == "5"
+    assert rmd_early_alert["confirmed_deaths"] == "0"
+
+
 def test_reimbursement_linker_replaces_stale_links_for_active_taxonomy_company(
     tmp_path: Path,
 ) -> None:
@@ -370,6 +467,51 @@ def test_diagnostics_research_review_decisions_are_same_day_exclusive() -> None:
         assert effective is not None
         assert effective.decision == decision_value
         assert effective.allow_portfolio_candidate_override is False
+
+
+def test_dxcm_and_rmd_postmarket_decisions_are_same_day_exclusive_and_scheduled() -> None:
+    path = REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    decisions, issues = load_analyst_review_decisions(path)
+    assert not [issue for issue in issues if issue["severity"] == "CRITICAL"]
+
+    for ticker, expected_decision in {"DXCM": "defer", "RMD": "watchlist"}.items():
+        same_day = effective_decision(
+            decisions,
+            ticker=ticker,
+            cohort="home_chronic_care_devices_dme_drug_delivery",
+            asof=date(2026, 7, 24),
+        )
+        effective = effective_decision(
+            decisions,
+            ticker=ticker,
+            cohort="home_chronic_care_devices_dme_drug_delivery",
+            asof=date(2026, 7, 25),
+        )
+        assert same_day is None
+        assert effective is not None
+        assert effective.decision == expected_decision
+        assert effective.review_category == "all"
+        assert effective.allow_portfolio_candidate_override is False
+
+    rmd = effective_decision(
+        decisions,
+        ticker="RMD",
+        cohort="home_chronic_care_devices_dme_drug_delivery",
+        asof=date(2026, 7, 25),
+    )
+    assert rmd is not None
+    assert rmd.expires_at == ""
+    assert rmd.next_review_at == "2026-08-24"
+    assert decision_expiration_status(
+        rmd,
+        asof=date(2026, 7, 25),
+        warning_days=7,
+    ) == ("active_no_expiration", None, 0)
+    assert decision_review_cadence_status(
+        rmd,
+        asof=date(2026, 8, 18),
+        warning_days=7,
+    ) == ("review_due_soon", 6, 1)
 
 
 def test_abt_product_family_governance_is_effective_dated_and_complete() -> None:

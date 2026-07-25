@@ -1,0 +1,13 @@
+sources:
+  - source_id: first_source
+    stage: stage_1
+    source_name: First
+    source_type: api
+    base_url: https://example.com/first
+    priority: 0
+  - source_id: second_source
+    stage: stage_1
+    source_name: Second
+    source_type: api
+    base_url: https://example.com/second
+    priority: 10

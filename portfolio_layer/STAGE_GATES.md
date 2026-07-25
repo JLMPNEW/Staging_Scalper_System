@@ -921,6 +921,32 @@ proper sampling cadence without losing information.
   t-stat >= 2, profit factor >= 1.10, positive stress return, at least four positive sectors, and
   promotion-grade execution coverage. Borrow/availability gates remain short-only feasibility
   requirements.
+- `backtest/rank_reconstitution.py`, `16i_rank_reconstitution_long.py`, and
+  `16j_calibrate_rank_reconstitution.py` - a separate rank-persistence test that does not alter
+  16g/16h. It compares top-10% and top-20% entry sets with fixed 10-percentage-point exit buffers,
+  executes every replacement at D+1 open, and derives the maximum name count from AUM and the
+  Stage-4 commission-to-position rule rather than a hard ten-name cap. Holding horizons are selected
+  separately for each entry breadth using unconditional training data; untouched outer blocks then
+  compare unconditional, PIT-V1-gated, and PIT-H1-gated arms on common dates. H1 missing coverage
+  fails closed to V1. The historical H1 comparison is diagnostic and cannot promote H1.
+- Candidate formation requires an observed signal-date close and excludes rows at or after the
+  sealed delisting date. Positions that reach a sealed terminal event settle at the final adjusted
+  close without inventing a later open or charging a fictitious market trade. Candidate-level
+  execution diagnostics distinguish missing history, missing D+1 opens with a sealed close, and
+  post-terminal score rows.
+- Rank-reconstitution outer folds use disjoint signal dates, but long-horizon outcomes can overlap
+  adjacent folds. Horizon-length HAC and circular-block bootstrap inference therefore model that
+  dependence instead of falsely treating 252-day labels as independent annual observations. The
+  evidence arm is one continuous OOS portfolio driven by the horizon selected from prior data at
+  each fold; positions may cross fold boundaries, but calendar returns and capital are never
+  duplicated. Inner horizon selection is endpoint-trimmed so no label crosses from outer training
+  into outer testing.
+- Rank-reconstitution evidence replaces the arbitrary raw-trade-count gate with a seeded circular
+  block-bootstrap confidence interval, autocorrelation-adjusted effective sample size, minimum OOS
+  calendar span, outer-fold sign consistency, sector breadth, stressed-cost return, and per-sector
+  D+1-open coverage. Raw trade count remains reported. All candidate horizons in a selection stage
+  use the same validation windows; a longer horizon cannot win by being scored on fewer favorable
+  folds. H1/V1 regime treatment is never used to select the structural holding parameter.
 - `backtest/17_publish_lockbox_ledger.py` - one-time sealed OOS publication after the Open Event.
 
 Only after those pass should optional modules be tested: `forecast/67_train_models.py` /

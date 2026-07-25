@@ -989,6 +989,7 @@ reimbursement_entity_linking:
   output_csv: "../output/med_devices_reports/med_device_reimbursement_entity_mapping.csv"
   unmapped_output_csv: "../output/med_devices_reports/med_device_reimbursement_unmapped_companies.csv"
   override_csv: "data/reimbursement_mapping_overrides.csv"
+  policy_override_csv: "data/reimbursement_policy_overrides.csv"
   resolved_classification_csv: "data/reimbursement_company_classifications.csv"
   manual_rate_csv: "data/reimbursement_manual_payment_rates.csv"
   manual_rate_audit_csv: "../output/med_devices_reports/med_device_reimbursement_manual_rate_audit.csv"
@@ -1011,6 +1012,9 @@ reimbursement_entity_linking:
   descriptor_max_code_matches_per_term: 50
   descriptor_require_rate_rows: true
   replace_existing_mappings: true
+
+company_risk_events:
+  input_csv: "data/company_risk_events.csv"
 
 ib_price_validation:
   input_csv: "../ticker_mapping/med_dev_tickers_clean_keep.csv"

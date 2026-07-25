@@ -24,7 +24,17 @@ from industrials.core.csv_utils import read_csv_flexible  # noqa: E402
 LOGGER = logging.getLogger("export_transportation_delisted_price_contract")
 DEFAULT_CONFIG = INDUSTRIALS_ROOT / "config.yaml"
 MODEL_FAMILY = "transportation"
-PRICE_FIELDS = ["ticker", "date", "adjclose", "close", "volume", "source_symbol"]
+PRICE_FIELDS = [
+    "ticker",
+    "date",
+    "adj_open",
+    "adj_high",
+    "adj_low",
+    "adjclose",
+    "close",
+    "volume",
+    "source_symbol",
+]
 EVENT_FIELDS = ["ticker", "delist_date", "delist_reason", "terminal_value"]
 PREFERRED_SOURCES = ["norgate_us_equities_total_return", "yahoo_finance_adjusted"]
 
@@ -123,7 +133,7 @@ def main() -> int:
             bars = conn.execute(
                 f"""
                 WITH ranked AS (
-                    SELECT bar_date, adj_close, close, volume, source_id,
+                    SELECT bar_date, open, high, low, adj_close, close, volume, source_id,
                            ROW_NUMBER() OVER (
                                PARTITION BY bar_date
                                ORDER BY CASE source_id {source_rank} ELSE 99 END
@@ -134,7 +144,7 @@ def main() -> int:
                       AND adj_close IS NOT NULL AND adj_close > 0
                       {date_filter}
                 )
-                SELECT bar_date, adj_close, close, volume, source_id
+                SELECT bar_date, open, high, low, adj_close, close, volume, source_id
                 FROM ranked WHERE source_order = 1 ORDER BY bar_date
                 """,
                 params,
@@ -143,10 +153,31 @@ def main() -> int:
                 missing.append(ticker)
                 continue
             for bar in bars:
+                close_px = (
+                    float(bar["close"]) if bar["close"] is not None else 0.0
+                )
+                factor = (
+                    float(bar["adj_close"]) / close_px if close_px > 0 else 0.0
+                )
                 price_rows.append(
                     {
                         "ticker": ticker,
                         "date": str(bar["bar_date"])[:10],
+                        "adj_open": (
+                            round(float(bar["open"]) * factor, 8)
+                            if bar["open"] is not None and factor > 0
+                            else ""
+                        ),
+                        "adj_high": (
+                            round(float(bar["high"]) * factor, 8)
+                            if bar["high"] is not None and factor > 0
+                            else ""
+                        ),
+                        "adj_low": (
+                            round(float(bar["low"]) * factor, 8)
+                            if bar["low"] is not None and factor > 0
+                            else ""
+                        ),
                         "adjclose": round(float(bar["adj_close"]), 8),
                         "close": round(float(bar["close"]), 8) if bar["close"] is not None else "",
                         "volume": int(bar["volume"]) if bar["volume"] is not None else "",

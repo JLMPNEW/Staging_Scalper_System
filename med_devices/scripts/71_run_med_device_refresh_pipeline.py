@@ -186,6 +186,13 @@ def build_steps(
         Step("14_sync_cms_reimbursement", "stage_5", "Sync CMS/reimbursement source facts", py_script("med_devices/scripts/14_sync_med_device_cms_reimbursement.py"), ["--allow-partial"], network=True),
         Step("15_link_reimbursement", "stage_5", "Link reimbursement evidence to companies", py_script("med_devices/scripts/15_link_med_device_reimbursement_to_companies.py"), asof_args),
         Step("11_build_reimbursement_features", "stage_5", "Build reimbursement features", py_script("med_devices/scripts/11_build_med_device_reimbursement_features.py"), asof_args),
+        Step(
+            "80_sync_company_risk_events",
+            "stage_5",
+            "Sync governed company legal/risk events",
+            py_script("med_devices/scripts/80_sync_med_device_company_risk_events.py"),
+            asof_args,
+        ),
         Step("12_build_technical_features", "stage_6", "Build technical-entry features", py_script("med_devices/scripts/12_build_med_device_technical_features.py"), asof_args),
         Step("55_sync_finra_short_volume", "stage_7", "Sync FINRA short-volume facts", py_script("med_devices/scripts/55_sync_med_device_finra_short_volume.py"), ["--end-date", asof] if asof else [], network=True, optional=True),
         Step("65_update_finra_short_interest", "stage_7", "Update shared FINRA short-interest facts", py_script("med_devices/scripts/65_update_med_device_finra_short_interest.py"), asof_args, pass_db=False, network=True, optional=True),

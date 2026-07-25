@@ -314,18 +314,32 @@ def main() -> int:
         )
         active_expiration_status = ""
         active_days_to_expiration: int | None = None
+        active_review_cadence_status = ""
+        active_days_to_review: int | None = None
         active_needs_review = 0
         if active_decision is not None:
-            active_expiration_status, active_days_to_expiration, active_needs_review = (
+            active_expiration_status, active_days_to_expiration, expiration_needs_review = (
                 analyst_review_core.decision_expiration_status(
                     active_decision,
                     asof=asof_date,
                     warning_days=expiration_warning_days,
                 )
             )
+            active_review_cadence_status, active_days_to_review, cadence_needs_review = (
+                analyst_review_core.decision_review_cadence_status(
+                    active_decision,
+                    asof=asof_date,
+                    warning_days=expiration_warning_days,
+                )
+            )
+            active_needs_review = max(expiration_needs_review, cadence_needs_review)
         queue_status = (
             "decision_expires_soon"
             if active_decision and active_expiration_status == "expires_soon"
+            else "decision_review_overdue"
+            if active_decision and active_review_cadence_status == "review_overdue"
+            else "decision_review_due_soon"
+            if active_decision and active_review_cadence_status == "review_due_soon"
             else "decided"
             if active_decision
             else "expired_decision_needs_review"
@@ -348,9 +362,16 @@ def main() -> int:
                 "analyst_decision_reason": decision_for_display.decision_reason if decision_for_display else "",
                 "analyst_reviewed_at": decision_for_display.reviewed_at if decision_for_display else "",
                 "analyst_review_expires_at": decision_for_display.expires_at if decision_for_display else "",
+                "analyst_next_review_at": decision_for_display.next_review_at if decision_for_display else "",
                 "analyst_expiration_status": active_expiration_status if active_decision else "expired" if expired_decision else "",
                 "analyst_days_to_expiration": (
                     "" if active_days_to_expiration is None else active_days_to_expiration
+                ),
+                "analyst_review_cadence_status": (
+                    active_review_cadence_status if active_decision else ""
+                ),
+                "analyst_days_to_review": (
+                    "" if active_days_to_review is None else active_days_to_review
                 ),
                 "analyst_review_due": active_needs_review if active_decision else int(bool(expired_decision)),
                 "analyst_override_allowed": (
@@ -400,8 +421,11 @@ def main() -> int:
         "analyst_decision_reason",
         "analyst_reviewed_at",
         "analyst_review_expires_at",
+        "analyst_next_review_at",
         "analyst_expiration_status",
         "analyst_days_to_expiration",
+        "analyst_review_cadence_status",
+        "analyst_days_to_review",
         "analyst_review_due",
         "analyst_override_allowed",
         "analyst_source_reference",
