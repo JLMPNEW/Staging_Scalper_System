@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import date
 from pathlib import Path
 from typing import Iterable
 from xml.etree import ElementTree as ET
@@ -20,6 +21,90 @@ EXCLUDED_MARKERS = (
     "report.css",
     "show.js",
 )
+INVALID_MONETARY_UNITS = frozenset({"", "PURE", "SHARES", "USD/SHARES"})
+
+
+def _table_has_columns(
+    conn: sqlite3.Connection,
+    table: str,
+    required: set[str],
+) -> bool:
+    exists = conn.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = ?
+        """,
+        (table,),
+    ).fetchone()
+    if exists is None:
+        return False
+    columns = {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table})")
+    }
+    return required <= columns
+
+
+def _reporting_currency(
+    conn: sqlite3.Connection,
+    *,
+    ticker: str,
+    model_family: str,
+    asof_date: str,
+    fallback: str,
+) -> str:
+    currency = ""
+    if _table_has_columns(
+        conn,
+        "feature_financial_statement",
+        {"ticker", "model_family", "asof_date", "reported_currency"},
+    ):
+        row = conn.execute(
+            """
+            SELECT UPPER(reported_currency) AS currency
+            FROM feature_financial_statement
+            WHERE ticker = ? AND model_family = ? AND asof_date <= ?
+              AND COALESCE(reported_currency, '') <> ''
+            ORDER BY asof_date DESC
+            LIMIT 1
+            """,
+            (ticker, model_family, asof_date),
+        ).fetchone()
+        currency = str(row["currency"] or "").strip() if row else ""
+    if (
+        currency in INVALID_MONETARY_UNITS
+        and _table_has_columns(
+            conn,
+            "fact_financial_statement_canonical",
+            {
+                "ticker",
+                "model_family",
+                "canonical_metric",
+                "period_end",
+                "filing_date",
+                "unit",
+            },
+        )
+    ):
+        row = conn.execute(
+            """
+            SELECT UPPER(unit) AS currency
+            FROM fact_financial_statement_canonical
+            WHERE ticker = ? AND model_family = ?
+              AND canonical_metric IN ('assets', 'revenue')
+              AND COALESCE(unit, '') <> ''
+              AND LENGTH(unit) = 3
+              AND COALESCE(NULLIF(filing_date, ''), '9999-12-31') <= ?
+            ORDER BY period_end DESC, filing_date DESC
+            LIMIT 1
+            """,
+            (ticker, model_family, asof_date),
+        ).fetchone()
+        currency = str(row["currency"] or "").strip() if row else ""
+    if currency in INVALID_MONETARY_UNITS:
+        currency = str(fallback or "USD").strip().upper()
+    return currency or "USD"
 
 
 def accession_directory(cache_dir: Path, filing: FilingRef) -> Path:
@@ -186,7 +271,7 @@ def _known_hash(
         FROM sec_parser_document_catalog
         WHERE cik = ? AND accession_number = ? AND document_name = ?
           AND source_path = ? AND file_size = ? AND modified_ns = ?
-        ORDER BY cataloged_at DESC
+        ORDER BY cataloged_at DESC, rowid DESC
         LIMIT 1
         """,
         (
@@ -217,12 +302,18 @@ def build_document_refs(
         filing=filing,
         keywords=keywords,
     )
-    if max_documents > 0:
-        names = names[:max_documents]
     full_submission = _full_submission_name(
         directory,
         accession_number=filing.accession_number,
     )
+    if max_documents > 0 and len(names) > max_documents:
+        truncated = list(names[:max_documents])
+        # The sort places the full submission last, so a plain cap silently
+        # drops it and the edgartools SGML inspection never runs. Reserve a
+        # slot for it instead.
+        if full_submission and full_submission in names and full_submission not in truncated:
+            truncated[-1] = full_submission
+        names = tuple(truncated)
     documents: list[DocumentRef] = []
     for name in names:
         path = directory / name
@@ -255,11 +346,13 @@ def build_document_refs(
 def filing_rows(
     conn: sqlite3.Connection,
     *,
+    model_family: str,
     asof_date: str,
     tickers: Iterable[str],
     accessions: Iterable[str] | None,
     supported_forms: tuple[str, ...],
     max_filings_per_ticker: int,
+    target_periods_by_ticker: dict[str, tuple[str, ...]] | None = None,
 ) -> dict[str, list[FilingRef]]:
     ticker_list = sorted(set(tickers))
     if not ticker_list:
@@ -319,12 +412,21 @@ def filing_rows(
             asof_date,
         ),
     ).fetchall()
-    grouped: dict[str, list[FilingRef]] = {ticker: [] for ticker in ticker_list}
+    grouped_all: dict[str, list[FilingRef]] = {
+        ticker: [] for ticker in ticker_list
+    }
+    reporting_currencies: dict[str, str] = {}
     for row in rows:
         ticker = str(row["ticker"])
-        if max_filings_per_ticker > 0 and len(grouped[ticker]) >= max_filings_per_ticker:
-            continue
-        grouped[ticker].append(
+        if ticker not in reporting_currencies:
+            reporting_currencies[ticker] = _reporting_currency(
+                conn,
+                ticker=ticker,
+                model_family=model_family,
+                asof_date=asof_date,
+                fallback=str(row["company_currency"] or "USD"),
+            )
+        grouped_all[ticker].append(
             FilingRef(
                 ticker=ticker,
                 cik=str(row["cik"] or ""),
@@ -335,7 +437,66 @@ def filing_rows(
                 report_date=str(row["report_date"] or ""),
                 primary_document=str(row["primary_document"] or ""),
                 source_id=str(row["source_id"] or ""),
-                company_currency=str(row["company_currency"] or "USD"),
+                company_currency=reporting_currencies[ticker],
             )
+        )
+    grouped: dict[str, list[FilingRef]] = {
+        ticker: [] for ticker in ticker_list
+    }
+    target_map = target_periods_by_ticker or {}
+    periodic_forms = {
+        "10-Q",
+        "10-Q/A",
+        "10-K",
+        "10-K/A",
+        "20-F",
+        "20-F/A",
+        "40-F",
+        "40-F/A",
+        "6-K",
+        "6-K/A",
+    }
+    for ticker, ticker_filings in grouped_all.items():
+        targets: list[date] = []
+        for value in target_map.get(ticker, ()):
+            try:
+                targets.append(date.fromisoformat(value[:10]))
+            except ValueError:
+                continue
+
+        def priority(item: FilingRef) -> tuple[int, int]:
+            report_date: date | None
+            try:
+                report_date = date.fromisoformat(item.report_date[:10])
+            except ValueError:
+                report_date = None
+            distances = (
+                [abs((report_date - target).days) for target in targets]
+                if report_date is not None
+                else []
+            )
+            nearest = min(distances) if distances else 10_000
+            form = item.form_type.upper()
+            if nearest == 0 and form in periodic_forms:
+                target_priority = 0
+            elif nearest <= 45 and form in periodic_forms:
+                target_priority = 1
+            elif targets and form in periodic_forms:
+                target_priority = 2
+            else:
+                target_priority = 3
+            try:
+                accepted_ordinal = date.fromisoformat(
+                    item.accepted_at[:10]
+                ).toordinal()
+            except ValueError:
+                accepted_ordinal = 0
+            return target_priority, -accepted_ordinal
+
+        prioritized = sorted(ticker_filings, key=priority)
+        grouped[ticker] = (
+            prioritized[:max_filings_per_ticker]
+            if max_filings_per_ticker > 0
+            else prioritized
         )
     return grouped

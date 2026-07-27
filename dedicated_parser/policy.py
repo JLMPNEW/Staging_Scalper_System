@@ -23,6 +23,7 @@ ALLOWED_DECISIONS = frozenset(
         "REJECTED_POLICY",
         "REVIEW_REQUIRED",
         "SUPPRESSED_SEMANTIC_DUPLICATE",
+        "STRUCTURAL_NA",
     }
 )
 POLICY_FIELDS = (
@@ -62,7 +63,7 @@ class ReviewPolicy:
     source_document: str
     metric_name: str
     concept_name: str
-    candidate_value: float
+    candidate_value: float | None
     value_tolerance: float
     unit: str
     period_start: str
@@ -126,20 +127,28 @@ def _load_review_policies_cached(
     policy_ids: set[str] = set()
     exact_keys: set[tuple[object, ...]] = set()
     for row_number, row in enumerate(rows, start=2):
-        if not _enabled(row.get("enabled")):
-            continue
+        # policy_id uniqueness is validated for DISABLED rows too: a disabled
+        # row silently sharing an enabled row's id would corrupt provenance the
+        # moment it is re-enabled.
         policy_id = _required(row, "policy_id", path=resolved)
         if policy_id in policy_ids:
             raise ValueError(f"{resolved}:{row_number}: duplicate policy_id {policy_id}")
         policy_ids.add(policy_id)
+        if not _enabled(row.get("enabled")):
+            continue
         decision = _required(row, "decision", path=resolved).upper()
         if decision not in ALLOWED_DECISIONS:
             raise ValueError(
                 f"{resolved}:{row_number}: unsupported decision {decision!r}"
             )
         try:
-            candidate_value = float(
-                _required(row, "candidate_value", path=resolved)
+            candidate_value_text = str(
+                row.get("candidate_value") or ""
+            ).strip()
+            candidate_value = (
+                float(candidate_value_text)
+                if candidate_value_text
+                else None
             )
             value_tolerance = float(
                 str(row.get("value_tolerance") or "0.000001")
@@ -158,6 +167,11 @@ def _load_review_policies_cached(
             raise ValueError(
                 f"{resolved}:{row_number}: invalid numeric policy field"
             ) from exc
+        if candidate_value is None and decision != "STRUCTURAL_NA":
+            raise ValueError(
+                f"{resolved}:{row_number}: candidate_value is required "
+                f"for decision {decision}"
+            )
         if value_tolerance < 0:
             raise ValueError(
                 f"{resolved}:{row_number}: value_tolerance cannot be negative"
@@ -166,9 +180,10 @@ def _load_review_policies_cached(
             raise ValueError(
                 f"{resolved}:{row_number}: confidence_override must be in [0, 1]"
             )
-        if not math.isfinite(candidate_value) or not math.isfinite(
-            value_tolerance
-        ):
+        if (
+            candidate_value is not None
+            and not math.isfinite(candidate_value)
+        ) or not math.isfinite(value_tolerance):
             raise ValueError(
                 f"{resolved}:{row_number}: policy numeric fields must be finite"
             )
@@ -226,7 +241,11 @@ def _load_review_policies_cached(
             concept_name=str(row.get("concept_name") or "").strip(),
             candidate_value=candidate_value,
             value_tolerance=value_tolerance,
-            unit=_required(row, "unit", path=resolved),
+            unit=(
+                str(row.get("unit") or "").strip()
+                if decision == "STRUCTURAL_NA"
+                else _required(row, "unit", path=resolved)
+            ),
             period_start=str(row.get("period_start") or "").strip(),
             period_end=_required(row, "period_end", path=resolved),
             decision=decision,
@@ -270,6 +289,49 @@ def _load_review_policies_cached(
             )
         exact_keys.add(exact_key)
         policies.append(policy)
+    # Tolerance-aware overlap detection at LOAD time, matching runtime
+    # semantics (blank concept is a wildcard; values match within combined
+    # tolerances). Exact-key dedup alone lets an overlapping pair ship and
+    # only fail per-evidence-row at parse time.
+    for first_index in range(len(policies)):
+        for second_index in range(first_index + 1, len(policies)):
+            first = policies[first_index]
+            second = policies[second_index]
+            if (
+                first.model_family == second.model_family
+                and first.ticker == second.ticker
+                and first.accession_number == second.accession_number
+                and first.source_document == second.source_document
+                and first.metric_name == second.metric_name
+                and first.unit == second.unit
+                and first.period_start == second.period_start
+                and first.period_end == second.period_end
+                and (
+                    not first.concept_name
+                    or not second.concept_name
+                    or first.concept_name == second.concept_name
+                )
+                and (
+                    (
+                        first.candidate_value is None
+                        and second.candidate_value is None
+                    )
+                    or (
+                        first.candidate_value is not None
+                        and second.candidate_value is not None
+                        and abs(
+                            first.candidate_value
+                            - second.candidate_value
+                        )
+                        <= first.value_tolerance + second.value_tolerance
+                    )
+                )
+            ):
+                raise ValueError(
+                    f"{resolved}: overlapping review policies "
+                    f"{first.policy_id} and {second.policy_id} can match the "
+                    "same evidence row"
+                )
     return tuple(policies)
 
 
@@ -279,6 +341,12 @@ def _matches(
     item: WorkItem,
     evidence: MetricEvidence,
 ) -> bool:
+    candidate_period = (evidence.period_start, evidence.period_end)
+    policy_period = (policy.period_start, policy.period_end)
+    effective_policy_period = (
+        policy.period_start_override or policy.period_start,
+        policy.period_end_override or policy.period_end,
+    )
     return (
         policy.model_family == item.model_family
         and policy.ticker == item.filing.ticker
@@ -289,15 +357,26 @@ def _matches(
             not policy.concept_name
             or policy.concept_name == evidence.concept_name
         )
-        and evidence.value is not None
-        and abs(float(evidence.value) - policy.candidate_value)
-        <= max(
-            policy.value_tolerance,
-            abs(policy.candidate_value) * 1e-12,
+        and (
+            (
+                evidence.value is None
+                and policy.candidate_value is None
+            )
+            or (
+                evidence.value is not None
+                and policy.candidate_value is not None
+                and abs(float(evidence.value) - policy.candidate_value)
+                <= max(
+                    policy.value_tolerance,
+                    abs(policy.candidate_value) * 1e-12,
+                )
+            )
         )
         and policy.unit == evidence.unit
-        and policy.period_start == evidence.period_start
-        and policy.period_end == evidence.period_end
+        # Parser upgrades can natively correct a date that an older reviewed
+        # policy repaired with an override. Keep that policy applicable to
+        # both the original observation and its reviewed effective period.
+        and candidate_period in {policy_period, effective_policy_period}
     )
 
 
@@ -308,11 +387,18 @@ def apply_review_policies(
     rows = tuple(evidence_rows)
     if not item.review_policy_path:
         return rows
+    registry_path = Path(item.review_policy_path)
     policies = load_review_policies(
-        Path(item.review_policy_path),
+        registry_path,
         expected_sha256=item.review_policy_sha256,
     )
+    # Provenance must record the sha of the registry actually loaded, not a
+    # possibly-blank value from a hand-built WorkItem.
+    applied_registry_sha256 = item.review_policy_sha256 or file_sha256(
+        registry_path
+    )
     output: list[MetricEvidence] = []
+    applied_policy_ids: set[str] = set()
     for evidence in rows:
         matches = [
             policy
@@ -330,16 +416,18 @@ def apply_review_policies(
             output.append(evidence)
             continue
         policy = matches[0]
+        applied_policy_ids.add(policy.policy_id)
         provenance = dict(evidence.provenance)
         provenance["review_policy"] = {
             "policy_id": policy.policy_id,
             "policy_version": policy.policy_version,
             "reviewed_by": policy.reviewed_by,
             "reviewed_at": policy.reviewed_at,
-            "registry_sha256": item.review_policy_sha256,
+            "registry_sha256": applied_registry_sha256,
             "matched_period_start": evidence.period_start,
             "matched_period_end": evidence.period_end,
             "matched_value": evidence.value,
+            "matched_reason": evidence.reason,
         }
         output.append(
             replace(
@@ -364,6 +452,68 @@ def apply_review_policies(
                 status=policy.decision,
                 reason=policy.status_reason,
                 provenance=provenance,
+            )
+        )
+    requested_metrics = {
+        request.metric_name for request in item.requested_metrics
+    }
+    documents = {document.name: document for document in item.documents}
+    for policy in policies:
+        if (
+            policy.policy_id in applied_policy_ids
+            or policy.model_family != item.model_family
+            or policy.ticker != item.filing.ticker
+            or policy.accession_number != item.filing.accession_number
+            or policy.metric_name not in requested_metrics
+            or policy.source_document not in documents
+        ):
+            continue
+        document = documents[policy.source_document]
+        output.append(
+            MetricEvidence(
+                metric_name=policy.metric_name,
+                concept_name=policy.concept_name or policy.metric_name,
+                value=(
+                    policy.value_override
+                    if policy.value_override is not None
+                    else policy.candidate_value
+                ),
+                unit=policy.unit,
+                period_start=(
+                    policy.period_start_override or policy.period_start
+                ),
+                period_end=(
+                    policy.period_end_override or policy.period_end
+                ),
+                scope=policy.scope_override or "unknown",
+                confidence=(
+                    policy.confidence_override
+                    if policy.confidence_override is not None
+                    else 1.0
+                ),
+                status=policy.decision,
+                reason=policy.status_reason,
+                evidence_text=(
+                    "Materialized from an enabled reviewed policy for "
+                    f"{policy.source_document}."
+                ),
+                source_document=policy.source_document,
+                extraction_method="dedicated_parser:review_policy_registry",
+                provenance={
+                    "review_policy": {
+                        "policy_id": policy.policy_id,
+                        "policy_version": policy.policy_version,
+                        "reviewed_by": policy.reviewed_by,
+                        "reviewed_at": policy.reviewed_at,
+                        "registry_sha256": applied_registry_sha256,
+                        "materialized": True,
+                    },
+                    "source_document": {
+                        "name": document.name,
+                        "content_sha256": document.content_sha256,
+                        "source_kind": document.source_kind,
+                    },
+                },
             )
         )
     return tuple(output)
@@ -399,6 +549,11 @@ def export_policy_golden_corpus(
                 **base,
                 "candidate_status": policy.decision,
                 "reason_contains": policy.status_reason,
+                # The policy matched evidence within THIS tolerance; the
+                # validator must use the same band or a legitimately matched
+                # value can fail the expectation (and a prohibited acceptance
+                # can slip past it).
+                "value_tolerance": policy.value_tolerance,
             }
         )
         if policy.decision.startswith(("REJECTED", "SUPPRESSED")):
@@ -409,6 +564,7 @@ def export_policy_golden_corpus(
                     "candidate_status": "ACCEPTED",
                     "reason_contains": "",
                     "expect_absent": True,
+                    "value_tolerance": policy.value_tolerance,
                 }
             )
     payload = {

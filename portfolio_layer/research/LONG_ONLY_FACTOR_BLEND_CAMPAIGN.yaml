@@ -1,0 +1,78 @@
+campaign_id: "stage11_long_only_factor_blend_v1"
+frozen_on: "2026-07-25"
+purpose: "Test whether a small residual pillar tilt improves the existing composite in the executable long-only book."
+
+panel_build: "2026-07-05"
+factor_evidence_campaign: "stage11_factor_payoff_v1"
+primary_horizon_days: 126
+primary_target: "excess_sector"
+signal_every_n_snapshots: 5
+
+# These are the eight unique sector/pillar candidates behind the ten marginal-FDR cells.
+# The candidate list is frozen; the build may not discover or substitute factors dynamically.
+candidates:
+  - {source_pipeline: software_infrastructure, component: quality_score}
+  - {source_pipeline: software_infrastructure, component: risk_control_score}
+  - {source_pipeline: technology_hardware, component: valuation_score}
+  - {source_pipeline: technology_hardware, component: positioning_score}
+  - {source_pipeline: biotech, component: clinical_opportunity_score}
+  - {source_pipeline: biotech, component: commercial_quality_score}
+  - {source_pipeline: med_devices, component: valuation_score}
+  - {source_pipeline: defense, component: risk_control_score}
+
+# Primary weight is unconditional. The one permitted regime interaction is an incremental,
+# heavily-shrunk HEATING_UP coefficient. Total factor weight can never exceed 0.25.
+lambda_base_grid: [0.0, 0.05, 0.10, 0.15, 0.20, 0.25]
+lambda_heating_increment_grid: [0.0, 0.025, 0.05]
+lambda_total_cap: 0.25
+lambda_heating_increment_cap: 0.05
+heating_increment_requires_positive_base: true
+
+validation:
+  outer_folds: 5
+  outer_initial_fraction: 0.40
+  minimum_outer_train_signal_dates: 60
+  inner_folds: 3
+  inner_initial_fraction: 0.50
+  minimum_inner_train_signal_dates: 40
+  minimum_valid_inner_folds: 2
+  embargo_signal_dates: 2
+  stability_penalty: 0.50
+  objective_tie_tolerance: 1.0e-9
+  minimum_factor_coverage_fraction: 0.90
+
+inference:
+  fdr_alpha: 0.10
+  family: "eight frozen sector/pillar candidates after nested lambda selection"
+  bootstrap_confidence: 0.90
+  bootstrap_replications: 2000
+  bootstrap_seed: 16425
+  bootstrap_block_length_trading_days: 131
+  minimum_outer_folds_positive: 4
+  minimum_active_t: 2.0
+  minimum_net_active_ann: 0.0
+  minimum_stress_active_ann: 0.0
+
+selection:
+  no_selection_on_ties: true
+  lambda_zero_is_baseline: true
+  boundary_selection_blocks: true
+  select_at_most_one_candidate: true
+
+confirmation:
+  # Research/74 viewed the entire development window. No slice of that window is untouched.
+  source: "sealed_lockbox_or_future_prospective_only"
+  development_results_are_diagnostic: true
+  lockbox_may_be_opened_by_this_script: false
+  promotion_requires_separate_confirmation: true
+
+terminal_rule:
+  if_development_fails: "STOP_FACTOR_REWEIGHTING_CURRENT_SIGNAL_STACK"
+  if_confirmation_fails: "STOP_FACTOR_REWEIGHTING_CURRENT_SIGNAL_STACK"
+  after_stop_focus: ["universe_breadth", "new_data", "short_side_cost_frontier"]
+
+governance:
+  evidence_only: true
+  may_modify_scoring: false
+  may_modify_production: false
+  code_hashing_required: true

@@ -84,7 +84,14 @@ def decode_text_document(payload: bytes) -> DocumentText:
         return DocumentText(payload.decode("utf-16"), "text_decode_utf16")
     if payload.startswith(b"\xef\xbb\xbf"):
         return DocumentText(payload.decode("utf-8-sig"), "text_decode_utf8")
-    return DocumentText(payload.decode("utf-8", errors="replace"), "text_decode_utf8")
+    try:
+        return DocumentText(payload.decode("utf-8"), "text_decode_utf8")
+    except UnicodeDecodeError:
+        # Windows-1252 filings (smart quotes, en-dashes, NBSP, currency
+        # symbols) are common; lossy U+FFFD replacement breaks date regexes
+        # ("March 31,<?>2026") and unit detection. cp1252 decodes any byte, so
+        # this never raises.
+        return DocumentText(payload.decode("cp1252"), "text_decode_cp1252")
 
 
 def _pypdf_text_unbounded(payload: bytes, *, max_pages: int) -> DocumentText:
@@ -262,6 +269,20 @@ def extract_pdf_text(
         timeout_sec=extraction_timeout_sec,
     )
     if len(direct.text.strip()) >= minimum_text_characters or not enable_ocr:
+        if (
+            not enable_ocr
+            and len(direct.text.strip()) < minimum_text_characters
+            and not direct.warning
+        ):
+            # An image-only PDF "succeeds" in pypdf with empty text. Without a
+            # warning the adapter emits no evidence at all and the document is
+            # mislabeled as issuer non-disclosure instead of PARSER_FAILURE.
+            return DocumentText(
+                direct.text,
+                direct.extraction_method,
+                page_count=direct.page_count,
+                warning="pdf_no_native_text_ocr_disabled",
+            )
         return direct
     ocr = _bounded_pdf_extract(
         "ocr",

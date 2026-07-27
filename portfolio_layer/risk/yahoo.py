@@ -284,6 +284,15 @@ def fetch_adjclose_with_splits(
 ) -> tuple[list[tuple[str, float]], list[dict[str, str]], str, str, str]:
     """Return (rows, split_events, status, provider, source_symbol). ``status == "ok"`` on success."""
     statuses: list[str] = []
+    best: tuple[
+        list[tuple[str, float]],
+        list[dict[str, str]],
+        str,
+    ] | None = None
+    required_end = end
+    while required_end.weekday() >= 5:
+        required_end -= timedelta(days=1)
+    required_end_iso = required_end.isoformat()
     for idx, url_template in enumerate(url_templates, start=1):
         rows, splits, status = _fetch_yahoo_adjclose(
             ticker,
@@ -296,8 +305,26 @@ def fetch_adjclose_with_splits(
         )
         provider = f"yahoo_query{idx}"
         if status == "ok" and rows:
-            return rows, splits, "ok", provider, ticker
+            last_date = max(day for day, _ in rows)
+            candidate = (rows, splits, provider)
+            if best is None:
+                best = candidate
+            else:
+                best_rows = best[0]
+                best_key = (max(day for day, _ in best_rows), len(best_rows))
+                candidate_key = (last_date, len(rows))
+                if candidate_key > best_key:
+                    best = candidate
+            if last_date >= required_end_iso:
+                return rows, splits, "ok", provider, ticker
+            statuses.append(
+                f"{provider}:partial_tail:{last_date}<{required_end_iso}"
+            )
+            continue
         statuses.append(f"{provider}:{status}")
+    if best is not None:
+        rows, splits, provider = best
+        return rows, splits, "ok", provider, ticker
     if enable_stooq_fallback:
         rows, status, source_symbol = _fetch_stooq_close(
             ticker,

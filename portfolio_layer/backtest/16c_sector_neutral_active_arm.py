@@ -10,12 +10,13 @@ At every weekly rebalance date D, PER SECTOR:
      (as_of_date <= D - purge_window(h); macro_regime == regime at D). No future data touches the
      weights. Falls back to the composite when trailing evidence is too thin.
   2. Score the current cross-section with those weights -> a within-sector "tilt".
-  3. Build two books, both beta-neutral vs the within-sector equal-weight benchmark:
+  3. Build two books, both sector-neutral vs the within-sector equal-weight benchmark:
        component_tilt_ls      dollar-neutral long/short spread (unit gross)  -> the RAW signal value
        component_tilt_active  long-only benchmark + clipped tilt             -> achievable TODAY
      plus composite_tilt_* controls built identically from the blended score.
-  4. Realize the book's return over [D, D_next] from the survivorship price panel (actual prices,
-     PIT), charge one-way turnover cost, and accumulate the net ACTIVE return stream.
+  4. Execute the D-close decision at D+1 adjusted open and hold to the adjusted open after the next
+     signal date. Delistings inside the interval settle at the sealed terminal adjusted close.
+     Charge turnover/borrow costs and accumulate the net ACTIVE return stream.
 
 Verdict uses the same promotion bar as backtest/16 (net IR > 0, active t >= 2, enough independent
 windows). A HIGHER Sharpe with flat active return is NOT a pass. SHADOW-only; changes no config and no
@@ -34,8 +35,10 @@ import json
 import logging
 import sqlite3
 import sys
+from bisect import bisect_right
 from datetime import date, timedelta
 from pathlib import Path
+from typing import cast
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PACKAGE_ROOT.parent
@@ -53,10 +56,12 @@ from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.research.stage11_common import (  # noqa: E402
+    calibration_admission_mask,
     forward_status_is_valid,
     independent_windows,
     load_lockbox,
     manifest_file_errors,
+    manifest_input_errors,
     mean_t,
     mean_t_hac,
 )
@@ -89,7 +94,9 @@ DEFAULT_PIPELINES = [
 ARM_FIELDS = [
     "arm", "n_rebalances", "n_days", "independent_windows", "net_active_ann", "active_vol_ann",
     "active_ir", "active_t", "net_active_sharpe", "gross_spread_sharpe", "turnover_per_year",
-    "cost_drag_ann_bps", "short_net_ann", "short_absolute_net_ann",
+    "cost_drag_ann_bps", "spread_drag_ann_bps", "commission_drag_ann_bps",
+    "borrow_drag_ann_bps", "commission_share_of_cost",
+    "short_net_ann", "short_absolute_net_ann",
     "stress_net_active_ann", "positive_sector_count",
     "spread_exact_weight_fraction", "borrow_actual_weight_fraction",
     "availability_observed_weight_fraction", "availability_fee_proxy_weight_fraction",
@@ -228,6 +235,32 @@ def _selftest() -> None:
     )
     assert abs(fixed["cost"] - 0.001) < 1e-12, fixed
     assert abs(fixed["short_cost"] - 0.0005) < 1e-12, fixed
+    assert _next_open_day(["2020-01-02", "2020-01-03"], "2020-01-02") == "2020-01-03"
+    assert _next_open_day(["2020-01-02"], "2020-01-02") is None
+    close_panel = pd.DataFrame(
+        {"X": [10.0, 12.0]},
+        index=pd.to_datetime(["2020-01-02", "2020-01-03"]),
+    )
+    ordinary = _execution_return(
+        entry_open=pd.Series({"X": 10.0}),
+        exit_open=pd.Series({"X": 11.0}),
+        prices=close_panel,
+        terminal_dates={},
+        ticker="X",
+        entry_day="2020-01-02",
+        exit_day="2020-01-06",
+    )
+    terminal = _execution_return(
+        entry_open=pd.Series({"X": 10.0}),
+        exit_open=pd.Series(dtype=float),
+        prices=close_panel,
+        terminal_dates={"X": "2020-01-03"},
+        ticker="X",
+        entry_day="2020-01-02",
+        exit_day="2020-01-06",
+    )
+    assert abs(ordinary - 0.10) < 1e-12, ordinary
+    assert abs(terminal - 0.20) < 1e-12, terminal
     selftest_short_cost_model()
     print("sector-neutral active-arm self-test: PASS")
 
@@ -286,12 +319,38 @@ def main() -> int:  # noqa: C901
     )
     component_manifest_path = component_dir / "component_ic_manifest.json"
     component_cells_path = component_dir / "component_ic.csv"
-    if not component_manifest_path.exists() or not component_cells_path.exists():
+    component_coverage_path = component_dir / "component_coverage.csv"
+    component_usable_coverage_path = component_dir / "component_usable_coverage.csv"
+    if (
+        not component_manifest_path.exists()
+        or not component_cells_path.exists()
+        or not component_coverage_path.exists()
+        or not component_usable_coverage_path.exists()
+    ):
         LOGGER.error("Missing matching component-IC evidence; run research/72 for %s", panel_dir.name)
         return 1
     component_manifest = json.loads(component_manifest_path.read_text(encoding="utf-8"))
     component_errors = manifest_file_errors(
-        component_manifest, {"component_ic.csv": component_cells_path}
+        component_manifest,
+        {
+            "component_ic.csv": component_cells_path,
+            "component_coverage.csv": component_coverage_path,
+            "component_usable_coverage.csv": component_usable_coverage_path,
+        },
+    )
+    component_input_errors = manifest_input_errors(
+        component_manifest,
+        {
+            "config.yaml": config_path,
+            "research/72_component_ic_by_regime.py": (
+                PACKAGE_ROOT / "research" / "72_component_ic_by_regime.py"
+            ),
+            "research/stage11_common.py": (
+                PACKAGE_ROOT / "research" / "stage11_common.py"
+            ),
+            "calibration_panel_manifest.json": calibration_manifest_path,
+            "calibration_panel.csv": panel_path,
+        },
     )
     component_inputs = component_manifest.get("inputs_sha256") or {}
     expected_pipelines = [p.strip() for p in str(args.pipelines).split(",") if p.strip()]
@@ -302,10 +361,12 @@ def main() -> int:  # noqa: C901
         or str(component_manifest.get("protocol_sha256", "")) != lockbox["protocol_sha256"]
         or str(component_inputs.get("config.yaml", "")) != sha256_file(config_path)
         or component_errors
+        or component_input_errors
     ):
         LOGGER.error(
-            "Component-IC evidence is stale, rejected, or universe-inconsistent: %s",
+            "Component-IC evidence is stale, rejected, or universe-inconsistent: files=%s inputs=%s",
             component_errors,
+            component_input_errors,
         )
         return 1
     usecols = ["as_of_date", "ticker", "source_pipeline", "macro_regime", "score_z_pipeline_date",
@@ -331,15 +392,8 @@ def main() -> int:  # noqa: C901
         spread_frame["half_spread_bps"] = spread_values.loc[spread_ok].astype(float)
         for (spread_day, ticker), values in spread_frame.groupby(["as_of_date", "ticker"]):
             exact_half_spreads[(str(spread_day), str(ticker))] = float(values["half_spread_bps"].median())
-    truthy = ("1", "1.0", "true", "True")
-    elig = panel["calibration_research_eligible"].astype(str).isin(truthy)
-    if "sidecar_stage11_eligible" in panel.columns:
-        elig = elig | panel["sidecar_stage11_eligible"].astype(str).isin(truthy)
     panel = panel.loc[
-        elig
-        & panel["usable_for_promoted_training"].astype(str).isin(truthy)
-        & panel["survivorship_complete"].astype(str).isin(truthy)
-        & ~panel["in_lockbox"].astype(str).isin(truthy)
+        calibration_admission_mask(panel)
         & panel["source_pipeline"].isin(pipelines)
     ].copy()
     if panel.empty:
@@ -415,7 +469,14 @@ def main() -> int:  # noqa: C901
         return 1
     survivorship_manifest = json.loads(survivorship_manifest_path.read_text(encoding="utf-8"))
     prices_path = survivorship_dir / "prices_adjclose.csv"
-    survivorship_errors = manifest_file_errors(survivorship_manifest, {"prices_adjclose.csv": prices_path})
+    ticker_coverage_path = survivorship_dir / "ticker_coverage.csv"
+    survivorship_errors = manifest_file_errors(
+        survivorship_manifest,
+        {
+            "prices_adjclose.csv": prices_path,
+            "ticker_coverage.csv": ticker_coverage_path,
+        },
+    )
     if survivorship_manifest.get("acceptance") != "PASS" or survivorship_errors:
         LOGGER.error("Survivorship panel is unaccepted/stale: %s", survivorship_errors)
         return 1
@@ -425,6 +486,69 @@ def main() -> int:  # noqa: C901
     prices.index = pd.to_datetime(prices.index, errors="coerce")
     prices = prices.loc[prices.index.notna()].sort_index()
     prices.columns = [str(c).strip().upper() for c in prices.columns]
+    ticker_coverage = pd.read_csv(ticker_coverage_path).fillna("")
+    terminal_dates = {
+        str(row["ticker"]).strip().upper(): str(row["delist_date"])[:10]
+        for _, row in ticker_coverage.iterrows()
+        if str(row.get("status", "")) == "delisted_covered"
+        and len(str(row.get("delist_date", ""))) >= 10
+    }
+
+    execution_dir = (
+        paths.output_dir
+        / str(
+            cfg_get(
+                config,
+                "execution_ohlcv_panel.dir",
+                "execution_ohlcv_panel",
+            )
+        )
+        / survivorship_build
+    )
+    execution_path = execution_dir / "prices_adjusted_ohlcv.csv.gz"
+    execution_manifest_path = execution_dir / "execution_ohlcv_manifest.json"
+    if not execution_manifest_path.exists() or not execution_path.exists():
+        LOGGER.error(
+            "Missing matching execution-OHLC panel; run backtest/15c for %s",
+            survivorship_build,
+        )
+        return 1
+    execution_manifest = json.loads(
+        execution_manifest_path.read_text(encoding="utf-8")
+    )
+    execution_errors = manifest_file_errors(
+        execution_manifest,
+        {"prices_adjusted_ohlcv.csv.gz": execution_path},
+    )
+    if (
+        execution_manifest.get("acceptance") != "PASS"
+        or str(execution_manifest.get("survivorship_manifest_sha256", ""))
+        != sha256_file(survivorship_manifest_path)
+        or execution_errors
+    ):
+        LOGGER.error("Execution panel rejected/stale: %s", execution_errors)
+        return 1
+    execution_frame = pd.read_csv(
+        execution_path,
+        usecols=lambda column: column in {"date", "ticker", "adj_open"},
+    )
+    execution_frame["date"] = (
+        execution_frame["date"].astype(str).str.slice(0, 10)
+    )
+    execution_frame["ticker"] = (
+        execution_frame["ticker"].astype(str).str.upper().str.strip()
+    )
+    execution_frame["adj_open"] = pd.to_numeric(
+        execution_frame["adj_open"], errors="coerce"
+    )
+    if execution_frame.duplicated(["date", "ticker"]).any():
+        LOGGER.error("Execution panel contains duplicate date/ticker rows")
+        return 1
+    opens = execution_frame.pivot(
+        index="date", columns="ticker", values="adj_open"
+    ).sort_index()
+    del execution_frame
+    open_days = list(opens.index.astype(str))
 
     out_dir = paths.output_dir / str(cfg_get(config, "sector_neutral_arm.dir", "sector_neutral_arm")) / panel_dir.name
     arm_path = out_dir / "arm_comparison.csv"
@@ -506,7 +630,6 @@ def main() -> int:  # noqa: C901
             LOGGER.error("Cannot initialize PIT short-cost model: %s", exc)
             return 1
     pillar_z_cols = {pipe: [f"{c}__z" for c in cols] for pipe, cols in pillar_sets.items()}
-    price_idx = np.asarray(pd.DatetimeIndex(prices.index).strftime("%Y-%m-%d"))
     arms = ["component_tilt_ls", "component_tilt_active", "composite_tilt_ls", "composite_tilt_active"]
     active: dict[str, list[float]] = {a: [] for a in arms}
     gross: dict[str, list[float]] = {a: [] for a in arms}
@@ -519,6 +642,10 @@ def main() -> int:  # noqa: C901
     prev_w: dict[str, dict[str, np.ndarray]] = {a: {} for a in arms}  # per (arm, pipe)
     turnover: dict[str, float] = {a: 0.0 for a in arms}
     cost_paid: dict[str, float] = {a: 0.0 for a in arms}
+    cost_components: dict[str, dict[str, float]] = {
+        a: {"spread_cost": 0.0, "commission_cost": 0.0, "borrow_cost": 0.0}
+        for a in arms
+    }
     coverage: dict[str, dict[str, float]] = {
         a: {
             "spread_total": 0.0,
@@ -533,8 +660,23 @@ def main() -> int:  # noqa: C901
     }
     day_index: list[str] = []
     fit_fallbacks = 0
-    purge = purge_window_days(h, 0)
+    sector_periods = {pipe: 0 for pipe in pipelines}
+    sector_fit_fallbacks = {pipe: 0 for pipe in pipelines}
+    sector_component_counts = {pipe: [] for pipe in pipelines}
+    execution_attempts = {pipe: 0 for pipe in pipelines}
+    execution_successes = {pipe: 0 for pipe in pipelines}
+    max_entry_lag = int(
+        cfg_get(config, "calibration_targets.max_entry_lag_trading_days", 5)
+    )
+    purge = purge_window_days(h, 0, max_entry_lag)
     total_holding_days = 0
+    min_component_coverage = float(
+        cfg_get(
+            config,
+            "sector_neutral_arm.min_component_coverage_fraction",
+            0.50,
+        )
+    )
 
     data_by_pipe = {pipe: data.loc[data["source_pipeline"] == pipe].copy() for pipe in pipeline_present(data, pipelines)}
     for pipe, pdata in data_by_pipe.items():
@@ -542,10 +684,12 @@ def main() -> int:  # noqa: C901
 
     for i in range(len(rebal) - 1):
         D, Dn = rebal[i], rebal[i + 1]
-        d_price = _price_at(prices, price_idx, D)
-        dn_price = _price_at(prices, price_idx, Dn)
-        if d_price is None or dn_price is None:
+        entry_day = _next_open_day(open_days, D)
+        exit_day = _next_open_day(open_days, Dn)
+        if entry_day is None or exit_day is None or exit_day <= entry_day:
             continue
+        entry_open = opens.loc[entry_day]
+        exit_open = opens.loc[exit_day]
         regime_here = _modal_regime(data, D)
         cutoff = (date.fromisoformat(D) - timedelta(days=purge)).isoformat()
         period_active: dict[str, float] = {a: 0.0 for a in arms}
@@ -555,21 +699,41 @@ def main() -> int:  # noqa: C901
         period_short_absolute: dict[str, float] = {a: 0.0 for a in arms}
         period_sector: dict[str, dict[str, float]] = {a: {} for a in arms}
         n_sectors = 0
-        calendar_days = max(1, (date.fromisoformat(Dn) - date.fromisoformat(D)).days)
-        trading_days = max(1, int(np.busday_count(D, Dn)))
+        calendar_days = max(
+            1,
+            (date.fromisoformat(exit_day) - date.fromisoformat(entry_day)).days,
+        )
+        trading_days = max(1, int(np.busday_count(entry_day, exit_day)))
         for pipe, pdata in data_by_pipe.items():
             cur = pdata.loc[pdata["as_of_date"] == D]
             if len(cur) < args.min_cross_section:
                 continue
             zcols = pillar_z_cols.get(pipe, [])
-            cur = cur.dropna(subset=[c for c in zcols if c in cur.columns] + ["composite__z"])
+            cur = cur.loc[
+                np.isfinite(_numeric_array(cur, "composite__z"))
+            ].copy()
             tickers = cur["ticker"].to_numpy()
-            r = np.array([_ret(d_price, dn_price, t) for t in tickers], dtype=float)
+            execution_attempts[pipe] += len(tickers)
+            r = np.array(
+                [
+                    _execution_return(
+                        entry_open=entry_open,
+                        exit_open=exit_open,
+                        prices=prices,
+                        terminal_dates=terminal_dates,
+                        ticker=str(t),
+                        entry_day=entry_day,
+                        exit_day=exit_day,
+                    )
+                    for t in tickers
+                ],
+                dtype=float,
+            )
             valid = np.isfinite(r)
+            execution_successes[pipe] += int(valid.sum())
             if int(valid.sum()) < args.min_cross_section:
                 continue
             cur, tickers, r = cur.loc[valid], tickers[valid], r[valid]
-            n_sectors += 1
             # component tilt: regime-conditional trailing purged ridge fit
             train = pdata.loc[(pdata["as_of_date"] <= cutoff) & (pdata["macro_regime"].astype(str) == str(regime_here))]
             # Match Gate 1 (research/72) label hygiene: only complete forward windows
@@ -577,15 +741,40 @@ def main() -> int:  # noqa: C901
             # excess_sector_{h}d label that would otherwise pollute the fit and suppress the tilt.
             if status in train.columns:
                 train = train.loc[train[status].map(forward_status_is_valid)]
-            train = train.dropna(subset=[c for c in zcols if c in train.columns] + [tgt])
+            train = train.loc[np.isfinite(_numeric_array(train, tgt))].copy()
+            active_zcols = [
+                column
+                for column in zcols
+                if column in train.columns
+                and column in cur.columns
+                and _finite_fraction(train, column) >= min_component_coverage
+                and _finite_fraction(cur, column) >= min_component_coverage
+                and _numeric_std(train, column) > 0
+            ]
+            sector_component_counts[pipe].append(len(active_zcols))
             comp_tilt = None
-            if len(train) >= args.min_train_rows and zcols:
-                w = ridge_fit(train[zcols].to_numpy(dtype=float), train[tgt].to_numpy(dtype=float), args.ridge)
+            if len(train) >= args.min_train_rows and active_zcols:
+                x_train = _numeric_matrix(train, active_zcols)
+                y_train = _numeric_array(train, tgt)
+                w = ridge_fit(x_train, y_train, args.ridge)
                 if w is not None:
-                    comp_tilt = cur[zcols].to_numpy(dtype=float) @ w
+                    x_current = _numeric_matrix(cur, active_zcols)
+                    complete_current = np.all(np.isfinite(x_current), axis=1)
+                    if int(complete_current.sum()) >= args.min_cross_section:
+                        # Missing pillars are not neutral observations. Use a complete-case,
+                        # common universe for every arm in this sector-period so attribution
+                        # cannot be manufactured by mean-imputing component inputs.
+                        cur = cur.loc[complete_current]
+                        tickers = tickers[complete_current]
+                        r = r[complete_current]
+                        x_current = x_current[complete_current]
+                        comp_tilt = x_current @ w
             if comp_tilt is None:
                 comp_tilt = cur["composite__z"].to_numpy(dtype=float)
                 fit_fallbacks += 1
+                sector_fit_fallbacks[pipe] += 1
+            n_sectors += 1
+            sector_periods[pipe] += 1
             comp_z = _std(comp_tilt)
             composite_z = _std(cur["composite__z"].to_numpy(dtype=float))
             for arm, tiltz, ls in (("component_tilt_ls", comp_z, True),
@@ -598,7 +787,7 @@ def main() -> int:  # noqa: C901
                         a_w,
                         tickers,
                         as_of=D,
-                        prices=d_price,
+                        prices=entry_open,
                         model=cost_model,
                         aum_usd=aum_usd,
                         sector_share=1.0 / max(1, len(data_by_pipe)),
@@ -643,6 +832,8 @@ def main() -> int:  # noqa: C901
                 period_sector[arm][pipe] = net_scaled
                 turnover[arm] += traded * scale
                 cost_paid[arm] += economics["cost"]
+                for key in cost_components[arm]:
+                    cost_components[arm][key] += economics[key]
                 for key in coverage[arm]:
                     coverage[arm][key] += economics[key]
                 prev_w[arm][pipe] = a_w
@@ -666,7 +857,11 @@ def main() -> int:  # noqa: C901
 
     # summarize
     years = max(total_holding_days / 252.0, 1e-9)
-    windows = independent_windows(sorted(set(day_index)), h)
+    windows = independent_windows(
+        sorted(set(day_index)),
+        h,
+        entry_lag_trading_days=max_entry_lag,
+    )
     promotion_cfg = cfg_get(config, "sector_neutral_arm.promotion", {}) or {}
     verdict_cfg = {
         "min_days": int(promotion_cfg.get("min_holding_days", 504)),
@@ -676,8 +871,16 @@ def main() -> int:  # noqa: C901
     }
     min_positive_sectors = int(promotion_cfg.get("min_positive_sectors", 4))
     min_borrow_coverage = float(promotion_cfg.get("min_actual_borrow_weight_fraction", 0.95))
+    min_spread_coverage = float(promotion_cfg.get("min_exact_spread_weight_fraction", 0.95))
     min_availability_coverage = float(
         promotion_cfg.get("min_observed_or_fee_proxy_availability_weight_fraction", 0.95)
+    )
+    min_sector_participation = float(
+        cfg_get(
+            config,
+            "sector_neutral_arm.min_sector_participation_fraction",
+            0.95,
+        )
     )
     arm_rows = []
     sector_rows: list[dict[str, object]] = []
@@ -693,12 +896,18 @@ def main() -> int:  # noqa: C901
         short_absolute_ann = (
             float(short_absolute_arr.sum() / years) if len(short_absolute_arr) else 0.0
         )
-        vol = float(arr.std(ddof=1) * np.sqrt(252 / max(1, int(args.rebalance_every)))) if len(arr) > 2 else 0.0
+        periods_per_year = len(arr) / years if years > 0.0 else 0.0
+        vol = (
+            float(arr.std(ddof=1) * np.sqrt(periods_per_year))
+            if len(arr) > 2 and periods_per_year > 0.0
+            else 0.0
+        )
         ir = ann / vol if vol > 0 else None
         hac_lag = max(0, int(np.ceil(h / max(1, int(args.rebalance_every)))) - 1)
         _m, _se, at = mean_t_hac(list(arr), max_lag=hac_lag) if len(arr) else (None, None, None)
-        gstats = perf_stats(list(garr), ppy=int(252 / max(1, int(args.rebalance_every))))
-        nstats = perf_stats(list(arr), ppy=int(252 / max(1, int(args.rebalance_every))))
+        ppy = max(1, int(round(periods_per_year)))
+        gstats = perf_stats(list(garr), ppy=ppy)
+        nstats = perf_stats(list(arr), ppy=ppy)
         promotable, reasons = promotion_verdict(
             n_days=total_holding_days, windows=windows, net_ir=ir, active_t=at, cfg=verdict_cfg)
         positive_sectors = 0
@@ -712,6 +921,24 @@ def main() -> int:  # noqa: C901
                 "source_pipeline": pipe,
                 "net_active_ann": round(sector_ann, 8),
                 "positive": int(sector_ann > 0),
+                "rebalances_participated": sector_periods[pipe],
+                "participation_fraction": round(
+                    sector_periods[pipe] / max(1, len(day_index)), 6
+                ),
+                "fit_fallbacks_to_composite": sector_fit_fallbacks[pipe],
+                "mean_active_components": round(
+                    float(np.mean(sector_component_counts[pipe]))
+                    if sector_component_counts[pipe]
+                    else 0.0,
+                    4,
+                ),
+                "execution_attempts": execution_attempts[pipe],
+                "execution_successes": execution_successes[pipe],
+                "execution_coverage_fraction": round(
+                    execution_successes[pipe]
+                    / max(1, execution_attempts[pipe]),
+                    6,
+                ),
             })
         spread_exact_fraction = _fraction(coverage[a]["spread_exact"], coverage[a]["spread_total"])
         borrow_actual_fraction = _fraction(coverage[a]["borrow_actual"], coverage[a]["borrow_total"])
@@ -722,6 +949,12 @@ def main() -> int:  # noqa: C901
             coverage[a]["availability_fee_proxy"], coverage[a]["availability_total"]
         )
         is_ls = a.endswith("_ls")
+        total_cost = cost_paid[a]
+        commission_share = (
+            cost_components[a]["commission_cost"] / total_cost
+            if total_cost > 0.0
+            else 0.0
+        )
         if not is_ls:
             promotable = False
             reasons.append("not_single_name_long_short_candidate")
@@ -740,6 +973,9 @@ def main() -> int:  # noqa: C901
         if is_ls and borrow_actual_fraction < min_borrow_coverage:
             promotable = False
             reasons.append(f"actual_borrow_coverage_below_{min_borrow_coverage:.2f}")
+        if is_ls and spread_exact_fraction < min_spread_coverage:
+            promotable = False
+            reasons.append(f"exact_spread_coverage_below_{min_spread_coverage:.2f}")
         if is_ls and availability_observed_fraction + availability_fee_fraction < min_availability_coverage:
             promotable = False
             reasons.append(f"short_availability_coverage_below_{min_availability_coverage:.2f}")
@@ -752,6 +988,19 @@ def main() -> int:  # noqa: C901
             "net_active_sharpe": round(nstats["sharpe"], 4), "gross_spread_sharpe": round(gstats["sharpe"], 4),
             "turnover_per_year": round(turnover[a] / years, 4),
             "cost_drag_ann_bps": round(cost_paid[a] / years * 1e4, 2),
+            "spread_drag_ann_bps": round(
+                cost_components[a]["spread_cost"] / years * 1e4,
+                2,
+            ),
+            "commission_drag_ann_bps": round(
+                cost_components[a]["commission_cost"] / years * 1e4,
+                2,
+            ),
+            "borrow_drag_ann_bps": round(
+                cost_components[a]["borrow_cost"] / years * 1e4,
+                2,
+            ),
+            "commission_share_of_cost": round(commission_share, 6),
             "short_net_ann": round(short_ann, 6),
             "short_absolute_net_ann": round(short_absolute_ann, 6),
             "stress_net_active_ann": round(stress_ann, 6),
@@ -764,6 +1013,61 @@ def main() -> int:  # noqa: C901
             "rejection_reasons": ";".join(dict.fromkeys(reasons)),
         })
 
+    sector_participation = {
+        pipe: sector_periods[pipe] / max(1, len(day_index))
+        for pipe in pipelines
+    }
+    bad_sector_participation = {
+        pipe: fraction
+        for pipe, fraction in sector_participation.items()
+        if fraction < min_sector_participation
+    }
+    ls_rows = [row for row in arm_rows if str(row["arm"]).endswith("_ls")]
+    max_exact_spread = max(
+        (float(row["spread_exact_weight_fraction"]) for row in ls_rows),
+        default=0.0,
+    )
+    max_borrow_actual = max(
+        (float(row["borrow_actual_weight_fraction"]) for row in ls_rows),
+        default=0.0,
+    )
+    max_observed_availability = max(
+        (
+            float(row["availability_observed_weight_fraction"])
+            + float(row["availability_fee_proxy_weight_fraction"])
+            for row in ls_rows
+        ),
+        default=0.0,
+    )
+    max_commission_share = max(
+        (float(row["commission_share_of_cost"]) for row in ls_rows),
+        default=0.0,
+    )
+    commission_warn_fraction = float(
+        cfg_get(config, "sector_neutral_arm.short_costs.commission_dominance_warn_fraction", 0.75)
+    )
+    min_mean_active_pillar_fraction = float(
+        cfg_get(config, "sector_neutral_arm.min_mean_active_pillar_fraction", 0.50)
+    )
+    max_fit_fallback_fraction = float(
+        cfg_get(config, "sector_neutral_arm.max_component_fit_fallback_fraction", 0.25)
+    )
+    mean_active_pillar_fraction = {
+        pipe: (
+            float(np.mean(sector_component_counts[pipe]))
+            / max(1, len(pillar_sets.get(pipe, [])))
+            if sector_component_counts[pipe]
+            else 0.0
+        )
+        for pipe in pipelines
+    }
+    bad_active_pillar_fraction = {
+        pipe: fraction
+        for pipe, fraction in mean_active_pillar_fraction.items()
+        if fraction < min_mean_active_pillar_fraction
+    }
+    total_sector_periods = sum(sector_periods.values())
+    fit_fallback_fraction = fit_fallbacks / max(1, total_sector_periods)
     checks = [
         {"check": "lockbox_dev_window_only", "status": "PASS",
          "detail": f"rebalances confined to < sealed_start={lockbox['sealed_start']}; n={len(day_index)}"},
@@ -771,12 +1075,83 @@ def main() -> int:  # noqa: C901
          "detail": f"component weights fit on as_of<=D-{purge}d, regime-matched; fallbacks_to_composite={fit_fallbacks}"},
         {"check": "sector_neutral_construction", "status": "PASS",
          "detail": "long/short spread dollar-neutral; long-only active sums to 0 vs equal-weight benchmark"},
+        {
+            "check": "required_sector_participation",
+            "status": "PASS" if not bad_sector_participation else "FAIL",
+            "detail": (
+                f"minimum={min_sector_participation:.3f}; "
+                f"fractions={sector_participation}"
+                if not bad_sector_participation
+                else (
+                    f"below minimum={min_sector_participation:.3f}: "
+                    f"{bad_sector_participation}"
+                )
+            ),
+        },
+        {
+            "check": "active_pillar_coverage",
+            "status": "PASS" if not bad_active_pillar_fraction else "FAIL",
+            "detail": (
+                f"minimum_mean_fraction={min_mean_active_pillar_fraction:.3f}; "
+                f"by_pipeline={mean_active_pillar_fraction}"
+            ),
+        },
+        {
+            "check": "component_fit_fallback_rate",
+            "status": (
+                "PASS"
+                if fit_fallback_fraction <= max_fit_fallback_fraction
+                else "FAIL"
+            ),
+            "detail": (
+                f"fallbacks={fit_fallbacks}/{total_sector_periods} "
+                f"fraction={fit_fallback_fraction:.3%}; "
+                f"maximum={max_fit_fallback_fraction:.3%}"
+            ),
+        },
+        {
+            "check": "next_open_execution",
+            "status": "PASS",
+            "detail": (
+                "signals formed at D close; entries/rebalances use the first "
+                "adjusted open after D; in-hold delistings settle at sealed close"
+            ),
+        },
         {"check": "promotion_bar_is_net_active_return", "status": "PASS",
          "detail": "long/short promotion requires PIT costs, active IR/t, positive short leg, "
                    "sector breadth, borrow/availability coverage, and positive stressed return"},
         {"check": "pit_short_cost_inputs", "status": "PASS" if cost_mode == "pit" else "WARN",
          "detail": f"mode={cost_mode}; exact spreads are same-date only; borrow/availability use "
                    "backward-only bounded as-of joins"},
+        {
+            "check": "short_cost_input_coverage",
+            "status": (
+                "PASS"
+                if cost_mode != "pit"
+                or (
+                    max_exact_spread > 0.0
+                    and max_exact_spread >= min_spread_coverage
+                    and max_borrow_actual > 0.0
+                    and max_observed_availability > 0.0
+                )
+                else "WARN"
+            ),
+            "detail": (
+                f"max across LS arms: exact_spread={max_exact_spread:.3%}; "
+                f"actual_borrow={max_borrow_actual:.3%}; "
+                f"observed_or_proxy_availability={max_observed_availability:.3%}. "
+                "Fallback-only results are diagnostic and cannot promote."
+            ),
+        },
+        {
+            "check": "commission_cost_realism",
+            "status": "WARN" if max_commission_share > commission_warn_fraction else "PASS",
+            "detail": (
+                f"max LS commission share={max_commission_share:.3%}; "
+                f"warn>{commission_warn_fraction:.3%}; AUM=${aum_usd:,.0f}. "
+                "Large commission share is an AUM/turnover effect, not signal decay."
+            ),
+        },
         {"check": "research_evidence_only", "status": "PASS",
          "detail": "the script emits promotion evidence and never changes a production book"},
     ]
@@ -785,7 +1160,19 @@ def main() -> int:  # noqa: C901
     write_csv(arm_path, ARM_FIELDS, arm_rows)
     write_csv(
         sector_path,
-        ["arm", "source_pipeline", "net_active_ann", "positive"],
+        [
+            "arm",
+            "source_pipeline",
+            "net_active_ann",
+            "positive",
+            "rebalances_participated",
+            "participation_fraction",
+            "fit_fallbacks_to_composite",
+            "mean_active_components",
+            "execution_attempts",
+            "execution_successes",
+            "execution_coverage_fraction",
+        ],
         sector_rows,
     )
     cost_input_rows = cost_model.used_rows() if cost_model is not None else []
@@ -827,16 +1214,26 @@ def main() -> int:  # noqa: C901
         "generated_at": utc_now(), "acceptance": "PASS" if passed else "FAIL",
         "panel_build": panel_dir.name, "protocol_sha256": lockbox["protocol_sha256"],
         "pipelines": pipelines, "pillar_sets": pillar_sets, "horizon_days": h,
+        "max_entry_lag_trading_days": max_entry_lag,
         "rebalance_every": int(args.rebalance_every), "ridge": args.ridge,
         "cost_mode": cost_mode, "fixed_one_way_cost_bps": fixed_cost_bps,
         "research_aum_usd": aum_usd, "commission_per_order_usd": commission_usd,
         "active_kappa": args.active_kappa,
+        "execution_policy": "signal_D_close_execute_D_plus_1_open",
         "rebalances": len(day_index), "holding_days": total_holding_days,
         "fit_fallbacks_to_composite": fit_fallbacks,
+        "fit_fallback_fraction": fit_fallback_fraction,
+        "mean_active_pillar_fraction": mean_active_pillar_fraction,
+        "sector_participation": sector_participation,
+        "execution_coverage_by_sector": {
+            pipe: execution_successes[pipe] / max(1, execution_attempts[pipe])
+            for pipe in pipelines
+        },
         "promotion_policy": {
             **verdict_cfg,
             "min_positive_sectors": min_positive_sectors,
             "min_actual_borrow_weight_fraction": min_borrow_coverage,
+            "min_exact_spread_weight_fraction": min_spread_coverage,
             "min_observed_or_fee_proxy_availability_weight_fraction": min_availability_coverage,
             "min_short_net_ann": float(promotion_cfg.get("min_short_net_ann", 0.0)),
             "min_stress_net_active_ann": float(promotion_cfg.get("min_stress_net_active_ann", 0.0)),
@@ -848,12 +1245,30 @@ def main() -> int:  # noqa: C901
             "backtest/short_costs.py": sha256_file(
                 PACKAGE_ROOT / "backtest" / "short_costs.py"
             ),
+            "backtest/walkforward_common.py": sha256_file(
+                PACKAGE_ROOT / "backtest" / "walkforward_common.py"
+            ),
+            "research/stage11_common.py": sha256_file(
+                PACKAGE_ROOT / "research" / "stage11_common.py"
+            ),
+            "research/72_component_ic_by_regime.py": sha256_file(
+                PACKAGE_ROOT / "research" / "72_component_ic_by_regime.py"
+            ),
             "component_ic_manifest.json": sha256_file(component_manifest_path),
             "component_ic.csv": sha256_file(component_cells_path),
+            "component_coverage.csv": sha256_file(component_coverage_path),
+            "component_usable_coverage.csv": sha256_file(
+                component_usable_coverage_path
+            ),
             "calibration_panel_manifest.json": sha256_file(calibration_manifest_path),
             "calibration_panel.csv": sha256_file(panel_path),
             "survivorship_manifest.json": sha256_file(survivorship_manifest_path),
             "prices_adjclose.csv": sha256_file(prices_path),
+            "ticker_coverage.csv": sha256_file(ticker_coverage_path),
+            "execution_ohlcv_manifest.json": sha256_file(
+                execution_manifest_path
+            ),
+            "prices_adjusted_ohlcv.csv.gz": sha256_file(execution_path),
             **{f"pillar_source:{path}": sha for path, sha in sorted(pillar_sources_sha256.items())},
         },
         "files": {
@@ -887,22 +1302,75 @@ def _modal_regime(data: pd.DataFrame, d: str) -> str:
     return sub.mode().iloc[0] if not sub.empty else ""
 
 
-def _price_at(prices: pd.DataFrame, price_idx: np.ndarray, d: str) -> pd.Series | None:
-    pos = int(np.searchsorted(price_idx, d, side="right")) - 1
-    if pos < 0:
-        return None
-    return prices.iloc[pos]
+def _next_open_day(open_days: list[str], signal_day: str) -> str | None:
+    """First execution session strictly after a close-generated signal."""
+    index = bisect_right(open_days, signal_day)
+    return open_days[index] if index < len(open_days) else None
 
 
-def _ret(p0: pd.Series, p1: pd.Series, ticker: str) -> float:
-    raw0, raw1 = p0.get(ticker), p1.get(ticker)
-    if raw0 is None or raw1 is None:
+def _execution_return(
+    *,
+    entry_open: pd.Series,
+    exit_open: pd.Series,
+    prices: pd.DataFrame,
+    terminal_dates: dict[str, str],
+    ticker: str,
+    entry_day: str,
+    exit_day: str,
+) -> float:
+    """D+1-open return, settling a delisting inside the hold at sealed close."""
+    raw0 = entry_open.get(ticker)
+    if raw0 is None:
         return float("nan")
     try:
-        a, b = float(raw0), float(raw1)
+        start = float(raw0)
     except (TypeError, ValueError):
         return float("nan")
-    return b / a - 1.0 if np.isfinite(a) and np.isfinite(b) and a > 0 else float("nan")
+    if not np.isfinite(start) or start <= 0:
+        return float("nan")
+    terminal = terminal_dates.get(ticker)
+    if terminal and entry_day <= terminal < exit_day:
+        terminal_stamp = pd.Timestamp(terminal)
+        if ticker not in prices.columns or terminal_stamp not in prices.index:
+            return float("nan")
+        raw_terminal = prices.at[terminal_stamp, ticker]
+        try:
+            end = float(raw_terminal)
+        except (TypeError, ValueError):
+            return float("nan")
+    else:
+        raw_exit = exit_open.get(ticker)
+        if raw_exit is None:
+            return float("nan")
+        try:
+            end = float(raw_exit)
+        except (TypeError, ValueError):
+            return float("nan")
+    return end / start - 1.0 if np.isfinite(end) and end > 0 else float("nan")
+
+
+def _numeric_array(frame: pd.DataFrame, column: str) -> np.ndarray:
+    series = cast(pd.Series, frame.loc[:, column])
+    numeric = cast(pd.Series, pd.to_numeric(series, errors="coerce"))
+    return np.asarray(numeric, dtype=float)
+
+
+def _numeric_matrix(frame: pd.DataFrame, columns: list[str]) -> np.ndarray:
+    return np.asarray(
+        frame.loc[:, columns].apply(pd.to_numeric, errors="coerce"),
+        dtype=float,
+    )
+
+
+def _finite_fraction(frame: pd.DataFrame, column: str) -> float:
+    values = _numeric_array(frame, column)
+    return float(np.isfinite(values).mean()) if len(values) else 0.0
+
+
+def _numeric_std(frame: pd.DataFrame, column: str) -> float:
+    values = _numeric_array(frame, column)
+    values = values[np.isfinite(values)]
+    return float(np.std(values)) if len(values) else 0.0
 
 
 def _std(x: np.ndarray) -> np.ndarray:
@@ -960,6 +1428,9 @@ def _period_economics(
         "cost": 0.0,
         "stress_cost": 0.0,
         "short_cost": 0.0,
+        "spread_cost": 0.0,
+        "commission_cost": 0.0,
+        "borrow_cost": 0.0,
         "spread_total": 0.0,
         "spread_exact": 0.0,
         "borrow_total": 0.0,
@@ -979,15 +1450,19 @@ def _period_economics(
             tx = delta * fixed_cost_bps / 1e4
             result["cost"] += tx
             result["stress_cost"] += tx
+            result["spread_cost"] += tx
             if delta > 0:
                 result["short_cost"] += tx * short_delta / delta
             continue
         resolved = model.resolve(as_of, ticker)
         commission = commission_fraction
-        tx = delta * resolved.half_spread_bps / 1e4 + commission
+        spread_cost = delta * resolved.half_spread_bps / 1e4
+        tx = spread_cost + commission
         stress_tx = delta * model.stressed_half_spread_bps(resolved) / 1e4 + commission
         result["cost"] += tx
         result["stress_cost"] += stress_tx
+        result["spread_cost"] += spread_cost
+        result["commission_cost"] += commission
         result["spread_total"] += delta
         if resolved.spread_source == "ibkr_exact":
             result["spread_exact"] += delta
@@ -1007,6 +1482,7 @@ def _period_economics(
         result["cost"] += borrow_cost
         result["stress_cost"] += stress_borrow
         result["short_cost"] += borrow_cost
+        result["borrow_cost"] += borrow_cost
         weighted = short_weight * day_fraction
         result["borrow_total"] += weighted
         result["availability_total"] += weighted

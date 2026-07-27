@@ -141,7 +141,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include-dedicated-parser-shadow",
         action="store_true",
-        help="Run the independent SEC parser after machinery financial coverage classification.",
+        help=(
+            "Run the independent SEC parser without production promotion when "
+            "production mode is disabled in config."
+        ),
+    )
+    parser.add_argument(
+        "--skip-dedicated-parser-production",
+        action="store_true",
+        help="Emergency bypass for the config-enabled parser production lane.",
     )
     parser.add_argument(
         "--dedicated-parser-python",
@@ -173,6 +181,7 @@ def build_steps(
     full_positioning_refresh: bool = False,
     bootstrap_sec_archives: bool = False,
     include_dedicated_parser_shadow: bool = False,
+    include_dedicated_parser_production: bool = False,
     include_historical_backfill: bool = False,
     history_start_date: str = "2019-01-02",
     history_frequency: str = "daily",
@@ -277,15 +286,15 @@ def build_steps(
             "20_validate_portfolio",
             "stage_10",
             "20_validate_machinery_portfolio_adapter.py",
-            ["--asof", asof],
+            ["--asof", asof, "--expect-research-eligible"],
             pass_db=False,
         ),
     ]
-    if include_dedicated_parser_shadow:
+    if include_dedicated_parser_shadow or include_dedicated_parser_production:
         insert_at = next(
             index
             for index, step in enumerate(steps)
-            if step.step_id == "13_sync_positioning"
+            if step.step_id == "08_build_financial"
         )
         steps.insert(
             insert_at,
@@ -293,9 +302,28 @@ def build_steps(
                 "08d_dedicated_parser_shadow",
                 "stage_4",
                 "08d_run_machinery_dedicated_parser_shadow.py",
-                ["--asof", asof],
+                [
+                    "--asof",
+                    asof,
+                    "--all-metrics",
+                    *(
+                        ["--require-complete-cache"]
+                        if include_dedicated_parser_production
+                        else []
+                    ),
+                ],
             ),
         )
+        if include_dedicated_parser_production:
+            steps.insert(
+                insert_at + 1,
+                Step(
+                    "08e_dedicated_parser_production",
+                    "stage_4",
+                    "08e_promote_machinery_dedicated_parser.py",
+                    ["--asof", asof],
+                ),
+            )
     if refresh_sec_insider:
         insert_at = next(index for index, step in enumerate(steps) if step.step_id == "13_sync_positioning")
         steps.insert(
@@ -462,6 +490,16 @@ def main() -> int:
         full_positioning_refresh=args.full_positioning_refresh,
         bootstrap_sec_archives=args.bootstrap_sec_archives,
         include_dedicated_parser_shadow=args.include_dedicated_parser_shadow,
+        include_dedicated_parser_production=(
+            bool(
+                cfg_get(
+                    config,
+                    "dedicated_parser.production_enabled",
+                    False,
+                )
+            )
+            and not args.skip_dedicated_parser_production
+        ),
         include_historical_backfill=args.include_historical_backfill,
         history_start_date=parse_asof(
             args.history_start_date
@@ -497,7 +535,11 @@ def main() -> int:
                 str(args.norgate_python.expanduser().resolve())
                 if step.step_id == "15_norgate_backfill" and args.norgate_python is not None
                 else str(args.dedicated_parser_python.expanduser().resolve())
-                if step.step_id == "08d_dedicated_parser_shadow"
+                if step.step_id
+                in {
+                    "08d_dedicated_parser_shadow",
+                    "08e_dedicated_parser_production",
+                }
                 and args.dedicated_parser_python is not None
                 else sys.executable
             )

@@ -29,12 +29,15 @@ from industrials.core.sec_predecessor_bridge import (  # noqa: E402
     load_certified_predecessor_rows,
 )
 from industrials.core.text_norm import normalize_ticker  # noqa: E402
-from industrials.machinery.financial_contract import (  # noqa: E402
+from industrials.core.financial_metric_contract import (  # noqa: E402
+    AVAILABILITY_MODEL_FAMILIES,
     AVAILABILITY_STATUSES,
     METRIC_OPERANDS,
     PROXY_METRIC_FEATURES,
     REQUIRED_METRIC_FEATURES,
     SOURCE_METRIC_FEATURES,
+    SUPPLEMENTAL_METRICS,
+    SUPPLEMENTAL_TAXONOMIES,
 )
 
 
@@ -47,19 +50,6 @@ XBRL_PROFILE_TAXONOMY = {
     "SEC_XBRL_IFRS": "ifrs-full",
     "SEC_XBRL_IFRS_PARTIAL": "ifrs-full",
 }
-MACHINERY_SUPPLEMENTAL_METRICS = frozenset(
-    {
-        "orders",
-        "funded_backlog",
-        "reported_backlog",
-        "remaining_performance_obligation",
-        "rpo_current",
-        "shares_outstanding",
-    }
-)
-MACHINERY_SUPPLEMENTAL_TAXONOMIES = frozenset(
-    {"dei", "issuer-ir", "sec-footnote", "sec-text"}
-)
 REPORT_FIELDS = [
     "ticker",
     "asof_date",
@@ -664,12 +654,56 @@ def refresh_canonical_facts(
     source_ph = placeholders(list(input_source_ids))
     append_only = os.environ.get("INDUSTRIALS_HISTORICAL_APPEND", "").strip() == "1"
     missing_only_sql = ""
+    suppression_table_exists = (
+        conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = 'sec_parser_production_suppression'
+            """
+        ).fetchone()
+        is not None
+    )
+    suppression_sql = ""
     query_params: tuple[Any, ...] = (
         *input_source_ids,
         *tickers,
         asof.isoformat(),
         asof.isoformat(),
     )
+    if suppression_table_exists:
+        suppression_sql = """
+          AND NOT EXISTS (
+              SELECT 1
+              FROM sec_parser_production_suppression AS suppression
+              WHERE suppression.active = 1
+                AND suppression.model_family = ?
+                AND suppression.ticker = f.ticker
+                AND suppression.canonical_metric = f.canonical_metric
+                AND suppression.period_end = f.period_end
+                AND (
+                    suppression.period_start = ''
+                    OR suppression.period_start = COALESCE(f.period_start, '')
+                )
+                AND UPPER(suppression.unit) = UPPER(COALESCE(f.unit, ''))
+                AND (
+                    suppression.accession_number = ''
+                    OR suppression.accession_number =
+                       COALESCE(f.accession_number, '')
+                )
+                AND ABS(f.value - suppression.candidate_value)
+                    <= suppression.value_tolerance
+                AND suppression.valid_from <= ?
+                AND COALESCE(suppression.valid_to, '9999-12-31') >= ?
+          )
+        """
+        query_params = (
+            *query_params,
+            model_family,
+            asof.isoformat(),
+            asof.isoformat(),
+        )
     if append_only:
         missing_only_sql = """
           AND NOT EXISTS (
@@ -700,6 +734,7 @@ def refresh_canonical_facts(
           AND f.period_end IS NOT NULL
           AND ({ACCEPTED_DATE_SQL}) <= ?
           AND f.period_end <= ?
+          {suppression_sql}
           {missing_only_sql}
         ORDER BY f.ticker, f.period_end, f.accession_number, f.canonical_metric,
                  f.source_priority DESC, f.concept_name DESC
@@ -1338,6 +1373,21 @@ def annual_plus_interim_ttm_result(rows: list[dict[str, Any]], metric: str) -> T
     if latest_interim is None or latest_interim_end is None:
         return consecutive_quarter_ttm_result(rows, metric)
 
+    latest_interim_start = parse_date(latest_interim.get("period_start"))
+    latest_interim_days = duration_days(latest_interim)
+    if (
+        latest_annual_end is not None
+        and latest_interim_start is not None
+        and latest_interim_days is not None
+        and latest_interim_days <= 130
+    ):
+        start_gap_days = (latest_interim_start - latest_annual_end).days
+        if start_gap_days < -1 or start_gap_days > PERIOD_DURATION_TOLERANCE_DAYS:
+            # An unlabeled discrete Q2/Q3 fact is not a cumulative interim.
+            # Prefer a complete four-quarter window instead of applying the
+            # annual-plus-Q1 formula to the wrong fiscal quarter.
+            return consecutive_quarter_ttm_result(rows, metric)
+
     quarter = fiscal_quarter(latest_interim)
     if quarter is None:
         return TtmResult(None, f"ttm_{metric}_unavailable_latest_interim_period_unknown")
@@ -1456,6 +1506,78 @@ def ttm_rows_ending_near(
         if (period_end := parse_date(row.get("period_end"))) is not None
         and period_end <= maximum_end
     ]
+
+
+def direct_ttm_result_uses_taxonomy(
+    rows: list[dict[str, Any]],
+    metric: str,
+    result: TtmResult,
+    *,
+    allowed_taxonomies: frozenset[str],
+) -> bool:
+    if result.value is None or result.window_start is None or result.window_end is None:
+        return False
+    for row in rows_for_metric(rows, metric):
+        row_start = parse_date(row.get("period_start"))
+        row_end = parse_date(row.get("period_end"))
+        if row_start is None or row_end is None:
+            continue
+        if (
+            str(row.get("taxonomy") or "") in allowed_taxonomies
+            and abs((row_start - result.window_start).days)
+            <= PERIOD_DURATION_TOLERANCE_DAYS
+            and abs((row_end - result.window_end).days)
+            <= PERIOD_DURATION_TOLERANCE_DAYS
+        ):
+            return True
+    return False
+
+
+def calculate_book_to_bill(
+    rows: list[dict[str, Any]],
+    *,
+    orders: TtmResult,
+    revenue: TtmResult,
+) -> tuple[float | None, str]:
+    if (
+        orders.value is None
+        or revenue.value is None
+        or revenue.value <= 0
+    ):
+        return None, ""
+    if ttm_windows_match(orders, revenue):
+        return orders.value / revenue.value, ""
+    if (
+        orders.window_end is not None
+        and revenue.window_end is not None
+        and (revenue.window_end - orders.window_end).days
+        > STALE_FACT_MAX_LAG_DAYS
+    ):
+        return None, "stale_orders_window_book_to_bill"
+    if (
+        orders.window_end is None
+        or not direct_ttm_result_uses_taxonomy(
+            rows,
+            "orders",
+            orders,
+            allowed_taxonomies=frozenset({"dedicated-parser"}),
+        )
+    ):
+        return None, "period_mismatch_book_to_bill"
+    aligned_revenue = ttm_metric_result(
+        ttm_rows_ending_near(rows, target_end=orders.window_end),
+        "revenue",
+    )
+    if (
+        aligned_revenue.value is None
+        or aligned_revenue.value <= 0
+        or not ttm_windows_match(orders, aligned_revenue)
+    ):
+        return None, "period_mismatch_book_to_bill"
+    return (
+        orders.value / aligned_revenue.value,
+        "book_to_bill_aligned_to_latest_reported_orders_window",
+    )
 
 
 def build_ccc_snapshot(
@@ -1593,31 +1715,45 @@ def rows_for_reporting_profile(
     if reporting_profile == DESPAC_BRIDGE_PROFILE:
         allowed = {"us-gaap", DESPAC_BRIDGE_TAXONOMY}
         filtered = [row for row in rows if str(row.get("taxonomy") or "") in allowed]
-        if model_family == "machinery":
+        if model_family in AVAILABILITY_MODEL_FAMILIES:
             filtered.extend(
                 row
                 for row in rows
-                if str(row.get("taxonomy") or "") in MACHINERY_SUPPLEMENTAL_TAXONOMIES
+                if str(row.get("taxonomy") or "") in SUPPLEMENTAL_TAXONOMIES
                 and str(row.get("canonical_metric") or "")
-                in MACHINERY_SUPPLEMENTAL_METRICS | machinery_sec_text_core_metrics
+                in SUPPLEMENTAL_METRICS | machinery_sec_text_core_metrics
             )
         return filtered, "us-gaap+audited-predecessor"
-    if model_family == "machinery" and reporting_profile in {
+    if model_family in AVAILABILITY_MODEL_FAMILIES and reporting_profile in {
         "SEC_ARCHIVE_TEXT_TABLE",
         "SEC_ARCHIVE_TEXT_TABLE_PARTIAL",
     }:
-        return [row for row in rows if str(row.get("taxonomy") or "") == "sec-text"], "sec-text"
+        filtered = [
+            row
+            for row in rows
+            if str(row.get("taxonomy") or "") == "sec-text"
+        ]
+        filtered.extend(
+            row
+            for row in rows
+            if str(row.get("taxonomy") or "")
+            in SUPPLEMENTAL_TAXONOMIES - {"sec-text"}
+            and str(row.get("canonical_metric") or "")
+            in SUPPLEMENTAL_METRICS
+            | machinery_sec_text_core_metrics
+        )
+        return filtered, "sec-text"
     target_taxonomy = XBRL_PROFILE_TAXONOMY.get(reporting_profile)
     if target_taxonomy is None:
         return rows, None
     filtered = [row for row in rows if str(row.get("taxonomy") or "") == target_taxonomy]
-    if model_family == "machinery":
+    if model_family in AVAILABILITY_MODEL_FAMILIES:
         filtered.extend(
             row
             for row in rows
-            if str(row.get("taxonomy") or "") in MACHINERY_SUPPLEMENTAL_TAXONOMIES
+            if str(row.get("taxonomy") or "") in SUPPLEMENTAL_TAXONOMIES
             and str(row.get("canonical_metric") or "")
-            in MACHINERY_SUPPLEMENTAL_METRICS | machinery_sec_text_core_metrics
+            in SUPPLEMENTAL_METRICS | machinery_sec_text_core_metrics
         )
     return filtered, target_taxonomy
 
@@ -2877,12 +3013,13 @@ def build_feature_from_facts(
         reported_backlog_growth_previous,
     )
     rpo_yoy_growth = growth(rpo_growth_current, rpo_growth_previous)
-    book_to_bill = None
-    if orders_ttm_local is not None and revenue_ttm_local is not None and revenue_ttm_local > 0:
-        if ttm_windows_match(ttm_results["orders"], ttm_results["revenue"]):
-            book_to_bill = orders_ttm_local / revenue_ttm_local
-        else:
-            quality_flags.append("period_mismatch_book_to_bill")
+    book_to_bill, book_to_bill_quality = calculate_book_to_bill(
+        currency_rows,
+        orders=ttm_results["orders"],
+        revenue=ttm_results["revenue"],
+    )
+    if book_to_bill_quality:
+        quality_flags.append(book_to_bill_quality)
     backlog_row = selected.get("funded_backlog")
     backlog_period_end = parse_date(backlog_row.get("period_end")) if backlog_row is not None else None
     revenue_window_end = ttm_results["revenue"].window_end
@@ -3455,9 +3592,12 @@ def classify_financial_metric_availability(
     asof: date,
     availability_policy: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    if model_family != "machinery":
+    if model_family not in AVAILABILITY_MODEL_FAMILIES:
         return []
     policy = availability_policy or {}
+    funded_backlog_default_applicable = bool(
+        policy.get("funded_backlog_default_applicable", False)
+    )
     funded_backlog_applicable = {
         normalize_ticker(item) for item in (policy.get("funded_backlog_applicable_tickers") or [])
     }
@@ -3513,6 +3653,38 @@ def classify_financial_metric_availability(
     output: list[dict[str, Any]] = []
     canonical_quality = str(feature.get("canonical_quality") or "")
     quality_tokens = {token for token in canonical_quality.split(";") if token}
+    production_overrides: dict[str, dict[str, Any]] = {}
+    override_table_exists = (
+        conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = 'sec_parser_production_metric_override'
+            """
+        ).fetchone()
+        is not None
+    )
+    if override_table_exists:
+        production_overrides = {
+            str(row["metric_name"]): dict(row)
+            for row in conn.execute(
+                """
+                SELECT metric_name, availability_status, status_reason
+                FROM sec_parser_production_metric_override
+                WHERE model_family = ? AND ticker = ? AND active = 1
+                  AND valid_from <= ?
+                  AND COALESCE(valid_to, '9999-12-31') >= ?
+                ORDER BY valid_from DESC, evidence_key DESC
+                """,
+                (
+                    model_family,
+                    ticker,
+                    asof.isoformat(),
+                    asof.isoformat(),
+                ),
+            )
+        }
     for metric_name, feature_field in REQUIRED_METRIC_FEATURES.items():
         value = as_float(feature.get(feature_field))
         source_metric = metric_name if metric_name in SOURCE_METRIC_FEATURES else ""
@@ -3561,6 +3733,11 @@ def classify_financial_metric_availability(
             )
             else None
         )
+        production_override = production_overrides.get(
+            metric_name
+        ) or production_overrides.get(
+            DISCLOSURE_SOURCE_METRIC.get(metric_name, "")
+        )
         if value is not None:
             status = "PROXY" if proxy else "REPORTED"
             if metric_name in CONTRACT_LOAD_PROXY_METRICS:
@@ -3570,6 +3747,14 @@ def classify_financial_metric_availability(
                     dynamic_proxy_reason
                     or ("reported_value" if not derived else "derived_from_validated_reported_operands")
                 )
+        elif production_override is not None:
+            status = str(
+                production_override["availability_status"]
+            )
+            reason = (
+                "reviewed_parser_structural_override:"
+                f"{production_override['status_reason']}"
+            )
         elif metric_name == "roic" and int(feature.get("roic_not_meaningful_flag") or 0) == 1:
             status = "NOT_APPLICABLE"
             reason = "average_invested_capital_nonpositive_roic_not_meaningful"
@@ -3616,7 +3801,11 @@ def classify_financial_metric_availability(
             # where the issuer still disclosed are unaffected.
             status = "NOT_APPLICABLE"
             reason = "short_cycle_issuer_no_or_ceased_backlog_disclosure"
-        elif metric_name in FUNDED_BACKLOG_METRICS and ticker not in funded_backlog_applicable:
+        elif (
+            metric_name in FUNDED_BACKLOG_METRICS
+            and not funded_backlog_default_applicable
+            and ticker not in funded_backlog_applicable
+        ):
             # Funded backlog is a government-contracting disclosure; commercial
             # issuers structurally never report it.
             status = "NOT_APPLICABLE"
@@ -3752,6 +3941,21 @@ def write_report(path: Path, rows: list[dict[str, Any]]) -> None:
     write_csv_atomic(path, REPORT_FIELDS, rows)
 
 
+def resolve_model_family(
+    requested_model_family: object,
+    configured_model_family: object,
+) -> str:
+    requested = str(requested_model_family or "").strip()
+    configured = str(configured_model_family or "").strip()
+    if requested and configured and requested != configured:
+        raise ValueError(
+            f"--model-family={requested!r} conflicts with configured "
+            f"industrials_universe.initial_subsector={configured!r}; "
+            "use the matching sector config"
+        )
+    return requested or configured or "defense"
+
+
 def main() -> None:
     configure_utc_logging()
     args = parse_args()
@@ -3759,19 +3963,22 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    model_family = str(args.model_family or cfg_get(config, "industrials_universe.initial_subsector", "defense") or "defense").strip()
+    model_family = resolve_model_family(
+        args.model_family,
+        cfg_get(config, "industrials_universe.initial_subsector", "defense"),
+    )
     source_id = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts") or "sec_companyfacts")
     supplemental_disclosure_source_ids = tuple(
         parse_source_list(
             cfg_get(config, "sec_fundamentals.supplemental_disclosure_source_ids", [])
         )
-        if model_family == "machinery"
+        if model_family in AVAILABILITY_MODEL_FAMILIES
         else ()
     )
     market_source_id = str(cfg_get(config, "market_data_policy.scoring_primary_source", "yahoo_finance_adjusted") or "yahoo_finance_adjusted")
     market_fallback_source_ids = parse_source_list(cfg_get(config, "market_data_policy.scoring_fallback_sources", []))
     market_source_ids = source_priority_list(market_source_id, market_fallback_source_ids)
-    availability_enabled = model_family == "machinery"
+    availability_enabled = model_family in AVAILABILITY_MODEL_FAMILIES
     availability_policy_raw = cfg_get(config, "financial_validation.availability_policy", {}) or {}
     availability_policy = availability_policy_raw if isinstance(availability_policy_raw, dict) else {}
     archive_core_metric_recovery_tickers = {

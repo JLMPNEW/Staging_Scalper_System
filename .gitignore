@@ -70,6 +70,18 @@ tmpomvpuh6h/
 !SEC_fundamentals/sec_issuer_metric_override_seed.csv
 !SEC_fundamentals/sec_metric_mapping_full.csv
 !industrials/**/system_csvs/*.csv
+!industrials/transportation/data/transportation_specialized_metric_discovery_registry.csv
+!industrials/transportation/data/transportation_parser_supporting_metric_registry.csv
+!industrials/transportation/data/transportation_operating_archetypes.csv
+!industrials/transportation/data/transportation_dedicated_parser_scope.csv
+!industrials/transportation/data/transportation_dedicated_parser_support_scope.csv
+!industrials/transportation/data/transportation_dp0_contract_manifest.json
+!industrials/transportation/data/transportation_dp1_readiness_audit.json
+!industrials/transportation/data/transportation_dedicated_parser_source_census.csv
+!industrials/transportation/data/transportation_dedicated_parser_source_decisions.csv
+!industrials/transportation/data/transportation_dedicated_parser_cache_gaps.csv
+!industrials/transportation/data/transportation_dp3_source_census_manifest.json
+!industrials/transportation/review_policies/*.csv
 
 # --- Portfolio MacroLayer generated artifacts ---
 portfolio_layer/MacroLayer/backups/

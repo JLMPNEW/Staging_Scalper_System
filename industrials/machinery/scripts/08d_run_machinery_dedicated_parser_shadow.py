@@ -51,10 +51,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--accessions", default="")
     parser.add_argument("--workers", type=int, default=0)
-    parser.add_argument("--max-filings-per-ticker", type=int, default=0)
-    parser.add_argument("--max-documents-per-filing", type=int, default=0)
+    parser.add_argument("--max-filings-per-ticker", type=int, default=None)
+    parser.add_argument("--max-documents-per-filing", type=int, default=None)
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--all-metrics",
+        action="store_true",
+        help=(
+            "Evaluate all selected source metrics while resuming completed "
+            "parser work."
+        ),
+    )
     parser.add_argument("--require-complete-cache", action="store_true")
     parser.add_argument("--hydrate-missing-cache", action="store_true")
     parser.add_argument("--hydration-only", action="store_true")
@@ -89,6 +97,13 @@ def _split_values(raw: object) -> list[str]:
             if value.strip()
         }
     )
+
+
+def resolve_limit(requested: int | None, configured: int) -> int:
+    value = configured if requested is None else requested
+    if value < 0:
+        raise ValueError("Parser limits must be zero or positive")
+    return value
 
 
 def build_hydration_command(
@@ -132,6 +147,7 @@ def _preflight_plan(
     max_filings: int,
     max_documents: int,
     force: bool,
+    all_metrics: bool,
 ) -> PlanSummary:
     registry = load_registry(ADAPTER)
     with connect_database(db_path) as conn:
@@ -146,6 +162,7 @@ def _preflight_plan(
             max_filings_per_ticker=max_filings,
             max_documents_per_filing=max_documents,
             force=force,
+            all_metrics=all_metrics,
         )
     return summary
 
@@ -158,10 +175,11 @@ def _validate_modes(args: argparse.Namespace) -> None:
         or args.hydration_only
         or args.plan_only
         or args.force
+        or args.all_metrics
     ):
         raise ValueError(
             "--reassess-run-id cannot be combined with hydration, "
-            "--plan-only, or --force"
+            "--plan-only, --force, or --all-metrics"
         )
     if args.tickers and args.ticker_cohort is not None:
         raise ValueError("--tickers and --ticker-cohort are mutually exclusive")
@@ -232,11 +250,19 @@ def main(argv: list[str] | None = None) -> int:
     workers = args.workers or int(
         cfg_get(config, "dedicated_parser.workers", 4)
     )
-    max_filings = args.max_filings_per_ticker or int(
-        cfg_get(config, "dedicated_parser.max_filings_per_ticker", 8)
+    max_filings = resolve_limit(
+        args.max_filings_per_ticker,
+        int(cfg_get(config, "dedicated_parser.max_filings_per_ticker", 8)),
     )
-    max_documents = args.max_documents_per_filing or int(
-        cfg_get(config, "dedicated_parser.max_documents_per_filing", 16)
+    max_documents = resolve_limit(
+        args.max_documents_per_filing,
+        int(
+            cfg_get(
+                config,
+                "dedicated_parser.max_documents_per_filing",
+                16,
+            )
+        ),
     )
     validate_cache_window_config(
         parser_max_filings=max_filings,
@@ -297,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
             max_filings=max_filings,
             max_documents=max_documents,
             force=args.force,
+            all_metrics=args.all_metrics,
         )
         missing_tickers = sorted(
             {
@@ -353,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
             max_filings=max_filings,
             max_documents=max_documents,
             force=args.force,
+            all_metrics=args.all_metrics,
         )
         manifest["after"] = asdict(after)
         manifest["status"] = (
@@ -405,6 +433,8 @@ def main(argv: list[str] | None = None) -> int:
         forwarded.append("--plan-only")
     if args.force:
         forwarded.append("--force")
+    if args.all_metrics:
+        forwarded.append("--all-metrics")
     if args.require_complete_cache:
         forwarded.append("--require-complete-cache")
     if args.reassess_run_id:

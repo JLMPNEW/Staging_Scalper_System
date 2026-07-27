@@ -32,9 +32,17 @@ def _extraction_stage(
     method: str,
     provenance_json: str,
 ) -> str:
+    # Classify from structured provenance fields, not substring search over
+    # the serialized JSON: warning strings like "pdf_ocr_unavailable" and
+    # ".pdf" filenames would otherwise misfile pypdf-text and even xbrl
+    # evidence into the OCR stage.
     normalized = method.lower()
-    provenance = provenance_json.lower()
-    if "ocr" in normalized or "ocr" in provenance or ".pdf" in provenance:
+    provenance = _json_object(provenance_json)
+    document_method = str(
+        provenance.get("document_extraction_method") or ""
+    ).lower()
+    ocr_used = bool(provenance.get("ocr_used"))
+    if ocr_used or document_method == "pdf_ocr" or "ocr" in normalized:
         return "pdf_ocr"
     if "arelle" in normalized or "xbrl" in normalized:
         return "xbrl_mapping"
@@ -134,6 +142,39 @@ def build_extraction_funnel(
             (run_id,),
         )
     }
+    provider_status_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    provider_warning_counts: Counter[str] = Counter()
+    provider_warning_messages: dict[str, set[str]] = defaultdict(set)
+    provider_metadata_rows = conn.execute(
+        """
+        SELECT ledger.provider_metadata_json
+        FROM sec_parser_run_work AS relation
+        JOIN sec_parser_work_ledger AS ledger
+          ON ledger.work_key = relation.work_key
+        WHERE relation.run_id = ?
+        """,
+        (run_id,),
+    ).fetchall()
+    for row in provider_metadata_rows:
+        metadata = _json_object(row["provider_metadata_json"])
+        for provider, raw_payload in metadata.items():
+            if not isinstance(raw_payload, dict):
+                continue
+            provider_name = str(provider)
+            provider_status_counts[provider_name][
+                str(raw_payload.get("status") or "unknown")
+            ] += 1
+            warning_count = int(
+                raw_payload.get("stderr_warning_count") or 0
+            )
+            provider_warning_counts[provider_name] += warning_count
+            messages = raw_payload.get("stderr_messages")
+            if isinstance(messages, list):
+                provider_warning_messages[provider_name].update(
+                    str(message)
+                    for message in messages
+                    if str(message)
+                )
     evidence_rows = extraction_funnel_rows(conn, run_id=run_id)
     evidence_stage_counts: Counter[str] = Counter()
     evidence_status_counts: Counter[str] = Counter()
@@ -195,6 +236,19 @@ def build_extraction_funnel(
         "normalized_fact_provider_counts": dict(
             sorted(provider_counts.items())
         ),
+        "provider_execution_status_counts": {
+            provider: dict(sorted(counts.items()))
+            for provider, counts in sorted(provider_status_counts.items())
+        },
+        "provider_stderr_warning_counts": dict(
+            sorted(provider_warning_counts.items())
+        ),
+        "provider_stderr_messages": {
+            provider: sorted(messages)
+            for provider, messages in sorted(
+                provider_warning_messages.items()
+            )
+        },
         "evidence_stage_counts": dict(
             sorted(evidence_stage_counts.items())
         ),

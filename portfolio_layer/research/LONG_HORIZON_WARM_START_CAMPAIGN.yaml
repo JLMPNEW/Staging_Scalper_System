@@ -1,0 +1,82 @@
+campaign_id: "stage11_long_horizon_warm_start_v1"
+frozen_on: "2026-07-26"
+purpose: >
+  Determine whether the top-decile within-sector long policy has net selection
+  alpha at 126-280 session horizons when held-out folds are scored on
+  warm-started, continuously invested daily P&L rather than from-cash
+  ramp-up and post-window liquidation tails.
+
+panel_build: "2026-07-05"
+pipelines:
+  - semiconductors
+  - software_infrastructure
+  - technology_hardware
+  - biotech
+  - med_devices
+  - defense
+
+execution_contract:
+  signal_known: "session_D_close"
+  entry: "session_D_plus_1_adjusted_open"
+  mark: "every_subsequent_adjusted_close"
+  exit: "next_adjusted_open_after_signal_invalidation_or_time_stop"
+  tail_fraction: 0.10
+  signal_every_n_snapshots: 5
+  invalidation_score_z: 0.0
+  target_long_gross: 0.95
+  max_position_weight: 0.05
+  sector_neutral_selection: true
+  costs: "existing_tactical_long_PIT_spread_plus_1.25_USD_per_order"
+
+horizon_grid_days: [126, 189, 252, 280]
+
+evaluation:
+  mode: "continuous_warm_start_test_window_daily_pnl"
+  warm_start: >
+    Each candidate is replayed continuously from the development-window start.
+    A held-out fold scores only daily P&L inside its disjoint test interval,
+    including positions established from PIT signals before the interval.
+  fold_end: >
+    Positions remain open across fold boundaries; no synthetic liquidation or
+    wind-down tail is included in the held-out score.
+  label_unit: "daily_active_return"
+  annualization_periods: 252
+  outer_folds: 5
+  outer_initial_fraction: 0.40
+  minimum_outer_train_signal_dates: 60
+  inner_folds: 3
+  inner_initial_fraction: 0.50
+  minimum_inner_train_signal_dates: 40
+  minimum_valid_inner_folds: 2
+  minimum_objective_windows: 2
+  embargo_signal_dates: 2
+  stability_penalty: 0.50
+  objective_tie_tolerance: 1.0e-9
+
+promotion:
+  minimum_net_selection_alpha_ann: 0.0
+  minimum_active_t_hac: 2.0
+  minimum_positive_outer_folds: 4
+  minimum_positive_sectors: 4
+  minimum_stress_net_ann: 0.0
+  minimum_independent_windows: 6
+  minimum_execution_ohlcv_fraction: 0.95
+  minimum_historical_exact_spread_weight_fraction: 0.0
+  historical_spread_requirement: "tiered_fallback_and_positive_stress_net"
+  boundary_selection_blocks: true
+  require_parameter_selected_in_all_outer_folds: true
+
+confirmation:
+  historical_result_is_development_only: true
+  promotion_requires_append_only_prospective_evidence: true
+  prospective_policy_horizon_days: 252
+  minimum_prospective_exact_spread_weight_fraction: 0.90
+  may_open_lockbox: false
+  may_modify_production: false
+
+governance:
+  evidence_only: true
+  code_hashing_required: true
+  database_snapshot_required: true
+  fail_if_output_exists: true
+  prior_campaign_outputs_must_remain_untouched: true

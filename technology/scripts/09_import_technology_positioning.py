@@ -20,6 +20,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from technology.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
 from technology.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
+from technology.core.short_interest_float import (  # noqa: E402
+    FloatPolicy,
+    enrich_short_interest_float,
+    validate_float_enrichment,
+)
 from technology.core.text_norm import normalize_cik, normalize_ticker  # noqa: E402
 
 
@@ -33,6 +38,7 @@ CSV_FIELDS = [
     "form4_latest_transaction_date",
     "institutional_rows",
     "short_interest_rows",
+    "short_interest_float_rows",
     "borrow_rows",
     "feature_status",
     "review_reason",
@@ -47,6 +53,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", default="", help="Feature as-of date. Defaults to today.")
     parser.add_argument("--tickers", default="")
     parser.add_argument("--output-csv", type=Path, default=None)
+    parser.add_argument(
+        "--allow-stale-market-positioning-on-error",
+        action="store_true",
+        help=(
+            "If the shared raw positioning DB is unavailable, retain existing "
+            "technology facts and rebuild features. Required coverage and "
+            "staleness gates still apply."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -76,6 +91,24 @@ def ro_connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def is_upstream_availability_error(exc: BaseException) -> bool:
+    if isinstance(exc, OSError):
+        return True
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).strip().lower()
+    return any(
+        marker in message
+        for marker in (
+            "unable to open database file",
+            "database is locked",
+            "database table is locked",
+            "database is busy",
+            "disk i/o error",
+        )
+    )
 
 
 def cfg_bool(config: dict[str, Any], key: str, default: bool = False) -> bool:
@@ -477,6 +510,62 @@ def import_borrow(
     return stats
 
 
+def existing_fact_stats(
+    conn: Any,
+    table: str,
+    tickers: list[str],
+    *,
+    source_id: str,
+) -> dict[str, int]:
+    stats = {ticker: 0 for ticker in tickers}
+    if not tickers:
+        return stats
+    rows = conn.execute(
+        f"""
+        SELECT ticker, COUNT(*) AS n
+        FROM {table}
+        WHERE source_id = ?
+          AND ticker IN ({qmarks(tickers)})
+        GROUP BY ticker
+        """,
+        (source_id, *tickers),
+    ).fetchall()
+    for row in rows:
+        ticker = normalize_ticker(row["ticker"])
+        if ticker in stats:
+            stats[ticker] = int(row["n"] or 0)
+    return stats
+
+
+def float_fact_stats(
+    conn: Any,
+    tickers: list[str],
+    *,
+    source_id: str,
+) -> dict[str, int]:
+    stats = {ticker: 0 for ticker in tickers}
+    if not tickers:
+        return stats
+    rows = conn.execute(
+        f"""
+        SELECT ticker, COUNT(*) AS n
+        FROM fact_short_interest
+        WHERE source_id = ?
+          AND ticker IN ({qmarks(tickers)})
+          AND short_interest_pct_float IS NOT NULL
+          AND COALESCE(float_shares, 0.0) > 0.0
+          AND COALESCE(float_source, '') <> ''
+        GROUP BY ticker
+        """,
+        (source_id, *tickers),
+    ).fetchall()
+    for row in rows:
+        ticker = normalize_ticker(row["ticker"])
+        if ticker in stats:
+            stats[ticker] = int(row["n"] or 0)
+    return stats
+
+
 def direct_form4_stats(conn: Any, tickers: list[str], *, source_id: str) -> dict[str, dict[str, Any]]:
     stats = {ticker: {"direct_form4_transactions": 0, "direct_form4_latest_transaction_date": ""} for ticker in tickers}
     if not tickers:
@@ -747,11 +836,30 @@ def main() -> None:
     require_short = cfg_bool(config, "positioning_import.require_upstream_short_for_gate", False)
     require_borrow = cfg_bool(config, "positioning_import.require_upstream_borrow_for_gate", False)
     include_historical = cfg_bool(config, "positioning_import.include_historical_members", False)
+    allow_stale_market_positioning = bool(args.allow_stale_market_positioning_on_error) or cfg_bool(
+        config,
+        "positioning_import.allow_stale_market_positioning_on_error",
+        False,
+    )
+    float_policy = FloatPolicy(
+        public_float_max_age_days=int(
+            cfg_get(config, "positioning_import.float_enrichment.public_float_max_age_days", 550)
+        ),
+        shares_outstanding_max_age_days=int(
+            cfg_get(config, "positioning_import.float_enrichment.shares_outstanding_max_age_days", 550)
+        ),
+        diluted_shares_max_age_days=int(
+            cfg_get(config, "positioning_import.float_enrichment.diluted_shares_max_age_days", 550)
+        ),
+        public_float_price_max_lag_days=int(
+            cfg_get(config, "positioning_import.float_enrichment.public_float_price_max_lag_days", 10)
+        ),
+    )
     ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
 
     if not form4_db.exists():
         raise FileNotFoundError(f"Form 4 upstream DB not found: {form4_db}")
-    if not mp_db.exists():
+    if not mp_db.exists() and not allow_stale_market_positioning:
         raise FileNotFoundError(f"Market positioning upstream DB not found: {mp_db}")
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
@@ -764,102 +872,281 @@ def main() -> None:
                 raise ValueError(f"No positioning universe tickers found for model_family={model_family}.")
             feature_ticker_set = set(feature_tickers)
             query_tickers, source_to_internal = load_source_ticker_map(conn, fact_tickers)
-            with ro_connect(form4_db) as form4_conn, ro_connect(mp_db) as mp_conn:
-                with conn:
-                    conn.execute(
-                        f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({qmarks(fact_tickers)})",
-                        (RUN_TYPE, *fact_tickers),
-                    )
-                    form4_stats = import_form4(
-                        conn,
-                        form4_conn,
-                        fact_tickers,
-                        query_tickers=query_tickers,
-                        source_to_internal=source_to_internal,
-                        source_id=form4_source,
-                        start=start,
-                    )
-                    direct_stats = direct_form4_stats(conn, fact_tickers, source_id=direct_ownership_source)
-                    inst_stats = import_13f(
-                        conn,
-                        mp_conn,
-                        fact_tickers,
-                        query_tickers=query_tickers,
-                        source_to_internal=source_to_internal,
-                        source_id=mp_source,
-                        start=start,
-                    )
-                    short_stats = import_short_interest(
-                        conn,
-                        mp_conn,
-                        fact_tickers,
-                        query_tickers=query_tickers,
-                        source_to_internal=source_to_internal,
-                        source_id=mp_source,
-                        start=start,
-                    )
-                    borrow_stats = import_borrow(
-                        conn,
-                        mp_conn,
-                        fact_tickers,
-                        query_tickers=query_tickers,
-                        source_to_internal=source_to_internal,
-                        source_id=mp_source,
-                        start=start,
-                    )
-                    feature_asof = parse_date(args.asof) or date.today()
-                    feature_status = build_positioning_features(
-                        conn,
-                        feature_tickers,
-                        asof=feature_asof,
-                        feature_source_id=feature_source,
-                        model_family=model_family,
-                        insider_days=int(cfg_get(config, "positioning_import.lookback_days.insider", 90)),
-                        short_change_days=int(cfg_get(config, "positioning_import.lookback_days.short_change", 92)),
-                        direct_source=direct_ownership_source,
-                        upstream_source=form4_source,
-                        require_13f=require_13f,
-                        require_short=require_short,
-                        require_borrow=require_borrow,
-                    )
-                    rows: list[dict[str, Any]] = []
-                    for ticker in fact_tickers:
-                        reasons: list[str] = []
-                        if form4_stats[ticker]["form4_transactions"] == 0 and direct_stats[ticker]["direct_form4_transactions"] == 0:
-                            reasons.append("no_form4_transactions")
-                            if ticker in feature_ticker_set:
-                                add_issue(conn, ticker, form4_source, "missing_form4_upstream_rows", "No Form 4 rows imported from sec_insider.sqlite.")
-                        elif form4_stats[ticker]["form4_transactions"] == 0 and direct_stats[ticker]["direct_form4_transactions"] > 0:
-                            reasons.append("form4_direct_sec_rows_found_no_upstream")
-                            if ticker in feature_ticker_set:
-                                add_issue(conn, ticker, form4_source, "form4_upstream_missing_direct_sec_rows_found", "No upstream Form 4 rows, but direct SEC ownership rows exist in technology.sqlite.")
-                        if inst_stats[ticker] == 0:
-                            reasons.append("no_13f_rows")
-                            if ticker in feature_ticker_set:
-                                add_issue(conn, ticker, mp_source, "missing_13f_upstream_rows", "No 13F snapshot rows available in market_positioning.sqlite for this ticker.")
-                        if short_stats[ticker] == 0:
-                            reasons.append("no_short_interest_rows")
-                            if ticker in feature_ticker_set:
-                                add_issue(conn, ticker, mp_source, "missing_short_interest_upstream_rows", "No short-interest rows available in market_positioning.sqlite for this ticker.")
-                        if borrow_stats[ticker] == 0:
-                            reasons.append("no_borrow_rows")
-                            if ticker in feature_ticker_set:
-                                add_issue(conn, ticker, mp_source, "missing_borrow_upstream_rows", "No IBKR borrow rows available in market_positioning.sqlite for this ticker.")
-                        if ticker in feature_ticker_set and feature_status.get(ticker):
-                            reasons.append(feature_status[ticker])
-                        rows.append(
-                            {
-                                "ticker": ticker,
-                                "form4_transactions": form4_stats[ticker]["form4_transactions"],
-                                "direct_form4_transactions": direct_stats[ticker]["direct_form4_transactions"],
-                                "form4_latest_transaction_date": form4_stats[ticker]["form4_latest_transaction_date"],
-                                "institutional_rows": inst_stats[ticker],
-                                "short_interest_rows": short_stats[ticker],
-                                "borrow_rows": borrow_stats[ticker],
-                                "feature_status": "review" if reasons else "success",
-                                "review_reason": ";".join(reason for reason in reasons if reason),
-                            }
+            upstream_warning = ""
+            mp_conn: sqlite3.Connection | None = None
+            try:
+                mp_conn = ro_connect(mp_db)
+            except (OSError, sqlite3.OperationalError) as exc:
+                if (
+                    not allow_stale_market_positioning
+                    or not is_upstream_availability_error(exc)
+                ):
+                    raise
+                upstream_warning = (
+                    f"market_positioning_upstream_unavailable_using_stale_facts:"
+                    f"{type(exc).__name__}"
+                )
+                LOGGER.warning(
+                    "Market-positioning raw DB unavailable (%s: %s); retaining "
+                    "existing technology facts. Coverage/staleness gates remain active.",
+                    type(exc).__name__,
+                    exc,
+                )
+            try:
+                with ro_connect(form4_db) as form4_conn:
+                    with conn:
+                        conn.execute(
+                            f"DELETE FROM data_quality_issues WHERE stage = ? AND ticker IN ({qmarks(fact_tickers)})",
+                            (RUN_TYPE, *fact_tickers),
                         )
+                        form4_stats = import_form4(
+                            conn,
+                            form4_conn,
+                            fact_tickers,
+                            query_tickers=query_tickers,
+                            source_to_internal=source_to_internal,
+                            source_id=form4_source,
+                            start=start,
+                        )
+                        direct_stats = direct_form4_stats(
+                            conn,
+                            fact_tickers,
+                            source_id=direct_ownership_source,
+                        )
+                        if mp_conn is not None:
+                            conn.execute("SAVEPOINT market_positioning_import")
+                            try:
+                                inst_stats = import_13f(
+                                    conn,
+                                    mp_conn,
+                                    fact_tickers,
+                                    query_tickers=query_tickers,
+                                    source_to_internal=source_to_internal,
+                                    source_id=mp_source,
+                                    start=start,
+                                )
+                                short_stats = import_short_interest(
+                                    conn,
+                                    mp_conn,
+                                    fact_tickers,
+                                    query_tickers=query_tickers,
+                                    source_to_internal=source_to_internal,
+                                    source_id=mp_source,
+                                    start=start,
+                                )
+                                borrow_stats = import_borrow(
+                                    conn,
+                                    mp_conn,
+                                    fact_tickers,
+                                    query_tickers=query_tickers,
+                                    source_to_internal=source_to_internal,
+                                    source_id=mp_source,
+                                    start=start,
+                                )
+                            except (OSError, sqlite3.OperationalError) as exc:
+                                conn.execute("ROLLBACK TO market_positioning_import")
+                                conn.execute("RELEASE market_positioning_import")
+                                if (
+                                    not allow_stale_market_positioning
+                                    or not is_upstream_availability_error(exc)
+                                ):
+                                    raise
+                                upstream_warning = (
+                                    "market_positioning_upstream_unavailable_using_stale_facts:"
+                                    f"{type(exc).__name__}"
+                                )
+                                LOGGER.warning(
+                                    "Market-positioning raw DB read failed (%s: %s); "
+                                    "rolled back the partial import and retained existing "
+                                    "technology facts. Coverage/staleness gates remain active.",
+                                    type(exc).__name__,
+                                    exc,
+                                )
+                                mp_conn.close()
+                                mp_conn = None
+                            else:
+                                conn.execute("RELEASE market_positioning_import")
+                        if mp_conn is None:
+                            inst_stats = existing_fact_stats(
+                                conn,
+                                "fact_13f_positioning",
+                                fact_tickers,
+                                source_id=mp_source,
+                            )
+                            short_stats = existing_fact_stats(
+                                conn,
+                                "fact_short_interest",
+                                fact_tickers,
+                                source_id=mp_source,
+                            )
+                            borrow_stats = existing_fact_stats(
+                                conn,
+                                "fact_ibkr_borrow_snapshot",
+                                fact_tickers,
+                                source_id=mp_source,
+                            )
+
+                        float_enrichment = enrich_short_interest_float(
+                            conn,
+                            fact_tickers,
+                            source_id=mp_source,
+                            policy=float_policy,
+                        )
+                        float_errors = validate_float_enrichment(
+                            conn,
+                            fact_tickers,
+                            source_id=mp_source,
+                        )
+                        if float_errors:
+                            sample = "; ".join(float_errors[:20])
+                            raise RuntimeError(
+                                "Short-interest float enrichment failed PIT/provenance "
+                                f"validation ({len(float_errors)} errors): {sample}"
+                            )
+                        float_stats = float_fact_stats(
+                            conn,
+                            fact_tickers,
+                            source_id=mp_source,
+                        )
+                        LOGGER.info(
+                            "Short-interest float enrichment: rows=%d/%d coverage=%.1f%% "
+                            "tickers=%d/%d sources=%s",
+                            float_enrichment.rows_enriched,
+                            float_enrichment.rows_examined,
+                            float_enrichment.coverage_pct,
+                            float_enrichment.tickers_enriched,
+                            float_enrichment.tickers_examined,
+                            float_enrichment.source_counts,
+                        )
+
+                        feature_asof = parse_date(args.asof) or date.today()
+                        feature_status = build_positioning_features(
+                            conn,
+                            feature_tickers,
+                            asof=feature_asof,
+                            feature_source_id=feature_source,
+                            model_family=model_family,
+                            insider_days=int(
+                                cfg_get(config, "positioning_import.lookback_days.insider", 90)
+                            ),
+                            short_change_days=int(
+                                cfg_get(config, "positioning_import.lookback_days.short_change", 92)
+                            ),
+                            direct_source=direct_ownership_source,
+                            upstream_source=form4_source,
+                            require_13f=require_13f,
+                            require_short=require_short,
+                            require_borrow=require_borrow,
+                        )
+                        rows: list[dict[str, Any]] = []
+                        for ticker in fact_tickers:
+                            reasons: list[str] = []
+                            if upstream_warning:
+                                reasons.append(upstream_warning)
+                                if ticker in feature_ticker_set:
+                                    add_issue(
+                                        conn,
+                                        ticker,
+                                        mp_source,
+                                        "market_positioning_upstream_unavailable",
+                                        "Existing technology positioning facts retained; "
+                                        "required coverage and staleness gates still apply.",
+                                    )
+                            if (
+                                form4_stats[ticker]["form4_transactions"] == 0
+                                and direct_stats[ticker]["direct_form4_transactions"] == 0
+                            ):
+                                reasons.append("no_form4_transactions")
+                                if ticker in feature_ticker_set:
+                                    add_issue(
+                                        conn,
+                                        ticker,
+                                        form4_source,
+                                        "missing_form4_upstream_rows",
+                                        "No Form 4 rows imported from sec_insider.sqlite.",
+                                    )
+                            elif (
+                                form4_stats[ticker]["form4_transactions"] == 0
+                                and direct_stats[ticker]["direct_form4_transactions"] > 0
+                            ):
+                                reasons.append("form4_direct_sec_rows_found_no_upstream")
+                                if ticker in feature_ticker_set:
+                                    add_issue(
+                                        conn,
+                                        ticker,
+                                        form4_source,
+                                        "form4_upstream_missing_direct_sec_rows_found",
+                                        "No upstream Form 4 rows, but direct SEC ownership "
+                                        "rows exist in technology.sqlite.",
+                                    )
+                            if inst_stats[ticker] == 0:
+                                reasons.append("no_13f_rows")
+                                if ticker in feature_ticker_set:
+                                    add_issue(
+                                        conn,
+                                        ticker,
+                                        mp_source,
+                                        "missing_13f_upstream_rows",
+                                        "No 13F snapshot rows available for this ticker.",
+                                    )
+                            if short_stats[ticker] == 0:
+                                reasons.append("no_short_interest_rows")
+                                if ticker in feature_ticker_set:
+                                    add_issue(
+                                        conn,
+                                        ticker,
+                                        mp_source,
+                                        "missing_short_interest_upstream_rows",
+                                        "No short-interest rows available for this ticker.",
+                                    )
+                            elif float_stats[ticker] == 0:
+                                reasons.append("no_pit_float_rows")
+                                if ticker in feature_ticker_set:
+                                    add_issue(
+                                        conn,
+                                        ticker,
+                                        mp_source,
+                                        "missing_short_interest_float_denominator",
+                                        "Short-interest rows exist but no PIT-safe float "
+                                        "denominator could be selected.",
+                                    )
+                            if borrow_stats[ticker] == 0:
+                                reasons.append("no_borrow_rows")
+                                if ticker in feature_ticker_set:
+                                    add_issue(
+                                        conn,
+                                        ticker,
+                                        mp_source,
+                                        "missing_borrow_upstream_rows",
+                                        "No IBKR borrow rows available for this ticker.",
+                                    )
+                            if ticker in feature_ticker_set and feature_status.get(ticker):
+                                reasons.append(feature_status[ticker])
+                            rows.append(
+                                {
+                                    "ticker": ticker,
+                                    "form4_transactions": form4_stats[ticker][
+                                        "form4_transactions"
+                                    ],
+                                    "direct_form4_transactions": direct_stats[ticker][
+                                        "direct_form4_transactions"
+                                    ],
+                                    "form4_latest_transaction_date": form4_stats[ticker][
+                                        "form4_latest_transaction_date"
+                                    ],
+                                    "institutional_rows": inst_stats[ticker],
+                                    "short_interest_rows": short_stats[ticker],
+                                    "short_interest_float_rows": float_stats[ticker],
+                                    "borrow_rows": borrow_stats[ticker],
+                                    "feature_status": "review" if reasons else "success",
+                                    "review_reason": ";".join(
+                                        reason for reason in reasons if reason
+                                    ),
+                                }
+                            )
+            finally:
+                if mp_conn is not None:
+                    mp_conn.close()
             write_report(output_csv, rows)
             finish_run(conn, run_id=run_id, status="success", row_count=sum(int(row["form4_transactions"]) for row in rows), message=f"fact_tickers={len(rows)} feature_tickers={len(feature_tickers)} output={output_csv}")
             LOGGER.info("Wrote positioning import report: %s", output_csv)

@@ -161,6 +161,7 @@ def solve_long_only_mv(
     gross: float = 1.0,
     solver: str = "ECOS",
     group_caps: list[tuple[list[int], float]] | None = None,
+    equal_weight_groups: list[list[int]] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Return (weights, solve_info). Long-only, sum(w)=gross, 0<=w<=max_weight.
 
@@ -173,6 +174,17 @@ def solve_long_only_mv(
         raise ValueError(f"max_weight*{n}={max_weight * n:.3f} < gross={gross}: caps make full investment infeasible")
     if group_caps:
         check_group_cap_feasibility(n, group_caps=group_caps, gross=gross, max_weight=max_weight)
+    equal_group_members: set[int] = set()
+    for indices in equal_weight_groups or []:
+        normalized = [int(index) for index in indices]
+        if any(index < 0 or index >= n for index in normalized):
+            raise ValueError("equal-weight group contains an invalid index")
+        overlap = equal_group_members.intersection(normalized)
+        if overlap:
+            raise ValueError(
+                f"equal-weight groups overlap on indices {sorted(overlap)[:5]}"
+            )
+        equal_group_members.update(normalized)
     w = cp.Variable(n, nonneg=True)
     risk = cp.quad_form(w, cp.psd_wrap(cov))
     objective = cp.Maximize(mu @ w - 0.5 * float(risk_aversion) * risk)
@@ -180,6 +192,10 @@ def solve_long_only_mv(
     for indices, cap in group_caps or []:
         if indices:
             constraints.append(cp.sum(w[np.asarray(indices, dtype=int)]) <= float(cap) * gross)
+    for indices in equal_weight_groups or []:
+        if len(indices) > 1:
+            anchor = int(indices[0])
+            constraints.extend(w[int(index)] == w[anchor] for index in indices[1:])
     problem = cp.Problem(objective, constraints)
 
     order = [solver] + [s for s in SOLVER_FALLBACK if s != solver]
@@ -304,12 +320,14 @@ def weight_sensitivity_band(
     gross: float,
     solver: str,
     group_caps: list[tuple[list[int], float]] | None = None,
+    equal_weight_groups: list[list[int]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-name [min, max] weight across a set of risk-aversion values (a robustness band)."""
     solutions = []
     for g in gammas:
         w, info = solve_long_only_mv(
             mu, cov, risk_aversion=g, max_weight=max_weight, gross=gross, solver=solver, group_caps=group_caps,
+            equal_weight_groups=equal_weight_groups,
         )
         if info["status"] not in ("optimal", "optimal_inaccurate"):
             raise ValueError(f"sensitivity solve failed for gamma={g}: {info}")

@@ -81,6 +81,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", required=True)
     parser.add_argument("--sector-output-root", type=Path, default=PROJECT_ROOT / "output")
     parser.add_argument("--expect-research-eligible", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--expect-production",
+        action="store_true",
+        help=(
+            "Require the validated production sleeve instead of the default "
+            "shadow-only contract."
+        ),
+    )
+    mode.add_argument(
+        "--expect-shadow",
+        action="store_true",
+        help="Require a non-investable shadow contract.",
+    )
     return parser.parse_args()
 
 
@@ -112,6 +126,22 @@ def main() -> int:
         args.sector_output_root.expanduser().resolve()
         / f"industrials/machinery/dashboard/{asof}/machinery_final_rank_table.csv"
     )
+    manifest_path = rank_path.with_name(
+        "machinery_final_rank_table_manifest.json"
+    )
+    try:
+        dashboard_manifest = json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        dashboard_manifest = {}
+    production_expected = bool(
+        args.expect_production
+        or (
+            not args.expect_shadow
+            and dashboard_manifest.get("production_policy_active") is True
+        )
+    )
     if not rank_path.exists():
         errors.append(f"machinery final-rank file not found: {rank_path}")
         rank_fields: set[str] = set()
@@ -132,28 +162,93 @@ def main() -> int:
             )
         else:
             errors.extend(validate_metric_availability_contract(rank_rows, asof=asof))
+        if production_expected:
+            selection_fields = {
+                "portfolio_universe_eligible_flag",
+                "portfolio_selection_policy",
+                "portfolio_sleeve_selected_flag",
+                "portfolio_sleeve_target_weight",
+            }
+            missing_selection_fields = sorted(
+                selection_fields - rank_fields
+            )
+            if missing_selection_fields:
+                errors.append(
+                    "machinery production rank file missing selection fields: "
+                    + ",".join(missing_selection_fields)
+                )
     adapter_rows = result.rows if result is not None else []
     if result is not None:
         if not adapter_rows:
             errors.append("portfolio adapter returned no machinery rows")
         if result.source_asof_date != asof:
             errors.append(f"source_asof_date={result.source_asof_date} expected={asof}")
-    if any(row.investable_eligible for row in adapter_rows):
-        errors.append("shadow machinery rows must not be investable")
-    if any(row.oos_score_valid_flag for row in adapter_rows):
-        errors.append("shadow machinery rows must not be OOS valid")
     research_eligible = sum(row.calibration_research_eligible for row in adapter_rows)
-    if args.expect_research_eligible and research_eligible == 0:
-        errors.append("expected survivorship-corrected research rows but adapter returned zero")
-    if not args.expect_research_eligible and research_eligible:
-        errors.append("live shadow dashboard unexpectedly exposed research calibration rows")
+    investable = {
+        row.ticker for row in adapter_rows if row.investable_eligible
+    }
+    if production_expected:
+        selected = {
+            str(row.get("ticker") or "").strip().upper()
+            for row in rank_rows
+            if str(row.get("portfolio_sleeve_selected_flag") or "") == "1"
+        }
+        broad_eligible = {
+            str(row.get("ticker") or "").strip().upper()
+            for row in rank_rows
+            if str(row.get("portfolio_universe_eligible_flag") or "") == "1"
+        }
+        if not selected:
+            errors.append("production machinery sleeve is empty")
+        if investable != selected:
+            errors.append(
+                "production adapter membership does not match selected sleeve"
+            )
+        if research_eligible != len(broad_eligible):
+            errors.append(
+                "production adapter research population does not match broad "
+                f"eligibility expected={len(broad_eligible)} "
+                f"actual={research_eligible}"
+            )
+        try:
+            target_weights = [
+                float(str(row.get("portfolio_sleeve_target_weight") or "0"))
+                for row in rank_rows
+                if str(row.get("portfolio_sleeve_selected_flag") or "") == "1"
+            ]
+        except ValueError:
+            target_weights = []
+            errors.append("production sleeve contains an invalid target weight")
+        if target_weights and abs(sum(target_weights) - 1.0) > 1e-8:
+            errors.append("production sleeve target weights do not sum to 1")
+        if (
+            target_weights
+            and max(target_weights) - min(target_weights) > 1e-10
+        ):
+            errors.append("production machinery sleeve is not equal weighted")
+    else:
+        if investable:
+            errors.append("shadow machinery rows must not be investable")
+        if any(row.oos_score_valid_flag for row in adapter_rows):
+            errors.append("shadow machinery rows must not be OOS valid")
+        if args.expect_research_eligible and research_eligible == 0:
+            errors.append(
+                "expected survivorship-corrected research rows but adapter "
+                "returned zero"
+            )
+        if not args.expect_research_eligible and research_eligible:
+            errors.append(
+                "live shadow dashboard unexpectedly exposed research "
+                "calibration rows"
+            )
     summary = {
         "acceptance": "PASS" if not errors else "FAIL",
         "adapter": result.adapter if result is not None else "",
         "source_pipeline": result.source_pipeline if result is not None else "",
         "source_asof_date": result.source_asof_date if result is not None else "",
         "rows": len(adapter_rows),
-        "investable_rows": sum(row.investable_eligible for row in adapter_rows),
+        "contract_mode": "production" if production_expected else "shadow",
+        "investable_rows": len(investable),
         "research_eligible_rows": research_eligible,
         "calibration_financial_field_count": len(CALIBRATION_FINANCIAL_FIELDS & rank_fields),
         "errors": errors,

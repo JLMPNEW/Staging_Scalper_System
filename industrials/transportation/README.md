@@ -8,6 +8,72 @@ The canonical active and delisted inputs live in `system_csvs`. Files under
 `ticker_mapping` are intake sources only and are checked for drift by the seed
 validator.
 
+Dedicated-parser design documents:
+
+- `DEDICATED_PARSER_INTEGRATION_PLAN.md`
+- `TRANSPORTATION_SPECIALIZED_METRIC_UNIVERSE.md`
+
+DP0 discovery-contract build and strict validation:
+
+```powershell
+C:\Users\josel\miniconda3\python.exe industrials\transportation\scripts\00b_build_transportation_dp0_contract.py
+C:\Users\josel\miniconda3\python.exe industrials\transportation\scripts\00b_validate_transportation_dp0_contract.py
+```
+
+DP0 materializes 160 reviewed identity/archetype rows and a complete
+`160 x 90 = 14,400`-row applicability scope. It records hashes for the frozen
+v2 metric, feature-history, rank, and portfolio baselines. Seven non-scoring
+supporting parser operands are separately frozen in a `160 x 7 = 1,120`-row
+scope. The complete one-pass search set is 84 metrics: 77 final direct targets
+and seven supporting operands. Both
+`production_enabled` and `parser_execution_authorized` remain false; these
+commands perform no filing hydration, parsing, feature rebuild, calibration,
+or portfolio publication.
+
+The transportation adapter is
+`industrials/transportation/dedicated_parser_adapter.py`. Its offline contract
+is fail-closed: all 84 search metrics have positive and cross-archetype
+prohibited fixtures; unit, period, issuer-scope, bounds, conflict, duplicate,
+and deterministic-order gates are explicit; one document is semantically
+parsed once for all requested metrics; and broad discoveries remain
+`REVIEW_REQUIRED`. The adapter has no production mappings.
+
+The sector-neutral DP1 policy-replay implementation is now present in
+`dedicated_parser.review_replay`, with a distinct
+`dedicated_parser.policy_replay_cli` command. It persists immutable evaluation
+overlays, fails closed when base evidence is already policy-mutated, limits
+materialization to sealed documents and requested metrics, verifies the base
+hash before and after replay, and records zero source/provider/OCR counters.
+The machinery 5% strategic weight is reconciled and its registration gate
+passes. The read-only DP3 source census reconciles 3,019 base accessions plus
+205 bounded supplemental accessions. Of 3,329 selected document rows, 3,177
+are byte-hash verified in cache and exactly 152 remain to hydrate. Exhaustive
+parse readiness therefore remains `NO_GO`; do not start transportation
+parsing until those gaps are resolved and the DP4 offline plan-only gate
+passes.
+
+Build and validate the census without network or database writes:
+
+```powershell
+C:\Users\josel\miniconda3\python.exe industrials\transportation\scripts\00c_build_transportation_source_census.py
+C:\Users\josel\miniconda3\python.exe industrials\transportation\scripts\00c_validate_transportation_source_census.py --verify-content-hashes
+```
+
+The exact hydration batch is
+`data/transportation_dedicated_parser_cache_gaps.csv`; the sealed manifest is
+`data/transportation_dp3_source_census_manifest.json`.
+
+After a future pre-policy base run exists, reviewed policies are evaluated
+without reparsing with:
+
+```powershell
+C:\Users\josel\miniconda3\python.exe -m dedicated_parser.policy_replay_cli `
+  --db C:\path\to\industrials.sqlite `
+  --adapter industrials.transportation.dedicated_parser_adapter:extract_metric_evidence `
+  --policy-replay-run-id <BASE_RUN_ID> `
+  --review-policy industrials\transportation\review_policies\dedicated_parser_review_policy.csv
+```
+
 Foundation command order:
 
 ```powershell

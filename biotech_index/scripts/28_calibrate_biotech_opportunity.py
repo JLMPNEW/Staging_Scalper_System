@@ -251,6 +251,9 @@ class CalibrationParams:
     omega_hurdle: float = DEFAULT_OMEGA_HURDLE
     min_selected_observations: int = DEFAULT_MIN_SELECTED_OBSERVATIONS
     min_asof_dates: int = DEFAULT_MIN_ASOF_DATES
+    min_selection_date_coverage_pct: float = 0.0
+    min_avg_selected_names_per_active_date: float = 0.0
+    min_selected_names_per_active_date: int = 0
     min_net_lcb_return_pct: float = DEFAULT_MIN_NET_LCB_RETURN_PCT
     min_sortino: float = DEFAULT_MIN_SORTINO
     min_profit_factor: float = DEFAULT_MIN_PROFIT_FACTOR
@@ -343,6 +346,8 @@ class SelectionPolicy:
     post_selection_cohort_top_k_per_cohort: int = 0
     post_selection_total_max: int = 0
     post_selection_min_score_pct_of_top: float = 0.0
+    min_selected_names: int = 0
+    below_min_selected_action: str = "cash"
     hard_veto: bool = False
     require_liquidity: bool = False
     max_risk_score: float | None = None
@@ -391,6 +396,14 @@ class SelectionPolicy:
             max(0, int(self.post_selection_cohort_top_k_per_cohort)),
         )
         object.__setattr__(self, "post_selection_total_max", max(0, int(self.post_selection_total_max)))
+        object.__setattr__(self, "min_selected_names", max(0, int(self.min_selected_names)))
+        below_min_action = str(self.below_min_selected_action or "cash").strip().lower()
+        if self.min_selected_names > 0 and below_min_action != "cash":
+            raise ValueError(
+                f"SelectionPolicy '{self.policy_name}' below_min_selected_action={below_min_action!r}; "
+                "expected 'cash'."
+            )
+        object.__setattr__(self, "below_min_selected_action", below_min_action)
         object.__setattr__(
             self,
             "post_selection_min_score_pct_of_top",
@@ -1161,6 +1174,11 @@ def load_calibration_params(config: dict[str, Any]) -> CalibrationParams:
         omega_hurdle=float(stack.get("omega_hurdle", DEFAULT_OMEGA_HURDLE)),
         min_selected_observations=int(stack.get("min_selected_observations", DEFAULT_MIN_SELECTED_OBSERVATIONS)),
         min_asof_dates=int(stack.get("min_asof_dates", DEFAULT_MIN_ASOF_DATES)),
+        min_selection_date_coverage_pct=float(stack.get("min_selection_date_coverage_pct", 0.0)),
+        min_avg_selected_names_per_active_date=float(
+            stack.get("min_avg_selected_names_per_active_date", 0.0)
+        ),
+        min_selected_names_per_active_date=int(stack.get("min_selected_names_per_active_date", 0)),
         min_net_lcb_return_pct=float(stack.get("min_net_lcb_return_pct", DEFAULT_MIN_NET_LCB_RETURN_PCT)),
         min_sortino=float(stack.get("min_sortino", DEFAULT_MIN_SORTINO)),
         min_profit_factor=float(stack.get("min_profit_factor", DEFAULT_MIN_PROFIT_FACTOR)),
@@ -1953,6 +1971,8 @@ def policy_signature(policy: SelectionPolicy) -> tuple[Any, ...]:
         int(policy.post_selection_cohort_top_k_per_cohort),
         int(policy.post_selection_total_max),
         round(float(policy.post_selection_min_score_pct_of_top), 6),
+        int(policy.min_selected_names),
+        policy.below_min_selected_action,
         None if policy.max_risk_score is None else round(float(policy.max_risk_score), 6),
         round(float(policy.hard_weakness_penalty), 6),
         round(float(policy.soft_weakness_penalty), 6),
@@ -2028,6 +2048,8 @@ def policy_from_dict(raw: dict[str, Any], *, fallback_name: str) -> SelectionPol
         ),
         post_selection_total_max=int(to_float(raw.get("post_selection_total_max"), 0.0) or 0.0),
         post_selection_min_score_pct_of_top=float(raw.get("post_selection_min_score_pct_of_top", 0.0)),
+        min_selected_names=int(to_float(raw.get("min_selected_names"), 0.0) or 0.0),
+        below_min_selected_action=str(raw.get("below_min_selected_action") or "cash"),
         hard_veto=as_bool(raw.get("hard_veto", False), False),
         require_liquidity=as_bool(raw.get("require_liquidity", False), False),
         max_risk_score=max_risk,
@@ -2503,6 +2525,8 @@ def policy_fields(policy: SelectionPolicy) -> dict[str, Any]:
         "selection_policy_post_selection_cohort_top_k_per_cohort": policy.post_selection_cohort_top_k_per_cohort,
         "selection_policy_post_selection_total_max": policy.post_selection_total_max,
         "selection_policy_post_selection_min_score_pct_of_top": policy.post_selection_min_score_pct_of_top,
+        "selection_policy_min_selected_names": policy.min_selected_names,
+        "selection_policy_below_min_selected_action": policy.below_min_selected_action,
         "selection_policy_hard_veto": policy.hard_veto,
         "selection_policy_require_liquidity": policy.require_liquidity,
         "selection_policy_max_risk_score": "" if policy.max_risk_score is None else policy.max_risk_score,
@@ -2547,6 +2571,8 @@ def policy_output_keys() -> list[str]:
         "selection_policy_post_selection_cohort_top_k_per_cohort",
         "selection_policy_post_selection_total_max",
         "selection_policy_post_selection_min_score_pct_of_top",
+        "selection_policy_min_selected_names",
+        "selection_policy_below_min_selected_action",
         "selection_policy_hard_veto",
         "selection_policy_require_liquidity",
         "selection_policy_max_risk_score",
@@ -5254,6 +5280,9 @@ def calibration_constraint_fields(
     selected_summary: dict[str, Any],
     *,
     asof_dates: int,
+    eligible_asof_dates: int,
+    avg_selected_names_per_active_date: float | None,
+    min_selected_names_per_active_date: int | None,
     params: CalibrationParams,
 ) -> dict[str, Any]:
     reasons: list[str] = []
@@ -5276,6 +5305,25 @@ def calibration_constraint_fields(
         reasons.append(f"n<{params.min_selected_observations}")
     if asof_dates < params.min_asof_dates:
         reasons.append(f"asof_dates<{params.min_asof_dates}")
+    selection_date_coverage_pct = (
+        100.0 * float(asof_dates) / float(eligible_asof_dates)
+        if eligible_asof_dates > 0
+        else 0.0
+    )
+    if selection_date_coverage_pct < params.min_selection_date_coverage_pct:
+        reasons.append(f"selection_date_coverage<{params.min_selection_date_coverage_pct}")
+    if params.min_avg_selected_names_per_active_date > 0.0 and (
+        avg_selected_names_per_active_date is None
+        or avg_selected_names_per_active_date < params.min_avg_selected_names_per_active_date
+    ):
+        reasons.append(
+            f"avg_selected_names_per_active_date<{params.min_avg_selected_names_per_active_date}"
+        )
+    if params.min_selected_names_per_active_date > 0 and (
+        min_selected_names_per_active_date is None
+        or min_selected_names_per_active_date < params.min_selected_names_per_active_date
+    ):
+        reasons.append(f"min_selected_names_per_active_date<{params.min_selected_names_per_active_date}")
     if lcb is None or lcb < params.min_net_lcb_return_pct:
         reasons.append(f"lcb<{params.min_net_lcb_return_pct}")
     if sortino is None or sortino < params.min_sortino:
@@ -5755,6 +5803,22 @@ def apply_policy_post_selection_filter(
     return pool
 
 
+def apply_policy_minimum_selection_floor(
+    selected_rows: list[dict[str, Any]],
+    policy: SelectionPolicy,
+) -> list[dict[str, Any]]:
+    """Return cash when an opt-in policy cannot form its minimum viable basket."""
+    minimum = int(policy.min_selected_names)
+    if minimum <= 0 or len(selected_rows) >= minimum:
+        return selected_rows
+    if policy.below_min_selected_action == "cash":
+        return []
+    raise ValueError(
+        f"SelectionPolicy '{policy.policy_name}' has unsupported below_min_selected_action="
+        f"{policy.below_min_selected_action!r}"
+    )
+
+
 def policy_uses_post_selection_filter(policy: SelectionPolicy) -> bool:
     return (
         bool(policy.post_selection_allowed_primary_cohorts)
@@ -5812,8 +5876,10 @@ def select_top_rows_and_policy_eligible(
     candidates.sort(key=lambda item: (-item[0], item[1]))
     ranked_rows = [row for _, _, row in candidates]
     if policy_uses_post_selection_filter(policy):
-        return apply_policy_post_selection_filter(ranked_rows, policy, top_n=top_n), policy_eligible
-    return apply_policy_cohort_top_k_limit(ranked_rows, policy)[:top_n], policy_eligible
+        selected = apply_policy_post_selection_filter(ranked_rows, policy, top_n=top_n)
+    else:
+        selected = apply_policy_cohort_top_k_limit(ranked_rows, policy)[:top_n]
+    return apply_policy_minimum_selection_floor(selected, policy), policy_eligible
 
 
 def split_rows_by_completed_return_date(
@@ -5911,6 +5977,7 @@ def candidate_grid_summary_row(
     policy_selection_rates: list[float],
     selected_ticker_sets: list[set[str]],
     date_count: int,
+    eligible_date_count: int,
     horizon: int,
     top_n: int,
     spec: WeightSpec,
@@ -5935,9 +6002,21 @@ def candidate_grid_summary_row(
         numeric_values(selected_rows, equal_weight_alpha_ret_key),
         params=params,
     )
+    avg_selected_names_per_active_date = (
+        mean([float(value) for value in selected_counts]) if selected_counts else None
+    )
+    min_selected_names_per_active_date = min(selected_counts) if selected_counts else None
+    selection_date_coverage_pct = (
+        100.0 * float(date_count) / float(eligible_date_count)
+        if eligible_date_count > 0
+        else 0.0
+    )
     constraint_fields = calibration_constraint_fields(
         selected_summary,
         asof_dates=date_count,
+        eligible_asof_dates=eligible_date_count,
+        avg_selected_names_per_active_date=avg_selected_names_per_active_date,
+        min_selected_names_per_active_date=min_selected_names_per_active_date,
         params=params,
     )
     return {
@@ -5957,7 +6036,19 @@ def candidate_grid_summary_row(
         "selection_policy_description": policy.description,
         "universe_baseline_type": "policy_eligible",
         "asof_dates": date_count,
-        "avg_selected_names_per_date": rounded(mean([float(v) for v in selected_counts])),
+        "eligible_asof_dates": eligible_date_count,
+        "selection_date_coverage_pct": rounded(selection_date_coverage_pct),
+        "avg_selected_names_per_date": rounded(avg_selected_names_per_active_date),
+        "avg_selected_names_per_eligible_date": rounded(
+            float(sum(selected_counts)) / float(eligible_date_count)
+            if eligible_date_count > 0
+            else 0.0
+        ),
+        "min_selected_names_per_active_date": (
+            min_selected_names_per_active_date
+            if min_selected_names_per_active_date is not None
+            else ""
+        ),
         "avg_selection_rate_pct": pct(mean(selection_rates)),
         "min_selection_rate_pct": pct(min(selection_rates) if selection_rates else None),
         "avg_policy_selection_rate_pct": pct(mean(policy_selection_rates)),
@@ -6004,6 +6095,7 @@ def build_candidate_grid_rows_for_top_ns(
             "policy_selection_rates": [],
             "selected_ticker_sets": [],
             "date_count": 0,
+            "eligible_date_count": 0,
         }
         for top_n in clean_top_ns
     }
@@ -6012,6 +6104,8 @@ def build_candidate_grid_rows_for_top_ns(
         eligible = [row for row in date_rows if to_float(row.get(ret_key)) is not None]
         if not eligible:
             continue
+        for state in states.values():
+            state["eligible_date_count"] += 1
         candidates: list[tuple[float, str, dict[str, Any]]] = []
         policy_eligible: list[dict[str, Any]] = []
         for row in eligible:
@@ -6035,6 +6129,7 @@ def build_candidate_grid_rows_for_top_ns(
                 selected = apply_policy_post_selection_filter(ranked_rows, job.policy, top_n=top_n)
             else:
                 selected = apply_policy_cohort_top_k_limit(ranked_rows, job.policy)[:top_n]
+            selected = apply_policy_minimum_selection_floor(selected, job.policy)
             if not selected:
                 continue
             state = states[top_n]
@@ -6063,6 +6158,7 @@ def build_candidate_grid_rows_for_top_ns(
                 policy_selection_rates=state["policy_selection_rates"],
                 selected_ticker_sets=state["selected_ticker_sets"],
                 date_count=int(state["date_count"]),
+                eligible_date_count=int(state["eligible_date_count"]),
                 horizon=job.horizon,
                 top_n=top_n,
                 spec=job.spec,
@@ -8390,6 +8486,9 @@ def main() -> None:
             "omega_hurdle": params.omega_hurdle,
             "min_selected_observations": params.min_selected_observations,
             "min_asof_dates": params.min_asof_dates,
+            "min_selection_date_coverage_pct": params.min_selection_date_coverage_pct,
+            "min_avg_selected_names_per_active_date": params.min_avg_selected_names_per_active_date,
+            "min_selected_names_per_active_date": params.min_selected_names_per_active_date,
             "min_net_lcb_return_pct": params.min_net_lcb_return_pct,
             "min_sortino": params.min_sortino,
             "min_profit_factor": params.min_profit_factor,

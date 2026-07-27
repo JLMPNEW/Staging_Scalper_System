@@ -1,0 +1,116 @@
+{
+  "acceptance": "PASS",
+  "baseline_artifacts": [
+    {
+      "exists": true,
+      "path": "industrials/transportation/data/transportation_metric_registry.yaml",
+      "sha256": "9aa56d03b7438b20bb8afba635d32e2eb31b8e54b157c41ccbe8bd3850a75091"
+    },
+    {
+      "exists": true,
+      "path": "output/industrials/transportation/stage4/transportation_metric_availability.csv",
+      "sha256": "1a381797865fe2fe1895fd030f8a591b868faa1bf1f8d6c43f1a9b479f1b8dfc"
+    },
+    {
+      "exists": true,
+      "path": "output/industrials/transportation/historical_features/transportation_pit_feature_history_build.json",
+      "sha256": "05ae0107256fb035b695f8f43dcccf3d534fd570f76b68c6e5109742af176918"
+    },
+    {
+      "exists": true,
+      "path": "output/industrials/transportation/historical_features/transportation_pit_feature_history_validation.json",
+      "sha256": "7e029207c9f23f63735d8ad49a0dec4f26181cea20c9106b0b4c6660ebca7c5e"
+    },
+    {
+      "exists": true,
+      "path": "output/industrials/transportation/dashboard/2026-07-22/transportation_final_rank_table.csv",
+      "sha256": "58acf1df332fb73ba4603573cbb26a80c84f2a7bd516d369dffab43421bcb1d2"
+    },
+    {
+      "exists": true,
+      "path": "output/industrials/transportation/dashboard/2026-07-22/transportation_final_rank_table_manifest.json",
+      "sha256": "de70ac2f0464ce3f56d59b29b2149b598e7867fe14ee533ff3cf64cdcbcb3dc0"
+    },
+    {
+      "exists": true,
+      "path": "output/industrials/transportation/dashboard/2026-07-22/transportation_portfolio_adapter_validation.json",
+      "sha256": "9581122a6b9a38b22df8dcb128d86ab3a3dac35fdf0fe28a155848a89a87caf3"
+    }
+  ],
+  "counts": {
+    "active_identities": 112,
+    "applicable_rows": 2535,
+    "delisted_identities": 48,
+    "development_overlay_identities": 29,
+    "direct_parser_metrics": 77,
+    "financial_derived_metrics": 6,
+    "metrics": 90,
+    "not_applicable_rows": 11865,
+    "parser_derived_metrics": 7,
+    "scope_rows": 14400,
+    "supporting_applicable_rows": 83,
+    "supporting_not_applicable_rows": 1037,
+    "supporting_parser_metrics": 7,
+    "supporting_scope_rows": 1120,
+    "total_identities": 160,
+    "total_parser_search_metrics": 84
+  },
+  "errors": [],
+  "hashes": {
+    "active_seed_sha256": "135dded55284d3809060d5c38e1c576f22c67a6ddb8a4a0733a80f16b66df13d",
+    "archetype_map_sha256": "82f56f3c0d44ae28ca8c177f64bce26cebc294e7e3c535115affe34d3dcfacfe",
+    "archetype_policy_sha256": "a62fc7689bf95bba4c046885d99a78d9a54d59811bc03469bd258567cf97b6ac",
+    "archetype_rows_canonical_sha256": "6c0d8c4f1e36a0e8bfb2363de9b06e289a3e104130ae5cb8a7258caef61f8936",
+    "delisted_seed_sha256": "4bc97f73f3dbdbdfe6e976f44cb17e9dbb077e84f982d0cfa55c5bd56a1215bf",
+    "metric_registry_sha256": "d3b425919e9d74b3c082a6f7d1cf6eee8bbb768a34ce5abc3d88bfcde25c6443",
+    "scope_rows_canonical_sha256": "3a1e7d16f622ca0c21844be323d0676c955296e4bb20a1200c01d232a818eed4",
+    "scope_sha256": "2fdff0059514153f6e17c201f7f09fc7751ea106a95ca3e00accbdb26855bb67",
+    "supporting_metric_registry_sha256": "5b11b93079f7e6b6b4c85fe0ed0c407097cc1c744e2388c38b704d5fed8ee917",
+    "supporting_scope_rows_canonical_sha256": "fb350a48a53e0b8a9503e65bcb55cedbf561c45ed9985fd4fb5984b5017c2954",
+    "supporting_scope_sha256": "0a21c02af36212a813aed13d5de4082c4b5c8d5199ec378259d4fd2235c25ec6"
+  },
+  "input_contract_hash": "804eeba846c75abc321df0821fe82a05e7bee9719cecff45798be0c82176ab7c",
+  "model_family": "transportation",
+  "next_gate": "DP1_POLICY_ONLY_REPLAY_AND_DP2_ADAPTER_FIXTURES",
+  "pack_counts": {
+    "air": 30,
+    "development": 18,
+    "marine": 17,
+    "surface": 25
+  },
+  "parser_execution_authorized": false,
+  "paths": {
+    "archetype_map": "industrials/transportation/data/transportation_operating_archetypes.csv",
+    "archetype_policy": "industrials/transportation/data/transportation_operating_archetype_policy.yaml",
+    "metric_registry": "industrials/transportation/data/transportation_specialized_metric_discovery_registry.csv",
+    "scope": "industrials/transportation/data/transportation_dedicated_parser_scope.csv",
+    "supporting_metric_registry": "industrials/transportation/data/transportation_parser_supporting_metric_registry.csv",
+    "supporting_scope": "industrials/transportation/data/transportation_dedicated_parser_support_scope.csv"
+  },
+  "policy_version": "transportation_operating_archetypes_v1",
+  "primary_archetype_counts": {
+    "aircraft_lessor": 5,
+    "airport_operator": 4,
+    "aviation_services": 3,
+    "cargo_airline": 2,
+    "marine_operator": 46,
+    "marine_services": 3,
+    "passenger_airline": 23,
+    "precommercial_transport": 2,
+    "surface_asset_leasing": 2,
+    "surface_logistics": 33,
+    "surface_rail_equipment": 4,
+    "surface_rail_operator": 9,
+    "surface_trucking": 24
+  },
+  "production_enabled": false,
+  "registry_version": "transportation_metrics_v3_discovery",
+  "scope_version": "transportation_dedicated_parser_scope_v1",
+  "source_lane_counts": {
+    "DP": 77,
+    "DP-D": 7,
+    "FIN-D": 6
+  },
+  "supporting_registry_version": "transportation_parser_support_v1",
+  "supporting_scope_version": "transportation_dedicated_parser_support_scope_v1"
+}

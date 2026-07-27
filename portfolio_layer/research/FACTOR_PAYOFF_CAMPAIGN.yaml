@@ -1,0 +1,46 @@
+campaign_id: "stage11_factor_payoff_v1"
+frozen_on: "2026-07-25"
+purpose: "Decide whether existing score pillars contain incremental, monetizable information before building weight calibration."
+
+output_dir: "factor_payoff_diagnostics"
+primary_horizon_days: 126
+primary_target: "excess_sector"
+diagnostic_targets: ["resid_sector"]
+primary_regimes: ["ALL", "HEATING_UP"]
+diagnostic_horizons_days: [21, 63, 126, 252]
+
+min_cross_section: 8
+min_dates: 60
+min_independent_windows: 5
+min_complete_case_fraction: 0.90
+quantile_count: 5
+top_fraction: 0.20
+
+bootstrap:
+  confidence: 0.90
+  replications: 1000
+  seed: 7425
+  block_length_trading_days: 131  # 126d label + configured maximum execution lag
+
+inference:
+  fdr_alpha: 0.10
+  family: "all primary-target sector x pillar x primary-regime marginal-and-delta hypotheses"
+  minimum_delta_vs_composite_ic: 0.0
+  minimum_net_quantile_spread_ann: 0.015
+  screen_requires_positive_halves: true
+
+economics:
+  screening_round_trip_cost_bps: 60.0
+  note: "Conservative diagnostic charge only; a passing factor still requires the full D+1-open execution replay."
+
+stop_rule:
+  minimum_passing_factors: 2
+  minimum_passing_sectors: 2
+  pass_decision: "CONTINUE_TO_WEIGHT_CALIBRATION"
+  fail_decision: "STOP_NO_INCREMENTAL_FACTORS"
+
+governance:
+  evidence_only: true
+  may_modify_scoring: false
+  may_modify_production: false
+  lockbox_may_be_opened: false

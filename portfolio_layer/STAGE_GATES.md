@@ -553,6 +553,12 @@ distribution available only as an explicit config option. Macro sector shifts us
 plus a small sleeve floor, so tiny sleeves are not
 silently eliminated by a single adverse macro score.
 
+**Machinery activation (2026-07-25):** machinery is a required Stage 1 source, has a hard 5% Stage 3
+sector cap with equal weights inside the sleeve, and now receives a 5% neutral strategic weight in the
+Stage 7 BL prior. The prior six-sleeve strategic mix is scaled proportionally to the remaining 95%, so the
+strategic weights still sum to 100%. This activates machinery throughout the shadow BL/sleeve evidence
+chain without promoting Stage 7 itself; `black_litterman_fusion.enabled_in_production` remains `false`.
+
 **Authority hierarchy realized in tier1's own machinery** (verified against `tier1_portfolio_optimizer`):
 macro = the **prior/budget** → `benchmark_sector_weights` drives `π = δ·Σ·w_bench`; rotation = the
 **bounded tilt** → `SectorState` × `sector_state_alpha_multipliers`; AQR alpha = per-name **absolute view**
@@ -890,14 +896,64 @@ proper sampling cadence without losing information.
 - `research/68_fit_ridge_alpha_slopes.py` - ridge/Fama-MacBeth slope evidence.
 - `research/69_validate_stage11_calibration.py` and `71_validate_regime_conditional_calibration.py` -
   purged OOS unconditional and regime-conditional validation.
-- `research/72_component_ic_by_regime.py` - component-level IC with global multiplicity control.
+- `research/72_component_ic_by_regime.py` - component-level PIT IC with global multiplicity
+  control, paired component-minus-composite tests, explicit raw and usable pillar-source coverage,
+  and a minimum of three non-overlapping label windows before a component can be attributed.
+  Lockbox exclusion is recomputed from admitted rows rather than asserted. Single-window
+  long-horizon results remain diagnostic.
+- `research/74_factor_payoff_diagnostics.py` - pre-registered, evidence-only stop/go screen for
+  existing factor pillars. At the frozen 126-session horizon it tests marginal IC after removing
+  the composite and the other pillars, paired improvement over the composite, complete-case
+  usability, redundancy, persistence/turnover, and top-minus-bottom payoff after a conservative
+  screening cost. Circular-block bootstrap inference and one combined BH family cover all primary
+  sector/pillar/regime hypotheses. The campaign contract is sealed in
+  `research/FACTOR_PAYOFF_CAMPAIGN.yaml`.
+  The standalone component-minus-composite delta is useful attribution, but it is **not** a valid
+  test of whether a small residual pillar weight improves the existing composite. Therefore
+  `STOP_NO_INCREMENTAL_FACTORS` ends standalone-factor replacement research only; it cannot veto
+  the separately frozen bounded long-only blend campaign.
+  **Frozen development result (2026-07-25):** 154 primary marginal/delta hypotheses were tested;
+  10 marginal-factor cells survived their own FDR test, but zero component-minus-composite deltas
+  survived FDR and zero factors passed the standalone replacement screen. The reported defense
+  45.6% annualized spread is a linear annualization of 540 overlapping 126-day label spreads
+  (mean 22.78% x 252/126), not a realizable replay return; it must not motivate sizing.
+- `backtest/16k_calibrate_long_factor_blend.py` - the corrected, separately pre-registered
+  long-only question. Its frozen contract is
+  `research/LONG_ONLY_FACTOR_BLEND_CAMPAIGN.yaml`. Eight unique sector/pillar candidates are tested
+  one at a time as `composite_z + lambda * residual_pillar_z`. The primary coefficient is
+  unconditional and capped at 0.25. At most one HEATING_UP increment is allowed, capped at 0.05,
+  with total factor weight still capped at 0.25. Inner walk-forward folds select lambda; five outer
+  folds run the unchanged `16g` D+1-open, cost-aware engine through a full-panel, hash-sealed score
+  override. Candidate OOS active returns form one BH family; objective ties, a lambda-zero choice,
+  a boundary choice, weak fold breadth, non-positive stress alpha, or weak HAC significance block
+  continuation. `16g` requires exact one-to-one override coverage and matching panel/file hashes.
+  Research/74 already viewed the entire development window, so no recent development slice can be
+  called confirmation. A development pass means `AWAITING_SEALED_CONFIRMATION`, never promotion;
+  final evidence must come from the unopened lockbox or genuinely prospective data. If development
+  or the one-shot confirmation fails, factor reweighting under the current signal stack stops
+  permanently and research moves to universe breadth, new data, and the short-side cost frontier.
+  **Frozen development result (2026-07-25):**
+  `STOP_FACTOR_REWEIGHTING_CURRENT_SIGNAL_STACK`. All eight candidates were evaluated on the same
+  1,072 paired OOS days. The largest arithmetic active improvements were software-infrastructure
+  risk-control (+0.213%/year, HAC t=1.31, positive in 2/5 folds) and med-device valuation
+  (+0.168%/year, t=1.18, positive in 2/5 folds). No candidate survived the eight-test BH family,
+  no candidate reached t=2 or 4/5 positive folds, and seven of eight selected the 0.25 grid boundary
+  in at least one outer fold. No score weights or production settings changed.
 - `research/70_apply_calibration_feedback.py` - sealed proposal only for cells that passed the evidence gates.
 - `backtest/16_run_ablation_walkforward.py`, `16b_run_regime_parameter_sweep.py`, and
   `16c_sector_neutral_active_arm.py` - net-of-cost overlay, parameter-grid, and six-sector
   single-name active-weight tests. `16c` uses ticker-level PIT spread/commission/borrow costs,
   observed-or-fee-proxy availability, cost stress, short-selection alpha versus an equal-weight
-  sector short, and sector-breadth/coverage gates. It emits evidence only and cannot create a
+  sector short, and sector-breadth/coverage gates. Signals formed at D close execute at the first
+  adjusted open after D; delistings settle at the sealed terminal close. Component-model fits and
+  current tilts use complete pillar rows only; missing pillar values are never neutral-imputed into
+  a trade. Required-sector participation is hard-gated. It emits evidence only and cannot create a
   production long/short target.
+  The corrected 2019-2025 development replay found multiplicity-controlled component IC but no
+  promotable conversion: the component long/short arm was negative net of conservative costs,
+  positive in only one sector, and lacked promotion-grade historical spread/borrow coverage.
+  Do not tune another parameter grid on this window. Any lower-turnover sparse candidate must be
+  pre-registered, frozen, and evaluated prospectively.
 - `backtest/16e_tactical_short_replay.py` - dedicated single-name short strategy. A score observed
   after D close enters at the D+1 adjusted open and is first evaluated at the D+1 close. The profit
   target is net of entry/estimated-exit spread, both commissions, and accrued borrow; a same-session

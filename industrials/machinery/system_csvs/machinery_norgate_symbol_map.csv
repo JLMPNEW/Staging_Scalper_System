@@ -47,7 +47,7 @@ GHM,GHM,GHM,US Equities,Graham Corporation,Graham Corp Common,1990-01-02,,verifi
 GNRC,GNRC,GNRC,US Equities,Generac Holdings Inc.,Generac Holdings Inc Common,2010-02-11,,verified_exact_active,exact_active_symbol_and_name_match,0.851064,,1,auto_verified,
 GRC,GRC,GRC,US Equities,The Gorman-Rupp Company,Gorman-Rupp Co Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,0.727273,,1,auto_verified,
 GTES,GTES,GTES,US Equities,Gates Industrial Corporation plc,Gates Industrial Corporation plc Common,2018-01-25,,verified_exact_active,exact_active_symbol_and_name_match,0.901408,,1,auto_verified,
-GTLS,GTLS,GTLS,US Equities,"Chart Industries, Inc.",Chart Industries Inc Common,2006-07-26,,verified_exact_active,exact_active_symbol_and_name_match,0.851064,,1,auto_verified,
+GTLS,GTLS,GTLS,US Equities,"Chart Industries, Inc.",Chart Industries Inc Common,2006-07-26,2026-07-16,verified_override,sec_merger_delisting_and_last_price_date_match,0.851064,2026,1,manual_verified,SEC Form 8-K confirms Baker Hughes acquisition and NYSE delisting on 2026-07-16; retain current GTLS Norgate symbol until local metadata migrates it to the delisted database.
 HLIO,HLIO,HLIO,US Equities,"Helios Technologies, Inc.",Helios Technologies Inc Common,1997-01-09,,verified_exact_active,exact_active_symbol_and_name_match,0.867925,,1,auto_verified,
 HUBB,HUBB,HUBB,US Equities,Hubbell Incorporated,Hubbell Inc Common,1990-01-02,,verified_exact_active,exact_active_symbol_and_name_match,0.684211,,1,auto_verified,
 HY,HY,HY,US Equities,"Hyster-Yale, Inc.",Hyster-Yale Inc Class A Common,2012-09-28,,verified_exact_active,exact_active_symbol_and_name_match,0.666667,,1,auto_verified,

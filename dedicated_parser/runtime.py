@@ -3,12 +3,16 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from importlib import import_module
 from pathlib import Path
 from typing import Iterable
 
-from dedicated_parser.adapters import load_extractor, load_fact_mapper
+from dedicated_parser.adapters import (
+    load_evidence_postprocessor,
+    load_extractor,
+    load_fact_mapper,
+)
 from dedicated_parser.contracts import WorkItem, WorkResult, file_sha256
 from dedicated_parser.providers.arelle_provider import extract_facts
 from dedicated_parser.providers.edgartools_provider import inspect_full_submission
@@ -123,6 +127,9 @@ def parse_work_item(
         fact_mapper = load_fact_mapper(item.adapter_path)
         if fact_mapper is not None:
             evidence.extend(fact_mapper(item, tuple(facts)))
+        postprocessor = load_evidence_postprocessor(item.adapter_path)
+        if postprocessor is not None:
+            evidence = list(postprocessor(item, tuple(evidence)))
         reviewed_evidence = apply_review_policies(item, evidence)
         return WorkResult(
             work_key=item.work_key,
@@ -156,9 +163,24 @@ def _persist_batch(
     run_id: int,
     results: list[WorkResult],
 ) -> None:
-    for result in results:
-        persist_result(conn, run_id=run_id, result=result)
-    conn.commit()
+    # One bounded transaction per batch: either the whole batch lands or none
+    # of it does. Without the rollback, a mid-batch failure leaves half-written
+    # uncommitted rows that a later commit (e.g. finish_run) would persist.
+    try:
+        for result in results:
+            # Attempt bookkeeping travels with the result so attempt_count only
+            # counts work that actually executed; items still queued when a run
+            # dies stay PENDING instead of a bogus RUNNING with an extra attempt.
+            mark_work_started(conn, work_key=result.work_key)
+            persist_result(conn, run_id=run_id, result=result)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+REGISTRATION_BATCH_SIZE = 500
+STALL_TIMEOUT_SECONDS = 900.0
 
 
 def execute_plan(
@@ -169,24 +191,23 @@ def execute_plan(
     worker_count: int,
     provider_state_dir: Path,
     write_batch_size: int = 8,
+    stall_timeout_seconds: float = STALL_TIMEOUT_SECONDS,
 ) -> tuple[int, int]:
     items = list(work_items)
-    with conn:
-        for item in items:
-            register_work(conn, run_id=run_id, item=item)
-            mark_work_started(conn, item=item)
+    # Bounded registration transactions instead of one plan-sized transaction.
+    for start in range(0, len(items), REGISTRATION_BATCH_SIZE):
+        with conn:
+            for item in items[start : start + REGISTRATION_BATCH_SIZE]:
+                register_work(conn, run_id=run_id, item=item)
     completed = 0
     failed = 0
     buffer: list[WorkResult] = []
     if worker_count == 1:
-        result_stream = (
-            parse_work_item(
+        for item in items:
+            result = parse_work_item(
                 item,
                 provider_state_dir=str(provider_state_dir),
             )
-            for item in items
-        )
-        for result in result_stream:
             buffer.append(result)
             completed += result.status == "COMPLETED"
             failed += result.status != "COMPLETED"
@@ -203,26 +224,58 @@ def execute_plan(
                 ): item
                 for item in items
             }
-            for future in as_completed(futures):
-                item = futures[future]
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    result = WorkResult(
-                        work_key=item.work_key,
-                        model_family=item.model_family,
-                        adapter_version=item.adapter_version,
-                        filing=item.filing,
-                        parser_release=item.parser_release,
-                        status="FAILED",
-                        error=f"WorkerFailure: {type(exc).__name__}: {exc}",
-                    )
-                buffer.append(result)
-                completed += result.status == "COMPLETED"
-                failed += result.status != "COMPLETED"
-                if len(buffer) >= write_batch_size:
-                    _persist_batch(conn, run_id=run_id, results=buffer)
-                    buffer.clear()
+            pending = set(futures)
+            while pending:
+                # Stall watchdog: progress-based, so a long healthy run never
+                # trips. Only when NO worker completes anything within the
+                # window (a pathological document wedged the pool) do we fail
+                # the remaining items instead of hanging the run forever.
+                done, pending = wait(
+                    pending,
+                    timeout=stall_timeout_seconds,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    for future in pending:
+                        future.cancel()
+                        item = futures[future]
+                        buffer.append(
+                            WorkResult(
+                                work_key=item.work_key,
+                                model_family=item.model_family,
+                                adapter_version=item.adapter_version,
+                                filing=item.filing,
+                                parser_release=item.parser_release,
+                                status="FAILED",
+                                error=(
+                                    "WorkerStalled: no worker completed within "
+                                    f"{stall_timeout_seconds:.0f}s; remaining work aborted"
+                                ),
+                            )
+                        )
+                        failed += 1
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                for future in done:
+                    item = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = WorkResult(
+                            work_key=item.work_key,
+                            model_family=item.model_family,
+                            adapter_version=item.adapter_version,
+                            filing=item.filing,
+                            parser_release=item.parser_release,
+                            status="FAILED",
+                            error=f"WorkerFailure: {type(exc).__name__}: {exc}",
+                        )
+                    buffer.append(result)
+                    completed += result.status == "COMPLETED"
+                    failed += result.status != "COMPLETED"
+                    if len(buffer) >= write_batch_size:
+                        _persist_batch(conn, run_id=run_id, results=buffer)
+                        buffer.clear()
     if buffer:
         _persist_batch(conn, run_id=run_id, results=buffer)
     return completed, failed

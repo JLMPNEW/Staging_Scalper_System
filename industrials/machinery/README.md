@@ -13,12 +13,16 @@ family-owned row is written with `model_family=machinery`, and loaders delete or
 replace only machinery-scoped rows. Raw market and SEC facts remain shared by
 ticker and source.
 
-The canonical active seed has 114 tickers in five calibration cohorts. The
-delisted seed has 50 research candidates. Norgate identity resolution is
+The canonical active seed has 113 tickers in five calibration cohorts. The
+delisted seed has 51 research candidates. Norgate identity resolution is
 explicit: `actual_ticker` is the historical exchange symbol and
 `norgate_symbol` is the local Norgate database symbol, including Norgate's date
 suffix when present. Unresolved or ambiguous mappings are never substituted
 with a same-text but different issuer.
+
+The current production refresh and portfolio contract pass as of 2026-07-24.
+The complete 28-metric review is in
+`ALL_METRICS_REVIEW_2026-07-24.md`.
 
 Core commands:
 
@@ -26,8 +30,65 @@ Core commands:
 C:\Users\josel\miniconda3\python.exe industrials\machinery\scripts\00_validate_machinery_seed.py
 C:\Users\josel\miniconda3\python.exe industrials\machinery\scripts\01_resolve_machinery_norgate_history.py
 C:\Users\josel\miniconda3\python.exe industrials\machinery\scripts\15_import_machinery_norgate_prices.py --dry-run
-C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\17_run_machinery_refresh_pipeline.py --asof 2026-07-22 --dry-run
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\17_run_machinery_refresh_pipeline.py --asof 2026-07-24 --dry-run
 ```
+
+Sealed calibration and portfolio-validation commands:
+
+```powershell
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\21_run_machinery_stage8_calibration.py --force --require-stage9-ready
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\21_validate_machinery_stage8_calibration.py --require-stage9-ready
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\22_run_machinery_stage9_backtest.py --force --require-stage12-ready
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\22_validate_machinery_stage9_backtest.py --require-stage12-ready
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\23_build_machinery_stage12_governance_lock.py --force
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\23_validate_machinery_stage12_governance_lock.py
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\10b_validate_machinery_dashboard_reports.py --asof 2026-07-24
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\20_validate_machinery_portfolio_adapter.py --asof 2026-07-24 --expect-production
+```
+
+Stage 8 consumes weekly survivorship-corrected sidecars through `2025-12-31`
+and never queries a price after that date. It writes component/raw-signal
+diagnostics, purged splits, constrained trials, expanding walk-forward blocks,
+D+1 adjusted-open execution labels, acceptance, and hash manifests under
+`output/industrials/machinery/stage8`.
+
+Stage 9 reads only those sealed files. It evaluates baseline and calibrated
+weights across top-decile/top-quintile, equal/score-weighted, long-only and
+long-short variants. Portfolio results use non-overlapping D+1 adjusted-open
+windows, transaction and short-borrow costs, holdings-level attribution,
+turnover, cohort concentration, ADV coverage, and trade-capacity limits. The
+validation-only selection is `long_only_q20_equal`; its untouched holdout and
+5x configured-AUM capacity gates pass. Its production-policy parity artifact
+reconstructs the selected names and weights exactly across all 26 validation
+and holdout periods. Stage 9 remains report-only.
+
+Stage 12 is active as of 2026-07-24. It freezes upstream hashes, verifies the
+$300K AUM contract, and applies the validated `long_only_q20_equal` policy
+through the industrial-family portfolio adapter. The production file contains
+113 rows, keeps 99 names broadly OOS-valid, selects 20 names, and reconciles
+exactly 20 candidates to 20 adapter-investable rows. The portfolio optimizer
+preserves equal weights within the machinery sleeve and produced a 4.1636%
+sleeve allocation under the approved 5% cap.
+
+Script 25 is the production transaction coordinator. On or after 5:00 p.m. ET
+on the approved date it holds the master orchestration lock, runs one incremental machinery
+refresh, prepares the candidate, changes only machinery `required` and its
+approved 5% cap, publishes the rank file, and runs one complete strategic
+portfolio smoke. The smoke requires exact Stage 1 membership, exact optimizer
+membership, equal within-sleeve weights, the 5% cap, all production portfolio
+groups, and a passing final-book manifest. Any failure restores the exact
+portfolio config and shadow dashboard bytes. Only after that smoke passes does
+the transaction write the hash-sealed production activation state consumed by
+later daily scorers. The 2026-07-24 transaction passed using hash-validated
+prefix reuse and a bounded downstream smoke; it did not rerun historical
+snapshots or macro stages. Subsequent dates reconstruct the approved
+top-quintile equal-weight policy; missing, changed, or inconsistent activation
+evidence fails closed. Transaction evidence is written under
+`output/industrials/machinery/stage12/activation_transactions/<date>/`.
+
+Script 25 remains the fail-closed coordinator for a future, separately
+governed activation. It must not be rerun for the already active 2026-07-24
+policy.
 
 The one-time resumable financial-disclosure bootstrap adds
 `--bootstrap-sec-archives`. It reuses cached SEC documents and extracts
@@ -70,12 +131,12 @@ transcripts are retained as review evidence and are never promoted directly.
 The issuer-IR stage is also included in the daily orchestrator:
 
 ```powershell
-C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\07b_sync_machinery_issuer_ir_disclosures.py --asof 2026-07-20 --allow-partial
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\07b_sync_machinery_issuer_ir_disclosures.py --asof 2026-07-24 --allow-partial
 ```
 
 ```powershell
-C:\Users\josel\miniconda3\python.exe industrials\machinery\scripts\08b_audit_machinery_disclosure_candidates.py --asof 2026-07-21 --scan-cache --limit 40 --max-filings-per-ticker 12
-C:\Users\josel\miniconda3\python.exe industrials\machinery\scripts\08c_audit_machinery_recoverable_coverage.py --asof 2026-07-21
+C:\Users\josel\miniconda3\python.exe industrials\machinery\scripts\08b_audit_machinery_disclosure_candidates.py --asof 2026-07-24 --scan-cache --limit 40 --max-filings-per-ticker 12
+C:\Users\josel\miniconda3\python.exe industrials\machinery\scripts\08c_audit_machinery_recoverable_coverage.py --asof 2026-07-24
 ```
 
 The daily orchestrator runs the bounded 40-ticker cache pass after SEC and
@@ -89,27 +150,59 @@ projection delay. The explicit full-history recovery is local, restartable,
 and includes ended/delisted point-in-time members:
 
 ```powershell
-C:\Users\josel\miniconda3\python.exe industrials\machinery\scripts\08b_audit_machinery_disclosure_candidates.py --asof 2026-07-21 --scan-cache --scan-start-date 2018-01-01 --include-historical --limit 0 --max-filings-per-ticker 0 --resume
+C:\Users\josel\miniconda3\python.exe industrials\machinery\scripts\08b_audit_machinery_disclosure_candidates.py --asof 2026-07-24 --scan-cache --scan-start-date 2018-01-01 --include-historical --limit 0 --max-filings-per-ticker 0 --resume
 ```
 
-## Independent Parser Pilot
+## Independent Parser
 
-The repository-level `dedicated_parser` package now supports a machinery
-shadow pilot. It reads the existing industrials database and SEC archive cache,
-uses EdgarTools for local submission structure and Arelle for dimensional
-XBRL, and writes only additive `sec_parser_*` shadow tables. Enable it with
-`--include-dedicated-parser-shadow` and pass the Python environment containing
-the pinned dependencies through `--dedicated-parser-python`. The stage is
-opt-in and does not alter financial features, scoring, dashboard files, or
-historical snapshots. See `dedicated_parser/README.md` for acceptance gates.
-Release `0.3.0` also provides an assessment-only command, exact versioned
-review policies, extraction-funnel artifacts, a fast complete-cache gate, and
-explicit ticker-bounded hydration through the existing machinery SEC sync.
-The initial full active-universe audit identified 33 missing accessions across
-ATS, BLDP, KRNT, SHMD, and SSYS. The 50-ticker benchmark hydrated all 27 gaps
-for ATS, BLDP, KRNT, and SHMD; six SSYS accessions remain outside that frozen
-cohort. Parser execution can be blocked until its selected source window is
-complete.
+The repository-level `dedicated_parser` package supports all sector adapters
+and is production-enabled for machinery. It reuses the existing industrials
+database and SEC archive cache, uses EdgarTools for local submission structure
+and Arelle for dimensional XBRL, and retains additive `sec_parser_*` evidence
+tables. Reviewed promotion writes only approved facts to the shared
+`dedicated_parser_production` taxonomy; the machinery financial builder then
+projects those facts under its normal period, scope, currency, and PIT gates.
+Assessment-only runs remain available through
+`--include-dedicated-parser-shadow`. See `dedicated_parser/README.md` for the
+promotion and acceptance contracts.
+
+Active-universe run 36 evaluated all 113 tickers and all 4,403 cached
+accessions with zero cache gaps and zero failures. It was not promoted
+wholesale because validation found three false MWA orders observations.
+Adapter `v3.6` now rejects that pattern. Bounded runs 37 through 41 validated
+the reviewed corrections, and promotions 8 through 12 completed with zero
+conflicts. Complete results are in `ALL_METRICS_REVIEW_2026-07-24.md`.
+
+Before rebuilding historical partitions after production promotions, run the
+read-only depth and impact preflight with explicit promotion IDs:
+
+```powershell
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\18a_preflight_machinery_historical_promotions.py --config industrials\machinery\config.yaml --promotion-ids 9,10,12
+```
+
+The preflight does not update the database or publish historical files. It
+uses the existing survivorship sidecars as a conservative lower bound, credits
+no unmaterialized promotion gains, subtracts every observation potentially
+exposed to a suppression, and writes the go/no-go decision plus the exact
+affected partition list under
+`output/industrials/machinery/historical_backfill/preflight/`.
+
+After a `GO_AFFECTED_PARTITIONS_ONLY` decision, materialize the exact
+fingerprinted partition list with:
+
+```powershell
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\18b_materialize_machinery_historical_promotions.py --config industrials\machinery\config.yaml --resume
+```
+
+The materializer reruns the preflight and refuses stale fingerprints. It
+restores each historical sidecar into temporary feature rows, rebuilds only
+the affected tickers, publishes and validates the full partition, then
+restores the database to its exact prior state. The live end-date partition
+is refreshed in place and is never compacted. Completion requires combined
+coverage and the industrial-family portfolio adapter to pass all 1,900 dated
+files. Promotions 9, 10, and 12 passed 689/689 affected partitions under
+fingerprint
+`bc2f7a17a2df2c6e27a951e2a608a53c11c8b105aee7607e39ff18d9233a8b34`.
 
 The 2018 lower bound intentionally retains prior-year evidence needed for the
 2019-01-02 calibration boundary. The per-ticker scan ledger keys completion by
@@ -181,6 +274,7 @@ output/industrials/machinery/dashboard/YYYY-MM-DD/machinery_stage11_survivorship
 output/industrials/machinery/dashboard/YYYY-MM-DD/machinery_final_rank_table_manifest.json
 ```
 
-Until an OOS calibration is sealed, every dashboard row is shadow-only and
-non-investable. The survivorship-corrected sidecar may still be consumed for
-research calibration when its row-level eligibility fields pass.
+Stages 8 and 9 are sealed and Stage 12 is active. The 2026-07-24 production
+rank table is the live OOS contract: 20 rows are investable and 99 remain
+research-eligible. The separate survivorship-corrected sidecar remains the
+immutable shadow research and calibration source of record.

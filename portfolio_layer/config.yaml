@@ -106,12 +106,12 @@ score_contract:
       file_path: "industrials/defense/dashboard/{yyyy-mm-dd}/defense_final_rank_table.csv"
       require_oos_score_valid: true
       calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
-    # Machinery remains an enabled optional shadow source until its OOS calibration
-    # is sealed. The adapter ingests rows for diagnostics but cannot size them.
+    # Machinery is production-active after its sealed Stage 8/9 calibration and
+    # Stage 12 activation. The 20-name validated sleeve is budgeted below.
     - model_family: machinery
       adapter: industrial_family
       enabled: true
-      required: false
+      required: true
       staleness_tolerance_days: 3
       sector: "Industrials"
       industry: "Machinery"
@@ -175,7 +175,7 @@ risk_panel:
       price_history_csv: "data/price_lineage_p.csv"
       issuer_id: "CIK0001474432"
       reason: "Pure Storage/Everpure active ticker; stitch PSTG history before P effective date"
-  benchmark_tickers: [SPY, QQQ, SMH, SOXX, XBI, XLK, XLV, XLF, XLE, XLI, XLP, XLY, XLU, XLB, XLRE, XLC, XAR, ITA, VIS]
+  benchmark_tickers: [SPY, QQQ, SMH, SOXX, XBI, XLK, XLV, XLF, XLE, XLI, XLP, XLY, XLU, XLB, XLRE, XLC, XAR, ITA, VIS, IYT]
   hedge_rotation_etfs: [IGV, IHI, XAR, MCHI, FXI, INDA, EWZ, EWG, EWY, EWT, IEMG]
   sector_etf_map:                                  # source_pipeline -> shrinkage-target ETF
     semiconductors: SOXX
@@ -185,6 +185,7 @@ risk_panel:
     med_devices: IHI
     defense: XAR
     machinery: XLI
+    transportation: IYT
   fetch:
     chart_url_templates:
       - "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -265,12 +266,18 @@ optimizer:
     # Research/shadow books (walk-forward arms, BL, sleeve diagnostics) are intentionally UNCAPPED —
     # a larger live budget is earned through Stage 7/BL fusion + Stage 11 calibration evidence.
     defense: 0.05
-    machinery: 0.00
+    machinery: 0.05
+    transportation: 0.00
     # deployable-book concentration/cash/liquidity policy 2026-07-20: cap the tech sleeves so the LIVE
     # book cannot over-concentrate in Information Technology (consumed ONLY by optimizer 09/10).
     software_infrastructure: 0.25
     semiconductors: 0.15
     technology_hardware: 0.12
+  # Preserve the sector model's validated within-sleeve construction while
+  # allowing the cross-sector optimizer to choose the sleeve's total budget.
+  # Machinery's validated production sleeve retains equal weights inside its
+  # optimizer-selected budget, capped at 5% of gross above.
+  fixed_equal_weight_sleeves: [machinery]
   # deployable-book concentration/cash/liquidity policy 2026-07-20: pre-solve liquidity floor — names
   # whose run-dir risk/spread_snapshot.csv median_half_spread_bps exceeds this are excluded from sizing
   # (fail-open: a missing snapshot or missing/blank row never excludes). Optimizer 09 only.
@@ -306,7 +313,7 @@ transaction_costs:
 rotation:
   enabled_in_production: false              # HARD shadow-only; promotion waits for Stage 7 fusion + Stage 11 OOS
   # Broad sector context to rank against (so a strong sleeve in a weak tape still gets a moderate percentile).
-  rank_universe_etfs: [XLK, XLV, XLF, XLE, XLI, XLP, XLY, XLU, XLB, XLRE, XLC, SOXX, IGV, XBI, IHI, XAR]
+  rank_universe_etfs: [XLK, XLV, XLF, XLE, XLI, XLP, XLY, XLU, XLB, XLRE, XLC, SOXX, IGV, XBI, IHI, XAR, IYT]
   momentum_windows_days: [21, 63, 126]      # multi-horizon total-return momentum
   momentum_weights: [0.5, 0.3, 0.2]         # blend weights (normalized internally)
   trend_filter:
@@ -388,6 +395,10 @@ macro:
       macro_sector_fallback: "Industrials"
       industries: ["Machinery", "Specialty Industrial Machinery", "Farm & Heavy Construction Machinery", "Building Products & Equipment"]
       industry_aggregates: ["Machinery"]
+    transportation:
+      macro_sector_fallback: "Industrials"
+      industries: ["Transportation", "Road & Rail", "Air Freight & Logistics", "Passenger Airlines", "Trucking", "Marine Transportation"]
+      industry_aggregates: ["Transportation"]
 
 # Stage 7 - Black-Litterman fusion (SHADOW-ONLY adapter over the vendored optimizer).
 # Units = annualized (option B): only Stage 1 final_score becomes an expected-return view; rating/state/
@@ -419,13 +430,16 @@ black_litterman_fusion:
   sector_alpha_scale_annual: 0.03           # annual magnitude of the rotation/macro sector tilt
   macro_sector_baseline_source: "strategic_weights"  # strategic_weights | stage3_weights | eligible_count
   strategic_sector_weights:                 # neutral sleeve policy before bounded macro/rotation tilts
-    biotech: 0.285
-    med_devices: 0.095
-    semiconductors: 0.2375
-    software_infrastructure: 0.19
-    technology_hardware: 0.1425
-    defense: 0.05
-    machinery: 0.00
+    # Machinery activation 2026-07-25: allocate 5% and proportionally scale the
+    # prior six-sleeve strategic mix to the remaining 95%; total remains 1.0.
+    biotech: 0.27075
+    med_devices: 0.09025
+    semiconductors: 0.225625
+    software_infrastructure: 0.1805
+    technology_hardware: 0.135375
+    defense: 0.0475
+    machinery: 0.05
+    transportation: 0.00
   benchmark_within_sector_source: "equal"   # equal | stage3_weights; ticker-level BL prior inside each sleeve
   macro_sector_shift_mode: "relative_with_floor"
   macro_sector_max_shift: 0.10              # absolute safety cap on |shift| before projection
@@ -465,6 +479,7 @@ sleeves:
     med_devices: "IHI"
     defense: "XAR"
     machinery: "XLI"
+    transportation: "IYT"
   factor_risk_caps:
     min_idiosyncratic_share: 0.50            # >= this share of book variance must be idiosyncratic
     max_market_share: 0.25                   # market-beta risk share cap
@@ -794,6 +809,7 @@ sector_neutral_arm:
     max_shortable_age_days: 7
     allow_fee_proxy_availability: true     # a same/prior-week IB fee observation is borrow evidence
     allow_unknown_availability: true       # allowed for research, but excluded from promotion coverage
+    commission_dominance_warn_fraction: 0.75
     stress_half_spread_fallback_bps: 30.0
     stress_observed_spread_multiplier: 1.5
     stress_missing_borrow_fee_annual: 0.25
@@ -807,7 +823,38 @@ sector_neutral_arm:
     min_stress_net_active_ann: 0.0
     min_positive_sectors: 4
     min_actual_borrow_weight_fraction: 0.90
+    min_exact_spread_weight_fraction: 0.90
     min_observed_or_fee_proxy_availability_weight_fraction: 0.90
+
+# Stage 11 - SHARED tactical universe-hygiene / data-fault / evidence policy (backtest/16e + 16g).
+# Frozen 2026-07-25 after the tactical long/short diagnostic found that 91.6% of realized short losses
+# came from a single corrupt expert-market tape (LLNW_EGIO sub-penny prints; XTIA adjusted open at
+# $291M). Every clause below is a fail-VISIBLE data gate: an excluded name is written to the run's
+# hygiene CSV with its reason and counted in the manifest, never silently dropped.
+tactical:
+  # ---- universe hygiene (entry filters; evaluated on the D+1 execution open) ----
+  min_entry_price: 1.0                    # both books: never enter a sub-$1 adjusted open
+  min_median_dollar_volume_20d: 250000    # trailing 20-session median of adj_close * volume, in USD
+  hygiene_lookback_sessions: 20           # trailing window for both the ADV median and the fault scan
+  min_dollar_volume_observations: 10      # min non-null sessions inside the window, else reject entry
+  # ---- data-fault detector ----
+  # An adjusted series that moved more than this fraction in one session on fewer than the share
+  # threshold is an expert-market/corporate-action artifact, not a tradable price. Any such session
+  # inside the trailing window poisons the name for entry AND for continued exposure.
+  data_fault_single_session_move: 0.80
+  data_fault_max_session_shares: 10000
+  # ---- gap guard ----
+  gap_exposure_cap_multiple: 3.0          # force cover/sell when current exposure > this x entry weight
+  daily_return_sanity_band: 0.50          # |portfolio day return| above this is a data fault, not P&L
+  # ---- beta-adjusted, matched-window selection alpha ----
+  beta_lookback_sessions: 63              # rolling OLS beta of the name to its sector ETF
+  beta_min_observations: 40               # fewer paired returns than this -> beta = 1.0 (documented)
+  beta_clip_min: 0.25
+  beta_clip_max: 2.5
+  # ---- evidence floors shared by both replays ----
+  hac_min_lag_days: 5                     # HAC lag = max(hac_min_lag_days, ceil(mean_hold_days / 5))
+  hac_horizon_divisor: 5
+  min_outer_folds_for_consistency: 5      # fold-consistency numbers are suppressed below this
 
 # Stage 11 - dedicated EOD tactical single-name short replay (backtest/16e).
 # Signal at D close, enter at the next session open, and return covered capital to CASH. This is a
@@ -828,19 +875,31 @@ tactical_short:
   target_short_gross: 0.30
   max_position_weight: 0.015
   max_borrow_fee_annual: 0.25
+  # Short-side hygiene floor on top of tactical.min_entry_price. Borrowing a $1-$5 name is neither
+  # reliably available nor executable at anything close to the modelled spread, and the diagnostic
+  # showed the loss tail lives entirely below this price.
+  min_short_entry_price: 5.0
   short_costs:
     market_positioning_db_path: "${MARKET_POSITIONING_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite}"
     research_aum_usd: 300000
     commission_per_order_usd: 1.25
-    historical_half_spread_fallback_bps: 15.0
-    missing_borrow_fee_annual: 0.10
+    historical_half_spread_fallback_bps: 15.0   # legacy flat fallback; only used if the tier map is empty
+    # Price-tiered half spread used when the sealed liquidity panel has no exact quote for the
+    # (date, ticker). A flat 15bps is optimistic by an order of magnitude for microcaps. Tiers are
+    # evaluated highest min_price first against the session's adjusted close.
+    tiered_half_spread_fallback_bps:
+      - {min_price: 20.0, half_spread_bps: 10.0}
+      - {min_price: 5.0, half_spread_bps: 25.0}
+      - {min_price: 1.0, half_spread_bps: 75.0}
+      - {min_price: 0.0, half_spread_bps: 300.0}
+    missing_borrow_fee_annual: 0.25        # hard-to-borrow-consistent; was 0.10 (optimistic)
     max_borrow_fee_age_days: 7
     max_shortable_age_days: 7
     allow_fee_proxy_availability: true
-    allow_unknown_availability: true
+    allow_unknown_availability: false      # FAIL CLOSED: unknown borrow is not a shortable name
     stress_half_spread_fallback_bps: 30.0
     stress_observed_spread_multiplier: 1.5
-    stress_missing_borrow_fee_annual: 0.25
+    stress_missing_borrow_fee_annual: 0.375
     stress_observed_borrow_multiplier: 1.5
   promotion:
     min_trades: 500
@@ -852,25 +911,85 @@ tactical_short:
     min_actual_borrow_weight_fraction: 0.90
     min_observed_or_fee_proxy_availability_weight_fraction: 0.90
     min_candidate_execution_ohlcv_fraction: 0.95
+    # Minimum non-overlapping executable windows (stage11_common.independent_windows) in the replay
+    # span. Falls back to the walkforward block when absent.
+    min_independent_windows: 6
 
 # Stage 11 - nested, purged calibration of the tactical-short exit policy (16f).
 # The grid is intentionally limited to economically interpretable neighboring
 # values. Outer folds are untouched by parameter selection.
 tactical_short_calibration:
   dir: "tactical_short_calibration"
-  max_holding_days: [1, 2, 3, 5, 7]
+  # Grid redesign 2026-07-25. One- and two-session holds were degenerate: the profit target and the
+  # stop can never bind inside the horizon, so whole target columns produced identical objectives and
+  # the minimum-value tie-breaker "selected" a parameter that was never actually chosen by evidence.
+  max_holding_days: [3, 5, 7, 10, 15]
   net_profit_targets: [0.005, 0.01, 0.02, 0.03]
-  stop_losses: [0.03, 0.05]
-  outer_folds: 4
+  stop_losses: [0.05, 0.08]
+  # A target that does not clear the estimated round trip cannot be reached net; such combinations are
+  # rejected at grid construction with an explicit log line rather than silently evaluated.
+  # 2 x 25bps tiered half spread (the $5-$20 tier that the $5 short floor implies) + 2 x ~2.8bps
+  # commission at the 1.5% max position weight = ~56bps; rounded up to 60bps.
+  estimated_round_trip_cost_bps: 60.0
+  target_cost_multiple: 1.5
+  outer_folds: 7                          # 5 materialize under minimum_outer_train_dates=252
   outer_initial_fraction: 0.50
   minimum_outer_train_dates: 252
-  minimum_valid_outer_folds: 3
+  minimum_valid_outer_folds: 3            # legacy floor; superseded by min_outer_folds below
+  min_outer_folds: 5                      # FAIL CLOSED below this many evaluable outer folds
   inner_folds: 3
+  min_inner_folds: 2                      # nested selection needs at least two inner evaluations
   inner_initial_fraction: 0.50
   minimum_inner_train_dates: 126
   embargo_trading_days: 2
   stability_penalty: 0.50
+  # 2026-07-26 fix, mirrored from the tactical-long twin (16h) where it was diagnosed live. The
+  # objective is mean - stability_penalty * pstdev over the evaluable inner windows, and pstdev of a
+  # SINGLE window is identically zero: such a candidate pays no stability penalty and outranks
+  # candidates measured three times. Every short candidate currently shares one inner-fold set whose
+  # size is already gated by min_inner_folds, so this is a latent hole here rather than a live one --
+  # it opens the moment min_inner_folds drops to 1. Candidates below this floor are marked
+  # insufficient_evaluation_windows and EXCLUDED from selection; if all are, the stage selects
+  # nothing and records why.
+  minimum_objective_windows: 2
   min_parameter_fold_consistency: 0.50
+  # No selection on an objective tie: a tie means the objective did not discriminate, so the honest
+  # action is no trade, not "take the smallest value in the grid".
+  objective_tie_tolerance: 1.0e-9
+
+# Stage 11 - PRE-REGISTERED LIQUID-TIER VARIANT of the tactical short program (registered
+# 2026-07-26, see backtest/LIQUID_SHORT_TEST.md). FAIL-CLOSED AND OFF BY DEFAULT: nothing in this
+# block is read unless backtest/16e and backtest/16f are invoked with --liquid-tier. The sealed
+# full-universe run (2026-07-05-v3: OOS selection alpha -5.7%/yr, active t -2.24, all five outer
+# folds negative) is never re-read, re-run or overwritten by it; the liquid variant writes to its
+# own sibling directories named below.
+#
+# HYPOTHESIS. The full-universe short book lost to costs, not to a bad signal. Restricting entries
+# to the top-liquidity tier moves the modelled round trip from the microcap stack (75-300bps
+# half spread tiers, hard-to-borrow fallbacks) into the 10-25bps tiers, so if the ranking carries
+# any short-side information the liquid tier is where it must show up.
+#
+# The two keys below are the ONLY behavioural change. They TIGHTEN the corresponding full-universe
+# floors (tactical_short.min_short_entry_price = 5.0 and tactical.min_median_dollar_volume_20d =
+# 250000); 16e refuses to run --liquid-tier if either value would loosen a gate. Every other piece
+# of corrected machinery -- tiered spreads, fail-closed borrow availability, the objective window
+# floor, the candidate cache, the [3,5,7,10,15] holding grid, the no-tie selection rule and the
+# promotion gates -- is shared with the full-universe configuration and is deliberately unchanged.
+tactical_short_liquid:
+  min_short_entry_price: 10.0             # was 5.0; at >=$10 the fallback tiers are 10bps / 25bps
+  min_median_dollar_volume_20d: 5000000   # was 250000; trailing 20-session median of adj_close*volume
+  # Sibling artifact directories. The sealed full-universe outputs under tactical_short/ and
+  # tactical_short_calibration/ are never written by a --liquid-tier run.
+  replay_dir: "tactical_short_liquid"
+  calibration_dir: "tactical_short_liquid_calibration"
+  # INFRASTRUCTURE ONLY. 16f accepts an override here for exactly three wall-clock/retry keys and
+  # refuses to start if this block tries to override anything statistical (grid, folds, objective,
+  # penalties, tolerances). The first liquid attempt (2026-07-26T18:52Z) died at outer3 candidate
+  # 18/30 because a single 16e candidate exceeded the shared 900s ceiling while the machine was
+  # saturated by unrelated jobs; the ceiling is a machine-load guard, not a modelling choice.
+  candidate_timeout_seconds: 7200
+  candidate_max_attempts: 3
+  candidate_retry_delay_seconds: 5
 
 # Stage 11 - dedicated long-only execution replay (backtest/16g). This does not replace the
 # Stage 3/4 baseline. It tests whether the highest-ranked names add net selection alpha using
@@ -889,7 +1008,13 @@ tactical_long:
     market_positioning_db_path: "${MARKET_POSITIONING_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite}"
     research_aum_usd: 300000
     commission_per_order_usd: 1.25
-    historical_half_spread_fallback_bps: 15.0
+    historical_half_spread_fallback_bps: 15.0   # legacy flat fallback; only used if the tier map is empty
+    # Same price-tiered fallback as the short book: a flat 15bps is not a microcap half spread.
+    tiered_half_spread_fallback_bps:
+      - {min_price: 20.0, half_spread_bps: 10.0}
+      - {min_price: 5.0, half_spread_bps: 25.0}
+      - {min_price: 1.0, half_spread_bps: 75.0}
+      - {min_price: 0.0, half_spread_bps: 300.0}
     stress_half_spread_fallback_bps: 30.0
     stress_observed_spread_multiplier: 1.5
   # Core gates deliberately match tactical_short.promotion. Borrow and availability
@@ -902,23 +1027,48 @@ tactical_long:
     min_positive_sectors: 4
     min_stress_net_ann: 0.0
     min_candidate_execution_ohlcv_fraction: 0.95
+    min_independent_windows: 6
 
 # Stage 11 - nested, purged calibration of the long-only holding horizon (backtest/16h).
 # No profit target or price stop is fitted; a position exits on the first signal
 # invalidation or at the selected maximum horizon.
 tactical_long_calibration:
   dir: "tactical_long_calibration"
-  max_holding_days: [15, 30, 63, 126, 252]
-  outer_folds: 4
-  outer_initial_fraction: 0.50
-  minimum_outer_train_dates: 126
-  minimum_valid_outer_folds: 3
+  # 2026-07-26 confirmation campaign. The 2026-07-25 run selected 252 at the grid ceiling, so the
+  # grid was extended above it. The requested extension [126,189,252,315,378] is NOT RUNNABLE on this
+  # panel: the outer-fold purge is ceil(grid_max/signal_every)+embargo and the observable sample is
+  # trimmed by grid_max, so a 378-session ceiling leaves 276 signal dates and only FOUR outer folds --
+  # below min_outer_folds=5, and the run fails closed (verified 2026-07-26, exit 1).
+  # 280 sessions is the LARGEST ceiling this 1758-date panel admits while still materializing five
+  # outer folds. The short horizons are retained because every horizon >= 126 is structurally
+  # infeasible in the early outer folds; dropping them leaves those folds with no candidate at all.
+  # 189 is added as the interior point that lets a non-boundary optimum exist.
+  max_holding_days: [15, 30, 63, 126, 189, 252, 280]
+  # Fold redesign 2026-07-25. Three outer folds is not enough evidence to publish a fold-consistency
+  # number, so five are now required and the run fails closed below that. The purge is candidate
+  # specific (ceil(hold/signal_every) + embargo): purging every candidate at the 252-session horizon
+  # left the early folds with no room for a second inner fold at ANY horizon.
+  outer_folds: 5
+  outer_initial_fraction: 0.40
+  minimum_outer_train_dates: 60
+  minimum_valid_outer_folds: 3            # legacy floor; superseded by min_outer_folds below
+  min_outer_folds: 5                      # FAIL CLOSED below this many evaluable outer folds
   inner_folds: 3
+  min_inner_folds: 2                      # a candidate that cannot support this in a fold is infeasible there
   inner_initial_fraction: 0.50
-  minimum_inner_train_dates: 126
+  minimum_inner_train_dates: 40
   embargo_signal_dates: 2
   stability_penalty: 0.50
+  # 2026-07-26 fix. The objective is mean - stability_penalty * pstdev over the evaluable inner
+  # windows, and pstdev of a SINGLE window is identically zero: a candidate evaluable in one window
+  # pays no stability penalty at all and ranks first on a raw mean 2-4x the properly averaged ones.
+  # That is how the 252-session horizon was selected twice. A candidate with fewer than this many
+  # evaluable windows is marked insufficient_evaluation_windows and EXCLUDED from selection (it is
+  # never selectable, and is recorded with its window count in the grid CSV and the manifest). If
+  # every candidate in a stage falls below the floor, the stage selects nothing and says why.
+  minimum_objective_windows: 2
   min_parameter_fold_consistency: 0.50
+  objective_tie_tolerance: 1.0e-9
 
 # Stage 11 - rank-reconstitution long research (16i/16j). This is deliberately
 # separate from the fixed-entry 16g/16h baseline. Incumbents enter inside the

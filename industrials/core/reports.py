@@ -44,7 +44,13 @@ def _write_atomic(
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle_fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    # Keep the temporary basename short. Windows paths can otherwise exceed
+    # legacy path limits when a long report name sits under a deep run root.
+    handle_fd, tmp_name = tempfile.mkstemp(
+        prefix=".tmp-",
+        suffix=path.suffix or ".tmp",
+        dir=str(path.parent),
+    )
     tmp_path = Path(tmp_name)
     try:
         with open(handle_fd, "w", encoding=encoding, newline=newline) as handle:

@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS sec_parser_work_ledger (
     adapter_version TEXT NOT NULL,
     requested_metrics_json TEXT NOT NULL,
     input_hashes_json TEXT NOT NULL,
+    provider_metadata_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     normalized_fact_count INTEGER NOT NULL DEFAULT 0,
@@ -113,6 +114,9 @@ CREATE TABLE IF NOT EXISTS sec_parser_normalized_fact_shadow (
 CREATE INDEX IF NOT EXISTS idx_sec_parser_normalized_fact_shadow_lookup
 ON sec_parser_normalized_fact_shadow(ticker, concept_name, period_end, accepted_at);
 
+CREATE INDEX IF NOT EXISTS idx_sec_parser_normalized_fact_shadow_work_key
+ON sec_parser_normalized_fact_shadow(work_key);
+
 CREATE TABLE IF NOT EXISTS sec_parser_run_normalized_fact (
     run_id INTEGER NOT NULL,
     fact_fingerprint TEXT NOT NULL,
@@ -161,6 +165,9 @@ ON sec_parser_metric_evidence_shadow(
     model_family, ticker, metric_name, period_end, candidate_status
 );
 
+CREATE INDEX IF NOT EXISTS idx_sec_parser_metric_evidence_shadow_work_key
+ON sec_parser_metric_evidence_shadow(work_key);
+
 CREATE TABLE IF NOT EXISTS sec_parser_run_metric_evidence (
     run_id INTEGER NOT NULL,
     evidence_key TEXT NOT NULL,
@@ -197,6 +204,9 @@ CREATE TABLE IF NOT EXISTS sec_parser_recovery_assessment (
     baseline_status TEXT NOT NULL,
     baseline_value REAL,
     anchor_period_end TEXT,
+    current_match_mode TEXT NOT NULL DEFAULT 'none',
+    current_evidence_period_end TEXT,
+    current_evidence_age_days INTEGER,
     recovery_class TEXT NOT NULL,
     predicted_status TEXT NOT NULL,
     accepted_current_count INTEGER NOT NULL DEFAULT 0,
@@ -219,17 +229,97 @@ CREATE INDEX IF NOT EXISTS idx_sec_parser_recovery_assessment_lookup
 ON sec_parser_recovery_assessment(
     model_family, asof_date, metric_name, recovery_class
 );
+
+CREATE TABLE IF NOT EXISTS sec_parser_production_promotion_run (
+    promotion_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    model_family TEXT NOT NULL,
+    asof_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    min_confidence REAL NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    status TEXT NOT NULL,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    promoted_count INTEGER NOT NULL DEFAULT 0,
+    blocked_count INTEGER NOT NULL DEFAULT 0,
+    suppression_count INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(run_id, source_id),
+    FOREIGN KEY(run_id) REFERENCES sec_parser_run(run_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS sec_parser_production_evidence (
+    promotion_id INTEGER NOT NULL,
+    evidence_key TEXT NOT NULL,
+    action TEXT NOT NULL,
+    raw_fact_id INTEGER,
+    status_reason TEXT NOT NULL,
+    promoted_at TEXT NOT NULL,
+    PRIMARY KEY(promotion_id, evidence_key),
+    FOREIGN KEY(promotion_id)
+        REFERENCES sec_parser_production_promotion_run(promotion_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY(evidence_key)
+        REFERENCES sec_parser_metric_evidence_shadow(evidence_key)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_sec_parser_production_evidence_action
+ON sec_parser_production_evidence(promotion_id, action);
+
+CREATE TABLE IF NOT EXISTS sec_parser_production_suppression (
+    suppression_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_family TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    canonical_metric TEXT NOT NULL,
+    period_start TEXT NOT NULL DEFAULT '',
+    period_end TEXT NOT NULL,
+    candidate_value REAL NOT NULL,
+    value_tolerance REAL NOT NULL DEFAULT 0.000001,
+    unit TEXT NOT NULL,
+    accession_number TEXT NOT NULL DEFAULT '',
+    evidence_key TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    valid_from TEXT NOT NULL,
+    valid_to TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    UNIQUE(model_family, evidence_key, policy_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sec_parser_production_suppression_lookup
+ON sec_parser_production_suppression(
+    model_family, ticker, canonical_metric, period_end, active
+);
+
+CREATE TABLE IF NOT EXISTS sec_parser_production_metric_override (
+    model_family TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    availability_status TEXT NOT NULL,
+    status_reason TEXT NOT NULL,
+    evidence_key TEXT NOT NULL,
+    valid_from TEXT NOT NULL,
+    valid_to TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(model_family, ticker, metric_name, evidence_key)
+);
 """
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
-    fact_columns = {
-        str(row[1])
-        for row in conn.execute(
-            "PRAGMA table_info(sec_parser_normalized_fact_shadow)"
+    ledger_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sec_parser_work_ledger)")}
+    if "provider_metadata_json" not in ledger_columns:
+        conn.execute(
+            """
+            ALTER TABLE sec_parser_work_ledger
+            ADD COLUMN provider_metadata_json TEXT NOT NULL DEFAULT '{}'
+            """
         )
-    }
+    fact_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sec_parser_normalized_fact_shadow)")}
     if "concept_metadata_json" not in fact_columns:
         conn.execute(
             """
@@ -237,12 +327,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             ADD COLUMN concept_metadata_json TEXT NOT NULL DEFAULT '{}'
             """
         )
-    assessment_columns = {
-        str(row[1])
-        for row in conn.execute(
-            "PRAGMA table_info(sec_parser_recovery_assessment)"
-        )
-    }
+    assessment_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sec_parser_recovery_assessment)")}
     if "parser_failure_count" not in assessment_columns:
         conn.execute(
             """
@@ -255,5 +340,26 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             """
             ALTER TABLE sec_parser_recovery_assessment
             ADD COLUMN missing_cache_filing_count INTEGER NOT NULL DEFAULT 0
+            """
+        )
+    if "current_match_mode" not in assessment_columns:
+        conn.execute(
+            """
+            ALTER TABLE sec_parser_recovery_assessment
+            ADD COLUMN current_match_mode TEXT NOT NULL DEFAULT 'none'
+            """
+        )
+    if "current_evidence_period_end" not in assessment_columns:
+        conn.execute(
+            """
+            ALTER TABLE sec_parser_recovery_assessment
+            ADD COLUMN current_evidence_period_end TEXT
+            """
+        )
+    if "current_evidence_age_days" not in assessment_columns:
+        conn.execute(
+            """
+            ALTER TABLE sec_parser_recovery_assessment
+            ADD COLUMN current_evidence_age_days INTEGER
             """
         )

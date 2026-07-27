@@ -8,13 +8,93 @@ backtest can seal the exact economic inputs it used.
 from __future__ import annotations
 
 import bisect
+import hashlib
 import math
+import os
 import sqlite3
 import tempfile
+from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Callable, Iterable, Sequence
+
+
+def snapshot_sqlite_database(source: Path, destination_root: Path) -> tuple[Path, str]:
+    """Create and content-address one transactionally consistent SQLite image."""
+    source = source.expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(f"SQLite source is missing: {source}")
+    destination_root.mkdir(parents=True, exist_ok=True)
+    staging = destination_root / f".snapshot-{os.getpid()}.sqlite"
+    if staging.exists():
+        staging.unlink()
+    source_conn = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True)
+    target_conn = sqlite3.connect(staging)
+    try:
+        source_conn.backup(target_conn)
+    finally:
+        target_conn.close()
+        source_conn.close()
+    digest = hashlib.sha256()
+    with staging.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    sha256 = digest.hexdigest()
+    snapshot = destination_root / f"{sha256}.sqlite"
+    if snapshot.exists():
+        staging.unlink()
+    else:
+        staging.replace(snapshot)
+    return snapshot, sha256
+
+
+def parse_spread_tiers(raw: Any) -> list[tuple[float, float]]:
+    """Normalize the config price-tier map into a descending ``(min_price, half_spread_bps)`` list.
+
+    A flat fallback half spread is optimistic by an order of magnitude for sub-$5 names, which is how
+    a corrupt sub-penny tape can look tradable. Tiers are matched highest ``min_price`` first, so the
+    list is stored descending and the last entry must be the catch-all floor.
+    """
+    if not raw:
+        return []
+    tiers: list[tuple[float, float]] = []
+    entries: Sequence[Any] = raw if isinstance(raw, (list, tuple)) else []
+    if not entries and isinstance(raw, dict):
+        entries = [
+            {"min_price": key, "half_spread_bps": value} for key, value in raw.items()
+        ]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError(f"spread tier entries must be mappings, got {entry!r}")
+        price = _nonnegative(entry.get("min_price", 0.0), "spread tier min_price")
+        spread = _nonnegative(entry.get("half_spread_bps", 0.0), "spread tier half_spread_bps")
+        tiers.append((price, spread))
+    if not tiers:
+        return []
+    tiers.sort(key=lambda item: item[0], reverse=True)
+    if len({price for price, _ in tiers}) != len(tiers):
+        raise ValueError("spread tier min_price values must be unique")
+    if tiers[-1][0] > 0.0:
+        raise ValueError("spread tier map needs a min_price=0 catch-all floor")
+    return tiers
+
+
+def tier_half_spread_bps(
+    tiers: list[tuple[float, float]], price: float | None
+) -> tuple[float, str] | None:
+    """Resolve ``price`` against the descending tier list; None when no tier map is configured."""
+    if not tiers:
+        return None
+    if price is None or not math.isfinite(price) or price <= 0:
+        # An unpriced name gets the most punitive tier. Never the cheapest.
+        worst = max(tiers, key=lambda item: item[1])
+        return worst[1], "price_tier_unpriced"
+    for min_price, spread in tiers:
+        if price >= min_price:
+            return spread, f"price_tier_ge_{min_price:g}"
+    worst = max(tiers, key=lambda item: item[1])
+    return worst[1], "price_tier_unpriced"
 
 
 @dataclass(frozen=True)
@@ -147,8 +227,12 @@ class PITShortCostModel:
         stress_spread_multiplier: float,
         stress_borrow_fee_fallback_annual: float,
         stress_borrow_fee_multiplier: float,
+        tiered_spread_fallback_bps: list[tuple[float, float]] | None = None,
+        reference_price: Callable[[str, str], float | None] | None = None,
     ) -> None:
         self.db_path = db_path
+        self.tiered_spread_fallback_bps = list(tiered_spread_fallback_bps or [])
+        self.reference_price = reference_price
         self.exact_half_spreads = {
             (str(day)[:10], str(ticker).strip().upper()): float(value)
             for (day, ticker), value in exact_half_spreads.items()
@@ -207,8 +291,18 @@ class PITShortCostModel:
         symbol = str(ticker).strip().upper()
         spread = self.exact_half_spreads.get((day, symbol))
         if spread is None:
-            spread = self.spread_fallback_bps
-            spread_source = "conservative_fallback"
+            # No exact panel quote. Price-tier the fallback so a $0.004 expert-market print is not
+            # charged the same 15bps as a mega-cap. The flat fallback survives only when no tier
+            # map is configured (legacy/self-test paths).
+            tiered = tier_half_spread_bps(
+                self.tiered_spread_fallback_bps,
+                self.reference_price(day, symbol) if self.reference_price else None,
+            )
+            if tiered is None:
+                spread = self.spread_fallback_bps
+                spread_source = "conservative_fallback"
+            else:
+                spread, spread_source = tiered
         else:
             spread_source = "ibkr_exact"
 
@@ -251,7 +345,28 @@ class PITShortCostModel:
     def stressed_half_spread_bps(self, value: ResolvedShortCost) -> float:
         if value.spread_source == "ibkr_exact":
             return value.half_spread_bps * self.stress_spread_multiplier
+        if value.spread_source.startswith("price_tier"):
+            # A tiered fallback is already a modelled estimate; stress it multiplicatively but never
+            # below the flat stress floor.
+            return max(
+                value.half_spread_bps * self.stress_spread_multiplier,
+                self.stress_spread_fallback_bps,
+            )
         return max(value.half_spread_bps, self.stress_spread_fallback_bps)
+
+    def spread_source_distribution(self) -> dict[str, int]:
+        """Counts of resolved spread provenance over distinct (date, ticker) observations."""
+        counts: Counter[str] = Counter(
+            resolved.spread_source for resolved in self._used.values()
+        )
+        return dict(sorted(counts.items()))
+
+    def borrow_source_distribution(self) -> dict[str, int]:
+        """Counts of resolved borrow provenance, collapsed to the provider prefix."""
+        counts: Counter[str] = Counter(
+            resolved.borrow_source.split(":", 1)[0] for resolved in self._used.values()
+        )
+        return dict(sorted(counts.items()))
 
     def stressed_borrow_fee_annual(self, value: ResolvedShortCost) -> float:
         if value.borrow_source == "conservative_fallback":
@@ -325,3 +440,71 @@ def selftest_short_cost_model() -> None:
         stale = model.resolve("2020-01-20", "A")
         assert stale.borrow_source == "conservative_fallback"
         assert stale.shortable_source == "unknown_fallback"
+        assert model.spread_source_distribution() == {
+            "conservative_fallback": 2,
+            "ibkr_exact": 1,
+        }, model.spread_source_distribution()
+
+        # --- price-tiered fallback spreads (2026-07-25 fix 4) ---
+        tiers = parse_spread_tiers(
+            [
+                {"min_price": 5.0, "half_spread_bps": 25.0},
+                {"min_price": 0.0, "half_spread_bps": 300.0},
+                {"min_price": 20.0, "half_spread_bps": 10.0},
+                {"min_price": 1.0, "half_spread_bps": 75.0},
+            ]
+        )
+        assert tiers == [(20.0, 10.0), (5.0, 25.0), (1.0, 75.0), (0.0, 300.0)], tiers
+        assert tier_half_spread_bps(tiers, 50.0) == (10.0, "price_tier_ge_20")
+        assert tier_half_spread_bps(tiers, 20.0) == (10.0, "price_tier_ge_20")
+        assert tier_half_spread_bps(tiers, 7.5) == (25.0, "price_tier_ge_5")
+        assert tier_half_spread_bps(tiers, 2.0) == (75.0, "price_tier_ge_1")
+        assert tier_half_spread_bps(tiers, 0.004) == (300.0, "price_tier_ge_0")
+        assert tier_half_spread_bps(tiers, None) == (300.0, "price_tier_unpriced")
+        assert tier_half_spread_bps([], 7.5) is None
+        try:
+            parse_spread_tiers([{"min_price": 1.0, "half_spread_bps": 75.0}])
+        except ValueError:
+            pass
+        else:  # pragma: no cover - defensive
+            raise AssertionError("tier map without a zero floor must be rejected")
+
+        prices = {("2020-01-05", "A"): 0.004, ("2020-01-06", "A"): 42.0}
+        tiered_model = PITShortCostModel(
+            db_path=db_path,
+            tickers={"A"},
+            start_date="2020-01-01",
+            end_date="2020-01-20",
+            exact_half_spreads={("2020-01-03", "A"): 4.0},
+            spread_fallback_bps=15.0,
+            borrow_fee_fallback_annual=0.25,
+            max_borrow_fee_age_days=7,
+            max_shortable_age_days=7,
+            allow_fee_proxy_availability=True,
+            allow_unknown_availability=False,
+            stress_spread_fallback_bps=30.0,
+            stress_spread_multiplier=1.5,
+            stress_borrow_fee_fallback_annual=0.375,
+            stress_borrow_fee_multiplier=1.5,
+            tiered_spread_fallback_bps=tiers,
+            reference_price=lambda day, ticker: prices.get((day, ticker)),
+        )
+        penny = tiered_model.resolve("2020-01-05", "A")
+        assert penny.half_spread_bps == 300.0 and penny.spread_source == "price_tier_ge_0"
+        assert tiered_model.stressed_half_spread_bps(penny) == 450.0
+        liquid = tiered_model.resolve("2020-01-06", "A")
+        assert liquid.half_spread_bps == 10.0 and liquid.spread_source == "price_tier_ge_20"
+        assert tiered_model.stressed_half_spread_bps(liquid) == 30.0
+        exact_tiered = tiered_model.resolve("2020-01-03", "A")
+        assert exact_tiered.spread_source == "ibkr_exact" and exact_tiered.half_spread_bps == 4.0
+        # fail-closed availability: an unknown borrow is not a shortable name
+        unknown = tiered_model.resolve("2020-01-20", "A")
+        assert unknown.shortable_source == "unknown_fallback" and not unknown.short_available
+        assert unknown.borrow_fee_annual == 0.25
+        assert tiered_model.spread_source_distribution() == {
+            "ibkr_exact": 1,
+            "price_tier_ge_0": 1,
+            "price_tier_ge_20": 1,
+            "price_tier_unpriced": 1,
+        }, tiered_model.spread_source_distribution()
+    print("short-cost model self-test: PASS")

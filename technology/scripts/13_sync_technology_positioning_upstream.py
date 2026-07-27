@@ -5,6 +5,7 @@ import argparse
 import csv
 import io
 import logging
+import sqlite3
 import subprocess
 import sys
 import time
@@ -91,6 +92,15 @@ def parse_args() -> argparse.Namespace:
             "the downstream staleness gate decide acceptance. Data/logic errors still fail."
         ),
     )
+    parser.add_argument(
+        "--allow-stale-market-positioning-on-error",
+        action="store_true",
+        help=(
+            "If the shared raw positioning DB is unavailable, leave its sealed "
+            "technology facts unchanged and allow the downstream import and "
+            "staleness validators to decide acceptance."
+        ),
+    )
     parser.add_argument("--skip-technology-import", action="store_true")
     parser.add_argument(
         "--reaggregate-13f-only",
@@ -113,6 +123,20 @@ def cfg_bool(config: dict[str, Any], key: str, default: bool = False) -> bool:
     if isinstance(raw, bool):
         return raw
     return str(raw).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def is_shared_db_availability_error(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).strip().lower()
+    return any(
+        marker in message
+        for marker in (
+            "unable to open database file",
+            "database is locked",
+            "database table is locked",
+            "database is busy",
+            "disk i/o error",
+        )
+    )
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -188,13 +212,19 @@ def build_positioning_universe_csv(config: dict[str, Any], *, base_dir: Path, ou
     return output_path
 
 
-def run_technology_import(config_path: Path) -> None:
+def run_technology_import(
+    config_path: Path,
+    *,
+    allow_stale_market_positioning_on_error: bool = False,
+) -> None:
     cmd = [
         sys.executable,
         str(PACKAGE_ROOT / "scripts" / "09_import_technology_positioning.py"),
         "--config",
         str(config_path),
     ]
+    if allow_stale_market_positioning_on_error:
+        cmd.append("--allow-stale-market-positioning-on-error")
     LOGGER.info("Running technology positioning import: %s", " ".join(cmd))
     subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=True)
 
@@ -520,71 +550,105 @@ def main() -> None:
     else:
         tickers_csv = resolve_path(cfg_get(config, "technology_universe.seed_csv"), base_dir=base_dir)
     user_agent = expand_env_vars(args.user_agent or str(cfg_get(config, "yahoo_price_ingestion.user_agent", DEFAULT_USER_AGENT)))
+    allow_stale_market_positioning = bool(args.allow_stale_market_positioning_on_error) or cfg_bool(
+        config,
+        "positioning_import.allow_stale_market_positioning_on_error",
+        False,
+    )
 
     LOGGER.info("Universe CSV: %s", tickers_csv)
     LOGGER.info("Market positioning DB: %s", mp_db)
     LOGGER.info("History window: %s to %s", history_start, end_date)
 
-    with connect_market_positioning(mp_db) as conn:
-        init_market_positioning_db(conn)
-        if args.reaggregate_13f_only:
-            tickers = load_universe_tickers(tickers_csv)
-            with conn:
-                snapshot_rows = aggregate_13f_ownership_for_tickers(conn, tickers, source="sec_13f_data_sets")
-            LOGGER.info("Reaggregated 13F ownership snapshots: rows=%d tickers=%d", snapshot_rows, len(tickers))
-            if not args.skip_technology_import:
-                run_technology_import(config_path)
-            return
-        if not args.skip_finra_short_interest:
-            result = sync_finra_equity_short_interest_files(
-                conn,
-                tickers_csv=tickers_csv,
-                history_start_date=history_start,
-                end_date=end_date,
-                cache_dir=cache_dir / "finra_short_interest",
-                user_agent=user_agent,
-                max_files=args.finra_max_files,
-            )
-            LOGGER.info("%s rows=%d message=%s", result.feed_name, result.rows, result.message)
-        if not args.skip_13f:
-            result = sync_sec_13f_data_sets_streaming(
-                conn,
-                tickers_csv=tickers_csv,
-                cusip_ticker_map_csv=tickers_csv,
-                history_start_date=history_start,
-                end_date=end_date,
-                cache_dir=cache_dir / "sec_13f",
-                user_agent=user_agent,
-                max_archives=args.sec_13f_max_archives,
-            )
-            LOGGER.info("%s rows=%d message=%s", result.feed_name, result.rows, result.message)
-        if not args.skip_ibkr_borrow:
-            try:
-                result = sync_ibkr_borrow_availability(
+    try:
+        with connect_market_positioning(mp_db) as conn:
+            init_market_positioning_db(conn)
+            if args.reaggregate_13f_only:
+                tickers = load_universe_tickers(tickers_csv)
+                with conn:
+                    snapshot_rows = aggregate_13f_ownership_for_tickers(
+                        conn,
+                        tickers,
+                        source="sec_13f_data_sets",
+                    )
+                LOGGER.info(
+                    "Reaggregated 13F ownership snapshots: rows=%d tickers=%d",
+                    snapshot_rows,
+                    len(tickers),
+                )
+                if not args.skip_technology_import:
+                    run_technology_import(
+                        config_path,
+                        allow_stale_market_positioning_on_error=allow_stale_market_positioning,
+                    )
+                return
+            if not args.skip_finra_short_interest:
+                result = sync_finra_equity_short_interest_files(
                     conn,
                     tickers_csv=tickers_csv,
                     history_start_date=history_start,
                     end_date=end_date,
-                    host=args.ibkr_host,
-                    port=args.ibkr_port,
-                    client_id=args.ibkr_client_id,
-                    market_data_type=args.ibkr_market_data_type,
-                    snapshot_wait_sec=args.ibkr_snapshot_wait_sec,
-                    max_tickers=args.ibkr_max_tickers,
+                    cache_dir=cache_dir / "finra_short_interest",
+                    user_agent=user_agent,
+                    max_files=args.finra_max_files,
                 )
                 LOGGER.info("%s rows=%d message=%s", result.feed_name, result.rows, result.message)
-            except (ConnectionError, TimeoutError, OSError) as exc:
-                if not args.allow_stale_ibkr_borrow_on_error:
-                    raise
-                LOGGER.warning(
-                    "IBKR borrow refresh unavailable (%s: %s); retaining prior sealed observations. "
-                    "The positioning validator will fail if they exceed its staleness tolerance.",
-                    type(exc).__name__,
-                    exc,
+            if not args.skip_13f:
+                result = sync_sec_13f_data_sets_streaming(
+                    conn,
+                    tickers_csv=tickers_csv,
+                    cusip_ticker_map_csv=tickers_csv,
+                    history_start_date=history_start,
+                    end_date=end_date,
+                    cache_dir=cache_dir / "sec_13f",
+                    user_agent=user_agent,
+                    max_archives=args.sec_13f_max_archives,
                 )
+                LOGGER.info("%s rows=%d message=%s", result.feed_name, result.rows, result.message)
+            if not args.skip_ibkr_borrow:
+                try:
+                    result = sync_ibkr_borrow_availability(
+                        conn,
+                        tickers_csv=tickers_csv,
+                        history_start_date=history_start,
+                        end_date=end_date,
+                        host=args.ibkr_host,
+                        port=args.ibkr_port,
+                        client_id=args.ibkr_client_id,
+                        market_data_type=args.ibkr_market_data_type,
+                        snapshot_wait_sec=args.ibkr_snapshot_wait_sec,
+                        max_tickers=args.ibkr_max_tickers,
+                    )
+                    LOGGER.info("%s rows=%d message=%s", result.feed_name, result.rows, result.message)
+                except (ConnectionError, TimeoutError, OSError) as exc:
+                    if not args.allow_stale_ibkr_borrow_on_error:
+                        raise
+                    LOGGER.warning(
+                        "IBKR borrow refresh unavailable (%s: %s); retaining prior sealed observations. "
+                        "The positioning validator will fail if they exceed its staleness tolerance.",
+                        type(exc).__name__,
+                        exc,
+                    )
+    except sqlite3.OperationalError as exc:
+        if (
+            not allow_stale_market_positioning
+            or not is_shared_db_availability_error(exc)
+        ):
+            raise
+        LOGGER.warning(
+            "Shared market-positioning DB unavailable (%s: %s); raw sync stopped. "
+            "Any previously completed transactions remain committed. The downstream "
+            "import will retain sealed technology facts and enforce "
+            "coverage/staleness gates.",
+            type(exc).__name__,
+            exc,
+        )
 
     if not args.skip_technology_import:
-        run_technology_import(config_path)
+        run_technology_import(
+            config_path,
+            allow_stale_market_positioning_on_error=allow_stale_market_positioning,
+        )
 
 
 if __name__ == "__main__":

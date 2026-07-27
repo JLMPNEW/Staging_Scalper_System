@@ -32,7 +32,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
+import shutil
+import stat
 import sys
 from datetime import date
 from pathlib import Path
@@ -96,6 +99,55 @@ STATE_FIELDS = [
     "sidecar_score_recomputed_pit",
     "score_z_pipeline_date", "score_pct_pipeline_date",
 ]
+
+
+def _remove_readonly(func: Any, path: str, _exc_info: Any) -> None:
+    """Retry a OneDrive/Windows removal after clearing a read-only attribute."""
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
+def _invalidate_dependent_evidence(
+    *,
+    output_dir: Path,
+    config: dict[str, Any],
+    build_id: str,
+) -> list[Path]:
+    """Remove build-specific evidence before replacing its calibration panel.
+
+    A ``--force`` panel rebuild changes the statistical input in place. Leaving old 68+ artifacts
+    beside it makes stale conclusions look current, so all known direct and transitive consumers
+    are invalidated first.
+    """
+    dependent_dirs = (
+        ("alpha_calibration.dir", "alpha_calibration"),
+        ("calibration_validation.dir", "calibration_validation"),
+        ("calibration_feedback.dir", "calibration_feedback"),
+        ("regime_calibration.dir", "regime_calibration"),
+        ("component_ic.dir", "component_ic"),
+        ("sector_neutral_arm.dir", "sector_neutral_arm"),
+        ("walkforward.dir", "walkforward"),
+        ("rank_reconstitution_long.dir", "rank_reconstitution_long"),
+        ("rank_reconstitution_calibration.dir", "rank_reconstitution_calibration"),
+        ("tactical_short.dir", "tactical_short"),
+        ("tactical_short_calibration.dir", "tactical_short_calibration"),
+        # Pre-registered liquid-tier short variant (backtest/LIQUID_SHORT_TEST.md). Its evidence
+        # is built from the same panel, so it must be invalidated with everything else.
+        ("tactical_short_liquid.replay_dir", "tactical_short_liquid"),
+        ("tactical_short_liquid.calibration_dir", "tactical_short_liquid_calibration"),
+        ("tactical_long.dir", "tactical_long"),
+        ("tactical_long_calibration.dir", "tactical_long_calibration"),
+    )
+    root = output_dir.resolve()
+    removed: list[Path] = []
+    for key, default in dependent_dirs:
+        candidate = (output_dir / str(cfg_get(config, key, default)) / build_id).resolve()
+        if root not in candidate.parents:
+            raise ValueError(f"refusing to invalidate evidence outside output root: {candidate}")
+        if candidate.is_dir():
+            shutil.rmtree(candidate, onerror=_remove_readonly)
+            removed.append(candidate)
+    return removed
 
 
 def iso_date_arg(raw: str) -> str:
@@ -584,6 +636,17 @@ def main() -> int:  # noqa: C901
     panel_path = out_dir / "calibration_panel.csv"
     manifest_path = out_dir / "calibration_panel_manifest.json"
     if args.force:
+        invalidated = _invalidate_dependent_evidence(
+            output_dir=paths.output_dir,
+            config=config,
+            build_id=targets_dir.name,
+        )
+        if invalidated:
+            LOGGER.warning(
+                "Invalidated %d dependent Stage-11 evidence directories for rebuilt panel %s",
+                len(invalidated),
+                targets_dir.name,
+            )
         for p in (panel_path, manifest_path):
             if p.exists():
                 p.unlink()
@@ -763,6 +826,9 @@ def main() -> int:  # noqa: C901
         "snapshots_joined": sorted(macro_cache),
         "sidecar_files_sha256": sidecar_hashes,
         "inputs_sha256": {
+            "config.yaml": sha256_file(config_path),
+            "research/67_join_calibration_panel.py": sha256_file(Path(__file__).resolve()),
+            "research/stage11_common.py": sha256_file(Path(__file__).with_name("stage11_common.py")),
             "targets_manifest.json": sha256_file(targets_dir / "targets_manifest.json"),
             "calibration_targets.csv": sha256_file(targets_path),
             "survivorship_manifest.json": sha256_file(panel_root / panel_build / "survivorship_manifest.json"),

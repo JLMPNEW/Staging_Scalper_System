@@ -1,6 +1,6 @@
 # Transportation Implementation Status
 
-Status date: 2026-07-23
+Status date: 2026-07-26
 
 ## Implemented Batches
 
@@ -49,6 +49,17 @@ Status date: 2026-07-23
   independent exact-coverage gate.
 - [x] Active-plus-inactive point-in-time market, financial, reporting-profile, and specialized
   feature history with a frozen 92-date evidence manifest.
+- [x] Dedicated-parser DP0 discovery contract: 90 unique specialized metrics, 160 reviewed
+  operating-archetype assignments, 14,400 explicit ticker/metric applicability rows, immutable
+  v2 baseline hashes, deterministic rebuild, and independent fail-closed validation.
+- [x] Dedicated-parser operand correction: seven non-scoring supporting extraction metrics and
+  a deterministic 1,120-row ticker/operand scope, closing all one-pass DP-D input gaps.
+- [x] Transportation dedicated-parser adapter phase A: 84 frozen search metrics, fail-closed
+  archetype applicability, one semantic parse per document, normalized-fact discovery,
+  review-only broad candidates, and positive/prohibited offline fixtures for every search metric.
+- [x] DP1 sector-neutral policy replay: immutable evaluation overlays, explicit CLI, exact
+  policy application/materialization, base-hash preservation, idempotency, and persisted
+  zero-document/provider/OCR counters without modifying existing dirty shared-parser files.
 - [ ] Positioning, daily orchestration, walk-forward OOS calibration, and production promotion.
 
 ## Verification
@@ -101,10 +112,33 @@ Status date: 2026-07-23
 - Specialized PIT availability uses the conservative SEC filing date. Three after-market-close
   submissions whose UTC acceptance date preceded their SEC filing date were excluded from the
   prior close and their affected snapshots were rebuilt before the panel was frozen.
+- Dedicated-parser DP0 gate: `PASS`; 90 metrics comprise 77 direct parser targets, seven
+  parser-derived metrics, and six financial-derived metrics. All 112 active and 48 delisted
+  identities are represented in a deterministic 14,400-row scope, including 2,535 applicable
+  and 11,865 explicit `NOT_APPLICABLE` pairs. The contract records 29 development overlays,
+  thirteen primary operating archetypes, the exact input/scope hashes, and the immutable v2
+  baseline hashes. Seven additional non-scoring operands produce a 1,120-row supporting scope
+  with 83 applicable and 1,037 explicit `NOT_APPLICABLE` pairs. The actual one-pass parser search
+  set is 84 metrics. Parser execution and production remain disabled.
+- Dedicated-parser DP2 offline fixtures: 77 final direct targets plus seven supporting operands
+  are registered; every one has a positive offline discovery fixture and a prohibited
+  cross-archetype fixture. Unit, period, issuer-scope, value-domain, conflict, duplicate, and
+  deterministic-order gates are explicit. Broad evidence remains review-only and no production
+  mapping exists.
+- Dedicated-parser DP1 implementation: `PASS`; the new replay API and CLI are separate from
+  assessment-only `--reassess-run-id`, require an immutable pre-policy base run, preserve the
+  base evidence hash, and store evaluated overlays without source-document or provider calls.
+  The machinery strategic-weight assertion is reconciled to the activated 0.05 value.
+- Dedicated-parser DP3 source census: read-only reconciliation passes for all 3,019 base
+  accessions. A bounded 205-accession supplemental scope produces 3,329 selected document rows:
+  3,177 cached/byte-hash verified and 152 exact hydration gaps. Parser execution remains
+  unauthorized until those 152 rows are hydrated or explicitly dispositioned and DP4 passes.
 - Current scoring and shadow publication: 112 rows, 26 rank-ready and 86 blocked by explicit
   coverage/liquidity/quality gates; portfolio candidates, OOS-valid rows, research-eligible rows,
   and survivorship-corrected rows all remain zero.
-- Focused transportation suites: 30 tests included in the passing regression run.
+- Transportation suites: 225 passed in the current regression run.
+- DP1 compatibility suites: 86 dedicated-parser and 32 defense tests passed.
+  The targeted machinery activation gate passes at strategic weight 0.05.
 - Industrials plus portfolio-layer regression suite: 151 passed.
 - Ruff: PASS for the changed transportation/shared files.
 

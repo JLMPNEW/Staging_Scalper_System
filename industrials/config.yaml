@@ -125,6 +125,39 @@ model_families:
       historical_sync_output_csv: "../output/industrials/transportation/historical_load/transportation_historical_specialized_disclosure_sync.csv"
       historical_sync_output_json: "../output/industrials/transportation/historical_load/transportation_historical_specialized_disclosure_sync.json"
       historical_validation_output_json: "../output/industrials/transportation/historical_load/transportation_historical_specialized_disclosure_validation.json"
+    dedicated_parser:
+      discovery_registry_version: transportation_metrics_v3_discovery
+      discovery_registry_csv: "transportation/data/transportation_specialized_metric_discovery_registry.csv"
+      supporting_registry_version: transportation_parser_support_v1
+      supporting_registry_csv: "transportation/data/transportation_parser_supporting_metric_registry.csv"
+      archetype_policy_yaml: "transportation/data/transportation_operating_archetype_policy.yaml"
+      archetype_map_csv: "transportation/data/transportation_operating_archetypes.csv"
+      scope_version: transportation_dedicated_parser_scope_v1
+      scope_manifest_csv: "transportation/data/transportation_dedicated_parser_scope.csv"
+      supporting_scope_version: transportation_dedicated_parser_support_scope_v1
+      supporting_scope_manifest_csv: "transportation/data/transportation_dedicated_parser_support_scope.csv"
+      dp0_manifest_json: "transportation/data/transportation_dp0_contract_manifest.json"
+      dp1_readiness_audit_json: "transportation/data/transportation_dp1_readiness_audit.json"
+      source_census_version: transportation_dp3_source_census_v1
+      source_census_start_date: "2017-11-28"
+      source_census_asof_date: "2026-07-22"
+      source_census_expected_identity_count: 160
+      source_census_expected_base_accessions: 3019
+      source_census_csv: "transportation/data/transportation_dedicated_parser_source_census.csv"
+      source_decisions_csv: "transportation/data/transportation_dedicated_parser_source_decisions.csv"
+      source_cache_gaps_csv: "transportation/data/transportation_dedicated_parser_cache_gaps.csv"
+      source_census_manifest_json: "transportation/data/transportation_dp3_source_census_manifest.json"
+      source_gap_overrides_csv: "transportation/review_policies/transportation_source_gap_overrides.csv"
+      production_enabled: false
+      parser_execution_authorized: false
+      baseline_artifacts:
+        - "transportation/data/transportation_metric_registry.yaml"
+        - "../output/industrials/transportation/stage4/transportation_metric_availability.csv"
+        - "../output/industrials/transportation/historical_features/transportation_pit_feature_history_build.json"
+        - "../output/industrials/transportation/historical_features/transportation_pit_feature_history_validation.json"
+        - "../output/industrials/transportation/dashboard/2026-07-22/transportation_final_rank_table.csv"
+        - "../output/industrials/transportation/dashboard/2026-07-22/transportation_final_rank_table_manifest.json"
+        - "../output/industrials/transportation/dashboard/2026-07-22/transportation_portfolio_adapter_validation.json"
     historical_features:
       # Month-end is an observation/coverage cadence for building the research
       # feature panel. It is not a portfolio rebalance policy.
@@ -305,6 +338,8 @@ sec_fundamentals:
     - "F-10/A"
     - "424B3"
     - "424B4"
+    - "8-K"
+    - "8-K/A"
   include_historical_members: false
   # CF-6: removed dead key neutral_fallback_enabled (no reader). Fallback/neutral
   # profiles are auto-authored unconditionally by 08_build; the gate on them is
@@ -319,6 +354,43 @@ sec_fundamentals:
   raw_response_retention_days: 90
   sync_output_csv: "../output/industrials/defense/stage4/sec_fundamentals_coverage.csv"
   feature_output_csv: "../output/industrials/defense/stage4/financial_feature_coverage.csv"
+  metric_availability_output_csv: "../output/industrials/defense/stage4/financial_metric_availability.csv"
+  supplemental_disclosure_source_ids:
+    - "dedicated_parser_defense_production"
+
+dedicated_parser:
+  output_root: "../output/industrials/defense/dedicated_parser"
+  provider_state_dir: "../tmp/edgartools/defense"
+  # Event filings from this date support the first 2019 PIT score snapshots
+  # while avoiding an unbounded pre-research 8-K document archive.
+  event_filing_start_date: "2018-01-01"
+  # Full-universe adjudication completed 2026-07-26 (649 reviewed policies,
+  # run 56: 0 failures, both golden corpora PASS, deterministic content
+  # fingerprints, production rank-table hash unchanged). Promotion populates
+  # dedicated_parser_defense_production only; scoring weight for the demand
+  # pillar still requires the candidate PIT/OOS run to beat baseline (script 29).
+  production_enabled: true
+  production_source_id: "dedicated_parser_defense_production"
+  production_min_confidence: 0.90
+  production_manifest_json: "../output/industrials/defense/dedicated_parser/dedicated_parser_production_promotion.json"
+  workers: 4
+  max_filings_per_ticker: 40
+  max_documents_per_filing: 32
+  pdf_ocr_enabled: true
+  max_pdf_pages: 250
+  max_pdf_bytes: 25000000
+  pdf_extraction_timeout_seconds: 30.0
+
+financial_validation:
+  availability_policy:
+    # Defense issuers may carry funded/appropriated government backlog. A
+    # missing value stays NOT_DISCLOSED until reviewed policy marks it N/A.
+    funded_backlog_default_applicable: true
+    funded_backlog_applicable_tickers: []
+    cancelable_order_model_tickers: []
+    structural_no_backlog_tickers: []
+    structural_no_inventory_tickers: []
+    recent_public_share_basis_transition_tickers: []
 
 fx_rates:
   source_id: "yahoo_fx_rates"
@@ -445,15 +517,27 @@ scoring_policy:
 
 sec_archive:
   enabled: true
+  # The bounded parser hydration stage supplies --archive-selected. Daily SEC
+  # refreshes must not rescan every historical filing for every defense name.
+  all_family_members: false
   index_url_template: "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/index.json"
   document_url_template: "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/{document_name}"
   submission_file_url_template: "https://data.sec.gov/submissions/{file_name}"
   browse_edgar_atom_url_template: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form_type}&owner=exclude&count=100&output=atom"
   max_submission_history_files: 0
-  max_filings_per_ticker: 0
+  max_filings_per_ticker: 40
+  supplemental_forms:
+    - "8-K"
+    - "8-K/A"
+  max_supplemental_filings_per_ticker: -1
   # CF-10: 0 means unlimited and is authoritative; the in-code default caps at 5 —
   # never rely on the in-code default.
-  max_documents_per_filing: 0
+  max_documents_per_filing: 32
+  include_pdf_documents: true
+  pdf_ocr_enabled: true
+  max_pdf_pages: 250
+  max_pdf_bytes: 25000000
+  pdf_extraction_timeout_sec: 30.0
   # FN-2: purge guard for archive re-syncs in script 07 — a refetch that stages fewer
   # than this fraction of the previously stored facts refuses to purge the existing
   # archive. Pinned to the in-code default (0.5).

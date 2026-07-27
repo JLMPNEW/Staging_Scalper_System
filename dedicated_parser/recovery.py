@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 from collections import Counter
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -27,40 +28,104 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     )
 
 
+def _table_columns(conn: sqlite3.Connection, name: str) -> set[str]:
+    if not _table_exists(conn, name):
+        return set()
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({name})")}
+
+
 def _baseline_rows(
     conn: sqlite3.Connection,
     *,
+    registry: AdapterRegistry,
     model_family: str,
     asof_date: str,
     tickers: list[str],
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    if not tickers or not _table_exists(
-        conn,
-        "feature_financial_metric_availability",
-    ):
+    if not tickers:
         return {}
     placeholders = ",".join("?" for _ in tickers)
-    rows = conn.execute(
-        f"""
-        SELECT a.ticker, a.metric_name, a.availability_status,
-               a.metric_value, a.period_end, a.status_reason
-        FROM feature_financial_metric_availability AS a
-        WHERE a.model_family = ?
-          AND a.ticker IN ({placeholders})
-          AND a.asof_date = (
-              SELECT MAX(a2.asof_date)
-              FROM feature_financial_metric_availability AS a2
-              WHERE a2.model_family = a.model_family
-                AND a2.ticker = a.ticker
-                AND a2.asof_date <= ?
-          )
-        """,
-        (model_family, *tickers, asof_date),
-    ).fetchall()
-    return {
-        (str(row["ticker"]), str(row["metric_name"])): dict(row)
-        for row in rows
+    output: dict[tuple[str, str], dict[str, Any]] = {}
+    if _table_exists(conn, "feature_financial_metric_availability"):
+        rows = conn.execute(
+            f"""
+            SELECT a.ticker, a.metric_name, a.availability_status,
+                   a.metric_value, a.period_end, a.status_reason
+            FROM feature_financial_metric_availability AS a
+            WHERE a.model_family = ?
+              AND a.ticker IN ({placeholders})
+              AND a.asof_date = (
+                  SELECT MAX(a2.asof_date)
+                  FROM feature_financial_metric_availability AS a2
+                  WHERE a2.model_family = a.model_family
+                    AND a2.ticker = a.ticker
+                    AND a2.asof_date <= ?
+              )
+            """,
+            (model_family, *tickers, asof_date),
+        ).fetchall()
+        output.update({(str(row["ticker"]), str(row["metric_name"])): dict(row) for row in rows})
+
+    # Families introduced before metric-availability classification can still
+    # have valid PIT source metrics in the financial feature table. Treat
+    # those rows as the legacy baseline instead of falsely reporting zero
+    # pre-parser coverage. Explicit availability rows always win.
+    feature_columns = _table_columns(conn, "feature_financial_statement")
+    source_fields = {
+        request.metric_name for request in registry.source_metrics if request.metric_name in feature_columns
     }
+    required_columns = {
+        "ticker",
+        "model_family",
+        "asof_date",
+        "fiscal_period_end",
+    }
+    if not source_fields or not required_columns <= feature_columns:
+        return output
+    selected_fields = ", ".join(f"ranked.{field}" for field in sorted(source_fields))
+    confidence_order = "COALESCE(f.financial_confidence, 0.0)" if "financial_confidence" in feature_columns else "0.0"
+    source_order = "COALESCE(f.source_id, '')" if "source_id" in feature_columns else "''"
+    feature_rows = conn.execute(
+        f"""
+        WITH ranked AS (
+            SELECT f.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY f.ticker
+                       ORDER BY f.asof_date DESC,
+                                {confidence_order} DESC,
+                                {source_order} ASC
+                   ) AS row_number
+            FROM feature_financial_statement AS f
+            WHERE f.model_family = ?
+              AND f.asof_date <= ?
+              AND f.ticker IN ({placeholders})
+        )
+        SELECT ranked.ticker, ranked.fiscal_period_end, {selected_fields}
+        FROM ranked
+        WHERE ranked.row_number = 1
+        """,
+        (model_family, asof_date, *tickers),
+    ).fetchall()
+    for row in feature_rows:
+        ticker = str(row["ticker"])
+        for metric_name in source_fields:
+            key = (ticker, metric_name)
+            if key in output:
+                continue
+            value = row[metric_name]
+            output[key] = {
+                "ticker": ticker,
+                "metric_name": metric_name,
+                "availability_status": ("REPORTED" if value is not None else "NOT_DISCLOSED"),
+                "metric_value": value,
+                "period_end": row["fiscal_period_end"],
+                "status_reason": (
+                    "legacy_feature_value_before_availability_classifier"
+                    if value is not None
+                    else "legacy_feature_value_missing"
+                ),
+            }
+    return output
 
 
 def _anchor_periods(
@@ -106,7 +171,7 @@ def _work_stats(
         JOIN sec_parser_work_ledger AS ledger
           ON ledger.work_key = rw.work_key
         LEFT JOIN sec_parser_document_catalog AS catalog
-          ON catalog.ticker = rw.ticker
+          ON catalog.cik = ledger.cik
          AND catalog.accession_number = rw.accession_number
         WHERE rw.run_id = ?
         GROUP BY rw.ticker
@@ -132,6 +197,7 @@ def _evidence_rows(
     rows = conn.execute(
         """
         SELECT e.evidence_key, e.ticker, e.metric_name, e.period_end,
+               e.period_start, e.form_type, e.filing_date, e.accepted_at,
                e.candidate_status, e.candidate_value, e.unit,
                e.status_reason, e.source_document, e.confidence
         FROM sec_parser_run_metric_evidence AS run_evidence
@@ -162,6 +228,7 @@ def _classify(
     document_count: int,
     failed_count: int,
     missing_cache_count: int,
+    current_match_mode: str = "exact_anchor",
 ) -> tuple[str, str, str]:
     if baseline_status in STRUCTURAL_STATUSES:
         return (
@@ -174,19 +241,27 @@ def _classify(
             return (
                 "CONFIRMED_REPORTED",
                 baseline_status,
-                "shadow_parser_confirmed_current_baseline_evidence",
+                (
+                    "shadow_parser_confirmed_recent_disclosure_under_metric_freshness_policy"
+                    if current_match_mode == "metric_freshness_fallback"
+                    else "shadow_parser_confirmed_current_baseline_evidence"
+                ),
+            )
+        # A policy-rejected current baseline is a correction even when
+        # historical-period evidence exists — checking historical first would
+        # keep the rejected baseline counted as covered, contradicting the
+        # corrected-coverage contract.
+        if baseline_rejected_match:
+            return (
+                "BASELINE_POLICY_CORRECTION",
+                "NOT_DISCLOSED",
+                "baseline_value_is_intentionally_suppressed_by_shadow_policy",
             )
         if accepted_historical:
             return (
                 "BASELINE_REPORTED_HISTORICAL_ONLY",
                 baseline_status,
                 "shadow_parser_found_history_but_not_current_anchor",
-            )
-        if baseline_rejected_match:
-            return (
-                "BASELINE_POLICY_CORRECTION",
-                "NOT_DISCLOSED",
-                "baseline_value_is_intentionally_suppressed_by_shadow_policy",
             )
         return (
             "BASELINE_REPORTED_UNCONFIRMED",
@@ -197,7 +272,11 @@ def _classify(
         return (
             "RECOVERED_REPORTED",
             "REPORTED_SHADOW",
-            "accepted_shadow_evidence_matches_current_anchor_period",
+            (
+                "accepted_shadow_evidence_within_metric_freshness_policy"
+                if current_match_mode == "metric_freshness_fallback"
+                else "accepted_shadow_evidence_matches_current_anchor_period"
+            ),
         )
     if accepted_historical:
         return (
@@ -248,6 +327,56 @@ def _classify(
     )
 
 
+def _parse_date(value: object) -> date | None:
+    try:
+        return date.fromisoformat(str(value or "")[:10])
+    except ValueError:
+        return None
+
+
+def _freshness_fallback_rows(
+    rows: list[dict[str, Any]],
+    *,
+    metric_name: str,
+    asof_date: str,
+    max_age_days: int,
+) -> tuple[list[dict[str, Any]], int | None]:
+    """Select the latest valid disclosure under a metric-specific age limit."""
+    if max_age_days <= 0:
+        return [], None
+    asof = _parse_date(asof_date)
+    if asof is None:
+        return [], None
+    eligible: list[tuple[date, dict[str, Any]]] = []
+    for row in rows:
+        period_end = _parse_date(row.get("period_end"))
+        available_date = _parse_date(row.get("accepted_at") or row.get("filing_date"))
+        if (
+            period_end is None
+            or available_date is None
+            or period_end > asof
+            or available_date > asof
+            or period_end > available_date
+        ):
+            continue
+        age_days = (asof - period_end).days
+        if age_days > max_age_days:
+            continue
+        if metric_name == "orders":
+            period_start = _parse_date(row.get("period_start"))
+            if period_start is None:
+                continue
+            duration_days = (period_end - period_start).days
+            if not 300 <= duration_days <= 400:
+                continue
+        eligible.append((period_end, row))
+    if not eligible:
+        return [], None
+    latest_period = max(period for period, _ in eligible)
+    selected = [row for period, row in eligible if period == latest_period]
+    return selected, (asof - latest_period).days
+
+
 def build_recovery_assessments(
     conn: sqlite3.Connection,
     *,
@@ -257,15 +386,14 @@ def build_recovery_assessments(
     tickers: Iterable[str],
     missing_cache_details: Iterable[dict[str, str]] = (),
 ) -> list[dict[str, Any]]:
-    selected = sorted(
-        {
-            str(ticker).strip().upper()
-            for ticker in tickers
-            if str(ticker).strip()
-        }
-    )
+    selected = sorted({str(ticker).strip().upper() for ticker in tickers if str(ticker).strip()})
     if not selected:
-        selected = [
+        # Universe mode: run_work only contains tickers that had cached work.
+        # A ticker whose entire filing window is absent from cache has no
+        # run_work rows and would silently receive NO recovery class at all —
+        # union in the missing-cache tickers so every requested pair is
+        # classified (mirrors the reassess path).
+        run_work_tickers = {
             str(row["ticker"])
             for row in conn.execute(
                 """
@@ -276,9 +404,16 @@ def build_recovery_assessments(
                 """,
                 (run_id,),
             )
-        ]
+        }
+        missing_tickers = {
+            str(detail.get("ticker") or "").strip().upper()
+            for detail in missing_cache_details
+            if str(detail.get("ticker") or "").strip()
+        }
+        selected = sorted(run_work_tickers | missing_tickers)
     baseline = _baseline_rows(
         conn,
+        registry=registry,
         model_family=registry.model_family,
         asof_date=asof_date,
         tickers=selected,
@@ -306,13 +441,8 @@ def build_recovery_assessments(
         for request in registry.source_metrics:
             metric_name = request.metric_name
             baseline_row = baseline.get((ticker, metric_name), {})
-            baseline_status = str(
-                baseline_row.get("availability_status") or "UNKNOWN"
-            )
-            anchor = str(
-                baseline_row.get("period_end")
-                or anchors.get(ticker, "")
-            )
+            baseline_status = str(baseline_row.get("availability_status") or "UNKNOWN")
+            anchor = str(baseline_row.get("period_end") or anchors.get(ticker, ""))
             metric_evidence = evidence.get((ticker, metric_name), [])
             accepted_by_observation: dict[
                 tuple[str, float | None, str],
@@ -323,77 +453,72 @@ def build_recovery_assessments(
                     continue
                 observation_key = (
                     str(row["period_end"] or ""),
-                    (
-                        round(float(row["candidate_value"]), 6)
-                        if row["candidate_value"] is not None
-                        else None
-                    ),
+                    (round(float(row["candidate_value"]), 6) if row["candidate_value"] is not None else None),
                     str(row["unit"] or ""),
                 )
                 current = accepted_by_observation.get(observation_key)
-                if current is None or float(row["confidence"] or 0.0) > float(
-                    current["confidence"] or 0.0
-                ):
+                if current is None or float(row["confidence"] or 0.0) > float(current["confidence"] or 0.0):
                     accepted_by_observation[observation_key] = row
             accepted = list(accepted_by_observation.values())
             baseline_value = baseline_row.get("metric_value")
-            if (
-                baseline_status in COVERED_STATUSES
-                and baseline_value is not None
-            ):
+            if baseline_status in COVERED_STATUSES and baseline_value is not None:
                 matching_baseline_rows = [
                     row
                     for row in accepted
                     if row["candidate_value"] is not None
-                    and abs(
-                        float(row["candidate_value"])
-                        - float(baseline_value)
-                    )
+                    and abs(float(row["candidate_value"]) - float(baseline_value))
                     <= max(1.0, abs(float(baseline_value)) * 1e-9)
                     and str(row["period_end"] or "")
+                    # PIT guard (matches accepted_periods below): a post-asof
+                    # period must never become the anchor, or forward RPO
+                    # windows demote legitimately-current rows to historical.
+                    and str(row["period_end"]) <= asof_date
                 ]
                 if matching_baseline_rows:
-                    anchor = max(
-                        str(row["period_end"])
-                        for row in matching_baseline_rows
-                    )
+                    anchor = max(str(row["period_end"]) for row in matching_baseline_rows)
             accepted_periods = [
                 str(row["period_end"])
                 for row in accepted
-                if str(row["period_end"] or "")
-                and str(row["period_end"]) <= asof_date
+                if str(row["period_end"] or "") and str(row["period_end"]) <= asof_date
             ]
             if accepted_periods:
                 anchor = max([anchor, *accepted_periods])
-            accepted_current_rows = [
-                row
-                for row in accepted
-                if anchor and str(row["period_end"] or "") == anchor
-            ]
-            accepted_historical_rows = [
-                row for row in accepted if row not in accepted_current_rows
-            ]
-            review_required = sum(
-                str(row["candidate_status"]) in REVIEW_STATUSES
-                for row in metric_evidence
-            )
-            rejected = sum(
-                str(row["candidate_status"]).startswith(
-                    ("REJECTED", "SUPPRESSED")
+            accepted_current_rows = [row for row in accepted if anchor and str(row["period_end"] or "") == anchor]
+            current_match_mode = "exact_anchor" if accepted_current_rows else "none"
+            current_evidence_age_days: int | None = None
+            if accepted_current_rows:
+                current_period = _parse_date(anchor)
+                current_asof = _parse_date(asof_date)
+                if current_period is not None and current_asof is not None:
+                    current_evidence_age_days = (current_asof - current_period).days
+            if not accepted_current_rows:
+                (
+                    accepted_current_rows,
+                    current_evidence_age_days,
+                ) = _freshness_fallback_rows(
+                    accepted,
+                    metric_name=metric_name,
+                    asof_date=asof_date,
+                    max_age_days=int(registry.metric_freshness_days.get(metric_name, 0)),
                 )
-                for row in metric_evidence
+                if accepted_current_rows:
+                    current_match_mode = "metric_freshness_fallback"
+            current_evidence_period_end = (
+                max(str(row["period_end"]) for row in accepted_current_rows if str(row["period_end"] or ""))
+                if accepted_current_rows
+                else ""
+            )
+            accepted_historical_rows = [row for row in accepted if row not in accepted_current_rows]
+            review_required = sum(str(row["candidate_status"]) in REVIEW_STATUSES for row in metric_evidence)
+            rejected = sum(
+                str(row["candidate_status"]).startswith(("REJECTED", "SUPPRESSED")) for row in metric_evidence
             )
             baseline_rejected_match = bool(
                 baseline_value is not None
                 and any(
-                    str(row["candidate_status"]).startswith(
-                        ("REJECTED", "SUPPRESSED")
-                    )
+                    str(row["candidate_status"]).startswith(("REJECTED", "SUPPRESSED"))
                     and row["candidate_value"] is not None
-                    and abs(
-                        float(row["candidate_value"])
-                        - float(baseline_value)
-                    )
+                    and abs(float(row["candidate_value"]) - float(baseline_value))
                     <= max(
                         1.0,
                         abs(float(baseline_value)) * 0.005,
@@ -401,10 +526,7 @@ def build_recovery_assessments(
                     for row in metric_evidence
                 )
             )
-            evidence_parser_failures = sum(
-                str(row["candidate_status"]) == "PARSER_FAILURE"
-                for row in metric_evidence
-            )
+            evidence_parser_failures = sum(str(row["candidate_status"]) == "PARSER_FAILURE" for row in metric_evidence)
             recovery_class, predicted_status, reason = _classify(
                 baseline_status=baseline_status,
                 accepted_current=len(accepted_current_rows),
@@ -417,6 +539,7 @@ def build_recovery_assessments(
                 document_count=stats["document_count"],
                 failed_count=stats["failed_count"],
                 missing_cache_count=missing_cache_by_ticker[ticker],
+                current_match_mode=current_match_mode,
             )
             output.append(
                 {
@@ -428,21 +551,20 @@ def build_recovery_assessments(
                     "baseline_status": baseline_status,
                     "baseline_value": baseline_value,
                     "anchor_period_end": anchor,
+                    "current_match_mode": current_match_mode,
+                    "current_evidence_period_end": (current_evidence_period_end),
+                    "current_evidence_age_days": (current_evidence_age_days),
                     "recovery_class": recovery_class,
                     "predicted_status": predicted_status,
                     "accepted_current_count": len(accepted_current_rows),
-                    "accepted_historical_count": len(
-                        accepted_historical_rows
-                    ),
+                    "accepted_historical_count": len(accepted_historical_rows),
                     "review_required_count": review_required,
                     "rejected_count": rejected,
                     "parser_failure_count": evidence_parser_failures,
                     "searched_filing_count": stats["filing_count"],
                     "searched_document_count": stats["document_count"],
                     "failed_filing_count": stats["failed_count"],
-                    "missing_cache_filing_count": (
-                        missing_cache_by_ticker[ticker]
-                    ),
+                    "missing_cache_filing_count": (missing_cache_by_ticker[ticker]),
                     "evidence_keys_json": json.dumps(
                         [str(row["evidence_key"]) for row in metric_evidence],
                         separators=(",", ":"),
@@ -472,7 +594,7 @@ def persist_recovery_assessments(
     placeholders = ",".join("?" for _ in columns)
     conn.executemany(
         f"""
-        INSERT INTO sec_parser_recovery_assessment({','.join(columns)})
+        INSERT INTO sec_parser_recovery_assessment({",".join(columns)})
         VALUES ({placeholders})
         """,
         [tuple(record[column] for column in columns) for record in records],
@@ -483,48 +605,22 @@ def persist_recovery_assessments(
 def assessment_summary(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
     records = list(rows)
     per_metric: dict[str, dict[str, int]] = {}
-    for metric_name in sorted(
-        {str(row["metric_name"]) for row in records}
-    ):
-        metric_rows = [
-            row for row in records if row["metric_name"] == metric_name
-        ]
-        applicable = [
-            row
-            for row in metric_rows
-            if row["baseline_status"] not in STRUCTURAL_STATUSES
-        ]
-        baseline_covered = sum(
-            row["baseline_status"] in COVERED_STATUSES
-            for row in applicable
-        )
-        predicted_covered = sum(
-            row["predicted_status"]
-            in {*COVERED_STATUSES, "REPORTED_SHADOW"}
-            for row in applicable
-        )
+    for metric_name in sorted({str(row["metric_name"]) for row in records}):
+        metric_rows = [row for row in records if row["metric_name"] == metric_name]
+        applicable = [row for row in metric_rows if row["baseline_status"] not in STRUCTURAL_STATUSES]
+        baseline_covered = sum(row["baseline_status"] in COVERED_STATUSES for row in applicable)
+        predicted_covered = sum(row["predicted_status"] in {*COVERED_STATUSES, "REPORTED_SHADOW"} for row in applicable)
         per_metric[metric_name] = {
             "applicable": len(applicable),
             "baseline_covered": baseline_covered,
             "predicted_covered": predicted_covered,
-            "recovered_current": sum(
-                row["recovery_class"] == "RECOVERED_REPORTED"
-                for row in applicable
-            ),
-            "historical_only": sum(
-                row["recovery_class"] == "HISTORICAL_RECOVERY_ONLY"
-                for row in applicable
-            ),
-            "ambiguous": sum(
-                row["recovery_class"] == "FOUND_AMBIGUOUS"
-                for row in applicable
-            ),
+            "recovered_current": sum(row["recovery_class"] == "RECOVERED_REPORTED" for row in applicable),
+            "historical_only": sum(row["recovery_class"] == "HISTORICAL_RECOVERY_ONLY" for row in applicable),
+            "ambiguous": sum(row["recovery_class"] == "FOUND_AMBIGUOUS" for row in applicable),
         }
     return {
         "assessment_count": len(records),
-        "recovery_class_counts": dict(
-            sorted(Counter(row["recovery_class"] for row in records).items())
-        ),
+        "recovery_class_counts": dict(sorted(Counter(row["recovery_class"] for row in records).items())),
         "metric_coverage": per_metric,
     }
 
@@ -536,15 +632,19 @@ def write_assessment_csv(
     records = list(rows)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    columns = list(records[0]) if records else [
-        "run_id",
-        "model_family",
-        "ticker",
-        "metric_name",
-        "asof_date",
-        "recovery_class",
-        "status_reason",
-    ]
+    columns = (
+        list(records[0])
+        if records
+        else [
+            "run_id",
+            "model_family",
+            "ticker",
+            "metric_name",
+            "asof_date",
+            "recovery_class",
+            "status_reason",
+        ]
+    )
     with temporary.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()

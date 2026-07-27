@@ -177,6 +177,7 @@ def main() -> int:  # noqa: C901
     shrinkage = float(ac.get("ridge_shrinkage", 0.25))
     min_cross_section = int(ac.get("min_cross_section_names", 8))
     horizons = [int(h) for h in cfg_get(config, "calibration_targets.horizons_trading_days", [21, 63, 126, 252])]
+    max_entry_lag = int(cfg_get(config, "calibration_targets.max_entry_lag_trading_days", 5))
     if shrinkage < 0 or min_cross_section < 2 or any(h <= 0 for h in horizons):
         LOGGER.error(
             "Invalid alpha_calibration config: ridge_shrinkage=%s min_cross_section=%s horizons=%s",
@@ -294,7 +295,11 @@ def main() -> int:  # noqa: C901
             first_half = float(np.mean(fm_slopes[:half])) if half else None
             second_half = float(np.mean(fm_slopes[half:])) if len(fm_slopes) > half else None
             dates_used = sorted({d for d in by_date if len(by_date[d]) >= min_cross_section})
-            windows = independent_windows(dates_used, h)
+            windows = independent_windows(
+                dates_used,
+                h,
+                entry_lag_trading_days=max_entry_lag,
+            )
             span = ((date.fromisoformat(max(dates_used)) - date.fromisoformat(min(dates_used))).days
                     if dates_used else 0)
             approved, reasons = approval(
@@ -359,6 +364,7 @@ def main() -> int:  # noqa: C901
         "target": target_kind,
         "ridge_shrinkage": shrinkage,
         "horizons_trading_days": horizons,
+        "max_entry_lag_trading_days": max_entry_lag,
         "rows_in_panel": len(rows),
         "rows_admitted": len(admitted),
         "exclusions": exclusions,
@@ -366,6 +372,15 @@ def main() -> int:  # noqa: C901
         "cells": len(slope_rows),
         "cells_approved": len(approved_rows),
         "checks": checks,
+        "inputs_sha256": {
+            "config.yaml": sha256_file(config_path),
+            "research/68_fit_ridge_alpha_slopes.py": sha256_file(Path(__file__).resolve()),
+            "research/stage11_common.py": sha256_file(Path(__file__).with_name("stage11_common.py")),
+            "calibration_panel_manifest.json": sha256_file(
+                panel_dir / "calibration_panel_manifest.json"
+            ),
+            "calibration_panel.csv": sha256_file(panel_path),
+        },
         "files": {
             "alpha_slopes.csv": {"sha256": sha256_file(slopes_path), "rows": len(slope_rows)},
             "fm_date_slopes.csv": {"sha256": sha256_file(date_slopes_path), "rows": len(date_slope_rows)},

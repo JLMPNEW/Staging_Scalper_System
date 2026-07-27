@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from technology.core.db import connect, init_db  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
+from technology.core.short_interest_float import validate_float_enrichment  # noqa: E402
 from technology.core.text_norm import normalize_ticker  # noqa: E402
 
 
@@ -378,6 +379,68 @@ def validate() -> int:
             f"SELECT COUNT(DISTINCT ticker) FROM fact_short_interest WHERE source_id = ? AND ticker IN ({ph})",
             (mp_source, *tickers),
         )
+        latest_float_tickers = scalar(
+            conn,
+            f"""
+            WITH ranked AS (
+                SELECT
+                    ticker,
+                    short_interest_pct_float,
+                    float_source,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ticker
+                        ORDER BY settlement_date DESC
+                    ) AS row_num
+                FROM fact_short_interest
+                WHERE source_id = ?
+                  AND ticker IN ({ph})
+            )
+            SELECT COUNT(*)
+            FROM ranked
+            WHERE row_num = 1
+              AND short_interest_pct_float IS NOT NULL
+              AND COALESCE(float_source, '') <> ''
+            """,
+            (mp_source, *tickers),
+        )
+        minimum_float_coverage_pct = float(
+            cfg_get(
+                config,
+                "positioning_import.float_enrichment.min_current_ticker_coverage_pct",
+                80.0,
+            )
+        )
+        current_float_coverage_pct = (
+            100.0 * latest_float_tickers / len(tickers) if tickers else 0.0
+        )
+        float_invariant_errors = validate_float_enrichment(
+            conn,
+            tickers,
+            source_id=mp_source,
+        )
+        if float_invariant_errors:
+            errors.append(
+                "Short-interest float PIT/provenance invariants failed: "
+                f"count={len(float_invariant_errors)} sample={float_invariant_errors[:10]}"
+            )
+        if require_short and current_float_coverage_pct < minimum_float_coverage_pct:
+            errors.append(
+                "Latest short-interest float coverage below required minimum: "
+                f"{latest_float_tickers}/{len(tickers)}="
+                f"{current_float_coverage_pct:.1f}% < {minimum_float_coverage_pct:.1f}%"
+            )
+        float_sources = conn.execute(
+            f"""
+            SELECT float_source, COUNT(*) AS row_count, COUNT(DISTINCT ticker) AS ticker_count
+            FROM fact_short_interest
+            WHERE source_id = ?
+              AND ticker IN ({ph})
+              AND COALESCE(float_source, '') <> ''
+            GROUP BY float_source
+            ORDER BY row_count DESC
+            """,
+            (mp_source, *tickers),
+        ).fetchall()
         borrow_tickers = scalar(
             conn,
             f"SELECT COUNT(DISTINCT ticker) FROM fact_ibkr_borrow_snapshot WHERE source_id = ? AND ticker IN ({ph})",
@@ -458,6 +521,13 @@ def validate() -> int:
         warnings.append(f"Form 4 rows={form4_rows} covered_tickers={form4_tickers} open_market_purchase_rows={form4_buy_rows} upstream_rows={upstream_form4_rows}/{upstream_form4_tickers} direct_rows={direct_form4_rows}/{direct_form4_tickers}")
         warnings.append(f"13F covered_tickers={institutional_tickers} required={require_13f} missing={missing_13f_tickers} exempt_missing={active_13f_exemptions}")
         warnings.append(f"Short-interest covered_tickers={short_tickers} required={require_short}")
+        warnings.append(
+            "Latest short-interest float covered_tickers="
+            f"{latest_float_tickers}/{len(tickers)} "
+            f"coverage_pct={current_float_coverage_pct:.1f} "
+            f"minimum_pct={minimum_float_coverage_pct:.1f} "
+            f"sources={[dict(row) for row in float_sources]}"
+        )
         warnings.append(f"Borrow covered_tickers={borrow_tickers} required={require_borrow} missing={missing_borrow_tickers} exempt_missing={active_borrow_exemptions}")
         warnings.append(f"Positioning feature covered_tickers={positioning_features} missing_upstream_issues={missing_positioning_issue_count}")
 

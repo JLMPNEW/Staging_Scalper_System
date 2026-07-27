@@ -6,7 +6,7 @@ chronologically contiguous test folds. For each fold the TRAIN set contains only
 whose forward-label windows cannot overlap any test date's window:
 
     train date d is admitted iff  d < test_start - W,
-    W = horizon trading days * 7/5 calendar + embargo_extra_calendar_days
+    W = ceil((horizon + maximum entry lag) * 365.25/252) calendar days + embargo
 
 (expanding-window purged walk-forward: overlapping label windows share outcomes and future dates
 are never available to an earlier fold). Per fold: fit the pooled ridge slope on train, then
@@ -14,7 +14,8 @@ score the test dates OUT OF FOLD:
 
   oof_rank_ic          per-test-date Spearman of sign(trained slope) * z vs the realized target
                        (did training pick the RIGHT DIRECTION out of sample?)
-  static_rank_ic       per-test-date Spearman of +z (the provisional score->alpha assumption)
+  static_rank_ic       per-test-date Spearman of the provisional Stage-1 annual alpha
+  trained_minus_static OOS R2 improvement of the fitted slope over that provisional alpha
   oos_r2_vs_zero       pooled 1 - MSE(slope*z) / MSE(0) on test rows (magnitude skill vs no-skill)
   calibration_slope    pooled OLS of realized y on predicted slope*z (1.0 = magnitudes calibrated)
 
@@ -53,7 +54,8 @@ from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E4
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.research.stage11_common import (  # noqa: E402
     admit_calibration_rows, forward_status_is_valid, independent_windows, load_lockbox,
-    manifest_file_errors, mean_t_hac, parse_finite, pooled_slopes, rank_ic_of,
+    label_window_calendar_days, manifest_file_errors, manifest_input_errors, mean_t_hac,
+    parse_finite, pooled_slopes, rank_ic_of,
 )
 
 
@@ -84,12 +86,25 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 # purged fold construction (pure, self-tested)
 # ---------------------------------------------------------------------------
-def purge_window_days(horizon_trading_days: int, embargo_extra_calendar_days: int) -> int:
-    return int(np.ceil(horizon_trading_days * 7.0 / 5.0)) + int(embargo_extra_calendar_days)
+def purge_window_days(
+    horizon_trading_days: int,
+    embargo_extra_calendar_days: int,
+    max_entry_lag_trading_days: int = 1,
+) -> int:
+    return label_window_calendar_days(
+        horizon_trading_days,
+        entry_lag_trading_days=max_entry_lag_trading_days,
+        embargo_extra_calendar_days=embargo_extra_calendar_days,
+    )
 
 
 def purged_folds(
-    dates: list[str], *, n_folds: int, horizon_trading_days: int, embargo_extra_calendar_days: int = 0,
+    dates: list[str],
+    *,
+    n_folds: int,
+    horizon_trading_days: int,
+    embargo_extra_calendar_days: int = 0,
+    max_entry_lag_trading_days: int = 1,
 ) -> list[tuple[list[str], list[str], list[str]]]:
     """(train_dates, test_dates, purged_dates) per chronologically contiguous test block.
 
@@ -100,7 +115,11 @@ def purged_folds(
     ordered = sorted(set(dates))
     if not ordered or n_folds < 1:
         return []
-    window = purge_window_days(horizon_trading_days, embargo_extra_calendar_days)
+    window = label_window_calendar_days(
+        horizon_trading_days,
+        entry_lag_trading_days=max_entry_lag_trading_days,
+        embargo_extra_calendar_days=embargo_extra_calendar_days,
+    )
     blocks = [list(b) for b in np.array_split(np.array(ordered), min(n_folds, len(ordered))) if len(b)]
     folds: list[tuple[list[str], list[str], list[str]]] = []
     for block in blocks:
@@ -145,6 +164,13 @@ def oos_metrics(pred: np.ndarray, y: np.ndarray) -> tuple[float | None, float | 
     spp = float(pred @ pred)
     calib = float(pred @ y) / spp if spp > 0 else None
     return r2, calib
+
+
+def annual_alpha_to_horizon(alpha: float, horizon_days: int) -> float:
+    """Convert an annual simple-return alpha to the target horizon without changing sign."""
+    if not np.isfinite(alpha) or alpha <= -1.0:
+        return float("nan")
+    return float(np.expm1(np.log1p(alpha) * horizon_days / 252.0))
 
 
 def validation_verdict(
@@ -278,6 +304,7 @@ def main() -> int:  # noqa: C901
     n_folds = int(cv.get("n_folds", 5))
     embargo_days = int(cv.get("embargo_extra_calendar_days", 0))
     min_train_dates = int(cv.get("min_train_dates", 8))
+    max_entry_lag = int(cfg_get(config, "calibration_targets.max_entry_lag_trading_days", 5))
     horizons = [int(h) for h in cfg_get(config, "calibration_targets.horizons_trading_days", [21, 63, 126, 252])]
     if shrinkage < 0 or min_cross_section < 2 or n_folds < 2 or embargo_days < 0 or min_train_dates < 1 \
             or any(h <= 0 for h in horizons):
@@ -352,7 +379,8 @@ def main() -> int:  # noqa: C901
             alpha_bad.append("alpha_panel_manifest_sha_mismatch")
         if str(alpha_manifest.get("target", "")) != target_kind:
             alpha_bad.append(f"alpha_target={alpha_manifest.get('target')}!={target_kind}")
-        if abs(float(alpha_manifest.get("ridge_shrinkage", float("nan"))) - shrinkage) > 1e-12:
+        manifest_shrinkage = parse_finite(alpha_manifest.get("ridge_shrinkage"))
+        if manifest_shrinkage is None or abs(manifest_shrinkage - shrinkage) > 1e-12:
             alpha_bad.append("alpha_ridge_shrinkage_mismatch")
         if [int(h) for h in alpha_manifest.get("horizons_trading_days", [])] != horizons:
             alpha_bad.append("alpha_horizons_mismatch")
@@ -365,6 +393,24 @@ def main() -> int:  # noqa: C901
                 "fm_date_slopes.csv": alpha_dir / "fm_date_slopes.csv",
             },
         ))
+        alpha_bad.extend(
+            manifest_input_errors(
+                alpha_manifest,
+                {
+                    "config.yaml": config_path,
+                    "research/68_fit_ridge_alpha_slopes.py": Path(__file__).with_name(
+                        "68_fit_ridge_alpha_slopes.py"
+                    ),
+                    "research/stage11_common.py": Path(__file__).with_name(
+                        "stage11_common.py"
+                    ),
+                    "calibration_panel_manifest.json": (
+                        panel_dir / "calibration_panel_manifest.json"
+                    ),
+                    "calibration_panel.csv": panel_path,
+                },
+            )
+        )
 
     cell_rows: list[dict[str, Any]] = []
     fold_rows: list[dict[str, Any]] = []
@@ -376,7 +422,7 @@ def main() -> int:  # noqa: C901
         for h in horizons:
             col = target_col.format(h=h)
             status_col = f"fwd_status_{h}d"
-            by_date: dict[str, list[tuple[float, float]]] = {}
+            by_date: dict[str, list[tuple[float, float, float]]] = {}
             for r in sub:
                 if not forward_status_is_valid(r.get(status_col)):
                     label_exclusions[f"{pipe}:{h}d:status"] = label_exclusions.get(f"{pipe}:{h}d:status", 0) + 1
@@ -386,26 +432,44 @@ def main() -> int:  # noqa: C901
                     continue
                 z = parse_finite(r.get("score_z_pipeline_date"))
                 y = parse_finite(r.get(col))
+                annual_static = parse_finite(r.get("final_score"))
                 if z is None:
                     label_exclusions[f"{pipe}:{h}d:score_z"] = label_exclusions.get(f"{pipe}:{h}d:score_z", 0) + 1
                     continue
                 if y is None:
                     label_exclusions[f"{pipe}:{h}d:target"] = label_exclusions.get(f"{pipe}:{h}d:target", 0) + 1
                     continue
+                if annual_static is None:
+                    label_exclusions[f"{pipe}:{h}d:static_alpha"] = (
+                        label_exclusions.get(f"{pipe}:{h}d:static_alpha", 0) + 1
+                    )
+                    continue
+                static_pred = annual_alpha_to_horizon(annual_static, h)
+                if not np.isfinite(static_pred):
+                    label_exclusions[f"{pipe}:{h}d:static_alpha"] = (
+                        label_exclusions.get(f"{pipe}:{h}d:static_alpha", 0) + 1
+                    )
+                    continue
                 by_date.setdefault(str(r.get("as_of_date", "")), []).append(
-                    (z, y)
+                    (z, y, static_pred)
                 )
             dates = sorted(d for d, pairs in by_date.items() if len(pairs) >= min_cross_section)
             if not dates:
                 continue
             n_obs = sum(len(by_date[d]) for d in dates)
             folds = purged_folds(dates, n_folds=n_folds, horizon_trading_days=h,
-                                 embargo_extra_calendar_days=embargo_days)
-            window = purge_window_days(h, embargo_days)
+                                 embargo_extra_calendar_days=embargo_days,
+                                 max_entry_lag_trading_days=max_entry_lag)
+            window = label_window_calendar_days(
+                h,
+                entry_lag_trading_days=max_entry_lag,
+                embargo_extra_calendar_days=embargo_days,
+            )
             purge_violations.extend(f"{pipe}:{h}d:{v}" for v in verify_purge(folds, window=window))
             oof_rics: list[float] = []
             static_rics: list[float] = []
             preds: list[np.ndarray] = []
+            static_preds: list[np.ndarray] = []
             ys: list[np.ndarray] = []
             folds_valid = 0
             test_dates_scored: set[str] = set()
@@ -422,8 +486,9 @@ def main() -> int:  # noqa: C901
                     for d in test:
                         z_te = np.array([p[0] for p in by_date[d]])
                         y_te = np.array([p[1] for p in by_date[d]])
+                        static_te = np.array([p[2] for p in by_date[d]])
                         ric = rank_ic_of(sign * z_te, y_te)
-                        s_ric = rank_ic_of(z_te, y_te)
+                        s_ric = rank_ic_of(static_te, y_te)
                         if ric is not None:
                             oof_rics.append(ric)
                             fold_rics.append(ric)
@@ -431,6 +496,7 @@ def main() -> int:  # noqa: C901
                         if s_ric is not None:
                             static_rics.append(s_ric)
                         preds.append(trained_ridge * z_te)
+                        static_preds.append(static_te)
                         ys.append(y_te)
                 fold_rows.append({
                     "source_pipeline": pipe, "horizon_days": h, "fold": i,
@@ -442,7 +508,16 @@ def main() -> int:  # noqa: C901
             oof_mean, _se, oof_t = mean_t_hac(oof_rics, max_lag=max(0, h - 1))
             static_mean = float(np.mean(static_rics)) if static_rics else None
             r2, calib = oos_metrics(np.concatenate(preds), np.concatenate(ys)) if preds else (None, None)
-            test_windows = independent_windows(sorted(test_dates_scored), h)
+            static_r2, _static_calib = (
+                oos_metrics(np.concatenate(static_preds), np.concatenate(ys))
+                if static_preds
+                else (None, None)
+            )
+            test_windows = independent_windows(
+                sorted(test_dates_scored),
+                h,
+                entry_lag_trading_days=max_entry_lag,
+            )
             validated, reasons = validation_verdict(
                 folds_valid=folds_valid, test_windows=test_windows, oof_t=oof_t, oos_r2=r2, cfg=cv,
             )
@@ -453,8 +528,8 @@ def main() -> int:  # noqa: C901
                 "oof_rank_ic": round(oof_mean, 6) if oof_mean is not None else "",
                 "oof_rank_ic_t": round(oof_t, 4) if oof_t is not None else "",
                 "static_rank_ic": round(static_mean, 6) if static_mean is not None else "",
-                "trained_minus_static": round(oof_mean - static_mean, 6)
-                if oof_mean is not None and static_mean is not None else "",
+                "trained_minus_static": round(r2 - static_r2, 6)
+                if r2 is not None and static_r2 is not None else "",
                 "oos_r2_vs_zero": round(r2, 6) if r2 is not None else "",
                 "calibration_slope": round(calib, 6) if calib is not None else "",
                 "oos_validated": validated,
@@ -504,6 +579,7 @@ def main() -> int:  # noqa: C901
         "ridge_shrinkage": shrinkage,
         "n_folds": n_folds,
         "embargo_extra_calendar_days": embargo_days,
+        "max_entry_lag_trading_days": max_entry_lag,
         "rows_in_panel": len(rows),
         "rows_admitted": len(admitted),
         "exclusions": exclusions,
@@ -512,6 +588,18 @@ def main() -> int:  # noqa: C901
         "cells": len(cell_rows),
         "cells_validated": len(validated_cells),
         "checks": checks,
+        "inputs_sha256": {
+            "config.yaml": sha256_file(config_path),
+            "research/69_validate_stage11_calibration.py": sha256_file(Path(__file__).resolve()),
+            "research/stage11_common.py": sha256_file(Path(__file__).with_name("stage11_common.py")),
+            "calibration_panel_manifest.json": sha256_file(
+                panel_dir / "calibration_panel_manifest.json"
+            ),
+            "calibration_panel.csv": sha256_file(panel_path),
+            "alpha_calibration_manifest.json": (
+                sha256_file(alpha_manifest_path) if alpha_manifest_path.exists() else ""
+            ),
+        },
         "files": {
             "oos_validation.csv": {"sha256": sha256_file(cells_path), "rows": len(cell_rows)},
             "fold_details.csv": {"sha256": sha256_file(folds_path), "rows": len(fold_rows)},

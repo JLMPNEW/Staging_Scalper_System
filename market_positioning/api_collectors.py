@@ -1046,6 +1046,34 @@ def ibkr_bar_date(raw: object) -> date | None:
     return parse_date(raw)
 
 
+def bounded_ibkr_end_date(
+    requested_end_date: date,
+    *,
+    capture_date: date | None = None,
+) -> date:
+    """Never ask IBKR to materialize observations beyond the capture date."""
+    observed_on = capture_date or datetime.now().astimezone().date()
+    return min(requested_end_date, observed_on)
+
+
+def prune_backdated_ibkr_shortable_rows(conn: sqlite3.Connection) -> int:
+    """Remove current availability snapshots stamped into historical replays.
+
+    IBKR does not provide historical shortable-share availability. UTC capture
+    timestamps can be one calendar day ahead of the local market date, so only
+    differences greater than one day are unambiguously backdated.
+    """
+    with conn:
+        result = conn.execute(
+            """
+            DELETE FROM ibkr_shortable_shares_snapshots
+            WHERE COALESCE(asof_datetime, '') <> ''
+              AND julianday(date(asof_datetime)) - julianday(date(asof_date)) > 1.0
+            """
+        )
+    return max(0, int(result.rowcount))
+
+
 def latest_ibkr_fee_asof(conn: sqlite3.Connection, ticker: str) -> date | None:
     row = conn.execute(
         """
@@ -1165,11 +1193,22 @@ def _sync_ibkr_borrow_availability(
     primary_exchange_by_ticker = load_universe_exchange_map(tickers_csv)
     ibkr_symbol_by_ticker = load_universe_ibkr_symbol_map(tickers_csv)
     membership_end_by_ticker = load_universe_membership_end_map(tickers_csv)
+    capture_date = datetime.now().astimezone().date()
+    effective_end_date = bounded_ibkr_end_date(end_date, capture_date=capture_date)
+    shortable_snapshot_requested = bool(shortable_snapshot)
+    # shortableShares is a live observation. A historical replay must not stamp
+    # today's value onto its requested historical as-of date.
+    shortable_snapshot = bool(shortable_snapshot and end_date >= capture_date)
+    backdated_shortable_rows_pruned = prune_backdated_ibkr_shortable_rows(conn)
     pruned_fee_rows, pruned_shortable_rows = prune_ibkr_rows_after_membership_end(
         conn,
         membership_end_by_ticker,
     )
-    tickers, ended_before_asof = filter_ibkr_tickers_for_asof(tickers, membership_end_by_ticker, end_date)
+    tickers, ended_before_asof = filter_ibkr_tickers_for_asof(
+        tickers,
+        membership_end_by_ticker,
+        effective_end_date,
+    )
     if max_tickers and max_tickers > 0:
         tickers = tickers[:max_tickers]
     if not tickers:
@@ -1201,14 +1240,14 @@ def _sync_ibkr_borrow_availability(
                     continue
                 contract = contracts[0]
                 latest_fee = latest_ibkr_fee_asof(conn, ticker)
-                if latest_fee is not None and latest_fee >= end_date:
+                if latest_fee is not None and latest_fee >= effective_end_date:
                     skipped_fee_history += 1
                     qualified[ticker] = contract
                     continue
                 duration = fee_rate_initial_duration if latest_fee is None else fee_rate_incremental_duration
                 bars = ib.reqHistoricalData(
                     contract,
-                    endDateTime=f"{end_date.strftime('%Y%m%d')} 23:59:59",
+                    endDateTime=f"{effective_end_date.strftime('%Y%m%d')} 23:59:59",
                     durationStr=str(duration),
                     barSizeSetting="1 day",
                     whatToShow="FEE_RATE",
@@ -1220,7 +1259,11 @@ def _sync_ibkr_borrow_availability(
                 records: list[tuple[Any, ...]] = []
                 for bar in bars:
                     bar_date = ibkr_bar_date(getattr(bar, "date", ""))
-                    if bar_date is None or bar_date < history_start_date or bar_date > end_date:
+                    if (
+                        bar_date is None
+                        or bar_date < history_start_date
+                        or bar_date > effective_end_date
+                    ):
                         continue
                     rate = normalize_ibkr_fee_rate(getattr(bar, "close", None), unit=fee_rate_unit)
                     if rate is None:
@@ -1288,7 +1331,7 @@ def _sync_ibkr_borrow_availability(
                         snapshot_rows.append(
                             (
                                 ticker,
-                                end_date.isoformat(),
+                                capture_date.isoformat(),
                                 now,
                                 int(getattr(contract, "conId", 0) or 0),
                                 shortable,
@@ -1326,6 +1369,8 @@ def _sync_ibkr_borrow_availability(
         )
     message = (
         "IBKR borrow availability loaded: "
+        f"requested_end_date={end_date.isoformat()} "
+        f"effective_end_date={effective_end_date.isoformat()} "
         f"qualified={qualified_count} fee_rows_new_or_refreshed={fee_rows_written} "
         f"fee_history_skipped_current={skipped_fee_history} shortable_rows_new_or_refreshed={shortable_rows_written} "
         f"shortable_coverage_pct={shortable_coverage_pct:.1f} "
@@ -1333,6 +1378,9 @@ def _sync_ibkr_borrow_availability(
         f"ended_memberships_skipped={len(ended_before_asof)} "
         f"post_membership_fee_rows_pruned={pruned_fee_rows} "
         f"post_membership_shortable_rows_pruned={pruned_shortable_rows} "
+        f"backdated_shortable_rows_pruned={backdated_shortable_rows_pruned} "
+        f"shortable_snapshot_requested={shortable_snapshot_requested} "
+        f"shortable_snapshot_historical_skip={shortable_snapshot_requested and not shortable_snapshot} "
         f"max_concurrent_shortable_requests={shortable_batch_size} "
         f"total_fee_rows={total_fee_rows} total_shortable_rows={total_shortable_rows}{coverage_warning}"
     )

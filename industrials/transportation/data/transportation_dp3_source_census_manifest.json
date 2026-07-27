@@ -1,0 +1,79 @@
+{
+  "acceptance": "NO_GO",
+  "active_identity_count": 112,
+  "adapter_version": "transportation_specialized_metrics_v3.discovery2",
+  "approved_gap_count": 0,
+  "artifacts": {
+    "cache_gaps": {
+      "canonical_rows_sha256": "d6f61ca413ebc89a3e08efea94dbd623795842c677c788cb162a00895c0a452f",
+      "path": "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\industrials\\transportation\\data\\transportation_dedicated_parser_cache_gaps.csv",
+      "row_count": 152,
+      "sha256": "100aac02211942c8a933668abac2845d9bc77f9083194d169ff00f807d598589"
+    },
+    "source_census": {
+      "canonical_rows_sha256": "8c1e72e31a78a5673c649d32bd05a4b420199635491edcc6a3a184bb63b6715a",
+      "path": "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\industrials\\transportation\\data\\transportation_dedicated_parser_source_census.csv",
+      "row_count": 3329,
+      "sha256": "6aa953b7586fe4a348c1d0cc978fc54e0871cf75c6ff8583268601e00f29b14f"
+    },
+    "source_decisions": {
+      "canonical_rows_sha256": "35a1d51885cf4b523d45ac0dbd770db85d670de541be3477a77969d8dca4a07e",
+      "path": "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\industrials\\transportation\\data\\transportation_dedicated_parser_source_decisions.csv",
+      "row_count": 11371,
+      "sha256": "ff35bcd039237d8fc2961993eaf31a7cf072aa40e1d8bc29fb12a1a4d39685b7"
+    }
+  },
+  "asof_date": "2026-07-22",
+  "base_accession_count": 3019,
+  "cached_document_row_count": 3177,
+  "database_mode": "read_only",
+  "decision_counts": {
+    "EXCLUDE": 941,
+    "EXCLUDE_NO_METADATA_SIGNAL": 7206,
+    "INCLUDE": 3224
+  },
+  "dp0_scope_sha256": "2fdff0059514153f6e17c201f7f09fc7751ea106a95ca3e00accbdb26855bb67",
+  "duplicate_cik_accession_group_count": 65,
+  "duplicate_content_group_count": 36,
+  "errors": [],
+  "expected_base_accession_count": 3019,
+  "expected_identity_count": 160,
+  "gap_type_counts": {
+    "SOURCE_DOCUMENT": 152
+  },
+  "identity_count": 160,
+  "inactive_identity_count": 48,
+  "manifest_version": "transportation_dp3_source_census_v1",
+  "missing_document_row_count": 152,
+  "model_family": "transportation",
+  "network_requests": 0,
+  "next_gate": "HYDRATE_OR_ADJUDICATE_EXACT_DP3_GAPS",
+  "parser_execution_authorized": false,
+  "parser_execution_options": {
+    "accession_selection": "sealed_manifest_only",
+    "all_metrics": true,
+    "document_selection": "sealed_manifest_only",
+    "enable_arelle": true,
+    "enable_edgartools": true,
+    "enable_pdf_ocr": false,
+    "max_documents_per_filing": 0,
+    "max_filings_per_ticker": 0,
+    "no_network": true,
+    "require_complete_cache": true
+  },
+  "parser_metric_count": 84,
+  "selected_accession_count": 3224,
+  "selected_document_row_count": 3329,
+  "selection_rule_counts": {
+    "base_periodic": 2765,
+    "base_periodic_financial_6k": 254,
+    "supplemental_earnings_item_2_02_or_7_01": 44,
+    "supplemental_event_index_metadata": 9,
+    "supplemental_event_positive_metadata_only": 7206,
+    "supplemental_registration_listing_window": 152
+  },
+  "start_date": "2017-11-28",
+  "supplemental_accession_count": 205,
+  "unique_content_hash_count": 3141,
+  "unresolved_gap_count": 152
+}

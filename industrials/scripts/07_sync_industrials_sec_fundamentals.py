@@ -11,7 +11,9 @@ import math
 import os
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -50,6 +52,8 @@ from industrials.machinery.reporting_currency import apply_reporting_currencies 
 
 
 LOGGER = logging.getLogger("sync_industrials_sec_fundamentals")
+_SEC_REQUEST_LOCK = threading.Lock()
+_SEC_LAST_REQUEST_AT = 0.0
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 RUN_TYPE = "sync_industrials_sec_fundamentals"
 RECENT_STUB_PROFILES = {"RECENT_IPO_DEVELOPMENT_STAGE", "RECENT_PUBLIC_STUB"}
@@ -365,6 +369,29 @@ REPORT_FIELDS = [
     "mapped_fact_count",
     "review_reason",
 ]
+CACHE_HYDRATION_REPORT_FIELDS = [
+    "ticker",
+    "cik",
+    "status",
+    "archive_request_count",
+    "cached_fact_candidate_count",
+    "error",
+]
+FILING_CATALOG_REPORT_FIELDS = [
+    "ticker",
+    "cik",
+    "status",
+    "catalog_start_date",
+    "catalog_end_date",
+    "requested_forms",
+    "cataloged_filing_count",
+    "cataloged_form_counts_json",
+    "relevant_history_file_count",
+    "missing_history_cache_count",
+    "missing_history_cache_files_json",
+    "network_request_count",
+    "error",
+]
 
 PROFILE_ACCEPTED_DATE_SQL = """
 CASE
@@ -451,10 +478,7 @@ def prose_candidate_facts(
             value=candidate.value,
             period_start=candidate.period_start,
             period_end=candidate.period_end,
-            frame=(
-                f"prose:{document_name}:{candidate.block_index}:"
-                f"{candidate.concept_name}:{candidate.period_end}"
-            ),
+            frame=(f"prose:{document_name}:{candidate.block_index}:{candidate.concept_name}:{candidate.period_end}"),
             decimals="",
             payload_json=candidate.payload_json(document_name=document_name),
             source_detail=PROSE_SOURCE_DETAIL,
@@ -472,13 +496,17 @@ class ContextInfo:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sync SEC submissions and companyfacts for an industrials model family.")
+    parser = argparse.ArgumentParser(
+        description="Sync SEC submissions and companyfacts for an industrials model family."
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--model-family", default="", help="Industrials model family to sync, e.g. defense.")
     parser.add_argument("--tickers", default="", help="Optional comma-separated ticker filter.")
     parser.add_argument("--max-tickers", type=int, default=0, help="Optional cap for smoke tests.")
-    parser.add_argument("--include-historical", action="store_true", help="Also sync non-current historical/delisted members.")
+    parser.add_argument(
+        "--include-historical", action="store_true", help="Also sync non-current historical/delisted members."
+    )
     parser.add_argument("--force", action="store_true", help="Ignore cached JSON and refetch.")
     parser.add_argument(
         "--incremental",
@@ -488,15 +516,109 @@ def parse_args() -> argparse.Namespace:
             "companyfacts/archive only for tickers with new filings or no existing SEC financial state."
         ),
     )
-    parser.add_argument("--force-submissions", action="store_true", help="Refetch submissions metadata without forcing companyfacts/archive caches.")
-    parser.add_argument("--force-companyfacts", action="store_true", help="Refetch companyfacts JSON without forcing archive document caches.")
+    parser.add_argument(
+        "--force-submissions",
+        action="store_true",
+        help="Refetch submissions metadata without forcing companyfacts/archive caches.",
+    )
+    parser.add_argument(
+        "--force-companyfacts",
+        action="store_true",
+        help="Refetch companyfacts JSON without forcing archive document caches.",
+    )
     parser.add_argument("--force-archive", action="store_true", help="Refetch SEC archive index/document caches.")
+    parser.add_argument(
+        "--archive-max-filings-per-ticker",
+        type=int,
+        default=None,
+        help=("Override sec_archive.max_filings_per_ticker for this run; 0 means unlimited."),
+    )
+    parser.add_argument(
+        "--archive-max-documents-per-filing",
+        type=int,
+        default=None,
+        help=("Override sec_archive.max_documents_per_filing for this run; 0 means unlimited."),
+    )
+    parser.add_argument(
+        "--archive-scan-all-documents",
+        action="store_true",
+        help=(
+            "Do not stop an archive filing after the first document with "
+            "mapped facts. Intended for explicit research hydration only."
+        ),
+    )
+    parser.add_argument(
+        "--archive-cache-only",
+        action="store_true",
+        help=(
+            "Hydrate SEC archive files without replacing canonical/archive "
+            "financial facts. Requires --archive-selected and --tickers."
+        ),
+    )
+    parser.add_argument(
+        "--filing-catalog-cache-only",
+        action="store_true",
+        help=(
+            "Populate fact_sec_filing only from cached SEC submissions JSON. "
+            "No network request or financial-fact write is allowed. Requires "
+            "--tickers."
+        ),
+    )
+    parser.add_argument(
+        "--filing-catalog-forms",
+        default="",
+        help=("Comma-separated form types for --filing-catalog-cache-only; defaults to the configured SEC form list."),
+    )
+    parser.add_argument(
+        "--filing-catalog-start-date",
+        default="",
+        help=("Inclusive filing-date lower bound for cache-only cataloging; defaults to sec_fundamentals.start_date."),
+    )
+    parser.add_argument(
+        "--archive-cache-workers",
+        type=int,
+        default=1,
+        help=(
+            "Ticker-level workers for --archive-cache-only. Network requests "
+            "remain governed by one process-wide SEC throttle."
+        ),
+    )
+    parser.add_argument(
+        "--filing-catalog-fetch-missing",
+        action="store_true",
+        help=(
+            "Allow --filing-catalog-cache-only to fetch only missing root or "
+            "history submissions JSON metadata. CompanyFacts and archive "
+            "documents remain disabled."
+        ),
+    )
+    parser.add_argument(
+        "--archive-document-keywords",
+        default="",
+        help=("Comma-separated report-description keywords used to hydrate specialized-metric FilingSummary reports."),
+    )
+    parser.add_argument(
+        "--archive-accession-scope-csv",
+        type=Path,
+        default=None,
+        help=("Optional ticker/accession CSV restricting cache-only hydration to the exact missing accession set."),
+    )
     parser.add_argument(
         "--archive-bootstrap",
         action="store_true",
         help="Process every configured family member through SEC archives while reusing valid cached documents.",
     )
-    parser.add_argument("--allow-partial", action="store_true", help="Finish with success when individual tickers fail.")
+    parser.add_argument(
+        "--archive-selected",
+        action="store_true",
+        help=(
+            "Process every explicitly --tickers-selected member through SEC "
+            "archives without enabling a full-family daily archive refresh."
+        ),
+    )
+    parser.add_argument(
+        "--allow-partial", action="store_true", help="Finish with success when individual tickers fail."
+    )
     parser.add_argument(
         "--asof",
         default="",
@@ -758,7 +880,21 @@ def named_cache_path(cache_dir: Path, *, source_id: str, name: str) -> Path:
     return cache_dir / source_id / safe_name
 
 
-def request_json(url: str, *, user_agent: str, timeout_sec: float, max_retries: int, sleep_sec: float) -> tuple[int, dict[str, Any], str]:
+def throttle_sec_request(minimum_interval_sec: float) -> None:
+    """Apply one process-wide SEC request rate across hydration workers."""
+    global _SEC_LAST_REQUEST_AT
+    interval = max(0.0, float(minimum_interval_sec))
+    with _SEC_REQUEST_LOCK:
+        now = time.monotonic()
+        wait_seconds = (_SEC_LAST_REQUEST_AT + interval) - now
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+        _SEC_LAST_REQUEST_AT = time.monotonic()
+
+
+def request_json(
+    url: str, *, user_agent: str, timeout_sec: float, max_retries: int, sleep_sec: float
+) -> tuple[int, dict[str, Any], str]:
     try:
         import requests  # type: ignore
     except ImportError as exc:
@@ -771,6 +907,7 @@ def request_json(url: str, *, user_agent: str, timeout_sec: float, max_retries: 
     last_status = 0
     last_text = ""
     for attempt in range(max(1, max_retries)):
+        throttle_sec_request(sleep_sec)
         response = requests.get(url, headers=headers, timeout=timeout_sec)
         last_status = int(response.status_code)
         last_text = response.text
@@ -782,7 +919,9 @@ def request_json(url: str, *, user_agent: str, timeout_sec: float, max_retries: 
     raise SecRequestError(status_code=last_status, url=url, body=last_text)
 
 
-def request_text(url: str, *, user_agent: str, timeout_sec: float, max_retries: int, sleep_sec: float) -> tuple[int, str]:
+def request_text(
+    url: str, *, user_agent: str, timeout_sec: float, max_retries: int, sleep_sec: float
+) -> tuple[int, str]:
     try:
         import requests  # type: ignore
     except ImportError as exc:
@@ -795,6 +934,7 @@ def request_text(url: str, *, user_agent: str, timeout_sec: float, max_retries: 
     last_status = 0
     last_text = ""
     for attempt in range(max(1, max_retries)):
+        throttle_sec_request(sleep_sec)
         response = requests.get(url, headers=headers, timeout=timeout_sec)
         last_status = int(response.status_code)
         last_text = response.text
@@ -826,6 +966,7 @@ def request_bytes(
     last_status = 0
     last_payload = b""
     for attempt in range(max(1, max_retries)):
+        throttle_sec_request(sleep_sec)
         response = requests.get(url, headers=headers, timeout=timeout_sec)
         last_status = int(response.status_code)
         last_payload = bytes(response.content)
@@ -844,9 +985,7 @@ def request_bytes(
 def write_cache_atomic(cache_file: Path, text: str) -> None:
     """Write an HTTP cache file via tmp + os.replace so readers never see a truncated file (MK-10)."""
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp_file = cache_file.with_name(
-        f"{cache_file.name}.{os.getpid()}.{time.time_ns()}.tmp"
-    )
+    tmp_file = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.{time.time_ns()}.tmp")
     tmp_file.write_text(text, encoding="utf-8")
     try:
         for attempt in range(8):
@@ -854,9 +993,7 @@ def write_cache_atomic(cache_file: Path, text: str) -> None:
                 os.replace(tmp_file, cache_file)
                 return
             except OSError as exc:
-                if getattr(exc, "winerror", None) not in {5, 32} and not isinstance(
-                    exc, PermissionError
-                ):
+                if getattr(exc, "winerror", None) not in {5, 32} and not isinstance(exc, PermissionError):
                     raise
                 try:
                     if cache_file.exists() and cache_file.read_text(encoding="utf-8") == text:
@@ -875,9 +1012,7 @@ def write_cache_atomic(cache_file: Path, text: str) -> None:
 
 def write_binary_cache_atomic(cache_file: Path, payload: bytes) -> None:
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp_file = cache_file.with_name(
-        f"{cache_file.name}.{os.getpid()}.{time.time_ns()}.tmp"
-    )
+    tmp_file = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.{time.time_ns()}.tmp")
     tmp_file.write_bytes(payload)
     try:
         os.replace(tmp_file, cache_file)
@@ -907,7 +1042,9 @@ def load_or_fetch_json(
             # Delete the bad file and fall through to a single refetch.
             LOGGER.warning("Deleting corrupt JSON cache and refetching once: %s", cache_file)
             cache_file.unlink()
-    status, payload, text = request_json(url, user_agent=user_agent, timeout_sec=timeout_sec, max_retries=max_retries, sleep_sec=sleep_sec)
+    status, payload, text = request_json(
+        url, user_agent=user_agent, timeout_sec=timeout_sec, max_retries=max_retries, sleep_sec=sleep_sec
+    )
     write_cache_atomic(cache_file, text)
     return status, payload, text, "network"
 
@@ -925,7 +1062,9 @@ def load_or_fetch_text(
     if cache_file.exists() and not force:
         text = cache_file.read_text(encoding="utf-8", errors="replace")
         return 200, text, "cache"
-    status, text = request_text(url, user_agent=user_agent, timeout_sec=timeout_sec, max_retries=max_retries, sleep_sec=sleep_sec)
+    status, text = request_text(
+        url, user_agent=user_agent, timeout_sec=timeout_sec, max_retries=max_retries, sleep_sec=sleep_sec
+    )
     write_cache_atomic(cache_file, text)
     return status, text, "network"
 
@@ -1092,10 +1231,7 @@ def load_universe(
     params: list[Any] = [model_family]
     membership_sql = ""
     if include_historical and membership_asof:
-        membership_sql = (
-            "AND m.start_date <= ? "
-            "AND COALESCE(NULLIF(m.end_date, ''), '9999-12-31') >= ?"
-        )
+        membership_sql = "AND m.start_date <= ? AND COALESCE(NULLIF(m.end_date, ''), '9999-12-31') >= ?"
         params.extend([membership_asof, membership_asof])
     if ticker_filter:
         filter_sql = f"AND c.ticker IN ({','.join('?' for _ in ticker_filter)})"
@@ -1140,6 +1276,17 @@ def load_universe(
         if model_family == "machinery" and currency_asof
         else output
     )
+
+
+def group_cache_hydration_items(
+    items: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Group aliases/share classes so one worker owns each CIK cache path."""
+    items_by_cik: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        group_key = normalize_cik(item.get("cik")) or (f"ticker:{normalize_ticker(item.get('ticker'))}")
+        items_by_cik.setdefault(group_key, []).append(item)
+    return list(items_by_cik.values())
 
 
 def filing_keys(conn: Any, *, ticker: str, source_id: str) -> set[tuple[str, str, str]]:
@@ -1306,6 +1453,8 @@ def upsert_filings(
     payload: dict[str, Any],
     allowed_forms: set[str],
     start_date: str,
+    end_date: str = "",
+    source_detail: str = "sec_submissions_recent",
 ) -> int:
     recent_payload = (payload.get("filings") or {}).get("recent") if isinstance(payload.get("filings"), dict) else None
     rows_payload = recent_payload if isinstance(recent_payload, dict) else payload
@@ -1329,18 +1478,31 @@ def upsert_filings(
         values = {key: (rows_payload.get(key) or []) for key in keys}
         accession = str(values["accessionNumber"][idx] or "").strip() if idx < len(values["accessionNumber"]) else ""
         filing_date = parse_date(values["filingDate"][idx] if idx < len(values["filingDate"]) else "")
-        if not accession or not filing_date or (start_date and filing_date < start_date):
+        if (
+            not accession
+            or not filing_date
+            or (start_date and filing_date < start_date)
+            or (end_date and filing_date > end_date)
+        ):
             continue
-        accepted_at = str(values["acceptanceDateTime"][idx] or "").strip() if idx < len(values["acceptanceDateTime"]) else ""
+        accepted_at = (
+            str(values["acceptanceDateTime"][idx] or "").strip() if idx < len(values["acceptanceDateTime"]) else ""
+        )
         report_date = parse_date(values["reportDate"][idx] if idx < len(values["reportDate"]) else "")
-        primary_document = str(values["primaryDocument"][idx] or "").strip() if idx < len(values["primaryDocument"]) else ""
+        primary_document = (
+            str(values["primaryDocument"][idx] or "").strip() if idx < len(values["primaryDocument"]) else ""
+        )
         # SEC submissions payloads carry no fiscal year/period columns (FN-12,
         # empirically verified): leave them honestly NULL/'' here. Per-fact
         # fy/fp arrive with the companyfacts payload instead.
         fiscal_year: int | None = None
         fiscal_period = ""
         accession_nodash = accession.replace("-", "")
-        filing_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession_nodash}/{primary_document}" if primary_document else ""
+        filing_url = (
+            f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession_nodash}/{primary_document}"
+            if primary_document
+            else ""
+        )
         conn.execute(
             """
             INSERT INTO fact_sec_filing(
@@ -1348,7 +1510,7 @@ def upsert_filings(
                 accepted_at, report_date, fiscal_year, fiscal_period, primary_document,
                 filing_url, source_detail, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sec_submissions_recent', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ticker, accession_number, source_id) DO UPDATE SET
                 cik = excluded.cik,
                 form_type = excluded.form_type,
@@ -1375,6 +1537,7 @@ def upsert_filings(
                 fiscal_period,
                 primary_document,
                 filing_url,
+                source_detail,
                 now,
                 now,
             ),
@@ -1400,6 +1563,243 @@ def submission_history_files(payload: dict[str, Any], *, max_files: int) -> list
         if max_files > 0 and len(names) >= max_files:
             break
     return names
+
+
+def relevant_submission_history_files(
+    payload: dict[str, Any],
+    *,
+    start_date: str,
+    end_date: str,
+    max_files: int,
+) -> list[str]:
+    files = (payload.get("filings") or {}).get("files") if isinstance(payload.get("filings"), dict) else []
+    if not isinstance(files, list):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        filing_from = parse_date(item.get("filingFrom"))
+        filing_to = parse_date(item.get("filingTo"))
+        if (
+            not name
+            or name in seen
+            or (start_date and filing_to and filing_to < start_date)
+            or (end_date and filing_from and filing_from > end_date)
+        ):
+            continue
+        names.append(name)
+        seen.add(name)
+        if max_files > 0 and len(names) >= max_files:
+            break
+    return names
+
+
+def read_cached_submission_payload(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Cached SEC submissions payload not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid cached SEC submissions JSON: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Cached SEC submissions payload must be an object: {path}")
+    return payload
+
+
+def catalog_cached_submission_filings(
+    conn: Any,
+    *,
+    items: list[dict[str, Any]],
+    source_id: str,
+    cache_dir: Path,
+    allowed_forms: set[str],
+    start_date: str,
+    end_date: str,
+    max_history_files: int,
+    fetch_missing: bool = False,
+    submissions_url_template: str = "",
+    history_url_template: str = "",
+    user_agent: str = "",
+    timeout_sec: float = 30.0,
+    max_retries: int = 3,
+    sleep_sec: float = 0.12,
+) -> list[dict[str, Any]]:
+    """Catalog cached SEC filing metadata without network or financial writes."""
+    if not allowed_forms:
+        raise ValueError("Cached filing catalog requires at least one form")
+    report_rows: list[dict[str, Any]] = []
+    requested_forms = ",".join(sorted(allowed_forms))
+    form_placeholders = ",".join("?" for _ in allowed_forms)
+    for group in group_cache_hydration_items(items):
+        cik = normalize_cik(group[0].get("cik")) if group else ""
+        network_request_count = 0
+        try:
+            if not cik:
+                raise ValueError("missing_or_invalid_cik")
+            root_path = cache_path(cache_dir, source_id=source_id, cik=cik)
+            if not root_path.exists() and fetch_missing:
+                if not submissions_url_template or not user_agent:
+                    raise ValueError("missing_catalog_network_configuration")
+                _, _, _, fetch_mode = load_or_fetch_json(
+                    submissions_url_template.format(cik=cik),
+                    cache_file=root_path,
+                    force=False,
+                    user_agent=user_agent,
+                    timeout_sec=timeout_sec,
+                    max_retries=max_retries,
+                    sleep_sec=sleep_sec,
+                )
+                network_request_count += int(fetch_mode == "network")
+            root_payload = read_cached_submission_payload(root_path)
+            payload_cik = normalize_cik(root_payload.get("cik"))
+            if payload_cik and payload_cik != cik:
+                raise ValueError(f"cached_submission_cik_mismatch:expected={cik};actual={payload_cik}")
+            history_names = relevant_submission_history_files(
+                root_payload,
+                start_date=start_date,
+                end_date=end_date,
+                max_files=max_history_files,
+            )
+            history_payloads: list[tuple[str, dict[str, Any]]] = []
+            missing_history: list[str] = []
+            for name in history_names:
+                history_path = named_cache_path(
+                    cache_dir,
+                    source_id=source_id,
+                    name=name,
+                )
+                if not history_path.exists():
+                    if fetch_missing:
+                        if not history_url_template or not user_agent:
+                            raise ValueError("missing_catalog_history_network_configuration")
+                        try:
+                            _, payload, _, fetch_mode = load_or_fetch_json(
+                                history_url_template.format(file_name=name),
+                                cache_file=history_path,
+                                force=False,
+                                user_agent=user_agent,
+                                timeout_sec=timeout_sec,
+                                max_retries=max_retries,
+                                sleep_sec=sleep_sec,
+                            )
+                        except SecRequestError:
+                            missing_history.append(name)
+                            continue
+                        network_request_count += int(fetch_mode == "network")
+                        history_payloads.append((name, payload))
+                        continue
+                    missing_history.append(name)
+                    continue
+                history_payloads.append((name, read_cached_submission_payload(history_path)))
+            with conn:
+                for item in group:
+                    ticker = normalize_ticker(item.get("ticker"))
+                    if not ticker:
+                        continue
+                    upsert_filings(
+                        conn,
+                        ticker=ticker,
+                        cik=cik,
+                        source_id=source_id,
+                        payload=root_payload,
+                        allowed_forms=allowed_forms,
+                        start_date=start_date,
+                        end_date=end_date,
+                        source_detail="sec_submissions_recent_cache_catalog",
+                    )
+                    for _, history_payload in history_payloads:
+                        upsert_filings(
+                            conn,
+                            ticker=ticker,
+                            cik=cik,
+                            source_id=source_id,
+                            payload=history_payload,
+                            allowed_forms=allowed_forms,
+                            start_date=start_date,
+                            end_date=end_date,
+                            source_detail=("sec_submissions_history_cache_catalog"),
+                        )
+            for item in group:
+                ticker = normalize_ticker(item.get("ticker"))
+                if not ticker:
+                    continue
+                form_counts = {
+                    str(row["form_type"]): int(row["filing_count"])
+                    for row in conn.execute(
+                        f"""
+                        SELECT UPPER(form_type) AS form_type,
+                               COUNT(*) AS filing_count
+                        FROM fact_sec_filing
+                        WHERE ticker = ?
+                          AND source_id = ?
+                          AND filing_date >= ?
+                          AND filing_date <= ?
+                          AND UPPER(form_type) IN ({form_placeholders})
+                        GROUP BY UPPER(form_type)
+                        ORDER BY UPPER(form_type)
+                        """,
+                        (
+                            ticker,
+                            source_id,
+                            start_date,
+                            end_date,
+                            *sorted(allowed_forms),
+                        ),
+                    )
+                }
+                report_rows.append(
+                    {
+                        "ticker": ticker,
+                        "cik": cik,
+                        "status": ("catalog_partial_history_cache" if missing_history else "cataloged"),
+                        "catalog_start_date": start_date,
+                        "catalog_end_date": end_date,
+                        "requested_forms": requested_forms,
+                        "cataloged_filing_count": sum(form_counts.values()),
+                        "cataloged_form_counts_json": json.dumps(
+                            form_counts,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        "relevant_history_file_count": len(history_names),
+                        "missing_history_cache_count": len(missing_history),
+                        "missing_history_cache_files_json": json.dumps(
+                            missing_history,
+                            separators=(",", ":"),
+                        ),
+                        "network_request_count": network_request_count,
+                        "error": "",
+                    }
+                )
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            LOGGER.exception(
+                "Cached SEC filing catalog failed cik=%s tickers=%s",
+                cik,
+                ",".join(normalize_ticker(item.get("ticker")) for item in group),
+            )
+            for item in group:
+                report_rows.append(
+                    {
+                        "ticker": normalize_ticker(item.get("ticker")),
+                        "cik": cik,
+                        "status": "catalog_failed",
+                        "catalog_start_date": start_date,
+                        "catalog_end_date": end_date,
+                        "requested_forms": requested_forms,
+                        "cataloged_filing_count": 0,
+                        "cataloged_form_counts_json": "{}",
+                        "relevant_history_file_count": 0,
+                        "missing_history_cache_count": 0,
+                        "missing_history_cache_files_json": "[]",
+                        "network_request_count": network_request_count,
+                        "error": detail,
+                    }
+                )
+    return sorted(report_rows, key=lambda row: str(row["ticker"]))
 
 
 def sync_submission_history_files(
@@ -1441,7 +1841,12 @@ def sync_submission_history_files(
             )
         except SecRequestError as exc:
             failed.append((exc.url, exc.status_code, exc.body))
-            LOGGER.warning("Skipping unavailable SEC submission history file ticker=%s url=%s status=%s", ticker, exc.url, exc.status_code)
+            LOGGER.warning(
+                "Skipping unavailable SEC submission history file ticker=%s url=%s status=%s",
+                ticker,
+                exc.url,
+                exc.status_code,
+            )
             continue
         fetched.append((url, status, payload, text, fetch_mode))
         if fetch_mode == "network":
@@ -1479,6 +1884,7 @@ def sync_submission_history_files(
                 payload=payload,
                 allowed_forms=allowed_forms,
                 start_date=start_date,
+                source_detail="sec_submissions_history",
             )
     return filing_count, request_count
 
@@ -1598,7 +2004,9 @@ def sync_browse_edgar_filings(
             )
         except SecRequestError as exc:
             failed.append((exc.url, exc.status_code, exc.body))
-            LOGGER.warning("Skipping unavailable SEC browse feed ticker=%s form=%s status=%s", ticker, form_type, exc.status_code)
+            LOGGER.warning(
+                "Skipping unavailable SEC browse feed ticker=%s form=%s status=%s", ticker, form_type, exc.status_code
+            )
             continue
         fetched.append((form_type, url, status, text, fetch_mode))
         if fetch_mode == "network":
@@ -1710,16 +2118,12 @@ def add_family_concept_mappings(
             raise ValueError(f"Family concept-alias CSV missing columns={sorted(missing)}")
         for line_number, row in enumerate(reader, start=2):
             if str(row.get("review_status") or "").strip().lower() != "reviewed":
-                raise ValueError(
-                    f"{path}:{line_number} concept alias must be reviewed"
-                )
+                raise ValueError(f"{path}:{line_number} concept alias must be reviewed")
             mapping = {
                 "taxonomy": str(row.get("taxonomy") or "").strip(),
                 "concept_name": str(row.get("concept_name") or "").strip(),
                 "canonical_metric": str(row.get("canonical_metric") or "").strip(),
-                "financial_statement": str(
-                    row.get("financial_statement") or ""
-                ).strip(),
+                "financial_statement": str(row.get("financial_statement") or "").strip(),
                 "period_type": str(row.get("period_type") or "").strip(),
                 "sign_policy": str(row.get("sign_policy") or "").strip(),
                 "priority": int(str(row.get("priority") or "")),
@@ -1930,10 +2334,7 @@ def classify_machinery_footnote_concept(
     if period_type == "instant" and "backlog" in semantic:
         if any(token in semantic for token in ("unfunded", "potential", "growth", "cancellation")):
             return ""
-        if any(
-            label in semantic
-            for label in ("funded backlog", "authorized backlog", "appropriated backlog")
-        ):
+        if any(label in semantic for label in ("funded backlog", "authorized backlog", "appropriated backlog")):
             return "FundedBacklog"
         if re.search(r"\b(?:total\s+)?(?:order\s+)?backlog\b", semantic):
             return "ReportedBacklog"
@@ -1975,9 +2376,7 @@ def classify_machinery_footnote_concept(
 
 def rpo_dimensions_only(dimensions: tuple[tuple[str, str], ...]) -> bool:
     return all(
-        "remainingperformanceobligationexpectedtimingofsatisfaction" in re.sub(
-            r"[^a-z]", "", axis.lower()
-        )
+        "remainingperformanceobligationexpectedtimingofsatisfaction" in re.sub(r"[^a-z]", "", axis.lower())
         or "rangeaxis" in re.sub(r"[^a-z]", "", axis.lower())
         for axis, _ in dimensions
     )
@@ -2052,7 +2451,20 @@ def add_calendar_months(value: date, months: int) -> date:
     month_index = value.month - 1 + months
     year = value.year + month_index // 12
     month = month_index % 12 + 1
-    month_ends = (31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    month_ends = (
+        31,
+        29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    )
     return value.replace(year=year, month=month, day=min(value.day, month_ends[month - 1]))
 
 
@@ -2126,9 +2538,7 @@ def rpo_current_amount_from_text(document_text: str) -> float | None:
         r"(?:expect(?:s|ed)?|anticipat(?:e|es|ed))\s+(?:approximately\s+|about\s+)?"
         r"(?:to\s+)?recognize"
     )
-    expected = (
-        r"(?:is|are|will\s+be)\s+(?:expected|anticipated)\s+to\s+be\s+recognized"
-    )
+    expected = r"(?:is|are|will\s+be)\s+(?:expected|anticipated)\s+to\s+be\s+recognized"
     patterns = (
         rf"{recognize}.{{0,80}}?{money}.{{0,160}}?(?:{horizon})",
         rf"{money}\s*{expected}.{{0,160}}?(?:{horizon})",
@@ -2216,11 +2626,7 @@ def derive_cross_source_rpo_current_facts(
     }
     totals: dict[tuple[str, str], list[ArchiveFact]] = {}
     for fact in facts:
-        if (
-            fact.concept_name == "RemainingPerformanceObligation"
-            and fact.period_end == report_end
-            and fact.value >= 0
-        ):
+        if fact.concept_name == "RemainingPerformanceObligation" and fact.period_end == report_end and fact.value >= 0:
             totals.setdefault((fact.period_end, fact.unit.lower()), []).append(fact)
 
     derived: list[ArchiveFact] = []
@@ -2441,14 +2847,10 @@ def parse_machinery_footnote_facts(
         facts.append(grouped[0][1])
 
     direct_current_periods = {
-        (fact.period_end, fact.unit)
-        for fact in facts
-        if fact.concept_name == "RemainingPerformanceObligationCurrent"
+        (fact.period_end, fact.unit) for fact in facts if fact.concept_name == "RemainingPerformanceObligationCurrent"
     }
     totals = {
-        (fact.period_end, fact.unit): fact
-        for fact in facts
-        if fact.concept_name == "RemainingPerformanceObligation"
+        (fact.period_end, fact.unit): fact for fact in facts if fact.concept_name == "RemainingPerformanceObligation"
     }
     buckets_by_period: dict[tuple[str, str], list[tuple[ContextInfo, ArchiveFact]]] = {}
     for context, fact in timing_buckets:
@@ -2470,12 +2872,8 @@ def parse_machinery_footnote_facts(
                 if current is None or current[1] is None or fact.frame < current[1].frame:
                     starts[start] = (context, fact)
         for context in contexts.values():
-            if (
-                context.period_end != period_end
-                or (
-                    context.context_id not in timing_durations
-                    and context.context_id not in timing_percentages
-                )
+            if context.period_end != period_end or (
+                context.context_id not in timing_durations and context.context_id not in timing_percentages
             ):
                 continue
             start = rpo_timing_start(context)
@@ -2526,17 +2924,10 @@ def parse_machinery_footnote_facts(
                     "percentage": sum(current_percentages),
                     "total_rpo": total.value,
                 }
-        if (
-            current_value is None
-            and total is not None
-            and filing_period_end
-            and period_end == filing_period_end
-        ):
+        if current_value is None and total is not None and filing_period_end and period_end == filing_period_end:
             text_percentage = rpo_timing_percentage_from_text(document_text)
             disclosed_amount = rpo_current_amount_from_text(document_text)
-            percentage_value = (
-                total.value * text_percentage if text_percentage is not None else None
-            )
+            percentage_value = total.value * text_percentage if text_percentage is not None else None
             amount_percentage_conflict = (
                 disclosed_amount is not None
                 and percentage_value is not None
@@ -2661,7 +3052,9 @@ def read_units(root: ET.Element) -> dict[str, str]:
     return units
 
 
-def parse_archive_facts(document_text: str, *, document_name: str, concept_map: dict[tuple[str, str], list[dict[str, Any]]]) -> list[ArchiveFact]:
+def parse_archive_facts(
+    document_text: str, *, document_name: str, concept_map: dict[tuple[str, str], list[dict[str, Any]]]
+) -> list[ArchiveFact]:
     try:
         root = ET.fromstring(document_text.encode("utf-8"))
     except ET.ParseError:
@@ -2730,19 +3123,39 @@ def parse_archive_facts(document_text: str, *, document_name: str, concept_map: 
 
 
 TEXT_TABLE_LABELS: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = [
-    ("Revenue", "duration", (r"^(?:total\s+)?(?:net\s+)?(?:sales|revenues?|revenue)\b",), (r"backlog", r"deferred", r"remaining", r"per\s+share", r"%")),
+    (
+        "Revenue",
+        "duration",
+        (r"^(?:total\s+)?(?:net\s+)?(?:sales|revenues?|revenue)\b",),
+        (r"backlog", r"deferred", r"remaining", r"per\s+share", r"%"),
+    ),
     ("CostOfRevenue", "duration", (r"^cost\s+of\s+(?:sales|revenues?|revenue|goods\s+sold)\b",), (r"%",)),
     ("GrossProfit", "duration", (r"^gross\s+profit\b",), (r"%",)),
-    ("OperatingIncomeLoss", "duration", (r"^(?:income|loss)\s+from\s+operations\b", r"^operating\s+(?:income|loss)\b"), (r"%",)),
+    (
+        "OperatingIncomeLoss",
+        "duration",
+        (r"^(?:income|loss)\s+from\s+operations\b", r"^operating\s+(?:income|loss)\b"),
+        (r"%",),
+    ),
     ("NetIncomeLoss", "duration", (r"^net\s+(?:income|loss|earnings)\b",), (r"per\s+share", r"attributable", r"%")),
     ("Assets", "instant", (r"^total\s+assets\b",), ()),
     ("Liabilities", "instant", (r"^total\s+liabilities\b",), (r"and\s+(?:stockholders|shareholders|equity)",)),
-    ("Equity", "instant", (r"^total\s+(?:stockholders|shareholders|members|owners).{0,30}equity\b", r"^total\s+equity\b"), (r"liabilities",)),
+    (
+        "Equity",
+        "instant",
+        (r"^total\s+(?:stockholders|shareholders|members|owners).{0,30}equity\b", r"^total\s+equity\b"),
+        (r"liabilities",),
+    ),
     ("CashAndCashEquivalents", "instant", (r"^cash\s+and\s+cash\s+equivalents\b",), (r"restricted", r"cash\s+flows?")),
     ("Inventory", "instant", (r"^inventor(?:y|ies)\b",), ()),
     ("AccountsReceivable", "instant", (r"^accounts\s+receivable\b", r"^trade\s+receivables\b"), ()),
     ("AccountsPayable", "instant", (r"^accounts\s+payable\b", r"^trade\s+payables\b"), ()),
-    ("OperatingCashFlow", "duration", (r"^net\s+cash\s+(?:provided\s+by|used\s+in|provided\s+by\s+\(used\s+in\))\s+operating\s+activities\b",), ()),
+    (
+        "OperatingCashFlow",
+        "duration",
+        (r"^net\s+cash\s+(?:provided\s+by|used\s+in|provided\s+by\s+\(used\s+in\))\s+operating\s+activities\b",),
+        (),
+    ),
     (
         "Capex",
         "duration",
@@ -2754,7 +3167,12 @@ TEXT_TABLE_LABELS: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    ("DepreciationAndAmortization", "duration", (r"^(?:depreciation\s+and\s+amortization|depreciation\s*&\s*amortization)\b",), (r"accumulated", r"%")),
+    (
+        "DepreciationAndAmortization",
+        "duration",
+        (r"^(?:depreciation\s+and\s+amortization|depreciation\s*&\s*amortization)\b",),
+        (r"accumulated", r"%"),
+    ),
     ("InterestExpense", "duration", (r"^interest\s+expense\b",), (r"income", r"%")),
     (
         "Orders",
@@ -3003,9 +3421,7 @@ REGISTRATION_STATEMENT_TYPES: dict[str, set[str]] = {
 # Comprehensive Income"/"Statement of Earnings"). Treating that default as a
 # conflict silently dropped every income-statement concept for those filers, so
 # it must never trigger the guard.
-RECOGNIZED_STATEMENT_TYPES: frozenset[str] = frozenset(
-    {"income_statement", "balance_sheet", "cash_flow"}
-)
+RECOGNIZED_STATEMENT_TYPES: frozenset[str] = frozenset({"income_statement", "balance_sheet", "cash_flow"})
 
 
 def strip_html_cell(raw: str) -> str:
@@ -3023,7 +3439,10 @@ def html_table_row_items(table_html: str) -> list[tuple[list[str], str]]:
     if not row_matches:
         return rows
     for row_match in row_matches:
-        cells = [strip_html_cell(match.group(1)) for match in re.finditer(r"(?is)<t[dh]\b[^>]*>(.*?)</t[dh]>", row_match.group(1))]
+        cells = [
+            strip_html_cell(match.group(1))
+            for match in re.finditer(r"(?is)<t[dh]\b[^>]*>(.*?)</t[dh]>", row_match.group(1))
+        ]
         cells = [cell for cell in cells if cell]
         if cells:
             rows.append((cells, row_match.group(0)))
@@ -3054,14 +3473,9 @@ def special_metric_row_has_conflicting_xbrl_concept(
             "transactionpriceallocatedtoremainingperformanceobligation",
         ),
     }.get(concept_name, ())
-    normalized = [
-        re.sub(r"[^a-z0-9]", "", tagged.split(":")[-1].lower())
-        for tagged in tagged_concepts
-    ]
+    normalized = [re.sub(r"[^a-z0-9]", "", tagged.split(":")[-1].lower()) for tagged in tagged_concepts]
     return bool(expected_fragments) and not any(
-        fragment in tagged
-        for tagged in normalized
-        for fragment in expected_fragments
+        fragment in tagged for tagged in normalized for fragment in expected_fragments
     )
 
 
@@ -3084,8 +3498,14 @@ def table_scale(text: str) -> float:
 def table_scale_info(text: str) -> tuple[float, str, str]:
     normalized = re.sub(r"\s+", " ", text.lower())
     scale_patterns: tuple[tuple[float, str], ...] = (
-        (1_000_000_000.0, r"(?:in|amounts in|presented in|expressed in|stated in|\$\s*in)\s+billions|\bbillions\b|\$000000000\b"),
-        (1_000_000.0, r"(?:in|amounts in|presented in|expressed in|stated in|\$\s*in)\s+millions|\bmillions\b|\$000000\b"),
+        (
+            1_000_000_000.0,
+            r"(?:in|amounts in|presented in|expressed in|stated in|\$\s*in)\s+billions|\bbillions\b|\$000000000\b",
+        ),
+        (
+            1_000_000.0,
+            r"(?:in|amounts in|presented in|expressed in|stated in|\$\s*in)\s+millions|\bmillions\b|\$000000\b",
+        ),
         (1_000.0, r"(?:in|amounts in|presented in|expressed in|stated in|\$\s*in)\s+thousands|\bthousands\b|\$000\b"),
     )
     for scale, pattern in scale_patterns:
@@ -3228,7 +3648,9 @@ def parse_table_number(raw: str) -> float | None:
     text = html_lib.unescape(str(raw or "")).replace("\xa0", " ").strip()
     if not text or "%" in text:
         return None
-    text = text.replace("$", "").replace("£", "").replace("€", "").replace(",", "").replace("*", "").replace("\u200b", "")
+    text = (
+        text.replace("$", "").replace("£", "").replace("€", "").replace(",", "").replace("*", "").replace("\u200b", "")
+    )
     text = re.sub(r"\[[^\]]*\]|\([a-zA-Z]\)|\b[a-zA-Z]\b", "", text).strip()
     if text in {"-", "--", "---", "N/A", "n/a"}:
         return None
@@ -3311,11 +3733,7 @@ def text_table_statement_provenance(context_text: str, table_text: str) -> tuple
         for match in re.finditer(pattern, normalized)
     ]
     latest_statement_position = max((position for position, _ in statement_matches), default=-1)
-    statement_type = (
-        max(statement_matches, key=lambda item: item[0])[1]
-        if statement_matches
-        else "financial_summary"
-    )
+    statement_type = max(statement_matches, key=lambda item: item[0])[1] if statement_matches else "financial_summary"
     projection_matches = list(
         re.finditer(
             r"\b(?:unaudited\s+pro\s+forma|pro\s+forma|projected|projection|forecast|estimated\s+financial)\b",
@@ -3397,7 +3815,9 @@ def month_day_pairs(text: str) -> list[tuple[int, int, str]]:
 def full_text_dates(text: str) -> list[tuple[str, str]]:
     dates: list[tuple[str, str]] = []
     month_names = "|".join(sorted(MONTH_LOOKUP, key=len, reverse=True))
-    for match in re.finditer(rf"\b({month_names})\.?\s+(\d{{1,2}}),?\s+((?:19|20)\d{{2}})\b", text, flags=re.IGNORECASE):
+    for match in re.finditer(
+        rf"\b({month_names})\.?\s+(\d{{1,2}}),?\s+((?:19|20)\d{{2}})\b", text, flags=re.IGNORECASE
+    ):
         month = month_number(match.group(1))
         if month is None:
             continue
@@ -3425,7 +3845,9 @@ def duration_days_from_table_context(text: str) -> int:
     return 364
 
 
-def duration_days_for_period_evidence(*, month: int | None, day: int | None, combined_text: str, default_days: int, form_type: str = "") -> int:
+def duration_days_for_period_evidence(
+    *, month: int | None, day: int | None, combined_text: str, default_days: int, form_type: str = ""
+) -> int:
     normalized = re.sub(r"\s+", " ", combined_text.lower())
     form = str(form_type or "").upper()
     if month == 12 and day in {30, 31} and re.search(r"\byears?\s+ended\b|\bfiscal\s+years?\b", normalized):
@@ -3559,7 +3981,10 @@ def infer_text_table_periods(
             return inferred
 
     if years and re.search(r"\byears?\s+ended\b|\bfiscal\s+years?\b", combined, re.IGNORECASE):
-        inferred = [(period_iso(year, 12, 31), 364, "table_column_year_default_dec31", str(year)) for year in years[:value_count]]
+        inferred = [
+            (period_iso(year, 12, 31), 364, "table_column_year_default_dec31", str(year))
+            for year in years[:value_count]
+        ]
         inferred = [item for item in inferred if item[0]]
         if len(inferred) == value_count:
             return inferred
@@ -3682,11 +4107,7 @@ def prefer_explicit_total_order_facts(facts: list[ArchiveFact]) -> list[ArchiveF
         preferred_ids.update(id(fact) for fact in explicit_totals)
         suppressed_ids.update(id(fact) for fact in grouped if fact not in explicit_totals)
 
-    return [
-        fact
-        for fact in facts
-        if id(fact) not in suppressed_ids or id(fact) in preferred_ids
-    ]
+    return [fact for fact in facts if id(fact) not in suppressed_ids or id(fact) in preferred_ids]
 
 
 def parse_archive_text_table_facts(
@@ -3718,9 +4139,7 @@ def parse_archive_text_table_facts(
         row_items = html_table_row_items(table_html)
         rows = [cells for cells, _ in row_items]
         label_resolver = (
-            registration_text_table_label_concept
-            if strict_registration_statements
-            else text_table_label_concept
+            registration_text_table_label_concept if strict_registration_statements else text_table_label_concept
         )
         concept_rows = [label_resolver(row[0]) if row else None for row in rows]
         if special_metrics_only:
@@ -3799,11 +4218,7 @@ def parse_archive_text_table_facts(
             for marker in ("orders", "bookings", "backlog", "remaining performance obligation")
         )
         has_actual_columns = "actual" in normalize_table_label(table_text[:500])
-        if (
-            strict_registration_statements
-            and projection_flag
-            and not has_actual_columns
-        ):
+        if strict_registration_statements and projection_flag and not has_actual_columns:
             continue
         if (
             strict_registration_statements
@@ -3834,12 +4249,9 @@ def parse_archive_text_table_facts(
             concept_name, period_type = label_result
             if special_metrics_only and concept_name not in BACKLOG_ORDER_TEXT_CONCEPTS:
                 continue
-            if (
-                concept_name in BACKLOG_ORDER_TEXT_CONCEPTS
-                and special_metric_row_has_conflicting_xbrl_concept(
-                    row_items[row_index][1],
-                    concept_name,
-                )
+            if concept_name in BACKLOG_ORDER_TEXT_CONCEPTS and special_metric_row_has_conflicting_xbrl_concept(
+                row_items[row_index][1],
+                concept_name,
             ):
                 continue
             allowed_statement_types = REGISTRATION_STATEMENT_TYPES.get(concept_name)
@@ -3860,9 +4272,7 @@ def parse_archive_text_table_facts(
                 # concept and fail the FPI-hybrid completeness gate.
                 continue
             nearby_header_rows = [
-                row
-                for row in rows[max(0, row_index - 8) : row_index]
-                if not (row and label_resolver(row[0]))
+                row for row in rows[max(0, row_index - 8) : row_index] if not (row and label_resolver(row[0]))
             ]
             # Long KPI tables can place an Orders row more than eight rows
             # below its date heading. Always retain the table-level header,
@@ -3888,10 +4298,7 @@ def parse_archive_text_table_facts(
                     local_header_rows = table_header_rows
                     values = align_registration_table_values(cells, local_header_rows)
             else:
-                if (
-                    concept_name in BACKLOG_ORDER_TEXT_CONCEPTS
-                    and consolidated_value_index is not None
-                ):
+                if concept_name in BACKLOG_ORDER_TEXT_CONCEPTS and consolidated_value_index is not None:
                     dimension_values = row_values(cells)
                     values = (
                         [dimension_values[consolidated_value_index]]
@@ -3908,9 +4315,7 @@ def parse_archive_text_table_facts(
                 continue
             period_context = provenance_context if strict_registration_statements else scale_context
             if consolidated_value_index is not None:
-                duration_days = duration_days_from_table_context(
-                    f"{period_context} {table_text[:1200]}"
-                )
+                duration_days = duration_days_from_table_context(f"{period_context} {table_text[:1200]}")
                 periods = [
                     (
                         period_end,
@@ -3938,17 +4343,16 @@ def parse_archive_text_table_facts(
                     strict_mixed_periods=strict_registration_statements,
                 )
             for value_index, raw_value in enumerate(values):
-                fact_period_end, duration_days, period_confidence, period_evidence = periods[min(value_index, len(periods) - 1)]
+                fact_period_end, duration_days, period_confidence, period_evidence = periods[
+                    min(value_index, len(periods) - 1)
+                ]
                 if period_type == "duration" and period_confidence == "fallback_filing_or_report_date":
                     continue
                 value = raw_value * scale
                 if concept_name in BACKLOG_ORDER_TEXT_CONCEPTS and (
                     period_confidence == "fallback_filing_or_report_date"
                     or abs(value) < BACKLOG_ORDER_MIN_PLAUSIBLE_USD
-                    or (
-                        scale_confidence == "low"
-                        and abs(value) < BACKLOG_ORDER_MIN_PLAUSIBLE_USD * 1000.0
-                    )
+                    or (scale_confidence == "low" and abs(value) < BACKLOG_ORDER_MIN_PLAUSIBLE_USD * 1000.0)
                 ):
                     # Prose/table backlog captures have produced mass mis-scaled
                     # junk (1,443 sub-$1M facts). These aggregates need a
@@ -3963,34 +4367,34 @@ def parse_archive_text_table_facts(
                     continue
                 seen.add(key)
                 fact = ArchiveFact(
-                        taxonomy="sec-text",
-                        concept_name=concept_name,
-                        unit=unit,
-                        value=value,
-                        period_start=period_start_for_text_fact(fact_period_end, period_type, duration_days),
-                        period_end=fact_period_end,
-                        frame=f"text_table:{document_name}:{table_index}:{row_index}:{value_index}",
-                        decimals="",
-                        payload_json=compact_json(
-                            {
-                                "document": document_name,
-                                "label": cells[0],
-                                "source": "sec_archive_text_table",
-                                "scale": scale,
-                                "scale_source": scale_source,
-                                "scale_confidence": scale_confidence,
-                                "currency_confidence": currency_confidence,
-                                "period_confidence": period_confidence,
-                                "period_evidence": period_evidence,
-                                "column_index": value_index,
-                                "column_count": len(values),
-                                "statement_type": statement_type,
-                                "projection_flag": projection_flag,
-                                "historical_statement_flag": historical_statement_flag,
-                            }
-                        ),
-                        source_detail=TEXT_TABLE_SOURCE_DETAIL,
-                    )
+                    taxonomy="sec-text",
+                    concept_name=concept_name,
+                    unit=unit,
+                    value=value,
+                    period_start=period_start_for_text_fact(fact_period_end, period_type, duration_days),
+                    period_end=fact_period_end,
+                    frame=f"text_table:{document_name}:{table_index}:{row_index}:{value_index}",
+                    decimals="",
+                    payload_json=compact_json(
+                        {
+                            "document": document_name,
+                            "label": cells[0],
+                            "source": "sec_archive_text_table",
+                            "scale": scale,
+                            "scale_source": scale_source,
+                            "scale_confidence": scale_confidence,
+                            "currency_confidence": currency_confidence,
+                            "period_confidence": period_confidence,
+                            "period_evidence": period_evidence,
+                            "column_index": value_index,
+                            "column_count": len(values),
+                            "statement_type": statement_type,
+                            "projection_flag": projection_flag,
+                            "historical_statement_flag": historical_statement_flag,
+                        }
+                    ),
+                    source_detail=TEXT_TABLE_SOURCE_DETAIL,
+                )
                 if strict_registration_statements and concept_name in {
                     "DepreciationComponent",
                     "AmortizationComponent",
@@ -4083,17 +4487,13 @@ def parse_archive_text_table_facts(
         duration_days = 0
         if start and end:
             duration_days = (
-                datetime.strptime(end, "%Y-%m-%d").date()
-                - datetime.strptime(start, "%Y-%m-%d").date()
+                datetime.strptime(end, "%Y-%m-%d").date() - datetime.strptime(start, "%Y-%m-%d").date()
             ).days
         payload = json.loads(fact.payload_json)
         label = normalize_table_label(str(payload.get("label") or ""))
         table_match = re.search(r":(\d+):", fact.frame)
         table_index = int(table_match.group(1)) if table_match else 1_000_000
-        equity_scope_rank = int(
-            fact.concept_name == "Equity"
-            and not label.startswith("total equity")
-        )
+        equity_scope_rank = int(fact.concept_name == "Equity" and not label.startswith("total equity"))
         return (
             -duration_days,
             equity_scope_rank,
@@ -4109,9 +4509,7 @@ def parse_archive_text_table_facts(
     return list(best_facts.values())
 
 
-LEGACY_ASCII_TABLE_NUMBER_RE = re.compile(
-    r"(?<![A-Za-z0-9.])(?:\$\s*)?(\(?-?\d[\d,]*(?:\.\d+)?\)?)(?![A-Za-z0-9.])"
-)
+LEGACY_ASCII_TABLE_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9.])(?:\$\s*)?(\(?-?\d[\d,]*(?:\.\d+)?\)?)(?![A-Za-z0-9.])")
 
 
 def parse_archive_legacy_ascii_table_facts(
@@ -4130,9 +4528,7 @@ def parse_archive_legacy_ascii_table_facts(
     """
     facts: list[ArchiveFact] = []
     seen: set[tuple[str, str, str, float]] = set()
-    fallback_period_end = parse_date(
-        filing.get("report_date") or filing.get("filing_date")
-    )
+    fallback_period_end = parse_date(filing.get("report_date") or filing.get("filing_date"))
     form_type = str(filing.get("form_type") or "").strip().upper()
     for table_index, match in enumerate(
         re.finditer(r"(?is)<table\b[^>]*>(.*?)</table>", document_text),
@@ -4145,22 +4541,15 @@ def parse_archive_legacy_ascii_table_facts(
         plain = re.sub(r"(?is)<(?:caption|s|c)\b[^>]*>", "\n", plain)
         plain = re.sub(r"(?is)</?(?:text|page)\b[^>]*>", "\n", plain)
         plain = re.sub(r"(?is)<[^>]+>", " ", plain)
-        lines = [
-            re.sub(r"[ \t]+", " ", line).strip()
-            for line in plain.replace("\r", "\n").split("\n")
-        ]
+        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in plain.replace("\r", "\n").split("\n")]
         lines = [line for line in lines if line]
         if not lines:
             continue
         table_text = "\n".join(lines)
-        statement_type, projection_flag, historical_statement_flag = (
-            text_table_statement_provenance(table_text[:2000], table_text)
+        statement_type, projection_flag, historical_statement_flag = text_table_statement_provenance(
+            table_text[:2000], table_text
         )
-        if (
-            statement_type not in RECOGNIZED_STATEMENT_TYPES
-            or projection_flag
-            or not historical_statement_flag
-        ):
+        if statement_type not in RECOGNIZED_STATEMENT_TYPES or projection_flag or not historical_statement_flag:
             continue
         first_data_index: int | None = None
         for line_index, line in enumerate(lines):
@@ -4168,11 +4557,7 @@ def parse_archive_legacy_ascii_table_facts(
             if not numeric_matches:
                 continue
             label = line[: numeric_matches[0].start()].strip(" $:-")
-            if (
-                re.search(r"[A-Za-z]{3}", label)
-                and not month_day_pairs(line)
-                and not full_text_dates(line)
-            ):
+            if re.search(r"[A-Za-z]{3}", label) and not month_day_pairs(line) and not full_text_dates(line):
                 first_data_index = line_index
                 break
         if first_data_index is None:
@@ -4181,9 +4566,7 @@ def parse_archive_legacy_ascii_table_facts(
         period_count = text_table_period_count(header_rows)
         if period_count <= 0 or period_count > 8:
             continue
-        scale, scale_source, scale_confidence = table_scale_info(
-            " ".join(lines[: min(first_data_index + 1, 25)])
-        )
+        scale, scale_source, scale_confidence = table_scale_info(" ".join(lines[: min(first_data_index + 1, 25)]))
         if scale_confidence != "high":
             continue
         unit, currency_confidence = text_table_unit(
@@ -4192,9 +4575,7 @@ def parse_archive_legacy_ascii_table_facts(
             company_currency=company_currency,
         )
         has_broader_revenue_row = any(
-            normalize_table_label(
-                line[: matches[0].start()].strip(" $:-")
-            )
+            normalize_table_label(line[: matches[0].start()].strip(" $:-"))
             in {"revenue", "revenues", "total revenue", "total revenues"}
             for line in lines[first_data_index:]
             if (matches := list(LEGACY_ASCII_TABLE_NUMBER_RE.finditer(line)))
@@ -4225,10 +4606,7 @@ def parse_archive_legacy_ascii_table_facts(
                 "DepreciationAndAmortization",
             }:
                 continue
-            values = [
-                parse_table_number(number_match.group(1))
-                for number_match in selected
-            ]
+            values = [parse_table_number(number_match.group(1)) for number_match in selected]
             if any(value is None for value in values):
                 continue
             periods = infer_text_table_periods(
@@ -4245,8 +4623,7 @@ def parse_archive_legacy_ascii_table_facts(
                     min(value_index, len(periods) - 1)
                 ]
                 if not period_end or (
-                    period_type == "duration"
-                    and period_confidence == "fallback_filing_or_report_date"
+                    period_type == "duration" and period_confidence == "fallback_filing_or_report_date"
                 ):
                     continue
                 value = parsed_value * scale
@@ -4266,10 +4643,7 @@ def parse_archive_legacy_ascii_table_facts(
                             duration_days,
                         ),
                         period_end=period_end,
-                        frame=(
-                            f"legacy_ascii:{document_name}:{table_index}:"
-                            f"{row_index}:{value_index}"
-                        ),
+                        frame=(f"legacy_ascii:{document_name}:{table_index}:{row_index}:{value_index}"),
                         decimals="",
                         payload_json=compact_json(
                             {
@@ -4302,17 +4676,19 @@ def archive_document_candidates(
     include_pdf: bool = False,
     targeted_report_documents: set[str] | None = None,
     machinery_targeted: bool = False,
+    research_targeted: bool = False,
     event_filing: bool = False,
+    event_exhibits_only: bool = False,
 ) -> list[str]:
-    raw_items = ((index_payload.get("directory") or {}).get("item") or [])
+    raw_items = (index_payload.get("directory") or {}).get("item") or []
     candidates: list[str] = []
+    event_research_documents: set[str] = set()
     primary = str(primary_document or "").strip()
     text_table_suffixes = (".xhtml", ".htm", ".html")
     allowed_suffixes = (
         text_table_suffixes + (ARCHIVE_PDF_SUFFIXES if include_pdf else ())
         if text_tables_only
-        else ARCHIVE_ALLOWED_DOCUMENT_SUFFIXES
-        + (ARCHIVE_PDF_SUFFIXES if include_pdf else ())
+        else ARCHIVE_ALLOWED_DOCUMENT_SUFFIXES + (ARCHIVE_PDF_SUFFIXES if include_pdf else ())
     )
     if primary and primary.lower().endswith(allowed_suffixes):
         candidates.append(primary)
@@ -4327,24 +4703,28 @@ def archive_document_candidates(
             continue
         if any(lower.endswith(suffix) for suffix in ARCHIVE_EXCLUDED_SUFFIXES):
             continue
-        if machinery_targeted and name != primary:
+        item_metadata = " ".join(
+            (
+                str(item.get("type") or ""),
+                str(item.get("description") or ""),
+            )
+        )
+        is_event_exhibit = event_filing and is_event_research_document(
+            name,
+            metadata=item_metadata,
+        )
+        if is_event_exhibit:
+            event_research_documents.add(name)
+        if (machinery_targeted or research_targeted) and name != primary:
             is_targeted_report = name in (targeted_report_documents or set())
             is_instance_xml = lower.endswith(".xml")
-            is_event_exhibit = event_filing and bool(
-                re.search(
-                    r"(?:ex(?:hibit)?[-_ ]?99|earnings|presentation|release)",
-                    lower,
-                )
-            )
             is_event_pdf = event_filing and lower.endswith(ARCHIVE_PDF_SUFFIXES)
-            if not (
-                is_targeted_report
-                or is_instance_xml
-                or is_event_exhibit
-                or is_event_pdf
-            ):
+            if not (is_targeted_report or is_instance_xml or is_event_exhibit or is_event_pdf):
                 continue
         candidates.append(name)
+    if event_filing and event_exhibits_only:
+        event_documents = [name for name in candidates if name != primary and name in event_research_documents]
+        candidates = event_documents or ([primary] if primary in candidates else [])
     candidates.sort(
         key=lambda name: (
             0 if name == primary else 1 if re.search(r"ex(?:hibit)?99|ex99", name, re.IGNORECASE) else 2,
@@ -4355,6 +4735,25 @@ def archive_document_candidates(
     if max_documents > 0:
         return candidates[:max_documents]
     return candidates
+
+
+def is_event_research_document(
+    document_name: object,
+    *,
+    metadata: object = "",
+) -> bool:
+    searchable = " ".join(
+        (
+            str(document_name or "").strip(),
+            str(metadata or "").strip(),
+        )
+    ).lower()
+    return bool(
+        re.search(
+            r"(?:ex(?:hibit)?[-_ ]?99|earnings|presentation|release)",
+            searchable,
+        )
+    )
 
 
 def archive_raw_submission_document_name(accession_number: object) -> str:
@@ -4377,9 +4776,10 @@ def should_stop_archive_document_scan(
     mapped_estimate: int,
     special_metric_count: int,
     parse_all_documents: bool,
+    scan_all_documents: bool = False,
 ) -> bool:
     """Keep scanning machinery event filings until an operating exhibit is found."""
-    if parse_all_documents or mapped_estimate <= 0:
+    if parse_all_documents or scan_all_documents or mapped_estimate <= 0:
         return False
     if model_family == "machinery" and form_type.strip().upper() in {"8-K", "8-K/A"}:
         # Separate EX-99 exhibits often contain different metrics. Parse all
@@ -4389,12 +4789,11 @@ def should_stop_archive_document_scan(
 
 
 def archive_label_linkbase_candidates(index_payload: dict[str, Any]) -> list[str]:
-    raw_items = ((index_payload.get("directory") or {}).get("item") or [])
+    raw_items = (index_payload.get("directory") or {}).get("item") or []
     candidates = {
         str(item.get("name") or "").strip()
         for item in raw_items
-        if isinstance(item, dict)
-        and str(item.get("name") or "").strip().lower().endswith("_lab.xml")
+        if isinstance(item, dict) and str(item.get("name") or "").strip().lower().endswith("_lab.xml")
     }
     return sorted(name for name in candidates if name)
 
@@ -4432,7 +4831,18 @@ def upsert_archive_facts(
         # path ('SHARES'/'USD' from read_units) and the companyfacts path agree;
         # readers compare case-insensitively for legacy rows.
         unit_text = str(fact.unit or "").strip().lower()
-        fact_key = make_fact_key(ticker, source_id, accession, fact.taxonomy, fact.concept_name, unit_text, fact.period_start, fact.period_end, fact.frame, document_name)
+        fact_key = make_fact_key(
+            ticker,
+            source_id,
+            accession,
+            fact.taxonomy,
+            fact.concept_name,
+            unit_text,
+            fact.period_start,
+            fact.period_end,
+            fact.frame,
+            document_name,
+        )
         conn.execute(
             """
             INSERT INTO fact_sec_xbrl_fact_raw(
@@ -4477,7 +4887,9 @@ def upsert_archive_facts(
                 now,
             ),
         )
-        raw_row = conn.execute("SELECT raw_fact_id FROM fact_sec_xbrl_fact_raw WHERE fact_key = ?", (fact_key,)).fetchone()
+        raw_row = conn.execute(
+            "SELECT raw_fact_id FROM fact_sec_xbrl_fact_raw WHERE fact_key = ?", (fact_key,)
+        ).fetchone()
         raw_fact_id = int(raw_row["raw_fact_id"]) if raw_row is not None else None
         raw_count += 1
         for mapping in concept_map.get((fact.taxonomy, fact.concept_name), []):
@@ -4663,16 +5075,8 @@ def select_archive_filing_rows(
     """Cap event filings separately so they cannot displace periodic history."""
     if not supplemental_forms:
         return filing_rows[:max_filings] if max_filings > 0 else filing_rows
-    core = [
-        row
-        for row in filing_rows
-        if str(row["form_type"] or "").strip().upper() not in supplemental_forms
-    ]
-    supplemental = [
-        row
-        for row in filing_rows
-        if str(row["form_type"] or "").strip().upper() in supplemental_forms
-    ]
+    core = [row for row in filing_rows if str(row["form_type"] or "").strip().upper() not in supplemental_forms]
+    supplemental = [row for row in filing_rows if str(row["form_type"] or "").strip().upper() in supplemental_forms]
     if max_filings > 0:
         core = core[:max_filings]
     if max_supplemental_filings >= 0:
@@ -4721,6 +5125,10 @@ def sync_archive_xbrl(
     company_currency: str = "",
     min_refetch_fact_fraction: float = 0.5,
     ingestion_run_id: int,
+    scan_all_documents: bool = False,
+    cache_only: bool = False,
+    document_keywords: tuple[str, ...] = (),
+    accession_filter: set[str] | None = None,
 ) -> tuple[int, int, int]:
     """Refresh archive-derived XBRL facts with stage-then-swap semantics (FN-2, XC-23).
 
@@ -4744,6 +5152,10 @@ def sync_archive_xbrl(
     ).fetchall()
     if not filing_rows:
         return 0, 0, 0
+    if accession_filter is not None:
+        filing_rows = [row for row in filing_rows if str(row["accession_number"] or "") in accession_filter]
+        if not filing_rows:
+            return 0, 0, 0
     filing_rows = select_archive_filing_rows(
         list(filing_rows),
         max_filings=max_filings,
@@ -4752,9 +5164,7 @@ def sync_archive_xbrl(
     )
 
     # Phase 1: network fetch + parse, staging facts in memory.
-    staged: list[
-        tuple[dict[str, Any], str, list[ArchiveFact], list[DisclosureCandidate]]
-    ] = []
+    staged: list[tuple[dict[str, Any], str, list[ArchiveFact], list[DisclosureCandidate]]] = []
     raw_responses: list[tuple[str, int, str]] = []
     document_parse_warnings: list[str] = []
     fetch_failures = 0
@@ -4782,7 +5192,9 @@ def sync_archive_xbrl(
         except SecRequestError as exc:
             raw_responses.append((exc.url, exc.status_code, exc.body))
             fetch_failures += 1
-            LOGGER.warning("Unavailable SEC archive index ticker=%s accession=%s status=%s", ticker, accession, exc.status_code)
+            LOGGER.warning(
+                "Unavailable SEC archive index ticker=%s accession=%s status=%s", ticker, accession, exc.status_code
+            )
             continue
         if index_fetch_mode == "network":
             # FN-8: cache hits are not new observations; only record network fetches.
@@ -4833,7 +5245,7 @@ def sync_archive_xbrl(
         form_type = str(filing.get("form_type") or "").strip().upper()
         event_filing = form_type in {"8-K", "8-K/A", "6-K", "6-K/A"}
         targeted_report_documents: set[str] = set()
-        if model_family == "machinery" and not event_filing:
+        if (model_family == "machinery" or document_keywords) and not event_filing:
             summary_document = filing_summary_document_name(index_payload)
             if summary_document:
                 summary_url = document_url_template.format(
@@ -4868,7 +5280,25 @@ def sync_archive_xbrl(
                         exc.status_code,
                     )
                 else:
-                    targeted_report_documents = filing_summary_report_documents(summary_text)
+                    targeted_report_documents = filing_summary_report_documents(
+                        summary_text,
+                        keywords=(
+                            document_keywords
+                            if document_keywords
+                            else (
+                                "backlog",
+                                "booking",
+                                "contract",
+                                "customer",
+                                "inventory",
+                                "order",
+                                "performance obligation",
+                                "remaining performance",
+                                "revenue",
+                                "segment",
+                            )
+                        ),
+                    )
                     if summary_fetch_mode == "network":
                         raw_responses.append((summary_url, summary_status, summary_text))
                         time.sleep(sleep_sec)
@@ -4877,12 +5307,12 @@ def sync_archive_xbrl(
             primary_document=str(filing.get("primary_document") or ""),
             max_documents=max_documents,
             text_tables_only=text_tables_only,
-            include_pdf=(
-                include_pdf_documents and model_family == "machinery" and event_filing
-            ),
+            include_pdf=(include_pdf_documents and event_filing),
             targeted_report_documents=targeted_report_documents,
             machinery_targeted=model_family == "machinery",
+            research_targeted=bool(document_keywords),
             event_filing=event_filing,
+            event_exhibits_only=(model_family == "defense" and bool(document_keywords) and event_filing),
         )
         # SEC's complete-submission text file is the authoritative fallback
         # for pre-XBRL filings whose legacy split-document links return 404.
@@ -4890,14 +5320,18 @@ def sync_archive_xbrl(
         # add it to FPI "parse every document" runs where it would duplicate
         # hundreds of already-parsed exhibits.
         raw_submission_name = archive_raw_submission_document_name(accession)
+        defense_targeted_event = model_family == "defense" and bool(document_keywords) and event_filing
         if (
             raw_submission_name
             and not parse_all_documents
+            and not defense_targeted_event
             and raw_submission_name not in document_candidates
         ):
             document_candidates.append(raw_submission_name)
         for document_name in document_candidates:
-            document_url = document_url_template.format(cik_int=cik_int, accession_nodash=accession_nodash, document_name=document_name)
+            document_url = document_url_template.format(
+                cik_int=cik_int, accession_nodash=accession_nodash, document_name=document_name
+            )
             document_cache = archive_cache_file(cache_dir, cik=cik, accession=accession, document_name=document_name)
             requests += 1
             try:
@@ -4922,9 +5356,7 @@ def sync_archive_xbrl(
                     )
                     document_text = extracted.text
                     if extracted.warning:
-                        document_parse_warnings.append(
-                            f"{accession}:{document_name}:{extracted.warning}"
-                        )
+                        document_parse_warnings.append(f"{accession}:{document_name}:{extracted.warning}")
                     if document_fetch_mode == "network":
                         raw_responses.append(
                             (
@@ -4957,7 +5389,13 @@ def sync_archive_xbrl(
             except SecRequestError as exc:
                 raw_responses.append((exc.url, exc.status_code, exc.body))
                 fetch_failures += 1
-                LOGGER.warning("Unavailable SEC archive document ticker=%s accession=%s document=%s status=%s", ticker, accession, document_name, exc.status_code)
+                LOGGER.warning(
+                    "Unavailable SEC archive document ticker=%s accession=%s document=%s status=%s",
+                    ticker,
+                    accession,
+                    document_name,
+                    exc.status_code,
+                )
                 continue
             facts = parse_archive_text_table_facts(
                 document_text,
@@ -5018,15 +5456,14 @@ def sync_archive_xbrl(
                 )
             staged.append((filing, document_name, facts, prose_candidates))
             mapped_estimate = sum(len(concept_map.get((fact.taxonomy, fact.concept_name), [])) for fact in facts)
-            special_metric_count = sum(
-                fact.concept_name in BACKLOG_ORDER_TEXT_CONCEPTS for fact in facts
-            )
+            special_metric_count = sum(fact.concept_name in BACKLOG_ORDER_TEXT_CONCEPTS for fact in facts)
             if should_stop_archive_document_scan(
                 model_family=model_family,
                 form_type=str(filing.get("form_type") or ""),
                 mapped_estimate=mapped_estimate,
                 special_metric_count=special_metric_count,
                 parse_all_documents=parse_all_documents,
+                scan_all_documents=scan_all_documents,
             ):
                 break
             if document_fetch_mode == "network":
@@ -5046,6 +5483,11 @@ def sync_archive_xbrl(
     )
 
     # Phase 2: one short write transaction — provenance, purge guard, swap.
+    if cache_only:
+        # Hydration supplies the dedicated parser's shadow cache. It must not
+        # replace canonical/archive financial facts as a side effect.
+        return staged_fact_count, 0, requests
+
     raw_total = 0
     mapped_total = 0
     with conn:
@@ -5059,8 +5501,12 @@ def sync_archive_xbrl(
                 asof_date=datetime.now(timezone.utc).date().isoformat(),
                 ingestion_run_id=ingestion_run_id,
             )
-        source_filter = "source_detail IN ('sec_archive_text_table', 'sec_archive_footnote_xbrl', 'sec_archive_prose_metric')" if text_tables_only else (
-            "source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl', 'sec_archive_prose_metric')"
+        source_filter = (
+            "source_detail IN ('sec_archive_text_table', 'sec_archive_footnote_xbrl', 'sec_archive_prose_metric')"
+            if text_tables_only
+            else (
+                "source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl', 'sec_archive_prose_metric')"
+            )
         )
         prior_row = conn.execute(
             f"""
@@ -5205,7 +5651,17 @@ def upsert_companyfacts(
                     fiscal_period = str(fact.get("fp") or "").strip()
                     period_start = parse_date(fact.get("start"))
                     frame = str(fact.get("frame") or "").strip()
-                    fact_key = make_fact_key(ticker, source_id, accession, taxonomy_text, concept_name, unit_text, period_start, period_end, frame)
+                    fact_key = make_fact_key(
+                        ticker,
+                        source_id,
+                        accession,
+                        taxonomy_text,
+                        concept_name,
+                        unit_text,
+                        period_start,
+                        period_end,
+                        frame,
+                    )
                     conn.execute(
                         """
                         INSERT INTO fact_sec_xbrl_fact_raw(
@@ -5247,7 +5703,9 @@ def upsert_companyfacts(
                             now,
                         ),
                     )
-                    raw_row = conn.execute("SELECT raw_fact_id FROM fact_sec_xbrl_fact_raw WHERE fact_key = ?", (fact_key,)).fetchone()
+                    raw_row = conn.execute(
+                        "SELECT raw_fact_id FROM fact_sec_xbrl_fact_raw WHERE fact_key = ?", (fact_key,)
+                    ).fetchone()
                     raw_fact_id = int(raw_row["raw_fact_id"]) if raw_row is not None else None
                     raw_count += 1
                     for mapping in mappings:
@@ -5369,10 +5827,7 @@ def classify_reporting_profile(
         ).fetchall()
     }
     taxonomies = {str(row["taxonomy"]): int(row["n"] or 0) for row in tax_rows}
-    taxonomy_latest_period = {
-        str(row["taxonomy"]): str(row["latest_period_end"] or "")
-        for row in tax_rows
-    }
+    taxonomy_latest_period = {str(row["taxonomy"]): str(row["latest_period_end"] or "") for row in tax_rows}
     core_metrics = {"revenue", "assets"}
 
     def primary_xbrl_taxonomy(*, require_core: bool) -> str:
@@ -5423,8 +5878,14 @@ def classify_reporting_profile(
     primary_partial_taxonomy = primary_xbrl_taxonomy(require_core=False)
     has_core = {"revenue", "assets"} <= metrics
     has_core_sec_text = {"revenue", "assets"} <= metrics_by_taxonomy.get("sec-text", set())
-    has_balance_sheet = "assets" in metrics and bool(metrics.intersection({"cash_and_equivalents", "liabilities", "equity"}))
-    has_operating_or_income = bool(metrics.intersection({"operating_income", "net_income", "operating_cash_flow", "capex", "research_and_development"}))
+    has_balance_sheet = "assets" in metrics and bool(
+        metrics.intersection({"cash_and_equivalents", "liabilities", "equity"})
+    )
+    has_operating_or_income = bool(
+        metrics.intersection(
+            {"operating_income", "net_income", "operating_cash_flow", "capex", "research_and_development"}
+        )
+    )
     has_partial_xbrl = has_balance_sheet or has_operating_or_income
     latest_form = str(latest["form_type"]) if latest is not None else ""
     latest_filing = str(latest["filing_date"]) if latest is not None else ""
@@ -5482,11 +5943,7 @@ def classify_reporting_profile(
             reason = override.review_reason or "fpi_hybrid_stub_loaded_not_rank_ready"
         confidence = max(override.financial_confidence, 0.55 if has_core else 0.35)
         usable_xbrl = 1
-    elif (
-        override is not None
-        and override.handling_type in FULL_STATEMENT_ARCHIVE_HANDLING_TYPES
-        and has_core_sec_text
-    ):
+    elif override is not None and override.handling_type in FULL_STATEMENT_ARCHIVE_HANDLING_TYPES and has_core_sec_text:
         profile = "SEC_ARCHIVE_TEXT_TABLE"
         standard = "sec_archive_text_table"
         primary_taxonomy = "sec-text"
@@ -5510,7 +5967,12 @@ def classify_reporting_profile(
         confidence = 0.75
         usable_xbrl = 1
         reason = ""
-    elif has_core and taxonomies.get("sec-text", 0) > 0 and override is not None and override.reporting_profile == "RECENT_IPO_DEVELOPMENT_STAGE":
+    elif (
+        has_core
+        and taxonomies.get("sec-text", 0) > 0
+        and override is not None
+        and override.reporting_profile == "RECENT_IPO_DEVELOPMENT_STAGE"
+    ):
         profile = "RECENT_IPO_DEVELOPMENT_STAGE"
         standard = "sec_archive_text_table"
         primary_taxonomy = "sec-text"
@@ -5542,7 +6004,12 @@ def classify_reporting_profile(
         confidence = 0.45
         usable_xbrl = 1
         reason = "partial_ifrs_xbrl_missing_core_revenue_or_assets"
-    elif has_partial_xbrl and taxonomies.get("sec-text", 0) > 0 and override is not None and override.reporting_profile == "RECENT_IPO_DEVELOPMENT_STAGE":
+    elif (
+        has_partial_xbrl
+        and taxonomies.get("sec-text", 0) > 0
+        and override is not None
+        and override.reporting_profile == "RECENT_IPO_DEVELOPMENT_STAGE"
+    ):
         profile = "RECENT_IPO_DEVELOPMENT_STAGE"
         standard = "sec_archive_text_table_partial"
         primary_taxonomy = "sec-text"
@@ -5575,7 +6042,11 @@ def classify_reporting_profile(
         usable_xbrl = 0
         reason = "foreign_issuer_no_usable_sec_xbrl"
     elif raw_archive_override or archive_attempt_override:
-        profile = override.reporting_profile if override is not None and override.reporting_profile else "SEC_RAW_ARCHIVE_REQUIRED"
+        profile = (
+            override.reporting_profile
+            if override is not None and override.reporting_profile
+            else "SEC_RAW_ARCHIVE_REQUIRED"
+        )
         standard = override.reporting_standard if override is not None else "legacy_sec_archive"
         primary_taxonomy = ",".join(sorted(taxonomies))
         fallback = override.fallback_status if override is not None else "raw_archive_required"
@@ -5741,7 +6212,9 @@ def start_ingestion_run(conn: Any, *, source_id: str) -> int:
     return int(cur.lastrowid)
 
 
-def finish_ingestion_run(conn: Any, *, ingestion_run_id: int, status: str, request_count: int, row_count: int, message: str) -> None:
+def finish_ingestion_run(
+    conn: Any, *, ingestion_run_id: int, status: str, request_count: int, row_count: int, message: str
+) -> None:
     with conn:
         conn.execute(
             """
@@ -5857,17 +6330,36 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
-    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    model_family = str(args.model_family or cfg_get(config, "industrials_universe.initial_subsector", "defense") or "defense").strip()
-    submissions_source_id = str(cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions") or "sec_submissions")
-    companyfacts_source_id = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts") or "sec_companyfacts")
-    submissions_template = str(cfg_get(config, "sec_fundamentals.submissions_url_template") or "https://data.sec.gov/submissions/CIK{cik}.json")
-    companyfacts_template = str(cfg_get(config, "sec_fundamentals.companyfacts_url_template") or "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json")
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    )
+    model_family = str(
+        args.model_family or cfg_get(config, "industrials_universe.initial_subsector", "defense") or "defense"
+    ).strip()
+    submissions_source_id = str(
+        cfg_get(config, "sec_fundamentals.submissions_source_id", "sec_submissions") or "sec_submissions"
+    )
+    companyfacts_source_id = str(
+        cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts") or "sec_companyfacts"
+    )
+    submissions_template = str(
+        cfg_get(config, "sec_fundamentals.submissions_url_template") or "https://data.sec.gov/submissions/CIK{cik}.json"
+    )
+    companyfacts_template = str(
+        cfg_get(config, "sec_fundamentals.companyfacts_url_template")
+        or "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+    )
     # CF-1: expand env-var templates before use, and fail loudly when the
     # expanded value is empty or carries no contact address — SEC fair-access
     # policy requires a contact in every User-Agent, and a literal "${...}"
     # template must never be sent upstream.
-    user_agent = "" if args.profiles_only else resolve_sec_user_agent(config)
+    user_agent = (
+        ""
+        if args.profiles_only or (args.filing_catalog_cache_only and not args.filing_catalog_fetch_missing)
+        else resolve_sec_user_agent(config)
+    )
     timeout_sec = float(cfg_get(config, "sec_fundamentals.timeout_sec", 30.0))
     max_retries = int(cfg_get(config, "sec_fundamentals.max_retries", 3))
     sleep_sec = float(cfg_get(config, "sec_fundamentals.request_sleep_sec", 0.12))
@@ -5875,7 +6367,7 @@ def main() -> None:
     allowed_forms = {str(form).upper() for form in (cfg_get(config, "sec_fundamentals.forms", []) or [])}
     cache_dir = resolve_path(cfg_get(config, "sec_fundamentals.cache_dir"), base_dir=base_dir)
     archive_enabled = as_bool(cfg_get(config, "sec_archive.enabled", True))
-    archive_all_family_members = as_bool(cfg_get(config, "sec_archive.all_family_members", False))
+    configured_archive_all_family_members = as_bool(cfg_get(config, "sec_archive.all_family_members", False))
     archive_core_metric_recovery_tickers = {
         normalize_ticker(item)
         for item in (cfg_get(config, "sec_archive.core_metric_recovery_tickers", []) or [])
@@ -5890,43 +6382,82 @@ def main() -> None:
         or "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/{document_name}"
     )
     archive_submission_file_template = str(
-        cfg_get(config, "sec_archive.submission_file_url_template")
-        or "https://data.sec.gov/submissions/{file_name}"
+        cfg_get(config, "sec_archive.submission_file_url_template") or "https://data.sec.gov/submissions/{file_name}"
     )
     archive_browse_edgar_template = str(
         cfg_get(config, "sec_archive.browse_edgar_atom_url_template")
         or "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form_type}&owner=exclude&count=100&output=atom"
     )
     archive_max_submission_files = int(cfg_get(config, "sec_archive.max_submission_history_files", 0) or 0)
-    archive_max_filings = int(cfg_get(config, "sec_archive.max_filings_per_ticker", 0) or 0)
+    configured_archive_max_filings = int(cfg_get(config, "sec_archive.max_filings_per_ticker", 0) or 0)
+    archive_max_filings = (
+        configured_archive_max_filings
+        if args.archive_max_filings_per_ticker is None
+        else int(args.archive_max_filings_per_ticker)
+    )
     archive_supplemental_forms = {
         str(form).strip().upper()
         for form in (cfg_get(config, "sec_archive.supplemental_forms", []) or [])
         if str(form).strip()
     }
-    archive_max_supplemental_filings = int(
-        cfg_get(config, "sec_archive.max_supplemental_filings_per_ticker", 0) or 0
+    archive_max_supplemental_filings = int(cfg_get(config, "sec_archive.max_supplemental_filings_per_ticker", 0) or 0)
+    archive_max_documents_raw = cfg_get(
+        config,
+        "sec_archive.max_documents_per_filing",
+        5,
     )
-    archive_max_documents_raw = cfg_get(config, "sec_archive.max_documents_per_filing", 5)
-    archive_max_documents = int(archive_max_documents_raw) if archive_max_documents_raw is not None else 5
-    archive_include_pdf_documents = bool(
-        cfg_get(config, "sec_archive.include_pdf_documents", False)
+    configured_archive_max_documents = int(archive_max_documents_raw) if archive_max_documents_raw is not None else 5
+    archive_max_documents = (
+        configured_archive_max_documents
+        if args.archive_max_documents_per_filing is None
+        else int(args.archive_max_documents_per_filing)
     )
+    if archive_max_filings < 0 or archive_max_documents < 0:
+        raise ValueError("Archive filing/document limits must be zero or positive")
+    archive_include_pdf_documents = bool(cfg_get(config, "sec_archive.include_pdf_documents", False))
     archive_pdf_ocr_enabled = bool(cfg_get(config, "sec_archive.pdf_ocr_enabled", False))
     archive_max_pdf_pages = int(cfg_get(config, "sec_archive.max_pdf_pages", 250) or 250)
-    archive_max_pdf_bytes = int(
-        cfg_get(config, "sec_archive.max_pdf_bytes", 25_000_000) or 25_000_000
+    archive_max_pdf_bytes = int(cfg_get(config, "sec_archive.max_pdf_bytes", 25_000_000) or 25_000_000)
+    archive_pdf_extraction_timeout_sec = float(cfg_get(config, "sec_archive.pdf_extraction_timeout_sec", 30.0) or 30.0)
+    archive_document_keywords = tuple(
+        sorted(
+            {value.strip().lower() for value in str(args.archive_document_keywords or "").split(",") if value.strip()}
+        )
     )
-    archive_pdf_extraction_timeout_sec = float(
-        cfg_get(config, "sec_archive.pdf_extraction_timeout_sec", 30.0) or 30.0
-    )
+    archive_accession_scope: dict[str, set[str]] = {}
+    if args.archive_accession_scope_csv is not None:
+        if not args.archive_cache_only:
+            raise ValueError("--archive-accession-scope-csv requires --archive-cache-only")
+        scope_path = args.archive_accession_scope_csv.expanduser().resolve()
+        if not scope_path.is_file():
+            raise ValueError(f"Archive accession scope CSV not found: {scope_path}")
+        with scope_path.open(
+            "r",
+            encoding="utf-8-sig",
+            newline="",
+        ) as handle:
+            for line_number, row in enumerate(
+                csv.DictReader(handle),
+                start=2,
+            ):
+                ticker = normalize_ticker(row.get("ticker"))
+                accession = str(row.get("accession_number") or "").strip()
+                if not ticker or not accession:
+                    raise ValueError(f"{scope_path}:{line_number} requires ticker and accession_number")
+                archive_accession_scope.setdefault(ticker, set()).add(accession)
     # FN-2: minimum fraction of previously stored archive facts a refetch must
     # reproduce before the purge-and-swap is allowed to destroy existing state.
     archive_min_refetch_fraction = float(cfg_get(config, "sec_archive.min_refetch_fact_fraction", 0.5))
     # FN-8: retention window for raw_api_responses payloads (days; <= 0 disables pruning).
     raw_response_retention_days = int(cfg_get(config, "sec_fundamentals.raw_response_retention_days", 90) or 0)
-    output_csv = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(cfg_get(config, "sec_fundamentals.sync_output_csv"), base_dir=base_dir)
-    include_historical = bool(args.include_historical or cfg_get(config, "sec_fundamentals.include_historical_members", False))
+    output_csv = (
+        args.output_csv.expanduser().resolve()
+        if args.output_csv
+        else resolve_path(cfg_get(config, "sec_fundamentals.sync_output_csv"), base_dir=base_dir)
+    )
+    include_historical = bool(
+        args.include_historical or cfg_get(config, "sec_fundamentals.include_historical_members", False)
+    )
     # EL-3: reporting overrides are point-in-time; select the rows effective at
     # the evaluation asof (defaults to the sync run's UTC date, never implicitly
     # a different wall-clock date for historical replays).
@@ -5940,12 +6471,53 @@ def main() -> None:
     # DR-2: per-family CSV resolution with a defense-only legacy fallback;
     # a configured-but-missing file raises instead of loading zero overrides.
     reporting_overrides_path = resolve_reporting_overrides_path(config, base_dir=base_dir, model_family=model_family)
-    reporting_graduations_path = resolve_reporting_graduations_path(config, base_dir=base_dir, model_family=model_family)
+    reporting_graduations_path = resolve_reporting_graduations_path(
+        config, base_dir=base_dir, model_family=model_family
+    )
     reporting_overrides = load_reporting_override_sources(
         [reporting_overrides_path, reporting_graduations_path],
         asof=evaluation_asof,
     )
     ticker_filter = parse_ticker_list(args.tickers)
+    catalog_forms = {
+        str(form).strip().upper() for form in str(args.filing_catalog_forms or "").split(",") if str(form).strip()
+    } or set(allowed_forms)
+    catalog_start_date = parse_date(args.filing_catalog_start_date or start_date)
+    if args.filing_catalog_start_date and not catalog_start_date:
+        raise ValueError(f"Invalid --filing-catalog-start-date value: {args.filing_catalog_start_date!r}")
+    unsupported_catalog_forms = catalog_forms - allowed_forms
+    if unsupported_catalog_forms:
+        raise ValueError(
+            "--filing-catalog-forms contains forms not enabled by "
+            "sec_fundamentals.forms: " + ",".join(sorted(unsupported_catalog_forms))
+        )
+    if args.filing_catalog_cache_only and not ticker_filter:
+        raise ValueError("--filing-catalog-cache-only requires an explicit --tickers filter")
+    if args.filing_catalog_cache_only and args.archive_cache_only:
+        raise ValueError("--filing-catalog-cache-only cannot be combined with --archive-cache-only")
+    if args.filing_catalog_fetch_missing and not args.filing_catalog_cache_only:
+        raise ValueError("--filing-catalog-fetch-missing requires --filing-catalog-cache-only")
+    if args.archive_selected and not ticker_filter:
+        raise ValueError("--archive-selected requires an explicit --tickers filter")
+    if args.archive_cache_only and not args.archive_selected:
+        raise ValueError("--archive-cache-only requires --archive-selected --tickers")
+    if args.archive_scan_all_documents and not args.archive_selected:
+        raise ValueError("--archive-scan-all-documents requires --archive-selected --tickers")
+    if args.archive_cache_only and any(
+        (
+            args.incremental,
+            args.force,
+            args.force_submissions,
+            args.force_companyfacts,
+            args.profiles_only,
+        )
+    ):
+        raise ValueError(
+            "--archive-cache-only cannot be combined with incremental, "
+            "companyfacts/submissions force, or profile-only modes"
+        )
+    if args.archive_cache_workers < 1:
+        raise ValueError("--archive-cache-workers must be at least 1")
     if args.profiles_only and any(
         (
             args.incremental,
@@ -5954,22 +6526,30 @@ def main() -> None:
             args.force_companyfacts,
             args.force_archive,
             args.archive_bootstrap,
+            args.archive_selected,
+            args.archive_cache_only,
+            args.filing_catalog_cache_only,
+            args.archive_scan_all_documents,
         )
     ):
         raise ValueError("--profiles-only cannot be combined with SEC fetch/force options")
     if args.profiles_all_members and not (args.profiles_only and args.include_historical):
-        raise ValueError(
-            "--profiles-all-members requires --profiles-only --include-historical"
-        )
+        raise ValueError("--profiles-all-members requires --profiles-only --include-historical")
     if args.incremental and args.force:
-        raise ValueError("--incremental cannot be combined with --force; use --force-submissions, --force-companyfacts, or --force-archive.")
+        raise ValueError(
+            "--incremental cannot be combined with --force; use --force-submissions, --force-companyfacts, or --force-archive."
+        )
     force_submissions = bool(args.force or args.force_submissions or args.incremental)
     force_submission_history = bool(args.force or args.force_submissions)
     force_companyfacts = bool(args.force or args.force_companyfacts)
     force_archive = bool(args.force or args.force_archive)
     archive_bootstrap = bool(args.archive_bootstrap)
+    archive_all_family_members = bool(configured_archive_all_family_members or args.archive_selected)
     if archive_bootstrap and not archive_all_family_members:
-        raise ValueError("--archive-bootstrap requires sec_archive.all_family_members=true")
+        raise ValueError(
+            "--archive-bootstrap requires sec_archive.all_family_members=true "
+            "or an explicit --archive-selected --tickers scope"
+        )
 
     with closing(connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0)))) as conn:
         init_db(conn)
@@ -5979,7 +6559,7 @@ def main() -> None:
                 upsert_source_registry(conn, load_source_registry(registry_path))
         if source_status(conn, submissions_source_id) != "active":
             raise ValueError(f"Source {submissions_source_id} must be active in source_registry.")
-        if source_status(conn, companyfacts_source_id) != "active":
+        if not args.filing_catalog_cache_only and source_status(conn, companyfacts_source_id) != "active":
             raise ValueError(f"Source {companyfacts_source_id} must be active in source_registry.")
 
         tickers = load_universe(
@@ -5987,11 +6567,7 @@ def main() -> None:
             model_family=model_family,
             ticker_filter=ticker_filter,
             include_historical=include_historical,
-            membership_asof=(
-                evaluation_asof
-                if args.profiles_only and not args.profiles_all_members
-                else ""
-            ),
+            membership_asof=(evaluation_asof if args.profiles_only and not args.profiles_all_members else ""),
             currency_asof=evaluation_asof,
         )
         if args.max_tickers > 0:
@@ -6009,6 +6585,46 @@ def main() -> None:
             archive_bootstrap,
         )
 
+        if args.filing_catalog_cache_only:
+            catalog_rows = catalog_cached_submission_filings(
+                conn,
+                items=tickers,
+                source_id=submissions_source_id,
+                cache_dir=cache_dir,
+                allowed_forms=catalog_forms,
+                start_date=catalog_start_date,
+                end_date=evaluation_asof,
+                max_history_files=archive_max_submission_files,
+                fetch_missing=bool(args.filing_catalog_fetch_missing),
+                submissions_url_template=submissions_template,
+                history_url_template=archive_submission_file_template,
+                user_agent=user_agent,
+                timeout_sec=timeout_sec,
+                max_retries=max_retries,
+                sleep_sec=sleep_sec,
+            )
+            write_csv_atomic(
+                output_csv,
+                FILING_CATALOG_REPORT_FIELDS,
+                catalog_rows,
+            )
+            catalog_failures = [
+                row for row in catalog_rows if row["status"] in {"catalog_failed", "catalog_partial_history_cache"}
+            ]
+            if catalog_failures and not args.allow_partial:
+                raise RuntimeError(
+                    "Cached filing catalog failures: "
+                    + "; ".join(f"{row['ticker']}:{row['status']}:{row['error']}" for row in catalog_failures[:20])
+                )
+            LOGGER.info(
+                "Cached filing catalog complete: tickers=%d filings=%d failures=%d output=%s",
+                len(catalog_rows),
+                sum(int(row["cataloged_filing_count"] or 0) for row in catalog_rows),
+                len(catalog_failures),
+                output_csv,
+            )
+            return
+
         concept_map = load_concept_map(conn)
         add_family_concept_mappings(
             concept_map,
@@ -6016,6 +6632,153 @@ def main() -> None:
             config=config,
             base_dir=base_dir,
         )
+        if args.archive_cache_only:
+            if not archive_enabled:
+                raise ValueError("--archive-cache-only requires sec_archive.enabled=true")
+
+            def hydrate_cache_item(
+                item: dict[str, Any],
+            ) -> dict[str, Any]:
+                ticker = normalize_ticker(item.get("ticker"))
+                cik = normalize_cik(item.get("cik"))
+                if not ticker or not cik:
+                    return {
+                        "ticker": ticker,
+                        "cik": cik,
+                        "status": "source_unavailable",
+                        "archive_request_count": 0,
+                        "cached_fact_candidate_count": 0,
+                        "error": "missing_ticker_or_cik",
+                    }
+                reporting_override = reporting_overrides.get(ticker)
+                try:
+                    with closing(
+                        connect(
+                            db_path,
+                            timeout_sec=float(
+                                cfg_get(
+                                    config,
+                                    "runtime.sqlite_timeout_sec",
+                                    30.0,
+                                )
+                            ),
+                        )
+                    ) as cache_conn:
+                        staged_count, _, request_count = sync_archive_xbrl(
+                            cache_conn,
+                            ticker=ticker,
+                            cik=cik,
+                            source_id=companyfacts_source_id,
+                            submissions_source_id=submissions_source_id,
+                            model_family=model_family,
+                            cache_dir=cache_dir,
+                            force=force_archive,
+                            user_agent=user_agent,
+                            timeout_sec=timeout_sec,
+                            max_retries=max_retries,
+                            sleep_sec=sleep_sec,
+                            concept_map=concept_map,
+                            start_date=start_date,
+                            index_url_template=archive_index_template,
+                            document_url_template=archive_document_template,
+                            max_filings=archive_max_filings,
+                            supplemental_forms=archive_supplemental_forms,
+                            max_supplemental_filings=(archive_max_supplemental_filings),
+                            max_documents=archive_max_documents,
+                            include_pdf_documents=(archive_include_pdf_documents),
+                            pdf_ocr_enabled=archive_pdf_ocr_enabled,
+                            max_pdf_pages=archive_max_pdf_pages,
+                            max_pdf_bytes=archive_max_pdf_bytes,
+                            pdf_extraction_timeout_sec=(archive_pdf_extraction_timeout_sec),
+                            parse_all_documents=bool(
+                                reporting_override is not None
+                                and reporting_override.reporting_profile in FPI_HYBRID_PROFILES
+                            ),
+                            text_tables_only=not bool(args.archive_scan_all_documents),
+                            strict_registration_statements=bool(
+                                reporting_override is not None
+                                and reporting_override.handling_type in FULL_STATEMENT_ARCHIVE_HANDLING_TYPES
+                            ),
+                            company_currency=str(item.get("currency") or ""),
+                            min_refetch_fact_fraction=(archive_min_refetch_fraction),
+                            ingestion_run_id=0,
+                            scan_all_documents=bool(args.archive_scan_all_documents),
+                            cache_only=True,
+                            document_keywords=archive_document_keywords,
+                            accession_filter=(archive_accession_scope.get(ticker) if archive_accession_scope else None),
+                        )
+                    return {
+                        "ticker": ticker,
+                        "cik": cik,
+                        "status": "cache_hydrated",
+                        "archive_request_count": request_count,
+                        "cached_fact_candidate_count": staged_count,
+                        "error": "",
+                    }
+                except Exception as exc:
+                    detail = f"{type(exc).__name__}: {exc}"
+                    LOGGER.exception(
+                        "Archive cache hydration failed ticker=%s",
+                        ticker,
+                    )
+                    return {
+                        "ticker": ticker,
+                        "cik": cik,
+                        "status": "cache_hydration_failed",
+                        "archive_request_count": 0,
+                        "cached_fact_candidate_count": 0,
+                        "error": detail,
+                    }
+
+            def hydrate_cache_group(
+                items: list[dict[str, Any]],
+            ) -> list[dict[str, Any]]:
+                # Share classes and aliases can use the same CIK/cache path.
+                # Process them serially within one worker to prevent concurrent
+                # writes to the same accession documents.
+                return [hydrate_cache_item(item) for item in items]
+
+            hydration_groups = group_cache_hydration_items(tickers)
+            indexed_results: list[tuple[int, list[dict[str, Any]]]] = []
+            with ThreadPoolExecutor(
+                max_workers=args.archive_cache_workers,
+                thread_name_prefix="sec-cache",
+            ) as executor:
+                futures = {
+                    executor.submit(hydrate_cache_group, group): index for index, group in enumerate(hydration_groups)
+                }
+                for completed_count, future in enumerate(
+                    as_completed(futures),
+                    start=1,
+                ):
+                    indexed_results.append((futures[future], future.result()))
+                    if completed_count % 10 == 0 or completed_count == len(futures):
+                        LOGGER.info(
+                            "Archive cache hydration progress: CIK groups=%d/%d",
+                            completed_count,
+                            len(futures),
+                        )
+            grouped_results = [group_rows for _, group_rows in sorted(indexed_results)]
+            cache_report_rows = [row for group_rows in grouped_results for row in group_rows]
+            cache_failures = [
+                f"{row['ticker']}: {row['error']}"
+                for row in cache_report_rows
+                if row["status"] == "cache_hydration_failed"
+            ]
+            write_csv_atomic(
+                output_csv,
+                CACHE_HYDRATION_REPORT_FIELDS,
+                cache_report_rows,
+            )
+            if cache_failures and not args.allow_partial:
+                raise RuntimeError("Archive cache hydration failures: " + "; ".join(cache_failures[:20]))
+            LOGGER.info(
+                "Archive cache-only hydration complete: tickers=%d failures=%d output=%s",
+                len(cache_report_rows),
+                len(cache_failures),
+                output_csv,
+            )
+            return
         if args.profiles_only:
             report_rows: list[dict[str, Any]] = []
             with conn:
@@ -6174,11 +6937,34 @@ def main() -> None:
                         status = "review"
                         review_reason = "missing_cik"
                         with conn:
-                            add_issue(conn, severity="error", ticker=ticker, model_family=model_family, source_id=submissions_source_id, issue_type="missing_cik", detail="Ticker has no CIK; SEC financial sync skipped.")
-                            profile = classify_reporting_profile(conn, ticker=ticker, cik="", country=country, model_family=model_family, source_id=submissions_source_id, asof=evaluation_asof, override=reporting_override)
+                            add_issue(
+                                conn,
+                                severity="error",
+                                ticker=ticker,
+                                model_family=model_family,
+                                source_id=submissions_source_id,
+                                issue_type="missing_cik",
+                                detail="Ticker has no CIK; SEC financial sync skipped.",
+                            )
+                            profile = classify_reporting_profile(
+                                conn,
+                                ticker=ticker,
+                                cik="",
+                                country=country,
+                                model_family=model_family,
+                                source_id=submissions_source_id,
+                                asof=evaluation_asof,
+                                override=reporting_override,
+                            )
                     else:
-                        existing_filing_keys = filing_keys(conn, ticker=ticker, source_id=submissions_source_id) if args.incremental else set()
-                        existing_archive_metadata = has_filing_metadata(conn, ticker=ticker, source_id=submissions_source_id)
+                        existing_filing_keys = (
+                            filing_keys(conn, ticker=ticker, source_id=submissions_source_id)
+                            if args.incremental
+                            else set()
+                        )
+                        existing_archive_metadata = has_filing_metadata(
+                            conn, ticker=ticker, source_id=submissions_source_id
+                        )
                         submissions_url = submissions_template.format(cik=cik)
                         submissions_cache = cache_path(cache_dir, source_id=submissions_source_id, cik=cik)
                         status_code, submissions_payload, submissions_text, submissions_fetch_mode = load_or_fetch_json(
@@ -6207,7 +6993,11 @@ def main() -> None:
                                 )
                             sec_conformed_name = str(submissions_payload.get("name") or "").strip()
                             name_score = normalized_name_similarity(company_name, sec_conformed_name)
-                            if company_name and sec_conformed_name and not names_plausibly_match(company_name, sec_conformed_name):
+                            if (
+                                company_name
+                                and sec_conformed_name
+                                and not names_plausibly_match(company_name, sec_conformed_name)
+                            ):
                                 status = "review"
                                 review_reason = f"sec_cik_company_name_mismatch:{sec_conformed_name}"
                                 name_mismatch = True
@@ -6262,8 +7052,10 @@ def main() -> None:
                         # XC-23: the history/browse helpers fetch before writing and
                         # manage their own short transactions, so they must run
                         # outside any open write transaction.
-                        if archive_enabled and (archive_all_family_members or should_attempt_archive(reporting_override)) and (
-                            not args.incremental or not existing_archive_metadata or force_submission_history
+                        if (
+                            archive_enabled
+                            and (archive_all_family_members or should_attempt_archive(reporting_override))
+                            and (not args.incremental or not existing_archive_metadata or force_submission_history)
                         ):
                             extra_filing_count, extra_submission_requests = sync_submission_history_files(
                                 conn,
@@ -6384,17 +7176,19 @@ def main() -> None:
                         # or no complete existing state) must not trust the
                         # cached payload, or the new filing's facts are never
                         # ingested and the ticker is skipped forever after.
-                        status_code, companyfacts_payload, companyfacts_text, companyfacts_fetch_mode = load_or_fetch_json(
-                            companyfacts_url,
-                            cache_file=companyfacts_cache,
-                            force=should_force_companyfacts_payload_fetch(
-                                incremental=bool(args.incremental),
-                                force_companyfacts=force_companyfacts,
-                            ),
-                            user_agent=user_agent,
-                            timeout_sec=timeout_sec,
-                            max_retries=max_retries,
-                            sleep_sec=sleep_sec,
+                        status_code, companyfacts_payload, companyfacts_text, companyfacts_fetch_mode = (
+                            load_or_fetch_json(
+                                companyfacts_url,
+                                cache_file=companyfacts_cache,
+                                force=should_force_companyfacts_payload_fetch(
+                                    incremental=bool(args.incremental),
+                                    force_companyfacts=force_companyfacts,
+                                ),
+                                user_agent=user_agent,
+                                timeout_sec=timeout_sec,
+                                max_retries=max_retries,
+                                sleep_sec=sleep_sec,
+                            )
                         )
                         companyfacts_requests += 1
                         with conn:
@@ -6421,7 +7215,9 @@ def main() -> None:
                         archive_requests = 0
                         archive_mapped_count = 0
                         archive_attempted = False
-                        if archive_enabled and (archive_all_family_members or should_attempt_archive(reporting_override)):
+                        if archive_enabled and (
+                            archive_all_family_members or should_attempt_archive(reporting_override)
+                        ):
                             # XC-23/FN-2: fetches outside write transactions with
                             # stage-then-swap purge protection inside the helper.
                             archive_attempted = True
@@ -6460,7 +7256,8 @@ def main() -> None:
                                     and reporting_override.reporting_profile in FPI_HYBRID_PROFILES
                                 ),
                                 text_tables_only=(
-                                    archive_all_family_members and not should_attempt_archive(reporting_override)
+                                    archive_all_family_members
+                                    and not should_attempt_archive(reporting_override)
                                     and ticker not in archive_core_metric_recovery_tickers
                                 ),
                                 strict_registration_statements=strict_registration_statements,
@@ -6492,7 +7289,16 @@ def main() -> None:
                                     issue_type="sec_archive_xbrl_no_mapped_facts",
                                     detail="Archive index/documents fetched but no mapped XBRL facts were extracted.",
                                 )
-                            profile = classify_reporting_profile(conn, ticker=ticker, cik=cik, country=country, model_family=model_family, source_id=companyfacts_source_id, asof=evaluation_asof, override=reporting_override)
+                            profile = classify_reporting_profile(
+                                conn,
+                                ticker=ticker,
+                                cik=cik,
+                                country=country,
+                                model_family=model_family,
+                                source_id=companyfacts_source_id,
+                                asof=evaluation_asof,
+                                override=reporting_override,
+                            )
                             if profile["review_reason"]:
                                 add_issue(
                                     conn,
@@ -6509,8 +7315,12 @@ def main() -> None:
                 except SecRequestError as exc:
                     if exc.status_code == 404:
                         status = "review"
-                        endpoint_source_id = companyfacts_source_id if "/companyfacts/" in exc.url else submissions_source_id
-                        endpoint_run_id = companyfacts_run_id if endpoint_source_id == companyfacts_source_id else submissions_run_id
+                        endpoint_source_id = (
+                            companyfacts_source_id if "/companyfacts/" in exc.url else submissions_source_id
+                        )
+                        endpoint_run_id = (
+                            companyfacts_run_id if endpoint_source_id == companyfacts_source_id else submissions_run_id
+                        )
                         review_reason = f"sec_endpoint_404:{endpoint_source_id}"
                         with conn:
                             record_raw_response(
@@ -6578,7 +7388,8 @@ def main() -> None:
                                         and reporting_override.reporting_profile in FPI_HYBRID_PROFILES
                                     ),
                                     text_tables_only=(
-                                        archive_all_family_members and not should_attempt_archive(reporting_override)
+                                        archive_all_family_members
+                                        and not should_attempt_archive(reporting_override)
                                         and ticker not in archive_core_metric_recovery_tickers
                                     ),
                                     strict_registration_statements=strict_registration_statements,
@@ -6648,8 +7459,25 @@ def main() -> None:
                         review_reason = f"{type(exc).__name__}: {exc}"
                         failures.append(f"{ticker}: {review_reason}")
                         with conn:
-                            add_issue(conn, severity="error", ticker=ticker, model_family=model_family, source_id=companyfacts_source_id, issue_type="sec_sync_failed", detail=review_reason)
-                            profile = classify_reporting_profile(conn, ticker=ticker, cik=cik, country=country, model_family=model_family, source_id=companyfacts_source_id, asof=evaluation_asof, override=reporting_override)
+                            add_issue(
+                                conn,
+                                severity="error",
+                                ticker=ticker,
+                                model_family=model_family,
+                                source_id=companyfacts_source_id,
+                                issue_type="sec_sync_failed",
+                                detail=review_reason,
+                            )
+                            profile = classify_reporting_profile(
+                                conn,
+                                ticker=ticker,
+                                cik=cik,
+                                country=country,
+                                model_family=model_family,
+                                source_id=companyfacts_source_id,
+                                asof=evaluation_asof,
+                                override=reporting_override,
+                            )
                         if not args.allow_partial:
                             raise
                 except Exception as exc:
@@ -6657,8 +7485,25 @@ def main() -> None:
                     review_reason = f"{type(exc).__name__}: {exc}"
                     failures.append(f"{ticker}: {review_reason}")
                     with conn:
-                        add_issue(conn, severity="error", ticker=ticker, model_family=model_family, source_id=companyfacts_source_id, issue_type="sec_sync_failed", detail=review_reason)
-                        profile = classify_reporting_profile(conn, ticker=ticker, cik=cik, country=country, model_family=model_family, source_id=companyfacts_source_id, asof=evaluation_asof, override=reporting_override)
+                        add_issue(
+                            conn,
+                            severity="error",
+                            ticker=ticker,
+                            model_family=model_family,
+                            source_id=companyfacts_source_id,
+                            issue_type="sec_sync_failed",
+                            detail=review_reason,
+                        )
+                        profile = classify_reporting_profile(
+                            conn,
+                            ticker=ticker,
+                            cik=cik,
+                            country=country,
+                            model_family=model_family,
+                            source_id=companyfacts_source_id,
+                            asof=evaluation_asof,
+                            override=reporting_override,
+                        )
                     if not args.allow_partial:
                         raise
 
@@ -6692,7 +7537,9 @@ def main() -> None:
             if raw_response_retention_days > 0:
                 # FN-8: config-driven retention so raw_api_responses cannot grow
                 # without bound under daily incremental refreshes.
-                prune_cutoff = (datetime.now(timezone.utc) - timedelta(days=raw_response_retention_days)).date().isoformat()
+                prune_cutoff = (
+                    (datetime.now(timezone.utc) - timedelta(days=raw_response_retention_days)).date().isoformat()
+                )
                 with conn:
                     pruned = conn.execute(
                         "DELETE FROM raw_api_responses WHERE source_id IN (?, ?) AND asof_date < ?",
@@ -6708,7 +7555,13 @@ def main() -> None:
             # XC-18: failures with allow_partial disabled re-raise inside the
             # loop, so reaching this point with failures implies --allow-partial.
             status = "success_with_failures" if failures else "success"
-            finish_run(conn, run_id=run_id, status=status, row_count=len(report_rows), message=f"rows={len(report_rows)} failures={len(failures)} output={output_csv}")
+            finish_run(
+                conn,
+                run_id=run_id,
+                status=status,
+                row_count=len(report_rows),
+                message=f"rows={len(report_rows)} failures={len(failures)} output={output_csv}",
+            )
             finish_ingestion_run(
                 conn,
                 ingestion_run_id=submissions_run_id,
@@ -6728,7 +7581,9 @@ def main() -> None:
             LOGGER.info("Wrote SEC fundamentals coverage report: %s", output_csv)
             LOGGER.info("SEC fundamentals sync complete: rows=%d failures=%d", len(report_rows), len(failures))
         except BaseException as exc:
-            finish_run(conn, run_id=run_id, status="failed", row_count=len(report_rows), message=f"{type(exc).__name__}: {exc}")
+            finish_run(
+                conn, run_id=run_id, status="failed", row_count=len(report_rows), message=f"{type(exc).__name__}: {exc}"
+            )
             finish_ingestion_run(
                 conn,
                 ingestion_run_id=submissions_run_id,

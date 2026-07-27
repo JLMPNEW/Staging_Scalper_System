@@ -68,6 +68,27 @@ def load_fact_mapper(
     )
 
 
+def load_evidence_postprocessor(
+    adapter_path: str,
+) -> Callable[[WorkItem, tuple[MetricEvidence, ...]], tuple[MetricEvidence, ...]] | None:
+    module = importlib.import_module(_module_name(adapter_path))
+    function = getattr(module, "postprocess_metric_evidence", None)
+    if function is None:
+        return None
+    if not callable(function):
+        raise TypeError(
+            f"Adapter {adapter_path!r} exposes a non-callable "
+            "postprocess_metric_evidence"
+        )
+    return cast(
+        Callable[
+            [WorkItem, tuple[MetricEvidence, ...]],
+            tuple[MetricEvidence, ...],
+        ],
+        function,
+    )
+
+
 def load_ticker_selector(
     adapter_path: str,
 ) -> Callable[[sqlite3.Connection, str], list[str]] | None:

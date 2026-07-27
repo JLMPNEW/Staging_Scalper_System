@@ -744,7 +744,32 @@ def resolve_machinery_disclosure_candidates(
                 )
                 <= 1.0
             )
-            if approved_total:
+            # A backlog label DIRECTLY modified by the horizon ("12-month
+            # Order Backlog of $X") is the current subset, never the total.
+            # largest_total defaults to the candidate's own value, so without
+            # this guard a period where only that subset was captured would
+            # self-approve as the consolidated total. Horizon language merely
+            # elsewhere in the paragraph (the separate "12-month Order Book")
+            # does not disqualify a genuine total.
+            horizon_modifies_backlog = bool(
+                re.search(
+                    r"\b(?:12|twelve)[-\s]+months?\s+order\s+backlog\b",
+                    evidence,
+                )
+            )
+            if approved_total and horizon_modifies_backlog:
+                filtered.append(
+                    _resolved(
+                        candidate,
+                        status="REVIEW_REQUIRED",
+                        reason=(
+                            "horizon_modified_backlog_label_"
+                            "cannot_confirm_total"
+                        ),
+                        confidence=min(candidate.confidence, 0.72),
+                    )
+                )
+            elif approved_total:
                 filtered.append(
                     _resolved(
                         candidate,

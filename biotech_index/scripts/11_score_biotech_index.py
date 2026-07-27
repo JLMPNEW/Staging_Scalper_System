@@ -1387,20 +1387,66 @@ def apply_promoted_portfolio_candidate_policy(rows: list[dict[str, Any]], config
     if not isinstance(settings, dict) or not as_bool(settings.get("enabled", False), False):
         return
     allowed_cohorts = set(parse_string_list(settings.get("allowed_primary_cohorts"), []))
+    selection_order = str(settings.get("selection_order") or "global_then_cohort").strip().lower()
+    supported_selection_orders = {"global_then_cohort", "cohort_then_rank"}
+    if selection_order not in supported_selection_orders:
+        raise ValueError(
+            "Unsupported biotech_scoring.portfolio_candidate_policy.selection_order="
+            f"{selection_order!r}; expected one of {sorted(supported_selection_orders)}"
+        )
     rank_top_n = max(0, int(float(settings.get("rank_top_n") or 0)))
     cohort_top_k = max(0, int(float(settings.get("cohort_top_k_per_cohort") or 0)))
     total_max = max(0, int(float(settings.get("total_max") or 0)))
+    min_selected_names = max(0, int(float(settings.get("min_selected_names") or 0)))
+    below_min_action = str(settings.get("below_min_selected_action") or "cash").strip().lower()
+    if min_selected_names > 0 and below_min_action != "cash":
+        raise ValueError(
+            "Unsupported biotech_scoring.portfolio_candidate_policy.below_min_selected_action="
+            f"{below_min_action!r}; expected 'cash'"
+        )
     score_floor_pct = max(0.0, min(100.0, to_float(settings.get("min_score_pct_of_top"), 0.0)))
     policy_name = str(settings.get("name") or settings.get("policy_name") or "promoted_portfolio_candidate_policy")
     selected_reason = str(settings.get("selected_reason") or policy_name)
     excluded_reason = str(settings.get("excluded_reason") or f"excluded_by_{policy_name}")
+    below_min_reason = str(
+        settings.get("below_min_selected_reason") or "cash_fallback_insufficient_promoted_policy_breadth"
+    )
+    evidence = settings.get("evidence") or {}
+    if evidence and not isinstance(evidence, dict):
+        raise ValueError("biotech_scoring.portfolio_candidate_policy.evidence must be a mapping")
+    if isinstance(evidence, dict):
+        validated_policy_name = str(evidence.get("validated_policy_name") or "").strip()
+        if validated_policy_name and validated_policy_name != policy_name:
+            raise ValueError(
+                "Promoted portfolio policy differs from its validation evidence: "
+                f"configured={policy_name!r} validated={validated_policy_name!r}"
+            )
+        validated_top_n = int(to_float(evidence.get("validated_rank_top_n"), 0.0))
+        if validated_top_n > 0 and validated_top_n != rank_top_n:
+            raise ValueError(
+                "Promoted portfolio rank_top_n differs from its validation evidence: "
+                f"configured={rank_top_n} validated={validated_top_n}"
+            )
+        validated_order = str(evidence.get("validated_selection_order") or "").strip().lower()
+        if validated_order and validated_order != selection_order:
+            raise ValueError(
+                "Promoted portfolio selection_order differs from its validation evidence: "
+                f"configured={selection_order!r} validated={validated_order!r}"
+            )
     if rank_top_n <= 0 and not allowed_cohorts and cohort_top_k <= 0 and total_max <= 0 and score_floor_pct <= 0.0:
         return
 
     base_candidates = [row for row in rows if _promoted_policy_base_candidate(row)]
     base_candidates.sort(key=lambda row: (-_candidate_policy_score(row), str(row.get("ticker") or "")))
-    pool = base_candidates[:rank_top_n] if rank_top_n > 0 else list(base_candidates)
-    if allowed_cohorts:
+    pool = list(base_candidates)
+    if selection_order == "cohort_then_rank" and allowed_cohorts:
+        pool = [
+            row
+            for row in pool
+            if str(row.get("biotech_primary_cohort") or "").strip() in allowed_cohorts
+        ]
+    pool = pool[:rank_top_n] if rank_top_n > 0 else pool
+    if selection_order == "global_then_cohort" and allowed_cohorts:
         pool = [
             row
             for row in pool
@@ -1423,6 +1469,9 @@ def apply_promoted_portfolio_candidate_policy(rows: list[dict[str, Any]], config
         pool = capped
     if total_max > 0:
         pool = pool[:total_max]
+    breadth_cash_fallback = min_selected_names > 0 and len(pool) < min_selected_names
+    if breadth_cash_fallback:
+        pool = []
     base_candidate_ids = {id(row) for row in base_candidates}
     selected_tickers = {str(row.get("ticker") or "").strip().upper() for row in pool}
 
@@ -1438,8 +1487,9 @@ def apply_promoted_portfolio_candidate_policy(rows: list[dict[str, Any]], config
         else:
             row["portfolio_candidate_gate"] = 0.0
             row["portfolio_candidate_status"] = "excluded"
-            row["portfolio_candidate_reason"] = excluded_reason
-            row["eligibility_reason"] = excluded_reason
+            reason = below_min_reason if breadth_cash_fallback else excluded_reason
+            row["portfolio_candidate_reason"] = reason
+            row["eligibility_reason"] = reason
 
 
 def commercial_risk_overlay_settings(config: dict[str, Any]) -> dict[str, Any]:

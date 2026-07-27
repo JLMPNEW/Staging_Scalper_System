@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
+from collections import defaultdict
 from dataclasses import asdict, replace
 from datetime import date, timedelta
 from pathlib import Path
@@ -12,7 +14,9 @@ from dedicated_parser.contracts import (
     AdapterRegistry,
     MetricEvidence,
     MetricRequest,
+    MetricRequirement,
     NormalizedFact,
+    ProductionMetricMapping,
     WorkItem,
 )
 from dedicated_parser.semantic import (
@@ -28,7 +32,7 @@ from industrials.machinery.disclosure_candidates import (
 from industrials.machinery.disclosure_documents import extract_document_text
 
 
-ADAPTER_VERSION = "machinery_specialized_metrics_v2.7"
+ADAPTER_VERSION = "machinery_specialized_metrics_v3.6"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _REVIEW_POLICY_PATH = (
     Path(__file__).resolve().parent
@@ -133,6 +137,14 @@ def get_registry() -> AdapterRegistry:
                 ),
             ),
         ),
+        supporting_metrics=(
+            MetricRequest(
+                "debt_total",
+                (
+                    r"(?:Debt|Borrowings|LongTermDebt|ShortTermBorrowings)",
+                ),
+            ),
+        ),
         metric_dependencies={
             "orders_yoy_growth": "orders",
             "book_to_bill": "orders",
@@ -147,6 +159,94 @@ def get_registry() -> AdapterRegistry:
             "contract_load_proxy": "reported_backlog",
             "contract_load_proxy_yoy_growth": "reported_backlog",
             "contract_load_proxy_to_revenue": "reported_backlog",
+            "roic": "debt_total",
+        },
+        metric_requirements={
+            "orders": MetricRequirement("orders"),
+            "orders_yoy_growth": MetricRequirement(
+                "orders_yoy_growth",
+                mode="comparable_period",
+                series_metric="orders",
+                minimum_discrete_periods=2,
+                lookback_days=550,
+            ),
+            "book_to_bill": MetricRequirement(
+                "book_to_bill",
+                mode="series_ttm",
+                series_metric="orders",
+                minimum_discrete_periods=4,
+                lookback_days=460,
+            ),
+            "funded_backlog": MetricRequirement("funded_backlog"),
+            "backlog_yoy_growth": MetricRequirement(
+                "backlog_yoy_growth"
+            ),
+            "backlog_to_revenue": MetricRequirement("backlog_to_revenue"),
+            "reported_backlog": MetricRequirement("reported_backlog"),
+            "reported_backlog_yoy_growth": MetricRequirement(
+                "reported_backlog_yoy_growth"
+            ),
+            "reported_backlog_to_revenue": MetricRequirement(
+                "reported_backlog_to_revenue"
+            ),
+            "remaining_performance_obligation": MetricRequirement(
+                "remaining_performance_obligation"
+            ),
+            "rpo_current": MetricRequirement("rpo_current"),
+            "rpo_yoy_growth": MetricRequirement("rpo_yoy_growth"),
+            "rpo_to_revenue": MetricRequirement("rpo_to_revenue"),
+            "rpo_implied_orders": MetricRequirement("rpo_implied_orders"),
+            "rpo_implied_book_to_bill": MetricRequirement(
+                "rpo_implied_book_to_bill"
+            ),
+            "contract_load_proxy": MetricRequirement(
+                "contract_load_proxy"
+            ),
+            "contract_load_proxy_yoy_growth": MetricRequirement(
+                "contract_load_proxy_yoy_growth"
+            ),
+            "contract_load_proxy_to_revenue": MetricRequirement(
+                "contract_load_proxy_to_revenue"
+            ),
+            "roic": MetricRequirement("roic"),
+        },
+        production_mappings={
+            "orders": ProductionMetricMapping(
+                "orders",
+                "orders",
+                "duration",
+                175,
+            ),
+            "funded_backlog": ProductionMetricMapping(
+                "funded_backlog",
+                "backlog",
+                "instant",
+                175,
+            ),
+            "reported_backlog": ProductionMetricMapping(
+                "reported_backlog",
+                "backlog",
+                "instant",
+                175,
+            ),
+            "remaining_performance_obligation": ProductionMetricMapping(
+                "remaining_performance_obligation",
+                "backlog",
+                "instant",
+                165,
+            ),
+            "rpo_current": ProductionMetricMapping(
+                "rpo_current",
+                "backlog",
+                "instant",
+                165,
+            ),
+            "debt_total": ProductionMetricMapping(
+                "debt_total",
+                "balance_sheet",
+                "instant",
+                175,
+            ),
         },
         document_keywords=(
             "backlog",
@@ -207,7 +307,9 @@ _TABLE_MONEY_PATTERN = re.compile(
     r"(?P<currency>U\.S\.\s*\$|US\$|USD|CA\$|C\$|CAD|AU\$|A\$|AUD|"
     r"EUR|\u20ac|GBP|\u00a3|CHF|\$)?\s*"
     r"(?P<number>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*"
-    r"(?P<scale>billions?|millions?|thousands?|bn|mm|[bmk])?\s*"
+    # Trailing boundary keeps a bare scale letter from greedily matching the
+    # first letter of the next word ("1,234 based" is not 1,234 billion).
+    r"(?P<scale>(?:billions?|millions?|thousands?|bn|mm|[bmk])\b)?\s*"
     r"(?P<close>\))?",
     re.IGNORECASE,
 )
@@ -251,7 +353,72 @@ _CURRENT_HORIZON = re.compile(
     re.IGNORECASE,
 )
 _CURRENT_PERCENT = re.compile(
-    r"\b(?P<percent>\d{1,3}(?:\.\d+)?)\s*%",
+    # Clause-bounded: the percentage must sit in the same clause as the
+    # twelve-month horizon phrase (either order), otherwise any stray growth
+    # percentage in the block ("Backlog increased 15% ...") hijacks the
+    # current-RPO derivation.
+    r"\b(?P<percent>\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b)"
+    r"[^.;]{0,160}?"
+    r"(?:(?:within|over)\s+(?:the\s+)?next|next)\s+(?:12|twelve)\s+months?"
+    r"|(?:(?:within|over)\s+(?:the\s+)?next|next)\s+(?:12|twelve)\s+months?"
+    r"[^.;]{0,160}?"
+    r"\b(?P<percent_after>\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b)"
+    r"|\b(?P<percent_one_year>\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b)"
+    r"[^.;]{0,160}?within\s+(?:one|1)\s+year",
+    re.IGNORECASE,
+)
+_CURRENT_RECOGNITION = re.compile(
+    r"\b(?:is|are|was|were|will\s+be|expected\s+to\s+be)\s+recognized\b"
+    r"|\bexpect(?:s|ed)?\s+to\s+recognize\b",
+    re.IGNORECASE,
+)
+_SUBCOMPONENT_AMOUNT = re.compile(
+    r"\b(?:related|attributable)\s+to\b|\bsubsidiar(?:y|ies)\b"
+    r"|\bsegment\b",
+    re.IGNORECASE,
+)
+_HORIZON_ROW_OR_COLUMN = re.compile(
+    r"\b(?:under|within|next)\s+(?:one|1)\s+year\b"
+    r"|\b(?:within|next)\s+(?:the\s+next\s+)?(?:12|twelve)\s+months?\b"
+    r"|\brecognized\s+within\s+(?:12|twelve)\s+months?\b",
+    re.IGNORECASE,
+)
+_TOTAL_DEBT_LABEL = re.compile(
+    r"^\s*(?:total\s+)?(?:debt|borrowings)(?:\s+outstanding)?\s*$",
+    re.IGNORECASE,
+)
+_ZERO_TABLE_VALUE = re.compile(
+    r"^\s*(?:[$\u20ac\u00a3]\s*)?(?:0(?:\.0+)?|[-\u2013\u2014])\s*$"
+)
+_NO_DEBT_PROSE = re.compile(
+    r"\b(?:we|the\s+company)\s+(?:had|has)\s+no\s+"
+    r"(?:debt|borrowings)\s+outstanding\b"
+    r"|\bno\s+(?:debt|borrowings)\s+(?:was|were)\s+outstanding\b",
+    re.IGNORECASE,
+)
+_FACILITY_NO_DEBT_PROSE = re.compile(
+    r"\bno\s+(?:debt|borrowings)\s+outstanding\s+under\s+"
+    r"(?:the|our)\s+(?:credit|revolving)\s+facility\b",
+    re.IGNORECASE,
+)
+_RPO_PRACTICAL_EXPEDIENT = re.compile(
+    r"\bpractical\s+expedient\b.{0,500}\b(?:remaining|unsatisfied)\s+"
+    r"performance\s+obligations?\b"
+    r"|\b(?:remaining|unsatisfied)\s+performance\s+obligations?\b"
+    r".{0,500}\bpractical\s+expedient\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_BACKLOG_NOT_DISCLOSED = re.compile(
+    r"\b(?:we|the\s+company)\s+(?:do|does)\s+not\s+"
+    r"(?:disclose|report|track)\s+(?:a\s+)?backlog\b",
+    re.IGNORECASE,
+)
+_NO_BINDING_BACKLOG = re.compile(
+    r"\b(?:we|the\s+company)\s+(?:do|does)\s+not\s+"
+    r"(?:maintain|have)\s+(?:a\s+)?(?:material\s+)?backlog\b"
+    r"|\borders?\s+(?:are|is)\s+(?:generally\s+)?"
+    r"(?:shipped|fulfilled)\s+(?:within|in)\s+"
+    r"(?:days|weeks|a\s+short\s+period)\b",
     re.IGNORECASE,
 )
 _NON_OPERATING_BACKLOG_TABLE = re.compile(
@@ -272,6 +439,11 @@ _NON_COMMERCIAL_ORDER_TABLE = re.compile(
     r"|\btask\s+order\s+no\.?\b"
     r"|\binterest\s+rate\s+swaps?\b"
     r"|\b(?:founder|ordinary|common)\s+shares?\b.{0,240}\border\b",
+    re.IGNORECASE,
+)
+_REVENUE_CONTRACT_DETAIL_TABLE = re.compile(
+    r"\brevenue\s+from\s+contracts?\s+with\s+customers?\b"
+    r"|\brevenue\s+from\s+contract\s+with\s+customer\s+\[text\s+block\]",
     re.IGNORECASE,
 )
 _NON_OPERATING_FACT = re.compile(
@@ -332,6 +504,25 @@ def _table_metric(text: str) -> tuple[str, str] | None:
         if pattern.search(text):
             return concept_name, metric_name
     return None
+
+
+def _is_explicit_table_metric_label(
+    text: str,
+    *,
+    metric_name: str,
+) -> bool:
+    """Distinguish a table label from narrative text containing a keyword."""
+    normalized = " ".join(text.split())
+    if (
+        not normalized
+        or len(normalized) > 160
+        or re.search(r"\[\s*text\s+block\s*\]", normalized, re.IGNORECASE)
+    ):
+        return False
+    return any(
+        name == metric_name and pattern.search(normalized)
+        for _, name, pattern in _TABLE_METRIC_PATTERNS
+    )
 
 
 def _scale_from_text(text: str) -> float:
@@ -422,10 +613,15 @@ def _money_from_text(
 
 
 def _date_from_text(text: str, *, fallback: str) -> str:
-    iso = _ISO_DATE.search(text)
+    # Multi-row headers merge fragments with " | " ("March 31, | 2026"),
+    # which defeats the day/year whitespace in _EXPLICIT_DATE and used to
+    # drop into the bare-year branch — stamping a fabricated -12-31 period
+    # end for a March column. Normalize the separator before matching.
+    normalized_text = text.replace(" | ", " ")
+    iso = _ISO_DATE.search(normalized_text)
     if iso:
         return iso.group(1)
-    explicit = _EXPLICIT_DATE.search(text)
+    explicit = _EXPLICIT_DATE.search(normalized_text)
     if explicit:
         month = _MONTHS[explicit.group("month").lower().rstrip(".")]
         try:
@@ -436,8 +632,15 @@ def _date_from_text(text: str, *, fallback: str) -> str:
             ).isoformat()
         except ValueError:
             return fallback
-    year_matches = re.findall(r"\b((?:19|20)\d{2})\b", text)
-    if len(year_matches) == 1:
+    year_matches = re.findall(r"\b((?:19|20)\d{2})\b", normalized_text)
+    if len(year_matches) == 1 and re.search(
+        r"\b(?:year[-\s]end(?:ed)?|fiscal|december)\b",
+        normalized_text,
+        re.IGNORECASE,
+    ):
+        # A bare year justifies a Dec-31 period end only when the context
+        # actually says year-end; otherwise a lone comparative-year header
+        # ("2024") in a non-December fiscal year fabricates the date.
         return f"{year_matches[0]}-12-31"
     return fallback
 
@@ -590,6 +793,16 @@ def _table_candidates(
             label_cell_index, metric = labeled_cells[0]
             concept_name, metric_name = metric
             row_label = block.cells[label_cell_index]
+            if _HORIZON_ROW_OR_COLUMN.search(row_label):
+                # "... to be recognized within 12 months" rows are the CURRENT
+                # portion, never a total. For RPO, reclassify to rpo_current
+                # (structured current-RPO disclosure); for other metrics, skip
+                # rather than record a partial-horizon value as the total.
+                if metric_name == "remaining_performance_obligation":
+                    concept_name = "RemainingPerformanceObligationCurrent"
+                    metric_name = "rpo_current"
+                else:
+                    continue
             for cell_index, cell in enumerate(block.cells):
                 value_text = cell
                 if cell_index == label_cell_index:
@@ -648,15 +861,16 @@ def _table_candidates(
                 if metric is None:
                     continue
                 concept_name, metric_name = metric
-                if (
-                    metric_name == "reported_backlog"
-                    and re.search(
-                        r"\b(?:under|within)\s+(?:one|1)\s+year\b",
-                        header,
-                        re.IGNORECASE,
-                    )
-                ):
-                    continue
+                if _HORIZON_ROW_OR_COLUMN.search(header):
+                    # Horizon-limited columns apply to every metric, not just
+                    # reported_backlog, and issuers write "12 months" as often
+                    # as "one year". RPO horizon columns are the structured
+                    # current-RPO disclosure — capture them as rpo_current.
+                    if metric_name == "remaining_performance_obligation":
+                        concept_name = "RemainingPerformanceObligationCurrent"
+                        metric_name = "rpo_current"
+                    else:
+                        continue
                 value_specs.append(
                     (
                         cell_index,
@@ -678,6 +892,21 @@ def _table_candidates(
             noncommercial_order = bool(
                 metric_name == "orders"
                 and _NON_COMMERCIAL_ORDER_TABLE.search(block.search_text)
+            )
+            row_label = label_context.rsplit("\n", maxsplit=1)[-1]
+            explicit_metric_label = (
+                header_metric
+                or _is_explicit_table_metric_label(
+                    row_label,
+                    metric_name=metric_name,
+                )
+            )
+            revenue_contract_narrative_order = bool(
+                metric_name == "orders"
+                and not explicit_metric_label
+                and _REVENUE_CONTRACT_DETAIL_TABLE.search(
+                    block.search_text
+                )
             )
             parsed = _money_from_text(
                 value_text,
@@ -716,15 +945,19 @@ def _table_candidates(
                 header or block.search_text,
                 fallback=report_date,
             )
-            period_start = (
-                _orders_period_start(
-                    period_end,
-                    period_context,
-                    form_type=form_type,
-                )
-                if metric_name == "orders"
-                else ""
-            )
+            # Duration from the cell's own column header first: search_text
+            # carries EVERY column group's header, so "Three Months Ended"
+            # from a sibling group would always win over this column's
+            # "Six Months Ended".
+            period_start = ""
+            if metric_name == "orders":
+                period_start = _duration_start(period_end, header)
+                if not period_start:
+                    period_start = _orders_period_start(
+                        period_end,
+                        period_context,
+                        form_type=form_type,
+                    )
             scope = _table_cell_scope(
                 header=header,
                 row_label=label_context.rsplit("\n", maxsplit=1)[-1],
@@ -753,6 +986,14 @@ def _table_candidates(
                 status = "REJECTED_POLICY"
                 reason = "noncommercial_legal_or_transactional_order_context"
                 confidence = 0.99
+            elif revenue_contract_narrative_order:
+                status = "REJECTED_POLICY"
+                reason = "revenue_contract_narrative_is_not_orders"
+                confidence = 0.99
+            elif metric_name == "orders" and not explicit_metric_label:
+                status = "REVIEW_REQUIRED"
+                reason = "semantic_table_order_label_not_explicit"
+                confidence = min(confidence, 0.70)
             elif header_metric and value < 1_000_000.0:
                 status = "REVIEW_REQUIRED"
                 reason = "semantic_table_scale_requires_policy"
@@ -780,8 +1021,17 @@ def _table_candidates(
 def _deduplicate_candidates(
     candidates: list[DisclosureCandidate],
 ) -> list[DisclosureCandidate]:
+    # Status is deliberately NOT part of the key: a prose REVIEW_REQUIRED and
+    # a table ACCEPTED for the same observation are one observation — keep the
+    # higher-precedence status so identical values don't add phantom review
+    # queue rows.
+    status_rank = {
+        "ACCEPTED": 3,
+        "REJECTED_POLICY": 2,
+        "REVIEW_REQUIRED": 1,
+    }
     output: dict[
-        tuple[str, float, str, str, str, str, str],
+        tuple[str, float, str, str, str, str],
         DisclosureCandidate,
     ] = {}
     for candidate in candidates:
@@ -792,10 +1042,20 @@ def _deduplicate_candidates(
             candidate.period_start,
             candidate.period_end,
             candidate.scope,
-            candidate.candidate_status,
         )
         previous = output.get(key)
-        if previous is None or candidate.confidence > previous.confidence:
+        if previous is None:
+            output[key] = candidate
+            continue
+        candidate_rank = (
+            status_rank.get(candidate.candidate_status, 0),
+            candidate.confidence,
+        )
+        previous_rank = (
+            status_rank.get(previous.candidate_status, 0),
+            previous.confidence,
+        )
+        if candidate_rank > previous_rank:
             output[key] = candidate
     return sorted(
         output.values(),
@@ -853,11 +1113,46 @@ def _rpo_amount_in_block(
     label_match = _TABLE_METRIC_PATTERNS[0][2].search(block.search_text)
     if label_match is None:
         return None
-    return _money_from_text(
-        block.search_text[label_match.end() :],
-        context=block.search_text,
-        company_currency=company_currency,
-    )
+    # Validate each money MATCH substring, not the whole tail: horizon words
+    # ("twelve months") appear in nearly every qualifying block and would make
+    # a whole-tail _money_from_text call reject everything (dead guard).
+    tail = block.search_text[label_match.end() :]
+    for money_match in _TABLE_MONEY_PATTERN.finditer(tail):
+        parsed = _money_from_text(
+            money_match.group(0),
+            context=block.search_text,
+            company_currency=company_currency,
+        )
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _clause_containing(
+    text: str,
+    *,
+    start: int,
+    end: int,
+) -> tuple[str, int]:
+    left = 0
+    for boundary in re.finditer(r"(?:[.;]\s+|\n+)", text[:start]):
+        left = boundary.end()
+    right_match = re.search(r"(?:[.;](?:\s+|$)|\n+)", text[end:])
+    right = end + right_match.start() if right_match is not None else len(text)
+    return text[left:right], left
+
+
+def _validated_total_scope(candidate: DisclosureCandidate) -> str:
+    if candidate.scope != "unknown":
+        return candidate.scope
+    if re.search(
+        r"\b(?:consolidated|company(?:'s)?|our|total)\s+"
+        r"(?:remaining\s+performance\s+obligations?|(?:order\s+)?backlog)\b",
+        candidate.evidence_text,
+        re.IGNORECASE,
+    ):
+        return "consolidated"
+    return "unknown"
 
 
 def _current_rpo_evidence(
@@ -897,13 +1192,26 @@ def _current_rpo_evidence(
             }
         ):
             continue
-        percentage_match = _CURRENT_PERCENT.search(text)
+        horizon_clause, clause_offset = _clause_containing(
+            text,
+            start=horizon_match.start(),
+            end=horizon_match.end(),
+        )
+        clause_horizon = _CURRENT_HORIZON.search(horizon_clause)
+        if clause_horizon is None:
+            continue
+        percentage_match = _CURRENT_PERCENT.search(horizon_clause)
         period_end = _date_from_text(text, fallback=report_date)
-        matching_totals = [
-            candidate
-            for candidate in accepted_totals
-            if candidate.period_end == period_end
-        ]
+        matching_totals = []
+        seen_total_keys: set[tuple[float, str]] = set()
+        for candidate in accepted_totals:
+            if candidate.period_end != period_end:
+                continue
+            total_key = (round(candidate.value, 2), candidate.unit)
+            if total_key in seen_total_keys:
+                continue
+            seen_total_keys.add(total_key)
+            matching_totals.append(candidate)
         block_amount = _rpo_amount_in_block(
             block,
             company_currency=company_currency,
@@ -923,6 +1231,19 @@ def _current_rpo_evidence(
         )
         if accepted_total is None and len(matching_totals) == 1:
             accepted_total = matching_totals[0]
+        accepted_total_scope = (
+            _validated_total_scope(accepted_total)
+            if accepted_total is not None
+            else "unknown"
+        )
+        parent_total_eligible = (
+            accepted_total is not None
+            and accepted_total_scope == "consolidated"
+            and (
+                accepted_total.confidence >= 0.90
+                or accepted_total.status_reason.startswith("reviewed_")
+            )
+        )
         total_rpo = (
             accepted_total.value
             if accepted_total is not None
@@ -937,11 +1258,98 @@ def _current_rpo_evidence(
             if block_amount is not None
             else ""
         )
+        # Explicit "of which $X is expected to be recognized ..." amounts take
+        # precedence over percentage derivation: the disclosed dollar figure is
+        # authoritative and the percentage path can only approximate it.
+        if accepted_total is not None:
+            explicit_amounts: list[tuple[float, str]] = []
+            for money_match in _TABLE_MONEY_PATTERN.finditer(horizon_clause):
+                protected_spans = [clause_horizon.span()]
+                if percentage_match is not None:
+                    protected_spans.append(percentage_match.span())
+                if any(
+                    money_match.start() < protected_end
+                    and money_match.end() > protected_start
+                    for protected_start, protected_end in protected_spans
+                ):
+                    continue
+                parsed = _money_from_text(
+                    money_match.group(0),
+                    context=horizon_clause,
+                    company_currency=company_currency,
+                )
+                bridge_start = min(money_match.end(), clause_horizon.start())
+                bridge_end = max(money_match.end(), clause_horizon.start())
+                bridge = horizon_clause[bridge_start:bridge_end]
+                if (
+                    parsed is not None
+                    and _CURRENT_RECOGNITION.search(horizon_clause)
+                    and _SUBCOMPONENT_AMOUNT.search(bridge) is None
+                ):
+                    explicit_amounts.append(parsed)
+            if (
+                explicit_amounts
+                and explicit_amounts[-1][1] == accepted_total.unit
+                and explicit_amounts[-1][0] < accepted_total.value
+            ):
+                output.append(
+                    MetricEvidence(
+                        metric_name="rpo_current",
+                        concept_name=(
+                            "RemainingPerformanceObligationCurrent"
+                            "ExplicitAmount"
+                        ),
+                        value=explicit_amounts[-1][0],
+                        unit=explicit_amounts[-1][1],
+                        period_start="",
+                        period_end=period_end,
+                        scope=accepted_total_scope,
+                        confidence=0.95 if parent_total_eligible else 0.72,
+                        status=(
+                            "ACCEPTED"
+                            if parent_total_eligible
+                            else "REVIEW_REQUIRED"
+                        ),
+                        reason=(
+                            "explicit_twelve_month_rpo_amount"
+                            if parent_total_eligible
+                            else "explicit_amount_parent_total_requires_review"
+                        ),
+                        evidence_text=horizon_clause[:1000],
+                        source_document=document.source_document,
+                        extraction_method=(
+                            "dedicated_parser:explicit_rpo_current_amount"
+                        ),
+                        provenance={
+                            "document_sha256": document_sha256,
+                            "adapter_version": ADAPTER_VERSION,
+                            "semantic_block_index": block.index,
+                            "clause_offset": clause_offset,
+                            "total_rpo": accepted_total.value,
+                            "derivation_type": "explicit_disclosure_amount",
+                        },
+                    )
+                )
+                continue
         if percentage_match is not None and total_rpo > 0:
-            percentage = float(percentage_match.group("percent"))
+            percent_text = next(
+                (
+                    group
+                    for group in (
+                        percentage_match.group("percent"),
+                        percentage_match.group("percent_after"),
+                        percentage_match.group("percent_one_year"),
+                    )
+                    if group
+                ),
+                "",
+            )
+            if not percent_text:
+                continue
+            percentage = float(percent_text)
             if not 0.0 < percentage <= 100.0:
                 continue
-            accepted = accepted_total is not None
+            accepted = parent_total_eligible
             output.append(
                 MetricEvidence(
                     metric_name="rpo_current",
@@ -954,18 +1362,18 @@ def _current_rpo_evidence(
                     period_start="",
                     period_end=period_end,
                     scope=(
-                        accepted_total.scope
+                        accepted_total_scope
                         if accepted_total is not None
                         else _semantic_scope(text)
                     ),
-                    confidence=0.88 if accepted else 0.72,
+                    confidence=0.93 if accepted else 0.72,
                     status="ACCEPTED" if accepted else "REVIEW_REQUIRED",
                     reason=(
                         "explicit_twelve_month_rpo_percentage"
                         if accepted
                         else "explicit_percentage_total_rpo_requires_review"
                     ),
-                    evidence_text=text[:1000],
+                    evidence_text=horizon_clause[:1000],
                     source_document=document.source_document,
                     extraction_method=(
                         "dedicated_parser:explicit_rpo_percentage"
@@ -974,6 +1382,7 @@ def _current_rpo_evidence(
                         "document_sha256": document_sha256,
                         "adapter_version": ADAPTER_VERSION,
                         "semantic_block_index": block.index,
+                        "clause_offset": clause_offset,
                         "total_rpo": total_rpo,
                         "explicit_percentage": percentage,
                         "derivation_type": (
@@ -983,64 +1392,194 @@ def _current_rpo_evidence(
                 )
             )
             continue
-        if accepted_total is None:
-            continue
-        preceding = text[: horizon_match.end()]
-        parsed_amounts: list[tuple[float, str]] = []
-        for money_match in _TABLE_MONEY_PATTERN.finditer(preceding):
-            parsed = _money_from_text(
-                money_match.group(0),
-                context=text,
-                company_currency=company_currency,
-            )
-            if parsed is not None:
-                parsed_amounts.append(parsed)
-        if not parsed_amounts:
-            continue
-        current_value, current_unit = parsed_amounts[-1]
-        explicit_current_clause = bool(
-            re.search(
-                r"\bof\s+which\b|\bexpected\s+to\s+be\s+recognized\b"
-                r"|\bexpect(?:s|ed)?\s+to\s+recognize\b",
-                preceding[-300:],
-                re.IGNORECASE,
-            )
-        )
-        if (
-            not explicit_current_clause
-            or current_unit != accepted_total.unit
-            or current_value >= accepted_total.value
-        ):
-            continue
-        output.append(
-            MetricEvidence(
-                metric_name="rpo_current",
-                concept_name=(
-                    "RemainingPerformanceObligationCurrent"
-                    "ExplicitAmount"
+    return output
+
+
+def _review_only_structural_evidence(
+    *,
+    metric_name: str,
+    concept_name: str,
+    reason: str,
+    text: str,
+    document: SemanticDocument,
+    block: SemanticBlock,
+    report_date: str,
+    document_sha256: str,
+) -> MetricEvidence:
+    return MetricEvidence(
+        metric_name=metric_name,
+        concept_name=concept_name,
+        value=None,
+        unit="",
+        period_start="",
+        period_end=report_date,
+        scope="consolidated",
+        confidence=0.90,
+        status="REVIEW_REQUIRED",
+        reason=reason,
+        evidence_text=text[:1000],
+        source_document=document.source_document,
+        extraction_method="dedicated_parser:negative_disclosure",
+        provenance={
+            "document_sha256": document_sha256,
+            "adapter_version": ADAPTER_VERSION,
+            "semantic_block_index": block.index,
+            "structural_candidate": True,
+        },
+    )
+
+
+def _debt_and_structural_evidence(
+    document: SemanticDocument,
+    *,
+    filing: dict[str, Any],
+    company_currency: str,
+    document_sha256: str,
+) -> list[MetricEvidence]:
+    report_date = str(
+        filing.get("report_date") or filing.get("filing_date") or ""
+    )[:10]
+    output: list[MetricEvidence] = []
+    for block in document.blocks:
+        text = block.search_text
+        if block.kind == "table_row":
+            debt_label = next(
+                (
+                    cell
+                    for cell in block.cells
+                    if _TOTAL_DEBT_LABEL.fullmatch(cell)
                 ),
-                value=current_value,
-                unit=current_unit,
-                period_start="",
-                period_end=period_end,
-                scope=accepted_total.scope,
-                confidence=0.95,
-                status="ACCEPTED",
-                reason="explicit_twelve_month_rpo_amount",
-                evidence_text=text[:1000],
-                source_document=document.source_document,
-                extraction_method=(
-                    "dedicated_parser:explicit_rpo_current_amount"
-                ),
-                provenance={
-                    "document_sha256": document_sha256,
-                    "adapter_version": ADAPTER_VERSION,
-                    "semantic_block_index": block.index,
-                    "total_rpo": accepted_total.value,
-                    "derivation_type": "explicit_disclosure_amount",
-                },
+                "",
             )
-        )
+            zero_cells = [
+                cell
+                for cell in block.cells
+                if cell != debt_label and _ZERO_TABLE_VALUE.fullmatch(cell)
+            ]
+            if debt_label and zero_cells:
+                output.append(
+                    MetricEvidence(
+                        metric_name="debt_total",
+                        concept_name="ExplicitZeroTotalDebt",
+                        value=0.0,
+                        unit=company_currency.upper(),
+                        period_start="",
+                        period_end=_date_from_text(
+                            " ".join(block.header_cells) or text,
+                            fallback=report_date,
+                        ),
+                        scope=(
+                            "consolidated"
+                            if _semantic_scope(text) != "segment"
+                            else "segment"
+                        ),
+                        confidence=0.84,
+                        status="REVIEW_REQUIRED",
+                        reason="explicit_zero_total_debt_table_requires_review",
+                        evidence_text=text[:1000],
+                        source_document=document.source_document,
+                        extraction_method=(
+                            "dedicated_parser:explicit_zero_debt_table"
+                        ),
+                        provenance={
+                            "document_sha256": document_sha256,
+                            "adapter_version": ADAPTER_VERSION,
+                            "semantic_block_index": block.index,
+                            "zero_cell_count": len(zero_cells),
+                        },
+                    )
+                )
+        if _FACILITY_NO_DEBT_PROSE.search(text):
+            output.append(
+                MetricEvidence(
+                    metric_name="debt_total",
+                    concept_name="NoFacilityBorrowingsOutstanding",
+                    value=0.0,
+                    unit=company_currency.upper(),
+                    period_start="",
+                    period_end=report_date,
+                    scope="facility",
+                    confidence=0.65,
+                    status="REVIEW_REQUIRED",
+                    reason="facility_specific_zero_is_not_total_debt",
+                    evidence_text=text[:1000],
+                    source_document=document.source_document,
+                    extraction_method=(
+                        "dedicated_parser:explicit_zero_debt_prose"
+                    ),
+                    provenance={
+                        "document_sha256": document_sha256,
+                        "adapter_version": ADAPTER_VERSION,
+                        "semantic_block_index": block.index,
+                    },
+                )
+            )
+        elif _NO_DEBT_PROSE.search(text):
+            output.append(
+                MetricEvidence(
+                    metric_name="debt_total",
+                    concept_name="NoDebtOutstanding",
+                    value=0.0,
+                    unit=company_currency.upper(),
+                    period_start="",
+                    period_end=report_date,
+                    scope="consolidated",
+                    confidence=0.88,
+                    status="REVIEW_REQUIRED",
+                    reason="explicit_zero_total_debt_prose_requires_review",
+                    evidence_text=text[:1000],
+                    source_document=document.source_document,
+                    extraction_method=(
+                        "dedicated_parser:explicit_zero_debt_prose"
+                    ),
+                    provenance={
+                        "document_sha256": document_sha256,
+                        "adapter_version": ADAPTER_VERSION,
+                        "semantic_block_index": block.index,
+                    },
+                )
+            )
+        if _RPO_PRACTICAL_EXPEDIENT.search(text):
+            output.append(
+                _review_only_structural_evidence(
+                    metric_name="remaining_performance_obligation",
+                    concept_name="RPOPracticalExpedientDisclosure",
+                    reason="asc606_practical_expedient_requires_review",
+                    text=text,
+                    document=document,
+                    block=block,
+                    report_date=report_date,
+                    document_sha256=document_sha256,
+                )
+            )
+        if _BACKLOG_NOT_DISCLOSED.search(text):
+            output.append(
+                _review_only_structural_evidence(
+                    metric_name="reported_backlog",
+                    concept_name="BacklogNotDisclosed",
+                    reason=(
+                        "confirmed_non_disclosure_not_structural_na"
+                    ),
+                    text=text,
+                    document=document,
+                    block=block,
+                    report_date=report_date,
+                    document_sha256=document_sha256,
+                )
+            )
+        elif _NO_BINDING_BACKLOG.search(text):
+            output.append(
+                _review_only_structural_evidence(
+                    metric_name="reported_backlog",
+                    concept_name="NoBindingBacklog",
+                    reason="short_cycle_or_no_binding_backlog_requires_review",
+                    text=text,
+                    document=document,
+                    block=block,
+                    report_date=report_date,
+                    document_sha256=document_sha256,
+                )
+            )
     return output
 
 
@@ -1062,7 +1601,33 @@ def extract_metric_evidence(item: WorkItem) -> tuple[MetricEvidence, ...]:
                     item.pdf_extraction_timeout_seconds
                 ),
             )
-        except OSError:
+        except OSError as exc:
+            # A cached file that fails to read after planning (permissions,
+            # OneDrive cloud-only placeholder, sharing violation) must surface
+            # as PARSER_FAILURE — silently skipping collapses the metric to
+            # baseline non-disclosure, the exact mislabeling the design forbids.
+            evidence.extend(
+                MetricEvidence(
+                    metric_name=request.metric_name,
+                    concept_name="DocumentReadFailure",
+                    value=None,
+                    unit="",
+                    period_start="",
+                    period_end=item.filing.report_date,
+                    scope="unknown",
+                    confidence=0.0,
+                    status="PARSER_FAILURE",
+                    reason=f"document_read_failed:{type(exc).__name__}",
+                    evidence_text=f"{type(exc).__name__}: {exc}"[:500],
+                    source_document=document.name,
+                    extraction_method="dedicated_parser:document_read",
+                    provenance={
+                        "document_sha256": document.content_sha256,
+                        "adapter_version": ADAPTER_VERSION,
+                    },
+                )
+                for request in item.requested_metrics
+            )
             continue
         if not extracted.text.strip():
             if extracted.warning:
@@ -1140,6 +1705,14 @@ def extract_metric_evidence(item: WorkItem) -> tuple[MetricEvidence, ...]:
                 resolved_candidates=resolved,
             )
         )
+        evidence.extend(
+            _debt_and_structural_evidence(
+                semantic_document,
+                filing=filing,
+                company_currency=item.filing.company_currency,
+                document_sha256=document.content_sha256,
+            )
+        )
     unique: dict[str, MetricEvidence] = {}
     for item_evidence in evidence:
         key = item_evidence.evidence_key(
@@ -1173,6 +1746,20 @@ def _fact_metric(fact: NormalizedFact) -> tuple[str, str] | None:
         )
     )
     lower = re.sub(r"[^a-z0-9]+", "", semantic_text.lower())
+    concept_lower = re.sub(
+        r"[^a-z0-9]+",
+        "",
+        fact.concept_name.lower(),
+    )
+    if concept_lower in {
+        "debtandfinanceleaseobligations",
+        "longtermdebtandcapitalleaseobligations",
+        "longtermdebtandfinanceleaseobligations",
+        "longtermdebtincludingcurrentmaturities",
+        "totalborrowings",
+        "totaldebt",
+    } and fact.numeric_value == 0.0:
+        return "debt_total", "DebtTotal"
     if (
         "remainingperformanceobligation" in lower
         or "unsatisfiedperformanceobligation" in lower
@@ -1306,7 +1893,17 @@ def _timing_dimension_member(fact: NormalizedFact) -> str:
 def _timing_dimension_aggregates(
     facts: tuple[NormalizedFact, ...],
 ) -> tuple[
-    list[tuple[NormalizedFact, NormalizedFact, bool]],
+    list[
+        tuple[
+            NormalizedFact,
+            NormalizedFact,
+            bool,
+            bool,
+            bool,
+            bool,
+            float | None,
+        ]
+    ],
     set[int],
 ]:
     grouped: dict[
@@ -1328,14 +1925,63 @@ def _timing_dimension_aggregates(
             (fact.period_end, fact.unit, fact.source_document),
             [],
         ).append((member, fact))
-    output: list[tuple[NormalizedFact, NormalizedFact, bool]] = []
+    dimensionless_totals: dict[
+        tuple[str, str, str],
+        set[float],
+    ] = {}
+    for fact in facts:
+        mapping = _fact_metric(fact)
+        if (
+            fact.numeric_value is None
+            or mapping is None
+            or mapping[0] != "remaining_performance_obligation"
+            or fact.scope != "consolidated"
+            or not _standard_taxonomy(fact)
+            or _timing_dimension_member(fact)
+        ):
+            continue
+        dimensionless_totals.setdefault(
+            (fact.period_end, fact.unit, fact.source_document),
+            set(),
+        ).add(round(float(fact.numeric_value), 6))
+
+    output: list[
+        tuple[
+            NormalizedFact,
+            NormalizedFact,
+            bool,
+            bool,
+            bool,
+            bool,
+            float | None,
+        ]
+    ] = []
     consumed: set[int] = set()
     for items in grouped.values():
-        unique_members = {member for member, _ in items}
+        # One value per member: iXBRL filings tag the same bucket fact in the
+        # table and the narrative, and summing every occurrence doubles that
+        # bucket. Conflicting values for one member make the schedule
+        # ambiguous — bail out, mirroring _reviewed_rpo_dimension_aggregates.
+        values_by_member: dict[str, list[tuple[str, NormalizedFact]]] = {}
+        member_value_sets: dict[str, set[float]] = {}
+        for member, fact in items:
+            member_value_sets.setdefault(member, set()).add(
+                float(fact.numeric_value or 0.0)
+            )
+            values_by_member.setdefault(member, []).append((member, fact))
+        if any(len(values) > 1 for values in member_value_sets.values()):
+            continue
+        deduped_items = [values[0] for values in values_by_member.values()]
+        unique_members = set(values_by_member)
         if len(unique_members) < 2:
             continue
-        ordered = sorted(items, key=lambda item: item[0])
+        ordered = sorted(deduped_items, key=lambda item: item[0])
         template = ordered[0][1]
+        dimensionless_values = dimensionless_totals.get(
+            (template.period_end, template.unit, template.source_document),
+            set(),
+        )
+        current_schedule_invalid = False
         try:
             period_date = date.fromisoformat(template.period_end)
             member_dates = [
@@ -1346,9 +1992,35 @@ def _timing_dimension_aggregates(
                 <= member_dates[0]
                 <= period_date + timedelta(days=31)
                 and member_dates[-1] > period_date
+                # The first bucket is only the 12-MONTH current portion when
+                # the next bucket starts ~one year later; quarterly or
+                # semi-annual schedules would otherwise pass one quarter of
+                # revenue off as current RPO.
+                and (
+                    len(member_dates) < 2
+                    or timedelta(days=330)
+                    <= member_dates[1] - member_dates[0]
+                    <= timedelta(days=400)
+                )
             )
+            current_schedule_invalid = not current_bucket_validated
         except ValueError:
             current_bucket_validated = False
+        current_fraction: float | None = None
+        current_fraction_outside_range = False
+        if len(dimensionless_values) == 1:
+            dimensionless_total = next(iter(dimensionless_values))
+            current_fraction = (
+                float(ordered[0][1].numeric_value or 0.0)
+                / dimensionless_total
+                if dimensionless_total > 0.0
+                else 0.0
+            )
+            current_fraction_outside_range = not (
+                0.05 <= current_fraction <= 1.0
+            )
+            if current_fraction_outside_range:
+                current_bucket_validated = False
         total_value = sum(
             float(fact.numeric_value or 0.0) for _, fact in ordered
         )
@@ -1374,8 +2046,19 @@ def _timing_dimension_aggregates(
             dimensions_json="{}",
             scope="consolidated",
         )
-        output.append((aggregate, current, current_bucket_validated))
-        consumed.update(id(fact) for _, fact in ordered)
+        dimensionless_total_available = len(dimensionless_values) == 1
+        output.append(
+            (
+                aggregate,
+                current,
+                current_bucket_validated,
+                dimensionless_total_available,
+                current_schedule_invalid,
+                current_fraction_outside_range,
+                current_fraction,
+            )
+        )
+        consumed.update(id(fact) for _, fact in items)
     return output, consumed
 
 
@@ -1479,11 +2162,147 @@ def _reviewed_consolidated_extension(
     )
 
 
+def _calculation_network_evidence(
+    facts: tuple[NormalizedFact, ...],
+) -> list[MetricEvidence]:
+    grouped: dict[
+        tuple[str, str, str, str, str, str],
+        dict[str, Any],
+    ] = {}
+    for fact in facts:
+        if (
+            fact.numeric_value is None
+            or fact.scope != "consolidated"
+            or fact.dimensions_json != "{}"
+        ):
+            continue
+        metadata = _fact_metadata(fact)
+        relationships = metadata.get("calculation_relationships")
+        if not isinstance(relationships, list):
+            continue
+        for relationship in relationships:
+            if (
+                not isinstance(relationship, dict)
+                or relationship.get("direction") != "incoming"
+            ):
+                continue
+            parent = str(relationship.get("related_concept") or "")
+            linkrole = str(relationship.get("linkrole") or "")
+            network_children = relationship.get("network_children")
+            if not parent or not isinstance(network_children, list):
+                continue
+            expected: dict[str, float] = {}
+            valid_network = True
+            for child in network_children:
+                if not isinstance(child, dict):
+                    valid_network = False
+                    break
+                child_name = str(child.get("concept_name") or "")
+                weight_value = child.get("weight")
+                try:
+                    if weight_value is None:
+                        valid_network = False
+                        break
+                    weight = float(weight_value)
+                except (TypeError, ValueError):
+                    valid_network = False
+                    break
+                if not child_name or not math.isfinite(weight):
+                    valid_network = False
+                    break
+                expected[child_name] = weight
+            if not valid_network or len(expected) < 2:
+                continue
+            key = (
+                parent,
+                linkrole,
+                fact.period_start,
+                fact.period_end,
+                fact.unit,
+                fact.source_document,
+            )
+            state = grouped.setdefault(
+                key,
+                {
+                    "expected": expected,
+                    "facts": defaultdict(list),
+                },
+            )
+            if state["expected"] != expected:
+                state["expected"] = {}
+                continue
+            state["facts"][fact.concept_name].append(fact)
+    output: list[MetricEvidence] = []
+    for key, state in grouped.items():
+        parent, linkrole, _, _, _, _ = key
+        expected = state["expected"]
+        child_facts = state["facts"]
+        if not expected or set(child_facts) != set(expected):
+            continue
+        selected: list[NormalizedFact] = []
+        ambiguous = False
+        for child_name in sorted(expected):
+            candidates = child_facts[child_name]
+            values = {
+                round(float(candidate.numeric_value or 0.0), 6)
+                for candidate in candidates
+            }
+            if len(values) != 1:
+                ambiguous = True
+                break
+            selected.append(candidates[0])
+        if ambiguous:
+            continue
+        template = selected[0]
+        synthetic = replace(
+            template,
+            concept_name=parent,
+            concept_metadata_json="{}",
+        )
+        mapping = _fact_metric(synthetic)
+        if mapping is None:
+            continue
+        metric_name, concept_name = mapping
+        value = sum(
+            float(fact.numeric_value or 0.0)
+            * expected[fact.concept_name]
+            for fact in selected
+        )
+        if value < 0.0:
+            continue
+        output.append(
+            _fact_evidence(
+                synthetic,
+                metric_name=metric_name,
+                concept_name=concept_name,
+                value=value,
+                accepted=True,
+                reason="complete_issuer_calculation_network_aggregation",
+                provenance={
+                    "derivation_type": "issuer_calculation_linkbase_sum",
+                    "calculation_parent": parent,
+                    "calculation_linkrole": linkrole,
+                    "calculation_children": [
+                        {
+                            "concept_name": fact.concept_name,
+                            "value": fact.numeric_value,
+                            "weight": expected[fact.concept_name],
+                            "context_id": fact.context_id,
+                        }
+                        for fact in selected
+                    ],
+                },
+            )
+        )
+    return output
+
+
 def map_normalized_facts(
     item: WorkItem,
     facts: tuple[NormalizedFact, ...],
 ) -> tuple[MetricEvidence, ...]:
     evidence: list[MetricEvidence] = []
+    evidence.extend(_calculation_network_evidence(facts))
     total_rpo_facts: list[NormalizedFact] = []
     percentage_facts: list[NormalizedFact] = []
     timing_aggregates, consumed_timing_facts = (
@@ -1514,49 +2333,88 @@ def map_normalized_facts(
                 },
             )
         )
-    for aggregate, current, current_bucket_validated in timing_aggregates:
+    for (
+        aggregate,
+        current,
+        current_bucket_validated,
+        dimensionless_total_available,
+        current_schedule_invalid,
+        current_fraction_outside_range,
+        current_fraction,
+    ) in timing_aggregates:
         standard_taxonomy = _standard_taxonomy(aggregate)
         accepted = standard_taxonomy and current_bucket_validated
-        total_rpo_facts.append(aggregate)
-        evidence.append(
-            _fact_evidence(
+        aggregate_evidence = _fact_evidence(
                 aggregate,
                 metric_name="remaining_performance_obligation",
                 concept_name="RemainingPerformanceObligation",
                 value=float(aggregate.numeric_value or 0.0),
-                accepted=accepted,
+                accepted=accepted and not dimensionless_total_available,
                 reason=(
-                    "standard_timing_dimension_exhaustive_sum"
-                    if accepted
+                    "dimensionless_total_supersedes_timing_dimension_sum"
+                    if dimensionless_total_available
                     else (
-                        "timing_dimension_incomplete_schedule_requires_sector_review"
-                        if standard_taxonomy
-                        else "timing_dimension_sum_requires_sector_review"
+                        "standard_timing_dimension_exhaustive_sum"
+                        if accepted
+                        else (
+                            "timing_dimension_incomplete_schedule_requires_sector_review"
+                            if standard_taxonomy
+                            else "timing_dimension_sum_requires_sector_review"
+                        )
                     )
                 ),
                 provenance={
                     "derivation_type": "exhaustive_dimension_sum",
                     "timing_schedule_complete": current_bucket_validated,
+                    "dimensionless_total_available": (
+                        dimensionless_total_available
+                    ),
                 },
             )
-        )
-        evidence.append(
-            _fact_evidence(
+        if dimensionless_total_available:
+            aggregate_evidence = replace(
+                aggregate_evidence,
+                status="REJECTED_POLICY",
+                confidence=0.99,
+            )
+        else:
+            total_rpo_facts.append(aggregate)
+        evidence.append(aggregate_evidence)
+        current_evidence = _fact_evidence(
                 current,
                 metric_name="rpo_current",
                 concept_name="RemainingPerformanceObligationCurrent",
                 value=float(current.numeric_value or 0.0),
                 accepted=accepted and current_bucket_validated,
                 reason=(
-                    "standard_earliest_timing_dimension_bucket"
-                    if accepted and current_bucket_validated
-                    else "timing_dimension_current_requires_sector_review"
+                    "timing_dimension_current_fraction_outside_valid_range"
+                    if current_fraction_outside_range
+                    else (
+                        "timing_dimension_current_bucket_not_twelve_months"
+                        if current_schedule_invalid
+                        else (
+                            "standard_earliest_timing_dimension_bucket"
+                            if accepted and current_bucket_validated
+                            else (
+                                "timing_dimension_current_requires_sector_review"
+                            )
+                        )
+                    )
                 ),
                 provenance={
                     "derivation_type": "earliest_timing_dimension_bucket",
+                    "current_fraction_of_dimensionless_total": (
+                        current_fraction
+                    ),
                 },
             )
-        )
+        if current_fraction_outside_range or current_schedule_invalid:
+            current_evidence = replace(
+                current_evidence,
+                status="REJECTED_POLICY",
+                confidence=0.99,
+            )
+        evidence.append(current_evidence)
     for fact in facts:
         if id(fact) in consumed_timing_facts:
             continue
@@ -1582,6 +2440,8 @@ def map_normalized_facts(
             and (_standard_taxonomy(fact) or reviewed_extension)
             and fact.scope == "consolidated"
         )
+        if metric_name == "debt_total":
+            accepted = False
         mapped_evidence = _fact_evidence(
             fact,
             metric_name=metric_name,
@@ -1594,10 +2454,14 @@ def map_normalized_facts(
                     "reviewed_consolidated_extension_fact"
                     if reviewed_extension
                     else (
+                        "explicit_total_debt_fact_requires_zero_debt_review"
+                        if metric_name == "debt_total"
+                        else (
                         "standard_taxonomy_consolidated_semantic_fact"
                         if accepted
                         else (
                             "extension_or_dimensional_fact_requires_sector_review"
+                        )
                         )
                     )
                 )
@@ -1671,6 +2535,196 @@ def map_normalized_facts(
                 row.value if row.value is not None else float("-inf"),
                 row.status,
                 row.source_document,
+            ),
+        )
+    )
+
+
+def _orders_interval_key(
+    evidence: MetricEvidence,
+) -> tuple[str, str, str, str, str]:
+    return (
+        evidence.source_document,
+        evidence.period_start,
+        evidence.period_end,
+        evidence.unit.upper(),
+        evidence.scope,
+    )
+
+
+def _derived_orders_quarter(
+    broad: MetricEvidence,
+    narrow: MetricEvidence,
+) -> MetricEvidence | None:
+    if (
+        broad.metric_name != "orders"
+        or narrow.metric_name != "orders"
+        or broad.status != "ACCEPTED"
+        or narrow.status != "ACCEPTED"
+        or broad.value is None
+        or narrow.value is None
+        or broad.source_document != narrow.source_document
+        or broad.unit.upper() != narrow.unit.upper()
+        or broad.scope != "consolidated"
+        or narrow.scope != "consolidated"
+    ):
+        return None
+    try:
+        broad_start = date.fromisoformat(broad.period_start)
+        broad_end = date.fromisoformat(broad.period_end)
+        narrow_start = date.fromisoformat(narrow.period_start)
+        narrow_end = date.fromisoformat(narrow.period_end)
+    except ValueError:
+        return None
+    if not (
+        broad_start <= narrow_start
+        and narrow_end <= broad_end
+        and (broad_start == narrow_start or broad_end == narrow_end)
+    ):
+        return None
+    if broad_start == narrow_start and broad_end > narrow_end:
+        period_start = narrow_end + timedelta(days=1)
+        period_end = broad_end
+    elif broad_end == narrow_end and broad_start < narrow_start:
+        period_start = broad_start
+        period_end = narrow_start - timedelta(days=1)
+    else:
+        return None
+    duration_days = (period_end - period_start).days
+    value = float(broad.value) - float(narrow.value)
+    if not 45 <= duration_days <= 130 or value < 0.0:
+        return None
+    return MetricEvidence(
+        metric_name="orders",
+        concept_name="OrdersDerivedDiscreteQuarter",
+        value=value,
+        unit=broad.unit,
+        period_start=period_start.isoformat(),
+        period_end=period_end.isoformat(),
+        scope="consolidated",
+        confidence=max(
+            0.0,
+            min(0.96, broad.confidence, narrow.confidence) - 0.02,
+        ),
+        status="ACCEPTED",
+        reason="explicit_same_filing_interval_arithmetic",
+        evidence_text=(
+            f"Derived discrete orders {value:g} {broad.unit} as "
+            f"{broad.value:g} ({broad.period_start}/{broad.period_end}) - "
+            f"{narrow.value:g} ({narrow.period_start}/{narrow.period_end})."
+        ),
+        source_document=broad.source_document,
+        extraction_method=(
+            "dedicated_parser:explicit_interval_arithmetic"
+        ),
+        provenance={
+            "adapter_version": ADAPTER_VERSION,
+            "derivation_type": "explicit_disclosure_interval_subtraction",
+            "broad_operand": {
+                "concept_name": broad.concept_name,
+                "period_start": broad.period_start,
+                "period_end": broad.period_end,
+                "value": broad.value,
+                "extraction_method": broad.extraction_method,
+            },
+            "narrow_operand": {
+                "concept_name": narrow.concept_name,
+                "period_start": narrow.period_start,
+                "period_end": narrow.period_end,
+                "value": narrow.value,
+                "extraction_method": narrow.extraction_method,
+            },
+        },
+    )
+
+
+def postprocess_metric_evidence(
+    item: WorkItem,
+    evidence: tuple[MetricEvidence, ...],
+) -> tuple[MetricEvidence, ...]:
+    output = list(evidence)
+    order_rows: dict[
+        tuple[str, str, str, str, str],
+        MetricEvidence,
+    ] = {}
+    conflicting_intervals: set[tuple[str, str, str, str, str]] = set()
+    for row in evidence:
+        if (
+            row.metric_name != "orders"
+            or row.status != "ACCEPTED"
+            or row.value is None
+        ):
+            continue
+        key = _orders_interval_key(row)
+        previous = order_rows.get(key)
+        if (
+            previous is not None
+            and previous.value is not None
+            and abs(float(previous.value) - float(row.value))
+            > max(1.0, abs(float(row.value)) * 1e-9)
+        ):
+            conflicting_intervals.add(key)
+            continue
+        if previous is None or row.confidence > previous.confidence:
+            order_rows[key] = row
+    eligible_rows = [
+        row
+        for key, row in order_rows.items()
+        if key not in conflicting_intervals
+    ]
+    derived_by_interval: dict[
+        tuple[str, str, str, str, str],
+        list[MetricEvidence],
+    ] = {}
+    for broad in eligible_rows:
+        for narrow in eligible_rows:
+            if broad is narrow:
+                continue
+            derived = _derived_orders_quarter(broad, narrow)
+            if derived is None:
+                continue
+            derived_by_interval.setdefault(
+                _orders_interval_key(derived),
+                [],
+            ).append(derived)
+    for candidates in derived_by_interval.values():
+        values = {
+            round(float(candidate.value or 0.0), 6)
+            for candidate in candidates
+        }
+        if len(values) != 1:
+            output.extend(
+                replace(
+                    candidate,
+                    status="REVIEW_REQUIRED",
+                    confidence=min(candidate.confidence, 0.70),
+                    reason="conflicting_interval_arithmetic_candidates",
+                )
+                for candidate in candidates
+            )
+            continue
+        output.append(
+            max(candidates, key=lambda candidate: candidate.confidence)
+        )
+    unique: dict[str, MetricEvidence] = {}
+    for row in output:
+        unique[
+            row.evidence_key(
+                model_family=item.model_family,
+                filing=item.filing,
+            )
+        ] = row
+    return tuple(
+        sorted(
+            unique.values(),
+            key=lambda row: (
+                row.metric_name,
+                row.period_end,
+                row.period_start,
+                row.value if row.value is not None else float("-inf"),
+                row.status,
+                row.source_document,
+                row.extraction_method,
             ),
         )
     )

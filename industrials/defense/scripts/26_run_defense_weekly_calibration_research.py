@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -132,6 +134,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--research-label",
+        default="",
+        help=(
+            "Candidate artifact namespace. When set, every stage8/stage9 research "
+            "artifact (weekly snapshots, panel, calibration, backtest, reports) is "
+            "written under stage8/candidates/<label> and stage9/candidates/<label>, "
+            "leaving the sealed production baseline untouched."
+        ),
+    )
+    parser.add_argument(
+        "--score-model-version",
+        default="",
+        help=(
+            "Override the score_model_version stamped on rebuilt rank snapshots "
+            "(exported as DEFENSE_SCORE_MODEL_VERSION to sub-steps). Requires "
+            "--research-label so a candidate version can never stamp baseline artifacts."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -458,8 +479,23 @@ def main() -> int:
         raise ValueError("--feature-backfill-only requires --backfill-features")
 
     python = sys.executable
+    research_label = str(args.research_label or "").strip().lower()
+    if research_label and not re.fullmatch(r"[a-z0-9_]{1,64}", research_label):
+        raise ValueError("--research-label must match [a-z0-9_]{1,64}")
+    if args.score_model_version and not research_label:
+        raise ValueError("--score-model-version requires --research-label; a candidate version must never stamp baseline artifacts")
     stage8_root = PROJECT_ROOT / "output" / "industrials" / "defense" / "stage8"
     stage9_root = PROJECT_ROOT / "output" / "industrials" / "defense" / "stage9"
+    if research_label:
+        # Candidate namespace: every derived research path below (weekly
+        # snapshots, panel, calibration, backtest, reports) branches off these
+        # two roots, so redirecting them isolates the whole run.
+        stage8_root = stage8_root / "candidates" / research_label
+        stage9_root = stage9_root / "candidates" / research_label
+        print(f"Candidate research namespace: {stage8_root}")
+    if args.score_model_version:
+        os.environ["DEFENSE_SCORE_MODEL_VERSION"] = str(args.score_model_version).strip()
+        print(f"Candidate score_model_version: {os.environ['DEFENSE_SCORE_MODEL_VERSION']}")
     panel_dir = stage8_root / "oos_calibration_panel_weekly"
     weekly_snapshot_root = stage8_root / "weekly_rank_snapshots"
     config_path = PACKAGE_ROOT / "config.yaml"
@@ -485,7 +521,14 @@ def main() -> int:
     calibration_dir = stage8_root / "optuna_calibration_weekly"
     calibration_summary = calibration_dir / "defense_optuna_calibration_summary.csv"
     backtest_dir = stage9_root / "score_backtest_weekly"
-    history_report = PROJECT_ROOT / "output" / "industrials" / "defense" / "stage6" / "weekly_shadow_snapshot_history_build_report.csv"
+    history_report = (
+        PROJECT_ROOT / "output" / "industrials" / "defense" / "stage6"
+        / (
+            f"weekly_shadow_snapshot_history_build_report_{research_label}.csv"
+            if research_label
+            else "weekly_shadow_snapshot_history_build_report.csv"
+        )
+    )
     run_report = (
         args.output_csv.expanduser().resolve()
         if args.output_csv

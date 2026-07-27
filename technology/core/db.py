@@ -809,6 +809,13 @@ CREATE TABLE IF NOT EXISTS fact_short_interest (
     float_shares REAL,
     short_interest_pct_float REAL,
     days_to_cover REAL,
+    float_source TEXT,
+    float_source_asof_date TEXT,
+    float_measurement_date TEXT,
+    float_proxy_flag INTEGER,
+    float_confidence REAL,
+    float_selection_reason TEXT,
+    float_split_adjustment_factor REAL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY(ticker, settlement_date, source_id),
@@ -1298,6 +1305,13 @@ def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, d
 def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "dim_technology_taxonomy", "calibration_cohort_id", "TEXT")
     ensure_column(conn, "feature_market_technical", "low_liquidity_flag", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "fact_short_interest", "float_source", "TEXT")
+    ensure_column(conn, "fact_short_interest", "float_source_asof_date", "TEXT")
+    ensure_column(conn, "fact_short_interest", "float_measurement_date", "TEXT")
+    ensure_column(conn, "fact_short_interest", "float_proxy_flag", "INTEGER")
+    ensure_column(conn, "fact_short_interest", "float_confidence", "REAL")
+    ensure_column(conn, "fact_short_interest", "float_selection_reason", "TEXT")
+    ensure_column(conn, "fact_short_interest", "float_split_adjustment_factor", "REAL")
     ensure_column(conn, "feature_financial_statement", "reporting_standard", "TEXT")
     ensure_column(conn, "feature_financial_statement", "financial_frequency", "TEXT")
     ensure_column(conn, "feature_financial_statement", "reported_currency", "TEXT")

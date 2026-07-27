@@ -1,0 +1,137 @@
+model_family: transportation
+policy_version: transportation_operating_archetypes_v1
+expected_identity_count: 160
+allowed_primary_archetypes:
+  - surface_rail_operator
+  - surface_rail_equipment
+  - surface_trucking
+  - surface_logistics
+  - surface_asset_leasing
+  - passenger_airline
+  - cargo_airline
+  - airport_operator
+  - aircraft_lessor
+  - aviation_services
+  - marine_operator
+  - marine_services
+  - precommercial_transport
+allowed_tags:
+  - surface_rail_operator
+  - surface_rail_equipment
+  - surface_trucking
+  - surface_logistics
+  - surface_asset_leasing
+  - passenger_airline
+  - cargo_airline
+  - airport_operator
+  - aircraft_lessor
+  - aviation_services
+  - marine_operator
+  - marine_services
+  - precommercial_transport
+  - regulated_precommercial
+  - ramping
+  - development_all
+cohort_industry_defaults:
+  surface_freight_and_logistics:
+    "Railroads": {primary_archetype: surface_rail_operator, tags: [surface_rail_operator]}
+    "Trucking": {primary_archetype: surface_trucking, tags: [surface_trucking]}
+    "Integrated Freight & Logistics": {primary_archetype: surface_logistics, tags: [surface_logistics]}
+    "Rental & Leasing Services": {primary_archetype: surface_asset_leasing, tags: [surface_asset_leasing]}
+  air_transport_and_aviation_services:
+    "Airlines": {primary_archetype: passenger_airline, tags: [passenger_airline]}
+    "Airports & Air Services": {primary_archetype: airport_operator, tags: [airport_operator]}
+    "Rental & Leasing Services": {primary_archetype: aircraft_lessor, tags: [aircraft_lessor]}
+  marine_shipping_and_maritime:
+    "Marine Shipping": {primary_archetype: marine_operator, tags: [marine_operator]}
+  development_stage_and_speculative_transport:
+    "Airports & Air Services": {primary_archetype: precommercial_transport, tags: [precommercial_transport, ramping]}
+    "Integrated Freight & Logistics": {primary_archetype: surface_logistics, tags: [surface_logistics]}
+    "Marine Shipping": {primary_archetype: marine_operator, tags: [marine_operator]}
+    "Railroads": {primary_archetype: precommercial_transport, tags: [precommercial_transport, ramping]}
+    "Trucking": {primary_archetype: surface_trucking, tags: [surface_trucking]}
+ticker_overrides:
+  AAWW:
+    primary_archetype: cargo_airline
+    tags: [cargo_airline]
+    reason: dedicated cargo airline
+  ASLE:
+    primary_archetype: aviation_services
+    tags: [aviation_services]
+    reason: aviation aftermarket and asset services rather than airport operator
+  ATSG:
+    primary_archetype: cargo_airline
+    tags: [cargo_airline, aviation_services]
+    reason: cargo airline and aircraft services
+  FSTR:
+    primary_archetype: surface_rail_equipment
+    tags: [surface_rail_equipment]
+    reason: rail infrastructure and equipment supplier rather than railroad operator
+  FTAI:
+    primary_archetype: aircraft_lessor
+    tags: [aircraft_lessor, aviation_services]
+    reason: aviation leasing and engine aftermarket economics
+  GATX:
+    primary_archetype: surface_asset_leasing
+    tags: [surface_asset_leasing, surface_rail_equipment]
+    reason: railcar leasing fleet
+  GBX:
+    primary_archetype: surface_rail_equipment
+    tags: [surface_rail_equipment, surface_asset_leasing]
+    reason: railcar manufacturing and leasing rather than railroad operation
+  HMR:
+    primary_archetype: marine_services
+    tags: [marine_services, marine_operator]
+    reason: commercial fleet manager with operating-fleet disclosures
+  HTCO:
+    primary_archetype: marine_services
+    tags: [marine_services, surface_logistics]
+    reason: international freight and logistics services rather than vessel operator
+  JBHT:
+    primary_archetype: surface_logistics
+    tags: [surface_logistics, surface_trucking]
+    reason: multimodal logistics with material asset-based trucking operations
+  JOBY:
+    primary_archetype: precommercial_transport
+    tags: [precommercial_transport, regulated_precommercial, ramping]
+    reason: precommercial certified air-mobility platform
+  MATX:
+    primary_archetype: marine_operator
+    tags: [marine_operator, surface_logistics]
+    reason: ocean transportation with material logistics operations
+  R:
+    primary_archetype: surface_asset_leasing
+    tags: [surface_asset_leasing, surface_logistics, surface_trucking]
+    reason: fleet leasing plus logistics and dedicated transportation
+  RAIL:
+    primary_archetype: surface_rail_equipment
+    tags: [surface_rail_equipment]
+    reason: railcar manufacturer rather than railroad operator
+  RVSN:
+    primary_archetype: precommercial_transport
+    tags: [precommercial_transport, ramping]
+    reason: development-stage rail technology rather than railroad operator
+  SOAR:
+    primary_archetype: aviation_services
+    tags: [aviation_services]
+    reason: operating private aviation platform rather than airport operator
+  SWVL:
+    primary_archetype: surface_logistics
+    tags: [surface_logistics]
+    reason: technology-enabled surface mobility operator rather than railroad
+  TRN:
+    primary_archetype: surface_rail_equipment
+    tags: [surface_rail_equipment, surface_asset_leasing]
+    reason: railcar manufacturing and leasing rather than railroad operation
+  UFG:
+    primary_archetype: marine_services
+    tags: [marine_services]
+    reason: marine fuel logistics and services rather than vessel operator
+  UP:
+    primary_archetype: aviation_services
+    tags: [aviation_services]
+    reason: operating private aviation platform rather than airport operator
+  WLFC:
+    primary_archetype: aircraft_lessor
+    tags: [aircraft_lessor, aviation_services]
+    reason: aircraft engine leasing and aviation services

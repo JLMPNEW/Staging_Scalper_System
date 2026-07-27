@@ -44,6 +44,49 @@ COVERAGE_FIELDS = [
     "status",
 ]
 CONCEPT_FIELDS = ["taxonomy", "concept_name", "ticker_count", "fact_count"]
+OBSERVATION_FIELDS = [
+    "asof_date",
+    "ticker",
+    "calibration_cohort",
+    "metric",
+    "category",
+    "gate_mode",
+    "metric_value",
+    "availability_status",
+    "applicable_flag",
+    "covered_flag",
+    "unit",
+    "source_id",
+    "accession_number",
+    "filing_date",
+    "period_start",
+    "period_end",
+    "taxonomy",
+    "concept_name",
+    "extraction_method",
+    "confidence",
+    "status_reason",
+    "provenance_json",
+]
+TICKER_COVERAGE_FIELDS = [
+    "asof_date",
+    "ticker",
+    "calibration_cohort",
+    "required_metric_count",
+    "applicable_metric_count",
+    "covered_metric_count",
+    "missing_applicable_metric_count",
+    "excluded_metric_count",
+    "coverage_fraction",
+    "reported_count",
+    "proxy_count",
+    "exempt_count",
+    "not_applicable_count",
+    "not_disclosed_count",
+    "disclosed_unparsed_count",
+    "parser_failure_count",
+    "missing_metrics",
+]
 
 
 @dataclass(frozen=True)
@@ -241,12 +284,20 @@ def audit_metric_availability(
     *,
     asof: str,
     members: dict[str, str],
-) -> tuple[dict[str, int], list[str], dict[str, dict[str, str]]]:
+) -> tuple[
+    dict[str, int],
+    list[str],
+    dict[str, dict[str, str]],
+    dict[tuple[str, str], dict[str, Any]],
+]:
     metrics = required_metric_names()
     expected = {(ticker, metric) for ticker in members for metric in metrics}
     rows = conn.execute(
         """
-        SELECT ticker, metric_name, availability_status
+        SELECT ticker, metric_name, availability_status, metric_value, unit,
+               source_id, accession_number, filing_date, period_start, period_end,
+               taxonomy, concept_name, extraction_method, confidence,
+               status_reason, provenance_json
         FROM feature_financial_metric_availability
         WHERE model_family = 'machinery'
           AND asof_date = ?
@@ -277,6 +328,7 @@ def audit_metric_availability(
         errors.append(f"metric availability contains invalid statuses: {invalid}")
     counts = {status: 0 for status in sorted(AVAILABILITY_STATUSES)}
     by_metric: dict[str, dict[str, str]] = {}
+    details: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
         if str(row["ticker"]) not in members:
             continue
@@ -284,9 +336,59 @@ def audit_metric_availability(
         if status in counts:
             counts[status] += 1
         by_metric.setdefault(str(row["metric_name"]), {})[str(row["ticker"])] = status
+        details[(str(row["ticker"]), str(row["metric_name"]))] = dict(row)
     counts["EXPECTED"] = len(expected)
     counts["CLASSIFIED"] = len(actual & expected)
-    return counts, errors, by_metric
+    return counts, errors, by_metric, details
+
+
+def build_ticker_coverage_rows(
+    *,
+    asof: str,
+    members: dict[str, str],
+    observation_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_ticker: dict[str, list[dict[str, Any]]] = {}
+    for row in observation_rows:
+        by_ticker.setdefault(str(row["ticker"]), []).append(row)
+    output: list[dict[str, Any]] = []
+    for ticker, cohort in sorted(members.items()):
+        rows = by_ticker.get(ticker, [])
+        applicable = [row for row in rows if int(row["applicable_flag"])]
+        covered = [row for row in applicable if int(row["covered_flag"])]
+        missing_metrics = sorted(
+            str(row["metric"])
+            for row in applicable
+            if not int(row["covered_flag"])
+        )
+        status_counts = {
+            status: sum(str(row["availability_status"]) == status for row in rows)
+            for status in AVAILABILITY_STATUSES
+        }
+        output.append(
+            {
+                "asof_date": asof,
+                "ticker": ticker,
+                "calibration_cohort": cohort,
+                "required_metric_count": len(rows),
+                "applicable_metric_count": len(applicable),
+                "covered_metric_count": len(covered),
+                "missing_applicable_metric_count": len(missing_metrics),
+                "excluded_metric_count": len(rows) - len(applicable),
+                "coverage_fraction": (
+                    f"{len(covered) / len(applicable):.6f}" if applicable else ""
+                ),
+                "reported_count": status_counts["REPORTED"],
+                "proxy_count": status_counts["PROXY"],
+                "exempt_count": status_counts["EXEMPT"],
+                "not_applicable_count": status_counts["NOT_APPLICABLE"],
+                "not_disclosed_count": status_counts["NOT_DISCLOSED"],
+                "disclosed_unparsed_count": status_counts["DISCLOSED_UNPARSED"],
+                "parser_failure_count": status_counts["PARSER_FAILURE"],
+                "missing_metrics": ",".join(missing_metrics),
+            }
+        )
+    return output
 
 
 def main() -> int:
@@ -305,6 +407,7 @@ def main() -> int:
     )
     errors: list[str] = []
     coverage_rows: list[dict[str, Any]] = []
+    observation_rows: list[dict[str, Any]] = []
     gate_metrics = {gate.metric for gate in METRIC_GATES}
     contract_metrics = set(required_metric_names())
     if gate_metrics != contract_metrics:
@@ -318,11 +421,12 @@ def main() -> int:
         if not members:
             errors.append(f"No machinery members are effective at {asof}")
         columns = table_columns(conn, "feature_financial_statement")
-        availability_counts, availability_errors, availability_by_metric = audit_metric_availability(
-            conn,
-            asof=asof,
-            members=members,
-        )
+        (
+            availability_counts,
+            availability_errors,
+            availability_by_metric,
+            availability_details,
+        ) = audit_metric_availability(conn, asof=asof, members=members)
         errors.extend(availability_errors)
         for gate in METRIC_GATES:
             implemented = gate.metric in columns
@@ -382,12 +486,50 @@ def main() -> int:
                     "status": status,
                 }
             )
+            for ticker, cohort in sorted(members.items()):
+                detail = availability_details.get((ticker, gate.metric), {})
+                applicable = ticker in applicable_members
+                observation_rows.append(
+                    {
+                        "asof_date": asof,
+                        "ticker": ticker,
+                        "calibration_cohort": cohort,
+                        "metric": gate.metric,
+                        "category": gate.category,
+                        "gate_mode": gate.gate_mode,
+                        "metric_value": values.get(ticker),
+                        "availability_status": detail.get("availability_status", ""),
+                        "applicable_flag": int(applicable),
+                        "covered_flag": int(applicable and ticker in covered_tickers),
+                        "unit": detail.get("unit"),
+                        "source_id": detail.get("source_id"),
+                        "accession_number": detail.get("accession_number"),
+                        "filing_date": detail.get("filing_date"),
+                        "period_start": detail.get("period_start"),
+                        "period_end": detail.get("period_end"),
+                        "taxonomy": detail.get("taxonomy"),
+                        "concept_name": detail.get("concept_name"),
+                        "extraction_method": detail.get("extraction_method"),
+                        "confidence": detail.get("confidence"),
+                        "status_reason": detail.get("status_reason"),
+                        "provenance_json": detail.get("provenance_json"),
+                    }
+                )
         concept_rows = raw_concept_candidates(conn, members=members, asof=asof)
+    ticker_coverage_rows = build_ticker_coverage_rows(
+        asof=asof,
+        members=members,
+        observation_rows=observation_rows,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     coverage_path = output_dir / "machinery_financial_metric_coverage.csv"
+    observations_path = output_dir / "machinery_financial_metric_observations.csv"
+    ticker_coverage_path = output_dir / "machinery_financial_ticker_coverage.csv"
     concepts_path = output_dir / "machinery_financial_concept_candidates.csv"
     manifest_path = output_dir / "machinery_financial_metric_coverage.json"
     write_csv_atomic(coverage_path, COVERAGE_FIELDS, coverage_rows)
+    write_csv_atomic(observations_path, OBSERVATION_FIELDS, observation_rows)
+    write_csv_atomic(ticker_coverage_path, TICKER_COVERAGE_FIELDS, ticker_coverage_rows)
     write_csv_atomic(concepts_path, CONCEPT_FIELDS, concept_rows)
     summary = {
         "acceptance": "PASS" if not errors else "FAIL",
@@ -406,6 +548,8 @@ def main() -> int:
         ),
         "availability_counts": availability_counts,
         "coverage_csv": str(coverage_path),
+        "observations_csv": str(observations_path),
+        "ticker_coverage_csv": str(ticker_coverage_path),
         "concept_candidates_csv": str(concepts_path),
         "errors": errors,
     }

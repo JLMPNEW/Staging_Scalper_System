@@ -13,7 +13,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from industrials.machinery.scoring import dated_path, parse_asof, publish_dashboard, read_rows  # noqa: E402
+from industrials.machinery.scoring import (  # noqa: E402
+    dated_path,
+    file_sha256,
+    parse_asof,
+    publish_dashboard,
+    read_rows,
+)
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -43,11 +49,36 @@ def main() -> int:
         "machinery_calibrated_scores.csv",
     )
     output_dir = args.output_dir.expanduser().resolve() if args.output_dir else dashboard_root / asof
+    score_manifest_path = input_path.with_suffix(".manifest.json")
+    try:
+        score_manifest = json.loads(
+            score_manifest_path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Invalid machinery score manifest {score_manifest_path}: {exc}"
+        ) from exc
+    if (
+        score_manifest.get("acceptance") != "PASS"
+        or score_manifest.get("asof_date") != asof
+        or score_manifest.get("output_sha256") != file_sha256(input_path)
+    ):
+        raise ValueError(
+            "Machinery score manifest acceptance, date, or hash mismatch"
+        )
+    production_active = (
+        score_manifest.get("production_policy_active") is True
+    )
+    production_metadata = score_manifest.get("production_metadata")
+    if not isinstance(production_metadata, dict):
+        raise ValueError("Machinery score manifest production metadata is invalid")
     manifest = publish_dashboard(
         output_dir=output_dir,
         rows=read_rows(input_path),
         asof=asof,
         allow_overwrite=args.allow_overwrite,
+        production_policy_active=production_active,
+        activation_metadata=production_metadata,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0

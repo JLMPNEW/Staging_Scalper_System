@@ -172,6 +172,9 @@ def main() -> int:  # noqa: C901
         return 0
 
     wf = cfg_get(config, "walkforward", {}) or {}
+    supportive_raw = wf.get("regime_gate_supportive_regimes")
+    if supportive_raw is None:
+        supportive_raw = ["HEATING_UP"]
     params = dict(
         rebalance_every_n_snapshots=int(wf.get("rebalance_every_n_snapshots", 5)),
         one_way_cost_bps=float(wf.get("one_way_cost_bps", 5.0)),
@@ -180,7 +183,7 @@ def main() -> int:  # noqa: C901
         shrinkage_intensity=float(cfg_get(config, "risk_panel.shrinkage_intensity", 0.2)),
         max_universe=int(wf.get("max_universe", 150)),
         min_universe=int(wf.get("min_universe", 20)),
-        use_confidence=bool(cfg_get(config, "optimizer.use_score_confidence", True)),
+        use_confidence=bool(cfg_get(config, "optimizer.use_confidence_adjusted_mu", True)),
         risk_aversion=float(cfg_get(config, "optimizer.risk_aversion", 5.0)),
         max_weight=float(cfg_get(config, "optimizer.max_weight_per_name", 0.05)),
         min_weight=float(cfg_get(config, "optimizer.min_weight_to_hold", 0.002)),
@@ -189,8 +192,7 @@ def main() -> int:  # noqa: C901
         macro_shift_scale=float(cfg_get(config, "black_litterman_fusion.macro_sector_shift_scale", 0.5)),
         macro_max_shift=float(cfg_get(config, "black_litterman_fusion.macro_sector_max_shift", 0.15)),
         rc_cap=float(cfg_get(config, "sleeves.per_name_risk_contribution_cap", 0.08)),
-        regime_gate_supportive_regimes=[str(s) for s in
-                                        (wf.get("regime_gate_supportive_regimes") or ["HEATING_UP"])],
+        regime_gate_supportive_regimes=[str(s) for s in supportive_raw],
         regime_lever_mu_multiplier=float(wf.get("regime_lever_mu_multiplier", 1.5)),
         regime_lever_unsupported_mode=str(wf.get("regime_lever_unsupported_mode", "min_var")),
     )
@@ -218,6 +220,11 @@ def main() -> int:  # noqa: C901
     replay_errors: list[str] = []
     if result["pit_violations"]:
         replay_errors.append(f"pit_violations={result['pit_violations'][:8]}")
+    pit_checked = int(result.get("pit_boundaries_checked", 0))
+    if pit_checked < int(result["n_rebalances"]) or pit_checked == 0:
+        replay_errors.append(
+            f"pit_boundaries_checked={pit_checked}<executed_rebalances={result['n_rebalances']}"
+        )
     if not result["day_index"]:
         replay_errors.append("no_holding_days")
     elif max(result["day_index"]) > open_event_date:
@@ -296,12 +303,35 @@ def main() -> int:  # noqa: C901
             "holding_days": len(result["day_index"]),
             "content_chain_sha256": content_chain.hexdigest(),
             "checks": [
-                {"check": "pit_no_violations", "status": "PASS", "detail": "no PIT violations"},
+                {
+                    "check": "pit_no_violations",
+                    "status": "PASS",
+                    "detail": (
+                        "independently checked covariance<=signal<execution for "
+                        f"{pit_checked} executable rebalances"
+                    ),
+                },
                 {"check": "open_event_right_edge", "status": "PASS",
                  "detail": f"last_return={max(result['day_index'])}<=open_event={open_event_date}"},
                 {"check": "minimum_evidence", "status": "PASS",
                  "detail": f"rebalances={result['n_rebalances']} days={len(result['day_index'])}"},
             ],
+            "inputs_sha256": {
+                "config.yaml": sha256_file(config_path),
+                "backtest/17_publish_lockbox_ledger.py": sha256_file(Path(__file__).resolve()),
+                "backtest/walkforward_common.py": sha256_file(
+                    Path(__file__).with_name("walkforward_common.py")
+                ),
+                "research/stage11_common.py": sha256_file(
+                    PACKAGE_ROOT / "research" / "stage11_common.py"
+                ),
+                "optimizer/optimizer_core.py": sha256_file(
+                    PACKAGE_ROOT / "optimizer" / "optimizer_core.py"
+                ),
+                "survivorship_manifest.json": sha256_file(panel_manifest_path),
+                "prices_adjclose.csv": sha256_file(prices_path),
+                "macro_serving.sqlite": macro_db_hash_after,
+            },
             "files": files,
         }
         write_manifest(temp_dir / "lockbox_ledger_manifest.json", manifest)

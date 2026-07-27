@@ -31,7 +31,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -50,10 +52,12 @@ from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.research.stage11_common import (  # noqa: E402
+    calibration_admission_mask,
     forward_status_is_valid,
     independent_windows,
     load_lockbox,
     manifest_file_errors,
+    manifest_input_errors,
     rank_ic_of,
 )
 from portfolio_layer.scores.adapters import dated_candidates  # noqa: E402
@@ -119,15 +123,17 @@ def deflated_t(ics: list[float], n_independent: int) -> tuple[float | None, floa
         return (float(arr.mean()) if len(arr) == 1 else None, None, None)
     mean = float(arr.mean())
     sd = float(arr.std(ddof=1))
-    n_eff = max(1, int(n_independent))
-    if sd <= 0:
+    n_eff = int(n_independent)
+    if sd <= 0 or n_eff < 2:
         return mean, None, None
     t = mean / sd * np.sqrt(n_eff)
-    p = float(2.0 * _stats.norm.sf(abs(t)))
+    # The effective sample is the non-overlapping-window count, often small.
+    # Normal tails materially overstate significance in that setting.
+    p = float(2.0 * _stats.t.sf(abs(t), df=n_eff - 1))
     return mean, float(t), p
 
 
-def benjamini_hochberg(pvals: list[float], alpha: float) -> list[bool]:
+def benjamini_hochberg(pvals: Sequence[float | None], alpha: float) -> list[bool]:
     """Return the BH-significant mask at FDR level alpha for the given p-values."""
     clean = [(i, float(p)) for i, p in enumerate(pvals) if p is not None and np.isfinite(p)]
     out = [False] * len(pvals)
@@ -216,6 +222,14 @@ def _load_pillar_frame(
         )
         pillar_union.update(detected)
         candidates.append((as_of, path, columns))
+    consolidated = _load_consolidated_pillar_frame(
+        candidates=candidates,
+        wanted_dates=wanted_dates,
+        requested_pillars=requested_pillars,
+        used_sha256=used_sha256,
+    )
+    if not consolidated.empty:
+        return consolidated
     pillars = sorted(pillar_union)
     if not candidates or not pillars:
         return pd.DataFrame()
@@ -248,6 +262,110 @@ def _load_pillar_frame(
     for c in pillars:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce")
+    return out
+
+
+def _load_consolidated_pillar_frame(
+    *,
+    candidates: list[tuple[str, Path, list[str]]],
+    wanted_dates: set[str],
+    requested_pillars: list[str] | None,
+    used_sha256: dict[str, str] | None,
+) -> pd.DataFrame:
+    """Load technology Stage 11 sidecars, including consolidated range chunks.
+
+    Source precedence matches research/67: root panel, ascending range chunks,
+    then per-date sidecars. Later rows replace earlier rows for the same
+    (as_of_date, ticker).
+    """
+    if not candidates or not requested_pillars:
+        return pd.DataFrame()
+    rank_path = candidates[0][1]
+    suffix = "_final_rank_table.csv"
+    if not rank_path.name.endswith(suffix):
+        return pd.DataFrame()
+    prefix = rank_path.name.removesuffix(suffix)
+    dashboard_root = rank_path.parent.parent
+    sidecar_name = f"{prefix}_stage11_survivorship_calibration_panel.csv"
+    source_paths: list[Path] = []
+    root_panel = dashboard_root / sidecar_name
+    if root_panel.exists():
+        source_paths.append(root_panel)
+    chunk_dir = dashboard_root / "stage11_combined"
+    if chunk_dir.exists():
+        range_re = re.compile(
+            r"_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.csv$"
+        )
+        chunks: list[tuple[tuple[str, str], Path]] = []
+        for path in chunk_dir.glob(
+            f"{prefix}_stage11_survivorship_calibration_panel_*.csv"
+        ):
+            match = range_re.search(path.name)
+            if match:
+                chunks.append(((match.group(2), match.group(1)), path))
+        source_paths.extend(path for _key, path in sorted(chunks))
+    source_paths.extend(
+        path.parent / sidecar_name
+        for _as_of, path, _columns in candidates
+        if (path.parent / sidecar_name).exists()
+    )
+    if not source_paths:
+        return pd.DataFrame()
+
+    frames: list[pd.DataFrame] = []
+    for order, path in enumerate(dict.fromkeys(source_paths)):
+        header = pd.read_csv(path, nrows=0)
+        date_column = (
+            "asof_date"
+            if "asof_date" in header.columns
+            else "as_of_date"
+            if "as_of_date" in header.columns
+            else ""
+        )
+        if "ticker" not in header.columns or not date_column:
+            raise ValueError(
+                f"Stage 11 pillar source lacks ticker/as-of columns: {path}"
+            )
+        available = [
+            pillar for pillar in requested_pillars if pillar in header.columns
+        ]
+        if not available:
+            continue
+        selected = {"ticker", date_column, *available}
+        frame = pd.read_csv(
+            path,
+            usecols=lambda column: column in selected,
+        )
+        frame.rename(columns={date_column: "as_of_date"}, inplace=True)
+        frame["as_of_date"] = (
+            frame["as_of_date"].astype(str).str.slice(0, 10)
+        )
+        frame = frame.loc[
+            frame["as_of_date"].isin(sorted(wanted_dates))
+        ].copy()
+        if frame.empty:
+            continue
+        if frame.duplicated(["as_of_date", "ticker"]).any():
+            raise ValueError(
+                f"Duplicate (as_of_date,ticker) rows within {path}"
+            )
+        for missing in set(requested_pillars) - set(available):
+            frame[missing] = np.nan
+        frame["_source_order"] = order
+        frames.append(
+            frame[["ticker", "as_of_date", *requested_pillars, "_source_order"]]
+        )
+        if used_sha256 is not None:
+            used_sha256[str(path.resolve())] = sha256_file(path)
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True)
+    out["ticker"] = out["ticker"].astype(str).str.upper().str.strip()
+    out.sort_values("_source_order", inplace=True)
+    out.drop_duplicates(["as_of_date", "ticker"], keep="last", inplace=True)
+    out.drop(columns=["_source_order"], inplace=True)
+    for pillar in requested_pillars:
+        out[pillar] = pd.to_numeric(out[pillar], errors="coerce")
     return out
 
 
@@ -295,19 +413,41 @@ def main() -> int:  # noqa: C901
         return 1
     panel_path = panel_dir / "calibration_panel.csv"
     panel_errors = manifest_file_errors(panel_manifest, {"calibration_panel.csv": panel_path})
-    if panel_errors:
-        LOGGER.error("Calibration panel %s is stale/unsealed: %s", panel_dir.name, panel_errors)
+    panel_input_errors = manifest_input_errors(
+        panel_manifest,
+        {
+            "config.yaml": config_path,
+            "research/67_join_calibration_panel.py": (
+                PACKAGE_ROOT / "research" / "67_join_calibration_panel.py"
+            ),
+            "research/stage11_common.py": (
+                PACKAGE_ROOT / "research" / "stage11_common.py"
+            ),
+        },
+    )
+    if panel_errors or panel_input_errors:
+        LOGGER.error(
+            "Calibration panel %s is stale/unsealed: files=%s inputs=%s",
+            panel_dir.name,
+            panel_errors,
+            panel_input_errors,
+        )
         return 1
 
     out_dir = paths.output_dir / str(cfg_get(config, "component_ic.dir", "component_ic")) / panel_dir.name
     cells_path = out_dir / "component_ic.csv"
+    coverage_path = out_dir / "component_coverage.csv"
+    usable_coverage_path = out_dir / "component_usable_coverage.csv"
     manifest_path = out_dir / "component_ic_manifest.json"
     if args.force:
-        for p in (cells_path, manifest_path):
+        for p in (cells_path, coverage_path, usable_coverage_path, manifest_path):
             if p.exists():
                 p.unlink()
     try:
-        fail_if_exists([cells_path, manifest_path], force=args.force)
+        fail_if_exists(
+            [cells_path, coverage_path, usable_coverage_path, manifest_path],
+            force=args.force,
+        )
     except FileExistsError as exc:
         LOGGER.error("%s", exc)
         return 1
@@ -323,19 +463,17 @@ def main() -> int:  # noqa: C901
     panel["ticker"] = panel["ticker"].astype(str).str.upper().str.strip()
     panel["as_of_date"] = panel["as_of_date"].astype(str).str.slice(0, 10)
 
-    truthy = ("1", "1.0", "true", "True")
-    eligible = panel["calibration_research_eligible"].astype(str).isin(truthy)
-    if "sidecar_stage11_eligible" in panel.columns:
-        eligible = eligible | panel["sidecar_stage11_eligible"].astype(str).isin(truthy)
-    admit = (
-        eligible
-        & panel["usable_for_promoted_training"].astype(str).isin(truthy)
-        & panel["survivorship_complete"].astype(str).isin(truthy)
-        & ~panel["in_lockbox"].astype(str).isin(truthy)
-        & panel["source_pipeline"].isin(pipelines)
+    lockbox_series = (
+        panel["in_lockbox"]
+        if "in_lockbox" in panel.columns
+        else pd.Series("", index=panel.index)
     )
+    lockbox_rows = lockbox_series.astype(str).str.strip().str.lower().isin(
+        ("1", "1.0", "true", "yes")
+    )
+    admit = calibration_admission_mask(panel) & panel["source_pipeline"].isin(pipelines)
+    admitted_lockbox_rows = int((admit & lockbox_rows).sum())
     panel = panel.loc[admit].copy()
-    leaked_lockbox = 0  # excluded above; recorded for the gate
     if panel.empty:
         LOGGER.error("No admitted panel rows for pipelines=%s", pipelines)
         return 1
@@ -345,6 +483,12 @@ def main() -> int:  # noqa: C901
     sectors_cfg = {str(s.get("model_family")): dict(s) for s in cfg_get(config, "score_contract.sectors", []) or []}
     pillar_sets: dict[str, list[str]] = {}
     pillar_sources_sha256: dict[str, str] = {}
+    coverage_rows: list[dict[str, Any]] = []
+    usable_coverage_rows: list[dict[str, Any]] = []
+    join_fractions: dict[str, float] = {}
+    min_component_coverage = float(
+        cfg_get(config, "component_ic.min_component_coverage_fraction", 0.50)
+    )
     merged: list[pd.DataFrame] = []
     for pipe in pipelines:
         sub = panel.loc[panel["source_pipeline"] == pipe]
@@ -364,7 +508,57 @@ def main() -> int:  # noqa: C901
             continue
         pillars = [c for c in pillar_frame.columns if c not in ("ticker", "as_of_date")]
         pillar_sets[pipe] = pillars
-        j = sub.merge(pillar_frame, on=["as_of_date", "ticker"], how="inner")
+        j = sub.merge(
+            pillar_frame,
+            on=["as_of_date", "ticker"],
+            how="left",
+            validate="one_to_one",
+        )
+        joined = j[pillars].notna().any(axis=1)
+        join_fractions[pipe] = float(joined.mean()) if len(j) else 0.0
+        for pillar in pillars:
+            present = j[pillar].notna()
+            coverage_rows.append(
+                {
+                    "source_pipeline": pipe,
+                    "component": pillar,
+                    "panel_rows": len(j),
+                    "nonmissing_rows": int(present.sum()),
+                    "nonmissing_fraction": round(float(present.mean()), 6),
+                    "dates_with_values": int(j.loc[present, "as_of_date"].nunique()),
+                    "coverage_eligible": int(float(present.mean()) >= min_component_coverage),
+                }
+            )
+        for (as_of, regime), cross_section in j.groupby(
+            ["as_of_date", "macro_regime"],
+            dropna=False,
+            sort=True,
+        ):
+            numeric = cross_section[pillars].apply(pd.to_numeric, errors="coerce")
+            finite = np.isfinite(numeric.to_numpy(dtype=float))
+            complete_case = finite.all(axis=1) if len(pillars) else np.zeros(len(numeric), dtype=bool)
+            nonconstant = 0
+            for pillar in pillars:
+                values = numeric[pillar].to_numpy(dtype=float)
+                values = values[np.isfinite(values)]
+                if len(values) >= 2 and float(np.std(values, ddof=0)) > 0.0:
+                    nonconstant += 1
+            usable_coverage_rows.append(
+                {
+                    "source_pipeline": pipe,
+                    "as_of_date": str(as_of),
+                    "macro_regime": "" if pd.isna(regime) else str(regime),
+                    "panel_rows": len(cross_section),
+                    "configured_pillars": len(pillars),
+                    "nonconstant_pillars": nonconstant,
+                    "complete_case_rows": int(complete_case.sum()),
+                    "complete_case_fraction": round(
+                        float(complete_case.mean()) if len(complete_case) else 0.0,
+                        6,
+                    ),
+                    "all_pillars_nonconstant": int(nonconstant == len(pillars)),
+                }
+            )
         merged.append(j)
     if not merged:
         LOGGER.error("No pipeline yielded a pillar-enriched panel")
@@ -379,6 +573,18 @@ def main() -> int:  # noqa: C901
     data["composite__z"] = pd.to_numeric(data["score_z_pipeline_date"], errors="coerce")
 
     regimes_all = sorted(r for r in data["macro_regime"].dropna().astype(str).unique() if r)
+    min_independent_windows = int(
+        cfg_get(config, "component_ic.min_independent_windows", 3)
+    )
+    max_entry_lag = int(
+        cfg_get(config, "calibration_targets.max_entry_lag_trading_days", 5)
+    )
+    component_coverage = {
+        (str(row["source_pipeline"]), str(row["component"])): bool(
+            row["coverage_eligible"]
+        )
+        for row in coverage_rows
+    }
 
     # --- compute per-cell IC ---
     rows: list[dict[str, Any]] = []
@@ -398,10 +604,21 @@ def main() -> int:  # noqa: C901
                 if rsub.empty:
                     continue
                 # composite IC first (baseline for the delta)
-                comp_ics_by_comp: dict[str, tuple[float | None, float | None, float | None, list[float], list[str]]] = {}
+                comp_ics_by_comp: dict[
+                    str,
+                    tuple[
+                        float | None,
+                        float | None,
+                        float | None,
+                        list[float],
+                        list[str],
+                        dict[str, float],
+                    ],
+                ] = {}
                 for comp in components:
                     ics: list[float] = []
                     dates: list[str] = []
+                    ic_by_date: dict[str, float] = {}
                     for d, g in rsub.groupby("as_of_date"):
                         zz = np.asarray(pd.to_numeric(g[comp], errors="coerce"), dtype=float)
                         yy = np.asarray(pd.to_numeric(g[tgt], errors="coerce"), dtype=float)
@@ -411,13 +628,21 @@ def main() -> int:  # noqa: C901
                             if ic is not None:
                                 ics.append(ic)
                                 dates.append(str(d))
+                                ic_by_date[str(d)] = ic
                     if len(ics) < args.min_dates:
                         continue
-                    n_ind = independent_windows(sorted(set(dates)), h)
+                    n_ind = independent_windows(
+                        sorted(set(dates)),
+                        h,
+                        entry_lag_trading_days=max_entry_lag,
+                    )
                     mean, t, p = deflated_t(ics, n_ind)
-                    comp_ics_by_comp[comp] = (mean, t, p, ics, dates)
+                    comp_ics_by_comp[comp] = (mean, t, p, ics, dates, ic_by_date)
                 composite_mean = comp_ics_by_comp.get("composite__z", (None,))[0]
-                for comp, (mean, t, p, ics, dates) in comp_ics_by_comp.items():
+                composite_by_date = (
+                    comp_ics_by_comp.get("composite__z", (None, None, None, [], [], {}))[5]
+                )
+                for comp, (mean, t, p, ics, dates, ic_by_date) in comp_ics_by_comp.items():
                     arr = np.asarray(ics, dtype=float)
                     n = len(arr)
                     half = n // 2
@@ -426,10 +651,42 @@ def main() -> int:  # noqa: C901
                     sign_stable = bool(np.isfinite(h1) and np.isfinite(h2)
                                        and np.sign(h1) == np.sign(h2) and mean is not None and mean != 0
                                        and np.sign(h1) == np.sign(mean))
+                    paired_dates = sorted(set(ic_by_date) & set(composite_by_date))
+                    deltas = [
+                        ic_by_date[d] - composite_by_date[d]
+                        for d in paired_dates
+                    ]
+                    delta_n_ind = independent_windows(
+                        paired_dates,
+                        h,
+                        entry_lag_trading_days=max_entry_lag,
+                    )
+                    delta_mean, delta_t, delta_p_two_sided = deflated_t(
+                        deltas,
+                        delta_n_ind,
+                    )
+                    if delta_p_two_sided is None or delta_t is None:
+                        delta_p_one_sided = None
+                    elif delta_t > 0:
+                        delta_p_one_sided = delta_p_two_sided / 2.0
+                    else:
+                        delta_p_one_sided = 1.0 - delta_p_two_sided / 2.0
                     rows.append({
                         "source_pipeline": pipe, "component": comp.replace("__z", ""),
                         "horizon_days": h, "regime": regime, "n_dates": n,
-                        "independent_windows": independent_windows(sorted(set(dates)), h),
+                        "independent_windows": independent_windows(
+                            sorted(set(dates)),
+                            h,
+                            entry_lag_trading_days=max_entry_lag,
+                        ),
+                        "enough_independent_windows": int(
+                            independent_windows(
+                                sorted(set(dates)),
+                                h,
+                                entry_lag_trading_days=max_entry_lag,
+                            )
+                            >= min_independent_windows
+                        ),
                         "mean_rank_ic": None if mean is None else round(mean, 6),
                         "ic_t_deflated": None if t is None else round(t, 4),
                         "p_two_sided": None if p is None else p,
@@ -441,6 +698,20 @@ def main() -> int:  # noqa: C901
                         "delta_vs_composite": (round(mean - composite_mean, 6)
                                                if mean is not None and composite_mean is not None
                                                and comp != "composite__z" else ""),
+                        "delta_paired_dates": len(paired_dates) if comp != "composite__z" else "",
+                        "delta_independent_windows": (
+                            delta_n_ind if comp != "composite__z" else ""
+                        ),
+                        "delta_t_deflated": (
+                            round(delta_t, 4)
+                            if comp != "composite__z" and delta_t is not None
+                            else ""
+                        ),
+                        "delta_p_one_sided": (
+                            delta_p_one_sided
+                            if comp != "composite__z" and delta_p_one_sided is not None
+                            else ""
+                        ),
                         "is_composite": int(comp == "composite__z"),
                     })
 
@@ -450,35 +721,161 @@ def main() -> int:  # noqa: C901
     fdr_mask = benjamini_hochberg(pvals, args.fdr_alpha)
     for i, flag in zip(non_comp_idx, fdr_mask):
         rows[i]["fdr_significant"] = int(flag)
+    delta_pvals = [
+        rows[i]["delta_p_one_sided"]
+        if rows[i]["delta_p_one_sided"] != ""
+        else None
+        for i in non_comp_idx
+    ]
+    delta_fdr_mask = benjamini_hochberg(delta_pvals, args.fdr_alpha)
+    for i, flag in zip(non_comp_idx, delta_fdr_mask):
+        rows[i]["delta_fdr_significant"] = int(flag)
     for r in rows:
         r.setdefault("fdr_significant", "")
+        r.setdefault("delta_fdr_significant", "")
         beats = (r["delta_vs_composite"] != "" and float(r["delta_vs_composite"]) >= args.delta_margin)
         r["attributes"] = int(
             (not r["is_composite"]) and r["fdr_significant"] == 1
+            and r["delta_fdr_significant"] == 1
             and r["sign_stable"] == 1 and beats
             and (r["mean_rank_ic"] is not None and float(r["mean_rank_ic"]) > 0)
+            and r["enough_independent_windows"] == 1
+            and component_coverage.get(
+                (str(r["source_pipeline"]), str(r["component"])), False
+            )
         )
 
     attributing = [r for r in rows if r["attributes"] == 1]
     fields = ["source_pipeline", "component", "horizon_days", "regime", "n_dates", "independent_windows",
+              "enough_independent_windows",
               "mean_rank_ic", "ic_t_deflated", "p_two_sided", "half1_ic", "half2_ic", "pct_pos",
-              "sign_stable", "composite_ic", "delta_vs_composite", "is_composite", "fdr_significant",
+              "sign_stable", "composite_ic", "delta_vs_composite", "delta_paired_dates",
+              "delta_independent_windows", "delta_t_deflated", "delta_p_one_sided",
+              "is_composite", "fdr_significant", "delta_fdr_significant",
               "attributes"]
     out_dir.mkdir(parents=True, exist_ok=True)
     write_via_temp(
         cells_path,
         lambda temp: pd.DataFrame(rows).reindex(columns=fields).to_csv(temp, index=False),
     )
+    coverage_fields = [
+        "source_pipeline",
+        "component",
+        "panel_rows",
+        "nonmissing_rows",
+        "nonmissing_fraction",
+        "dates_with_values",
+        "coverage_eligible",
+    ]
+    write_via_temp(
+        coverage_path,
+        lambda temp: pd.DataFrame(coverage_rows)
+        .reindex(columns=coverage_fields)
+        .to_csv(temp, index=False),
+    )
+    usable_coverage_fields = [
+        "source_pipeline",
+        "as_of_date",
+        "macro_regime",
+        "panel_rows",
+        "configured_pillars",
+        "nonconstant_pillars",
+        "complete_case_rows",
+        "complete_case_fraction",
+        "all_pillars_nonconstant",
+    ]
+    write_via_temp(
+        usable_coverage_path,
+        lambda temp: pd.DataFrame(usable_coverage_rows)
+        .reindex(columns=usable_coverage_fields)
+        .to_csv(temp, index=False),
+    )
 
+    min_join_fraction = float(
+        cfg_get(config, "component_ic.min_pillar_join_fraction", 0.90)
+    )
+    bad_joins = {
+        pipe: fraction
+        for pipe, fraction in join_fractions.items()
+        if fraction < min_join_fraction
+    }
+    min_complete_case_fraction = float(
+        cfg_get(config, "component_ic.min_complete_case_fraction", 0.90)
+    )
+    usable_by_pipeline: dict[str, dict[str, float]] = {}
+    for pipe in pipelines:
+        rows_for_pipe = [
+            row for row in usable_coverage_rows if row["source_pipeline"] == pipe
+        ]
+        if not rows_for_pipe:
+            usable_by_pipeline[pipe] = {
+                "dates": 0,
+                "complete_case_date_fraction": 0.0,
+                "all_nonconstant_date_fraction": 0.0,
+            }
+            continue
+        usable_by_pipeline[pipe] = {
+            "dates": len(rows_for_pipe),
+            "complete_case_date_fraction": round(
+                sum(
+                    float(row["complete_case_fraction"]) >= min_complete_case_fraction
+                    for row in rows_for_pipe
+                )
+                / len(rows_for_pipe),
+                6,
+            ),
+            "all_nonconstant_date_fraction": round(
+                sum(int(row["all_pillars_nonconstant"]) == 1 for row in rows_for_pipe)
+                / len(rows_for_pipe),
+                6,
+            ),
+        }
+    degraded_usable = {
+        pipe: values
+        for pipe, values in usable_by_pipeline.items()
+        if values["complete_case_date_fraction"] < min_complete_case_fraction
+        or values["all_nonconstant_date_fraction"] < min_complete_case_fraction
+    }
     checks = [
-        {"check": "lockbox_no_sealed_rows", "status": "PASS",
-         "detail": f"sealed rows excluded from admission; leaked={leaked_lockbox}"},
+        {
+            "check": "lockbox_no_sealed_rows",
+            "status": "PASS" if admitted_lockbox_rows == 0 else "FAIL",
+            "detail": (
+                f"admitted_lockbox_rows={admitted_lockbox_rows}; "
+                f"panel_lockbox_rows={int(lockbox_rows.sum())}"
+            ),
+        },
         {"check": "multiplicity_disclosed", "status": "PASS",
          "detail": f"cells={len(rows)} non_composite={len(non_comp_idx)} fdr_alpha={args.fdr_alpha}; "
-                   "BH gate applied across all component cells"},
+                   "BH gates applied to component IC and paired component-minus-composite deltas"},
+        {
+            "check": "pillar_join_coverage",
+            "status": "PASS" if not bad_joins else "FAIL",
+            "detail": (
+                f"minimum={min_join_fraction:.3f}; fractions={join_fractions}"
+                if not bad_joins
+                else f"below minimum={min_join_fraction:.3f}: {bad_joins}"
+            ),
+        },
+        {
+            "check": "usable_pillar_coverage",
+            "status": "PASS" if not degraded_usable else "WARN",
+            "detail": (
+                f"minimum_date_fraction={min_complete_case_fraction:.3f}; "
+                f"by_pipeline={usable_by_pipeline}"
+            ),
+        },
+        {
+            "check": "independent_window_floor",
+            "status": "PASS",
+            "detail": (
+                f"attribution requires >= {min_independent_windows} "
+                "non-overlapping forward windows"
+            ),
+        },
         {"check": "shadow_only", "status": "PASS",
-         "detail": "evidence only; no config or scoring change. Reweighting requires 73 + 16c + a "
-                   "protocol amendment."},
+         "detail": "evidence only; no config or scoring change. Reweighting requires the "
+                   "pre-registered 74/75 campaign, economic conversion, and a protocol amendment."},
     ]
     passed = all(c["status"] in ("PASS", "WARN") for c in checks)
     write_manifest(manifest_path, {
@@ -493,6 +890,9 @@ def main() -> int:  # noqa: C901
         "inputs_sha256": {
             "config.yaml": sha256_file(config_path),
             "research/72_component_ic_by_regime.py": sha256_file(Path(__file__).resolve()),
+            "research/stage11_common.py": sha256_file(
+                Path(__file__).with_name("stage11_common.py")
+            ),
             "calibration_panel_manifest.json": sha256_file(panel_dir / "calibration_panel_manifest.json"),
             "calibration_panel.csv": sha256_file(panel_path),
             **{f"pillar_source:{path}": sha for path, sha in sorted(pillar_sources_sha256.items())},
@@ -500,11 +900,31 @@ def main() -> int:  # noqa: C901
         "horizons": HORIZONS,
         "fdr_alpha": args.fdr_alpha,
         "delta_margin": args.delta_margin,
+        "min_independent_windows": min_independent_windows,
+        "max_entry_lag_trading_days": max_entry_lag,
+        "min_component_coverage_fraction": min_component_coverage,
+        "min_pillar_join_fraction": min_join_fraction,
+        "min_complete_case_fraction": min_complete_case_fraction,
+        "pillar_join_fractions": join_fractions,
+        "usable_coverage_by_pipeline": usable_by_pipeline,
         "rows_admitted": int(len(data)),
         "cells": len(rows),
         "attributing_cells": len(attributing),
         "checks": checks,
-        "files": {"component_ic.csv": {"sha256": sha256_file(cells_path), "rows": len(rows)}},
+        "files": {
+            "component_ic.csv": {
+                "sha256": sha256_file(cells_path),
+                "rows": len(rows),
+            },
+            "component_coverage.csv": {
+                "sha256": sha256_file(coverage_path),
+                "rows": len(coverage_rows),
+            },
+            "component_usable_coverage.csv": {
+                "sha256": sha256_file(usable_coverage_path),
+                "rows": len(usable_coverage_rows),
+            },
+        },
     })
     for c in checks:
         LOGGER.info("[%s] %s -- %s", c["status"], c["check"], c["detail"])

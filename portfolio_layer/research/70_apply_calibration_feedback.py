@@ -48,7 +48,11 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
-from portfolio_layer.research.stage11_common import load_lockbox, parse_finite  # noqa: E402
+from portfolio_layer.research.stage11_common import (  # noqa: E402
+    load_lockbox,
+    manifest_input_errors,
+    parse_finite,
+)
 
 
 LOGGER = logging.getLogger("apply_calibration_feedback")
@@ -142,6 +146,38 @@ def main() -> int:  # noqa: C901
         lineage_errors.append("69:panel_manifest_sha")
     if str(validation_manifest.get("alpha_calibration_manifest_sha256", "")) != sha256_file(slopes_manifest_path):
         lineage_errors.append("69:alpha_manifest_sha")
+    common_source = Path(__file__).with_name("stage11_common.py")
+    lineage_errors.extend(
+        f"68:{error}"
+        for error in manifest_input_errors(
+            slopes_manifest,
+            {
+                "config.yaml": config_path,
+                "research/68_fit_ridge_alpha_slopes.py": Path(__file__).with_name(
+                    "68_fit_ridge_alpha_slopes.py"
+                ),
+                "research/stage11_common.py": common_source,
+                "calibration_panel_manifest.json": panel_manifest_path,
+                "calibration_panel.csv": panel_dir / "calibration_panel.csv",
+            },
+        )
+    )
+    lineage_errors.extend(
+        f"69:{error}"
+        for error in manifest_input_errors(
+            validation_manifest,
+            {
+                "config.yaml": config_path,
+                "research/69_validate_stage11_calibration.py": Path(__file__).with_name(
+                    "69_validate_stage11_calibration.py"
+                ),
+                "research/stage11_common.py": common_source,
+                "calibration_panel_manifest.json": panel_manifest_path,
+                "calibration_panel.csv": panel_dir / "calibration_panel.csv",
+                "alpha_calibration_manifest.json": slopes_manifest_path,
+            },
+        )
+    )
     input_files = {
         "alpha_slopes.csv": slopes_dir / "alpha_slopes.csv",
         "oos_validation.csv": valid_dir / "oos_validation.csv",
@@ -289,6 +325,8 @@ def main() -> int:  # noqa: C901
         "checks": checks,
         "inputs_sha256": {
             "config.yaml": sha256_file(config_path),
+            "research/70_apply_calibration_feedback.py": sha256_file(Path(__file__).resolve()),
+            "research/stage11_common.py": sha256_file(common_source),
             "alpha_calibration_manifest.json": sha256_file(slopes_manifest_path),
             "alpha_slopes.csv": sha256_file(input_files["alpha_slopes.csv"]),
             "validation_manifest.json": sha256_file(validation_manifest_path),

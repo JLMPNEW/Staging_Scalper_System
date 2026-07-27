@@ -93,7 +93,7 @@ def _float_list(values: Any, default: list[float]) -> list[float]:
     out: list[float] = []
     for value in values:
         out.append(float(value))
-    return out or default
+    return out
 
 
 def _int_list(values: Any, default: list[int]) -> list[int]:
@@ -102,18 +102,21 @@ def _int_list(values: Any, default: list[int]) -> list[int]:
     out: list[int] = []
     for value in values:
         out.append(max(1, int(value)))
-    return out or default
+    return out
 
 
 def _str_list(values: Any, default: list[str]) -> list[str]:
     if values is None:
         return default
     out = [str(v).strip() for v in values if str(v).strip()]
-    return out or default
+    return out
 
 
 def _base_params(config: dict[str, Any]) -> dict[str, Any]:
     wf = cfg_get(config, "walkforward", {}) or {}
+    supportive_raw = wf.get("regime_gate_supportive_regimes")
+    if supportive_raw is None:
+        supportive_raw = ["HEATING_UP"]
     return dict(
         rebalance_every_n_snapshots=int(wf.get("rebalance_every_n_snapshots", 5)),
         one_way_cost_bps=float(wf.get("one_way_cost_bps", 5.0)),
@@ -122,7 +125,7 @@ def _base_params(config: dict[str, Any]) -> dict[str, Any]:
         shrinkage_intensity=float(cfg_get(config, "risk_panel.shrinkage_intensity", 0.2)),
         max_universe=int(wf.get("max_universe", 150)),
         min_universe=int(wf.get("min_universe", 20)),
-        use_confidence=bool(cfg_get(config, "optimizer.use_score_confidence", True)),
+        use_confidence=bool(cfg_get(config, "optimizer.use_confidence_adjusted_mu", True)),
         risk_aversion=float(cfg_get(config, "optimizer.risk_aversion", 5.0)),
         max_weight=float(cfg_get(config, "optimizer.max_weight_per_name", 0.05)),
         min_weight=float(cfg_get(config, "optimizer.min_weight_to_hold", 0.002)),
@@ -131,8 +134,7 @@ def _base_params(config: dict[str, Any]) -> dict[str, Any]:
         macro_shift_scale=float(cfg_get(config, "black_litterman_fusion.macro_sector_shift_scale", 0.5)),
         macro_max_shift=float(cfg_get(config, "black_litterman_fusion.macro_sector_max_shift", 0.15)),
         rc_cap=float(cfg_get(config, "sleeves.per_name_risk_contribution_cap", 0.08)),
-        regime_gate_supportive_regimes=[str(s) for s in
-                                        (wf.get("regime_gate_supportive_regimes") or ["HEATING_UP"])],
+        regime_gate_supportive_regimes=[str(s) for s in supportive_raw],
         regime_lever_mu_multiplier=float(wf.get("regime_lever_mu_multiplier", 1.5)),
         regime_lever_unsupported_mode=str(wf.get("regime_lever_unsupported_mode", "min_var")),
     )
@@ -457,6 +459,12 @@ def main() -> int:
         "sealed_snapshots_skipped": sealed_skipped,
         "inputs_sha256": {
             "config": sha256_file(config_path),
+            "backtest/16b_run_regime_parameter_sweep.py": sha256_file(
+                Path(__file__).resolve()
+            ),
+            "backtest/walkforward_common.py": sha256_file(
+                PACKAGE_ROOT / "backtest" / "walkforward_common.py"
+            ),
             "lockbox_protocol": sha256_file(LOCKBOX_PROTOCOL) if LOCKBOX_PROTOCOL.exists() else "",
             "survivorship_manifest": sha256_file(panel_dir / "survivorship_manifest.json"),
             "prices_adjclose": sha256_file(panel_dir / "prices_adjclose.csv"),

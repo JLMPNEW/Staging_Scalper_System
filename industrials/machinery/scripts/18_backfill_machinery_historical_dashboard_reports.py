@@ -36,6 +36,7 @@ from industrials.machinery.build_contract import (  # noqa: E402
 from industrials.machinery.financial_contract import required_metric_names  # noqa: E402
 from industrials.machinery.historical_coverage import (  # noqa: E402
     build_combined_historical_coverage,
+    expected_tickers_by_date,
     load_validated_sidecar,
 )
 from industrials.machinery.scoring import (  # noqa: E402
@@ -43,6 +44,7 @@ from industrials.machinery.scoring import (  # noqa: E402
     finalize_rank_rows,
     parse_asof,
     publish_dashboard,
+    read_rows,
     survivorship_sidecar,
     write_json_atomic,
 )
@@ -105,6 +107,16 @@ def parse_args() -> argparse.Namespace:
         help="Reuse one Python interpreter for feature stages while retaining per-stage DB transactions.",
     )
     parser.add_argument("--allow-zero-eligible", action="store_true")
+    parser.add_argument(
+        "--coverage-only",
+        action="store_true",
+        help="Rebuild the global historical coverage index from existing validated sidecars only.",
+    )
+    parser.add_argument(
+        "--repair-membership-sidecars",
+        action="store_true",
+        help="Reconcile membership metadata and hashes in existing historical files without rebuilding features.",
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--continue-on-error", action="store_true")
     return parser.parse_args()
@@ -149,6 +161,163 @@ def weekly_dates(dates: list[str]) -> list[str]:
         iso_year, iso_week, _ = parsed.isocalendar()
         by_week[(iso_year, iso_week)] = raw
     return [by_week[key] for key in sorted(by_week)]
+
+
+def published_dashboard_dates(
+    dashboard_root: Path,
+    *,
+    start_date: str,
+    end_date: str,
+) -> list[str]:
+    dates: list[str] = []
+    if not dashboard_root.exists():
+        return dates
+    for path in dashboard_root.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            asof = parse_asof(path.name)
+        except ValueError:
+            continue
+        if (
+            start_date <= asof <= end_date
+            and (path / "machinery_stage11_survivorship_calibration_panel.csv").exists()
+        ):
+            dates.append(asof)
+    return sorted(set(dates))
+
+
+def validate_existing_membership(
+    conn: sqlite3.Connection,
+    *,
+    asof: str,
+    rows: list[dict[str, str]],
+) -> None:
+    expected = expected_tickers_by_date(conn, [asof])[asof]["combined"]
+    actual = {str(row.get("ticker") or "") for row in rows}
+    if actual != expected:
+        raise ValueError(
+            f"historical membership mismatch missing={sorted(expected - actual)} "
+            f"extra={sorted(actual - expected)}"
+        )
+
+
+MEMBERSHIP_FIELDS = (
+    "membership_source_id",
+    "membership_basis",
+    "membership_start_date",
+    "membership_end_date",
+    "membership_status",
+    "membership_confidence",
+)
+
+
+def expected_membership_metadata(
+    conn: sqlite3.Connection,
+    *,
+    asof: str,
+) -> dict[str, dict[str, str]]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM (
+            SELECT
+                m.ticker,
+                m.membership_source_id,
+                m.membership_basis,
+                m.start_date AS membership_start_date,
+                COALESCE(m.end_date, '') AS membership_end_date,
+                m.membership_status,
+                m.confidence AS membership_confidence,
+                ROW_NUMBER() OVER (
+                    PARTITION BY m.ticker
+                    ORDER BY
+                        CASE WHEN m.membership_basis = 'survivorship_corrected_pit_contract' THEN 0 ELSE 1 END,
+                        m.confidence DESC,
+                        m.start_date DESC
+                ) AS membership_row_number
+            FROM dim_universe_membership m
+            WHERE m.model_family = 'machinery'
+              AND m.start_date <= ?
+              AND (m.end_date IS NULL OR m.end_date = '' OR m.end_date >= ?)
+        )
+        WHERE membership_row_number = 1
+        ORDER BY ticker
+        """,
+        (asof, asof),
+    ).fetchall()
+    output: dict[str, dict[str, str]] = {}
+    for row in rows:
+        confidence = row["membership_confidence"]
+        output[str(row["ticker"])] = {
+            "membership_source_id": str(row["membership_source_id"] or ""),
+            "membership_basis": str(row["membership_basis"] or ""),
+            "membership_start_date": str(row["membership_start_date"] or ""),
+            "membership_end_date": str(row["membership_end_date"] or ""),
+            "membership_status": str(row["membership_status"] or ""),
+            "membership_confidence": (
+                f"{float(confidence):g}" if confidence is not None else ""
+            ),
+        }
+    return output
+
+
+def reconcile_membership_metadata(
+    rows: list[dict[str, str]],
+    *,
+    expected: dict[str, dict[str, str]],
+) -> tuple[list[dict[str, str]], list[str]]:
+    actual_tickers = {str(row.get("ticker") or "") for row in rows}
+    expected_tickers = set(expected)
+    if actual_tickers != expected_tickers:
+        raise ValueError(
+            f"historical membership mismatch missing={sorted(expected_tickers - actual_tickers)} "
+            f"extra={sorted(actual_tickers - expected_tickers)}"
+        )
+    updated: list[dict[str, str]] = []
+    changed: list[str] = []
+    for source in rows:
+        row = dict(source)
+        ticker = str(row["ticker"])
+        metadata = expected[ticker]
+        if any(str(row.get(field) or "") != metadata[field] for field in MEMBERSHIP_FIELDS):
+            row.update(metadata)
+            changed.append(ticker)
+        updated.append(row)
+    return updated, sorted(changed)
+
+
+def repair_membership_sidecars(
+    conn: sqlite3.Connection,
+    *,
+    dashboard_root: Path,
+    dates: list[str],
+) -> dict[str, Any]:
+    repaired_dates: list[str] = []
+    repaired_tickers: set[str] = set()
+    for asof in dates:
+        output_dir = dashboard_root / asof
+        rank_path = output_dir / "machinery_final_rank_table.csv"
+        rows = read_rows(rank_path)
+        expected = expected_membership_metadata(conn, asof=asof)
+        updated, changed = reconcile_membership_metadata(rows, expected=expected)
+        if not changed:
+            continue
+        publish_dashboard(
+            output_dir=output_dir,
+            rows=updated,
+            asof=asof,
+            allow_overwrite=True,
+        )
+        repaired_dates.append(asof)
+        repaired_tickers.update(changed)
+    return {
+        "acceptance": "PASS",
+        "validated_date_count": len(dates),
+        "repaired_date_count": len(repaired_dates),
+        "repaired_dates": repaired_dates,
+        "repaired_tickers": sorted(repaired_tickers),
+    }
 
 
 _SHARED_STAGE_NAMES = {
@@ -595,6 +764,52 @@ def main() -> int:
         raise ValueError("end-date must be on or after start-date")
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     dashboard_root = resolve_path(cfg_get(config, "machinery_scoring.dashboard_root"), base_dir=base_dir)
+    report_root = dashboard_root.parent / "historical_backfill"
+    report_root.mkdir(parents=True, exist_ok=True)
+    if args.coverage_only and args.repair_membership_sidecars:
+        raise ValueError("--coverage-only and --repair-membership-sidecars are mutually exclusive")
+    if args.repair_membership_sidecars:
+        repair_dates = published_dashboard_dates(
+            dashboard_root,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if not repair_dates:
+            raise ValueError(
+                f"No machinery historical sidecars from {start_date} through {end_date}"
+            )
+        with connect(
+            db_path,
+            timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 120.0)),
+        ) as conn:
+            summary = repair_membership_sidecars(
+                conn,
+                dashboard_root=dashboard_root,
+                dates=repair_dates,
+            )
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+    if args.coverage_only:
+        coverage_dates = published_dashboard_dates(
+            dashboard_root,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if not coverage_dates:
+            raise ValueError(
+                f"No validated machinery historical sidecars from {start_date} through {end_date}"
+            )
+        with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 120.0))) as conn:
+            summary = build_combined_historical_coverage(
+                conn,
+                dates=coverage_dates,
+                dashboard_root=dashboard_root,
+                report_root=report_root,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0 if summary["acceptance"] == "PASS" else 1
     sector_output_root = dashboard_root.parents[2]
     benchmark = str(cfg_get(config, "industrials_universe.benchmark_ticker", "XLI"))
     primary_source = str(cfg_get(config, "market_data_policy.scoring_primary_source", "yahoo_finance_adjusted"))
@@ -659,8 +874,6 @@ def main() -> int:
     )
     market_sources = tuple(source for source in market_sources if source)
     report: list[dict[str, Any]] = []
-    report_root = dashboard_root.parent / "historical_backfill"
-    report_root.mkdir(parents=True, exist_ok=True)
     report_csv = report_root / f"machinery_history_{start_date}_{end_date}_{args.frequency}.csv"
     with connect(db_path, timeout_sec=timeout) as conn:
         initialized_feature_dates = existing_feature_dates(conn)
@@ -687,6 +900,12 @@ def main() -> int:
                         asof=asof,
                         expected_build_signature=build_signature,
                     )
+                    with connect(db_path, timeout_sec=timeout) as conn:
+                        validate_existing_membership(
+                            conn,
+                            asof=asof,
+                            rows=historical_rows,
+                        )
                     reused = True
                     reuse_validation = "build_signature_match"
                 except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
@@ -851,13 +1070,21 @@ def main() -> int:
         final=True,
     )
     if summary["acceptance"] == "PASS":
+        coverage_start_date = parse_asof(
+            str(cfg_get(config, "machinery_scoring.history_start_date", "2019-01-02"))
+        )
+        coverage_dates = published_dashboard_dates(
+            dashboard_root,
+            start_date=coverage_start_date,
+            end_date=end_date,
+        )
         with connect(db_path, timeout_sec=timeout) as conn:
             combined = build_combined_historical_coverage(
                 conn,
-                dates=dates,
+                dates=coverage_dates,
                 dashboard_root=dashboard_root,
                 report_root=report_root,
-                start_date=start_date,
+                start_date=coverage_start_date,
                 end_date=end_date,
             )
         summary["combined_coverage_acceptance"] = combined["acceptance"]

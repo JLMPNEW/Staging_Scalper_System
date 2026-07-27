@@ -54,13 +54,15 @@ def _period_corrections(
         ]
         if not candidates:
             continue
+        # Deterministic tie-break: candidates comes from a set, whose
+        # iteration order is hash-randomized; equidistant candidates would
+        # otherwise vary between identical runs.
         winner = min(
             candidates,
-            key=lambda key: _date_distance(
-                str(legacy_key[4]),
-                str(key[4]),
-            )
-            or 0,
+            key=lambda key: (
+                _date_distance(str(legacy_key[4]), str(key[4])) or 0,
+                key,
+            ),
         )
         corrections.append((legacy_key, winner))
         remaining_legacy.remove(legacy_key)
@@ -74,6 +76,7 @@ def compare_shadow_run(
     run_id: int,
     model_family: str,
     asof_date: str,
+    requested_metrics: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     all_shadow_rows = conn.execute(
         """
@@ -88,22 +91,10 @@ def compare_shadow_run(
         """,
         (run_id, model_family, asof_date),
     ).fetchall()
-    shadow_rows = [
-        row
-        for row in all_shadow_rows
-        if str(row["candidate_status"]) == "ACCEPTED"
-    ]
+    shadow_rows = [row for row in all_shadow_rows if str(row["candidate_status"]) == "ACCEPTED"]
     rejected_shadow_rows = [
-        row
-        for row in all_shadow_rows
-        if str(row["candidate_status"]).startswith(
-            ("REJECTED", "SUPPRESSED")
-        )
+        row for row in all_shadow_rows if str(row["candidate_status"]).startswith(("REJECTED", "SUPPRESSED"))
     ]
-    attempted_groups = {
-        (str(row["ticker"]), str(row["metric_name"]))
-        for row in all_shadow_rows
-    }
     work_scope = [
         (str(row["ticker"]), str(row["accession_number"]))
         for row in conn.execute(
@@ -117,46 +108,82 @@ def compare_shadow_run(
     ]
     if not work_scope:
         return []
-    scope_predicates = " OR ".join(
-        "(ticker = ? AND accession_number = ?)" for _ in work_scope
+    # Attempted pairs derive from the WORK SCOPE, not from emitted evidence:
+    # a filing searched cleanly with zero candidates emits nothing, and
+    # deriving attempts from evidence would hide exactly the worst class of
+    # regression (legacy-ACCEPTED value that the shadow parser missed).
+    work_tickers = {ticker for ticker, _ in work_scope}
+    attempted_groups = {(ticker, metric_name) for ticker in work_tickers for metric_name in requested_metrics} | {
+        (str(row["ticker"]), str(row["metric_name"])) for row in all_shadow_rows
+    }
+    conn.execute(
+        """
+        CREATE TEMP TABLE IF NOT EXISTS temp_sec_parser_work_scope(
+            ticker TEXT NOT NULL,
+            accession_number TEXT NOT NULL,
+            PRIMARY KEY(ticker, accession_number)
+        ) WITHOUT ROWID
+        """
+    )
+    conn.execute("DELETE FROM temp_sec_parser_work_scope")
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO temp_sec_parser_work_scope(
+            ticker, accession_number
+        ) VALUES (?, ?)
+        """,
+        work_scope,
     )
     legacy_rows = conn.execute(
-        f"""
-        SELECT ticker, metric_name, candidate_value, unit,
-               period_start, period_end, accession_number
-        FROM fact_sec_metric_disclosure_candidate
-        WHERE model_family = ? AND ({scope_predicates})
-          AND candidate_status = 'ACCEPTED'
-          AND SUBSTR(COALESCE(NULLIF(accepted_at, ''), filing_date), 1, 10) <= ?
+        """
+        SELECT candidate.ticker, candidate.metric_name,
+               candidate.candidate_value, candidate.unit,
+               candidate.period_start, candidate.period_end,
+               candidate.accession_number
+        FROM fact_sec_metric_disclosure_candidate AS candidate
+        JOIN temp_sec_parser_work_scope AS scope
+          ON scope.ticker = candidate.ticker
+         AND scope.accession_number = candidate.accession_number
+        WHERE candidate.model_family = ?
+          AND candidate.candidate_status = 'ACCEPTED'
+          AND SUBSTR(
+              COALESCE(
+                  NULLIF(candidate.accepted_at, ''),
+                  candidate.filing_date
+              ),
+              1,
+              10
+          ) <= ?
         """,
-        (
-            model_family,
-            *(value for pair in work_scope for value in pair),
-            asof_date,
-        ),
+        (model_family, asof_date),
     ).fetchall()
     legacy_fact_rows = conn.execute(
-        f"""
-        SELECT ticker, canonical_metric AS metric_name,
-               value AS candidate_value, unit, period_start, period_end,
-               accession_number
-        FROM fact_sec_xbrl_fact
-        WHERE ({scope_predicates})
-          AND canonical_metric IN (
+        """
+        SELECT fact.ticker, fact.canonical_metric AS metric_name,
+               fact.value AS candidate_value, fact.unit,
+               fact.period_start, fact.period_end,
+               fact.accession_number
+        FROM fact_sec_xbrl_fact AS fact
+        JOIN temp_sec_parser_work_scope AS scope
+          ON scope.ticker = fact.ticker
+         AND scope.accession_number = fact.accession_number
+        WHERE fact.canonical_metric IN (
               'orders',
               'funded_backlog',
               'reported_backlog',
               'remaining_performance_obligation',
               'rpo_current'
           )
-          AND value IS NOT NULL
-          AND SUBSTR(COALESCE(NULLIF(accepted_at, ''), filing_date), 1, 10) <= ?
+          AND fact.value IS NOT NULL
+          AND SUBSTR(
+              COALESCE(NULLIF(fact.accepted_at, ''), fact.filing_date),
+              1,
+              10
+          ) <= ?
         """,
-        (
-            *(value for pair in work_scope for value in pair),
-            asof_date,
-        ),
+        (asof_date,),
     ).fetchall()
+    conn.execute("DROP TABLE temp_sec_parser_work_scope")
     legacy: dict[tuple[str, str], set[tuple[Any, ...]]] = defaultdict(set)
     legacy_accessions: dict[
         tuple[str, str, tuple[Any, ...]],
@@ -167,28 +194,25 @@ def compare_shadow_run(
         group = (str(row["ticker"]), str(row["metric_name"]))
         candidate_key = _candidate_key(row)
         legacy[group].add(candidate_key)
-        legacy_accessions[(group[0], group[1], candidate_key)].add(
-            str(row["accession_number"])
-        )
+        legacy_accessions[(group[0], group[1], candidate_key)].add(str(row["accession_number"]))
     canonical_facts: dict[tuple[str, str], set[tuple[Any, ...]]] = defaultdict(set)
     for row in legacy_fact_rows:
         group = (str(row["ticker"]), str(row["metric_name"]))
         candidate_key = _candidate_key(row)
         canonical_facts[group].add(candidate_key)
-        legacy_accessions[(group[0], group[1], candidate_key)].add(
-            str(row["accession_number"])
-        )
+        legacy_accessions[(group[0], group[1], candidate_key)].add(str(row["accession_number"]))
     for row in shadow_rows:
-        shadow[(str(row["ticker"]), str(row["metric_name"]))].add(
-            _candidate_key(row)
-        )
+        shadow[(str(row["ticker"]), str(row["metric_name"]))].add(_candidate_key(row))
     rejected_identities = {
         (
             str(row["ticker"]),
+            # Metric is part of the identity: reported_backlog and RPO
+            # routinely disclose the identical dollar amount in one filing,
+            # and a rejected RPO candidate must not absolve a genuine backlog
+            # regression.
+            str(row["metric_name"]),
             str(row["accession_number"]),
-            round(float(row["candidate_value"]), 6)
-            if row["candidate_value"] is not None
-            else None,
+            round(float(row["candidate_value"]), 6) if row["candidate_value"] is not None else None,
             str(row["unit"] or "").upper(),
         )
         for row in rejected_shadow_rows
@@ -237,32 +261,23 @@ def compare_shadow_run(
             if any(
                 (
                     ticker,
+                    metric_name,
                     accession,
                     key[1],
                     key[2],
                 )
                 in rejected_identities
-                for accession in legacy_accessions[
-                    (ticker, metric_name, key)
-                ]
+                for accession in legacy_accessions[(ticker, metric_name, key)]
             )
         }
         legacy_only -= policy_corrections
-        if (
-            not legacy_only
-            and not shadow_only
-            and policy_corrections
-        ):
+        if not legacy_only and not shadow_only and policy_corrections:
             status = "POLICY_CORRECTION"
         elif (
             not legacy_only
             and not shadow_only
             and period_corrections
-            or (
-                not legacy_only
-                and not shadow_only
-                and duplicate_period_corrections
-            )
+            or (not legacy_only and not shadow_only and duplicate_period_corrections)
         ):
             status = "PERIOD_CORRECTION"
         elif not legacy_only and not shadow_only:
@@ -277,9 +292,7 @@ def compare_shadow_run(
             "legacy_only": sorted(legacy_only),
             "shadow_only": sorted(shadow_only),
             "period_corrections": sorted(period_corrections),
-            "duplicate_period_corrections": sorted(
-                duplicate_period_corrections
-            ),
+            "duplicate_period_corrections": sorted(duplicate_period_corrections),
             "policy_corrections": sorted(policy_corrections),
         }
         row = {
@@ -289,11 +302,7 @@ def compare_shadow_run(
             "metric_name": metric_name,
             "legacy_accepted_count": len(legacy_keys),
             "shadow_accepted_count": len(shadow_keys),
-            "matched_count": (
-                len(matched)
-                + len(period_corrections)
-                + len(duplicate_period_corrections)
-            ),
+            "matched_count": (len(matched) + len(period_corrections) + len(duplicate_period_corrections)),
             "legacy_only_count": len(legacy_only),
             "shadow_only_count": len(shadow_only),
             "comparison_status": status,

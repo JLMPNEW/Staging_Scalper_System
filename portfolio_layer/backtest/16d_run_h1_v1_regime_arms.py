@@ -61,6 +61,7 @@ from portfolio_layer.backtest.walkforward_common import (  # noqa: E402
     finite_or_default,
     pairwise_shrunk_cov,
     perf_stats,
+    pit_boundary_errors,
     turnover_between,
 )
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
@@ -196,25 +197,37 @@ def run_regime_scalar_arms(
     attribution: dict[str, dict[str, list[float]]] = {a: {} for a in arms}
     rebalance_rows: list[dict[str, Any]] = []
     pit_violations: list[str] = []
+    pit_boundaries_checked = 0
     skipped = {"no_calendar": 0, "thin_universe": 0, "solver": 0}
     h1_fallback_rebalances = 0
     n_rebalances = 0
 
     for i, rb_date in enumerate(rebalance_dates):
         pos = int(np.searchsorted(cal_arr, rb_date, side="right"))
-        if pos == 0:
+        end_pos = len(calendar)
+        if i + 1 < len(rebalance_dates):
+            end_pos = int(np.searchsorted(cal_arr, rebalance_dates[i + 1], side="right"))
+        if pos == 0 or pos >= len(calendar) or end_pos <= pos:
             skipped["no_calendar"] += 1
             continue
         window = returns.iloc[max(0, pos - lookback):pos]
-        if len(window) and str(prices.index[pos - 1]) > rb_date:
-            pit_violations.append(f"{rb_date}:cov_edge={prices.index[pos - 1]}")
+        pit_violations.extend(
+            pit_boundary_errors(
+                signal_date=rb_date,
+                covariance_end_date=str(window.index[-1]) if len(window) else None,
+                execution_start_date=calendar[pos],
+            )
+        )
+        pit_boundaries_checked += 1
         scored = []
         for r in snapshots[rb_date]:
             ticker = str(r.get("ticker", "")).strip().upper()
             raw_mu = r.get("final_score")
             if raw_mu is None:
                 continue
-            raw_conf = r.get("score_confidence") or "0.5"
+            raw_conf = r.get("score_confidence")
+            if raw_conf is None or str(raw_conf).strip() == "":
+                raw_conf = "0.5"
             try:
                 mu = float(raw_mu)
                 conf = float(raw_conf)
@@ -304,9 +317,6 @@ def run_regime_scalar_arms(
             current_label[arm] = arm_label[arm]
         n_rebalances += 1
 
-        end_pos = len(calendar)
-        if i + 1 < len(rebalance_dates):
-            end_pos = int(np.searchsorted(cal_arr, rebalance_dates[i + 1], side="right"))
         for day_pos in range(pos, end_pos):
             for arm in arms:
                 holdings[arm], port_ret = drift_weights(holdings[arm], returns.iloc[day_pos])
@@ -336,6 +346,7 @@ def run_regime_scalar_arms(
         "n_rebalances": n_rebalances,
         "h1_fallback_rebalances": h1_fallback_rebalances,
         "pit_violations": pit_violations,
+        "pit_boundaries_checked": pit_boundaries_checked,
         "skipped": skipped,
     }
 
@@ -598,7 +609,7 @@ def main() -> int:  # noqa: C901
         shrinkage_intensity=float(cfg_get(config, "risk_panel.shrinkage_intensity", 0.2)),
         max_universe=int(wf.get("max_universe", 150)),
         min_universe=int(wf.get("min_universe", 20)),
-        use_confidence=bool(cfg_get(config, "optimizer.use_score_confidence", True)),
+        use_confidence=bool(cfg_get(config, "optimizer.use_confidence_adjusted_mu", True)),
         risk_aversion=float(cfg_get(config, "optimizer.risk_aversion", 5.0)),
         max_weight=float(cfg_get(config, "optimizer.max_weight_per_name", 0.05)),
         min_weight=float(cfg_get(config, "optimizer.min_weight_to_hold", 0.002)),
@@ -695,9 +706,22 @@ def main() -> int:  # noqa: C901
     def rec(name: str, status: str, detail: str) -> None:
         checks.append({"check": name, "status": status, "detail": detail})
 
-    rec("pit_no_lookahead", "PASS" if not result["pit_violations"] else "FAIL",
-        "covariance/state windows end at/before every rebalance date"
-        if not result["pit_violations"] else f"{result['pit_violations'][:8]}")
+    pit_checked = int(result.get("pit_boundaries_checked", 0))
+    executed = int(result["n_rebalances"])
+    pit_ok = not result["pit_violations"] and pit_checked >= executed > 0
+    rec(
+        "pit_no_lookahead",
+        "PASS" if pit_ok else "FAIL",
+        (
+            f"independently checked covariance<=signal<execution for "
+            f"{pit_checked} attempted boundaries for {executed} executed rebalances"
+        )
+        if pit_ok
+        else (
+            f"checked={pit_checked}; executed={executed}; "
+            f"violations={result['pit_violations'][:8]}"
+        ),
+    )
     total_solver = int(result["skipped"].get("solver", 0))
     rec("solver_reliability", "PASS" if total_solver == 0 else "WARN",
         f"solver_skips={total_solver}; thin_universe={result['skipped'].get('thin_universe', 0)}")
@@ -771,6 +795,16 @@ def main() -> int:  # noqa: C901
         "a17_gate": gate,
         "checks": checks,
         "inputs_sha256": {
+            "backtest/16d_run_h1_v1_regime_arms.py": sha256_file(Path(__file__).resolve()),
+            "backtest/walkforward_common.py": sha256_file(
+                Path(__file__).with_name("walkforward_common.py")
+            ),
+            "research/stage11_common.py": sha256_file(
+                PACKAGE_ROOT / "research" / "stage11_common.py"
+            ),
+            "optimizer/optimizer_core.py": sha256_file(
+                PACKAGE_ROOT / "optimizer" / "optimizer_core.py"
+            ),
             "survivorship_manifest.json": sha256_file(panel_manifest_path),
             "prices_adjclose.csv": sha256_file(prices_path),
             "config.yaml": sha256_file(config_path),

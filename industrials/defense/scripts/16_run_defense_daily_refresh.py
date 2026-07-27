@@ -71,6 +71,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--include-dedicated-parser-shadow",
+        action="store_true",
+        help=(
+            "Run the full current+historical defense specialized-metric parser "
+            "and before/after audit. The live score remains unchanged."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the planned step matrix and write a DRY_RUN manifest without executing steps or taking the lock.",
@@ -92,7 +100,13 @@ def parse_asof(raw: str) -> str:
     return datetime.strptime(raw.strip(), "%Y-%m-%d").date().isoformat()
 
 
-def build_steps(asof: str, history_start: str, *, positioning_through_publish_only: bool) -> list[Step]:
+def build_steps(
+    asof: str,
+    history_start: str,
+    *,
+    positioning_through_publish_only: bool,
+    include_dedicated_parser_shadow: bool = False,
+) -> list[Step]:
     steps: list[Step] = []
     if not positioning_through_publish_only:
         steps.extend(
@@ -156,6 +170,37 @@ def build_steps(asof: str, history_start: str, *, positioning_through_publish_on
                 ),
             ]
         )
+        if include_dedicated_parser_shadow:
+            insert_at = next(
+                index
+                for index, step in enumerate(steps)
+                if step.step_id == "09_profile_graduation"
+            )
+            steps[insert_at:insert_at] = [
+                Step(
+                    "08d_dedicated_parser_shadow",
+                    "stage_4",
+                    "run defense dedicated parser shadow",
+                    [
+                        "industrials/defense/scripts/08d_run_defense_dedicated_parser_shadow.py",
+                        "--asof",
+                        asof,
+                        "--all-metrics",
+                    ],
+                    accepts_config=True,
+                ),
+                Step(
+                    "08f_compare_specialized_metrics",
+                    "stage_4",
+                    "compare defense specialized metrics",
+                    [
+                        "industrials/defense/scripts/08f_compare_defense_specialized_metrics.py",
+                        "--asof",
+                        asof,
+                    ],
+                    accepts_config=True,
+                ),
+            ]
     steps.extend(
         [
             Step(
@@ -392,8 +437,25 @@ def run_selftest() -> int:
     history_start = "2018-01-01"
     full = build_steps(asof, history_start, positioning_through_publish_only=False)
     fast = build_steps(asof, history_start, positioning_through_publish_only=True)
+    shadow = build_steps(
+        asof,
+        history_start,
+        positioning_through_publish_only=False,
+        include_dedicated_parser_shadow=True,
+    )
     assert len(full) == 14, f"expected 14 full steps, got {len(full)}"
     assert len(fast) == 6, f"expected 6 publish-only steps, got {len(fast)}"
+    assert len(shadow) == 16, f"expected 16 parser-shadow steps, got {len(shadow)}"
+    shadow_ids = [step.step_id for step in shadow]
+    assert shadow_ids.index("08_validate_financial") < shadow_ids.index(
+        "08d_dedicated_parser_shadow"
+    )
+    assert shadow_ids.index(
+        "08d_dedicated_parser_shadow"
+    ) < shadow_ids.index("08f_compare_specialized_metrics")
+    assert shadow_ids.index(
+        "08f_compare_specialized_metrics"
+    ) < shadow_ids.index("09_profile_graduation")
     full_ids = [step.step_id for step in full]
     assert full_ids[0] == "03_sync_prices", full_ids
     assert full_ids[-3:] == ["17_publish", "18_validate_publish", "20_validate_portfolio"], full_ids
@@ -511,7 +573,12 @@ def main() -> int:
     orchestration_root = (PROJECT_ROOT / "output" / "industrials" / "defense" / "orchestration").resolve()
     lock_path = shared_industrials_lock_path()
 
-    steps = build_steps(asof, history_start, positioning_through_publish_only=args.positioning_through_publish_only)
+    steps = build_steps(
+        asof,
+        history_start,
+        positioning_through_publish_only=args.positioning_through_publish_only,
+        include_dedicated_parser_shadow=args.include_dedicated_parser_shadow,
+    )
     if args.list_steps:
         for step in steps:
             print(f"{step.step_id}\t{step.stage}\t{'network' if step.network else 'local'}\t{step.args[0]}")

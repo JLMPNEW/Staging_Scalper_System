@@ -1,7 +1,7 @@
 model_family: machinery
 source_of_truth: true
-expected_ticker_count: 114
-expected_delisted_count: 50
+expected_ticker_count: 113
+expected_delisted_count: 51
 history_start_date: "2019-01-02"
 default_sector: Industrials
 default_industry: Machinery

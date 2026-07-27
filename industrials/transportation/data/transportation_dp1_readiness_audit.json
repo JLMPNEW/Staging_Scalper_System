@@ -1,0 +1,52 @@
+{
+  "acceptance": "NO_GO",
+  "audit_date": "2026-07-26",
+  "dp1_implementation_status": "PASS",
+  "exhaustive_transportation_parse_authorized": false,
+  "findings": {
+    "base_adapter_evidence_is_required_to_be_pre_policy": true,
+    "base_hash_rechecked_on_idempotent_reuse": true,
+    "explicit_policy_replay_cli_mode_present": true,
+    "immutable_review_evaluation_overlay_present": true,
+    "materialization_is_limited_to_requested_metrics_and_sealed_documents": true,
+    "reassess_mode_remains_assessment_only": true,
+    "review_policy_still_applies_during_normal_parse_work": true,
+    "zero_provider_counters_persisted": true
+  },
+  "implementation": {
+    "cli_module": "dedicated_parser.policy_replay_cli",
+    "contract_version": "review_evaluation_v1",
+    "new_shared_files": [
+      "dedicated_parser/review_replay.py",
+      "dedicated_parser/policy_replay_cli.py",
+      "tests/dedicated_parser/test_policy_replay.py"
+    ],
+    "preexisting_shared_parser_files_modified": false,
+    "transportation_imports_in_shared_replay_files": 0
+  },
+  "known_external_regression": {
+    "cause": "",
+    "dp1_related": false,
+    "failing_test": "",
+    "status": "RESOLVED_AT_CONFIRMED_WEIGHT_0_05"
+  },
+  "model_family": "transportation",
+  "observed_parser_contract": {
+    "parser_release": "0.4.6",
+    "schema_version": 7
+  },
+  "remaining_before_exhaustive_parse_go": [
+    "Hydrate or explicitly disposition the 152 exact DP3 source-document cache gaps and reseal the census.",
+    "Pass the DP4 offline full-universe plan-only gate."
+  ],
+  "verification": {
+    "dedicated_parser_tests": "86 passed",
+    "defense_tests": "32 passed",
+    "machinery_activation_gate": "PASS at strategic_weight=0.05",
+    "policy_replay_focused_tests": "9 passed",
+    "transportation_tests": "225 passed",
+    "transportation_dp3_full_byte_hash_validation": "PASS for 3,177 cached documents",
+    "defense_and_machinery_selected_tests": "133 passed",
+    "ruff": "PASS"
+  }
+}

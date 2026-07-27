@@ -284,6 +284,19 @@ def build_combined_historical_coverage(
             missing = sorted(expected[asof]["combined"] - published)
             extra = sorted(published - expected[asof]["combined"])
             errors.append(f"{asof}: membership mismatch missing={missing} extra={extra}")
+        for universe_class in ("active", "delisted"):
+            published_class = {
+                str(row["ticker"])
+                for row in rows
+                if row_universe_class(row) == universe_class
+            }
+            if published_class != expected[asof][universe_class]:
+                missing = sorted(expected[asof][universe_class] - published_class)
+                extra = sorted(published_class - expected[asof][universe_class])
+                errors.append(
+                    f"{asof}: {universe_class} membership-class mismatch "
+                    f"missing={missing} extra={extra}"
+                )
         total_published_rows += len(rows)
 
         for universe_class in UNIVERSE_CLASSES:

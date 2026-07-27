@@ -128,13 +128,9 @@ def merge_run_metadata(
     try:
         metadata = json.loads(str(run.get("metadata_json") or "{}"))
     except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Dedicated-parser run_id={run_id} has invalid metadata_json"
-        ) from exc
+        raise ValueError(f"Dedicated-parser run_id={run_id} has invalid metadata_json") from exc
     if not isinstance(metadata, dict):
-        raise ValueError(
-            f"Dedicated-parser run_id={run_id} metadata_json is not an object"
-        )
+        raise ValueError(f"Dedicated-parser run_id={run_id} metadata_json is not an object")
     metadata.update(updates)
     conn.execute(
         "UPDATE sec_parser_run SET metadata_json = ? WHERE run_id = ?",
@@ -259,10 +255,7 @@ def register_work(
                 separators=(",", ":"),
             ),
             json.dumps(
-                {
-                    document.name: document.content_sha256
-                    for document in item.documents
-                },
+                {document.name: document.content_sha256 for document in item.documents},
                 sort_keys=True,
                 separators=(",", ":"),
             ),
@@ -286,8 +279,12 @@ def register_work(
 def mark_work_started(
     conn: sqlite3.Connection,
     *,
-    item: WorkItem,
+    work_key: str = "",
+    item: WorkItem | None = None,
 ) -> None:
+    key = work_key or (item.work_key if item is not None else "")
+    if not key:
+        raise ValueError("mark_work_started requires a work_key or item")
     conn.execute(
         """
         UPDATE sec_parser_work_ledger
@@ -295,8 +292,65 @@ def mark_work_started(
             started_at = ?, completed_at = NULL, error = NULL
         WHERE work_key = ?
         """,
-        (utc_now(), item.work_key),
+        (utc_now(), key),
     )
+
+
+def link_completed_work(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    entries: Iterable[dict[str, str]],
+) -> int:
+    """Link resume-skipped completed work (and its evidence) into a new run.
+
+    Without this, the run's recovery assessment sees zero evidence for pairs
+    whose parse was skipped as already complete and regresses them to
+    UNCONFIRMED/MISSING.
+    """
+
+    linked = 0
+    for entry in entries:
+        work_key = str(entry.get("work_key") or "")
+        if not work_key:
+            continue
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO sec_parser_run_work(
+                run_id, work_key, ticker, accession_number
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                work_key,
+                str(entry.get("ticker") or ""),
+                str(entry.get("accession_number") or ""),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO sec_parser_run_metric_evidence(
+                run_id, evidence_key
+            )
+            SELECT ?, evidence_key
+            FROM sec_parser_metric_evidence_shadow
+            WHERE work_key = ?
+            """,
+            (run_id, work_key),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO sec_parser_run_normalized_fact(
+                run_id, fact_fingerprint
+            )
+            SELECT ?, fact_fingerprint
+            FROM sec_parser_normalized_fact_shadow
+            WHERE work_key = ?
+            """,
+            (run_id, work_key),
+        )
+        linked += 1
+    return linked
 
 
 def persist_result(
@@ -371,6 +425,7 @@ def persist_result(
             evidence.evidence_key(
                 model_family=result.model_family,
                 filing=filing,
+                work_key=result.work_key,
             ),
             run_id,
             result.work_key,
@@ -442,13 +497,19 @@ def persist_result(
         """
         UPDATE sec_parser_work_ledger
         SET status = ?, normalized_fact_count = ?, evidence_count = ?,
-            elapsed_seconds = ?, error = ?, completed_at = ?
+            provider_metadata_json = ?, elapsed_seconds = ?, error = ?,
+            completed_at = ?
         WHERE work_key = ?
         """,
         (
             result.status,
             len(result.normalized_facts),
             len(result.metric_evidence),
+            json.dumps(
+                result.provider_metadata,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
             result.elapsed_seconds,
             result.error or None,
             now,

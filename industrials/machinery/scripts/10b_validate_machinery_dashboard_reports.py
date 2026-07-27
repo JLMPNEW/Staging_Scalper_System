@@ -23,6 +23,12 @@ from industrials.machinery.scoring import (  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+PRODUCTION_SELECTION_FIELDS = {
+    "portfolio_universe_eligible_flag",
+    "portfolio_selection_policy",
+    "portfolio_sleeve_selected_flag",
+    "portfolio_sleeve_target_weight",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,11 +45,27 @@ def validate_dashboard_artifacts(input_dir: Path, *, asof: str) -> tuple[list[st
     manifest_path = input_dir / "machinery_final_rank_table_manifest.json"
     errors: list[str] = []
     try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        errors.append(f"invalid manifest: {exc}")
+        manifest = {}
+    production_flag = manifest.get("production_policy_active", False)
+    production_active = production_flag is True
+    try:
         rank_rows = read_rows(rank_path)
     except (OSError, ValueError) as exc:
         return [f"invalid rank table: {exc}"], 0
-    errors.extend(validate_rank_rows(rank_rows, asof=asof))
-    if rank_rows and set(rank_rows[0]) != set(FINAL_RANK_FIELDS):
+    errors.extend(
+        validate_rank_rows(
+            rank_rows,
+            asof=asof,
+            allow_production=production_active,
+        )
+    )
+    rank_fields = set(rank_rows[0]) if rank_rows else set()
+    full_fields = set(FINAL_RANK_FIELDS)
+    legacy_shadow_fields = full_fields - PRODUCTION_SELECTION_FIELDS
+    if rank_rows and rank_fields != full_fields and (production_active or rank_fields != legacy_shadow_fields):
         errors.append("final rank table schema differs from final rank contract")
     try:
         sidecar = read_rows(sidecar_path)
@@ -53,23 +75,34 @@ def validate_dashboard_artifacts(input_dir: Path, *, asof: str) -> tuple[list[st
     if not sidecar:
         errors.append("calibration sidecar is empty")
     else:
-        errors.extend(validate_rank_rows(sidecar, asof=asof))
-        if set(sidecar[0]) != set(FINAL_RANK_FIELDS):
+        errors.extend(
+            validate_rank_rows(
+                sidecar,
+                asof=asof,
+                allow_production=False,
+            )
+        )
+        sidecar_fields = set(sidecar[0])
+        if sidecar_fields not in (full_fields, legacy_shadow_fields):
             errors.append("calibration sidecar schema differs from final rank contract")
-        rank_identity = [(row.get("ticker"), row.get("final_rank")) for row in rank_rows]
-        sidecar_identity = [(row.get("ticker"), row.get("final_rank")) for row in sidecar]
-        if sidecar_identity != rank_identity:
-            errors.append("calibration sidecar ticker/rank identity differs from final rank table")
+        if production_active:
+            rank_tickers = sorted(row.get("ticker", "") for row in rank_rows)
+            sidecar_tickers = sorted(row.get("ticker", "") for row in sidecar)
+            if sidecar_tickers != rank_tickers:
+                errors.append("calibration sidecar ticker universe differs from final rank table")
+        else:
+            rank_identity = [(row.get("ticker"), row.get("final_rank")) for row in rank_rows]
+            sidecar_identity = [(row.get("ticker"), row.get("final_rank")) for row in sidecar]
+            if sidecar_identity != rank_identity:
+                errors.append("calibration sidecar ticker/rank identity differs from final rank table")
     for row in sidecar:
         if row.get("survivorship_corrected_panel_flag") != "1":
             errors.append(f"{row.get('ticker')}: sidecar survivorship_corrected_panel_flag must be 1")
-        if row.get("stage11_calibration_input_eligible_flag") == "1" and row.get("calibration_sample_role") != "pre_lock_research":
+        if (
+            row.get("stage11_calibration_input_eligible_flag") == "1"
+            and row.get("calibration_sample_role") != "pre_lock_research"
+        ):
             errors.append(f"{row.get('ticker')}: eligible sidecar row must be pre_lock_research")
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        errors.append(f"invalid manifest: {exc}")
-        manifest = {}
     if manifest.get("acceptance") != "PASS":
         errors.append("manifest acceptance must be PASS")
     if manifest.get("model_family") != "machinery":
@@ -79,15 +112,34 @@ def validate_dashboard_artifacts(input_dir: Path, *, asof: str) -> tuple[list[st
     expected_manifest_values = {
         "row_count": len(rank_rows),
         "rank_ready_count": sum(row.get("rank_ready_flag") == "1" for row in rank_rows),
-        "portfolio_candidate_count": 0,
+        "portfolio_candidate_count": sum(row.get("portfolio_candidate_gate") == "1" for row in rank_rows),
         "sidecar_calibration_eligible_count": sum(
             row.get("stage11_calibration_input_eligible_flag") == "1" for row in sidecar
         ),
     }
+    if production_active:
+        expected_manifest_values["selected_sleeve_count"] = sum(
+            row.get("portfolio_sleeve_selected_flag") == "1" for row in rank_rows
+        )
     for field, expected in expected_manifest_values.items():
         if manifest.get(field) != expected:
             errors.append(f"manifest {field}={manifest.get(field)!r} expected={expected}")
-    if manifest.get("contract_fields") != FINAL_RANK_FIELDS:
+    if not isinstance(production_flag, bool):
+        errors.append("manifest production_policy_active is not boolean")
+    activation_metadata = manifest.get("activation_metadata")
+    if activation_metadata is not None and not isinstance(
+        activation_metadata,
+        dict,
+    ):
+        errors.append("manifest activation_metadata must be an object")
+    if production_active and not activation_metadata:
+        errors.append("active production dashboard lacks activation metadata")
+    if production_active and manifest.get("sidecar_retained_shadow") is not True:
+        errors.append("active production dashboard must identify the retained shadow calibration sidecar")
+    manifest_fields = manifest.get("contract_fields")
+    if manifest_fields != FINAL_RANK_FIELDS and (
+        production_active or set(manifest_fields or []) != legacy_shadow_fields
+    ):
         errors.append("manifest contract_fields differ from final rank contract")
     expected_versions = sorted({row.get("scoring_contract_version", "") for row in rank_rows})
     if manifest.get("scoring_contract_versions") != expected_versions:

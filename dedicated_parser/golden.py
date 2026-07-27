@@ -27,11 +27,19 @@ def validate_corpus(
         "sec_parser_metric_evidence_shadow",
     }:
         raise ValueError(f"Unsupported golden corpus table: {table}")
+    if run_id is not None and table != "sec_parser_metric_evidence_shadow":
+        # The fact_ table has no run mapping; silently ignoring run_id would
+        # validate a different population than the caller asked for.
+        raise ValueError(
+            f"run_id filtering is not supported for table {table}"
+        )
     corpus = load_corpus(corpus_path)
     errors: list[str] = []
+    evaluated = 0
     for expectation in corpus["expectations"]:
         if tickers is not None and str(expectation["ticker"]) not in tickers:
             continue
+        evaluated += 1
         alias = "c"
         clauses = [
             f"{alias}.ticker = ?",
@@ -72,6 +80,14 @@ def validate_corpus(
             params,
         ).fetchall()
         expected_value = expectation.get("candidate_value")
+        # Honor a per-expectation tolerance (policy-generated expectations
+        # carry the tolerance the policy itself matched with); otherwise the
+        # tight default can fail a legitimately matched value and let a
+        # prohibited acceptance slip past the absence check.
+        expectation_tolerance = max(
+            value_tolerance,
+            float(expectation.get("value_tolerance") or 0.0),
+        )
         matched = False
         for row in rows:
             actual_value = row["candidate_value"]
@@ -80,7 +96,10 @@ def validate_corpus(
                 if expected_value is None
                 else actual_value is not None
                 and abs(float(actual_value) - float(expected_value))
-                <= max(value_tolerance, abs(float(expected_value)) * 1e-9)
+                <= max(
+                    expectation_tolerance,
+                    abs(float(expected_value)) * 1e-9,
+                )
             )
             if not value_matches:
                 continue
@@ -110,4 +129,11 @@ def validate_corpus(
             errors.append(
                 f"{expectation['id']}: expected row not found in {table}"
             )
+    if evaluated == 0:
+        # An empty or fully-filtered corpus checked nothing; a PASS here
+        # would be vacuous.
+        errors.append(
+            f"{corpus_path}: zero expectations evaluated "
+            "(empty corpus or ticker filter excluded every expectation)"
+        )
     return errors

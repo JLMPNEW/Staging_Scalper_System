@@ -13,6 +13,7 @@ import math
 import os
 import sqlite3
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
@@ -117,6 +118,19 @@ class AdapterResult:
 # ---------------------------------------------------------------------------
 # IO helpers (atomic writes so consumers never read a half-written file)
 # ---------------------------------------------------------------------------
+def _replace_atomic(source: str | Path, target: str | Path) -> None:
+    """Publish a sibling temp file despite brief Windows/OneDrive sharing locks."""
+    attempts = 8
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(min(0.05 * (2**attempt), 1.0))
+
+
 def write_csv(path: Path, fieldnames: Sequence[str], rows: Iterable[dict[str, Any]]) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
@@ -128,7 +142,7 @@ def write_csv(path: Path, fieldnames: Sequence[str], rows: Iterable[dict[str, An
             for row in rows:
                 writer.writerow(row)
                 count += 1
-        os.replace(tmp_name, path)
+        _replace_atomic(tmp_name, path)
     finally:
         if os.path.exists(tmp_name):
             os.remove(tmp_name)
@@ -154,7 +168,7 @@ def write_manifest(path: Path, payload: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
-        os.replace(tmp_name, path)
+        _replace_atomic(tmp_name, path)
     finally:
         if os.path.exists(tmp_name):
             os.remove(tmp_name)
@@ -166,7 +180,7 @@ def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None
     try:
         with os.fdopen(fd, "w", encoding=encoding, newline="") as handle:
             handle.write(text)
-        os.replace(tmp_name, path)
+        _replace_atomic(tmp_name, path)
     finally:
         if os.path.exists(tmp_name):
             os.remove(tmp_name)
@@ -180,7 +194,7 @@ def write_via_temp(path: Path, writer: Callable[[Path], None]) -> None:
     tmp_path = Path(tmp_name)
     try:
         writer(tmp_path)
-        os.replace(tmp_path, path)
+        _replace_atomic(tmp_path, path)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()

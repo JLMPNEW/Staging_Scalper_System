@@ -444,11 +444,13 @@ def _build_option_lots(
 
     lots: list[dict[str, str]] = []
     mismatches: list[str] = []
+    pre_report: list[str] = []
     for symbol, pos in sorted(open_options.items()):
         qty = _f(pos.get("quantity"))
         prior_rows = prior_options.get(symbol, [])
         prior_qty = sum(float(row["quantity"]) for row in prior_rows)
-        expected_qty = prior_qty + qty_by_symbol.get(symbol, 0.0)
+        period_trade_qty = qty_by_symbol.get(symbol, 0.0)
+        expected_qty = prior_qty + period_trade_qty
         if prior_rows:
             entry_date = str(prior_rows[0].get("entry_date", ""))
             entry_unknown = int(prior_rows[0].get("entry_date_unknown", 0))
@@ -456,11 +458,25 @@ def _build_option_lots(
             if abs(expected_qty - qty) > 1e-6:
                 mismatches.append(f"{symbol}:prior_plus_trades={expected_qty:.6g},open={qty:.6g}")
         else:
-            entry_date = first_date.get(symbol, "")
-            entry_unknown = 0 if entry_date else 1
-            provenance = "option aggregate lot from IB open position; trade history used for quantity check"
-        if not prior_rows and abs(qty_by_symbol.get(symbol, 0.0) - qty) > 1e-6:
-            mismatches.append(f"{symbol}:trades={qty_by_symbol.get(symbol, 0.0):.6g},open={qty:.6g}")
+            inferred_pre_report_qty = qty - period_trade_qty
+            if abs(inferred_pre_report_qty) <= 1e-6:
+                entry_date = first_date.get(symbol, "")
+                entry_unknown = 0 if entry_date else 1
+                provenance = (
+                    "option aggregate lot from IB open position; "
+                    "current-period trades reconcile quantity"
+                )
+            else:
+                entry_date = ""
+                entry_unknown = 1
+                pre_report.append(
+                    f"{symbol}:inferred_pre_report_qty="
+                    f"{inferred_pre_report_qty:.6g}"
+                )
+                provenance = (
+                    "option aggregate lot from IB open position; "
+                    "entry predates available sealed ledger/trade history"
+                )
         basis = _f(pos.get("cost_basis"))
         cost_price = basis / qty if abs(qty) > 1e-12 else 0.0
         lots.append({
@@ -483,7 +499,17 @@ def _build_option_lots(
         "status": "PASS" if not mismatches else "FAIL",
         "detail": "open options match prior ledger plus period option trades" if not mismatches else "; ".join(mismatches[:8]),
     }
-    return lots, [rec]
+    history_rec = {
+        "run_as_of": run_as_of,
+        "check": "option_pre_report_lots",
+        "status": "WARN" if pre_report else "PASS",
+        "detail": (
+            "; ".join(pre_report[:8])
+            if pre_report
+            else "no option lots predate available sealed history"
+        ),
+    }
+    return lots, [rec, history_rec]
 
 
 def _holding_state(run_as_of: str, source_sha: str, open_positions: list[dict[str, str]]) -> list[dict[str, str]]:

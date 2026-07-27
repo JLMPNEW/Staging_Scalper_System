@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -60,6 +60,34 @@ def manifest_file_errors(
     return errors
 
 
+def manifest_input_errors(
+    manifest: dict[str, Any],
+    files: Mapping[str, Path],
+) -> list[str]:
+    """Verify source/config/input hashes recorded under ``inputs_sha256``.
+
+    Evidence artifacts must seal both their data and the code that produced them. A missing
+    source entry is an error, not permission to trust an artifact produced by unknown code.
+    """
+    errors: list[str] = []
+    sealed = manifest.get("inputs_sha256") or {}
+    if not isinstance(sealed, dict):
+        return ["inputs_sha256:missing"]
+    for name, path in files.items():
+        expected = str(sealed.get(name, "")).strip()
+        if not expected:
+            errors.append(f"{name}:input_hash_missing")
+        elif not path.exists():
+            errors.append(f"{name}:input_file_missing")
+        else:
+            actual = sha256_file(path)
+            if actual != expected:
+                errors.append(
+                    f"{name}:input_hash_mismatch expected={expected[:12]} actual={actual[:12]}"
+                )
+    return errors
+
+
 def load_lockbox(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     """Verify the config lockbox mirror against the canonical protocol document, or refuse to run.
 
@@ -106,8 +134,11 @@ def load_lockbox(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # calibration-row admission (shared by 68 fit and 69 validate — identical semantics)
 # ---------------------------------------------------------------------------
+TRUTHY_FLAGS = frozenset({"1", "1.0", "true", "yes"})
+
+
 def _truthy_flag(value: Any) -> bool:
-    return str(value).strip().lower() in {"1", "1.0", "true", "yes"}
+    return str(value).strip().lower() in TRUTHY_FLAGS
 
 
 VALID_FORWARD_STATUSES = frozenset({"ok", "ok_delisted_terminal"})
@@ -118,6 +149,59 @@ def forward_status_is_valid(value: Any) -> bool:
     return str(value).strip() in VALID_FORWARD_STATUSES
 
 
+def calibration_admission_reason(row: Mapping[str, Any]) -> str:
+    """Return the canonical Stage-11 row-exclusion reason, or ``""`` when admitted."""
+    if _truthy_flag(row.get("in_lockbox", "")):
+        return "in_lockbox"
+    eligible = _truthy_flag(row.get("calibration_research_eligible", "")) or _truthy_flag(
+        row.get("sidecar_stage11_eligible", "")
+    )
+    if not eligible:
+        return "not_research_eligible"
+    if not _truthy_flag(row.get("usable_for_promoted_training", "")):
+        return "not_usable_for_promoted_training"
+    if not _truthy_flag(row.get("survivorship_complete", "")):
+        return "survivorship_incomplete"
+    if parse_finite(row.get("score_z_pipeline_date")) is None:
+        return "missing_score_z"
+    return ""
+
+
+def calibration_admission_mask(frame: Any) -> Any:
+    """Vectorized canonical admission mask for pandas consumers.
+
+    Keeping this in shared code prevents research/72 and backtest/16c from silently drifting from
+    the exact 68/69 row contract while retaining vectorized performance on million-row panels.
+    """
+    required = {
+        "calibration_research_eligible",
+        "usable_for_promoted_training",
+        "survivorship_complete",
+        "score_z_pipeline_date",
+    }
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f"calibration panel missing admission columns: {missing}")
+
+    def truthy_series(column: str) -> Any:
+        if column not in frame.columns:
+            return frame.index.to_series().map(lambda _value: False)
+        return frame[column].astype(str).str.strip().str.lower().isin(TRUTHY_FLAGS)
+
+    eligible = truthy_series("calibration_research_eligible") | truthy_series(
+        "sidecar_stage11_eligible"
+    )
+    not_lockbox = ~truthy_series("in_lockbox")
+    score = frame["score_z_pipeline_date"].map(parse_finite).notna()
+    return (
+        not_lockbox
+        & eligible
+        & truthy_series("usable_for_promoted_training")
+        & truthy_series("survivorship_complete")
+        & score
+    )
+
+
 def admit_calibration_rows(rows: list[dict[str, str]]) -> tuple[list[dict[str, str]], dict[str, int]]:
     """Admit panel rows usable for promoted training, with full exclusion accounting.
 
@@ -125,25 +209,15 @@ def admit_calibration_rows(rows: list[dict[str, str]]) -> tuple[list[dict[str, s
     flag, survivorship completeness, and a standardized score. Nothing drops silently.
     """
     exclusions = {
+        "in_lockbox": 0,
         "not_research_eligible": 0, "not_usable_for_promoted_training": 0,
         "survivorship_incomplete": 0, "missing_score_z": 0,
     }
     admitted: list[dict[str, str]] = []
     for r in rows:
-        eligible = str(r.get("calibration_research_eligible", "")).strip() == "1" or _truthy_flag(
-            r.get("sidecar_stage11_eligible", "")
-        )
-        if not eligible:
-            exclusions["not_research_eligible"] += 1
-            continue
-        if str(r.get("usable_for_promoted_training", "")).strip() != "1":
-            exclusions["not_usable_for_promoted_training"] += 1
-            continue
-        if str(r.get("survivorship_complete", "")).strip() != "1":
-            exclusions["survivorship_incomplete"] += 1
-            continue
-        if parse_finite(r.get("score_z_pipeline_date")) is None:
-            exclusions["missing_score_z"] += 1
+        reason = calibration_admission_reason(r)
+        if reason:
+            exclusions[reason] += 1
             continue
         admitted.append(r)
     return admitted, exclusions
@@ -243,11 +317,49 @@ def mean_t_hac(values: list[float], *, max_lag: int) -> tuple[float | None, floa
     return mean, se, mean / se if se > 0.0 else None
 
 
-def independent_windows(dates: list[str], horizon_days: int) -> int:
-    """Non-overlapping forward-label windows the snapshot span supports (trading-day horizon,
-    converted to calendar days at 7/5). Overlapping windows share outcomes and must not be
-    counted as independent evidence."""
+CALENDAR_DAYS_PER_TRADING_DAY = 365.25 / 252.0
+
+
+def trading_days_to_calendar_days(trading_days: int) -> int:
+    """Conservative calendar span covering ``trading_days`` market sessions."""
+    if trading_days < 0:
+        raise ValueError(f"trading_days must be non-negative, got {trading_days}")
+    return int(math.ceil(trading_days * CALENDAR_DAYS_PER_TRADING_DAY))
+
+
+def label_window_calendar_days(
+    horizon_days: int,
+    *,
+    entry_lag_trading_days: int = 1,
+    embargo_extra_calendar_days: int = 0,
+) -> int:
+    """Calendar span occupied by a D-close signal's executable forward label.
+
+    Labels enter no earlier than D+1, so the entry lag belongs in both purge and independence
+    calculations. The 365.25/252 conversion is conservative relative to the old 7/5 shortcut.
+    """
+    if horizon_days <= 0:
+        raise ValueError(f"horizon_days must be positive, got {horizon_days}")
+    if entry_lag_trading_days < 0 or embargo_extra_calendar_days < 0:
+        raise ValueError("entry lag and embargo must be non-negative")
+    return (
+        trading_days_to_calendar_days(horizon_days + entry_lag_trading_days)
+        + int(embargo_extra_calendar_days)
+    )
+
+
+def independent_windows(
+    dates: list[str],
+    horizon_days: int,
+    *,
+    entry_lag_trading_days: int = 1,
+) -> int:
+    """Conservative number of non-overlapping executable forward-label windows."""
     if not dates:
         return 0
     span = (date.fromisoformat(max(dates)) - date.fromisoformat(min(dates))).days
-    return 1 + int(span / (horizon_days * 7.0 / 5.0))
+    window = label_window_calendar_days(
+        horizon_days,
+        entry_lag_trading_days=entry_lag_trading_days,
+    )
+    return 1 + int(span / window)

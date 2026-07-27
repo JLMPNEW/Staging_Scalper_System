@@ -301,10 +301,33 @@ def main() -> int:  # noqa: C901
         if indices:
             group_caps.append((indices, cap))
         sector_cap_summary[pipeline] = {"cap": cap, "n_universe": len(indices)}
+    fixed_equal_sleeves = {
+        str(value).strip()
+        for value in (oc.get("fixed_equal_weight_sleeves") or [])
+        if str(value).strip()
+    }
+    equal_weight_groups: list[list[int]] = []
+    for pipeline in sorted(fixed_equal_sleeves):
+        if pipeline not in sector_caps_cfg:
+            LOGGER.error(
+                "optimizer.fixed_equal_weight_sleeves=%s requires a "
+                "matching sector_weight_caps entry",
+                pipeline,
+            )
+            return 1
+        indices = [
+            i
+            for i, ticker in enumerate(universe)
+            if str(scores[ticker].get("source_pipeline", "")).strip()
+            == pipeline
+        ]
+        if indices:
+            equal_weight_groups.append(indices)
 
     weights, info = solve_long_only_mv(
         mu_used, sigma, risk_aversion=risk_aversion, max_weight=max_weight, gross=gross, solver=solver,
         group_caps=group_caps or None,
+        equal_weight_groups=equal_weight_groups or None,
     )
     if info["status"] not in ("optimal", "optimal_inaccurate"):
         LOGGER.error("Solver did not converge: %s", info)
@@ -321,6 +344,7 @@ def main() -> int:  # noqa: C901
     band_low, band_high = weight_sensitivity_band(
         mu_used, sigma, gammas=band_gammas, min_weight=min_hold, max_weight=max_weight, gross=gross,
         solver=solver, group_caps=group_caps or None,
+        equal_weight_groups=equal_weight_groups or None,
     )
     for pipeline, summary in sector_cap_summary.items():
         realized = float(sum(
@@ -356,6 +380,7 @@ def main() -> int:  # noqa: C901
         "max_weight_per_name": max_weight,
         "min_weight_to_hold": min_hold,
         "sector_weight_caps": sector_cap_summary,
+        "fixed_equal_weight_sleeves": sorted(fixed_equal_sleeves),
         "liquidity_floor": {
             "max_half_spread_bps": max_half_spread,
             "snapshot_present": bool(spread_rows),

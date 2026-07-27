@@ -1,0 +1,1 @@
+policy_id,policy_version,enabled,model_family,ticker,accession_number,source_document,metric_name,concept_name,candidate_value,value_tolerance,unit,period_start,period_end,decision,status_reason,scope_override,confidence_override,reviewed_by,reviewed_at,period_start_override,period_end_override,value_override

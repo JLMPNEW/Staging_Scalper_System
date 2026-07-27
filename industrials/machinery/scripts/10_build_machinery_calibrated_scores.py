@@ -15,12 +15,16 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.machinery.scoring import (  # noqa: E402
     dated_path,
+    file_sha256,
     finalize_rank_rows,
     parse_asof,
     read_rows,
     validate_rank_rows,
     write_json_atomic,
     write_rank_rows,
+)
+from industrials.machinery.stage12_activation import (  # noqa: E402
+    apply_active_production_policy,
 )
 
 
@@ -57,13 +61,37 @@ def main() -> int:
     )
     if output_path.exists() and not args.force:
         raise FileExistsError(f"Refusing to overwrite machinery scores without --force: {output_path}")
-    rows = finalize_rank_rows(
+    shadow_rows = finalize_rank_rows(
         read_rows(input_path),
         score_model_version=str(cfg_get(config, "machinery_scoring.score_model_version")),
         model_version=str(cfg_get(config, "machinery_scoring.model_version")),
         scoring_contract_version=str(cfg_get(config, "machinery_scoring.contract_version")),
     )
-    errors = validate_rank_rows(rows, asof=asof)
+    stage12_output = str(
+        cfg_get(config, "machinery_stage12.output_root", "")
+    ).strip()
+    if stage12_output:
+        rows, production_metadata = apply_active_production_policy(
+            config,
+            config_path=config_path,
+            governance_root=resolve_path(stage12_output, base_dir=base_dir),
+            asof=asof,
+            shadow_rows=shadow_rows,
+        )
+    else:
+        rows = shadow_rows
+        production_metadata = {
+            "production_policy_active": False,
+            "production_policy_status": "SHADOW_NO_STAGE12_CONFIG",
+        }
+    production_active = bool(
+        production_metadata["production_policy_active"]
+    )
+    errors = validate_rank_rows(
+        rows,
+        asof=asof,
+        allow_production=production_active,
+    )
     if errors:
         raise ValueError("; ".join(errors[:20]))
     write_rank_rows(output_path, rows)
@@ -73,8 +101,13 @@ def main() -> int:
         "asof_date": asof,
         "row_count": len(rows),
         "rank_ready_count": sum(row["rank_ready_flag"] == "1" for row in rows),
-        "portfolio_candidate_count": 0,
+        "portfolio_candidate_count": sum(
+            row["portfolio_candidate_gate"] == "1" for row in rows
+        ),
+        "production_policy_active": production_active,
+        "production_metadata": production_metadata,
         "output_csv": str(output_path),
+        "output_sha256": file_sha256(output_path),
     }
     write_json_atomic(output_path.with_suffix(".manifest.json"), manifest)
     print(json.dumps(manifest, indent=2, sort_keys=True))

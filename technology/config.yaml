@@ -388,6 +388,10 @@ positioning_import:
   form4_source_id: "sec_insider_upstream"
   direct_ownership_source_id: "sec_ownership_direct"
   market_positioning_source_id: "market_positioning_upstream"
+  # The shared database is a common raw-data layer, not a scoring dependency.
+  # If it is temporarily unavailable, retain the sealed technology facts and
+  # let required coverage/staleness validators decide whether they remain usable.
+  allow_stale_market_positioning_on_error: true
   start_date: "2013-01-01"
   include_historical_members: true
   positioning_universe_csv: "../output/technology_cache/positioning/semiconductor_positioning_universe.csv"
@@ -397,11 +401,18 @@ positioning_import:
   lookback_days:
     insider: 90
     short_change: 92
+  float_enrichment:
+    # Availability is the SEC filing date, never the XBRL period end.
+    # These limits cover annual foreign filers without allowing indefinite carry.
+    public_float_max_age_days: 550
+    shares_outstanding_max_age_days: 550
+    diluted_shares_max_age_days: 550
+    public_float_price_max_lag_days: 10
+    min_current_ticker_coverage_pct: 80.0
   require_upstream_13f_for_gate: true
   upstream_13f_gate_exempt_tickers:
     - CBRS
-  upstream_borrow_gate_exempt_tickers:
-    - P
+  upstream_borrow_gate_exempt_tickers: []
   require_upstream_short_for_gate: true
   require_upstream_borrow_for_gate: true
   require_direct_ownership_for_gate: false

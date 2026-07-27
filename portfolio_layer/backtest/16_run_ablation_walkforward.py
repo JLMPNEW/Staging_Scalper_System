@@ -60,7 +60,13 @@ from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.macro.contract import open_macro_serving_db, rows_at_latest, single_latest_row  # noqa: E402
 from portfolio_layer.macro.taxonomy import select_sleeve_macro_fit, sleeve_taxonomy  # noqa: E402
 from portfolio_layer.backtest.walkforward_common import (  # noqa: E402
-    ARM_FIELDS, ARMS, finite_or_default, perf_stats, run_walkforward, summarize_arms,
+    ARM_FIELDS,
+    ARMS,
+    finite_or_default,
+    perf_stats,
+    pit_boundary_errors,
+    run_walkforward,
+    summarize_arms,
 )
 from portfolio_layer.research.stage11_common import load_lockbox, manifest_file_errors  # noqa: E402
 from portfolio_layer.rotation.sector_rotation_selector import build_sector_rotation  # noqa: E402
@@ -81,6 +87,20 @@ def parse_args() -> argparse.Namespace:
 # self-test (synthetic providers through the identical engine)
 # ---------------------------------------------------------------------------
 def _selftest() -> None:
+    ruined = perf_stats([-1.2, 0.5])
+    assert ruined["ann_return"] == -1.0 and ruined["max_dd"] == -1.0, ruined
+    assert not pit_boundary_errors(
+        signal_date="2001-01-10",
+        covariance_end_date="2001-01-10",
+        execution_start_date="2001-01-11",
+    )
+    contaminated = pit_boundary_errors(
+        signal_date="2001-01-10",
+        covariance_end_date="2001-01-11",
+        execution_start_date="2001-01-10",
+    )
+    assert len(contaminated) == 2, contaminated
+
     rng = np.random.default_rng(23)
     n_days, names_per_pipe = 400, 8
     pipes = {"alpha_pipe": 0.0009, "beta_pipe": 0.0002, "gamma_pipe": -0.0006}
@@ -225,6 +245,9 @@ def main() -> int:  # noqa: C901
         return 1
 
     wf = cfg_get(config, "walkforward", {}) or {}
+    supportive_raw = wf.get("regime_gate_supportive_regimes")
+    if supportive_raw is None:
+        supportive_raw = ["HEATING_UP"]
     params = dict(
         rebalance_every_n_snapshots=int(wf.get("rebalance_every_n_snapshots", 5)),
         one_way_cost_bps=float(wf.get("one_way_cost_bps", 5.0)),
@@ -233,7 +256,7 @@ def main() -> int:  # noqa: C901
         shrinkage_intensity=float(cfg_get(config, "risk_panel.shrinkage_intensity", 0.2)),
         max_universe=int(wf.get("max_universe", 150)),
         min_universe=int(wf.get("min_universe", 20)),
-        use_confidence=bool(cfg_get(config, "optimizer.use_score_confidence", True)),
+        use_confidence=bool(cfg_get(config, "optimizer.use_confidence_adjusted_mu", True)),
         risk_aversion=float(cfg_get(config, "optimizer.risk_aversion", 5.0)),
         max_weight=float(cfg_get(config, "optimizer.max_weight_per_name", 0.05)),
         min_weight=float(cfg_get(config, "optimizer.min_weight_to_hold", 0.002)),
@@ -242,8 +265,7 @@ def main() -> int:  # noqa: C901
         macro_shift_scale=float(cfg_get(config, "black_litterman_fusion.macro_sector_shift_scale", 0.5)),
         macro_max_shift=float(cfg_get(config, "black_litterman_fusion.macro_sector_max_shift", 0.15)),
         rc_cap=float(cfg_get(config, "sleeves.per_name_risk_contribution_cap", 0.08)),
-        regime_gate_supportive_regimes=[str(s) for s in
-                                        (wf.get("regime_gate_supportive_regimes") or ["HEATING_UP"])],
+        regime_gate_supportive_regimes=[str(s) for s in supportive_raw],
         regime_lever_mu_multiplier=float(wf.get("regime_lever_mu_multiplier", 1.5)),
         regime_lever_unsupported_mode=str(wf.get("regime_lever_unsupported_mode", "min_var")),
     )
@@ -451,9 +473,22 @@ def main() -> int:  # noqa: C901
         f"dev snapshots={len(snapshots)}, sealed skipped={sealed_skipped}"
         if not bad_snapshot_dates else f"out_of_partition={bad_snapshot_dates[:8]}",
     )
-    rec("pit_no_lookahead", "PASS" if not result["pit_violations"] else "FAIL",
-         "covariance and state windows end at/before every rebalance date"
-         if not result["pit_violations"] else f"{result['pit_violations'][:8]}")
+    pit_checked = int(result.get("pit_boundaries_checked", 0))
+    executed = int(result["n_rebalances"])
+    pit_ok = not result["pit_violations"] and pit_checked >= executed > 0
+    rec(
+        "pit_no_lookahead",
+        "PASS" if pit_ok else "FAIL",
+        (
+            f"independently checked covariance<=signal<execution for "
+            f"{pit_checked} attempted boundaries for {executed} executed rebalances"
+        )
+        if pit_ok
+        else (
+            f"checked={pit_checked}; executed={executed}; "
+            f"violations={result['pit_violations'][:8]}"
+        ),
+    )
     total_solver_failures = base_solver_failures + sum(arm_solver_fallbacks.values())
     rec(
         "solver_reliability",
@@ -512,6 +547,17 @@ def main() -> int:  # noqa: C901
         "arm_solver_fallbacks": arm_solver_fallbacks,
         "checks": checks,
         "inputs_sha256": {
+            "config.yaml": sha256_file(config_path),
+            "backtest/16_run_ablation_walkforward.py": sha256_file(Path(__file__).resolve()),
+            "backtest/walkforward_common.py": sha256_file(
+                Path(__file__).with_name("walkforward_common.py")
+            ),
+            "research/stage11_common.py": sha256_file(
+                PACKAGE_ROOT / "research" / "stage11_common.py"
+            ),
+            "optimizer/optimizer_core.py": sha256_file(
+                PACKAGE_ROOT / "optimizer" / "optimizer_core.py"
+            ),
             "survivorship_manifest.json": sha256_file(panel_manifest_path),
             "prices_adjclose.csv": sha256_file(prices_path),
             "macro_serving.sqlite": macro_hash_after,

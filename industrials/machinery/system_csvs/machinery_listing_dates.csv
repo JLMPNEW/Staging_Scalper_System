@@ -47,7 +47,7 @@ GHM,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_sy
 GNRC,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=GNRC
 GRC,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=GRC
 GTES,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=GTES
-GTLS,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=GTLS
+GTLS,2019-01-02,2026-07-16,sec_merger_delisting_date,https://www.sec.gov/Archives/edgar/data/892553/000119312526305482/d10289d8k.htm,0.95,norgate_symbol=GTLS; SEC Form 8-K confirms acquisition completion and delisting
 HLIO,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=HLIO
 HUBB,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=HUBB
 HY,2019-01-02,,norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=HY

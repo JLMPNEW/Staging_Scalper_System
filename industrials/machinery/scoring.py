@@ -7,7 +7,7 @@ import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from industrials.core.policy_loader import PolicyKey, PolicyRow, resolve_policy
 from industrials.core.reports import write_csv_atomic, write_text_atomic
@@ -245,6 +245,10 @@ FINAL_RANK_FIELDS = [
     "score_model_version",
     "model_version",
     "scoring_contract_version",
+    "portfolio_universe_eligible_flag",
+    "portfolio_selection_policy",
+    "portfolio_sleeve_selected_flag",
+    "portfolio_sleeve_target_weight",
     "portfolio_candidate_gate",
     "portfolio_candidate_score",
     "portfolio_candidate_status",
@@ -924,7 +928,12 @@ def read_rows(path: Path) -> list[dict[str, str]]:
         return [{str(key): str(value or "") for key, value in row.items() if key is not None} for row in reader]
 
 
-def validate_rank_rows(rows: list[dict[str, str]], *, asof: str) -> list[str]:
+def validate_rank_rows(
+    rows: list[dict[str, str]],
+    *,
+    asof: str,
+    allow_production: bool = False,
+) -> list[str]:
     errors: list[str] = []
     if not rows:
         return ["rank table is empty"]
@@ -950,10 +959,43 @@ def validate_rank_rows(rows: list[dict[str, str]], *, asof: str) -> list[str]:
             errors.append(f"{ticker}: invalid final_score={row.get('final_score')!r}")
         if confidence is None or not 0.0 <= confidence <= 1.0:
             errors.append(f"{ticker}: invalid score_confidence={row.get('score_confidence')!r}")
-        if str(row.get("portfolio_candidate_gate") or "") != "0":
-            errors.append(f"{ticker}: shadow publisher must set portfolio_candidate_gate=0")
-        if str(row.get("oos_score_valid_flag") or "") != "0":
-            errors.append(f"{ticker}: shadow publisher must set oos_score_valid_flag=0")
+        candidate = str(row.get("portfolio_candidate_gate") or "")
+        oos_valid = str(row.get("oos_score_valid_flag") or "")
+        selected = str(row.get("portfolio_sleeve_selected_flag") or "")
+        universe_eligible = str(
+            row.get("portfolio_universe_eligible_flag") or ""
+        )
+        if not allow_production:
+            if candidate != "0":
+                errors.append(
+                    f"{ticker}: shadow publisher must set "
+                    "portfolio_candidate_gate=0"
+                )
+            if oos_valid != "0":
+                errors.append(
+                    f"{ticker}: shadow publisher must set "
+                    "oos_score_valid_flag=0"
+                )
+        else:
+            if (
+                candidate not in {"0", "1"}
+                or oos_valid not in {"0", "1"}
+                or selected not in {"0", "1"}
+                or universe_eligible not in {"0", "1"}
+            ):
+                errors.append(f"{ticker}: invalid production eligibility flags")
+            if candidate != selected:
+                errors.append(
+                    f"{ticker}: production candidate/selection mismatch"
+                )
+            if selected == "1" and universe_eligible != "1":
+                errors.append(
+                    f"{ticker}: selected production row is not universe eligible"
+                )
+            if oos_valid != universe_eligible:
+                errors.append(
+                    f"{ticker}: production OOS/universe eligibility mismatch"
+                )
         try:
             ranks.append(int(str(row.get("final_rank") or "")))
         except ValueError:
@@ -1114,6 +1156,8 @@ def publish_dashboard(
     rows: list[dict[str, str]],
     asof: str,
     allow_overwrite: bool,
+    production_policy_active: bool = False,
+    activation_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     rank_path = output_dir / "machinery_final_rank_table.csv"
@@ -1122,7 +1166,11 @@ def publish_dashboard(
     existing = [path for path in (rank_path, sidecar_path, manifest_path) if path.exists()]
     if existing and not allow_overwrite:
         raise FileExistsError(f"Refusing to overwrite immutable machinery dashboard artifacts: {existing}")
-    errors = validate_rank_rows(rows, asof=asof)
+    errors = validate_rank_rows(
+        rows,
+        asof=asof,
+        allow_production=production_policy_active,
+    )
     if errors:
         raise ValueError("; ".join(errors[:20]))
     sidecar_rows = survivorship_sidecar(rows)
@@ -1138,7 +1186,12 @@ def publish_dashboard(
         "sidecar_sha256": file_sha256(sidecar_path),
         "row_count": len(rows),
         "rank_ready_count": sum(str(row.get("rank_ready_flag") or "") == "1" for row in rows),
-        "portfolio_candidate_count": 0,
+        "portfolio_candidate_count": sum(
+            str(row.get("portfolio_candidate_gate") or "") == "1"
+            for row in rows
+        ),
+        "production_policy_active": production_policy_active,
+        "activation_metadata": dict(activation_metadata or {}),
         "sidecar_calibration_eligible_count": sum(
             str(row.get("stage11_calibration_input_eligible_flag") or "") == "1" for row in sidecar_rows
         ),

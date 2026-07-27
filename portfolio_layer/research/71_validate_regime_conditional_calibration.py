@@ -137,6 +137,7 @@ def validate_regime_cell(
     shrinkage: float,
     min_regime_dates: int,
     verdict_cfg: dict[str, Any],
+    max_entry_lag_trading_days: int = 1,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
     """69-equivalent purged validation restricted to one regime's dates, plus the complement contrast."""
     static_in = [ric for d in regime_dates
@@ -148,8 +149,13 @@ def validate_regime_cell(
     delta_t = welch_t(static_in, static_out, max_lag=max(0, horizon - 1))
 
     folds = purged_folds(regime_dates, n_folds=n_folds, horizon_trading_days=horizon,
-                         embargo_extra_calendar_days=embargo_days)
-    window = purge_window_days(horizon, embargo_days)
+                         embargo_extra_calendar_days=embargo_days,
+                         max_entry_lag_trading_days=max_entry_lag_trading_days)
+    window = purge_window_days(
+        horizon,
+        embargo_days,
+        max_entry_lag_trading_days,
+    )
     violations = verify_purge(folds, window=window)
     oof_rics: list[float] = []
     ridges: list[float] = []
@@ -187,7 +193,11 @@ def validate_regime_cell(
         })
     oof_mean, _se, oof_t = mean_t_hac(oof_rics, max_lag=max(0, horizon - 1))
     r2, calib = oos_metrics(np.concatenate(preds), np.concatenate(ys)) if preds else (None, None)
-    test_windows = independent_windows(sorted(test_dates_scored), horizon)
+    test_windows = independent_windows(
+        sorted(test_dates_scored),
+        horizon,
+        entry_lag_trading_days=max_entry_lag_trading_days,
+    )
     validated, reasons = validation_verdict(
         folds_valid=folds_valid, test_windows=test_windows, oof_t=oof_t, oos_r2=r2, cfg=verdict_cfg,
     )
@@ -307,6 +317,7 @@ def main() -> int:  # noqa: C901
     # stricter than 69: this grid multiplies the comparisons by the number of regimes
     verdict_cfg["validate_t_min"] = float(rc.get("validate_t_min", 2.5))
     horizons = [int(h) for h in cfg_get(config, "calibration_targets.horizons_trading_days", [21, 63, 126, 252])]
+    max_entry_lag = int(cfg_get(config, "calibration_targets.max_entry_lag_trading_days", 5))
     target_col = {"excess_sector": "excess_sector_{h}d", "excess_spy": "excess_spy_{h}d",
                   "raw": "fwd_return_{h}d", "resid_sector": "resid_sector_{h}d"}.get(target_kind)
     if target_col is None:
@@ -384,6 +395,7 @@ def main() -> int:  # noqa: C901
                     by_date, regime_dates, complement, horizon=h, n_folds=n_folds,
                     embargo_days=embargo_days, min_train_dates=min_train_dates, shrinkage=shrinkage,
                     min_regime_dates=min_regime_dates, verdict_cfg=verdict_cfg,
+                    max_entry_lag_trading_days=max_entry_lag,
                 )
                 purge_violations.extend(f"{pipe}:{h}d:{regime}:{v}" for v in violations)
                 cell_rows.append({
@@ -442,12 +454,29 @@ def main() -> int:  # noqa: C901
         "regimes": regimes,
         "min_regime_dates": min_regime_dates,
         "validate_t_min": verdict_cfg["validate_t_min"],
+        "max_entry_lag_trading_days": max_entry_lag,
         "rows_in_panel": len(rows),
         "rows_admitted": len(admitted),
         "cells": len(cell_rows),
         "cells_validated": len(validated_cells),
         "cells_validated_negative_slope": len(negative_validated),
         "checks": checks,
+        "inputs_sha256": {
+            "config.yaml": sha256_file(config_path),
+            "research/71_validate_regime_conditional_calibration.py": sha256_file(
+                Path(__file__).resolve()
+            ),
+            "research/69_validate_stage11_calibration.py": sha256_file(
+                Path(__file__).with_name("69_validate_stage11_calibration.py")
+            ),
+            "research/stage11_common.py": sha256_file(
+                Path(__file__).with_name("stage11_common.py")
+            ),
+            "calibration_panel_manifest.json": sha256_file(
+                panel_dir / "calibration_panel_manifest.json"
+            ),
+            "calibration_panel.csv": sha256_file(panel_path),
+        },
         "files": {
             "regime_oos_validation.csv": {"sha256": sha256_file(cells_path), "rows": len(cell_rows)},
             "regime_fold_details.csv": {"sha256": sha256_file(folds_path), "rows": len(fold_rows)},

@@ -1137,8 +1137,13 @@ def main() -> int:
     base_dir = config_path.parent
     db_path = resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     policy_path = resolve_eligibility_policy_path(config, base_dir=base_dir)
+    # Candidate research runs must not stamp baseline provenance: an explicit
+    # DEFENSE_SCORE_MODEL_VERSION env override (set by the 26 orchestrator for
+    # labeled candidate namespaces) wins over config, which wins over the
+    # module constant.
     provenance_version = str(
-        cfg_get(
+        os.environ.get("DEFENSE_SCORE_MODEL_VERSION", "").strip()
+        or cfg_get(
             config,
             "oos_calibration_standards.families.defense.calibration_provenance_version",
             SCORE_MODEL_VERSION,

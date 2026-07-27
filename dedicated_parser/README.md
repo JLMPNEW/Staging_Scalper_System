@@ -48,14 +48,34 @@ is not mislabeled as issuer non-disclosure.
 
 Neither provider is allowed to fetch a filing during the current cache-first
 pilot. Network acquisition remains the responsibility of the existing SEC
-synchronization stage.
+synchronization stage. This is enforced in code: the Arelle web cache runs in
+offline mode (unresolvable taxonomy references fail the parse instead of
+downloading), and the EdgarTools local-data environment variables are set
+unconditionally rather than with setdefault. The shared CLI has no default
+adapter; `--adapter` is required so a bare invocation can never silently run
+another sector's adapter.
 
 ## Parallel Runtime
 
 An accession is one process-pool work item. Workers read immutable cache files
 and return serializable results. Only the parent process writes SQLite, in
-bounded transactions. This avoids SQLite writer contention and makes one-worker
-and multi-worker output deterministic.
+bounded transactions that roll back atomically on mid-batch failure. Attempt
+bookkeeping is recorded with each persisted result, so `attempt_count` only
+counts work that actually executed. A progress-based stall watchdog fails the
+remaining items (and the run) if no worker completes anything within the
+watchdog window, instead of hanging forever on a pathological document. This
+avoids SQLite writer contention and makes one-worker and multi-worker output
+deterministic.
+
+Work keys hash only content-bearing filing identity (volatile planner metadata
+does not force mass reparses). Evidence keys exclude review-mutable fields for
+within-work observation deduplication, while persisted evidence keys also
+include the immutable work key. Therefore an adapter or review-policy change
+creates a new evaluated evidence row instead of mutating rows linked to an
+earlier run. Schema version 7 deliberately reschedules older work once to
+establish this run-immutability contract. Resume-skipped completed work is
+linked into each new run so its recovery assessment sees prior evidence
+instead of regressing those pairs.
 
 The default machinery configuration uses four workers. Increase it only after
 benchmarking memory use and OneDrive file hydration on the target machine.
@@ -170,9 +190,66 @@ Validate a reviewed shadow run:
 C:\Users\josel\miniconda3\envs\scalper-staging\python.exe dedicated_parser\validate_golden_corpus.py --db C:\Users\josel\Documents\STAGING\DB\industrials.sqlite --corpus dedicated_parser\golden_corpus\machinery_v1.json --corpus dedicated_parser\golden_corpus\machinery_policy_generated.json --run-id 12
 ```
 
+## Production Promotion
+
+The shared parser remains sector-neutral. Sector adapters register source
+metrics, extraction policy, downstream requirements, and production mappings.
+Machinery is the first production consumer.
+
+Machinery production runs execute the parser and promoter immediately before
+the Stage 4 financial build:
+
+```powershell
+C:\Users\josel\miniconda3\python.exe industrials\machinery\scripts\17_run_machinery_refresh_pipeline.py --asof 2026-07-24 --dedicated-parser-python C:\Users\josel\miniconda3\envs\scalper-staging\python.exe
+```
+
+`dedicated_parser.production_enabled: true` activates the two-step flow:
+
+1. `08d_dedicated_parser_shadow` creates immutable evidence and keeps
+   ambiguous/rejected candidates outside financial facts.
+2. `08e_dedicated_parser_production` synchronizes only accepted,
+   consolidated, PIT-valid, conflict-free evidence at or above the configured
+   confidence threshold into source `dedicated_parser_production`.
+
+The promoter is idempotent by parser run and source ID. It also persists
+reviewed suppressions. A structural-N/A override requires an enabled reviewed
+policy; parser prose alone cannot change the scoring denominator.
+`--skip-dedicated-parser-production` is the emergency rollback switch.
+
+Validated machinery run 28 used parser release `0.4.1`, covered all 113 active
+tickers and 4,403 cached accessions, linked 12,182 documents, and had zero
+failed work items. Both reviewed corpora passed. Promotion 2 promoted 647
+facts, blocked 5,112 nonqualifying candidates, retained eight conflicts for
+review, and persisted 13 suppressions. Repeating promotion returned the same
+promotion ID and counts.
+
+Release `0.4.1` also makes reviewed decisions stable across conservative
+extractor changes. If an exact reviewed candidate is no longer emitted, the
+policy may materialize it only when the reviewed accession/document was part
+of the parsed work and the metric was requested. Provenance records the
+document SHA-256 and policy identity.
+
+Current production release `0.4.6` remains the same shared parser package; the
+release number is provenance metadata, not a separate parser implementation.
+It adds accession-scoped conflict resolution, numeric XBRL value precedence,
+dimensionless-total precedence, clause-bounded current-RPO parsing, and
+deterministic rejection of timing buckets that are not a 12-month current-RPO
+window. Explicit `--max-filings-per-ticker 0` and
+`--max-documents-per-filing 0` now correctly mean unlimited, allowing genuine
+full-history validation instead of silently falling back to configured limits.
+
+Focused machinery run 34 processed all 85 locally cached GNRC filings and 123
+documents with zero failures. It classified all 26 current-RPO timing
+candidates as six accepted 12-month observations and 20 rejected non-12-month
+observations. Both golden corpora passed. Promotion 6 published 32 accepted
+facts, blocked 73 candidates, had zero conflicts, and persisted 20
+cross-source suppressions so the shared SEC source cannot reintroduce the
+rejected partial-year values.
+
 ## Promotion Gates
 
-Promotion from `shadow` to `shared` requires all of the following:
+Promotion from `shadow` to a sector production source requires all of the
+following:
 
 1. The reviewed machinery golden corpus passes with no regressions.
 2. Every shadow-only addition is accepted or rejected through analyst review.
@@ -236,7 +313,17 @@ warranted.
 ## Fifty-Ticker Priority Review
 
 The 25-cell bounded review is complete. Adapter
-`machinery_specialized_metrics_v2.7` adds multi-row/`colspan` table headers,
+`machinery_specialized_metrics_v2.8` (the 2026-07-20 audit release) fixes
+split multi-row header date parsing (no more fabricated December-31 period
+ends), clause-bounds the current-RPO percentage derivation, extends the
+horizon-column guard to every metric and to "12 months" phrasing (RPO horizon
+columns now become `rpo_current` candidates), deduplicates timing-dimension
+buckets with an ambiguity bail-out, requires ~12-month spacing before the
+earliest timing bucket is accepted as current RPO, adds a word boundary after
+table money scale letters, repairs the dead block-total cross-check, and
+surfaces unreadable/no-native-text documents as `PARSER_FAILURE` instead of
+silent non-disclosure. Its predecessor `machinery_specialized_metrics_v2.7`
+added multi-row/`colspan` table headers,
 explicit period and value overrides, canonical-observation deduplication,
 stale-anchor advancement, noncommercial order rejection, acquisition-backlog
 rejection, explicit 12-month guards for current RPO, and reviewed exhaustive
@@ -261,3 +348,43 @@ The detailed result is stored in
 These results remain shadow-only. Production promotion requires a controlled
 write path, removal of the two invalid baselines, affected-partition rebuilds,
 and the full machinery-to-portfolio smoke gate.
+
+## Full Active Machinery Validation
+
+The schema-v3 benchmark was expanded from the 50-ticker stress cohort to all
+114 machinery tickers active on 2026-07-22. Use `--all-metrics` for this
+exhaustive benchmark scope. It evaluates every selected source metric while
+still resuming completed filing work; it is intentionally different from
+`--force`, which reparses unchanged filings.
+
+Runs 20 and 21 parsed 4,442 accessions and 12,056 cached document references
+with zero failed work items. A targeted 44-accession repair then made legacy
+review policies match either their original parser period or their reviewed
+effective period. The first full reconciliation exposed an ATS currency
+mismatch: `dim_company` said USD while point-in-time financial statements said
+CAD. The shared catalog now prefers financial-statement reporting currency and
+includes non-USD currency in the work identity. Final run 24 reparsed only the
+76 affected ATS/SHMD accessions, reused the other 4,366 completed accessions,
+and produced exactly 570 assessments (114 tickers times five source metrics),
+with no cache gaps or parser failures.
+
+Accuracy-adjusted coverage across the 373 applicable non-funded-backlog cells
+is 153/373 (41.0%), versus 138/373 (37.0%) in the production baseline. The
+metric bridge is:
+
+| Source metric | Baseline | Parser shadow |
+|---|---:|---:|
+| Orders | 16/95 | 17/95 |
+| Total RPO | 49/91 | 58/91 |
+| Reported backlog | 38/96 | 40/96 |
+| Current RPO | 35/91 | 38/91 |
+
+Funded backlog has no applicable machinery tickers under the current reviewed
+policy, so its 0/0 result is structural N/A rather than missing coverage. All
+74 reviewed golden expectations across 17 problematic issuers pass for run
+24. This validates the reviewed traps, not every unreviewed candidate in the
+universe: 11 ticker/metric cells remain ambiguous and 30 production-reported
+cells remain unconfirmed by the dedicated parser.
+
+The complete run-24 artifacts are stored in
+`output/industrials/machinery/dedicated_parser/2026-07-22/full_active_v31_accuracy_validated/`.
